@@ -217,12 +217,18 @@ fn a_warm_plan_hit_s_allocations_are_named_by_size() {
          order -- a residual that grew or shrank between them would mean it is not yet \
          steady-state"
     );
-    // ROW 303's residual, named rather than merely counted: 18 allocations,
-    // steady-state, every warm call against this plan. A later landing that
-    // removes some of these updates this assertion alongside the fix that
-    // earns it -- see that landing's own commit for which sizes moved and why.
+    // ROW 303's residual: 18 allocations before this landing, reduced to 11 by
+    // making the hazard-input list and the uniform-byte packing plan-owned
+    // and reused (`Plan::hazard_state`, `Plan::uniform_scratch`) instead of
+    // rebuilt every call -- see this landing's own commit for the removed
+    // sizes. The remaining 11 are `device_buffers`, a fresh `BTreeMap` built
+    // from scratch every call by this function's own design (its VALUES --
+    // the block upload's device buffer -- can change call to call, unlike
+    // the hazard/uniform scratch this landing reused) plus `finish`'s
+    // read-back `Vec<f32>`, the actual output payload the caller receives,
+    // not scratch the plan could own instead.
     assert_eq!(
-        warm_call_allocations, 18,
+        warm_call_allocations, 11,
         "a warm plan-hit step's allocation count moved -- update this assertion \
          alongside whatever fix (or regression) changed it: sizes in order: \
          {warm_call_sizes:?}"

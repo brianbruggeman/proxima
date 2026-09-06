@@ -428,6 +428,16 @@ pub struct Plan {
     /// `None` for this plan's whole life, which costs nothing beyond the
     /// one empty `RefCell`.
     resolved_steps: RefCell<Option<ResolvedSteps>>,
+    /// [`HazardState`]'s own doc: [`execute_plan_with_placements`]'s hazard
+    /// tracker and its per-step input-pointer scratch, reused call-to-call
+    /// instead of rebuilt every call.
+    hazard_state: RefCell<HazardState>,
+    /// [`encode_op`]'s plan-owned uniform-byte scratch for the
+    /// `metal-plan-stable-buffers` hot path: [`pack_uniforms_into`] writes
+    /// each step's bytes here in place instead of returning a fresh `Vec`
+    /// [`pack_uniforms`] would allocate every call.
+    #[cfg(feature = "metal-plan-stable-buffers")]
+    uniform_scratch: RefCell<Vec<u8>>,
 }
 
 /// [`Plan::resolved_steps`]'s payload -- the mode it was built under, so a
@@ -696,6 +706,9 @@ pub fn plan(
         #[cfg(feature = "metal-plan-stable-buffers")]
         uniforms: core::cell::OnceCell::new(),
         resolved_steps: RefCell::new(None),
+        hazard_state: RefCell::new(HazardState::new()),
+        #[cfg(feature = "metal-plan-stable-buffers")]
+        uniform_scratch: RefCell::new(Vec::new()),
     })
 }
 
@@ -843,6 +856,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             &mut device_buffers,
             bound,
             packed_operands,
+            None,
             None,
             None,
             plan.math_mode,
@@ -1088,6 +1102,34 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
     }
 }
 
+/// [`execute_plan_with_placements`]'s per-call hazard bookkeeping, owned by
+/// the [`Plan`] and reused call-to-call instead of rebuilt: [`HazardTracker`]'s
+/// two `HashSet`s and [`resolve_hazard_inputs`]'s pointer list all allocate
+/// on their first insert of a call. A fresh [`HazardTracker::new`] and a
+/// fresh `Vec` every call paid that allocation every call, forever, even
+/// though every call needs the exact same starting (empty) state -- ROW 303's
+/// residual. [`HazardState::reset`] clears both without releasing their
+/// capacity, so only the very first call after a plan's own construction
+/// ever allocates.
+struct HazardState {
+    tracker: HazardTracker<*const ProtocolObject<dyn MTLBuffer>>,
+    inputs: Vec<*const ProtocolObject<dyn MTLBuffer>>,
+}
+
+impl HazardState {
+    fn new() -> Self {
+        Self {
+            tracker: HazardTracker::new(),
+            inputs: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.tracker.reset();
+        self.inputs.clear();
+    }
+}
+
 /// The one adapter from a dispatch's read `NodeId`s (see
 /// `crate::msl::hazard_read_nodes`, the caller's own source for `nodes` below)
 /// to the hazard tracker's buffer-pointer identities, resolved from
@@ -1096,18 +1138,39 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
 /// behavior) — a node missing from `device_buffers` means the encode this
 /// identity feeds is already wrong, so hiding it from the hazard check only
 /// hides a real bug behind a missing barrier.
+/// Test-only surface: production hazard resolution goes through
+/// [`resolve_hazard_inputs_into`] against [`Plan::hazard_state`]'s reused
+/// scratch list. Kept as an owned-`Vec` wrapper here since a unit test wants
+/// a value to assert on, not a buffer to manage.
+#[cfg(test)]
 fn resolve_hazard_inputs(
     nodes: impl Iterator<Item = NodeId>,
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
 ) -> Result<Vec<*const ProtocolObject<dyn MTLBuffer>>, MetalError> {
-    nodes
-        .map(|operand| {
-            device_buffers
-                .get(&operand)
-                .map(|(buffer, _offset)| Retained::as_ptr(buffer))
-                .ok_or(MetalError::UnresolvedHazardOperand { node: operand })
-        })
-        .collect()
+    let mut resolved = Vec::new();
+    resolve_hazard_inputs_into(nodes, device_buffers, &mut resolved)?;
+    Ok(resolved)
+}
+
+/// [`resolve_hazard_inputs`], writing into a caller-owned, reused buffer
+/// instead of collecting a fresh `Vec` -- [`execute_plan_with_placements`]
+/// calls this against [`Plan::hazard_state`]'s own scratch list every
+/// position so a warm plan-hit step's hazard resolution allocates nothing
+/// (ROW 303's residual).
+fn resolve_hazard_inputs_into(
+    nodes: impl Iterator<Item = NodeId>,
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    resolved: &mut Vec<*const ProtocolObject<dyn MTLBuffer>>,
+) -> Result<(), MetalError> {
+    resolved.clear();
+    for operand in nodes {
+        let pointer = device_buffers
+            .get(&operand)
+            .map(|(buffer, _offset)| Retained::as_ptr(buffer))
+            .ok_or(MetalError::UnresolvedHazardOperand { node: operand })?;
+        resolved.push(pointer);
+    }
+    Ok(())
 }
 
 /// The exact per-op hazard step [`execute_plan_with_placements`]'s loop
@@ -1529,7 +1592,16 @@ pub fn execute_plan_with_placements(
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command buffer refused to hand out a compute encoder".to_string(),
         })?;
-    let mut hazards: HazardTracker<*const ProtocolObject<dyn MTLBuffer>> = HazardTracker::new();
+    // plan-owned, reused across every call against this `Plan` (`HazardState`'s
+    // own doc) -- `reset` clears both the tracker's sets and the input scratch
+    // without releasing their capacity, so a warm call after the first never
+    // pays their first-insert allocation again.
+    let mut hazard_state = plan.hazard_state.borrow_mut();
+    hazard_state.reset();
+    // reborrowed as a plain `&mut` so `tracker`/`inputs` split into disjoint
+    // field borrows below -- the borrow checker cannot see through
+    // `RefMut`'s own `Deref`/`DerefMut` to know the two fields are disjoint.
+    let hazard_state = &mut *hazard_state;
 
     // diagnostic-only, `instrument`-gated, always emitted at `trace` level
     // (default-off via the runtime filter, never a bespoke env var): each
@@ -1612,9 +1684,10 @@ pub fn execute_plan_with_placements(
                         owned_bindings.as_slice()
                     }
                 };
-                let hazard_inputs = resolve_hazard_inputs(
+                resolve_hazard_inputs_into(
                     crate::msl::hazard_read_nodes(bindings_for_hazard),
                     &device_buffers,
+                    &mut hazard_state.inputs,
                 )?;
                 // resolved ONCE, before the hazard check, from the exact same
                 // placement -> arena -> fresh-allocation chain `encode_op`
@@ -1641,7 +1714,7 @@ pub fn execute_plan_with_placements(
                     Some(bound.node)
                 );
                 let hazard_output = Retained::as_ptr(&resolved.0);
-                if hazard_step(&mut hazards, &hazard_inputs, hazard_output) {
+                if hazard_step(&mut hazard_state.tracker, &hazard_state.inputs, hazard_output) {
                     encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
                     counter!(BARRIERS_EMITTED, 1);
                 }
@@ -1654,6 +1727,10 @@ pub fn execute_plan_with_placements(
                 None => placement,
             };
             let uniform_buffer = plan_uniform_buffer(plan, position)?;
+            #[cfg(feature = "metal-plan-stable-buffers")]
+            let uniform_scratch = Some(&plan.uniform_scratch);
+            #[cfg(not(feature = "metal-plan-stable-buffers"))]
+            let uniform_scratch = None;
             let fault = encode_op(
                 &device,
                 &encoder,
@@ -1662,6 +1739,7 @@ pub fn execute_plan_with_placements(
                 packed_operands,
                 placement,
                 uniform_buffer,
+                uniform_scratch,
                 plan.math_mode,
                 resolved_step,
             )?;
@@ -1685,7 +1763,7 @@ pub fn execute_plan_with_placements(
             // no hazard history -- see `HazardTracker::forget`'s own doc.
             if dispatch_type == DispatchType::Concurrent {
                 if let Some((buffer, _offset)) = device_buffers.remove(retired) {
-                    hazards.forget(Retained::as_ptr(&buffer));
+                    hazard_state.tracker.forget(Retained::as_ptr(&buffer));
                 }
             } else {
                 device_buffers.remove(retired);
@@ -1913,6 +1991,7 @@ fn execute_op_timed(
         packed_operands,
         placement,
         plan_uniform,
+        None,
         math_mode,
         None,
     )?;
@@ -2562,6 +2641,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             packed_operands,
             placement,
             uniform_buffer,
+            None,
             plan.math_mode,
             None,
         )?;
@@ -3265,6 +3345,16 @@ fn push_i64_row(bytes: &mut Vec<u8>, values: &[i64], width: usize) {
     }
 }
 
+/// [`push_i64_row`]'s `u64`-extents counterpart -- casts in place instead of
+/// collecting `bound.extents` into a temporary `Vec<i64>` first, the
+/// allocation ROW 303's residual named in [`pack_elementwise_uniforms`].
+fn push_extent_row(bytes: &mut Vec<u8>, extents: &[u64], width: usize) {
+    for slot in 0..width {
+        let value = extents.get(slot).map(|extent| *extent as i64).unwrap_or(0);
+        push_i64(bytes, value);
+    }
+}
+
 /// Appends the four gather arrays every `Uniforms` struct declares last (via
 /// `crate::msl::push_gather_uniform_fields`) when `bound` has at least one
 /// gathered operand: `gather_index_base`, `gather_index_strides`,
@@ -3369,16 +3459,35 @@ fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
 }
 
 fn pack_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
+    let mut bytes = Vec::new();
+    pack_uniforms_into(bound, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// [`pack_uniforms`], writing into a caller-owned, reused buffer instead of
+/// returning a fresh `Vec` -- [`encode_op`]'s `metal-plan-stable-buffers` hot
+/// path calls this against [`Plan::uniform_scratch`] so a warm step's uniform
+/// packing allocates nothing (ROW 303's residual). `scratch` is cleared, not
+/// reallocated, so only the first call against a given buffer (or a call
+/// whose bytes grow past its previous capacity) ever allocates.
+fn pack_uniforms_into(bound: &BoundOp, scratch: &mut Vec<u8>) -> Result<(), EmitError> {
+    scratch.clear();
     match &bound.kind {
-        BoundOpKind::CachedAttention { .. } => pack_cached_attention_uniforms(bound),
-        BoundOpKind::Elementwise { .. } => Ok(pack_elementwise_uniforms(bound)),
+        BoundOpKind::CachedAttention { .. } => pack_cached_attention_uniforms(bound, scratch),
+        BoundOpKind::Elementwise { .. } => {
+            pack_elementwise_uniforms(bound, scratch);
+            Ok(())
+        }
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => pack_reduce_uniforms(bound),
+        } => pack_reduce_uniforms(bound, scratch),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
-        } => pack_scan_uniforms(bound),
-        BoundOpKind::Iota | BoundOpKind::Constant { .. } => Ok(pack_leaf_uniforms(bound)),
+        } => pack_scan_uniforms(bound, scratch),
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } => {
+            pack_leaf_uniforms(bound, scratch);
+            Ok(())
+        }
     }
 }
 
@@ -3518,7 +3627,7 @@ mod pack_uniforms_byte_len_tests {
     }
 }
 
-fn pack_cached_attention_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
+fn pack_cached_attention_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) -> Result<(), EmitError> {
     let BoundOpKind::CachedAttention { head_dim, .. } = &bound.kind else {
         return Err(EmitError::RenderKindMismatch {
             node: bound.node,
@@ -3532,9 +3641,8 @@ fn pack_cached_attention_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError>
         .map(|extent| *extent as i64)
         .product::<i64>()
         / *head_dim as i64;
-    let mut bytes = Vec::new();
-    push_i64(&mut bytes, total);
-    Ok(bytes)
+    push_i64(bytes, total);
+    Ok(())
 }
 
 /// Mirrors the `Uniforms` struct `crate::msl::render_iota` and
@@ -3543,11 +3651,9 @@ fn pack_cached_attention_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError>
 /// there is nothing else this struct needs to carry. `render_constant`
 /// bakes its literal into the source instead of adding a field here, which
 /// is what lets one packer serve both.
-fn pack_leaf_uniforms(bound: &BoundOp) -> Vec<u8> {
+fn pack_leaf_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) {
     let total: i64 = bound.extents.iter().map(|extent| *extent as i64).product();
-    let mut bytes = Vec::new();
-    push_i64(&mut bytes, total);
-    bytes
+    push_i64(bytes, total);
 }
 
 /// Mirrors the `Uniforms` struct `crate::msl::render_elementwise` declares
@@ -3557,21 +3663,18 @@ fn pack_leaf_uniforms(bound: &BoundOp) -> Vec<u8> {
 /// `push_gather_uniform_fields` arrays [`push_gather_uniforms`] appends, in
 /// that order — every field `long`, so a flat `i64` concatenation is the
 /// struct's byte layout.
-fn pack_elementwise_uniforms(bound: &BoundOp) -> Vec<u8> {
+fn pack_elementwise_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) {
     let rank_len = bound.extents.len().max(1);
-    let extents: Vec<i64> = bound.extents.iter().map(|extent| *extent as i64).collect();
 
-    let mut bytes = Vec::new();
-    push_i64(&mut bytes, extents.iter().product());
-    push_i64_row(&mut bytes, &extents, rank_len);
+    push_i64(bytes, bound.extents.iter().map(|extent| *extent as i64).product());
+    push_extent_row(bytes, &bound.extents, rank_len);
     for (_, layout, _) in bound.operands() {
-        push_i64(&mut bytes, layout.base);
+        push_i64(bytes, layout.base);
     }
     for (_, layout, _) in bound.operands() {
-        push_i64_row(&mut bytes, &layout.strides, rank_len);
+        push_i64_row(bytes, &layout.strides, rank_len);
     }
-    push_gather_uniforms(&mut bytes, bound, rank_len);
-    bytes
+    push_gather_uniforms(bytes, bound, rank_len);
 }
 
 /// Mirrors the `Uniforms` struct `crate::msl::render_reduce` declares at
@@ -3581,7 +3684,7 @@ fn pack_elementwise_uniforms(bound: &BoundOp) -> Vec<u8> {
 /// `operand_strides[operand_count][rank_len]`, `out_base`,
 /// `out_strides[rank_len]`, then the gather arrays (see
 /// [`pack_elementwise_uniforms`]'s doc), in that order.
-fn pack_reduce_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
+fn pack_reduce_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) -> Result<(), EmitError> {
     let BoundOpKind::Reduce {
         output_axes,
         out_layout,
@@ -3600,6 +3703,11 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     let reduce_axes = reduction_dims(bound, output_axes);
     let reduce_rank_len = reduce_axes.len().max(1);
 
+    // ROW 303 residual: these two stay temporary `Vec<i64>`s rather than
+    // `push_extent_row`'s direct-slice form -- unlike `bound.extents` itself,
+    // neither is a contiguous slice of `bound`'s own storage (each is an
+    // axis-indexed GATHER over it), so writing them in place would need a
+    // second scratch buffer this landing does not add.
     let output_extents: Vec<i64> = output_axes
         .iter()
         .map(|axis| bound.extents[*axis as usize] as i64)
@@ -3609,33 +3717,32 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
         .map(|axis| bound.extents[*axis as usize] as i64)
         .collect();
 
-    let mut bytes = Vec::new();
-    push_i64(&mut bytes, output_extents.iter().product());
-    push_i64(&mut bytes, reduction_extents.iter().product());
-    push_i64_row(&mut bytes, &output_extents, output_rank_len);
-    push_i64_row(&mut bytes, &reduction_extents, reduce_rank_len);
+    push_i64(bytes, output_extents.iter().product());
+    push_i64(bytes, reduction_extents.iter().product());
+    push_i64_row(bytes, &output_extents, output_rank_len);
+    push_i64_row(bytes, &reduction_extents, reduce_rank_len);
     for (_, layout, _) in bound.operands() {
-        push_i64(&mut bytes, layout.base);
+        push_i64(bytes, layout.base);
     }
     for (_, layout, _) in bound.operands() {
-        push_i64_row(&mut bytes, &layout.strides, rank_len);
+        push_i64_row(bytes, &layout.strides, rank_len);
     }
-    push_i64(&mut bytes, out_layout.base);
-    push_i64_row(&mut bytes, &out_layout.strides, rank_len);
+    push_i64(bytes, out_layout.base);
+    push_i64_row(bytes, &out_layout.strides, rank_len);
     // `crate::msl::render_reduce`'s own `Uniforms` struct declares these
     // fields ONLY when `epilogue_operands` is non-empty (byte-identical to
     // before epilogue fusion existed otherwise), so this must stay
     // conditional on the exact same test.
     if !epilogue_operands.is_empty() {
         for (_, layout, _) in epilogue_operands {
-            push_i64(&mut bytes, layout.base);
+            push_i64(bytes, layout.base);
         }
         for (_, layout, _) in epilogue_operands {
-            push_i64_row(&mut bytes, &layout.strides, output_rank_len);
+            push_i64_row(bytes, &layout.strides, output_rank_len);
         }
     }
-    push_gather_uniforms(&mut bytes, bound, rank_len);
-    Ok(bytes)
+    push_gather_uniforms(bytes, bound, rank_len);
+    Ok(())
 }
 
 /// Mirrors the `Uniforms` struct `crate::msl::render_scan` declares at
@@ -3646,7 +3753,7 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
 /// [`pack_elementwise_uniforms`]'s doc), in that order. `crate::msl::validate`
 /// already rejected a rank-0 scan before `emit` (and therefore this) ever
 /// runs, so `bound.extents` is never empty here.
-fn pack_scan_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
+fn pack_scan_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) -> Result<(), EmitError> {
     let BoundOpKind::Reduce { out_layout, .. } = &bound.kind else {
         return Err(EmitError::RenderKindMismatch {
             node: bound.node,
@@ -3659,26 +3766,25 @@ fn pack_scan_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     let outer_rank = rank.saturating_sub(1);
     let outer_rank_len = outer_rank.max(1);
 
-    let outer_extents: Vec<i64> = bound.extents[..outer_rank]
-        .iter()
-        .map(|extent| *extent as i64)
-        .collect();
+    let outer_extents = &bound.extents[..outer_rank];
     let inner_len = bound.extents.last().copied().unwrap_or(1) as i64;
 
-    let mut bytes = Vec::new();
-    push_i64(&mut bytes, outer_extents.iter().product());
-    push_i64(&mut bytes, inner_len);
-    push_i64_row(&mut bytes, &outer_extents, outer_rank_len);
+    push_i64(
+        bytes,
+        outer_extents.iter().map(|extent| *extent as i64).product(),
+    );
+    push_i64(bytes, inner_len);
+    push_extent_row(bytes, outer_extents, outer_rank_len);
     for (_, layout, _) in bound.operands() {
-        push_i64(&mut bytes, layout.base);
+        push_i64(bytes, layout.base);
     }
     for (_, layout, _) in bound.operands() {
-        push_i64_row(&mut bytes, &layout.strides, rank_len);
+        push_i64_row(bytes, &layout.strides, rank_len);
     }
-    push_i64(&mut bytes, out_layout.base);
-    push_i64_row(&mut bytes, &out_layout.strides, rank_len);
-    push_gather_uniforms(&mut bytes, bound, rank_len);
-    Ok(bytes)
+    push_i64(bytes, out_layout.base);
+    push_i64_row(bytes, &out_layout.strides, rank_len);
+    push_gather_uniforms(bytes, bound, rank_len);
+    Ok(())
 }
 
 fn nserror_description(error: &NSError) -> String {
@@ -5415,9 +5521,17 @@ fn encode_op(
     packed_operands: &PackedOperands,
     placement: Option<(&MetalBuffer, usize)>,
     plan_uniform: Option<&MetalBuffer>,
+    // only ever `Some` from `execute_plan_with_placements`, and only reached
+    // under `metal-plan-stable-buffers` -- see the `uniform_scratch` match
+    // arm below.
+    uniform_scratch: Option<&RefCell<Vec<u8>>>,
     math_mode: MathMode,
     resolved: Option<&ResolvedStep>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
+    // read only inside the `metal-plan-stable-buffers` arm below -- named
+    // here so a build without that feature does not warn on an unused param.
+    #[cfg(not(feature = "metal-plan-stable-buffers"))]
+    let _ = uniform_scratch;
     // `resolved` is `Some` only from `execute_plan_with_placements`, once
     // `resolve_steps` has run: this whole block -- `kernel_cache_key`'s
     // `String`, `kernel_dispatch_shape`'s `Vec<Binding>`, and
@@ -5468,7 +5582,21 @@ fn encode_op(
         Some(buffer) => {
             #[cfg(feature = "metal-plan-stable-buffers")]
             {
-                write_plan_uniform_bytes(buffer, &pack_uniforms(bound)?);
+                // `uniform_scratch` is `Some` only from
+                // `execute_plan_with_placements`, mirroring `resolved` above:
+                // its plan-owned buffer is cleared and rewritten in place here
+                // instead of `pack_uniforms` allocating a fresh `Vec` every
+                // step (ROW 303's residual). The `*_op_timed` diagnostics pass
+                // `None` and keep paying `pack_uniforms`'s own allocation --
+                // byte-identical to before this landing.
+                match uniform_scratch {
+                    Some(scratch) => {
+                        let mut bytes = scratch.borrow_mut();
+                        pack_uniforms_into(bound, &mut bytes)?;
+                        write_plan_uniform_bytes(buffer, &bytes);
+                    }
+                    None => write_plan_uniform_bytes(buffer, &pack_uniforms(bound)?),
+                }
                 counter!(PLAN_UNIFORM_WRITES, 1);
             }
             buffer.clone()
