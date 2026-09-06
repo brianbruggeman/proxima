@@ -84,6 +84,18 @@ pub enum TensorError {
         found: usize,
     },
 
+    /// [`cpu::QuantizedBlock::element_count`](crate::cpu::QuantizedBlock::element_count)
+    /// found a packed buffer whose byte length is not a whole multiple of its
+    /// own codec's block size — never a legitimate on-disk GGUF payload (a
+    /// partial trailing block), only ever bytes that are corrupt, truncated,
+    /// or bound to the wrong codec.
+    #[error("{codec} packed block is {bytes} bytes, not a whole multiple of its {block_bytes}-byte block")]
+    PackedBlockBytesNotAMultiple {
+        codec: &'static str,
+        bytes: usize,
+        block_bytes: usize,
+    },
+
     // these five carry free-form parsed text and are only ever constructed
     // by `spec.rs`, which is itself `config`-only (std+alloc); scoping them
     // to `config` keeps `TensorError` alloc-free outside that tier instead

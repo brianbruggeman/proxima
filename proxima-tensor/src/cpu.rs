@@ -174,6 +174,11 @@ type MatmulSession<'a> = CohortSession<'a, TensorError>;
 
 use half::{bf16, f16};
 
+// aliased against `half::{bf16, f16}` above: these are the per-codec on-disk
+// modules `QuantizedBlock::element_count` composes down to, not the scalar
+// float types.
+use proxima_gguf::quant::{bf16 as gguf_bf16, f16 as gguf_f16, q3_k, q4_0, q4_k, q5_k, q6_k, q8_0};
+
 use crate::bind::{
     self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg, block_node_ids,
     dead_resolved_nodes, index_node_ids, node_retirement, push_indices_node,
@@ -3171,6 +3176,84 @@ pub enum QuantizedBlock<'a> {
     /// bit layout (8-bit exponent, 7-bit mantissa) needing its own
     /// conversion. See [`matmul_bf16_f32`] and [`proxima_gguf::quant::bf16`].
     BFloat16(&'a [u8]),
+}
+
+impl QuantizedBlock<'_> {
+    /// Element count this block decodes to, derived from its own codec's
+    /// block geometry -- [`proxima_gguf::quant`]'s per-format
+    /// `blocks_for_bytes`/`elements_for_blocks` pair, never `bytes.len()`
+    /// directly (a `Q4_K` super-block is 144 bytes carrying 256 elements;
+    /// bytes and elements are not the same unit). The one definition every
+    /// caller that needs "how many f32 elements does this packed buffer
+    /// decode to" composes down to, instead of restating this per-codec
+    /// table itself.
+    ///
+    /// # Errors
+    /// [`TensorError::PackedBlockBytesNotAMultiple`] if a non-[`Self::Float32`]
+    /// variant's byte length is not a whole multiple of its codec's block
+    /// size -- never legitimate GGUF, only ever corrupt, truncated, or
+    /// misattributed bytes.
+    pub fn element_count(&self) -> Result<usize, TensorError> {
+        let (codec, bytes, block_bytes, blocks) = match self {
+            QuantizedBlock::Float32(data) => return Ok(data.len()),
+            QuantizedBlock::Q4K(bytes) => (
+                "q4_k",
+                bytes.len(),
+                q4_k::BLOCK_BYTES,
+                q4_k::blocks_for_bytes(bytes.len()).map(q4_k::elements_for_blocks),
+            ),
+            QuantizedBlock::Q5K(bytes) => (
+                "q5_k",
+                bytes.len(),
+                q5_k::BLOCK_BYTES,
+                q5_k::blocks_for_bytes(bytes.len()).map(q5_k::elements_for_blocks),
+            ),
+            QuantizedBlock::Q3K(bytes) => (
+                "q3_k",
+                bytes.len(),
+                q3_k::BLOCK_BYTES,
+                q3_k::blocks_for_bytes(bytes.len()).map(q3_k::elements_for_blocks),
+            ),
+            QuantizedBlock::Q6K(bytes) => (
+                "q6_k",
+                bytes.len(),
+                q6_k::BLOCK_BYTES,
+                q6_k::blocks_for_bytes(bytes.len()).map(q6_k::elements_for_blocks),
+            ),
+            QuantizedBlock::Q8_0(bytes) => (
+                "q8_0",
+                bytes.len(),
+                q8_0::BLOCK_BYTES,
+                q8_0::blocks_for_bytes(bytes.len()).map(q8_0::elements_for_blocks),
+            ),
+            QuantizedBlock::Q4_0(bytes) => (
+                "q4_0",
+                bytes.len(),
+                q4_0::BLOCK_BYTES,
+                q4_0::blocks_for_bytes(bytes.len()).map(q4_0::elements_for_blocks),
+            ),
+            // f16/bf16 blocks are one element wide (`QK_F16`/`QK_BF16` == 1),
+            // so a block count already IS the element count -- neither module
+            // exposes its own `elements_for_blocks`.
+            QuantizedBlock::Float16(bytes) => (
+                "float16",
+                bytes.len(),
+                gguf_f16::BLOCK_BYTES,
+                gguf_f16::blocks_for_bytes(bytes.len()),
+            ),
+            QuantizedBlock::BFloat16(bytes) => (
+                "bfloat16",
+                bytes.len(),
+                gguf_bf16::BLOCK_BYTES,
+                gguf_bf16::blocks_for_bytes(bytes.len()),
+            ),
+        };
+        blocks.ok_or(TensorError::PackedBlockBytesNotAMultiple {
+            codec,
+            bytes,
+            block_bytes,
+        })
+    }
 }
 
 /// [`evaluate`]'s counterpart for a program with one `Q4_K`-quantized weight
@@ -18909,6 +18992,85 @@ mod tests {
         assert!(evaluated.get(requested).is_none());
         assert!(!evaluated.is_placed(never_requested));
         assert!(evaluated.get(never_requested).is_none());
+    }
+
+    fn packed_block<'a>(codec: &str, bytes: &'a [u8]) -> QuantizedBlock<'a> {
+        match codec {
+            "q4_k" => QuantizedBlock::Q4K(bytes),
+            "q5_k" => QuantizedBlock::Q5K(bytes),
+            "q6_k" => QuantizedBlock::Q6K(bytes),
+            "q8_0" => QuantizedBlock::Q8_0(bytes),
+            "q4_0" => QuantizedBlock::Q4_0(bytes),
+            "float16" => QuantizedBlock::Float16(bytes),
+            "bfloat16" => QuantizedBlock::BFloat16(bytes),
+            other => panic!("packed_block: unknown test codec {other}"),
+        }
+    }
+
+    /// One block-count times one codec's own `elements_for_blocks` is the
+    /// exact contract [`QuantizedBlock::element_count`] promises every
+    /// non-`Float32` variant -- this is the single owner
+    /// `omega::metal`/`omega::wgpu_driver` both now call instead of
+    /// restating the per-codec bytes-to-elements table themselves.
+    #[proxima::test]
+    #[case::q4_k_two_super_blocks("q4_k", q4_k::BLOCK_BYTES, q4_k::QK_K, 2)]
+    #[case::q5_k_three_super_blocks("q5_k", q5_k::BLOCK_BYTES, q5_k::QK_K, 3)]
+    #[case::q6_k_one_super_block("q6_k", q6_k::BLOCK_BYTES, q6_k::QK_K, 1)]
+    #[case::q8_0_four_blocks("q8_0", q8_0::BLOCK_BYTES, q8_0::QK8_0, 4)]
+    #[case::q4_0_five_blocks("q4_0", q4_0::BLOCK_BYTES, q4_0::QK4_0, 5)]
+    #[case::float16_seven_elements("float16", gguf_f16::BLOCK_BYTES, 1, 7)]
+    #[case::bfloat16_two_elements("bfloat16", gguf_bf16::BLOCK_BYTES, 1, 2)]
+    async fn quantized_block_element_count_multiplies_block_count_by_elements_per_block(
+        #[case] codec: &str,
+        #[case] block_bytes: usize,
+        #[case] elements_per_block: usize,
+        #[case] block_count: usize,
+    ) {
+        let bytes = vec![0u8; block_bytes * block_count];
+        let block = packed_block(codec, &bytes);
+
+        let elements = block
+            .element_count()
+            .expect("a whole multiple of block_bytes never errors");
+
+        assert_eq!(elements, elements_per_block * block_count);
+    }
+
+    #[proxima::test]
+    async fn quantized_block_element_count_reports_float32_slice_length_directly() {
+        let data = [0.0f32; 5];
+        let block = QuantizedBlock::Float32(&data);
+
+        assert_eq!(block.element_count().expect("float32 never errors"), 5);
+    }
+
+    #[proxima::test]
+    #[case::q4_k("q4_k", q4_k::BLOCK_BYTES)]
+    #[case::q5_k("q5_k", q5_k::BLOCK_BYTES)]
+    #[case::q6_k("q6_k", q6_k::BLOCK_BYTES)]
+    #[case::q8_0("q8_0", q8_0::BLOCK_BYTES)]
+    #[case::q4_0("q4_0", q4_0::BLOCK_BYTES)]
+    #[case::float16("float16", gguf_f16::BLOCK_BYTES)]
+    #[case::bfloat16("bfloat16", gguf_bf16::BLOCK_BYTES)]
+    async fn quantized_block_element_count_rejects_a_byte_length_not_a_whole_block_multiple(
+        #[case] codec: &'static str,
+        #[case] block_bytes: usize,
+    ) {
+        let bytes = vec![0u8; block_bytes + 1];
+        let block = packed_block(codec, &bytes);
+
+        let error = block
+            .element_count()
+            .expect_err("one byte past a whole block is never a legal length");
+
+        assert_eq!(
+            error,
+            TensorError::PackedBlockBytesNotAMultiple {
+                codec,
+                bytes: block_bytes + 1,
+                block_bytes,
+            }
+        );
     }
 
     /// `stage_offsets` for `stage_count` stages of a UNIFORM `chunks_per_stage`
