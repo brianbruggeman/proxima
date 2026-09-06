@@ -9,14 +9,9 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use toml::Value;
+use proxima_build::sizing::{require_nonzero, SizingSource};
 
-fn require_nonzero(name: &str, value: u64) -> u64 {
-    assert!(value > 0, "{name} must be non-zero; got {value}");
-    value
-}
-
-fn require_pow2(name: &str, value: u64) -> u64 {
+fn require_pow2(name: &str, value: usize) -> usize {
     assert!(
         value.is_power_of_two(),
         "{name} must be a power of two (heapless::FnvIndexMap requirement); got {value}"
@@ -24,106 +19,44 @@ fn require_pow2(name: &str, value: u64) -> u64 {
     value
 }
 
-fn require_usize(name: &str, value: u64) -> usize {
-    usize::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows usize"))
-}
-
-fn read_int(table: &Value, section: &str, key: &str) -> u64 {
-    let raw = table
-        .get(section)
-        .and_then(|sec| sec.get(key))
-        .and_then(Value::as_integer)
-        .unwrap_or_else(|| panic!("proxima-notify.toml: missing or non-integer [{section}].{key}"));
-    u64::try_from(raw).unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-}
-
-fn resolve(table: &Value, section: &str, key: &str) -> u64 {
-    let env_name = format!(
-        "PROXIMA_NOTIFY_{section}_{key}",
-        section = section.to_uppercase(),
-        key = key.to_uppercase()
-    );
-    println!("cargo:rerun-if-env-changed={env_name}");
-    if let Ok(raw) = env::var(&env_name) {
-        raw.parse::<u64>()
-            .unwrap_or_else(|err| panic!("{env_name}={raw} must parse as u64: {err}"))
-    } else {
-        read_int(table, section, key)
-    }
+fn resolve(source: &SizingSource, section: &str, key: &str) -> i64 {
+    source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=proxima-notify.toml");
+    // SizingSource::load only arms rerun-if-changed for the toml it reads;
+    // printing any rerun-if-changed disables cargo's implicit whole-package
+    // watch, so build.rs itself needs re-arming explicitly.
     println!("cargo:rerun-if-changed=build.rs");
 
-    let toml_text = fs::read_to_string("proxima-notify.toml")
-        .unwrap_or_else(|err| panic!("read proxima-notify.toml: {err}"));
-    let toml_table: Value =
-        toml::from_str(&toml_text).unwrap_or_else(|err| panic!("parse proxima-notify.toml: {err}"));
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
+    let source = SizingSource::load(&manifest_dir, "proxima-notify.toml", "PROXIMA_NOTIFY")
+        .unwrap_or_else(|err| panic!("{err}"));
 
-    let label_key_max = require_usize(
-        "alert.label_key_max",
-        require_nonzero(
-            "alert.label_key_max",
-            resolve(&toml_table, "alert", "label_key_max"),
-        ),
-    );
-    let label_val_max = require_usize(
-        "alert.label_val_max",
-        require_nonzero(
-            "alert.label_val_max",
-            resolve(&toml_table, "alert", "label_val_max"),
-        ),
-    );
-    let labels_max = require_usize(
+    let label_key_max = require_nonzero("alert.label_key_max", resolve(&source, "alert", "label_key_max"));
+    let label_val_max = require_nonzero("alert.label_val_max", resolve(&source, "alert", "label_val_max"));
+    let labels_max = require_pow2(
         "alert.labels_max",
-        require_pow2(
-            "alert.labels_max",
-            require_nonzero(
-                "alert.labels_max",
-                resolve(&toml_table, "alert", "labels_max"),
-            ),
-        ),
+        require_nonzero("alert.labels_max", resolve(&source, "alert", "labels_max")),
     );
-    let kind_max = require_usize(
-        "alert.kind_max",
-        require_nonzero("alert.kind_max", resolve(&toml_table, "alert", "kind_max")),
-    );
-    let payload_max = require_usize(
-        "alert.payload_max",
-        require_nonzero(
-            "alert.payload_max",
-            resolve(&toml_table, "alert", "payload_max"),
-        ),
-    );
+    let kind_max = require_nonzero("alert.kind_max", resolve(&source, "alert", "kind_max"));
+    let payload_max = require_nonzero("alert.payload_max", resolve(&source, "alert", "payload_max"));
 
-    let question_max = require_usize(
+    let question_max = require_nonzero(
         "guidance.question_max",
-        require_nonzero(
-            "guidance.question_max",
-            resolve(&toml_table, "guidance", "question_max"),
-        ),
+        resolve(&source, "guidance", "question_max"),
     );
-    let answer_max = require_usize(
+    let answer_max = require_nonzero(
         "guidance.answer_max",
-        require_nonzero(
-            "guidance.answer_max",
-            resolve(&toml_table, "guidance", "answer_max"),
-        ),
+        resolve(&source, "guidance", "answer_max"),
     );
-    let context_max = require_usize(
+    let context_max = require_nonzero(
         "guidance.context_max",
-        require_nonzero(
-            "guidance.context_max",
-            resolve(&toml_table, "guidance", "context_max"),
-        ),
+        resolve(&source, "guidance", "context_max"),
     );
-    let responder_max = require_usize(
+    let responder_max = require_nonzero(
         "guidance.responder_max",
-        require_nonzero(
-            "guidance.responder_max",
-            resolve(&toml_table, "guidance", "responder_max"),
-        ),
+        resolve(&source, "guidance", "responder_max"),
     );
 
     let out_dir =
