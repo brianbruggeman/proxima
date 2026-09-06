@@ -3099,16 +3099,26 @@ const WHOLE_TOKEN_HEAD_K: usize = 4096;
 /// packed-row sweep mechanism (`nsg=4`, `MTLMathMode::Fast`) applied to the
 /// SAME whole-token sequence, so the two arms differ ONLY in compiled
 /// pipeline/dispatch geometry, never in which ops run or how they are
-/// encoded.
+/// encoded. ROW 340: Arm A was mislabeled "production's default kernel" --
+/// production's actual default cell is `nsg=2`/`MTLMathMode::Relaxed` (ROW
+/// 297/311), not `nsg=1`/`Safe`. Arm C is that ACTUAL production cell, timed
+/// with the same bare llama-style encoding as A/B, so ROW 339's "9 ms is the
+/// kernel" conclusion can be checked against the cell it should have used.
+/// Arm D holds `nsg=2` fixed and swaps only the math mode to `Fast`,
+/// isolating math from `nsg` on top of Arm C (ROW 338 found `nsg=2`/relaxed
+/// and `nsg=4`/fast land within ~2% of each other on the FFN shape alone;
+/// D checks whether that holds across the whole token).
 struct WholeTokenArm {
     name: &'static str,
     simdgroups_per_tg: usize,
     math: MTLMathMode,
 }
 
-const WHOLE_TOKEN_ARMS: [WholeTokenArm; 2] = [
+const WHOLE_TOKEN_ARMS: [WholeTokenArm; 4] = [
     WholeTokenArm { name: "A_llama_encoding_production_kernel", simdgroups_per_tg: 1, math: MTLMathMode::Safe },
     WholeTokenArm { name: "B_llama_encoding_nsg4_fast", simdgroups_per_tg: 4, math: MTLMathMode::Fast },
+    WholeTokenArm { name: "C_llama_encoding_nsg2_relaxed_production_cell", simdgroups_per_tg: 2, math: MTLMathMode::Relaxed },
+    WholeTokenArm { name: "D_llama_encoding_nsg2_fast", simdgroups_per_tg: 2, math: MTLMathMode::Fast },
 ];
 
 /// ROW 339: does llama.cpp's own SERIAL encoding (one plain
