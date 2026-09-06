@@ -19,55 +19,11 @@
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use toml::Value;
+use proxima_build::sizing::SizingSource;
 
 const CONFIG_FILE: &str = "proxima-centauri.toml";
-
-fn override_name(section: &str, key: &str) -> String {
-    format!(
-        "PROXIMA_CENTAURI_{}_{}",
-        section.to_uppercase(),
-        key.to_uppercase()
-    )
-}
-
-/// Read `[section].key` as an integer, letting an env override win.
-fn sized_int(root: &Value, section: &str, key: &str) -> u64 {
-    let name = override_name(section, key);
-    println!("cargo:rerun-if-env-changed={name}");
-
-    if let Ok(raw) = env::var(&name) {
-        return raw
-            .parse()
-            .unwrap_or_else(|err| panic!("{name}={raw} is not a non-negative integer: {err}"));
-    }
-
-    let raw = root
-        .get(section)
-        .and_then(|table| table.get(key))
-        .and_then(Value::as_integer)
-        .unwrap_or_else(|| panic!("{CONFIG_FILE}: missing or non-integer [{section}].{key}"));
-
-    u64::try_from(raw).unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-}
-
-/// Read `[section].key` as a string, letting an env override win.
-fn sized_str(root: &Value, section: &str, key: &str) -> String {
-    let name = override_name(section, key);
-    println!("cargo:rerun-if-env-changed={name}");
-
-    if let Ok(raw) = env::var(&name) {
-        return raw;
-    }
-
-    root.get(section)
-        .and_then(|table| table.get(key))
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("{CONFIG_FILE}: missing or non-string [{section}].{key}"))
-        .to_owned()
-}
 
 /// Does the target have 64-bit atomics? Cargo hands us the widths as a
 /// comma-separated list, so this is a fact about the target rather than a
@@ -134,16 +90,15 @@ fn warn_on_software_aes() {
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
-    let config_path = Path::new(&manifest_dir).join(CONFIG_FILE);
-    println!("cargo:rerun-if-changed={CONFIG_FILE}");
+    let source = SizingSource::load(&manifest_dir, CONFIG_FILE, "PROXIMA_CENTAURI")
+        .unwrap_or_else(|err| panic!("{err}"));
+    let sized_int = |section: &str, key: &str| -> u64 {
+        let value = source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"));
+        u64::try_from(value)
+            .unwrap_or_else(|_| panic!("[{section}].{key} = {value} must be non-negative"))
+    };
 
-    let text = fs::read_to_string(&config_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", config_path.display()));
-    let root: Value = text
-        .parse()
-        .unwrap_or_else(|err| panic!("parse {}: {err}", config_path.display()));
-
-    let window_packets = sized_int(&root, "replay", "window_packets");
+    let window_packets = sized_int("replay", "window_packets");
     assert!(
         window_packets > 0,
         "[replay].window_packets must be non-zero"
@@ -155,8 +110,12 @@ fn main() {
     );
     let window_words = window_packets / 64;
 
-    let counter_bits = resolve_counter_bits(&sized_str(&root, "entropy", "counter_bits"));
-    let max_identity = sized_int(&root, "auth", "max_identity_bytes");
+    let counter_bits = resolve_counter_bits(
+        &source
+            .resolve_str("entropy", "counter_bits")
+            .unwrap_or_else(|err| panic!("{err}")),
+    );
+    let max_identity = sized_int("auth", "max_identity_bytes");
     assert!(
         max_identity > 0,
         "[auth].max_identity_bytes must be non-zero"
@@ -166,10 +125,10 @@ fn main() {
         "[auth].max_identity_bytes must fit the u16 length prefix; got {max_identity}"
     );
 
-    let max_packets = sized_int(&root, "lifetime", "max_packets");
+    let max_packets = sized_int("lifetime", "max_packets");
     assert!(max_packets > 0, "[lifetime].max_packets must be non-zero");
 
-    let max_payload = sized_int(&root, "esp", "max_payload_bytes");
+    let max_payload = sized_int("esp", "max_payload_bytes");
     assert!(max_payload > 0, "[esp].max_payload_bytes must be non-zero");
 
     let mut generated = String::new();
