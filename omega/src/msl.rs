@@ -1239,10 +1239,18 @@ pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kern
 /// # Errors
 /// Propagates [`type_token`]'s unsupported-dtype rejection — the same gate
 /// [`emit`] enforces before ever building a kernel.
-// metal-only production caller (`crate::metal::encode_op`); the `mod tests`
-// call sites below are the second, so `cfg(test)` keeps a non-macOS
-// `cargo test` build honest without a blanket `allow(dead_code)`.
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+// production caller is `crate::metal::encode_op` (macOS-only driver, gated
+// on `metal`, which now implies `metal-core`); the `mod tests` call sites
+// below are the second, so `cfg(test)` keeps a non-macOS `cargo test` build
+// honest. No macOS-specific code lives in this function body, so it is
+// gated on `metal-core` alone -- it builds (and is exercised) on Linux too.
+// `metal-core` without `metal` (the Linux emitter-only build) has no driver
+// to call it, hence the `allow`: genuinely unreachable there, not a hidden bug.
+#[cfg(any(test, feature = "metal-core"))]
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
+)]
 pub(crate) fn kernel_cache_key(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
@@ -1348,8 +1356,13 @@ pub(crate) fn kernel_cache_key(
 /// enforces before ever building a kernel.
 // unlike `kernel_cache_key` above, this has no `mod tests` call site of its
 // own, so a bare `cfg(test)` disjunct leaves it genuinely dead-code on a
-// non-macOS `cargo test`/`nextest` build -- gate on the one real caller.
-#[cfg(all(feature = "metal", target_os = "macos"))]
+// non-macOS `cargo test`/`nextest` build -- gate on the one real caller
+// (`crate::metal::encode_op`, via `metal-core`, same rationale as above).
+#[cfg(feature = "metal-core")]
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
+)]
 pub(crate) fn kernel_dispatch_shape(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
