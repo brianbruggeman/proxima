@@ -107,11 +107,19 @@
 //! Timed by `commit()` -> `waitUntilCompleted()` around exactly
 //! [`WEIGHT_TENSOR_COUNT`] dispatches per repeat (one dispatch per real,
 //! distinct weight tensor, all encoded into ONE command buffer before that
-//! buffer is ever committed), 5 repeats per arm (`REPEATS`), nothing
-//! subtracted -- the encode loop itself (binding each dispatch's own weight
-//! offset and output offset) happens entirely BEFORE the timer starts, same
-//! convention `device_streaming_ceiling.rs` uses around its own single
-//! dispatch. The L3 baseline arm is the one exception: it times
+//! buffer is ever committed). Every arm runs one UNTIMED warm-up dispatch of
+//! its own command buffer first, immediately discarded, then [`REPEATS`]
+//! timed repeats (ROW 335: ROW 296/302/331 all saw the same cold-first-
+//! dispatch signature, so the warm-up removes that outlier from the timed set
+//! rather than leaving it to be averaged around; [`warmed_up_samples`] is the
+//! one function every arm below calls for this). Nothing is subtracted from
+//! a timed repeat itself -- the encode loop (binding each dispatch's own
+//! weight offset and output offset) happens entirely BEFORE the timer
+//! starts, same convention `device_streaming_ceiling.rs` uses around its own
+//! single dispatch. Every arm reports the MEDIAN of its timed repeats as the
+//! headline number (robust to a single outlier repeat), alongside min, max,
+//! and CoV, and keeps the mean for continuity with every prior ladder row's
+//! own printed number. The L3 baseline arm is the one exception: it times
 //! `omega::metal::execute_plan` end to end (upload resolution + all
 //! [`WEIGHT_TENSOR_COUNT`] dispatches + readback of every requested output)
 //! because assembling the emitted kernel's general uniform buffer by hand
@@ -483,7 +491,7 @@ const ROW_310_IN_PROGRAM_GBPS: &[(&str, Option<f64>)] = &[
     ("ffn_gate", Some(236.55)),
 ];
 
-const REPEATS: usize = 5;
+const REPEATS: usize = 7;
 const PARITY_ROWS: usize = 64;
 
 /// Parity is measured relative to the batch's own peak reference magnitude,
@@ -1070,17 +1078,57 @@ fn time_batch_empty(
     started.elapsed()
 }
 
-fn mean_and_cov(samples: &[f64]) -> (f64, f64) {
+/// One arm's own timed-repeat statistics (ROW 335). `median` is the arm's
+/// reported headline number -- robust to a single cold-outlier repeat, the
+/// exact failure ROW 296/302/331 all saw (repeat 1 at 4-13 GB/s, repeats 2-5
+/// converged; ROW 331's Q6_K head sample list `[3.95, 43.17, 21.48, 65.45,
+/// 56.60]` never converged at all in 5). `mean` travels alongside it for
+/// continuity with every prior ladder row's own printed number; `min`/`max`/
+/// `cov_pct` show the spread the median alone hides.
+struct SampleStats {
+    mean: f64,
+    median: f64,
+    min: f64,
+    max: f64,
+    cov_pct: f64,
+}
+
+fn sample_stats(samples: &[f64]) -> SampleStats {
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
     let variance =
         samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / samples.len() as f64;
     let stddev = variance.sqrt();
-    let cov = if mean.abs() > f64::MIN_POSITIVE {
-        stddev / mean * 100.0
+    let cov_pct = if mean.abs() > f64::MIN_POSITIVE { stddev / mean * 100.0 } else { 0.0 };
+
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|left, right| left.partial_cmp(right).expect("bandwidth/latency samples are never NaN"));
+    let len = sorted.len();
+    let median = if len % 2 == 1 {
+        sorted[len / 2]
     } else {
-        0.0
+        (sorted[len / 2 - 1] + sorted[len / 2]) / 2.0
     };
-    (mean, cov)
+
+    SampleStats {
+        mean,
+        median,
+        min: sorted[0],
+        max: sorted[len - 1],
+        cov_pct,
+    }
+}
+
+/// Every arm's own timing discipline (ROW 335): one untimed warm-up dispatch
+/// of the arm's own command buffer, immediately discarded, then [`REPEATS`]
+/// timed repeats. ROW 296/302/331 all saw the same signature -- a cold first
+/// dispatch reading 4-13 GB/s while later repeats converged -- so the warm-up
+/// removes that outlier from the timed set itself, rather than leaving it in
+/// and averaging (or medianing) around it. `dispatch_once` is whatever one
+/// arm's own command-buffer-commit-and-wait closure is; every call site below
+/// supplies its own.
+fn warmed_up_samples<F: FnMut() -> Duration>(mut dispatch_once: F) -> Vec<Duration> {
+    dispatch_once();
+    (0..REPEATS).map(|_| dispatch_once()).collect()
 }
 
 fn gbps_samples(elapsed_samples: &[Duration], total_bytes: u64) -> Vec<f64> {
@@ -1332,9 +1380,8 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         )
         .expect("device allocates L0's output buffer");
     {
-        let mut elapsed_samples = Vec::with_capacity(REPEATS);
-        for _ in 0..REPEATS {
-            let elapsed = time_batch_l0l1l2(
+        let elapsed_samples = warmed_up_samples(|| {
+            time_batch_l0l1l2(
                 &queue,
                 &l0_pipeline,
                 &no_copy_weight,
@@ -1344,16 +1391,16 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
                 &blocks_per_row_uniform,
                 default_grid_threads,
                 default_threadgroup_width,
-            );
-            elapsed_samples.push(elapsed);
-        }
+            )
+        });
         let samples = gbps_samples(&elapsed_samples, TOTAL_TIMED_BYTES);
-        let (mean, cov) = mean_and_cov(&samples);
+        let stats = sample_stats(&samples);
         println!(
-            "arm=L0_streaming mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?} \
-             dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES}"
+            "arm=L0_streaming median_gbps={:.2} mean_gbps={:.2} min_gbps={:.2} max_gbps={:.2} \
+             cov_pct={:.2} samples={samples:?} dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES}",
+            stats.median, stats.mean, stats.min, stats.max, stats.cov_pct
         );
-        ladder_gbps.insert("L0_streaming", mean);
+        ladder_gbps.insert("L0_streaming", stats.median);
     }
 
     // ---- L1 ----
@@ -1371,9 +1418,8 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         )
         .expect("device allocates L1's output buffer");
     {
-        let mut elapsed_samples = Vec::with_capacity(REPEATS);
-        for _ in 0..REPEATS {
-            let elapsed = time_batch_l0l1l2(
+        let elapsed_samples = warmed_up_samples(|| {
+            time_batch_l0l1l2(
                 &queue,
                 &l1_pipeline,
                 &no_copy_weight,
@@ -1383,16 +1429,16 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
                 &blocks_per_row_uniform,
                 default_grid_threads,
                 default_threadgroup_width,
-            );
-            elapsed_samples.push(elapsed);
-        }
+            )
+        });
         let samples = gbps_samples(&elapsed_samples, TOTAL_TIMED_BYTES);
-        let (mean, cov) = mean_and_cov(&samples);
+        let stats = sample_stats(&samples);
         println!(
-            "arm=L1_header_decode mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?} \
-             dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES}"
+            "arm=L1_header_decode median_gbps={:.2} mean_gbps={:.2} min_gbps={:.2} max_gbps={:.2} \
+             cov_pct={:.2} samples={samples:?} dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES}",
+            stats.median, stats.mean, stats.min, stats.max, stats.cov_pct
         );
-        ladder_gbps.insert("L1_header_decode", mean);
+        ladder_gbps.insert("L1_header_decode", stats.median);
     }
 
     // ---- L2 ----
@@ -1410,9 +1456,8 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         )
         .expect("device allocates L2's output buffer");
     {
-        let mut elapsed_samples = Vec::with_capacity(REPEATS);
-        for _ in 0..REPEATS {
-            let elapsed = time_batch_l0l1l2(
+        let elapsed_samples = warmed_up_samples(|| {
+            time_batch_l0l1l2(
                 &queue,
                 &l2_pipeline,
                 &no_copy_weight,
@@ -1422,16 +1467,16 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
                 &blocks_per_row_uniform,
                 default_grid_threads,
                 default_threadgroup_width,
-            );
-            elapsed_samples.push(elapsed);
-        }
+            )
+        });
         let samples = gbps_samples(&elapsed_samples, TOTAL_TIMED_BYTES);
-        let (mean, cov) = mean_and_cov(&samples);
+        let stats = sample_stats(&samples);
         println!(
-            "arm=L2_dequant mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?} \
-             dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES}"
+            "arm=L2_dequant median_gbps={:.2} mean_gbps={:.2} min_gbps={:.2} max_gbps={:.2} \
+             cov_pct={:.2} samples={samples:?} dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES}",
+            stats.median, stats.mean, stats.min, stats.max, stats.cov_pct
         );
-        ladder_gbps.insert("L2_dequant", mean);
+        ladder_gbps.insert("L2_dequant", stats.median);
     }
 
     // ---- L3 baseline: the REAL production kernel, through the public
@@ -1459,25 +1504,27 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
 
     let mut l3_baseline_layer0_up: Vec<f32> = Vec::new();
     {
-        let mut elapsed_samples = Vec::with_capacity(REPEATS);
-        for _ in 0..REPEATS {
+        let elapsed_samples = warmed_up_samples(|| {
             let started = Instant::now();
             let evaluated = omega::metal::execute_plan(&plan, &blocks)
                 .expect("execute_plan runs the real production q4_k matmul over every ffn tensor");
-            elapsed_samples.push(started.elapsed());
+            let elapsed = started.elapsed();
             l3_baseline_layer0_up = evaluated
                 .get(sums[0])
                 .map(|(data, _)| data.to_vec())
                 .expect("blk.0.ffn_up's own reduce node is a requested output");
-        }
+            elapsed
+        });
         let samples = gbps_samples(&elapsed_samples, TOTAL_TIMED_BYTES);
-        let (mean, cov) = mean_and_cov(&samples);
+        let stats = sample_stats(&samples);
         println!(
-            "arm=L3_baseline_production_execute_plan mean_gbps={mean:.2} cov_pct={cov:.2} \
-             samples={samples:?} dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES} \
-             (end-to-end plan+dispatch+readback, see module doc)"
+            "arm=L3_baseline_production_execute_plan median_gbps={:.2} mean_gbps={:.2} \
+             min_gbps={:.2} max_gbps={:.2} cov_pct={:.2} samples={samples:?} \
+             dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES} \
+             (end-to-end plan+dispatch+readback, see module doc)",
+            stats.median, stats.mean, stats.min, stats.max, stats.cov_pct
         );
-        ladder_gbps.insert("L3_baseline", mean);
+        ladder_gbps.insert("L3_baseline", stats.median);
     }
     parity_failures.extend(check_parity(
         "L3_baseline vs cpu_reference",
@@ -1521,43 +1568,40 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
                     DispatchMode::Threads => "dispatchThreads",
                     DispatchMode::Threadgroups => "dispatchThreadgroups",
                 };
-                let mut elapsed_samples = Vec::with_capacity(REPEATS);
-                for _ in 0..REPEATS {
-                    let elapsed = match dispatch_mode {
-                        DispatchMode::Threads => time_batch_l3_shape_threads(
-                            &queue,
-                            &pipeline,
-                            &no_copy_weight,
-                            &weight_offsets,
-                            &activation_buffer,
-                            &l3_output,
-                            ROWS * size_of::<f32>(),
-                            &blocks_per_row_uniform,
-                            grid_threads,
-                            threadgroup_width,
-                        ),
-                        DispatchMode::Threadgroups => time_batch_l3_shape_threadgroups(
-                            &queue,
-                            &pipeline,
-                            &no_copy_weight,
-                            &weight_offsets,
-                            &activation_buffer,
-                            &l3_output,
-                            ROWS * size_of::<f32>(),
-                            &blocks_per_row_uniform,
-                            threadgroup_count,
-                            threadgroup_width,
-                        ),
-                    };
-                    elapsed_samples.push(elapsed);
-                }
+                let elapsed_samples = warmed_up_samples(|| match dispatch_mode {
+                    DispatchMode::Threads => time_batch_l3_shape_threads(
+                        &queue,
+                        &pipeline,
+                        &no_copy_weight,
+                        &weight_offsets,
+                        &activation_buffer,
+                        &l3_output,
+                        ROWS * size_of::<f32>(),
+                        &blocks_per_row_uniform,
+                        grid_threads,
+                        threadgroup_width,
+                    ),
+                    DispatchMode::Threadgroups => time_batch_l3_shape_threadgroups(
+                        &queue,
+                        &pipeline,
+                        &no_copy_weight,
+                        &weight_offsets,
+                        &activation_buffer,
+                        &l3_output,
+                        ROWS * size_of::<f32>(),
+                        &blocks_per_row_uniform,
+                        threadgroup_count,
+                        threadgroup_width,
+                    ),
+                });
                 let samples = gbps_samples(&elapsed_samples, TOTAL_TIMED_BYTES);
-                let (mean, cov) = mean_and_cov(&samples);
+                let stats = sample_stats(&samples);
                 println!(
                     "arm=L3_shape math_mode={:<8} simdgroups_per_tg={simdgroups_per_tg} \
-                     dispatch={dispatch_name:<20} mean_gbps={mean:.2} cov_pct={cov:.2} \
-                     samples={samples:?} dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES}",
-                    math_arm.name
+                     dispatch={dispatch_name:<20} median_gbps={:.2} mean_gbps={:.2} \
+                     min_gbps={:.2} max_gbps={:.2} cov_pct={:.2} samples={samples:?} \
+                     dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES}",
+                    math_arm.name, stats.median, stats.mean, stats.min, stats.max, stats.cov_pct
                 );
 
                 let is_production_default = matches!(math_arm.name, "safe")
@@ -1566,7 +1610,7 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
                 if is_production_default {
                     let full = read_f32_buffer(&l3_output, WEIGHT_TENSOR_COUNT * ROWS);
                     default_shape_layer0_up = full[..ROWS].to_vec();
-                    ladder_gbps.insert("L3_shape_default", mean);
+                    ladder_gbps.insert("L3_shape_default", stats.median);
                 }
             }
         }
@@ -1594,16 +1638,16 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         )
         .expect("device allocates the empty arm's output buffer");
     {
-        let mut elapsed_samples = Vec::with_capacity(REPEATS);
-        for _ in 0..REPEATS {
-            let elapsed = time_batch_empty(&queue, &empty_pipeline, &empty_output, WEIGHT_TENSOR_COUNT, 32, 32);
-            elapsed_samples.push(elapsed);
-        }
+        let elapsed_samples = warmed_up_samples(|| {
+            time_batch_empty(&queue, &empty_pipeline, &empty_output, WEIGHT_TENSOR_COUNT, 32, 32)
+        });
         let ns_samples = ns_per_dispatch_samples(&elapsed_samples, WEIGHT_TENSOR_COUNT);
-        let (mean, cov) = mean_and_cov(&ns_samples);
+        let stats = sample_stats(&ns_samples);
         println!(
-            "arm=empty mean_ns_per_dispatch={mean:.1} cov_pct={cov:.2} samples={ns_samples:?} \
-             dispatches={WEIGHT_TENSOR_COUNT}"
+            "arm=empty median_ns_per_dispatch={:.1} mean_ns_per_dispatch={:.1} \
+             min_ns_per_dispatch={:.1} max_ns_per_dispatch={:.1} cov_pct={:.2} samples={ns_samples:?} \
+             dispatches={WEIGHT_TENSOR_COUNT}",
+            stats.median, stats.mean, stats.min, stats.max, stats.cov_pct
         );
     }
 
@@ -1852,17 +1896,17 @@ fn run_shape_arm(label: &str, codec: ShapeCodec, rows: usize, k: usize, tensor_c
     let _ = omega::metal::metal_stage_totals();
 
     let mut first_tensor_output: Vec<f32> = Vec::new();
-    let mut elapsed_samples = Vec::with_capacity(REPEATS);
-    for _ in 0..REPEATS {
+    let elapsed_samples = warmed_up_samples(|| {
         let started = Instant::now();
         let evaluated = omega::metal::execute_plan(&plan, &blocks)
             .expect("execute_plan runs the synthetic matmul over every tensor");
-        elapsed_samples.push(started.elapsed());
+        let elapsed = started.elapsed();
         first_tensor_output = evaluated
             .get(sums[0])
             .map(|(data, _)| data.to_vec())
             .expect("first tensor's own reduce node is a requested output");
-    }
+        elapsed
+    });
     // ROW 334: `resident_uploads`/`resident_reuses` witness the NAME-keyed
     // `RESIDENT_BUFFERS` copy path (ROW 332's own fix); `nocopy_uploads`/
     // `nocopy_reuses` witness the ADDRESS-keyed `NOCOPY_BUFFERS` cache --
@@ -1883,24 +1927,28 @@ fn run_shape_arm(label: &str, codec: ShapeCodec, rows: usize, k: usize, tensor_c
         );
     }
     let samples = gbps_samples(&elapsed_samples, total_timed_bytes);
-    let (mean, cov) = mean_and_cov(&samples);
-    let ratio_to_ceiling = mean / DEVICE_CEILING_GBPS;
+    let stats = sample_stats(&samples);
+    let ratio_to_ceiling = stats.median / DEVICE_CEILING_GBPS;
     println!(
         "arm={label} rows={rows} k={k} codec={codec_name} tensors={tensor_count} bytes={total_timed_bytes} \
-         mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?} ratio_to_device_ceiling={ratio_to_ceiling:.3}"
+         median_gbps={:.2} mean_gbps={:.2} min_gbps={:.2} max_gbps={:.2} cov_pct={:.2} samples={samples:?} \
+         ratio_to_device_ceiling={ratio_to_ceiling:.3}",
+        stats.median, stats.mean, stats.min, stats.max, stats.cov_pct
     );
     if let Some((_, row_310_gbps)) =
         ROW_310_IN_PROGRAM_GBPS.iter().find(|(family, _)| *family == label)
     {
         match row_310_gbps {
             Some(in_program) => println!(
-                "summary family={label}: isolated={mean:.2} GB/s vs ROW 310 in-program={in_program:.2} \
+                "summary family={label}: isolated={:.2} GB/s vs ROW 310 in-program={in_program:.2} \
                  GB/s (ratio isolated/in_program={:.3})",
-                mean / in_program
+                stats.median,
+                stats.median / in_program
             ),
             None => println!(
-                "summary family={label}: isolated={mean:.2} GB/s vs ROW 310 in-program=noise-negative \
-                 (not comparable, see ROW 310's own CoV note)"
+                "summary family={label}: isolated={:.2} GB/s vs ROW 310 in-program=noise-negative \
+                 (not comparable, see ROW 310's own CoV note)",
+                stats.median
             ),
         }
     }
@@ -2409,21 +2457,23 @@ fn run_head_arm(
         .expect("the reduce position's own key is the plan's last resolved position");
 
     let mut first_tensor_output: Vec<f32> = Vec::new();
-    let mut elapsed_samples = Vec::with_capacity(REPEATS);
-    for _ in 0..REPEATS {
+    let elapsed_samples = warmed_up_samples(|| {
         let started = Instant::now();
         let evaluated = omega::metal::execute_plan(&plan, &blocks)
             .expect("execute_plan runs the output-head matmul over every weight input");
-        elapsed_samples.push(started.elapsed());
+        let elapsed = started.elapsed();
         first_tensor_output = evaluated
             .get(sums[0])
             .map(|(data, _)| data.to_vec())
             .expect("first weight's own reduce node is a requested output");
-    }
+        elapsed
+    });
     let ns_per_dispatch = ns_per_dispatch_samples(&elapsed_samples, tensor_count);
-    let (mean_ns_per_dispatch, _) = mean_and_cov(&ns_per_dispatch);
+    let ns_stats = sample_stats(&ns_per_dispatch);
     let samples = gbps_samples(&elapsed_samples, total_timed_bytes);
-    let (mean_gbps, cov) = mean_and_cov(&samples);
+    let gbps_stats = sample_stats(&samples);
+    let median_ns_per_dispatch = ns_stats.median;
+    let median_gbps = gbps_stats.median;
 
     let parity_failure = if assert_parity {
         let first_tensor_bytes: &[u8] = match (buffer_kind, &synth_bytes) {
@@ -2444,12 +2494,20 @@ fn run_head_arm(
 
     println!(
         "arm={label} op_shape={} buffer_kind={} key={key} tensor_count={tensor_count} \
-         mean_ns_per_dispatch={mean_ns_per_dispatch:.0} mean_gbps={mean_gbps:.2} cov_pct={cov:.2}",
+         median_ns_per_dispatch={:.0} mean_ns_per_dispatch={:.0} median_gbps={:.2} mean_gbps={:.2} \
+         min_gbps={:.2} max_gbps={:.2} cov_pct={:.2}",
         op_shape.label(),
-        buffer_kind.label()
+        buffer_kind.label(),
+        median_ns_per_dispatch,
+        ns_stats.mean,
+        median_gbps,
+        gbps_stats.mean,
+        gbps_stats.min,
+        gbps_stats.max,
+        gbps_stats.cov_pct
     );
 
-    (key, mean_ns_per_dispatch, mean_gbps, parity_failure)
+    (key, median_ns_per_dispatch, median_gbps, parity_failure)
 }
 
 /// ROW 327: isolates the two variables ROW 326 found confounded between
@@ -2499,10 +2557,10 @@ fn head_buffer_kind_by_kernel_variant() {
             HeadBufferKind::RealNoCopy { .. } => real_tensor.out_dim as u32,
         };
 
-        let (_, first_dispatch_ns, _, _) =
+        let (_, first_dispatch_median_ns, _, _) =
             run_head_arm(&label, *op_shape, buffer_kind, rows, IN_DIM as u32, 1, 90_000, false);
 
-        let (key, mean_dispatch_ns, mean_gbps, parity_failure) = run_head_arm(
+        let (key, steady_dispatch_median_ns, steady_median_gbps, parity_failure) = run_head_arm(
             &label,
             *op_shape,
             buffer_kind,
@@ -2517,10 +2575,11 @@ fn head_buffer_kind_by_kernel_variant() {
         }
 
         println!(
-            "summary arm={label} key={key} first_dispatch_ms={:.4} mean_dispatch_ms={:.4} \
-             mean_gbps={mean_gbps:.2} vs_row_326_in_program_first_ms=2.19 vs_row_326_in_program_dup_ms=0.41",
-            first_dispatch_ns / 1e6,
-            mean_dispatch_ns / 1e6
+            "summary arm={label} key={key} first_dispatch_median_ms={:.4} steady_dispatch_median_ms={:.4} \
+             steady_median_gbps={steady_median_gbps:.2} vs_row_326_in_program_first_ms=2.19 \
+             vs_row_326_in_program_dup_ms=0.41",
+            first_dispatch_median_ns / 1e6,
+            steady_dispatch_median_ns / 1e6
         );
     }
 
