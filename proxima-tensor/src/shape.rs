@@ -221,31 +221,44 @@ impl ShapeTable {
                 if entry.skip_axis == Some(axis_index as u16) {
                     continue;
                 }
-                if let [term] = axis.terms.as_slice()
+                // A declared `len` is the axis's true extent regardless of
+                // how the address term is spelled -- single-term, shifted
+                // (`i+1@2`), scaled (`2*i@4`), or multi-term (`2*i+p@2`,
+                // resolved onto whichever term is the plain, `coeff == 1`
+                // one; see `AxisIndex::len_target_axis`). Without `len` this
+                // falls back to today's only other extent-defining shape: a
+                // pure, unshifted `coeff == 1` projection reading the
+                // operand's own on-disk width -- itself just as much an
+                // anchor as a declared `len`, so the two are unified into
+                // the same `resolved` slot below and disagree the same way.
+                let defines = if let Some(len) = &axis.len {
+                    let target = axis.len_target_axis().ok_or(TensorError::AmbiguousLenAxis {
+                        node: here,
+                        dim: axis_index as u16,
+                    })?;
+                    Some((target, resolve_extent(len, &self.symbols)?))
+                } else if let [term] = axis.terms.as_slice()
                     && term.coeff == 1
                     && axis.offset == 0
                 {
-                    // `len`, when set, is the axis's true extent — a fact
-                    // distinct from `operand_shape[axis_index]` (that
-                    // operand's own on-disk width at this position, which
-                    // may be wider: a genuine prefix read). See
-                    // `AxisIndex::len`'s own doc.
-                    let extent = match &axis.len {
-                        Some(len) => resolve_extent(len, &self.symbols)?,
-                        None => operand_shape[axis_index],
-                    };
-                    let slot = &mut resolved[term.axis as usize];
-                    match *slot {
-                        None => *slot = Some(extent),
-                        Some(existing) if existing == extent => {}
-                        Some(existing) => {
-                            return Err(TensorError::ExtentMismatch {
-                                node: here,
-                                dim: term.axis,
-                                left: existing,
-                                right: extent,
-                            });
-                        }
+                    Some((term.axis, operand_shape[axis_index]))
+                } else {
+                    None
+                };
+                let Some((target, extent)) = defines else {
+                    continue;
+                };
+                let slot = &mut resolved[target as usize];
+                match *slot {
+                    None => *slot = Some(extent),
+                    Some(existing) if existing == extent => {}
+                    Some(existing) => {
+                        return Err(TensorError::ExtentMismatch {
+                            node: here,
+                            dim: target,
+                            left: existing,
+                            right: extent,
+                        });
                     }
                 }
             }
@@ -918,6 +931,210 @@ mod tests {
             .expect_err("a declared len wider than the operand's real storage is rejected");
         assert!(
             matches!(error, TensorError::IndexOutOfBounds { .. }),
+            "{error}"
+        );
+    }
+
+    /// The owner-traced bug, reproduced exactly: `unify_iteration_space`
+    /// only ever consulted `axis.len` inside the `coeff == 1, offset == 0`
+    /// branch (before this test's fix), so `left`'s shifted `i+1@2` term
+    /// never entered that branch at all -- its declared `len` was silently
+    /// dropped -- while `right`'s plain, unshifted `i` projection anchored
+    /// axis `i` at its own on-disk width (3) uncontested. `left`'s own
+    /// address (`offset = 1`, extent 3) stayed in bounds against `left`'s
+    /// on-disk width (4), so nothing ever raised, and `infer` returned
+    /// `Ok([1, 3])` -- the declared `@2` silently ignored. A declared `len`
+    /// is exactly as much an anchor as a plain projection's on-disk width
+    /// (`AxisIndex::len`'s own doc, `map.rs`), so once both compete for the
+    /// same iteration axis, disagreeing anchors (2 vs 3) must reject the
+    /// same way two disagreeing plain projections already do
+    /// (`disagreeing_operand_extents_are_rejected`, above) -- not silently
+    /// prefer whichever one the old code's shape-matching happened to see.
+    #[test]
+    fn a_shifted_len_declaration_disagrees_with_an_unshifted_anchor() {
+        let mut program = Vec::new();
+        let left = leaf(&mut program, &[Extent::Static(1), Extent::Static(4)]);
+        let right = leaf(&mut program, &[Extent::Static(1), Extent::Static(3)]);
+
+        // "s,i+1@2->si": axis 0 is a plain projection onto `s`; axis 1 reads
+        // `i+1` (offset 1) and declares its true extent as 2.
+        let left_map = IndexMap::Affine(map::IndexPattern {
+            iter_rank: 2,
+            axes: alloc::vec![
+                map::AxisIndex {
+                    terms: alloc::vec![AxisTerm::projection(0)].into_iter().collect(),
+                    offset: 0,
+                    len: None,
+                },
+                map::AxisIndex {
+                    terms: alloc::vec![AxisTerm::projection(1)].into_iter().collect(),
+                    offset: 1,
+                    len: Some(Extent::Static(2)),
+                },
+            ],
+        });
+        // "si->si": both axes are plain, unshifted projections -- axis 1
+        // anchors `i` at `right`'s own on-disk width, 3.
+        let right_map = IndexMap::Affine(map::projection(2, &[0, 1]));
+
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(left, left_map), (right, right_map)],
+                name: None,
+            },
+        );
+
+        let error = infer(&program, &[])
+            .expect_err("a declared len (2) disagreeing with an anchor-derived extent (3) is rejected");
+        assert!(
+            matches!(
+                error,
+                TensorError::ExtentMismatch {
+                    dim: 1,
+                    left: 2,
+                    right: 3,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    /// The same shifted `i+1@2` declaration as
+    /// `a_shifted_len_declaration_disagrees_with_an_unshifted_anchor`, minus
+    /// the conflicting anchor: `right` only ever projects `s` (a broadcast),
+    /// so `left`'s declared `len` is the sole fact about axis `i` and wins
+    /// cleanly -- proving the fix resolves the declaration, not merely that
+    /// it detects a conflict.
+    #[test]
+    fn a_shifted_len_declaration_with_no_conflicting_anchor_resolves() {
+        let mut program = Vec::new();
+        let left = leaf(&mut program, &[Extent::Static(1), Extent::Static(4)]);
+        let bias = leaf(&mut program, &[Extent::Static(1)]);
+
+        let left_map = IndexMap::Affine(map::IndexPattern {
+            iter_rank: 2,
+            axes: alloc::vec![
+                map::AxisIndex {
+                    terms: alloc::vec![AxisTerm::projection(0)].into_iter().collect(),
+                    offset: 0,
+                    len: None,
+                },
+                map::AxisIndex {
+                    terms: alloc::vec![AxisTerm::projection(1)].into_iter().collect(),
+                    offset: 1,
+                    len: Some(Extent::Static(2)),
+                },
+            ],
+        });
+        // "s->si": a broadcast that never touches axis `i` at all.
+        let bias_map = IndexMap::Affine(map::projection(2, &[0]));
+
+        let added = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(left, left_map), (bias, bias_map)],
+                name: None,
+            },
+        );
+
+        let shapes = infer(&program, &[])
+            .expect("a declared len with no competing anchor resolves cleanly");
+        assert_eq!(
+            shapes.of(added),
+            &[1, 2],
+            "axis i takes the declared len (2), not left's on-disk width (4) or bias's absence"
+        );
+    }
+
+    /// A multi-term axis (`2*i+p@2`, the same two-term shape
+    /// `a_compound_axis_infers_from_two_real_anchors_without_an_anchor_trick`
+    /// exercises) can still declare `len` -- it resolves onto the one
+    /// `coeff == 1` term (`p`, `AxisIndex::len_target_axis`), leaving the
+    /// scaled term (`i`) to its own independent anchor. `x`'s own on-disk
+    /// width (8) is wider than what either term needs, proving `p`'s extent
+    /// comes from the declaration, not from `x`'s storage or a second
+    /// anchor operand.
+    #[test]
+    fn a_multi_term_axis_resolves_len_onto_its_unit_coefficient_term() {
+        let pairs = 3;
+        let mut program = Vec::new();
+        let x = leaf(&mut program, &[Extent::Static(8)]);
+        let anchor_i = leaf(&mut program, &[Extent::Static(pairs)]);
+
+        let x_map = IndexMap::Affine(map::IndexPattern {
+            iter_rank: 2,
+            axes: alloc::vec![map::AxisIndex {
+                terms: alloc::vec![AxisTerm::scaled(0, 2), AxisTerm::projection(1)]
+                    .into_iter()
+                    .collect(),
+                offset: 0,
+                len: Some(Extent::Static(2)),
+            }],
+        });
+        let anchor_i_map = IndexMap::Affine(map::projection(2, &[0]));
+
+        let touched = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(x, x_map), (anchor_i, anchor_i_map)],
+                name: None,
+            },
+        );
+
+        let shapes = infer(&program, &[])
+            .expect("p's declared len needs no second anchor operand to resolve");
+        assert_eq!(shapes.of(touched), &[pairs as u64, 2]);
+    }
+
+    /// `AxisIndex::len_target_axis` has no unique `coeff == 1` term to
+    /// resolve `len` onto when two terms both carry one (`i+j@2`) --
+    /// ambiguous, not a guessable default.
+    #[test]
+    fn a_len_on_two_unit_coefficient_terms_is_ambiguous() {
+        let mut program = Vec::new();
+        let x = leaf(&mut program, &[Extent::Static(8)]);
+        let anchor_i = leaf(&mut program, &[Extent::Static(3)]);
+        let anchor_j = leaf(&mut program, &[Extent::Static(3)]);
+
+        let x_map = IndexMap::Affine(map::IndexPattern {
+            iter_rank: 2,
+            axes: alloc::vec![map::AxisIndex {
+                terms: alloc::vec![AxisTerm::projection(0), AxisTerm::projection(1)]
+                    .into_iter()
+                    .collect(),
+                offset: 0,
+                len: Some(Extent::Static(2)),
+            }],
+        });
+        let anchor_i_map = IndexMap::Affine(map::projection(2, &[0]));
+        let anchor_j_map = IndexMap::Affine(map::projection(2, &[1]));
+
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Select,
+                operands: alloc::vec![
+                    (x, x_map),
+                    (anchor_i, anchor_i_map),
+                    (anchor_j, anchor_j_map)
+                ],
+                name: None,
+            },
+        );
+
+        let error = infer(&program, &[])
+            .expect_err("len has two equally-plain terms to choose between, not one");
+        assert!(
+            matches!(error, TensorError::AmbiguousLenAxis { dim: 0, .. }),
             "{error}"
         );
     }

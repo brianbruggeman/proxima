@@ -288,11 +288,21 @@ fn parse_axis_expr(token: &str, space: &[char], notation: &str) -> Result<AxisIn
     if terms.is_empty() {
         return Err(TensorError::MalformedMap(notation.to_string()));
     }
-    Ok(AxisIndex {
+    let axis = AxisIndex {
         terms: terms.into_iter().collect(),
         offset,
         len,
-    })
+    };
+    // A `len` this crate cannot honor is a malformed map, not an accepted-
+    // and-silently-ignored one: `len_target_axis` names the same
+    // single-plain-term rule `shape::unify_iteration_space` resolves `len`
+    // against, so a notation like `i+j@2` (two `coeff == 1` terms) rejects
+    // here instead of shipping a program shape inference would either
+    // silently mis-resolve or reject far from this call site.
+    if axis.len.is_some() && axis.len_target_axis().is_none() {
+        return Err(TensorError::MalformedMap(notation.to_string()));
+    }
+    Ok(axis)
 }
 
 /// A term's letter, rejecting anything but exactly one ASCII lowercase
@@ -8416,6 +8426,35 @@ name = "weights.embedding"
             matches!(error, TensorError::UnknownIndexLetter { letter: 'z', .. }),
             "{error}"
         );
+    }
+
+    /// A shifted, scaled, or multi-term address still honors a trailing
+    /// `@length` -- the same declared-`len` fact `shape::unify_iteration_space`
+    /// resolves regardless of how the address term is spelled
+    /// (`AxisIndex::len_target_axis`'s own doc).
+    #[proxima::test]
+    #[case::shifted("s,i+1@2->si")]
+    #[case::scaled("s,2*i@4->si")]
+    #[case::multi_term_unit_coefficient("s,2*i+p@2->sip")]
+    async fn a_len_declaration_parses_regardless_of_address_shape(#[case] notation: &str) {
+        let pattern = parse_operand_pattern(notation).expect("a declared len parses");
+        let len_bearing = pattern
+            .axes
+            .iter()
+            .find(|axis| axis.len.is_some())
+            .expect("one axis in the notation declares len");
+        assert!(len_bearing.len_target_axis().is_some());
+    }
+
+    /// `i+j@2` has two equally-plain (`coeff == 1`) terms -- `len` cannot
+    /// say which one it describes, so this is malformed at parse time
+    /// rather than accepted and silently ignored (or rejected far later, at
+    /// shape inference, over a program already built).
+    #[test]
+    fn a_len_on_two_unit_coefficient_terms_is_rejected_at_parse_time() {
+        let error =
+            parse_operand_pattern("s,i+j@2->sij").expect_err("len has no unambiguous target");
+        assert!(matches!(error, TensorError::MalformedMap(_)), "{error}");
     }
 
     #[test]
