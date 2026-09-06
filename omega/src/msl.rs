@@ -3262,22 +3262,6 @@ fn render_reduce(
             found: resolved.kind.name(),
         });
     };
-    // `push_reduce_epilogue_write`'s own doc: `epilogue_operand_strides` is
-    // declared over `output_rank` (`output_axes`'s own smaller space), never
-    // `resolved.extents`'s full pre-reduction rank. A non-empty
-    // `epilogue_broadcast_axes` (`bind::BoundOpKind::Reduce::epilogue_
-    // broadcast_axes`'s own doc: the RMSNorm-shaped `x * inv_rms`
-    // "broadcast-reduce" epilogue) needs the WIDER space instead, which no
-    // renderer here emits yet -- reject at bind time rather than render a
-    // kernel that reads/writes the wrong number of elements, the same
-    // "no renderer, reject" contract `EpilogueNotSupported` above already
-    // gives the tiled GEMM path.
-    if !epilogue_broadcast_axes.is_empty() {
-        return Err(EmitError::EpilogueNotSupported {
-            node: resolved.node,
-            reason: "the broadcast-reduce epilogue (epilogue_broadcast_axes) has no Metal renderer yet",
-        });
-    }
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
@@ -3286,6 +3270,37 @@ fn render_reduce(
     let reduce_dims = reduction_dims(resolved, output_axes);
     let reduce_rank = reduce_dims.len();
     let reduce_rank_len = reduce_rank.max(1);
+    // `push_reduce_epilogue_write`'s own doc: `epilogue_operand_strides` is
+    // declared over `output_rank` (`output_axes`'s own smaller space) for the
+    // pre-existing PLAIN epilogue shape. A non-empty `epilogue_broadcast_axes`
+    // (`bind::BoundOpKind::Reduce::epilogue_broadcast_axes`'s own doc: the
+    // RMSNorm-shaped `x * inv_rms` "broadcast-reduce" epilogue) needs the
+    // WIDER full-rank space instead -- `push_cooperative_reduce_tail` is the
+    // only renderer that walks it (see its own doc), so anything else
+    // rejects: a mismatched axis set (this bind-time invariant is proven at
+    // `bind::epilogue_broadcast_axes_for`, but a stray value here would
+    // otherwise silently read/write the wrong element count), a non-
+    // cooperative reduce (`push_serial_reduce_body` has no broadcast write),
+    // or a tiled-GEMM/row-blocked packed match (`push_tiled_gemm_body`/
+    // `push_packed_row_blocked_body` each own their write tail entirely and
+    // neither has one).
+    let is_broadcast_epilogue = !epilogue_broadcast_axes.is_empty();
+    if is_broadcast_epilogue {
+        let matches_reduce_dims = epilogue_broadcast_axes.len() == reduce_dims.len()
+            && epilogue_broadcast_axes
+                .iter()
+                .all(|axis| reduce_dims.contains(axis));
+        if !matches_reduce_dims
+            || !reduce_is_cooperative(resolved)
+            || tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
+            || packed_row_block(resolved, quantized).is_some()
+        {
+            return Err(EmitError::EpilogueNotSupported {
+                node: resolved.node,
+                reason: "the broadcast-reduce epilogue only has a Metal renderer for the plain cooperative-reduce path",
+            });
+        }
+    }
     let gather_count = gather_count(resolved);
     let gather_slots = gather_slots(resolved);
     let element_type = type_token(resolved.node, resolved.dtype)?;
@@ -3322,13 +3337,29 @@ fn render_reduce(
     ));
     source.push_str("    long out_base;\n");
     source.push_str(&format!("    long out_strides[{rank_len}];\n"));
+    // Broadcast case: `epilogue_operand_strides` widens from `output_rank_len`
+    // to `rank_len` (`x`/`gamma` are read at the FULL `(s, d)` coordinate,
+    // `push_cooperative_reduce_tail`'s own broadcast-write loop's doc), and
+    // a fresh `broadcast_out_strides` row carries the CONTIGUOUS full-extents
+    // layout the materialized output buffer is allocated with -- `out_strides`
+    // above stays `out_layout`'s own compact, stride-0-on-broadcast-axes
+    // addressing (still needed to locate the fold's own scalar), a genuinely
+    // different address space from the widened write.
+    let epilogue_stride_rank_len = if is_broadcast_epilogue {
+        rank_len
+    } else {
+        output_rank_len
+    };
     if epilogue_operand_count > 0 {
         source.push_str(&format!(
             "    long epilogue_operand_base[{epilogue_operand_count}];\n"
         ));
         source.push_str(&format!(
-            "    long epilogue_operand_strides[{epilogue_operand_count}][{output_rank_len}];\n"
+            "    long epilogue_operand_strides[{epilogue_operand_count}][{epilogue_stride_rank_len}];\n"
         ));
+    }
+    if is_broadcast_epilogue {
+        source.push_str(&format!("    long broadcast_out_strides[{rank_len}];\n"));
     }
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
@@ -3364,6 +3395,7 @@ fn render_reduce(
             element_type,
             epilogue_body,
             epilogue_operands,
+            is_broadcast_epilogue,
         )?;
     } else {
         push_serial_reduce_body(
@@ -5883,6 +5915,7 @@ fn push_cooperative_reduce_body(
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    is_broadcast_epilogue: bool,
 ) -> Result<(), EmitError> {
     let rank_len = rank.max(1);
     let output_rank = output_axes.len();
@@ -6035,7 +6068,16 @@ fn push_cooperative_reduce_body(
             .filter_map(|(index, codec)| matches!(codec, Some(PackedCodec::Q4K)).then_some(index))
             .collect();
         let run = Q4K_BLOCK_ELEMENTS / SIMD_WIDTH as usize;
-        let tiled = q4k_super_block_tiled(resolved, quantized, reduce_dims);
+        // The broadcast-write tail (`push_cooperative_reduce_tail`'s own doc)
+        // only ever walks the plain per-lane strided loop below -- the Q4K
+        // super-block-tiled specialization is Q4K-only (packed weight
+        // operand), never the shape a broadcast-reduce epilogue's f32
+        // activation fold takes, and `render_reduce`'s own gate already
+        // rejects a packed-row-block match, so this stays `false` in
+        // practice; forced off here rather than relied upon so a future
+        // packed operand slipping past that gate still falls through to the
+        // supported loop instead of silently skipping the epilogue write.
+        let tiled = !is_broadcast_epilogue && q4k_super_block_tiled(resolved, quantized, reduce_dims);
         if tiled {
             let weight = packed[0];
             for index in 0..operand_count {
@@ -6106,6 +6148,8 @@ fn push_cooperative_reduce_body(
                 output_rank,
                 epilogue_body,
                 epilogue_operands,
+                reduce_dims,
+                is_broadcast_epilogue,
             )?;
             return Ok(());
         }
@@ -6169,6 +6213,8 @@ fn push_cooperative_reduce_body(
             output_rank,
             epilogue_body,
             epilogue_operands,
+            reduce_dims,
+            is_broadcast_epilogue,
         )?;
         return Ok(());
     }
@@ -6233,6 +6279,8 @@ fn push_cooperative_reduce_body(
         output_rank,
         epilogue_body,
         epilogue_operands,
+        reduce_dims,
+        is_broadcast_epilogue,
     )?;
     Ok(())
 }
@@ -6273,6 +6321,8 @@ fn push_cooperative_reduce_tail(
     output_rank: usize,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    reduce_dims: &[u16],
+    is_broadcast_epilogue: bool,
 ) -> Result<(), EmitError> {
     let combine_fn = simd_combine_fn(node, reduce_op)?;
     let simdgroups = width / SIMD_WIDTH;
@@ -6284,9 +6334,27 @@ fn push_cooperative_reduce_tail(
         }
     };
     if simdgroups <= 1 {
+        // `combine_fn` is a `simd_*` reduction (`simd_combine_fn`'s own
+        // doc): Metal broadcasts its result to every lane of the simdgroup
+        // already, so a broadcast-reduce epilogue needs no extra barrier
+        // here to make `reduced` visible everywhere `push_broadcast_
+        // epilogue_write` reads it from.
         source.push_str(&format!(
             "    {element_type} reduced = {combine_fn}(accumulator);\n"
         ));
+        if is_broadcast_epilogue {
+            push_broadcast_epilogue_write(
+                source,
+                rank,
+                reduce_dims,
+                width,
+                epilogue_body,
+                epilogue_operands,
+                element_type,
+                "reduced",
+            );
+            return Ok(());
+        }
         source.push_str("    if (lane == 0u) {\n");
         source.push_str("        long out_offset = u.out_base;\n");
         for dim in 0..rank {
@@ -6319,6 +6387,37 @@ fn push_cooperative_reduce_tail(
         "    if (lane % {SIMD_WIDTH}u == 0u) {{ partials[lane / {SIMD_WIDTH}u] = partial; }}\n"
     ));
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    if is_broadcast_epilogue {
+        // Every lane needs `reduced`, not just lane 0 -- fold on lane 0 same
+        // as below, publish it back through `partials[0]`, and a second
+        // barrier before every lane reads it, matching llama.cpp's own
+        // `kernel_rms_norm` shape (`ggml-metal.metal`: cooperative fold,
+        // scalar broadcast through shared memory, every lane writes its own
+        // elements).
+        source.push_str("    if (lane == 0u) {\n");
+        source.push_str(&format!("        {element_type} reduced = partials[0];\n"));
+        source.push_str(&format!(
+            "        for (uint fold_index = 1u; fold_index < {simdgroups}u; ++fold_index) {{\n"
+        ));
+        let fold_expr = scalar_op_expr(reduce_op, &["reduced", "partials[fold_index]"]);
+        source.push_str(&format!("            reduced = {fold_expr};\n"));
+        source.push_str("        }\n");
+        source.push_str("        partials[0] = reduced;\n");
+        source.push_str("    }\n");
+        source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+        source.push_str(&format!("    {element_type} reduced = partials[0];\n"));
+        push_broadcast_epilogue_write(
+            source,
+            rank,
+            reduce_dims,
+            width,
+            epilogue_body,
+            epilogue_operands,
+            element_type,
+            "reduced",
+        );
+        return Ok(());
+    }
     source.push_str("    if (lane == 0u) {\n");
     source.push_str(&format!("        {element_type} reduced = partials[0];\n"));
     source.push_str(&format!(
@@ -6346,6 +6445,75 @@ fn push_cooperative_reduce_tail(
     );
     source.push_str("    }\n");
     Ok(())
+}
+
+/// The broadcast-reduce epilogue's own write tail
+/// ([`BoundOpKind::Reduce::epilogue_broadcast_axes`]'s own doc): once the
+/// fold's scalar (`reduced_expr`, already visible to every lane -- see each
+/// [`push_cooperative_reduce_tail`] call site) is available, every lane
+/// re-walks the SAME per-lane strided range over the reduction dims the
+/// accumulation loop above just folded (`bind::epilogue_broadcast_axes_for`'s
+/// own doc: a non-empty value is always exactly this fold's `reduce_dims`,
+/// nothing else -- `render_reduce`'s own gate rejects anything that would
+/// disagree), this time writing one output element per step instead of
+/// reading one. Same shape llama.cpp's `kernel_rms_norm` takes (`ggml-metal.
+/// metal`): a cooperative fold, then every thread writes its own share of
+/// the row. `epilogue_operand_strides`/`broadcast_out_strides` are the two
+/// uniform rows [`pack_reduce_uniforms`] packs at FULL rank for exactly this
+/// loop -- `output_rank` handed to [`push_reduce_epilogue_write`] here is
+/// `rank` itself (the widened space), and `coord` reads `full_coord[dim]`
+/// rather than `output_coord[dim]`.
+#[allow(clippy::too_many_arguments)]
+fn push_broadcast_epilogue_write(
+    source: &mut String,
+    rank: usize,
+    reduce_dims: &[u16],
+    width: u64,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    element_type: &str,
+    reduced_expr: &str,
+) {
+    let reduce_rank = reduce_dims.len();
+    let reduce_rank_len = reduce_rank.max(1);
+    source.push_str(&format!(
+        "    for (long r = (long)lane; r < u.reduction_total; r += {width}) {{\n"
+    ));
+    if reduce_rank > 0 {
+        source.push_str(&format!(
+            "        long reduction_coord[{reduce_rank_len}];\n"
+        ));
+        source.push_str("        long remaining_r = r;\n");
+        for index in (0..reduce_rank).rev() {
+            source.push_str(&format!(
+                "        reduction_coord[{index}] = remaining_r % u.reduction_extents[{index}]; \
+                 remaining_r /= u.reduction_extents[{index}];\n"
+            ));
+        }
+        for (index, dim) in reduce_dims.iter().enumerate() {
+            source.push_str(&format!(
+                "        full_coord[{dim}] = reduction_coord[{index}];\n"
+            ));
+        }
+    }
+    source.push_str("        long out_offset = u.out_base;\n");
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "        out_offset += full_coord[{dim}] * u.broadcast_out_strides[{dim}];\n"
+        ));
+    }
+    push_reduce_epilogue_write(
+        source,
+        epilogue_body,
+        epilogue_operands,
+        rank,
+        element_type,
+        "        ",
+        |dim| format!("full_coord[{dim}]"),
+        reduced_expr,
+        "out_offset",
+    );
+    source.push_str("    }\n");
 }
 
 fn render_scan(

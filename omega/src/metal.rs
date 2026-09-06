@@ -3496,13 +3496,22 @@ fn promote_output_placed_nodes(resolved: &mut Vec<BoundOp>, effective_outputs: &
 /// thread count — a `Keep::Scan` scan dispatches one thread per *line* but
 /// writes `inner_len` values per thread, so grid threads and output length
 /// diverge there.
+///
+/// A non-empty `epilogue_broadcast_axes` (`bind::BoundOpKind::Reduce::
+/// epilogue_broadcast_axes`'s own doc, `proxima_tensor::cpu`'s own
+/// `node_output_len` mirrors this same widening) re-broadcasts the fold's
+/// scalar back over the axes it reduced away, so the MATERIALIZED output is
+/// the full `extents` product, not just `output_axes`'s smaller fold shape —
+/// falls through to the same full-iteration-space arm every other kind
+/// takes.
 fn bound_output_len(bound: &BoundOp) -> usize {
     match &bound.kind {
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
             output_axes,
+            epilogue_broadcast_axes,
             ..
-        } => output_axes
+        } if epilogue_broadcast_axes.is_empty() => output_axes
             .iter()
             .map(|axis| bound.extents[*axis as usize] as usize)
             .product(),
@@ -3919,6 +3928,7 @@ fn pack_reduce_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) -> Result<(), Emit
         output_axes,
         out_layout,
         epilogue_operands,
+        epilogue_broadcast_axes,
         ..
     } = &bound.kind
     else {
@@ -3932,6 +3942,20 @@ fn pack_reduce_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) -> Result<(), Emit
     let output_rank_len = output_axes.len().max(1);
     let reduce_axes = reduction_dims(bound, output_axes);
     let reduce_rank_len = reduce_axes.len().max(1);
+    // `crate::msl::render_reduce`'s own doc: a non-empty `epilogue_broadcast_
+    // axes` widens `epilogue_operand_strides` from `output_rank_len` to the
+    // full `rank_len` (`x`/`gamma` read at the whole `(s, d)` coordinate, not
+    // just `s`), and needs a SEPARATE `broadcast_out_strides` row -- the
+    // CONTIGUOUS row-major layout the wider materialized output buffer is
+    // allocated with, never `out_layout.strides` (kept as-is above: that
+    // stays the fold's own COMPACT addressing, stride `0` on every broadcast
+    // axis, still needed to locate the fold's scalar).
+    let is_broadcast_epilogue = !epilogue_broadcast_axes.is_empty();
+    let epilogue_stride_rank_len = if is_broadcast_epilogue {
+        rank_len
+    } else {
+        output_rank_len
+    };
 
     // ROW 303 residual, removed by this landing: `output_extents`/
     // `reduction_extents` used to be temporary `Vec<i64>`s built by
@@ -3960,11 +3984,29 @@ fn pack_reduce_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) -> Result<(), Emit
             push_i64(bytes, layout.base);
         }
         for (_, layout, _) in epilogue_operands {
-            push_i64_row(bytes, &layout.strides, output_rank_len);
+            push_i64_row(bytes, &layout.strides, epilogue_stride_rank_len);
         }
+    }
+    if is_broadcast_epilogue {
+        push_i64_row(bytes, &contiguous_strides(&bound.extents), rank_len);
     }
     push_gather_uniforms(bytes, bound, rank_len);
     Ok(())
+}
+
+/// The row-major (C-order) strides the FULL `extents` product buffer a
+/// broadcast-reduce epilogue materializes is allocated with -- a genuinely
+/// different address space from any [`Layout`]'s own strides (which may
+/// carry a stride of `0` on a broadcast axis), computed fresh here rather
+/// than read off any bound operand.
+fn contiguous_strides(extents: &[u64]) -> Vec<i64> {
+    let mut strides = vec![0i64; extents.len()];
+    let mut running = 1i64;
+    for (axis, extent) in extents.iter().enumerate().rev() {
+        strides[axis] = running;
+        running *= *extent as i64;
+    }
+    strides
 }
 
 /// Mirrors the `Uniforms` struct `crate::msl::render_scan` declares at

@@ -332,6 +332,7 @@ pub(crate) fn kernel_identity(
             output_axes,
             epilogue_body,
             epilogue_operands,
+            epilogue_broadcast_axes,
             ..
         } => {
             let body = body_token(resolved.element_body());
@@ -351,8 +352,25 @@ pub(crate) fn kernel_identity(
             let epilogue = if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
                 String::new()
             } else {
+                // A non-empty `epilogue_broadcast_axes` widens every
+                // renderer's own write/operand addressing to full rank
+                // (`crate::msl::render_reduce`'s own doc) -- two folds
+                // sharing every other token here but disagreeing on the
+                // PLAIN-vs-BROADCAST epilogue shape must never share a
+                // pipeline entry, since they bake different array widths
+                // into the emitted source text.
+                let broadcast = if epilogue_broadcast_axes.is_empty() {
+                    String::new()
+                } else {
+                    let axes = epilogue_broadcast_axes
+                        .iter()
+                        .map(u16::to_string)
+                        .collect::<Vec<_>>()
+                        .join("_");
+                    format!("_eb{axes}")
+                };
                 format!(
-                    "_epi{}_{}",
+                    "_epi{}_{}{broadcast}",
                     epilogue_operands.len(),
                     body_token(epilogue_body)
                 )
