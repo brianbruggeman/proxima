@@ -66,6 +66,7 @@ use smallvec::SmallVec;
 
 use crate::dtype::DType;
 use crate::error::TensorError;
+use crate::numeric::{NumericPolicy, NumericRewrite, admit};
 #[cfg(feature = "instrument")]
 use crate::instrument;
 use crate::live;
@@ -2739,7 +2740,7 @@ pub fn bind(
     shapes: &Shapes,
     outputs: &[NodeId],
 ) -> Result<Vec<BoundOp>, TensorError> {
-    bind_with_fusion(program, shapes, outputs, true)
+    bind_with_fusion(program, shapes, outputs, true, NumericPolicy::default())
 }
 
 /// Same as [`bind`], but `fuse_cached_attention` states whether the caller's
@@ -2758,15 +2759,35 @@ pub fn bind(
 /// `reduce_epilogue_fusion`, private and feature-gated); there is no third
 /// "silently ignore it" caller to protect the way `fuse_cached_attention: false`
 /// protects wgpu/cuda from a fused kind they cannot render at all.
+///
+/// `numeric_policy` is the [`NumericPolicy`] every bit-changing rewrite this
+/// function fires must clear via [`admit`] before it runs. The three
+/// rewrites shipped today (identity elimination, chain fusion,
+/// reduce-epilogue fusion) are classified [`NumericRewrite`]s whose
+/// [`NumericRewrite::minimum_level`] is [`NumericPolicy::BitExact`], so
+/// [`bind`]'s own call with [`NumericPolicy::default`] always clears —
+/// nothing regresses. A future reassociating rewrite in this crate declares
+/// its own [`NumericRewrite`] variant and is admitted the same way.
 pub fn bind_with_fusion(
     program: &[Op],
     shapes: &Shapes,
     outputs: &[NodeId],
     fuse_cached_attention: bool,
+    numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
+    // The three rewrites this crate ships unconditionally today are
+    // bit-exact by construction (identity elimination, chain fusion --
+    // both inside `bind_cached_attention_fusion`'s own `bind_plain` --
+    // and reduce-epilogue fusion below), so `admit` always clears at
+    // `NumericPolicy::default()`; the call is the explicit, testable
+    // declaration of that fact, not a behavior change (`op.rs:107`'s
+    // `is_associative` has no such caller today).
+    admit(numeric_policy, NumericRewrite::IdentityElimination)?;
+    admit(numeric_policy, NumericRewrite::ChainFusion)?;
     let built = bind_cached_attention_fusion(program, shapes, outputs, fuse_cached_attention)?;
     #[cfg(feature = "reduce-epilogue-fusion")]
     {
+        admit(numeric_policy, NumericRewrite::ReduceEpilogueFusion)?;
         reduce_epilogue_fusion(program, shapes, built, outputs)
     }
     #[cfg(not(feature = "reduce-epilogue-fusion"))]

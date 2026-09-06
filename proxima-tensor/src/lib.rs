@@ -205,6 +205,11 @@ pub mod instrument;
 pub mod live;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod map;
+// pure over `NumericPolicy`/`NumericRewrite`/`TensorError` -- no alloc, no
+// std -- so it lives ungated at the same `alloc`+ tier `error` needs for the
+// `TensorError` variant it constructs.
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub mod numeric;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod op;
 pub mod physical;
@@ -253,6 +258,8 @@ pub use error::TensorError;
 pub use live::annotate;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use map::{AxisIndex, AxisTerm, IndexMap, IndexPattern, affine, projection};
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub use numeric::{NumericPolicy, NumericRewrite, admit};
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
 #[cfg(any(feature = "std", feature = "alloc"))]

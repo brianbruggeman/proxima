@@ -11190,6 +11190,7 @@ value = 1.0
             &two_range_shapes,
             &two_range_outputs,
             false,
+            crate::numeric::NumericPolicy::default(),
         )
         .expect("the two-range cached program binds")
         .len();
@@ -11221,6 +11222,7 @@ value = 1.0
             &single_range_shapes,
             &single_range_outputs,
             false,
+            crate::numeric::NumericPolicy::default(),
         )
         .expect("the single-range cached program binds")
         .len();
@@ -11574,6 +11576,7 @@ value = 1.0
             block_node_ids,
         };
         use crate::cpu::Interpreter;
+        use crate::numeric::NumericPolicy;
         use proxima_primitives::pipe::Pipe;
 
         const VOCAB: u32 = 5;
@@ -11701,9 +11704,9 @@ value = 1.0
                     .collect()
             };
 
-            let fused = bind_with_fusion(program, &shapes, &[root], true)
+            let fused = bind_with_fusion(program, &shapes, &[root], true, NumericPolicy::default())
                 .expect("fused single-range bind succeeds");
-            let unfused = bind_with_fusion(program, &shapes, &[root], false)
+            let unfused = bind_with_fusion(program, &shapes, &[root], false, NumericPolicy::default())
                 .expect("unfused single-range bind succeeds");
 
             assert!(
@@ -12769,8 +12772,14 @@ value = 1.0
         // default (`bind_with_fusion(.., true)`) would otherwise fuse 32
         // attention chains into `BoundOpKind::CachedAttention` and silently
         // invalidate every count below.
-        let bound = crate::bind::bind_with_fusion(&program, &shapes, &outputs, false)
-            .expect("the program binds");
+        let bound = crate::bind::bind_with_fusion(
+            &program,
+            &shapes,
+            &outputs,
+            false,
+            crate::numeric::NumericPolicy::default(),
+        )
+        .expect("the program binds");
         // `reduce-epilogue-fusion` is a bind-time REWRITE gated only by this
         // crate feature (`bind::bind_with_fusion`'s own doc: it "runs
         // unconditionally after this ... gated only by the crate feature"),
@@ -13431,8 +13440,14 @@ value = 1.0
         // split held.
         #[cfg(feature = "cached-attention-streaming")]
         {
-            let fused = crate::bind::bind_with_fusion(&program, &shapes, &outputs, true)
-                .expect("the program binds with fusion enabled");
+            let fused = crate::bind::bind_with_fusion(
+                &program,
+                &shapes,
+                &outputs,
+                true,
+                crate::numeric::NumericPolicy::default(),
+            )
+            .expect("the program binds with fusion enabled");
             let fused_cached_attention = fused
                 .iter()
                 .filter(|op| matches!(op.kind, crate::bind::BoundOpKind::CachedAttention { .. }))
@@ -13486,6 +13501,7 @@ value = 1.0
             &baseline_shapes,
             &baseline_outputs,
             false,
+            crate::numeric::NumericPolicy::default(),
         )
         .expect("the baseline program binds");
         let baseline_reduce_total = baseline_bound
@@ -13505,7 +13521,13 @@ value = 1.0
         let paired_shapes = crate::shape::infer(&paired_program, &[1, 71])
             .expect("paired: one new position against a 71-position cache infers");
         let paired_bound =
-            crate::bind::bind_with_fusion(&paired_program, &paired_shapes, &paired_outputs, false)
+            crate::bind::bind_with_fusion(
+                &paired_program,
+                &paired_shapes,
+                &paired_outputs,
+                false,
+                crate::numeric::NumericPolicy::default(),
+            )
                 .expect("the paired program binds");
         let paired_reduce_total = paired_bound
             .iter()
@@ -13604,6 +13626,7 @@ value = 1.0
             &baseline_shapes,
             &baseline_outputs,
             false,
+            crate::numeric::NumericPolicy::default(),
         )
         .expect("the baseline program binds");
         let baseline_total = baseline_bound.len();
@@ -13624,7 +13647,13 @@ value = 1.0
         let fused_shapes = crate::shape::infer(&fused_program, &[1, 71])
             .expect("fused: one new position against a 71-position cache infers");
         let fused_bound =
-            crate::bind::bind_with_fusion(&fused_program, &fused_shapes, &fused_outputs, false)
+            crate::bind::bind_with_fusion(
+                &fused_program,
+                &fused_shapes,
+                &fused_outputs,
+                false,
+                crate::numeric::NumericPolicy::default(),
+            )
                 .expect("the fused-qkv program binds");
         let fused_total = fused_bound.len();
         let fused_reduce_total = fused_bound
