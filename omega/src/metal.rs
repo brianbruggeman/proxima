@@ -998,17 +998,19 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
     }
 }
 
-/// Resolves every hazard-tracked identity for a bound op's operands from
-/// `device_buffers`, erroring on the first operand with none instead of
+/// The one adapter from a dispatch's read `NodeId`s (see
+/// `crate::msl::hazard_read_nodes`, the caller's own source for `nodes` below)
+/// to the hazard tracker's buffer-pointer identities, resolved from
+/// `device_buffers` — erroring on the first node with none instead of
 /// silently dropping it from the hazard set (the previous `filter_map`
-/// behavior) — an operand missing from `device_buffers` means the encode
-/// this identity feeds is already wrong, so hiding it from the hazard check
-/// only hides a real bug behind a missing barrier.
+/// behavior) — a node missing from `device_buffers` means the encode this
+/// identity feeds is already wrong, so hiding it from the hazard check only
+/// hides a real bug behind a missing barrier.
 fn resolve_hazard_inputs(
-    operands: impl Iterator<Item = NodeId>,
+    nodes: impl Iterator<Item = NodeId>,
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
 ) -> Result<Vec<*const ProtocolObject<dyn MTLBuffer>>, MetalError> {
-    operands
+    nodes
         .map(|operand| {
             device_buffers
                 .get(&operand)
@@ -1494,15 +1496,30 @@ pub fn execute_plan_with_placements(
             // tracker catches could ever race -- skip it entirely rather
             // than pay the resolve/record bookkeeping for barriers that
             // would never fire.
+            let resolved_step = resolved_steps
+                .as_ref()
+                .and_then(|resolved| resolved.steps.get(position));
             let resolved_output: Option<DeviceBuffer> = if dispatch_type == DispatchType::Concurrent {
-                // `all_read_sources`, not `operands` -- a `BoundOpKind::Reduce`
-                // with a fused epilogue reads its `epilogue_operands` too
-                // (`msl::bindings` binds one `Binding::Input` per entry, the
-                // exact set the kernel actually reads), so the hazard set
-                // must see every one of them or a RAW against a sibling's
-                // still-in-flight write goes unbarriered.
+                // The hazard read set is derived from `bindings` -- the exact
+                // list `bind_buffers` will bind for this op -- rather than
+                // enumerated separately from `bound.all_read_sources()`: ROW
+                // 323 was exactly those two enumerations drifting apart when
+                // `msl::bindings` grew a source (a fused epilogue operand)
+                // this hazard check had not been taught to see. Reading
+                // `bindings` itself makes that class of drift impossible --
+                // there is only one list, and both the encoder bind loop
+                // (`bind_buffers`) and this hazard walk read the same one.
+                let owned_bindings: Vec<Binding>;
+                let bindings_for_hazard: &[Binding] = match resolved_step {
+                    Some(step) => step.bindings.as_slice(),
+                    None => {
+                        let (bindings, _grid) = kernel_dispatch_shape(bound, packed_operands)?;
+                        owned_bindings = bindings;
+                        owned_bindings.as_slice()
+                    }
+                };
                 let hazard_inputs = resolve_hazard_inputs(
-                    bound.all_read_sources().map(|(operand, _, _)| *operand),
+                    crate::msl::hazard_read_nodes(bindings_for_hazard),
                     &device_buffers,
                 )?;
                 // resolved ONCE, before the hazard check, from the exact same
@@ -1519,6 +1536,16 @@ pub fn execute_plan_with_placements(
                     Some((buffer, offset)) => (buffer.clone(), offset),
                     None => (allocate_buffer(&device, bound_output_len(bound), bound.dtype)?, 0),
                 };
+                // the write side of the same "derived from bindings" guarantee:
+                // `bindings_for_hazard`'s one `Binding::Output` must name this
+                // op's own node -- if it ever didn't, the buffer the hazard
+                // tracker records as written and the buffer `bind_buffers`
+                // actually binds as this op's output would be two different
+                // things, which is a worse bug than the one this refactor closes.
+                debug_assert_eq!(
+                    crate::msl::hazard_write_node(bindings_for_hazard),
+                    Some(bound.node)
+                );
                 let hazard_output = Retained::as_ptr(&resolved.0);
                 if hazard_step(&mut hazards, &hazard_inputs, hazard_output) {
                     encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
@@ -1533,9 +1560,6 @@ pub fn execute_plan_with_placements(
                 None => placement,
             };
             let uniform_buffer = plan_uniform_buffer(plan, position)?;
-            let resolved_step = resolved_steps
-                .as_ref()
-                .and_then(|resolved| resolved.steps.get(position));
             let fault = encode_op(
                 &device,
                 &encoder,
@@ -6126,7 +6150,15 @@ mod arena_tests {
 mod hazard_tracker_tests {
     use std::collections::BTreeMap;
 
-    use super::{DeviceBuffer, HazardTracker, MetalError, NodeId, hazard_step, resolve_hazard_inputs};
+    use proxima_tensor::{
+        Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, projection,
+    };
+
+    use super::{
+        Binding, DeviceBuffer, HazardTracker, MetalError, NodeId, PackedOperands, hazard_step,
+        kernel_dispatch_shape, resolve_hazard_inputs,
+    };
+    use crate::msl::{hazard_read_nodes, hazard_write_node};
 
     /// `a -> b`, `a -> c` (independent, both only read `a`), then `b, c ->
     /// d` -- the shape this whole feature exists for (Q/K/V from one normed
@@ -6267,6 +6299,199 @@ mod hazard_tracker_tests {
         assert!(
             !hazards.needs_barrier(&[], Some("written_and_read")),
             "a forgotten identity must carry no hazard history for a later allocation"
+        );
+    }
+
+    /// `raw -> y` (a dispatched `Identity`), then `weights -> reduced`, fused
+    /// with `Add(reduced, y)` into ONE `BoundOpKind::Reduce` whose
+    /// `epilogue_operands` reads `y` -- the exact decode-shaped census ROW
+    /// 323 named: a fused reduce's epilogue reads a SIBLING's just-written
+    /// output, not one of its own compute-step `operands()`. `extra_y_use`
+    /// (a second, independent consumer of `y`) keeps `y` from being inlined
+    /// away by ordinary elementwise fusion before the reduce-epilogue fold
+    /// ever runs. Returns the plan's dispatched `BoundOp`s in plan order,
+    /// `y`'s own node, the fused reduce's own node (the surviving `consumer`
+    /// NodeId), and `PackedOperands::new()` (no packed/quantized operand
+    /// here, so an empty table is exactly right -- same as [`emit`]'s own
+    /// doctest).
+    fn epilogue_reads_sibling_output_fixture()
+    -> (Vec<super::BoundOp>, NodeId, NodeId, PackedOperands) {
+        let mut program = Vec::new();
+        let raw = append(
+            &mut program,
+            Op::Input {
+                dtype: super::DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let identity = || IndexMap::Affine(projection(1, &[0]));
+        let y = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: super::DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(raw, identity())],
+                name: None,
+            },
+        );
+        let weights = append(
+            &mut program,
+            Op::Input {
+                dtype: super::DType::Float32,
+                shape: alloc::vec![Extent::Static(8), Extent::Static(4)],
+                name: None,
+            },
+        );
+        let reduced = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: super::DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: weights,
+                in_map: IndexMap::Affine(projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(projection(2, &[1])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let consumer = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: super::DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(reduced, identity()), (y, identity())],
+                name: None,
+            },
+        );
+        // a second, independent consumer of `y` -- without it, elementwise
+        // fusion inlines `y`'s trivial `Identity` body straight into
+        // `consumer`'s own composed body before `reduce-epilogue-fusion` ever
+        // runs, collapsing the whole program to one op and defeating the
+        // fixture's own point (a SIBLING dispatch's buffer read via the
+        // epilogue). A second use forces `y` to materialize as its own
+        // dispatched node, same trick `reduce_then_residual_add_program`
+        // (`proxima-tensor/src/bind.rs`) uses for `x`.
+        let extra_y_use = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: super::DType::Float32,
+                body: ScalarOp::Negate,
+                operands: alloc::vec![(y, identity())],
+                name: None,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("epilogue fixture infers");
+        let resolved =
+            bind(&program, &shapes, &[consumer, extra_y_use]).expect("epilogue fixture binds");
+        assert_eq!(
+            resolved.len(),
+            3,
+            "degenerate gate: `y`, `extra_y_use`, and the fused reduce must be the only \
+             dispatched ops -- `reduce-epilogue-fusion` folded `consumer` into `reduced`'s own \
+             epilogue, and `extra_y_use` keeps `y` from being inlined away entirely"
+        );
+        let fused = resolved
+            .iter()
+            .find(|bound| bound.node == consumer)
+            .expect("the consumer's NodeId now names the fused reduce+epilogue op");
+        assert!(
+            matches!(
+                fused.kind,
+                super::BoundOpKind::Reduce { ref epilogue_operands, .. }
+                    if epilogue_operands.iter().any(|(node, _, _)| *node == y)
+            ),
+            "degenerate gate: the fused reduce's epilogue must read `y`, not just `weights`, got {:?}",
+            fused.kind
+        );
+        (resolved, y, consumer, PackedOperands::new())
+    }
+
+    /// `bindings()`'s `Binding::Input` entries come 1:1 from
+    /// `BoundOp::all_read_sources()` (`msl::bindings`'s own doc), so deriving
+    /// the hazard read set from `bindings` instead of a parallel
+    /// `all_read_sources()` enumeration cannot change which barriers fire for
+    /// a program that already has no missing binding -- proven here by
+    /// running the tracker over the census fixture's own `bindings`, in plan
+    /// order: `y` writes fresh (no prior hazard, no barrier); the fused
+    /// reduce reads `y` via its epilogue, and `y` was written since the last
+    /// barrier, so a barrier is required immediately before it -- exactly
+    /// the RAW ROW 323 named; `extra_y_use`'s own read of `y` then sees a
+    /// tracker the fused reduce's own barrier already reset, so it does not
+    /// barrier again.
+    #[test]
+    fn hazard_walk_over_bindings_matches_the_decode_shaped_fixtures_expected_trace() {
+        let (resolved, y_node, fused_node, packed_operands) = epilogue_reads_sibling_output_fixture();
+        let mut hazards: HazardTracker<NodeId> = HazardTracker::new();
+
+        let mut barrier_by_node = std::collections::BTreeMap::new();
+        for bound in &resolved {
+            let (bindings, _grid) =
+                kernel_dispatch_shape(bound, &packed_operands).expect("fixture ops emit a shape");
+            let reads: Vec<NodeId> = hazard_read_nodes(&bindings).collect();
+            let write = hazard_write_node(&bindings).expect("every bound op writes one node");
+            barrier_by_node.insert(bound.node, hazard_step(&mut hazards, &reads, write));
+        }
+
+        assert!(
+            !barrier_by_node[&y_node],
+            "y's own dispatch reads only a plain Input, never tracked as written -- no barrier"
+        );
+        assert!(
+            barrier_by_node[&fused_node],
+            "the fused reduce reads y (via its epilogue binding) after y was just written -- \
+             this is the exact RAW ROW 323 named, now caught because the read set is derived \
+             from the same bindings the encoder binds"
+        );
+    }
+
+    /// The class fix, isolated from any real `BoundOp`/fusion machinery: a
+    /// dispatch's `bindings` list gains a read a hand-written `operands()`-only
+    /// enumeration would never have seen -- exactly the shape a future fusion
+    /// rule (or any new `Binding` producer) could add. Deriving the hazard
+    /// read set from `bindings` itself, rather than from a second, parallel
+    /// operand table, means that read is barriered by CONSTRUCTION: there is
+    /// no second call site left to forget to update.
+    #[test]
+    fn a_binding_list_gaining_a_read_is_barriered_with_no_second_call_site_to_update() {
+        let mut hazards: HazardTracker<NodeId> = HazardTracker::new();
+        let unrelated_input = NodeId(0);
+        let producer_output = NodeId(1);
+
+        // op0: writes `producer_output`, reading only its own unrelated input.
+        let bindings0 = [
+            Binding::Input(unrelated_input),
+            Binding::Output(producer_output),
+        ];
+        let barrier0 = hazard_step(
+            &mut hazards,
+            &hazard_read_nodes(&bindings0).collect::<Vec<_>>(),
+            hazard_write_node(&bindings0).expect("bindings0 names one output"),
+        );
+        assert!(!barrier0, "a fresh write with no prior hazard history never barriers");
+
+        // op1's own compute-step operand is `op1_own_operand`; its `bindings`
+        // gain an EXTRA read of `producer_output` -- the slot a fused
+        // epilogue (or any future `Binding` producer) would occupy, never
+        // named by a bare `operands()` walk.
+        let op1_own_operand = NodeId(2);
+        let op1_output = NodeId(3);
+        let bindings1 = [
+            Binding::Input(op1_own_operand),
+            Binding::Input(producer_output),
+            Binding::Output(op1_output),
+        ];
+        let barrier1 = hazard_step(
+            &mut hazards,
+            &hazard_read_nodes(&bindings1).collect::<Vec<_>>(),
+            hazard_write_node(&bindings1).expect("bindings1 names one output"),
+        );
+
+        assert!(
+            barrier1,
+            "a RAW hazard against a buffer just written must barrier even when the read arrived \
+             through a binding slot no separate operand table names"
         );
     }
 }
