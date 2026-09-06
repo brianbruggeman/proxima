@@ -437,10 +437,10 @@ libc = { workspace = true, optional = true }
 block2 = { version = "0.6", default-features = false, optional = true }
 
 [build-dependencies]
-# reads `omega-runtime.toml` at build time (`build.rs`'s `emit_sizing_consts`,
-# mirroring `proxima-tensor/build.rs`'s function of the same name) --
-# build-dependency only, never links into the compiled artifact.
-toml.workspace = true
+# reads `omega-runtime.toml` at build time via `proxima_build::sizing`
+# (`build.rs`'s `emit_sizing_consts`) -- build-dependency only, never links
+# into the compiled artifact.
+proxima-build.workspace = true
 
 [lints]
 workspace = true

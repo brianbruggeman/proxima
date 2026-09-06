@@ -30,6 +30,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub mod profile;
+pub mod sizing;
 
 pub use profile::{
     AxisParseError, Executor, H3Impl, Profile, QuicImpl, Reactor, Timer, TlsBackend,

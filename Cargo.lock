@@ -3165,6 +3165,7 @@ dependencies = [
  "pollster",
  "proxima",
  "proxima-autograd",
+ "proxima-build",
  "proxima-gguf",
  "proxima-onnx",
  "proxima-safetensors",
@@ -4137,6 +4138,7 @@ dependencies = [
  "temp-env",
  "tempfile",
  "thiserror 2.0.19",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -5020,6 +5022,7 @@ dependencies = [
  "prime",
  "proptest",
  "proxima",
+ "proxima-build",
  "proxima-clock",
  "proxima-gguf",
  "proxima-primitives",

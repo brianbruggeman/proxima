@@ -316,4 +316,4 @@ required-features = ["test-support", "q4k-int8-dot"]
 libc = { workspace = true, optional = true }
 
 [build-dependencies]
-toml.workspace = true
+proxima-build.workspace = true

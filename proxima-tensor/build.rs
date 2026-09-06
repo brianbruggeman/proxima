@@ -5,7 +5,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use toml::Value;
+use proxima_build::sizing::{require_nonzero, SizingSource};
 
 fn main() {
     emit_dotprod_cfg();
@@ -102,67 +102,21 @@ fn emit_avx2_cfg() {
     }
 }
 
-fn require_nonzero(name: &str, value: i64) -> usize {
-    let value = usize::try_from(value)
-        .unwrap_or_else(|_| panic!("{name} must be a non-negative integer; got {value}"));
-    assert!(value > 0, "{name} must be non-zero");
-    value
+/// Thin panic-on-error wrapper over `proxima_build::sizing::SizingSource`'s
+/// `resolve_int` -- build.rs has no caller to propagate a `Result` to, so
+/// this is where the shared library's typed error becomes the build-time
+/// panic every call site below already assumes.
+fn resolve_int(source: &SizingSource, section: &str, key: &str) -> i64 {
+    source
+        .resolve_int(section, key)
+        .unwrap_or_else(|err| panic!("{err}"))
 }
 
-fn get_int(table: &Value, section: &str, key: &str) -> i64 {
-    table
-        .get(section)
-        .and_then(|section_value| section_value.get(key))
-        .and_then(Value::as_integer)
-        .unwrap_or_else(|| {
-            panic!("proxima-tensor-runtime.toml: missing or non-integer [{section}].{key}")
-        })
-}
-
-/// like `get_int`, but a `PROXIMA_TENSOR_<SECTION>_<KEY>` env var overrides
-/// the TOML value when present -- mirrors `prime/build.rs`'s `resolve_int`
-/// (principle 12: every override consulted emits its own
-/// `cargo:rerun-if-env-changed` line, so a cached build never ignores it).
-fn resolve_int(table: &Value, section: &str, key: &str) -> i64 {
-    let env_name = format!(
-        "PROXIMA_TENSOR_{section}_{key}",
-        section = section.to_uppercase(),
-        key = key.to_uppercase()
-    );
-    println!("cargo:rerun-if-env-changed={env_name}");
-    match env::var(&env_name) {
-        Ok(raw) => raw
-            .parse::<i64>()
-            .unwrap_or_else(|err| panic!("{env_name}={raw} must parse as i64: {err}")),
-        Err(_) => get_int(table, section, key),
-    }
-}
-
-fn get_float(table: &Value, section: &str, key: &str) -> f64 {
-    table
-        .get(section)
-        .and_then(|section_value| section_value.get(key))
-        .and_then(Value::as_float)
-        .unwrap_or_else(|| {
-            panic!("proxima-tensor-runtime.toml: missing or non-float [{section}].{key}")
-        })
-}
-
-/// like `resolve_int`, but for a floating-point key -- same
-/// `PROXIMA_TENSOR_<SECTION>_<KEY>` env override shape.
-fn resolve_float(table: &Value, section: &str, key: &str) -> f64 {
-    let env_name = format!(
-        "PROXIMA_TENSOR_{section}_{key}",
-        section = section.to_uppercase(),
-        key = key.to_uppercase()
-    );
-    println!("cargo:rerun-if-env-changed={env_name}");
-    match env::var(&env_name) {
-        Ok(raw) => raw
-            .parse::<f64>()
-            .unwrap_or_else(|err| panic!("{env_name}={raw} must parse as f64: {err}")),
-        Err(_) => get_float(table, section, key),
-    }
+/// Like [`resolve_int`], but for a floating-point key.
+fn resolve_float(source: &SizingSource, section: &str, key: &str) -> f64 {
+    source
+        .resolve_float(section, key)
+        .unwrap_or_else(|err| panic!("{err}"))
 }
 
 /// Mirrors `prime/build.rs`'s `emit_sizing_consts` -- reads
@@ -185,14 +139,8 @@ fn resolve_float(table: &Value, section: &str, key: &str) -> f64 {
 #[allow(clippy::expect_used)]
 fn emit_sizing_consts() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-    let toml_path = PathBuf::from(&manifest_dir).join("proxima-tensor-runtime.toml");
-    println!("cargo:rerun-if-changed=proxima-tensor-runtime.toml");
-
-    let text = fs::read_to_string(&toml_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", toml_path.display()));
-    let root: Value = text
-        .parse()
-        .unwrap_or_else(|err| panic!("parse {}: {err}", toml_path.display()));
+    let root = SizingSource::load(&manifest_dir, "proxima-tensor-runtime.toml", "PROXIMA_TENSOR")
+        .unwrap_or_else(|err| panic!("{err}"));
 
     let parallel_threshold = require_nonzero(
         "parallel.threshold",
@@ -286,14 +234,8 @@ fn emit_sizing_consts() {
 #[allow(clippy::expect_used)]
 fn emit_alloc_tier_sizing_consts() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-    let toml_path = PathBuf::from(&manifest_dir).join("proxima-tensor-runtime.toml");
-    println!("cargo:rerun-if-changed=proxima-tensor-runtime.toml");
-
-    let text = fs::read_to_string(&toml_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", toml_path.display()));
-    let root: Value = text
-        .parse()
-        .unwrap_or_else(|err| panic!("parse {}: {err}", toml_path.display()));
+    let root = SizingSource::load(&manifest_dir, "proxima-tensor-runtime.toml", "PROXIMA_TENSOR")
+        .unwrap_or_else(|err| panic!("{err}"));
 
     let rope_freq_base_default = resolve_float(&root, "rope", "freq_base_default");
     assert!(
