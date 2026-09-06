@@ -852,7 +852,7 @@ impl<'file> LoadedModel<'file> {
     /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
     /// can fail with.
     pub fn load(parsed: &ParsedGguf, file_bytes: &'file [u8]) -> Result<Self, InteropError> {
-        Self::load_inner(parsed, file_bytes, false)
+        Self::load_inner(parsed, file_bytes, false, false)
     }
 
     /// [`Self::load`] with the paired gate/up reduce
@@ -875,13 +875,39 @@ impl<'file> LoadedModel<'file> {
         file_bytes: &'file [u8],
         paired_gate_up_reduce: bool,
     ) -> Result<Self, InteropError> {
-        Self::load_inner(parsed, file_bytes, paired_gate_up_reduce)
+        Self::load_inner(parsed, file_bytes, paired_gate_up_reduce, false)
+    }
+
+    /// [`Self::load`] with the fused Q/K/V reduce
+    /// (`proxima_tensor::spec::append_mistral_cached_layer`'s
+    /// `fused_qkv_reduce`) flipped on: one `Op::Reduce` per layer over
+    /// `blk.{layer}.attn_qkv.weight` (`crate::bind::bind_matmul_weight_triple`)
+    /// in place of today's three independent `attn_q`/`attn_k`/`attn_v`
+    /// matvecs. Unlike [`Self::load_with_paired_gate_up_reduce`], this does
+    /// NOT remove dispatches -- q/k/v's three different GQA row counts mean
+    /// none of them can be read back out of the shared reduce at zero
+    /// extra cost (`append_mistral_cached_layer`'s `fused_qkv_reduce` doc
+    /// traces the exact `shape::infer` limit this hits), so the measured
+    /// effect, if any, is per-dispatch bandwidth on the one larger reduce,
+    /// not fewer kernel launches. No effect on a `qwen35` checkpoint or a
+    /// mixture-of-experts checkpoint, same carve-outs as the paired flag.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::load`].
+    pub fn load_with_fused_qkv_reduce(
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        fused_qkv_reduce: bool,
+    ) -> Result<Self, InteropError> {
+        Self::load_inner(parsed, file_bytes, false, fused_qkv_reduce)
     }
 
     fn load_inner(
         parsed: &ParsedGguf,
         file_bytes: &'file [u8],
         paired_gate_up_reduce: bool,
+        fused_qkv_reduce: bool,
     ) -> Result<Self, InteropError> {
         // registers `file_bytes` -- the checkpoint's own mmap, page-aligned
         // at its base by construction -- as the single mapping every packed
@@ -944,8 +970,13 @@ impl<'file> LoadedModel<'file> {
 
         let architecture = architecture_from_metadata(parsed)?;
         let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
-        let weights =
-            bind_all_weights(parsed, file_bytes, &architecture, paired_gate_up_reduce)?;
+        let weights = bind_all_weights(
+            parsed,
+            file_bytes,
+            &architecture,
+            paired_gate_up_reduce,
+            fused_qkv_reduce,
+        )?;
         // `architecture.expert_count`/`expert_used_count` read `0` for every
         // dense checkpoint (`ModelArchitecture`'s own doc), which selects
         // exactly the dense program this crate has always built -- a
@@ -968,19 +999,26 @@ impl<'file> LoadedModel<'file> {
             architecture.expert_used_count,
             qk_norm,
             paired_gate_up_reduce,
+            fused_qkv_reduce,
         )?;
-        // `mistral_single_range_cached_forward_program`'s own `w_gate`/`w_up`
-        // leaves (`build_single_range_program`) do not know about
-        // `paired_gate_up_reduce` yet -- `LoadedModel::run_decode_loop_observed`'s
-        // placed-KV fast path would try to read `blk.{layer}.ffn_gate.weight`
-        // against a `weights` set that, under this flag, only ever binds
-        // `blk.{layer}.ffn_gate_up.weight`. Forcing `None` here falls
-        // through to the two-range decode loop below, which DOES thread the
-        // flag correctly, rather than a `Metal(Tensor(UnboundInputName(..)))`
-        // panic -- the correct, paired-aware path over a crash, until the
-        // placed-KV builder gains the same flag.
+        // `mistral_single_range_cached_forward_program`'s own `w_gate`/`w_up`/
+        // `wq`/`wk`/`wv` leaves (`build_single_range_program`) do not know
+        // about `paired_gate_up_reduce`/`fused_qkv_reduce` yet --
+        // `LoadedModel::run_decode_loop_observed`'s placed-KV fast path
+        // would try to read `blk.{layer}.ffn_gate.weight`/
+        // `blk.{layer}.attn_q.weight` against a `weights` set that, under
+        // either flag, binds a differently-named fused tensor instead.
+        // Forcing `None` here falls through to the two-range decode loop
+        // below, which DOES thread both flags correctly, rather than a
+        // `Metal(Tensor(UnboundInputName(..)))` panic -- the correct,
+        // fusion-aware path over a crash, until the placed-KV builder
+        // gains both flags (tracked, not done in this change: threading
+        // `fused_qkv_reduce` through `mistral_single_range_cached_forward_program`
+        // is a second builder needing the identical q/k/v leaf and
+        // extract-op rewrite `append_mistral_cached_layer` just got, and is
+        // out of this change's scope).
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let single_range = if paired_gate_up_reduce {
+        let single_range = if paired_gate_up_reduce || fused_qkv_reduce {
             None
         } else {
             build_single_range_program(&architecture)?
@@ -1049,6 +1087,7 @@ impl<'file> LoadedModel<'file> {
             architecture.block_count,
             architecture.expert_count,
             architecture.expert_used_count,
+            false,
             false,
             false,
         )?;

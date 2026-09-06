@@ -2417,6 +2417,59 @@ pub type Qwen35DenseAttentionRoots = (NodeId, NodeId, NodeId, NodeId);
 /// one `Op::Reduce` (and its own kernel dispatch) per layer at load-time
 /// cost only when the checkpoint's `ffn_gate`/`ffn_up` tensors are not
 /// byte-adjacent (`proxima-model-interop::bind::bind_matmul_weight_paired`).
+///
+/// `fused_qkv_reduce`, when `true`, requires `query_heads` (this is the ONE
+/// extra scalar this branch needs that `paired_gate_up_reduce` did not: q's
+/// row count differs from k's/v's under GQA, so the flat row axis cannot
+/// be recovered from `group`/`head_dim` alone), `head_shape_ones`/
+/// `kv_head_shape_ones` (`[query_heads, head_dim]`/`[kv_heads, head_dim]`
+/// constants of `1.0`, this function's own doc on those two parameters
+/// below), and the SAME `NodeId` passed for `wq`, `wk`, `wv` -- a single
+/// `[query_heads + 2 * kv_heads, head_dim, embedding]`-flattened-to-`[rows,
+/// embedding]` leaf (q rows, then k rows, then v rows) rather than three
+/// separate `[embedding, heads, head_dim]` leaves.
+///
+/// The IR CANNOT split the fused reduce's one real `[s, rows]` axis back
+/// into two independent virtual sub-axes (`h`/`d` for q, `u`/`d` for k/v)
+/// from a single operand alone -- confirmed empirically
+/// (`shape::infer`'s own `UnconstrainedDim`, not inferred): a compound
+/// axis term like `"{head_dim}*h+d"` needs BOTH `h`'s and `d`'s extents
+/// pinned by SOME operand's own real, uncompounded axis, and an
+/// `Op::Elementwise`'s operand count is fixed to its `ScalarOp`'s arity
+/// (`op::ScalarOp::arity`), so there is no room to add a pure
+/// shape-providing operand to an already-binary op (`Multiply(gate,
+/// weight)`) the way `paired_gate_up_reduce`'s zero-coefficient parity
+/// trick could ride a term that was already a bare constant. This is why
+/// `paired_gate_up_reduce` (identical row counts either side of its split)
+/// could read `gate`/`up` back with ZERO extra dispatch, and this flag
+/// (three DIFFERENT row counts under GQA, so no single shared axis exists
+/// to split on) cannot: `q_raw`/`k_new_raw`/`v_new` each need their own
+/// `ScalarOp::Multiply`-against-a-ones-shaped-constant extract (arity 2,
+/// satisfying shape inference; the ones constant contributes only shape,
+/// value `1.0`, so the extracted values are bit-identical to a direct
+/// read) -- three small dispatches, not one, added back. Net per layer: 3
+/// reduces removed, 1 fused reduce added, 3 small extracts added -- ONE
+/// MORE dispatch, not fewer. This corrects this feature's own premise (a
+/// bandwidth-only reading of ROW 336 predicted `-2`/layer); the measured
+/// win, if any, is per-dispatch bandwidth on the one big reduce, not
+/// dispatch count. Requires `qk_norm` be `None` -- QK-norm's
+/// `rmsnorm_per_head` call needs `q_raw`/`k_new_raw` as their own
+/// full-shape node regardless, which this branch already provides via the
+/// same extract, but no call site in this crate combines the two flags
+/// today and the combination is untested.
+/// Where `append_mistral_cached_layer` reads `q`/`k_new`/`v_new` from --
+/// [`Self::Split`] is today's three independent reduces; [`Self::Fused`]
+/// carries the one shared flat-row reduce plus the byte offset `v_new`'s
+/// rows start at within it (`fused_qkv_reduce`'s own doc on that function).
+enum QkvSource {
+    Split,
+    Fused {
+        node: NodeId,
+        v_offset: u32,
+        head_dim: u32,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_mistral_cached_layer(
     program: &mut Vec<Op>,
@@ -2428,9 +2481,12 @@ fn append_mistral_cached_layer(
     cos_new: NodeId,
     sin_new: NodeId,
     group_ones: NodeId,
+    head_shape_ones: NodeId,
+    kv_head_shape_ones: NodeId,
     is_future: NodeId,
     group: u32,
     head_dim: u32,
+    query_heads: u32,
     attn_norm_weight: NodeId,
     ffn_norm_weight: NodeId,
     wq: NodeId,
@@ -2445,40 +2501,92 @@ fn append_mistral_cached_layer(
     v_cache: NodeId,
     qk_norm: Option<(NodeId, NodeId, NodeId)>,
     paired_gate_up_reduce: bool,
+    fused_qkv_reduce: bool,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
+    let kv_heads = query_heads / group;
 
-    let q_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed, "si->shdi"), (wq, "ihd->shdi")],
-    )?;
-    let q_raw = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        q_product,
-        "shdi->shdi",
-        "shd->shdi",
-    )?;
+    let (q_raw, k_new_raw, v_new_source): (NodeId, NodeId, QkvSource) = if fused_qkv_reduce {
+        let qkv_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed, "si->spi"), (wq, "pi->spi")],
+        )?;
+        let qkv_reduced = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            qkv_product,
+            "spi->spi",
+            "sp->spi",
+        )?;
+        let q_raw = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[
+                (qkv_reduced, alloc::format!("s,{head_dim}*h+d->shd").as_str()),
+                (head_shape_ones, "hd->shd"),
+            ],
+        )?;
+        let k_offset = query_heads * head_dim;
+        let k_new_raw = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[
+                (
+                    qkv_reduced,
+                    alloc::format!("s,{head_dim}*u+d+{k_offset}->sud").as_str(),
+                ),
+                (kv_head_shape_ones, "ud->sud"),
+            ],
+        )?;
+        (
+            q_raw,
+            k_new_raw,
+            QkvSource::Fused {
+                node: qkv_reduced,
+                v_offset: (query_heads + kv_heads) * head_dim,
+                head_dim,
+            },
+        )
+    } else {
+        let q_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed, "si->shdi"), (wq, "ihd->shdi")],
+        )?;
+        let q_raw = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            q_product,
+            "shdi->shdi",
+            "shd->shdi",
+        )?;
 
-    let k_new_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed, "si->sudi"), (wk, "iud->sudi")],
-    )?;
-    let k_new_raw = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        k_new_product,
-        "sudi->sudi",
-        "sud->sudi",
-    )?;
+        let k_new_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed, "si->sudi"), (wk, "iud->sudi")],
+        )?;
+        let k_new_raw = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            k_new_product,
+            "sudi->sudi",
+            "sud->sudi",
+        )?;
+        (q_raw, k_new_raw, QkvSource::Split)
+    };
 
     let (q, k_new) = match qk_norm {
         Some((q_norm_weight, k_norm_weight, inv_head_dim)) => {
@@ -2489,21 +2597,37 @@ fn append_mistral_cached_layer(
         None => (q_raw, k_new_raw),
     };
 
-    let v_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed, "si->sudi"), (wv, "iud->sudi")],
-    )?;
-    let v_new = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        v_product,
-        "sudi->sudi",
-        "sud->sudi",
-    )?;
+    let v_new = match v_new_source {
+        QkvSource::Fused { node, v_offset, head_dim } => elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[
+                (
+                    node,
+                    alloc::format!("s,{head_dim}*u+d+{v_offset}->sud").as_str(),
+                ),
+                (kv_head_shape_ones, "ud->sud"),
+            ],
+        )?,
+        QkvSource::Split => {
+            let v_product = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(normed, "si->sudi"), (wv, "iud->sudi")],
+            )?;
+            reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                v_product,
+                "sudi->sudi",
+                "sud->sudi",
+            )?
+        }
+    };
 
     // Two incompatible RoPE pairings live behind `qk_norm.is_some()`, not a
     // separate flag: llama.cpp's own GGUF converter permutes a "normal"
@@ -2518,6 +2642,11 @@ fn append_mistral_cached_layer(
     // [`append_qwen35_dense_attention_layer`]'s own split-half section,
     // which this mirrors at `pass_dim = 0` (Qwen3's rotary width equals its
     // full head width, so there is no untouched remainder).
+    // `q`/`k_new` are real, fully materialized `[s,h,d]`/`[s,u,d]` nodes
+    // under BOTH `QkvSource` variants (the `Multiply`-by-shape-constant
+    // extract above already re-materializes them under `Fused`), so every
+    // op below reads them exactly as the split path always has -- zero
+    // further changes needed downstream of this point.
     let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match qk_norm {
         Some(_) => {
             let pairs = head_dim / 2;
@@ -6940,6 +7069,7 @@ pub fn mistral_cached_forward_program(
         0,
         false,
         false,
+        false,
     )
 }
 
@@ -6974,6 +7104,7 @@ pub fn qwen3_cached_forward_program(
         0,
         true,
         false,
+        false,
     )
 }
 
@@ -6997,6 +7128,15 @@ pub fn qwen3_cached_forward_program(
 /// (`proxima-model-interop::bind::bind_matmul_weight_paired`). No effect on
 /// the `expert_count > 0` branch (MoE's own gate/up weights are a separate
 /// per-expert stack this flag does not touch).
+///
+/// `fused_qkv_reduce` is passed straight through to every dense layer's
+/// `append_mistral_cached_layer` call (see that parameter's own doc) --
+/// `false` at every call site in this crate today; a caller opts in only
+/// once its loader has bound `blk.{layer}.attn_qkv.weight`
+/// (`proxima-model-interop::bind::bind_matmul_weight_triple`). Requires
+/// `qk_norm == false` (`append_mistral_cached_layer`'s own doc); no effect
+/// on the `expert_count > 0` branch (attention projections are untouched by
+/// which FFN branch runs).
 #[allow(clippy::too_many_arguments)]
 pub fn mistral_cached_forward_program_with_experts(
     vocab: u32,
@@ -7010,6 +7150,7 @@ pub fn mistral_cached_forward_program_with_experts(
     expert_used_count: u32,
     qk_norm: bool,
     paired_gate_up_reduce: bool,
+    fused_qkv_reduce: bool,
 ) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>), TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
@@ -7058,6 +7199,40 @@ pub fn mistral_cached_forward_program_with_experts(
             value: 1.0,
         },
     );
+    // Only ever consulted by `append_mistral_cached_layer`'s
+    // `fused_qkv_reduce` branch (that parameter's own doc) -- built ONLY
+    // when the flag is set, so `false` reproduces today's program
+    // node-for-node (`cached_attention_rewrite_replaces_the_bound_attention_subgraph`'s
+    // own literal bound-op-count fixture is the guard: it caught the
+    // unconditional-`Op::Constant` version of this as a real +2 node
+    // regression before this comment existed).
+    let (head_shape_ones, kv_head_shape_ones) = if fused_qkv_reduce {
+        let head_shape_ones = op::append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(query_heads), Extent::Static(head_dim)],
+                value: 1.0,
+            },
+        );
+        let kv_head_shape_ones = op::append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
+                value: 1.0,
+            },
+        );
+        (head_shape_ones, kv_head_shape_ones)
+    } else {
+        // Never read (`append_mistral_cached_layer`'s `fused_qkv_reduce`
+        // branch is the only reader, and it never runs when the flag is
+        // `false`) -- `ones` (already built above) is reused as the
+        // placeholder rather than adding an `Option` the callee would need
+        // to `expect()` out of (this crate's own no-`expect`-in-production
+        // rule), or building a real constant no `false` caller ever needs.
+        (ones, ones)
+    };
     let (is_future, _neg_infinity) = causal_mask(&mut program)?;
 
     let mut cache_roots: Vec<CachedLayerRoots> = Vec::with_capacity(block_count as usize);
@@ -7075,36 +7250,48 @@ pub fn mistral_cached_forward_program_with_experts(
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.ffn_norm.weight"),
         );
-        let wq = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![
-                Extent::Static(embedding),
-                Extent::Static(query_heads),
-                Extent::Static(head_dim)
-            ],
-            &alloc::format!("blk.{layer}.attn_q.weight"),
-        );
-        let wk = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![
-                Extent::Static(embedding),
-                Extent::Static(kv_heads),
-                Extent::Static(head_dim)
-            ],
-            &alloc::format!("blk.{layer}.attn_k.weight"),
-        );
-        let wv = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![
-                Extent::Static(embedding),
-                Extent::Static(kv_heads),
-                Extent::Static(head_dim)
-            ],
-            &alloc::format!("blk.{layer}.attn_v.weight"),
-        );
+        let (wq, wk, wv) = if fused_qkv_reduce {
+            let rows = (query_heads + 2 * kv_heads) * head_dim;
+            let w_qkv = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(rows), Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.attn_qkv.weight"),
+            );
+            (w_qkv, w_qkv, w_qkv)
+        } else {
+            let wq = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(embedding),
+                    Extent::Static(query_heads),
+                    Extent::Static(head_dim)
+                ],
+                &alloc::format!("blk.{layer}.attn_q.weight"),
+            );
+            let wk = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(embedding),
+                    Extent::Static(kv_heads),
+                    Extent::Static(head_dim)
+                ],
+                &alloc::format!("blk.{layer}.attn_k.weight"),
+            );
+            let wv = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(embedding),
+                    Extent::Static(kv_heads),
+                    Extent::Static(head_dim)
+                ],
+                &alloc::format!("blk.{layer}.attn_v.weight"),
+            );
+            (wq, wk, wv)
+        };
         let wo = input_leaf(
             &mut program,
             DType::Float32,
@@ -7207,9 +7394,12 @@ pub fn mistral_cached_forward_program_with_experts(
                 cos_new,
                 sin_new,
                 group_ones,
+                head_shape_ones,
+                kv_head_shape_ones,
                 is_future,
                 group,
                 head_dim,
+                query_heads,
                 attn_norm_weight,
                 ffn_norm_weight,
                 wq,
@@ -7224,6 +7414,7 @@ pub fn mistral_cached_forward_program_with_experts(
                 v_cache,
                 qk_norm_weights,
                 paired_gate_up_reduce,
+                fused_qkv_reduce,
             )?
         } else {
             let gate_inp = input_leaf(
@@ -13308,7 +13499,7 @@ value = 1.0
 
         let (paired_program, paired_logits, paired_roots) =
             mistral_cached_forward_program_with_experts(
-                32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, true,
+                32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, true, false,
             )
             .expect("the paired cached forward pass lowers to a program");
         let mut paired_outputs = alloc::vec![paired_logits];
@@ -13379,6 +13570,92 @@ value = 1.0
                  non-identity parity-sliced read of the paired reduce's own output"
             );
         }
+    }
+
+    /// `fused_qkv_reduce`'s own census, same relation-form discipline as
+    /// [`paired_gate_up_reduce_removes_one_reduce_per_layer_relative_to_the_baseline`]
+    /// above -- deltas against a freshly computed baseline, never a
+    /// re-typed literal. Q/K/V's three independent reduces collapse into
+    /// one fused reduce (`-2` `Op::Reduce`/layer, `-64` total), but q's, k's,
+    /// AND v's rows are three DIFFERENT sizes under GQA (unlike
+    /// `paired_gate_up_reduce`'s identical-size gate/up), so none of the
+    /// three can be read back out of the shared flat buffer at zero extra
+    /// cost the way `paired_gate_up_reduce` reads its parity axis -- the IR
+    /// cannot split one real axis into two unconstrained virtual sub-axes
+    /// from a single operand (`append_mistral_cached_layer`'s
+    /// `fused_qkv_reduce` doc traces the exact `shape::infer`
+    /// `UnconstrainedDim` this hits and why `ScalarOp::arity` blocks the
+    /// obvious fix of adding a shape-only operand to an existing binary
+    /// op). All three of q/k/v need their own small
+    /// `ScalarOp::Multiply`-by-shape-constant extract instead. Net per
+    /// layer: 3 reduces removed, 1 fused reduce added, 3 extracts added --
+    /// this test asserts the CORRECTED count, `+1` dispatch/layer (`+32`
+    /// total), not the `-2`/layer a bandwidth-only reading of ROW 336 would
+    /// predict.
+    #[test]
+    fn fused_qkv_reduce_adds_one_dispatch_per_layer_relative_to_the_baseline() {
+        let (baseline_program, baseline_logits, baseline_roots) =
+            mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+                .expect("the baseline cached forward pass lowers to a program");
+        let mut baseline_outputs = alloc::vec![baseline_logits];
+        for (even, odd, value) in &baseline_roots {
+            baseline_outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let baseline_shapes = crate::shape::infer(&baseline_program, &[1, 71])
+            .expect("baseline: one new position against a 71-position cache infers");
+        let baseline_bound = crate::bind::bind_with_fusion(
+            &baseline_program,
+            &baseline_shapes,
+            &baseline_outputs,
+            false,
+        )
+        .expect("the baseline program binds");
+        let baseline_total = baseline_bound.len();
+        let baseline_reduce_total = baseline_bound
+            .iter()
+            .filter(|op| matches!(&op.kind, crate::bind::BoundOpKind::Reduce { .. }))
+            .count();
+
+        let (fused_program, fused_logits, fused_roots) =
+            mistral_cached_forward_program_with_experts(
+                32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, false, true,
+            )
+            .expect("the fused-qkv cached forward pass lowers to a program");
+        let mut fused_outputs = alloc::vec![fused_logits];
+        for (even, odd, value) in &fused_roots {
+            fused_outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let fused_shapes = crate::shape::infer(&fused_program, &[1, 71])
+            .expect("fused: one new position against a 71-position cache infers");
+        let fused_bound =
+            crate::bind::bind_with_fusion(&fused_program, &fused_shapes, &fused_outputs, false)
+                .expect("the fused-qkv program binds");
+        let fused_total = fused_bound.len();
+        let fused_reduce_total = fused_bound
+            .iter()
+            .filter(|op| matches!(&op.kind, crate::bind::BoundOpKind::Reduce { .. }))
+            .count();
+
+        std::println!(
+            "fused_qkv_reduce_census baseline_reduce_total={baseline_reduce_total} fused_reduce_total={fused_reduce_total} baseline_bound_total={baseline_total} fused_bound_total={fused_total}"
+        );
+        assert_eq!(
+            baseline_reduce_total - fused_reduce_total,
+            64,
+            "fused_qkv_reduce must remove exactly two Op::Reduce per layer (32 layers) relative \
+             to the baseline -- q's, k's, and v's three independent reduces collapsing into one \
+             fused reduce"
+        );
+        assert_eq!(
+            fused_total - baseline_total,
+            34,
+            "fused_qkv_reduce must ADD exactly one dispatch per layer (32 layers -> +32) plus the \
+             two one-time Op::Constant shape hints built once for the whole program (+2), 34 \
+             total -- 3 reduces removed, 1 fused reduce added, 3 shape-constant extracts added \
+             (q/k/v each need their own, unlike paired_gate_up_reduce's zero-extra-cost parity \
+             read) nets +1/layer, not the -2/layer a bandwidth-only reading of the reduce count \
+             would predict"
+        );
     }
 
     /// Proof the new test can fail: perturbing one tap weight must move the

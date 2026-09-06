@@ -903,6 +903,89 @@ pub(crate) fn bind_matmul_weight_paired<'file>(
     Ok(())
 }
 
+/// [`bind_matmul_weight_paired`]'s three-tensor counterpart: binds
+/// `q_name`/`k_name`/`v_name` (`blk.{layer}.attn_q.weight`/`attn_k.weight`/
+/// `attn_v.weight`) as ONE packed operand under `target_name`
+/// (`blk.{layer}.attn_qkv.weight`) -- the loader half of
+/// `proxima_tensor::spec::append_mistral_cached_layer`'s `fused_qkv_reduce`
+/// flag. Requires all three tensors share one packed codec, the same
+/// contract [`bind_matmul_weight_paired`] enforces for its pair.
+///
+/// Zero-copy only when the THREE tensors form one contiguous chain
+/// (`k_name` starts exactly where `q_name` ends, `v_name` exactly where
+/// `k_name` ends) -- see `proxima-gguf/src/tests.rs`'s
+/// `attn_q_k_v_adjacency_per_layer`, which this function's own doc cites as
+/// the check a caller runs before relying on this path staying zero-copy
+/// for a DIFFERENT checkpoint. Either gap falls back to one owned
+/// concatenation ([`BoundWeights::packed_owned`]), paid once at load time.
+///
+/// # Errors
+///
+/// [`InteropError::UnknownTensor`] if any tensor is missing;
+/// [`InteropError::Gguf`] if any tensor's declared byte range doesn't fit
+/// `file_bytes`; [`InteropError::UnrepresentableGgmlType`] if the three
+/// tensors' codecs disagree, or if their shared codec has no packed decoder
+/// this crate carries.
+#[cfg(feature = "std")]
+pub(crate) fn bind_matmul_weight_triple<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    q_name: &str,
+    k_name: &str,
+    v_name: &str,
+    target_name: alloc::string::String,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    let q_tensor = find_tensor(parsed, q_name)?;
+    let k_tensor = find_tensor(parsed, k_name)?;
+    let v_tensor = find_tensor(parsed, v_name)?;
+    if q_tensor.ggml_type != k_tensor.ggml_type || q_tensor.ggml_type != v_tensor.ggml_type {
+        return Err(InteropError::UnrepresentableGgmlType {
+            tensor: q_name.into(),
+            ggml_type: q_tensor.ggml_type,
+        });
+    }
+    let codec = q_tensor.ggml_type;
+    let file_len = file_bytes.len() as u64;
+    let q_range = parsed.tensor_data_range(q_tensor, file_len)?;
+    let k_range = parsed.tensor_data_range(k_tensor, file_len)?;
+    let v_range = parsed.tensor_data_range(v_tensor, file_len)?;
+
+    if k_range.start == q_range.end && v_range.start == k_range.end {
+        let bytes = &file_bytes[q_range.start as usize..v_range.end as usize];
+        let block = match codec {
+            GgmlType::Q4_K => proxima_tensor::cpu::QuantizedBlock::Q4K(bytes),
+            GgmlType::Q5_K => proxima_tensor::cpu::QuantizedBlock::Q5K(bytes),
+            GgmlType::Q3_K => proxima_tensor::cpu::QuantizedBlock::Q3K(bytes),
+            GgmlType::Q6_K => proxima_tensor::cpu::QuantizedBlock::Q6K(bytes),
+            GgmlType::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes),
+            other => {
+                return Err(InteropError::UnrepresentableGgmlType {
+                    tensor: q_name.into(),
+                    ggml_type: other,
+                });
+            }
+        };
+        state.packed.push((target_name, block));
+    } else {
+        let kind =
+            PackedOwnedKind::from_ggml_type(codec).ok_or(InteropError::UnrepresentableGgmlType {
+                tensor: q_name.into(),
+                ggml_type: codec,
+            })?;
+        let q_bytes = &file_bytes[q_range.start as usize..q_range.end as usize];
+        let k_bytes = &file_bytes[k_range.start as usize..k_range.end as usize];
+        let v_bytes = &file_bytes[v_range.start as usize..v_range.end as usize];
+        let mut owned = vec![0u8; q_bytes.len() + k_bytes.len() + v_bytes.len()];
+        owned[..q_bytes.len()].copy_from_slice(q_bytes);
+        owned[q_bytes.len()..q_bytes.len() + k_bytes.len()].copy_from_slice(k_bytes);
+        owned[q_bytes.len() + k_bytes.len()..].copy_from_slice(v_bytes);
+        state.resident_bytes += owned.len();
+        state.packed_owned.push((target_name, owned, kind));
+    }
+    Ok(())
+}
+
 /// ROW 328 diagnostic knob: `PROXIMA_HEAD_PRIVATE_COPY=1`, unset in every
 /// production run. Same env-var convention as `PROXIMA_PREFAULT`/
 /// `PROXIMA_MLOCK` (this module's `real_openchat_file` submodule).
@@ -1237,6 +1320,7 @@ pub(crate) fn bind_all_weights<'file>(
     file_bytes: &'file [u8],
     architecture: &ModelArchitecture,
     paired_gate_up_reduce: bool,
+    fused_qkv_reduce: bool,
 ) -> Result<BoundWeights<'file>, InteropError> {
     let mut state = BoundWeights {
         resident_bytes: file_bytes.len(),
@@ -1273,30 +1357,42 @@ pub(crate) fn bind_all_weights<'file>(
             alloc::format!("blk.{layer}.ffn_norm.weight"),
             &mut state,
         )?;
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            alloc::format!("blk.{layer}.attn_q.weight"),
-            q_dim,
-            embedding,
-            &mut state,
-        )?;
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            alloc::format!("blk.{layer}.attn_k.weight"),
-            kv_dim,
-            embedding,
-            &mut state,
-        )?;
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            alloc::format!("blk.{layer}.attn_v.weight"),
-            kv_dim,
-            embedding,
-            &mut state,
-        )?;
+        if fused_qkv_reduce {
+            bind_matmul_weight_triple(
+                parsed,
+                file_bytes,
+                &alloc::format!("blk.{layer}.attn_q.weight"),
+                &alloc::format!("blk.{layer}.attn_k.weight"),
+                &alloc::format!("blk.{layer}.attn_v.weight"),
+                alloc::format!("blk.{layer}.attn_qkv.weight"),
+                &mut state,
+            )?;
+        } else {
+            bind_matmul_weight(
+                parsed,
+                file_bytes,
+                alloc::format!("blk.{layer}.attn_q.weight"),
+                q_dim,
+                embedding,
+                &mut state,
+            )?;
+            bind_matmul_weight(
+                parsed,
+                file_bytes,
+                alloc::format!("blk.{layer}.attn_k.weight"),
+                kv_dim,
+                embedding,
+                &mut state,
+            )?;
+            bind_matmul_weight(
+                parsed,
+                file_bytes,
+                alloc::format!("blk.{layer}.attn_v.weight"),
+                kv_dim,
+                embedding,
+                &mut state,
+            )?;
+        }
         bind_matmul_weight(
             parsed,
             file_bytes,
@@ -3218,6 +3314,76 @@ mod real_openchat_file {
         );
     }
 
+    /// Byte-identity oracle for `proxima_tensor::spec::append_mistral_cached_layer`'s
+    /// `fused_qkv_reduce` flag, same structure as
+    /// [`paired_gate_up_reduce_matches_the_two_matvec_baseline_byte_for_byte`]
+    /// above. CURRENTLY CANNOT RUN END-TO-END against this crate's own
+    /// `ServingConfig::default().model_path` fixture even with the host
+    /// checkpoint present: `proxima-gguf`'s own
+    /// `attn_q_k_v_adjacency_per_layer` measured that checkpoint's
+    /// `attn_v` at a different codec (`Q5_K`) than `attn_q`/`attn_k`
+    /// (`Q4_K`), and `crate::bind::bind_matmul_weight_triple` correctly
+    /// refuses to bind three tensors under one codec-typed
+    /// `QuantizedBlock` when their codecs disagree -- `LoadedModel::load_with_fused_qkv_reduce`
+    /// returns `Err(InteropError::UnrepresentableGgmlType)` for THIS
+    /// checkpoint, so this test's own `.expect(..)` documents that failure
+    /// rather than a parity result. Kept `#[ignore]`d and structurally
+    /// identical to the paired oracle so a checkpoint whose q/k/v DO share
+    /// one codec (and are declared adjacent, in q/k/v order) exercises
+    /// this path without a second test to write.
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo, AND that checkpoint's own attn_v codec disagreeing with attn_q/attn_k (see this test's own doc) means it cannot currently pass against it"]
+    fn fused_qkv_reduce_matches_the_three_matvec_baseline_byte_for_byte() {
+        let path = std::path::Path::new(ServingConfig::default().model_path);
+        if !path.exists() {
+            eprintln!(
+                "skipping: no host-local openchat gguf fixture at {}",
+                ServingConfig::default().model_path
+            );
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local openchat gguf fixture");
+        prefault_if_requested(file_bytes);
+
+        let prompt = decode_loop_prompt();
+        let max_tokens = std::env::var("PROXIMA_MAX_TOKENS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(3);
+
+        let baseline_model = LoadedModel::load(&parsed, file_bytes)
+            .expect("load real openchat checkpoint, three independent matvecs");
+        let baseline = block_on(baseline_model.call((prompt.clone(), max_tokens)))
+            .expect("generate through the public Pipe path, baseline");
+
+        let fused_model = LoadedModel::load_with_fused_qkv_reduce(&parsed, file_bytes, true)
+            .expect("load real openchat checkpoint, one fused reduce per layer");
+        let fused = block_on(fused_model.call((prompt, max_tokens)))
+            .expect("generate through the public Pipe path, fused");
+
+        std::println!(
+            "fused_qkv_reduce_parity baseline_text={:?} fused_text={:?}",
+            baseline.1,
+            fused.1
+        );
+        assert_eq!(
+            baseline.0, fused.0,
+            "fused_qkv_reduce must generate the identical token id sequence"
+        );
+        assert_eq!(
+            baseline.1, fused.1,
+            "fused_qkv_reduce must generate byte-identical text"
+        );
+        assert_eq!(
+            baseline.2, fused.2,
+            "fused_qkv_reduce must stop on the same eos/budget signal"
+        );
+    }
+
     /// The multi-token counterpart, through the same public path: one
     /// [`LoadedModel::load`], one [`Pipe::call`] with
     /// `max_tokens: PROXIMA_MAX_TOKENS` (default 24) -- the direct fix for
@@ -3839,7 +4005,7 @@ mod real_openchat_file {
                 .expect("parse host-local openchat gguf fixture");
             let architecture = architecture_from_metadata(&parsed)
                 .expect("derive architecture from real metadata");
-            let weights = bind_all_weights(&parsed, file_bytes, &architecture, false)
+            let weights = bind_all_weights(&parsed, file_bytes, &architecture, false, false)
                 .expect("bind real openchat checkpoint weights");
 
             use proxima_tensor::spec::mistral_cached_forward_program;

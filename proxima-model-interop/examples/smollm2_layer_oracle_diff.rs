@@ -75,6 +75,7 @@ fn layer_boundary_node_id(
         0,
         false,
         false,
+        false,
     )
     .expect("build shallow throwaway program");
     let (deep, _, _) = mistral_cached_forward_program_with_experts(
@@ -87,6 +88,7 @@ fn layer_boundary_node_id(
         block_count + 1,
         0,
         0,
+        false,
         false,
         false,
     )
