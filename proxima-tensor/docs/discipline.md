@@ -24850,3 +24850,76 @@ PROXIMA_MAX_TOKENS=64 PROXIMA_METAL_KIND_FILTER='!cached_attention' "$BIN" bind:
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | docs-only: `docs(tensor): row 342 attention cost vs context length` | Kind-filter ablation across FULL/`!cached_attention`/`!reduce-cooperative`/`!elementwise` isolates ROW 341's context-length rise to `cached_attention`: removing it flattens growth from +1.885 ms (FULL) to -0.106 ms (within noise); the other two kinds leave growth unchanged (+1.866, +2.122 ms). Mechanism: `msl.rs:3012`'s context loop is serial with zero dispatch-side parallelism over context (`metal.rs:3785-3791` grids over query positions only), unlike llama's `kernel_flash_attn_ext_vec` (`ggml-metal.metal:4016`), whose `nsg` simdgroups partition the context range and whose count scales with context (`ggml-metal.m:4900`) | 1 round/cell, 64 steps/round; per-window CoV 0.20-2.04% | quiet gate FAILED at load-1 28.83 (traced to an orphaned loop, PID 16470, in another worktree; killed by the coordinator), re-verified PASSING (pgrep empty, load-1 6.33-6.52) immediately before the release build and again before all 4 timed runs; held quiet throughout (post-run load-1 4.71) |
+
+## ROW 345 -- 81f3e6d's key-range split (chunks 1..4 online-softmax merge): default `keys_per_chunk=64` gives chunks=1 at <=64 tokens; a 16-key override does not measurably help there, NO FLIP
+
+**Card:** none (measurement only, no functional code change; 81f3e6d already landed on `main` before this row). **Worktree/branch:** `proxima-wt-r345`, `docs/row-345-attention-split`, off `main` at `81f3e6d`.
+
+**Question this row answers.** 81f3e6d splits `render_cached_attention`'s key range across `context_chunks` simdgroups with an online-softmax merge, `context_chunks = clamp(ceil(context / keys_per_chunk), 1, cap)` (`omega/src/msl.rs:2932`, config at `omega/omega-runtime.toml:203-218`). The shipped default `keys_per_chunk = 64` gives `chunks = 1` for every step at or below 64 keys -- i.e. the split never engages inside ROW 342's own 64-token oracle window, which measured `cached_attention` alone carrying +1.885 ms of growth from steps 3..7 to 32..63 there. Does lowering `keys_per_chunk` to 16 (engaging chunks 1->4 as context grows 16->64 within the same window) reduce that per-token cost, and does the cross-simdgroup merge change output?
+
+**Method.** Same harness as ROW 324/341/342/343 (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `--features metal,instrument`, `PROXIMA_MAX_TOKENS=64`, `--exact --ignored --nocapture`). Two release test binaries built from the same tree (`cargo test -p proxima-model-interop --release --features metal,instrument --no-run`), differing only in the env vars `build.rs` consults (`omega/build.rs:281-293`): A = default (`OMEGA_ATTENTION_CONTEXT_CHUNKS_KEYS_PER_CHUNK` unset, `keys_per_chunk=64`, chunks=1 throughout); B = `OMEGA_ATTENTION_CONTEXT_CHUNKS_KEYS_PER_CHUNK=16 OMEGA_ATTENTION_CONTEXT_CHUNKS_CAP=4` (chunks 1->4 as context crosses 16/32/48/64 keys). `omega/build.rs` touched between builds to force the build script to rerun since `cargo clean -p omega` reported 0 files removed; the resulting binaries differ byte-for-byte (`cmp` on the two 3,848,720-byte binaries reports a difference) confirming the override took effect, since the only input that changed between the two builds was the env var. Binaries copied to `r345-logs/oracle-A`/`oracle-B`. 3 rounds interleaved A, B, A, B, A, B.
+
+**Quiet gate.** `pgrep -l cargo`, `pgrep -l matvec_roofline`, `pgrep -l proxima_model_interop` all empty immediately before setup and again immediately before the first timed round -- PASSED both checks; no ladder measurer (`matvec_roofline`, ROW 344) was running at any point in this session.
+
+**Data -- `gpu_exec_ms` means per window (5 datapoints for 3..7, 24 for 8..31, 32 for 32..63, per round):**
+
+| round | arm | steps 3..7 (ms) | steps 8..31 (ms) | steps 32..63 (ms) |
+| --- | --- | --- | --- | --- |
+| 1 | A (default, keys_per_chunk=64) | 25.748 | 26.547 | 28.125 |
+| 1 | B (keys_per_chunk=16, cap=4) | 26.589 | 26.956 | 28.498 |
+| 2 | A | 25.726 | 26.991 | 28.417 |
+| 2 | B | 26.508 | 26.852 | 28.423 |
+| 3 | A | 26.469 | 26.683 | 28.402 |
+| 3 | B | 29.771 | 29.897 | 31.167 |
+
+`generated_text="Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`python\ndef fibonacci(n):\n    if n <= 0:\n        return \"Invalid input\"\n    elif n == 1:\n        return 0\n    elif"` is byte-identical across all 6 runs (A and B, all 3 rounds) -- no divergent token, confirming the online-softmax merge does not change the decoded sequence at this length beyond float noise absorbed by greedy argmax.
+
+**Round 3's B run is contaminated** -- steps 6 and 9 spike to 34.5/34.1 ms against B's own round-1/round-2 band of 26.4-27.0 ms (round-1-B and round-2-B both sit flat in that band across steps 3..10); pooled B CoV is 6.5-10.3% across windows against A's 1.35-1.99%, an order of magnitude apart, the same signature ROW 343 named for its own round-2 B contamination. Per that row's convention this datapoint is named, not hidden, and reported alongside the clean subset:
+
+| arm | window | n | mean (ms) | CoV |
+| --- | --- | --- | --- | --- |
+| A, pooled (3 rounds) | 3..7 | 15 | 25.981 | 1.35% |
+| A, pooled (3 rounds) | 8..31 | 72 | 26.740 | 1.88% |
+| A, pooled (3 rounds) | 32..63 | 96 | 28.315 | 1.99% |
+| B, pooled (3 rounds) | 3..7 | 15 | 27.622 | 7.79% |
+| B, pooled (3 rounds) | 8..31 | 72 | 27.902 | 10.32% |
+| B, pooled (3 rounds) | 32..63 | 96 | 29.363 | 6.54% |
+| B, rounds 1+2 only | 3..7 | 10 | 26.548 | 0.89% |
+| B, rounds 1+2 only | 8..31 | 48 | 26.904 | 0.75% |
+| B, rounds 1+2 only | 32..63 | 64 | 28.461 | 1.56% |
+
+Growth (32..63 minus 3..7) per arm: A pooled +2.334 ms; A rounds-1+2-only +2.534 ms; B pooled +1.740 ms; B rounds-1+2-only +1.913 ms.
+
+**Result.** Excluding round 3's named B contamination, B (keys_per_chunk=16, chunks engaging at 16/32/48/64 tokens) sits at 26.548/26.904/28.461 ms against A's 25.737/26.769/28.271 ms (A's own rounds-1+2 figures) across the three windows -- B is 0.19-0.81 ms **higher**, not lower, at every window, and that gap is smaller than A's own round-to-round spread (25.726 to 26.469, a 0.74 ms band). B's growth (+1.91 ms rounds-1+2-only) is nominally lower than A's (+2.53 ms) but the two arms' own per-round variance (A: 25.726-26.469 at the short window; B: 26.508-26.589 at the short window, excluding the contaminated round) overlaps that difference. **B is not measurably better than A within CoV at any window measured.** Per the owner rule (flip only if output is identical AND work is measurably down AND wall is not worse), output is identical but wall is not better -- **NO FLIP**: `omega/omega-runtime.toml`'s `keys_per_chunk = 64` stays as landed. The split itself (81f3e6d) is unchanged and remains correct (parity confirmed); this row only says the specific 16-key threshold does not pay off inside the 3..63-token range this oracle measures.
+
+**Scoreboard line.** Same-session denominator not re-measured this row (no `llama-bench` arm); using ROW 343's own same-host llama record, `17.4642 ms/token`: A `step_wall_ms`-equivalent via `gpu_exec_ms` 26.740 (pooled 8..31 window, the closest analog to ROW 343's steady-state cell) is **1.531x llama**, consistent with ROW 342/343's 1.52-1.64x band; B pooled same window 27.902 = **1.598x llama**. Per LLAMA-IS-NOT-THE-FLOOR this borrows a prior session's denominator rather than measuring it fresh.
+
+**Residual, named not hidden.** (1) Round 3's B contamination (steps 6 and 9, isolated spikes, not a uniform shift) has no identified mechanism -- the quiet gate was clean immediately before the round; consistent with ROW 324's and ROW 343's own unattributed contamination, reported as an open question rather than silently excluded. (2) This row only measures the 16-key threshold at the 3..63-token range; it does not measure whether a lower threshold (e.g. 8) or a higher `cap` pays off at longer contexts where ROW 342's DERIVED projection (35.8 us/context-token) would make more chunks worth more. (3) No fresh `llama-bench` arm was run this session; the scoreboard ratio borrows ROW 343's denominator. (4) Binary-difference verification (`cmp` reporting a diff) is process evidence that the env var was consumed by the build, not a direct read of the emitted MSL source's `context_chunks_for` call site inside each binary -- no disassembly or embedded-shader-source diff was performed to directly confirm the constant's numeric value inside each binary.
+
+**Gates.** None run -- no functional source change lands from this row; `keys_per_chunk` stays at its landed default, so `omega-runtime.toml` is untouched. `git status --porcelain` in the worktree shows only this doc edit.
+
+**Re-prove command (each cell):**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-row345-repro -b test/row-345-repro main
+cd ../proxima-wt-row345-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p proxima-model-interop --release --features metal,instrument --no-run
+BIN=$(find target/release/deps -name 'proxima_model_interop-*' -type f -perm +111)
+cp "$BIN" oracle-A
+touch omega/build.rs
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  OMEGA_ATTENTION_CONTEXT_CHUNKS_KEYS_PER_CHUNK=16 OMEGA_ATTENTION_CONTEXT_CHUNKS_CAP=4 \
+  cargo test -p proxima-model-interop --release --features metal,instrument --no-run
+BIN=$(find target/release/deps -name 'proxima_model_interop-*' -type f -perm +111)
+cp "$BIN" oracle-B
+PROXIMA_MAX_TOKENS=64 ./oracle-A bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache --exact --ignored --nocapture
+PROXIMA_MAX_TOKENS=64 ./oracle-B bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache --exact --ignored --nocapture
+```
+(expected: ~1-2 min release build each, then 2 runs of ~13-14s each; each run prints 64 `token_breakdown_metal` lines to parse `gpu_exec_ms` from.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | docs-only: `docs(tensor): row 345 attention key-range split at 64 tokens` | 81f3e6d's key-range split correctly gives chunks=1 at the shipped `keys_per_chunk=64` default for every step <=64 tokens; forcing chunks to engage at `keys_per_chunk=16` does not measurably lower `gpu_exec_ms` at steps 3..7/8..31/32..63 (B sits 0.19-0.81 ms higher than A once round-3's contamination is excluded, within each arm's own CoV) -- NO FLIP, default stays at 64. Output byte-identical across all 6 runs (A/B x 3 rounds) confirming the online-softmax merge preserves correctness | 3 rounds interleaved, 64 steps/round; pooled CoV A 1.35-1.99%, B 6.54-10.32% (7.79-10.32% driven entirely by round 3's named contamination; 0.75-1.56% rounds 1+2 only) | quiet gate PASSED (pgrep empty for cargo/matvec_roofline/proxima_model_interop) before setup and immediately before the first timed round; no concurrent ladder measurer observed |
