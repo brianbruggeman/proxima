@@ -339,14 +339,20 @@ pub fn stream_cached_attention_split_gqa(
     let Some(output_width) = output_width else {
         return false;
     };
+    // A zero-length cached range (a merged-KV fusion's `cached_key_rows: 0`)
+    // never indexes into `keys[0]`/`values[0]` below -- the caller may pass
+    // the same buffer it passed for the new range, so its length is not
+    // required to match a zero-sized cached extent.
+    let cached_range_empty = extents.cached_key_rows == 0;
     if queries.iter().any(|query| query.len() != query_width as usize)
-        || keys[0]
-            .iter()
-            .any(|key| key.len() != cached_pair_width as usize)
+        || (!cached_range_empty
+            && keys[0]
+                .iter()
+                .any(|key| key.len() != cached_pair_width as usize))
         || keys[1]
             .iter()
             .any(|key| key.len() != new_pair_width as usize)
-        || values[0].len() != cached_value_width as usize
+        || (!cached_range_empty && values[0].len() != cached_value_width as usize)
         || values[1].len() != new_value_width as usize
         || output.len() != output_width as usize
     {
@@ -628,5 +634,74 @@ mod tests {
         let reverse_weighted_second = (4.0 + first_weight * 8.0) / (1.0 + first_weight);
         assert!((output[2] - reverse_weighted_first).abs() < 1e-6);
         assert!((output[3] - reverse_weighted_second).abs() < 1e-6);
+    }
+
+    /// Regression for the merged-KV single-range fusion bug (ROW 366): the
+    /// buggy bind duplicated the same bucketed-capacity key/value range into
+    /// BOTH slots and neutered the "cached" half with an unreachable
+    /// `[i64::MAX, i64::MAX]` band; the fix declares `cached_key_rows: 0` --
+    /// an empty range, not a dead one. Both forms must agree exactly, since
+    /// the dead band never touched the accumulator either way.
+    #[test]
+    fn merged_kv_zero_cached_range_matches_the_old_duplicated_capacity_with_a_dead_band() {
+        let capacity = 4u64;
+        let query_even = [1.0f32];
+        let query_odd = [0.0f32];
+        let key_even = [1.0f32, 0.0, 1.0, 0.0];
+        let key_odd = [0.0f32, 1.0, 0.0, 1.0];
+        let value = [2.0f32, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
+        let extents_old = AttentionExtents {
+            query_rows: 1,
+            cached_key_rows: capacity,
+            new_key_rows: capacity,
+            kv_heads: 1,
+            query_groups: 1,
+            head_dim: 2,
+        };
+        let extents_new = AttentionExtents {
+            cached_key_rows: 0,
+            ..extents_old.clone()
+        };
+        let bands_old = [
+            CausalBand {
+                lower_inclusive: i64::MAX,
+                upper_inclusive: i64::MAX,
+            },
+            CausalBand {
+                lower_inclusive: i64::MIN,
+                upper_inclusive: 1,
+            },
+        ];
+        let bands_new = [
+            CausalBand {
+                lower_inclusive: i64::MIN,
+                upper_inclusive: i64::MAX,
+            },
+            CausalBand {
+                lower_inclusive: i64::MIN,
+                upper_inclusive: 1,
+            },
+        ];
+        let mut output_old = [0.0f32; 2];
+        let mut output_new = [0.0f32; 2];
+        assert!(stream_cached_attention_split_gqa(
+            [&query_even[..], &query_odd[..]],
+            [[&key_even[..], &key_odd[..]], [&key_even[..], &key_odd[..]]],
+            [&value[..], &value[..]],
+            &mut output_old,
+            extents_old,
+            1.0,
+            bands_old,
+        ));
+        assert!(stream_cached_attention_split_gqa(
+            [&query_even[..], &query_odd[..]],
+            [[&key_even[..], &key_odd[..]], [&key_even[..], &key_odd[..]]],
+            [&value[..], &value[..]],
+            &mut output_new,
+            extents_new,
+            1.0,
+            bands_new,
+        ));
+        assert_eq!(output_old, output_new);
     }
 }

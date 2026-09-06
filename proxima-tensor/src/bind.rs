@@ -2406,12 +2406,13 @@ fn cached_attention_candidates(
 /// two key/value ranges (its only shape today, per this module's own
 /// `no new BoundOpKind` constraint): the single merged range is placed in
 /// the "new" slot, which already carries the causal band restricting it to
-/// non-future positions, and duplicated into the "cached" slot with a band
-/// pinned to the unreachable `[i64::MAX, i64::MAX]` singleton so that slot's
-/// pass over the same rows contributes nothing — [`crate::physical::
-/// stream_cached_attention_split_gqa`]'s existing per-range loop already
-/// skips every row a dead band rejects, so this needs no new runtime
-/// branch, only the right scalar arguments.
+/// non-future positions, and the "cached" slot is declared with
+/// `cached_key_rows: 0` rather than duplicating the merged range into it —
+/// an empty range, not a live range neutered by an unreachable band. Both
+/// [`crate::physical::stream_cached_attention_split_gqa`] and the Metal
+/// kernel ([`crate::msl`]'s cached-attention render) treat a zero-length
+/// cached range as a first-class case: nothing iterates it, rather than
+/// iterating it and skipping every row via a dead-band `continue`.
 #[cfg(feature = "cached-attention-streaming")]
 fn cached_attention_single_range_candidates(
     program: &[Op],
@@ -2622,13 +2623,17 @@ fn cached_attention_single_range_candidates(
             kind: BoundOpKind::CachedAttention {
                 operands,
                 query_rows: query_shape[0],
-                cached_key_rows: key_shape[0],
+                // no separate cached range exists for a merged buffer -- see
+                // this function's own doc; `cached_key_rows: 0` makes the
+                // kernel's cached half a first-class empty range instead of
+                // a live range neutered by an unreachable band sentinel.
+                cached_key_rows: 0,
                 new_key_rows: key_shape[0],
                 kv_heads: query_shape[1],
                 query_groups: query_shape[2],
                 head_dim,
                 scale: scale_value,
-                cached_lower_inclusive: i64::MAX,
+                cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
             },
         };
@@ -3470,6 +3475,72 @@ mod tests {
                 .count(),
             32,
             "one fused cached-attention step per layer on the real openchat shape"
+        );
+    }
+
+    /// Regression for ROW 366 (`fix/merged-kv-attention-bounds`): the
+    /// single-range fusion used to duplicate the same bucketed-capacity
+    /// key/value shape into BOTH `cached_key_rows` and `new_key_rows`,
+    /// neutering the cached half with an unreachable `[i64::MAX, i64::MAX]`
+    /// band -- a kernel that iterates a fabricated cached half every call.
+    /// The merged-KV form has no separate cached range at all, so the fused
+    /// op declares `cached_key_rows: 0`: an empty range the kernel skips
+    /// entirely, not a live range it walks and discards.
+    #[test]
+    #[cfg(feature = "cached-attention-streaming")]
+    fn single_range_fusion_declares_an_empty_cached_range_not_a_duplicated_capacity() {
+        let (program, logits, cache_roots, _) =
+            crate::spec::mistral_single_range_cached_forward_program(
+                32,
+                16,
+                24,
+                4,
+                2,
+                4,
+                1,
+                crate::spec::DuplicateHeadPosition::None,
+            )
+            .expect("single-range fixture builds");
+        let mut outputs = alloc::vec![logits];
+        for (even, odd, value) in &cache_roots {
+            outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let shapes = crate::shape::infer(&program, &[1, 5]).expect("single-range fixture infers");
+        let resolved = bind_plain(&program, &shapes, &outputs).expect("plain bind succeeds");
+
+        let candidates =
+            cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
+        assert!(
+            !candidates.is_empty(),
+            "the fixture must still produce a fusable single-range candidate"
+        );
+        let BoundOpKind::CachedAttention {
+            cached_key_rows,
+            new_key_rows,
+            cached_lower_inclusive,
+            operands,
+            ..
+        } = &candidates[0].0.kind
+        else {
+            panic!("single-range candidate must carry CachedAttention operands");
+        };
+        assert_eq!(
+            *cached_key_rows, 0,
+            "a merged-KV buffer has no separate cached range"
+        );
+        assert!(
+            *new_key_rows > 0,
+            "the merged range itself must still carry the bucketed capacity"
+        );
+        assert_eq!(
+            *cached_lower_inclusive,
+            i64::MIN,
+            "no dead-band sentinel is needed once the cached range is empty"
+        );
+        assert_eq!(
+            operands.len(),
+            9,
+            "the live cached_len still travels as the ninth runtime operand"
         );
     }
 
