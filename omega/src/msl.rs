@@ -3252,6 +3252,7 @@ fn render_reduce(
         output_axes,
         epilogue_body,
         epilogue_operands,
+        epilogue_broadcast_axes,
         ..
     } = &resolved.kind
     else {
@@ -3261,6 +3262,22 @@ fn render_reduce(
             found: resolved.kind.name(),
         });
     };
+    // `push_reduce_epilogue_write`'s own doc: `epilogue_operand_strides` is
+    // declared over `output_rank` (`output_axes`'s own smaller space), never
+    // `resolved.extents`'s full pre-reduction rank. A non-empty
+    // `epilogue_broadcast_axes` (`bind::BoundOpKind::Reduce::epilogue_
+    // broadcast_axes`'s own doc: the RMSNorm-shaped `x * inv_rms`
+    // "broadcast-reduce" epilogue) needs the WIDER space instead, which no
+    // renderer here emits yet -- reject at bind time rather than render a
+    // kernel that reads/writes the wrong number of elements, the same
+    // "no renderer, reject" contract `EpilogueNotSupported` above already
+    // gives the tiled GEMM path.
+    if !epilogue_broadcast_axes.is_empty() {
+        return Err(EmitError::EpilogueNotSupported {
+            node: resolved.node,
+            reason: "the broadcast-reduce epilogue (epilogue_broadcast_axes) has no Metal renderer yet",
+        });
+    }
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
@@ -8195,6 +8212,35 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// `bind::BoundOpKind::Reduce::epilogue_broadcast_axes`'s own doc: a
+    /// non-empty value is the RMSNorm-shaped "broadcast-reduce" epilogue
+    /// (`x * inv_rms`, re-broadcasting the fold's scalar back over the
+    /// reduced axis) — no Metal kernel here widens `push_reduce_epilogue_
+    /// write`'s own `output_rank`-only uniform declaration to match, so this
+    /// must reject with a typed error rather than emit a kernel that reads
+    /// or writes the wrong element count. The Metal HALF of this fusion is
+    /// the next slice; this proves main stays correct if the bind-time half
+    /// lands first.
+    #[test]
+    fn render_reduce_rejects_a_broadcast_reduce_epilogue() {
+        let mut bound = matmul_op(4, 8, 4);
+        let BoundOpKind::Reduce {
+            epilogue_broadcast_axes,
+            ..
+        } = &mut bound.kind
+        else {
+            panic!("matmul_op always builds a Keep::Reduce fold")
+        };
+        epilogue_broadcast_axes.push(1);
+
+        let error = render_reduce(&bound, "entry", &[None])
+            .expect_err("a broadcast-reduce epilogue has no Metal renderer yet");
+        assert!(
+            matches!(error, EmitError::EpilogueNotSupported { .. }),
+            "{error}"
+        );
     }
 
     #[test]
