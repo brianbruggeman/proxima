@@ -1313,6 +1313,98 @@ mod real_file {
             );
         }
     }
+
+    /// MEASURES whether `blk.N.attn_q.weight`, `attn_k.weight`,
+    /// `attn_v.weight` sit byte-adjacent, in that order, and share one
+    /// codec, in the real openchat checkpoint, for layers 0..2 -- the
+    /// load-bearing check for a fused Q/K/V reduce over one concatenated
+    /// `[q_rows + k_rows + v_rows, embedding]` buffer
+    /// (`bind_matmul_weight_triple` in `proxima-model-interop`; same
+    /// relation-form check [`ffn_gate_and_up_adjacency_per_layer`] runs for
+    /// the pair case). MEASURED result on this checkpoint (see the
+    /// in-loop comment): NEITHER holds -- `attn_k` precedes `attn_q` in
+    /// file order (not adjacent to it), and `attn_v` carries a different,
+    /// higher-precision codec than `attn_q`/`attn_k`. This test asserts
+    /// only tensor-range validity, not the (false, for this checkpoint)
+    /// adjacency/codec claim -- see `debug!`'s own fields for the numbers.
+    #[test]
+    fn attn_q_k_v_adjacency_per_layer() {
+        let path = std::path::Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            eprintln!("skipping: no host-local gguf fixture at {FIXTURE_PATH}");
+            return;
+        }
+
+        let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
+        let file_len = file.metadata().expect("stat gguf fixture").len();
+        let mut header_buf = alloc::vec::Vec::new();
+        let parsed = 'grow: {
+            for cap in [4usize << 20, 16 << 20, 64 << 20] {
+                header_buf.resize(cap, 0);
+                file.seek(SeekFrom::Start(0)).expect("seek to file start");
+                let read = file.read(&mut header_buf).expect("read gguf header region");
+                header_buf.truncate(read);
+                if let Ok(parsed) = parse_complete(&header_buf) {
+                    break 'grow parsed;
+                }
+            }
+            panic!("gguf metadata region did not fit in 64 MiB");
+        };
+
+        for layer in 0..3u32 {
+            let q = find_tensor(&parsed, &alloc::format!("blk.{layer}.attn_q.weight"));
+            let k = find_tensor(&parsed, &alloc::format!("blk.{layer}.attn_k.weight"));
+            let v = find_tensor(&parsed, &alloc::format!("blk.{layer}.attn_v.weight"));
+            let q_range = parsed
+                .tensor_data_range(q, file_len)
+                .expect("attn_q range within file bounds");
+            let k_range = parsed
+                .tensor_data_range(k, file_len)
+                .expect("attn_k range within file bounds");
+            let v_range = parsed
+                .tensor_data_range(v, file_len)
+                .expect("attn_v range within file bounds");
+            let q_k_gap = i64::try_from(k_range.start).expect("offset fits in i64")
+                - i64::try_from(q_range.end).expect("offset fits in i64");
+            let k_v_gap = i64::try_from(v_range.start).expect("offset fits in i64")
+                - i64::try_from(k_range.end).expect("offset fits in i64");
+            debug!(
+                layer,
+                q_type = ?q.ggml_type,
+                k_type = ?k.ggml_type,
+                v_type = ?v.ggml_type,
+                q_start = q_range.start,
+                q_end = q_range.end,
+                k_start = k_range.start,
+                k_end = k_range.end,
+                v_start = v_range.start,
+                v_end = v_range.end,
+                q_k_gap_bytes = q_k_gap,
+                k_v_gap_bytes = k_v_gap,
+                "attn q/k/v adjacency for real openchat checkpoint"
+            );
+            // Neither codec agreement NOR byte-adjacency is asserted here
+            // (unlike `ffn_gate_and_up_adjacency_per_layer`'s gate/up, which
+            // hold both on this checkpoint) -- MEASURED on the real
+            // openchat checkpoint: `attn_k` sits BEFORE `attn_q` in file
+            // order with a multi-megabyte gap (declaration order is k, q, v
+            // here, not q, k, v), and `attn_v` is a DIFFERENT, higher-
+            // precision codec than `attn_q`/`attn_k` (llama.cpp's own
+            // common practice for the value projection). Both facts
+            // independently rule out `bind_matmul_weight_triple`'s
+            // zero-copy path for this checkpoint (order AND adjacency both
+            // fail), and the differing codec ALSO rules out its owned-copy
+            // fallback (`PackedOwnedKind` speaks one codec). This test
+            // exists to MEASURE and record those two facts, not assert an
+            // adjacency this checkpoint does not have -- forcing a
+            // false-positive assertion here would be exactly the shortcut
+            // principle 6 rules out.
+            assert!(
+                q_range.start < q_range.end && k_range.start < k_range.end && v_range.start < v_range.end,
+                "layer {layer}: every tensor's declared byte range must be non-empty"
+            );
+        }
+    }
 }
 
 // -- Metadata + tensor-directory survey across three host-local GGUF files
