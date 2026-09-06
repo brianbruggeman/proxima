@@ -3601,7 +3601,11 @@ mod real_openchat_file {
         prompts.truncate(prompt_count);
         let max_tokens = decode_loop_max_tokens();
 
-        let serving_config = crate::generate::supported_serving_config(0);
+        let serving_config = crate::generate::supported_serving_config(
+            0,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            omega::MathMode::default(),
+        );
         for prompt in &prompts {
             let mut runtime = crate::generate::BackendRuntime::new(&serving_config);
             let (ids, text, stopped_by_eos) = model

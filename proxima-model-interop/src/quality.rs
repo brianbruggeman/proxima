@@ -234,7 +234,13 @@ fn max_abs_logit_delta(reference_logits: &[f32], variant_logits: &[f32]) -> f32 
 /// [`crate::serving::GPU_LAYERS_ALL`] for Metal on a `metal`-featured
 /// build) -- [`quality_report`]'s own doc names why this is a per-side knob
 /// rather than baked into `reference`/`variant` themselves ([`ServingConfig`]
-/// is call-time state, not part of a loaded checkpoint).
+/// is call-time state, not part of a loaded checkpoint). `math_mode` is the
+/// SAME [`omega::MathMode`] both sides' [`supported_serving_config`] runs
+/// under -- ROW 356's fix: before this parameter existed,
+/// `supported_serving_config`'s `..ServingConfig::default()` silently pinned
+/// every quality measurement to `Relaxed` no matter what
+/// `PROXIMA_MATH_MODE` said, because the quality path never read the env
+/// var the decode-loop tests do.
 fn score_prompt(
     reference: &LoadedModel,
     reference_gpu_layers: i32,
@@ -242,9 +248,18 @@ fn score_prompt(
     variant_gpu_layers: i32,
     prompt: &Prompt,
     max_tokens: usize,
+    #[cfg(all(feature = "metal", target_os = "macos"))] math_mode: omega::MathMode,
 ) -> Result<PromptQuality, InteropError> {
-    let reference_config = supported_serving_config(reference_gpu_layers);
-    let variant_config = supported_serving_config(variant_gpu_layers);
+    let reference_config = supported_serving_config(
+        reference_gpu_layers,
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        math_mode,
+    );
+    let variant_config = supported_serving_config(
+        variant_gpu_layers,
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        math_mode,
+    );
 
     let mut reference_logits: Vec<Vec<f32>> = Vec::with_capacity(max_tokens);
     let mut reference_runtime = BackendRuntime::new(&reference_config);
@@ -343,7 +358,11 @@ fn score_prompt(
 /// `metal`-featured build) -- passing the reference's own value on both
 /// sides against the SAME [`LoadedModel`] is the degenerate control this
 /// module's own tests use (`exact_match_rate: 1.0`, every KL term `0.0`
-/// exactly, since both sides then compute the identical forward).
+/// exactly, since both sides then compute the identical forward). `math_mode`
+/// is [`score_prompt`]'s own parameter of the same name, one level up: the
+/// caller picks the [`omega::MathMode`] this whole report measures under
+/// (ROW 356) instead of the harness silently defaulting to
+/// `ServingConfig::default`'s `Relaxed` regardless of what was asked for.
 ///
 /// # Errors
 ///
@@ -357,6 +376,7 @@ pub fn quality_report(
     variant_gpu_layers: i32,
     prompts: &[Prompt],
     max_tokens: usize,
+    #[cfg(all(feature = "metal", target_os = "macos"))] math_mode: omega::MathMode,
 ) -> Result<QualityReport, InteropError> {
     let mut per_prompt = Vec::with_capacity(prompts.len());
     for prompt in prompts {
@@ -367,6 +387,8 @@ pub fn quality_report(
             variant_gpu_layers,
             prompt,
             max_tokens,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            math_mode,
         )?);
     }
 
@@ -781,8 +803,17 @@ mod real_openchat_file {
         let prompts = load_quality_prompts();
         let max_tokens = quality_max_tokens();
 
-        let report = quality_report(&model, GPU_LAYERS_ALL, &model, GPU_LAYERS_ALL, &prompts, max_tokens)
-            .expect("quality_report against the same model and backend on both sides");
+        let report = quality_report(
+            &model,
+            GPU_LAYERS_ALL,
+            &model,
+            GPU_LAYERS_ALL,
+            &prompts,
+            max_tokens,
+            #[cfg(target_os = "macos")]
+            crate::test_support::math_mode_from_env(),
+        )
+        .expect("quality_report against the same model and backend on both sides");
 
         #[cfg(feature = "instrument")]
         print_quality_report(&report);
@@ -836,8 +867,17 @@ mod real_openchat_file {
         let prompts = load_quality_prompts();
         let max_tokens = quality_max_tokens();
 
-        let report = quality_report(&model, 0, &model, GPU_LAYERS_ALL, &prompts, max_tokens)
-            .expect("quality_report against a CPU reference and a Metal variant");
+        let report = quality_report(
+            &model,
+            0,
+            &model,
+            GPU_LAYERS_ALL,
+            &prompts,
+            max_tokens,
+            #[cfg(target_os = "macos")]
+            crate::test_support::math_mode_from_env(),
+        )
+        .expect("quality_report against a CPU reference and a Metal variant");
 
         #[cfg(feature = "instrument")]
         print_quality_report(&report);
@@ -903,8 +943,17 @@ mod real_openchat_file {
         let prompts = load_quality_prompts();
         let max_tokens = quality_max_tokens();
 
-        let report = quality_report(&reference, GPU_LAYERS_ALL, &variant, GPU_LAYERS_ALL, &prompts, max_tokens)
-            .expect("quality_report against a Q4_K_S reference and a Q3_K_M variant");
+        let report = quality_report(
+            &reference,
+            GPU_LAYERS_ALL,
+            &variant,
+            GPU_LAYERS_ALL,
+            &prompts,
+            max_tokens,
+            #[cfg(target_os = "macos")]
+            crate::test_support::math_mode_from_env(),
+        )
+        .expect("quality_report against a Q4_K_S reference and a Q3_K_M variant");
 
         #[cfg(feature = "instrument")]
         print_quality_report(&report);

@@ -1389,12 +1389,23 @@ fn build_position_inputs(
 /// `gpu_layers` is the caller's own backend pick threaded straight through
 /// to [`ServingConfig::gpu_layers`]/[`select_backend`] -- `0` for CPU,
 /// [`GPU_LAYERS_ALL`] for Metal (only valid on a `metal`-featured build,
-/// `apply_serving_config`'s own gate). `pub(crate)` rather than private:
-/// `crate::quality`'s reference/variant harness needs the identical
-/// fully-supported knob set [`Self::generate`] runs, with only the backend
-/// choice left open, so it reuses this function instead of hand-copying its
-/// field list.
-pub(crate) fn supported_serving_config(gpu_layers: i32) -> ServingConfig<'static> {
+/// `apply_serving_config`'s own gate). `math_mode` is the same kind of
+/// pass-through for [`ServingConfig::math_mode`] -- present only on a
+/// `metal`-featured macOS build, the same gate that field carries, since
+/// [`omega::MathMode`] itself does not exist otherwise. `crate::quality`'s
+/// harness is the reason this is a parameter rather than always
+/// `ServingConfig::default`'s `Relaxed`: without it, `quality_report` could
+/// never measure any math mode other than the compiled-in default (ROW 356).
+/// Every other caller here passes [`omega::MathMode::default`] to keep its
+/// own behavior exactly as it was before this parameter existed.
+/// `pub(crate)` rather than private: `crate::quality`'s reference/variant
+/// harness needs the identical fully-supported knob set [`Self::generate`]
+/// runs, with only the backend choice left open, so it reuses this function
+/// instead of hand-copying its field list.
+pub(crate) fn supported_serving_config(
+    gpu_layers: i32,
+    #[cfg(all(feature = "metal", target_os = "macos"))] math_mode: omega::MathMode,
+) -> ServingConfig<'static> {
     ServingConfig {
         kv_cache_key_quant: GgmlType::F32,
         kv_cache_value_quant: GgmlType::F32,
@@ -1403,7 +1414,33 @@ pub(crate) fn supported_serving_config(gpu_layers: i32) -> ServingConfig<'static
         ubatch_size: 0,
         gpu_layers,
         reasoning_budget: 0,
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        math_mode,
         ..ServingConfig::default()
+    }
+}
+
+/// ROW 356's own regression: proves [`supported_serving_config`] actually
+/// carries its `math_mode` argument into [`ServingConfig::math_mode`]
+/// rather than the `..ServingConfig::default()` tail silently overwriting
+/// it -- the exact defect the quality harness had (`generate.rs:1397` built
+/// its config with `..ServingConfig::default()` and no `math_mode` field at
+/// all, so every quality measurement ran `Relaxed` no matter what
+/// `PROXIMA_MATH_MODE` said). Structural, no checkpoint needed: the real
+/// end-to-end check is `quality::real_openchat_file::metal_vs_cpu_reports_real_drift`,
+/// `#[ignore]`d because it needs a host-local model.
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod supported_serving_config_tests {
+    use super::supported_serving_config;
+
+    #[test]
+    fn threads_the_requested_math_mode_into_the_serving_config() {
+        let safe_config = supported_serving_config(0, omega::MathMode::Safe);
+        let fast_config = supported_serving_config(0, omega::MathMode::Fast);
+
+        assert_eq!(safe_config.math_mode, omega::MathMode::Safe);
+        assert_eq!(fast_config.math_mode, omega::MathMode::Fast);
     }
 }
 
@@ -2010,7 +2047,11 @@ impl<'file> LoadedModel<'file> {
         prompt: &str,
         max_tokens: usize,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        self.generate_with_serving_config(prompt, max_tokens, supported_serving_config(0))
+        self.generate_with_serving_config(
+            prompt,
+            max_tokens,
+            supported_serving_config(0, #[cfg(all(feature = "metal", target_os = "macos"))] omega::MathMode::default()),
+        )
     }
 
     /// The greedy decode loop itself: `max_tokens` steps, each one call
@@ -3158,7 +3199,11 @@ impl<'file> LoadedModel<'file> {
         node_ids: &[NodeId],
         gpu_layers: i32,
     ) -> Result<Vec<Vec<f32>>, InteropError> {
-        let serving_config = supported_serving_config(gpu_layers);
+        let serving_config = supported_serving_config(
+            gpu_layers,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            omega::MathMode::default(),
+        );
         let mut runtime = BackendRuntime::new(&serving_config);
 
         let ids = proxima_tokenizer::encode_with_bos_eos(
