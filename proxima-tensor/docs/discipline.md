@@ -24437,3 +24437,70 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `test(omega): ladder arms warm up once and report the median of seven` + this row | Every arm in `matvec_roofline_ladder.rs` (L0-L3 rungs, L3 shape sweep, empty floor, decode-shape arms, ROW 327's 2x2) now runs one untimed warm-up dispatch before `REPEATS=7` (was 5) timed repeats and reports median/min/max/CoV alongside the mean; `decode_shape_roofline_ladder`'s CoV fell from ROW 333's 33-50% to 2.79-23.53% (6/10 arms under 10%), the L0-L3/shape-sweep ladder's CoV fell from ROW 289's 35-120% to 0.06-1.22% across every rung | 1 full 10-arm `decode_shape_roofline_ladder` run (1508s, release, all parity-clean) + 1 full `matvec_roofline_ladder_l0_through_l3_and_shape_sweep` run (4.73s, release, parity-clean) | quiet gate (`pgrep -l` process-name list) EMPTY and load-1 < 10 confirmed before each measured run |
+
+## ROW 336 -- isolated kernel bandwidth per decode shape, uploads excluded: ROW 335's own shape numbers were void (a memcpy-scale re-upload every timed repeat), fixed by marking every weight buffer resident AND keeping its host bytes alive for the whole run
+
+**Card:** `test(omega): ladder arms upload once and time only the dispatches` (off `main` at `d344ead`). **Worktree/branch:** `proxima-wt-r336`, `test/ladder-uploads-once`.
+
+**Defect this row fixes.** ROW 334's own fix (`427d219`) left every `run_shape_arm` weight node OUT of `plan.mark_resident` on purpose, to avoid the exact stale-buffer bug that row root-caused (`NOCOPY_BUFFERS` is keyed on `(pointer, byte_length)` alone; a freed arm's `Vec<u8>` landing at a later arm's identical address served the later arm the earlier arm's stale bytes). The cost of that fix was never measured until ROW 335: with weight nodes unmarked, every one of `execute_plan`'s [`REPEATS`] timed calls re-runs `upload_block_no_copy_uncached` for every weight tensor -- a fresh `newBufferWithBytesNoCopy` device-buffer wrapper INSIDE the timed `commit()`-`waitUntilCompleted()` span, on every repeat, not just the first. ROW 335's own numbers (20-25 GB/s for every `Q4_K`/`Q5_K` shape arm) were reading that per-repeat re-wrap cost, not the kernel: the SAME kernel, dispatched through the SAME `execute_plan` path with resident weight buffers (this row), reads 94-232 GB/s -- 4-8x higher, and the L3 one-shape rung (`matvec_roofline_ladder_l0_through_l3_and_shape_sweep`, unchanged this row, ROW 335's own numbers restated below) reads 181-247 GB/s over the identical `q4k_pair_dot` kernel. **ROW 335's shape-arm table is VOID; its own L0-L3 one-shape table is unaffected (that path was never routed through `run_shape_arm`'s resident logic).**
+
+**Fix.** `run_shape_arm` (`omega/tests/matvec_roofline_ladder.rs`) now marks every weight node resident too -- each already carries a name unique per arm AND tensor (`{label}_{index}`, `multi_tensor_matmul_program`'s own doc), so ROW 332's collision (a shared literal name across arms) cannot recur -- and the function's own `weight_bytes` `Vec<u8>` is moved into a `weight_keepalive: &mut Vec<Vec<u8>>` accumulator the caller holds for its ENTIRE test run, rather than dropped at the end of the call. That second half is what actually restores ROW 334's soundness argument: `NOCOPY_BUFFERS`'s hazard was never residency itself, it was a FREED host address being handed to a LATER, different allocation; a `Vec` this function never frees can never donate its address to a later arm, so the exact collision ROW 334 reproduced is now impossible by construction (every arm's own bytes stay live and distinct for the whole process), not merely avoided by leaving weights unmarked. All four call sites (`decode_shape_roofline_ladder`, `q6k_head_and_layer_shape_roofline_ladder`, `row334_attn_q_then_attn_output_real_scale`, `row334_four_failing_arms_real_scale`) now own and pass a `weight_keepalive` accumulator. No new type (guiding-principles §1): `Vec<Vec<u8>>`, not a bespoke keepalive struct.
+
+**Assertion, not just a faster wall time.** Under `--features instrument`, `run_shape_arm` now reads `omega::metal::metal_stage_totals()` once per `warmed_up_samples` call (index 0 is the untimed warm-up, indices 1.. are the timed repeats it exists to prove clean) and asserts, for every TIMED repeat: `nocopy_uploads == nocopy_reuses` (every no-copy weight touch this repeat was a cache HIT, zero fresh device-buffer creations) and `resident_uploads == 0` (the misaligned/copy-path counterpart never re-copies). The two counters are NOT symmetric and this row found that out the direct way: `upload_block_as_float`/`upload_packed_bytes` fire `nocopy_uploads` unconditionally, before the hit/miss branch, so a naive `nocopy_uploads == 0` assertion false-failed on `attn_q`'s very first timed repeat (`left: 212, right: 0`) even though every one of those 212 touches was in fact a cache hit; `resident_uploads` (`upload_resident_copy`'s own counter site) fires ONLY inside the miss branch, so `== 0` is correct there. Both forms are documented in-line at the assertion site so the fix does not need rediscovering.
+
+**Build.** `cargo check -p omega --tests --features metal`: EXIT 0. `cargo check -p omega --tests --features metal,instrument`: EXIT 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder --no-run`: EXIT 0.
+
+**Quiet gate.** `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'` EMPTY and load-1 < 10 confirmed immediately before the measured run below (waited ~90s once for load-1 to drop from 11.09 to 4.49 before launch; `uptime` before 2.45, after 3.08).
+
+**Data -- `decode_shape_roofline_ladder`, 1502.32s, `test result: ok. 1 passed`, all 10 arms parity-clean, zero uploads on every timed repeat of every arm** (`/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6e203711-bd50-48cc-9ade-409668bdafdd/scratchpad/r336-logs/row336-run2.log`):
+
+| family | rows | k | codec | median GB/s | min-max GB/s | CoV % | ratio to 381.24 | uploads on timed repeats | ROW 310 in-program GB/s |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| attn_q | 4096 | 4096 | Q4_K | 122.46 | 119.71-123.59 | 1.09 | 0.321 | 0 | noise-negative |
+| attn_k | 1024 | 4096 | Q4_K | 94.89 | 93.07-98.54 | 2.38 | 0.249 | 0 | noise-negative |
+| attn_v | 1024 | 4096 | Q4_K | 97.94 | 92.96-98.74 | 1.85 | 0.257 | 0 | noise-negative |
+| attn_v_q5k | 1024 | 4096 | Q5_K | 96.15 | 95.23-96.98 | 0.64 | 0.252 | 0 | (attn_v family, noise-negative) |
+| attn_output | 4096 | 4096 | Q4_K | 130.97 | 128.81-132.73 | 0.93 | 0.344 | 0 | 144.94 |
+| ffn_gate | 14336 | 4096 | Q4_K | 183.80 | 182.20-188.91 | 1.16 | 0.482 | 0 | 236.55 |
+| ffn_up | 14336 | 4096 | Q4_K | 186.90 | 184.26-187.57 | 0.65 | 0.490 | 0 | 183.48 |
+| ffn_down | 4096 | 14336 | Q4_K | 196.94 | 194.63-197.61 | 0.55 | 0.517 | 0 | 200.46 |
+| ffn_down_q5k | 4096 | 14336 | Q5_K | 180.08 | 177.59-183.63 | 1.04 | 0.472 | 0 | (ffn_down family, no separate ROW 310 entry) |
+| head | 32000 | 4096 | Q6_K | 231.96 | 229.99-235.90 | 0.94 | 0.608 | 0 | 41.63 |
+
+"Uploads on timed repeats" is the direct witness, not an inference: every one of the 7 timed repeats per arm passed both `assert_eq!` gates above before this table's own `println!` ran; a single nonzero upload on any repeat would have panicked the test before printing this row's own numbers, exactly as it did on the first (pre-fix-2) attempt at this row (`attn_q timed repeat 1: left: 212, right: 0`, the asymmetric-counter bug this row's own assertion doc now names).
+
+Every `Q4_K`/`Q5_K` family now reads 94.89-196.94 GB/s, a 4-8x jump over ROW 335's own void 20.29-25.68 GB/s for the SAME shapes; `head` (`Q6_K`) reads 231.96 GB/s, matching ROW 322's own isolated head measurement (231 GB/s) this row's brief pointed at. Every family's isolated number now sits closer to (`ffn_up` 1.019x, `ffn_down` 0.982x) or a smaller, explainable fraction of (`attn_output` 0.904x, `ffn_gate` 0.777x, `head` 5.572x -- `head`'s in-program number is itself confounded by concurrent-dispatch overlap and terminal-dispatch-position effects ROW 310/314/327 already named, not re-litigated here) its own ROW 310 in-program figure, instead of ROW 335's uniform ~0.06-0.19x gap that a per-repeat re-upload alone was sufficient to explain.
+
+**L3 one-shape reference (ROW 335, unaffected by this fix -- restated for comparison, not re-measured):**
+
+| arm | median GB/s | min-max GB/s | CoV % |
+| --- | --- | --- | --- |
+| L0_streaming | 329.50 | 324.26-335.70 | 1.22 |
+| L1_header_decode | 332.09 | 329.27-333.22 | 0.40 |
+| L2_dequant | 282.12 | 281.74-282.33 | 0.07 |
+| L3_baseline (production `execute_plan`) | 186.37 | 184.50-187.46 | 0.57 |
+| L3_shape_default (safe, sg=1, dispatchThreads) | 181.11 | 180.42-181.27 | 0.18 |
+| L3_shape fastest cell (fast, sg=4, dispatchThreads) | 246.96 | 246.76-247.22 | 0.06 |
+
+Every `Q4_K`/`Q5_K` family in this row's table now sits inside or just under the L3 rung's own 181-247 GB/s band (94.89-196.94 GB/s -- the smaller `attn_k`/`attn_v`/`attn_v_q5k` shapes, ~9 MB/tensor, sit lowest, consistent with a per-dispatch fixed-cost floor mattering more at a smaller tensor size, not re-investigated this row), rather than ROW 335's uniform ~10x-under reading.
+
+**Residual, named not hidden.** `q6k_head_and_layer_shape_roofline_ladder`, `row334_attn_q_then_attn_output_real_scale`, and `row334_four_failing_arms_real_scale` were not re-run this row (all three call the same `run_shape_arm` this row fixed, so the same fix and the same per-repeat assertion apply to them by construction, but this row's own budget covered the one gate the brief named). `head`'s 5.572x isolated-over-in-program ratio is reported, not explained beyond the existing ROW 310/314/327 pointers -- a genuinely new finding this row did not have budget to chase.
+
+**Gates.** `cargo check -p omega --tests --features metal`: EXIT 0. `cargo check -p omega --tests --features metal,instrument`: EXIT 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0.
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-row336-repro -b docs/row-336-repro main
+cd ../proxima-wt-row336-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder \
+  -- --ignored --nocapture decode_shape_roofline_ladder
+```
+(expected: `test result: ok`, no `assert_eq!` panic from any arm's per-repeat upload check, and every arm's own `stage_totals`/`per_call_uploads` line shows `(N, 0)` for every entry after the first.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | `test(omega): ladder arms upload once and time only the dispatches` + this row | Every `run_shape_arm` weight node is now `plan.mark_resident`-marked and its backing `Vec<u8>` is kept alive for the whole test run via a caller-owned `weight_keepalive` accumulator, fixing ROW 335's void per-repeat re-upload without reintroducing ROW 334's stale-buffer collision; a per-repeat `assert_eq!` on `nocopy_uploads`/`resident_uploads` now proves zero uploads on every timed repeat, not just a faster wall time | Every `Q4_K`/`Q5_K` shape arm's median GB/s rose 4-8x (ROW 335's 20.29-25.68 -> this row's 94.89-196.94); `head` (`Q6_K`) rose from 8.07 to 231.96, matching ROW 322 | 1 full 10-arm `decode_shape_roofline_ladder` run (1502.32s, release, all parity-clean, zero uploads on every timed repeat) | quiet gate (`pgrep -l` process-name list) EMPTY and load-1 < 10 confirmed before the measured run (waited ~90s for load-1 11.09 -> 4.49) |
