@@ -2446,6 +2446,11 @@ fn run_shape_arm_sweep(
 /// L3 sweep and ROW 336's per-shape isolation with the axes ROW 335 already
 /// has, generalized across every representative shape instead of one.
 ///
+/// `PROXIMA_SWEEP_SHAPE` (read here, at the test edge only) restricts the run
+/// to one [`SHAPE_ARM_SWEEP_SPECS`] family by name -- ROW 337 found the full
+/// 4-shape x 6-cell run does not finish inside a 25-minute quiet-box window,
+/// so a per-shape landing needs to name the shape it is actually timing.
+///
 /// `#[ignore]`d: synthesizes real quantized bytes per shape through the real
 /// encoder (CPU-bound minutes of work) and needs a real Metal device, same
 /// posture as this file's other synthetic-data arms.
@@ -2455,10 +2460,19 @@ fn decode_shape_nsg_math_sweep() {
     let device = MTLCreateSystemDefaultDevice().expect("a Metal device is available on this host");
     let queue = device.newCommandQueue().expect("device creates a command queue");
 
-    let failures: Vec<String> = SHAPE_ARM_SWEEP_SPECS
+    let requested_shape = std::env::var("PROXIMA_SWEEP_SHAPE").ok();
+    let specs: Vec<&ShapeArmSweepSpec> = SHAPE_ARM_SWEEP_SPECS
         .iter()
-        .flat_map(|spec| run_shape_arm_sweep(&device, &queue, spec))
+        .filter(|spec| requested_shape.as_deref().is_none_or(|shape| shape == spec.family))
         .collect();
+    assert!(
+        !specs.is_empty(),
+        "PROXIMA_SWEEP_SHAPE={:?} matched no family in SHAPE_ARM_SWEEP_SPECS",
+        requested_shape
+    );
+
+    let failures: Vec<String> =
+        specs.iter().flat_map(|spec| run_shape_arm_sweep(&device, &queue, spec)).collect();
 
     assert!(
         failures.is_empty(),
