@@ -1252,6 +1252,67 @@ mod real_file {
             );
         }
     }
+
+    /// Whether `blk.N.ffn_gate.weight` and `blk.N.ffn_up.weight` sit
+    /// byte-adjacent in the real openchat checkpoint, for layers 0..2 --
+    /// the load-bearing check for a paired gate/up reduce over one
+    /// concatenated weight buffer (zero-copy only if adjacent).
+    #[test]
+    fn ffn_gate_and_up_adjacency_per_layer() {
+        let path = std::path::Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            eprintln!("skipping: no host-local gguf fixture at {FIXTURE_PATH}");
+            return;
+        }
+
+        let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
+        let file_len = file.metadata().expect("stat gguf fixture").len();
+        let mut header_buf = alloc::vec::Vec::new();
+        let parsed = 'grow: {
+            for cap in [4usize << 20, 16 << 20, 64 << 20] {
+                header_buf.resize(cap, 0);
+                file.seek(SeekFrom::Start(0)).expect("seek to file start");
+                let read = file.read(&mut header_buf).expect("read gguf header region");
+                header_buf.truncate(read);
+                if let Ok(parsed) = parse_complete(&header_buf) {
+                    break 'grow parsed;
+                }
+            }
+            panic!("gguf metadata region did not fit in 64 MiB");
+        };
+
+        for layer in 0..3u32 {
+            let gate = find_tensor(&parsed, &alloc::format!("blk.{layer}.ffn_gate.weight"));
+            let up = find_tensor(&parsed, &alloc::format!("blk.{layer}.ffn_up.weight"));
+            let gate_range = parsed
+                .tensor_data_range(gate, file_len)
+                .expect("ffn_gate range within file bounds");
+            let up_range = parsed
+                .tensor_data_range(up, file_len)
+                .expect("ffn_up range within file bounds");
+            let gap = i64::try_from(up_range.start).expect("offset fits in i64")
+                - i64::try_from(gate_range.end).expect("offset fits in i64");
+            debug!(
+                layer,
+                gate_type = ?gate.ggml_type,
+                up_type = ?up.ggml_type,
+                gate_start = gate_range.start,
+                gate_end = gate_range.end,
+                up_start = up_range.start,
+                up_end = up_range.end,
+                gap_bytes = gap,
+                "ffn gate/up adjacency for real openchat checkpoint"
+            );
+            assert_eq!(
+                gate.ggml_type, up.ggml_type,
+                "layer {layer}: gate and up must share one codec to bind as one operand"
+            );
+            assert_eq!(
+                gap, 0,
+                "layer {layer}: ffn_up must start exactly where ffn_gate ends for a zero-copy paired bind"
+            );
+        }
+    }
 }
 
 // -- Metadata + tensor-directory survey across three host-local GGUF files
