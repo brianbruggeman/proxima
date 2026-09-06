@@ -57,7 +57,7 @@
 //!   through the generic per-element unpack accessor instead.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_tensor::{
@@ -278,14 +278,16 @@ fn validate(resolved: &BoundOp) -> Result<(), EmitError> {
                 node: resolved.node,
             });
         }
-        // No cuda reduce renderer folds `BoundOpKind::Reduce::epilogue_body`
-        // into its output write yet -- `crate::msl::push_reduce_epilogue_write`
-        // is the Metal-only counterpart. Reject, named, rather than silently
-        // dropping the fused elementwise tail.
-        if !reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+        // `render_reduce` (this module's `Keep::Reduce` renderer) now folds
+        // `BoundOpKind::Reduce::epilogue_body` into its output write via
+        // `push_reduce_epilogue_write`, mirroring `crate::msl`/`crate::wgsl`.
+        // Scan's renderer (`render_scan`) has no such write hook yet -- same
+        // "no renderer, reject" contract, scoped to the one shape still
+        // missing it.
+        if *keep == Keep::Scan && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
-                kind: "reduce with a fused epilogue",
+                kind: "scan with a fused epilogue",
             });
         }
         if *keep == Keep::Scan && resolved.extents.is_empty() {
@@ -330,9 +332,12 @@ fn gather_slots(resolved: &BoundOp) -> Vec<Option<usize>> {
 }
 
 fn bindings(resolved: &BoundOp) -> Vec<Binding> {
+    // `all_read_sources`, not `operands` -- a `BoundOpKind::Reduce` with a
+    // fused epilogue reads its `epilogue_operands` too, and those need a
+    // buffer bound at the exact `epi{index}` parameter position
+    // `kernel_signature` declares (see that function's own doc).
     let mut bindings: Vec<Binding> = resolved
-        .operands()
-        .iter()
+        .all_read_sources()
         .map(|(node, _, _)| Binding::Input(*node))
         .collect();
     for (_, _, gather) in resolved.operands() {
@@ -528,6 +533,8 @@ fn entry_name(resolved: &BoundOp) -> String {
             init,
             keep,
             output_axes,
+            epilogue_body,
+            epilogue_operands,
             ..
         } => {
             let body = body_token(resolved.element_body());
@@ -535,8 +542,24 @@ fn entry_name(resolved: &BoundOp) -> String {
             let reduce_body = op_token(*reduce_op);
             let init = init_token(*init);
             let output_rank = output_axes.len();
+            // A fused epilogue changes both the `Uniforms` layout (the extra
+            // `epilogue_operand_base`/`_strides` fields) and the body text
+            // (`push_reduce_epilogue_write`'s emitted tail) -- mirrors
+            // `crate::msl::entry_name`/`crate::wgsl::entry_name`'s own
+            // `epilogue` suffix, so a future CUDA driver's own kernel cache
+            // never collides two structurally-different reduces under one
+            // name the way `crate::wgsl::entry_name`'s own doc warns about.
+            let epilogue = if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+                String::new()
+            } else {
+                format!(
+                    "_epi{}_{}",
+                    epilogue_operands.len(),
+                    body_token(epilogue_body)
+                )
+            };
             format!(
-                "omega_cuda_{kind}_r{rank}_o{output_rank}_n{operand_count}_{body}_{reduce_body}_{init}"
+                "omega_cuda_{kind}_r{rank}_o{output_rank}_n{operand_count}_{body}_{reduce_body}_{init}{epilogue}"
             )
         }
         BoundOpKind::Iota => format!("omega_cuda_iota_r{rank}"),
@@ -635,20 +658,94 @@ fn push_body_steps(
     indent: &str,
     element_type: &str,
 ) -> String {
-    for (index, step) in body.steps.iter().enumerate() {
-        let args: Vec<String> = step
-            .args
-            .iter()
-            .map(|arg| match arg {
-                StepArg::Operand(operand_index) => format!("scratch[{operand_index}]"),
-                StepArg::Step(step_index) => format!("step{step_index}"),
-            })
-            .collect();
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let expr = scalar_op_expr(step.op, &arg_refs);
-        source.push_str(&format!("{indent}{element_type} step{index} = {expr};\n"));
+    crate::epilogue::declare_steps(
+        source,
+        body,
+        "scratch",
+        "step",
+        scalar_op_expr,
+        |source, index, expr| {
+            source.push_str(&format!("{indent}{element_type} step{index} = {expr};\n"));
+        },
+    )
+}
+
+/// [`push_body_steps`]'s counterpart for [`BoundOpKind::Reduce::
+/// epilogue_body`] — the CUDA sibling of `crate::msl::
+/// push_epilogue_body_steps`/`crate::wgsl::push_epilogue_body_steps`, reading
+/// `epi_scratch[i]`/`epi_step{k}` instead of `push_body_steps`'s
+/// `scratch[i]`/`step{k}` so the epilogue's own operand table never collides
+/// with the fold's.
+fn push_epilogue_body_steps(
+    source: &mut String,
+    body: &ComposedBody,
+    indent: &str,
+    element_type: &str,
+) -> String {
+    crate::epilogue::declare_steps(
+        source,
+        body,
+        "epi_scratch",
+        "epi_step",
+        scalar_op_expr,
+        |source, index, expr| {
+            source.push_str(&format!(
+                "{indent}{element_type} epi_step{index} = {expr};\n"
+            ));
+        },
+    )
+}
+
+/// Shared write tail for every CUDA reduce renderer that folds an output
+/// element ([`push_serial_reduce_body`], [`push_cooperative_reduce_body`]) —
+/// the CUDA counterpart of `crate::msl::push_reduce_epilogue_write`/
+/// `crate::wgsl::push_reduce_epilogue_write`. `coord` gives the OUTPUT-
+/// axis-order coordinate expression for axis `dim`. When the epilogue is the
+/// untouched identity default ([`reduce_epilogue_is_identity`]), this emits
+/// exactly the one-line `out[...] = accumulator;` write every caller emitted
+/// before epilogue fusion existed.
+#[allow(clippy::too_many_arguments)]
+fn push_reduce_epilogue_write(
+    source: &mut String,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    output_rank: usize,
+    element_type: &str,
+    indent: &str,
+    coord: impl Fn(usize) -> String,
+    accumulator_expr: &str,
+    out_offset_expr: &str,
+) {
+    if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+        source.push_str(&format!(
+            "{indent}out[{out_offset_expr}] = {accumulator_expr};\n"
+        ));
+        return;
     }
-    format!("step{}", body.steps.len().saturating_sub(1))
+    let epilogue_operand_count = epilogue_operands.len();
+    source.push_str(&format!(
+        "{indent}{element_type} epi_scratch[{}];\n",
+        epilogue_operand_count + 1
+    ));
+    for index in 0..epilogue_operand_count {
+        source.push_str(&format!(
+            "{indent}long epi_off{index} = u.epilogue_operand_base[{index}];\n"
+        ));
+        for dim in 0..output_rank {
+            source.push_str(&format!(
+                "{indent}epi_off{index} += {} * u.epilogue_operand_strides[{index}][{dim}];\n",
+                coord(dim)
+            ));
+        }
+        source.push_str(&format!(
+            "{indent}epi_scratch[{index}] = epi{index}[epi_off{index}];\n"
+        ));
+    }
+    source.push_str(&format!(
+        "{indent}epi_scratch[{epilogue_operand_count}] = {accumulator_expr};\n"
+    ));
+    let epi_value = push_epilogue_body_steps(source, epilogue_body, indent, element_type);
+    source.push_str(&format!("{indent}out[{out_offset_expr}] = {epi_value};\n"));
 }
 
 /// `<math.h>` (via `<cuda_runtime.h>`) has no `erf` variant that matches the
@@ -692,6 +789,7 @@ fn preamble(source: &mut String, needs_half: bool) {
 fn kernel_signature(
     source: &mut String,
     quantized: &[Option<PackedCodec>],
+    epilogue_operand_count: usize,
     gather_count: usize,
     entry: &str,
     element_type: &str,
@@ -705,6 +803,17 @@ fn kernel_signature(
         };
         source.push_str(&format!(
             "    const {binding_type}* __restrict__ in{index},\n"
+        ));
+    }
+    // A [`proxima_tensor::BoundOpKind::Reduce::epilogue_operands`] entry is
+    // always a plain, un-gathered, un-packed `element_type` buffer -- the
+    // same restriction `crate::msl::kernel_signature`'s own `epi{index}`
+    // params carry -- so each gets one flat `__restrict__` pointer,
+    // positioned right after the fold's own operands and before anything
+    // gather adds.
+    for index in 0..epilogue_operand_count {
+        source.push_str(&format!(
+            "    const {element_type}* __restrict__ epi{index},\n"
         ));
     }
     for slot in 0..gather_count {
@@ -853,7 +962,7 @@ fn render_elementwise(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, quantized, gather_count, entry, element_type);
+    kernel_signature(&mut source, quantized, 0, gather_count, entry, element_type);
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
 
     if rank > 0 {
@@ -920,6 +1029,8 @@ fn push_serial_reduce_body(
     gather_slots: &[Option<usize>],
     quantized: &[Option<PackedCodec>],
     element_type: &str,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) -> Result<(), EmitError> {
     source.push_str("    if (gid >= u.output_total) { return; }\n");
 
@@ -1010,7 +1121,23 @@ fn push_serial_reduce_body(
             "    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
         ));
     }
-    source.push_str("    out[out_offset] = accumulator;\n");
+    push_reduce_epilogue_write(
+        source,
+        epilogue_body,
+        epilogue_operands,
+        output_rank,
+        element_type,
+        "    ",
+        |dim| {
+            if output_rank > 0 {
+                format!("output_coord[{dim}]")
+            } else {
+                "0".to_string()
+            }
+        },
+        "accumulator",
+        "out_offset",
+    );
     Ok(())
 }
 
@@ -1033,6 +1160,8 @@ fn push_cooperative_reduce_body(
     rank: usize,
     quantized: &[Option<PackedCodec>],
     element_type: &str,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) -> Result<(), EmitError> {
     let rank_len = rank.max(1);
     let output_rank = output_axes.len();
@@ -1148,7 +1277,23 @@ fn push_cooperative_reduce_body(
             "    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
         ));
     }
-    source.push_str("    out[out_offset] = accumulator;\n");
+    push_reduce_epilogue_write(
+        source,
+        epilogue_body,
+        epilogue_operands,
+        output_rank,
+        element_type,
+        "    ",
+        |dim| {
+            if output_rank > 0 {
+                format!("output_coord[{dim}]")
+            } else {
+                "0".to_string()
+            }
+        },
+        "accumulator",
+        "out_offset",
+    );
     Ok(())
 }
 
@@ -1161,6 +1306,8 @@ fn render_reduce(
         reduce_op,
         init,
         output_axes,
+        epilogue_body,
+        epilogue_operands,
         ..
     } = &resolved.kind
     else {
@@ -1181,6 +1328,7 @@ fn render_reduce(
     let gather_count = gather_count(resolved);
     let gather_slots = gather_slots(resolved);
     let element_type = type_token(resolved.node, resolved.dtype)?;
+    let epilogue_operand_count = epilogue_operands.len();
 
     let mut source = String::new();
     preamble(&mut source, element_type == "__half");
@@ -1196,10 +1344,25 @@ fn render_reduce(
     ));
     source.push_str("    long out_base;\n");
     source.push_str(&format!("    long out_strides[{rank_len}];\n"));
+    if epilogue_operand_count > 0 {
+        source.push_str(&format!(
+            "    long epilogue_operand_base[{epilogue_operand_count}];\n"
+        ));
+        source.push_str(&format!(
+            "    long epilogue_operand_strides[{epilogue_operand_count}][{output_rank_len}];\n"
+        ));
+    }
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, quantized, gather_count, entry, element_type);
+    kernel_signature(
+        &mut source,
+        quantized,
+        epilogue_operand_count,
+        gather_count,
+        entry,
+        element_type,
+    );
 
     if reduce_is_cooperative(resolved) {
         push_cooperative_reduce_body(
@@ -1212,6 +1375,8 @@ fn render_reduce(
             rank,
             quantized,
             element_type,
+            epilogue_body,
+            epilogue_operands,
         )?;
     } else {
         push_serial_reduce_body(
@@ -1231,6 +1396,8 @@ fn render_reduce(
             &gather_slots,
             quantized,
             element_type,
+            epilogue_body,
+            epilogue_operands,
         )?;
     }
     source.push_str("}\n");
@@ -1278,7 +1445,7 @@ fn render_scan(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, quantized, gather_count, entry, element_type);
+    kernel_signature(&mut source, quantized, 0, gather_count, entry, element_type);
     source.push_str("    if (gid != 0) { return; }\n");
 
     if outer_rank > 0 {
@@ -1962,5 +2129,116 @@ mod tests {
             error,
             EmitError::NonCooperativeReduceOp { op: "subtract", .. }
         ));
+    }
+
+    /// `row_sum(lhs)[rows] + bias[rows]` -- the smallest program
+    /// `reduce_epilogue_candidates` (`proxima-tensor/src/bind.rs`) fuses: a
+    /// sole `Add` elementwise consumer, over the reduce's own output shape,
+    /// with an identity map on both operands. Structural (`ROW 294`) proof
+    /// that CUDA renders the fused write text ROW 294 found this crate
+    /// rejecting outright -- no CUDA toolchain on this host means this
+    /// asserts source STRUCTURE only (the module doc's own "No CUDA
+    /// toolchain" note), never numeric parity.
+    #[cfg(feature = "reduce-epilogue-fusion")]
+    fn row_sum_plus_bias_op(rows: u32, cols: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let lhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(rows), Extent::Static(cols)],
+                name: None,
+            },
+        );
+        let reduce = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: lhs,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep: Keep::Reduce,
+                name: Some("row_sum".into()),
+            }),
+        );
+        let bias = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(rows)],
+                name: None,
+            },
+        );
+        let consumer = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: vec![
+                    (reduce, IndexMap::Affine(map::projection(1, &[0]))),
+                    (bias, IndexMap::Affine(map::projection(1, &[0]))),
+                ],
+                name: None,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("infer succeeds");
+        let bound = bind(&program, &shapes, &[consumer]).expect("bind succeeds");
+        bound.into_iter().next().expect("fusion collapses to one bound op")
+    }
+
+    #[test]
+    #[cfg(feature = "reduce-epilogue-fusion")]
+    fn a_fused_reduce_plus_bias_epilogue_renders_the_epilogue_write_in_cuda_c() {
+        let bound = row_sum_plus_bias_op(4, 8);
+        let BoundOpKind::Reduce {
+            epilogue_operands, ..
+        } = &bound.kind
+        else {
+            panic!("row_sum_plus_bias_op must bind to a Reduce");
+        };
+        assert_eq!(
+            epilogue_operands.len(),
+            1,
+            "the bias consumer must fuse into the reduce's own epilogue"
+        );
+
+        let kernel = emit_cuda(&bound, &no_packed()).expect("emit succeeds");
+        assert!(
+            kernel.source.contains("epi_scratch"),
+            "fused epilogue must declare its own scratch array: {}",
+            kernel.source
+        );
+        assert!(
+            kernel.source.contains("const float* __restrict__ epi0"),
+            "the bias operand must bind as its own epi0 buffer: {}",
+            kernel.source
+        );
+        assert!(
+            kernel.source.contains("u.epilogue_operand_base[0]"),
+            "the epilogue operand's offset must read the uniforms epilogue table: {}",
+            kernel.source
+        );
+        assert_eq!(
+            kernel.bindings.len(),
+            4,
+            "lhs, bias, output, uniforms -- one binding per `all_read_sources` \
+             entry plus output and uniforms: {:?}",
+            kernel.bindings
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "reduce-epilogue-fusion")]
+    fn a_fused_reduce_epilogue_gives_a_distinct_entry_name_from_the_bare_reduce() {
+        let fused = row_sum_plus_bias_op(4, 8);
+        let bare = matmul_reduce_op(4, 8, ScalarOp::Add);
+        assert_ne!(
+            entry_name(&fused),
+            entry_name(&bare),
+            "a fused epilogue must never collide with the bare reduce's cache key \
+             (crate::wgpu_driver::pipeline_for's own caching-by-name hazard)"
+        );
     }
 }

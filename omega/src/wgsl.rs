@@ -399,14 +399,17 @@ fn validate(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<(), 
                 node: resolved.node,
             });
         }
-        // No wgsl reduce renderer folds `BoundOpKind::Reduce::epilogue_body`
-        // into its output write yet -- `crate::msl::push_reduce_epilogue_write`
-        // is the Metal-only counterpart. Reject, named, rather than silently
-        // dropping the fused elementwise tail.
-        if !reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+        // `render_reduce`/`render_reduce_cooperative` (this module's
+        // `Keep::Reduce` renderers) now fold `BoundOpKind::Reduce::
+        // epilogue_body` into their output write via
+        // `push_reduce_epilogue_write`, mirroring `crate::msl`'s own. Scan's
+        // renderer (`render_scan`) has no such write hook yet -- same "no
+        // renderer, reject" contract, scoped to the one shape still missing
+        // it.
+        if *keep == Keep::Scan && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
             return Err(EmitError::UnsupportedOpKind {
                 node: resolved.node,
-                kind: "reduce with a fused epilogue",
+                kind: "scan with a fused epilogue",
             });
         }
         if *keep == Keep::Scan {
@@ -453,9 +456,12 @@ fn operand_codecs(
 }
 
 fn bindings(resolved: &BoundOp) -> Vec<Binding> {
+    // `all_read_sources`, not `operands` -- a `BoundOpKind::Reduce` with a
+    // fused epilogue reads its `epilogue_operands` too, and those need a
+    // buffer bound at the exact `@binding` index `preamble`'s `epi{index}`
+    // declarations claim (see that function's own doc).
     let mut bindings: Vec<Binding> = resolved
-        .operands()
-        .iter()
+        .all_read_sources()
         .map(|(node, _, _)| Binding::Input(*node))
         .collect();
     for (_, _, gather) in resolved.operands() {
@@ -594,6 +600,8 @@ fn entry_name(resolved: &BoundOp) -> String {
             init,
             keep,
             output_axes,
+            epilogue_body,
+            epilogue_operands,
             ..
         } => {
             let body = body_token(resolved.element_body());
@@ -617,8 +625,25 @@ fn entry_name(resolved: &BoundOp) -> String {
                 .map(u16::to_string)
                 .collect::<Vec<_>>()
                 .join("_");
+            // A fused epilogue changes both the `Uniforms` layout (the extra
+            // `epilogue_operand_base`/`_strides` fields) and the body text
+            // (`push_reduce_epilogue_write`'s emitted tail) -- mirrors
+            // `crate::msl::entry_name`'s own `epilogue` suffix, for the same
+            // `pipeline_for` cache-key reason `output_axes` above needs one:
+            // the untouched identity default contributes nothing here, so a
+            // program with no fused epilogue anywhere names exactly what it
+            // always did.
+            let epilogue = if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+                String::new()
+            } else {
+                format!(
+                    "_epi{}_{}",
+                    epilogue_operands.len(),
+                    body_token(epilogue_body)
+                )
+            };
             format!(
-                "omega_wgsl_{kind}_r{rank}_ax{axes}_n{operand_count}_{body}_{reduce_body}_{init}"
+                "omega_wgsl_{kind}_r{rank}_ax{axes}_n{operand_count}_{body}_{reduce_body}_{init}{epilogue}"
             )
         }
         BoundOpKind::Iota => format!("omega_wgsl_iota_r{rank}"),
@@ -830,27 +855,100 @@ fn push_body_steps(
     indent: &str,
     element_type: &str,
 ) -> String {
-    for (index, step) in body.steps.iter().enumerate() {
-        let args: Vec<String> = step
-            .args
-            .iter()
-            .map(|arg| match arg {
-                StepArg::Operand(operand_index) => format!("scratch[{operand_index}]"),
-                StepArg::Step(step_index) => format!("step{step_index}"),
-            })
-            .collect();
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let expr = scalar_op_expr(step.op, &arg_refs);
-        source.push_str(&format!(
-            "{indent}let step{index}: {element_type} = {expr};\n"
-        ));
+    crate::epilogue::declare_steps(
+        source,
+        body,
+        "scratch",
+        "step",
+        scalar_op_expr,
+        |source, index, expr| {
+            source.push_str(&format!(
+                "{indent}let step{index}: {element_type} = {expr};\n"
+            ));
+        },
+    )
+}
+
+/// [`push_body_steps`]'s counterpart for [`BoundOpKind::Reduce::
+/// epilogue_body`] — the WGSL sibling of `crate::msl::
+/// push_epilogue_body_steps`, reading `epi_scratch[i]`/`epi_step{k}` instead
+/// of `push_body_steps`'s `scratch[i]`/`step{k}` so the epilogue's own
+/// operand table never collides with the fold's.
+fn push_epilogue_body_steps(
+    source: &mut String,
+    body: &ComposedBody,
+    indent: &str,
+    element_type: &str,
+) -> String {
+    crate::epilogue::declare_steps(
+        source,
+        body,
+        "epi_scratch",
+        "epi_step",
+        scalar_op_expr,
+        |source, index, expr| {
+            source.push_str(&format!(
+                "{indent}let epi_step{index}: {element_type} = {expr};\n"
+            ));
+        },
+    )
+}
+
+/// Shared write tail for every wgsl reduce renderer that folds an output
+/// element ([`render_reduce`], [`render_reduce_cooperative`]) — the WGSL
+/// counterpart of `crate::msl::push_reduce_epilogue_write`. `coord` gives the
+/// OUTPUT-axis-order coordinate expression for axis `dim`. When the epilogue
+/// is the untouched identity default ([`reduce_epilogue_is_identity`]), this
+/// emits exactly the one-line `out[...] = accumulator;` write every caller
+/// emitted before epilogue fusion existed, cast the same way
+/// [`write_cast`] always has.
+#[allow(clippy::too_many_arguments)]
+fn push_reduce_epilogue_write(
+    source: &mut String,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    output_rank: usize,
+    element_type: &str,
+    indent: &str,
+    coord: impl Fn(usize) -> String,
+    accumulator_expr: &str,
+    out_offset_expr: &str,
+) {
+    if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+        let stored = write_cast(element_type, accumulator_expr);
+        source.push_str(&format!("{indent}out[{out_offset_expr}] = {stored};\n"));
+        return;
     }
-    format!("step{}", body.steps.len().saturating_sub(1))
+    let epilogue_operand_count = epilogue_operands.len();
+    source.push_str(&format!(
+        "{indent}var epi_scratch: array<{element_type}, {}>;\n",
+        epilogue_operand_count + 1
+    ));
+    for index in 0..epilogue_operand_count {
+        source.push_str(&format!(
+            "{indent}var epi_off{index}: i32 = u.epilogue_operand_base[{index}];\n"
+        ));
+        for dim in 0..output_rank {
+            source.push_str(&format!(
+                "{indent}epi_off{index} += {} * u.epilogue_operand_strides[{index}][{dim}];\n",
+                coord(dim)
+            ));
+        }
+        let read = read_cast(element_type, &format!("epi{index}[epi_off{index}]"));
+        source.push_str(&format!("{indent}epi_scratch[{index}] = {read};\n"));
+    }
+    source.push_str(&format!(
+        "{indent}epi_scratch[{epilogue_operand_count}] = {accumulator_expr};\n"
+    ));
+    let epi_value = push_epilogue_body_steps(source, epilogue_body, indent, element_type);
+    let stored = write_cast(element_type, &epi_value);
+    source.push_str(&format!("{indent}out[{out_offset_expr}] = {stored};\n"));
 }
 
 fn preamble(
     source: &mut String,
     operand_count: usize,
+    epilogue_operand_count: usize,
     gather_count: usize,
     quantized: &[Option<PackedCodec>],
     element_type: &str,
@@ -892,13 +990,26 @@ fn preamble(
             "@group(0) @binding({index}) var<storage, read> in{index}: {binding_type};\n"
         ));
     }
+    // A [`proxima_tensor::BoundOpKind::Reduce::epilogue_operands`] entry is
+    // always a plain, un-gathered, un-packed `f32` buffer -- the same
+    // restriction `crate::msl::kernel_signature`'s own `epi{index}` params
+    // carry -- so each gets one flat storage buffer, positioned right after
+    // the fold's own operands and before anything gather adds (mirrors
+    // `all_read_sources`'s operand-then-epilogue order, which is what
+    // `bindings` below walks).
+    for index in 0..epilogue_operand_count {
+        source.push_str(&format!(
+            "@group(0) @binding({}) var<storage, read> epi{index}: array<f32>;\n",
+            operand_count + index
+        ));
+    }
     for slot in 0..gather_count {
         source.push_str(&format!(
             "@group(0) @binding({}) var<storage, read> gather_idx{slot}: array<f32>;\n",
-            operand_count + slot
+            operand_count + epilogue_operand_count + slot
         ));
     }
-    let output_binding = operand_count + gather_count;
+    let output_binding = operand_count + epilogue_operand_count + gather_count;
     source.push_str(&format!(
         "@group(0) @binding({output_binding}) var<storage, read_write> out: array<f32>;\n"
     ));
@@ -1075,6 +1186,7 @@ fn render_elementwise(
     preamble(
         &mut source,
         operand_count,
+        0,
         gather_total,
         quantized,
         element_type,
@@ -1142,6 +1254,8 @@ fn render_reduce(
         reduce_op,
         init,
         output_axes,
+        epilogue_body,
+        epilogue_operands,
         ..
     } = &resolved.kind
     else {
@@ -1161,6 +1275,7 @@ fn render_reduce(
     let reduce_rank_len = reduce_rank.max(1);
     let gather_total = gather_count(resolved);
     let slots = gather_slots(resolved);
+    let epilogue_operand_count = epilogue_operands.len();
 
     let mut uniforms = String::new();
     uniforms.push_str("struct Uniforms {\n");
@@ -1178,6 +1293,14 @@ fn render_reduce(
     ));
     uniforms.push_str("    out_base: i32,\n");
     uniforms.push_str(&format!("    out_strides: array<i32, {rank_len}>,\n"));
+    if epilogue_operand_count > 0 {
+        uniforms.push_str(&format!(
+            "    epilogue_operand_base: array<i32, {epilogue_operand_count}>,\n"
+        ));
+        uniforms.push_str(&format!(
+            "    epilogue_operand_strides: array<array<i32, {output_rank_len}>, {epilogue_operand_count}>,\n"
+        ));
+    }
     push_gather_uniform_fields(&mut uniforms, gather_total, rank_len);
     uniforms.push_str("};\n");
 
@@ -1185,6 +1308,7 @@ fn render_reduce(
     preamble(
         &mut source,
         operand_count,
+        epilogue_operand_count,
         gather_total,
         quantized,
         element_type,
@@ -1291,8 +1415,23 @@ fn render_reduce(
             "    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
         ));
     }
-    let stored = write_cast(element_type, "accumulator");
-    source.push_str(&format!("    out[out_offset] = {stored};\n"));
+    push_reduce_epilogue_write(
+        &mut source,
+        epilogue_body,
+        epilogue_operands,
+        output_rank,
+        element_type,
+        "    ",
+        |dim| {
+            if output_rank > 0 {
+                format!("output_coord[{dim}]")
+            } else {
+                "0".to_string()
+            }
+        },
+        "accumulator",
+        "out_offset",
+    );
     source.push_str("}\n");
     Ok(source)
 }
@@ -1319,6 +1458,8 @@ fn render_reduce_cooperative(
         reduce_op,
         init,
         output_axes,
+        epilogue_body,
+        epilogue_operands,
         ..
     } = &resolved.kind
     else {
@@ -1336,6 +1477,7 @@ fn render_reduce_cooperative(
     let reduce_dims = reduction_dims(resolved, output_axes);
     let reduce_rank = reduce_dims.len();
     let reduce_rank_len = reduce_rank.max(1);
+    let epilogue_operand_count = epilogue_operands.len();
 
     let mut uniforms = String::new();
     uniforms.push_str("struct Uniforms {\n");
@@ -1353,6 +1495,14 @@ fn render_reduce_cooperative(
     ));
     uniforms.push_str("    out_base: i32,\n");
     uniforms.push_str(&format!("    out_strides: array<i32, {rank_len}>,\n"));
+    if epilogue_operand_count > 0 {
+        uniforms.push_str(&format!(
+            "    epilogue_operand_base: array<i32, {epilogue_operand_count}>,\n"
+        ));
+        uniforms.push_str(&format!(
+            "    epilogue_operand_strides: array<array<i32, {output_rank_len}>, {epilogue_operand_count}>,\n"
+        ));
+    }
     uniforms.push_str("};\n");
 
     let mut source = String::new();
@@ -1361,6 +1511,7 @@ fn render_reduce_cooperative(
     preamble(
         &mut source,
         operand_count,
+        epilogue_operand_count,
         0,
         quantized,
         element_type,
@@ -1472,8 +1623,23 @@ fn render_reduce_cooperative(
             "        out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
         ));
     }
-    let stored = write_cast(element_type, "reduced");
-    source.push_str(&format!("        out[out_offset] = {stored};\n"));
+    push_reduce_epilogue_write(
+        &mut source,
+        epilogue_body,
+        epilogue_operands,
+        output_rank,
+        element_type,
+        "        ",
+        |dim| {
+            if output_rank > 0 {
+                format!("output_coord[{dim}]")
+            } else {
+                "0".to_string()
+            }
+        },
+        "reduced",
+        "out_offset",
+    );
     source.push_str("    }\n");
     source.push_str("}\n");
     Ok(source)
@@ -1508,7 +1674,7 @@ fn render_iota(resolved: &BoundOp, entry: &str) -> String {
     uniforms.push_str("struct Uniforms {\n    total_elements: i32,\n};\n");
 
     let mut source = String::new();
-    preamble(&mut source, 0, 0, &[], "f32", &uniforms);
+    preamble(&mut source, 0, 0, 0, &[], "f32", &uniforms);
     kernel_signature(&mut source, entry);
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
     source.push_str("    out[gid] = f32(gid);\n");
@@ -1529,7 +1695,7 @@ fn render_constant(resolved: &BoundOp, entry: &str, value: f32) -> String {
     uniforms.push_str("struct Uniforms {\n    total_elements: i32,\n};\n");
 
     let mut source = String::new();
-    preamble(&mut source, 0, 0, &[], "f32", &uniforms);
+    preamble(&mut source, 0, 0, 0, &[], "f32", &uniforms);
     kernel_signature(&mut source, entry);
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
     let literal = wgsl_literal(value);
@@ -1576,6 +1742,7 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> Result<St
     preamble(
         &mut source,
         operand_count,
+        0,
         0,
         &alloc::vec![None; operand_count],
         element_type,
