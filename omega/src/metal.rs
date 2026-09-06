@@ -2745,70 +2745,9 @@ struct Prepared {
     index_nodes: BTreeSet<NodeId>,
 }
 
-/// Element count of one bound block, whatever codec carries it. The CPU
-/// evaluator's own block table is [`QuantizedBlock`]; this driver now takes
-/// the identical type rather than an `&[&[f32]]` of its own, so the two
-/// evaluators cannot drift on what a block IS. A packed codec's element
-/// count is derived from its own block geometry, never from `data.len()` —
-/// packed bytes and elements are not the same unit. Infallible now that
-/// every `QuantizedBlock` variant has a real Metal path (`Q3_K` was the
-/// last arm that could still fail here); kept returning a `Result`
-/// regardless, so a future codec added without an entry here is still a
-/// typed error rather than a silent miscount.
-fn block_element_count(block: &QuantizedBlock<'_>) -> Result<usize, MetalError> {
-    match block {
-        QuantizedBlock::Float32(data) => Ok(data.len()),
-        // `Q3_K`'s super-block is 110 bytes carrying the same 256-element
-        // count as the rest of the K-quant family (`Q4_K`/`Q5_K`/`Q6_K`) --
-        // see `crate::msl::Q4K_BLOCK_ELEMENTS`'s own doc.
-        QuantizedBlock::Q3K(bytes) => {
-            Ok((bytes.len() / crate::msl::Q3K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
-        }
-        // packed bytes and elements are NOT the same unit: a `Q4_K`
-        // super-block is 144 bytes carrying 256 elements, so the count the
-        // shape check compares against comes from block geometry, never
-        // from `bytes.len()`.
-        QuantizedBlock::Q4K(bytes) => {
-            Ok((bytes.len() / crate::msl::Q4K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
-        }
-        // `Q6_K`'s super-block is a different byte width (210, not 144) but
-        // the SAME element count per super-block (256) as `Q4_K`/`Q5_K` —
-        // see `crate::msl::Q4K_BLOCK_ELEMENTS`'s own doc.
-        QuantizedBlock::Q6K(bytes) => {
-            Ok((bytes.len() / crate::msl::Q6K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
-        }
-        // `Q5_K`'s super-block is yet another byte width (176) over the
-        // same 256-element count.
-        QuantizedBlock::Q5K(bytes) => {
-            Ok((bytes.len() / crate::msl::Q5K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
-        }
-        // `Q8_0`'s block is a different shape entirely (34 bytes carrying
-        // 32 elements, no super-block) — its own constants, never
-        // `Q4K_BLOCK_ELEMENTS`.
-        QuantizedBlock::Q8_0(bytes) => {
-            Ok((bytes.len() / crate::msl::Q8_0_BLOCK_BYTES) * crate::msl::Q8_0_BLOCK_ELEMENTS)
-        }
-        // `Q4_0`'s block is the same flat shape as `Q8_0` (18 bytes
-        // carrying 32 elements, no super-block) but a different byte
-        // width -- its own constants, never `Q8_0_BLOCK_BYTES`.
-        QuantizedBlock::Q4_0(bytes) => {
-            Ok((bytes.len() / crate::msl::Q4_0_BLOCK_BYTES) * crate::msl::Q4_0_BLOCK_ELEMENTS)
-        }
-        // Half-precision weights are one element per block -- no
-        // super-block to divide out, unlike every quantized codec above.
-        QuantizedBlock::Float16(bytes) => Ok(
-            (bytes.len() / crate::msl::FLOAT16_BLOCK_BYTES) * crate::msl::FLOAT16_BLOCK_ELEMENTS
-        ),
-        QuantizedBlock::BFloat16(bytes) => {
-            Ok((bytes.len() / crate::msl::BFLOAT16_BLOCK_BYTES)
-                * crate::msl::BFLOAT16_BLOCK_ELEMENTS)
-        }
-    }
-}
-
 /// Raw host bytes one [`QuantizedBlock`] hands [`upload_block`]/
 /// [`upload_packed_bytes`] — the split-4019 "block upload" term's byte count,
-/// distinct from [`block_element_count`]'s element count (a `Q4_K`
+/// distinct from [`QuantizedBlock::element_count`]'s element count (a `Q4_K`
 /// super-block's bytes and elements are not the same unit either).
 #[cfg(feature = "instrument")]
 fn block_byte_len(block: &QuantizedBlock<'_>) -> usize {
@@ -2857,7 +2796,7 @@ fn prepare(
     }
     for (node, block) in block_nodes.iter().zip(blocks.iter()) {
         let expected = element_count(shapes.of(*node));
-        let found = block_element_count(block)?;
+        let found = block.element_count()?;
         if found != expected {
             return Err(TensorError::InputSizeMismatch {
                 node: *node,
