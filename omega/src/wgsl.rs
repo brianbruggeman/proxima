@@ -1104,6 +1104,7 @@ fn render_reduce(
         output_axes,
         epilogue_body,
         epilogue_operands,
+        epilogue_broadcast_axes,
         ..
     } = &resolved.kind
     else {
@@ -1113,6 +1114,21 @@ fn render_reduce(
             found: resolved.kind.name(),
         });
     };
+    // `omega::msl::render_reduce`'s own doc: a non-empty `epilogue_broadcast_
+    // axes` (`bind::BoundOpKind::Reduce::epilogue_broadcast_axes`'s own doc,
+    // the RMSNorm-shaped `x * inv_rms` "broadcast-reduce" epilogue) needs
+    // `epilogue_operand_strides`/the output write widened to the FULL
+    // pre-reduction rank -- this renderer still declares/addresses that
+    // uniform at `output_rank` alone below, so reject at bind time rather
+    // than emit a kernel that reads or writes the wrong element count, the
+    // same "no renderer, reject" contract Metal used before its own
+    // broadcast-reduce write landed.
+    if !epilogue_broadcast_axes.is_empty() {
+        return Err(EmitError::EpilogueNotSupported {
+            node: resolved.node,
+            reason: "the broadcast-reduce epilogue (epilogue_broadcast_axes) has no WGSL renderer yet",
+        });
+    }
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
@@ -2057,6 +2073,34 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// `bind::BoundOpKind::Reduce::epilogue_broadcast_axes`'s own doc: a
+    /// non-empty value is the RMSNorm-shaped "broadcast-reduce" epilogue
+    /// (`x * inv_rms`, re-broadcasting the fold's scalar back over the
+    /// reduced axis) -- this renderer's `epilogue_operand_strides` uniform
+    /// is still declared at `output_rank` alone, so it must reject with a
+    /// typed error rather than emit a kernel that reads or writes the wrong
+    /// element count, the same contract Metal's `render_reduce` held before
+    /// its own broadcast-reduce write landed.
+    #[test]
+    fn render_reduce_rejects_a_broadcast_reduce_epilogue() {
+        let mut bound = matmul_reduce_op(4, 8, 4);
+        let BoundOpKind::Reduce {
+            epilogue_broadcast_axes,
+            ..
+        } = &mut bound.kind
+        else {
+            panic!("matmul_reduce_op always builds a Keep::Reduce fold")
+        };
+        epilogue_broadcast_axes.push(1);
+
+        let error = render_reduce(&bound, "entry", "f32", &[None])
+            .expect_err("a broadcast-reduce epilogue has no WGSL renderer yet");
+        assert!(
+            matches!(error, EmitError::EpilogueNotSupported { .. }),
+            "{error}"
+        );
     }
 
     #[test]
