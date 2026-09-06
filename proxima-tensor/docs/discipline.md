@@ -24787,6 +24787,50 @@ This linear extrapolation assumes the serial-loop shape holds unchanged out to 2
 
 **Gates.** Docs-only row; the only "source" touched was an environment variable already wired at `omega/src/metal.rs:1715-1783` before this row (ROW 308's own kind-filter mechanism) -- no clippy/nextest run, consistent with ROW 341's own gate posture for a docs-and-measurement-only row.
 
+## ROW 343 -- 14757eb's coord_q cache: not worse (A stays as landed default)
+
+**Card:** none (measurement only, no code change; 14757eb already landed on `main` before this row). **Worktree/branch:** `proxima-wt-r343`, `docs/row-343-coordq`, off `main` at `05e746c`. Second detached worktree `proxima-wt-parent` at `408bb9d` (the commit immediately before 14757eb).
+
+**Question this row answers.** 14757eb (`omega/src/msl.rs`, `push_packed_row_combine_and_write`, both the `metal-wide-cooperative-reduce`-on and -off arms) replaced a second `flat % / u.output_extents` coordinate-decode chain in the combine-and-write stage with a read of `coord_q_cache[q][dim]`, a coordinate the kernel's own preamble (`push_packed_row_blocked_body`'s `weight_base`/`other_base` loop) already computed for the same `q` to address the weight/activation operands. One division/modulo chain removed per output element per row-group, GPU-side, in every dispatch of the emitted MSL. Owner rule: less work + same output stays as the default unless it measures worse beyond CoV.
+
+**Method.** Same harness as ROW 324/341/342 (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `--features metal,instrument`, `PROXIMA_MAX_TOKENS=8`, `--exact --ignored --nocapture --test-threads=1`). Both release binaries built `--no-run` (`cargo test -p proxima-model-interop --release --features metal,instrument --no-run --lib`), copied to `r343-logs/oracle-A` (main, 05e746c, has 14757eb) / `oracle-B` (408bb9d, parent, does not). 3 rounds interleaved A, B, A, B, A, B.
+
+**Quiet gate.** Immediately before setup: `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'` empty, `pgrep -fl 'while true' | grep -v pgrep` empty, load-1 8.76 -- PASSED. Re-checked immediately before the timed runs (both release builds had just finished): pgrep empty (both patterns), load-1 9.04 -- PASSED (load-5/15 elevated at 12.77/12.28 from the just-finished builds; the gate binds on load-1 only, per this row's own brief).
+
+**Data -- `gpu_exec_ms`/`step_wall_ms` over steps 3..7 (5 datapoints/arm/round):**
+
+| round | arm | gpu_exec mean (ms) | step_wall mean (ms) |
+| --- | --- | --- | --- |
+| 1 | A (14757eb) | 25.5267 | 26.3650 |
+| 1 | B (408bb9d) | 26.1957 | 26.9081 |
+| 2 | A (14757eb) | 25.5043 | 26.3717 |
+| 2 | B (408bb9d) | 28.7392 | 30.6317 |
+| 3 | A (14757eb) | 26.1780 | 26.8851 |
+| 3 | B (408bb9d) | 26.4200 | 28.5095 |
+
+`generated_text="Here is a simple Python function that returns"` is byte-identical across all 6 runs.
+
+**Pooled (15 datapoints/arm, all 3 rounds, population sd):**
+
+| arm | gpu_exec mean (ms) | gpu CoV | step_wall mean (ms) | wall CoV |
+| --- | --- | --- | --- | --- |
+| A (14757eb) | 25.7363 | 1.25% | 26.5406 | 0.97% |
+| B (408bb9d) | 27.1183 | 8.63% | 28.6831 | 11.43% |
+
+**Round 2's B run is contaminated** -- step 4 spikes to `gpu_exec_ms=35.606`/`step_wall_ms=40.152` against steps 3/5/6/7's 26.1-26.9 ms band (B's own round-1 and round-3 steps all sit in that same band), driving B's pooled CoV to 8.63%/11.43%, an order of magnitude above A's 1.25%/0.97% and above B's own round-1 and round-3 individual bands. Per ROW 324's own convention this datapoint is named, not hidden, and B is also reported with round 2 excluded:
+
+| arm | n | gpu_exec mean (ms) | gpu CoV | step_wall mean (ms) | wall CoV |
+| --- | --- | --- | --- | --- | --- |
+| B (408bb9d), rounds 1+3 only | 10 | 26.3079 | 0.90% | 27.7088 | 4.68% |
+
+**Result.** On every reading -- pooled (25.74 vs 27.12 ms `gpu_exec_ms`) and rounds-1+3-only (25.74 vs 26.31 ms) -- A (14757eb, the coord_q cache) is faster than B (408bb9d, the double-decode), by a margin that exceeds A's own CoV (1.25%) in both comparisons. The coord_q cache is less work (one coordinate-decode chain instead of two) and is not worse: **it stays as the landed default**, no revert needed. The one contaminated B datapoint (round 2, step 4) only widens B's own spread; excluding it moves the comparison toward parity but never inverts it, so it does not change the owner-rule verdict either way.
+
+**Scoreboard line.** Same-session denominator not re-measured this row (no `llama-bench` arm); using ROW 324's own same-host llama record, `17.4642 ms/token`: A (14757eb) `step_wall_ms` 26.5406 = **1.5197x llama**; B (408bb9d) pooled `step_wall_ms` 28.6831 = **1.6424x llama** (rounds 1+3 only: 27.7088 = **1.5866x llama**). Per LLAMA-IS-NOT-THE-FLOOR this is a same-arm-vs-arm scoreboard entry referencing a prior session's denominator, not a fresh floor claim.
+
+**Residual, named not hidden.** (1) Round 2's B contamination (step 4 only, +9.4 ms/+9.0 ms above its own band) has no identified mechanism -- the quiet gate was clean and load-1 < 10 immediately before the round started, so if it is contention it happened inside the ~2 s window covering steps 3..7, not before the run; consistent with ROW 324's own unattributed round-3 contamination, this is reported as an open question. (2) No fresh `llama-bench` arm was run this session; the scoreboard ratio borrows ROW 324's denominator rather than measuring it same-session. (3) This row measures the emitted kernel's wall/GPU cost only, not instruction count or disassembly of the two MSL variants directly -- the diff read (14757eb's own commit message and `omega/src/msl.rs` diff) is the mechanism evidence, not a cycle-level trace.
+
+**Gates.** None run -- no source change lands from this row (`git status --porcelain` clean in both worktrees apart from this doc edit); 14757eb already landed its own gates before this row started.
+
 **Re-prove command (each cell):**
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
