@@ -1323,7 +1323,6 @@ fn packed_row_block_direct_axis(
 pub(crate) fn kernel_cache_key(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
-    math_mode_token: char,
     numeric_policy: NumericPolicy,
 ) -> Result<String, EmitError> {
     // Called for its unsupported-dtype rejection alone -- `kernel_identity`
@@ -1339,7 +1338,7 @@ pub(crate) fn kernel_cache_key(
         packed_row_block_shape: Some(packed_row_block_shape_token(resolved, &quantized)),
         packed_row_block_stride_is_one: packed_row_block_stride_is_one(resolved, &quantized),
         packed_row_block_direct_axis: packed_row_block_direct_axis(resolved, &quantized),
-        math_mode_token: Some(math_mode_token),
+        numeric_policy_token: Some(crate::identity::numeric_policy_cache_token(numeric_policy)),
     };
     Ok(crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Metal,
@@ -7552,8 +7551,8 @@ mod tests {
         );
 
         let empty = BTreeMap::new();
-        let key_two_axes = kernel_cache_key(&keeps_two_axes, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
-        let key_one_axis = kernel_cache_key(&keeps_one_axis, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
+        let key_two_axes = kernel_cache_key(&keeps_two_axes, &empty, NumericPolicy::default()).expect("cache key builds");
+        let key_one_axis = kernel_cache_key(&keeps_one_axis, &empty, NumericPolicy::default()).expect("cache key builds");
         assert_ne!(
             key_two_axes, key_one_axis,
             "a coarser key would let a 1-output-axis fold hit the 2-output-axis pipeline"
@@ -7588,8 +7587,8 @@ mod tests {
             "reduce op must change the emitted body"
         );
         assert_ne!(
-            kernel_cache_key(&add, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
-            kernel_cache_key(&max, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&add, &empty, NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&max, &empty, NumericPolicy::default()).expect("cache key builds"),
             "reduce op must change the identity"
         );
 
@@ -7648,8 +7647,8 @@ mod tests {
             "dtype must change the emitted body (half vs. float declarations)"
         );
         assert_ne!(
-            kernel_cache_key(&f32_bound, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
-            kernel_cache_key(&f16_bound, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&f32_bound, &empty, NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&f16_bound, &empty, NumericPolicy::default()).expect("cache key builds"),
             "dtype must change the identity"
         );
 
@@ -7667,31 +7666,39 @@ mod tests {
             "packed codec must change the emitted body"
         );
         assert_ne!(
-            kernel_cache_key(&bound, &q4k, 'R', NumericPolicy::default()).expect("cache key builds"),
-            kernel_cache_key(&bound, &q5k, 'R', NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&bound, &q5k, NumericPolicy::default()).expect("cache key builds"),
             "packed codec must change the identity"
         );
 
-        // math mode -- folded into `kernel_cache_key` directly now (never
-        // embedded in `emit`'s own source text, so no source-side assertion
-        // here: `math_mode_cache_key_tests` covers the token set itself).
+        // numeric policy -- folded into `kernel_cache_key` directly now
+        // (never embedded in `emit`'s own source text, so no source-side
+        // assertion here). All 4 rungs, pairwise: `BitExact` and
+        // `FusedNoReassociation` both compile the SAME `MathMode::Safe`
+        // (`metal::numeric_policy_as_metal_math_mode`'s own doc table), so
+        // a math-mode-keyed token alone could not tell them apart -- this
+        // is the case a `MathMode` token would have missed.
         assert_ne!(
-            kernel_cache_key(&bound, &q4k, 'S', NumericPolicy::default()).expect("cache key builds"),
-            kernel_cache_key(&bound, &q4k, 'R', NumericPolicy::default()).expect("cache key builds"),
-            "math mode must change the identity, or a Safe- and a Relaxed-compiled \
-             kernel could share one PIPELINE_CACHE entry"
+            kernel_cache_key(&bound, &q4k, NumericPolicy::BitExact).expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, NumericPolicy::FusedNoReassociation)
+                .expect("cache key builds"),
+            "numeric policy must change the identity, or a BitExact- and a \
+             FusedNoReassociation-compiled kernel could share one PIPELINE_CACHE \
+             entry even though both compile MathMode::Safe"
         );
         assert_ne!(
-            kernel_cache_key(&bound, &q4k, 'S', NumericPolicy::default()).expect("cache key builds"),
-            kernel_cache_key(&bound, &q4k, 'F', NumericPolicy::default()).expect("cache key builds"),
-            "math mode must change the identity, or a Safe- and a Fast-compiled \
-             kernel could share one PIPELINE_CACHE entry"
+            kernel_cache_key(&bound, &q4k, NumericPolicy::BitExact).expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, NumericPolicy::ReassociationPermitted)
+                .expect("cache key builds"),
+            "numeric policy must change the identity, or a BitExact- and a \
+             ReassociationPermitted-compiled kernel could share one PIPELINE_CACHE entry"
         );
         assert_ne!(
-            kernel_cache_key(&bound, &q4k, 'R', NumericPolicy::default()).expect("cache key builds"),
-            kernel_cache_key(&bound, &q4k, 'F', NumericPolicy::default()).expect("cache key builds"),
-            "math mode must change the identity, or a Relaxed- and a Fast-compiled \
-             kernel could share one PIPELINE_CACHE entry"
+            kernel_cache_key(&bound, &q4k, NumericPolicy::ReassociationPermitted)
+                .expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, NumericPolicy::FastMath).expect("cache key builds"),
+            "numeric policy must change the identity, or a ReassociationPermitted- and a \
+             FastMath-compiled kernel could share one PIPELINE_CACHE entry"
         );
 
         // cooperative-reduce width -- ROW 290's own defect, at the same two
@@ -7701,8 +7708,8 @@ mod tests {
             let narrow = single_axis_sum_op(34);
             let wide = single_axis_sum_op(4096);
             assert_ne!(
-                kernel_cache_key(&narrow, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
-                kernel_cache_key(&wide, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
+                kernel_cache_key(&narrow, &empty, NumericPolicy::default()).expect("cache key builds"),
+                kernel_cache_key(&wide, &empty, NumericPolicy::default()).expect("cache key builds"),
                 "two cooperative reduces at different widths must never share a pipeline \
                  (ROW 290: a stale narrower kernel silently drops reduction terms)"
             );
@@ -7732,9 +7739,9 @@ mod tests {
             "same total rank"
         );
         let key_first_second =
-            kernel_cache_key(&keeps_first_and_second, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
+            kernel_cache_key(&keeps_first_and_second, &empty, NumericPolicy::default()).expect("cache key builds");
         let key_first_third =
-            kernel_cache_key(&keeps_first_and_third, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
+            kernel_cache_key(&keeps_first_and_third, &empty, NumericPolicy::default()).expect("cache key builds");
         assert_ne!(
             key_first_second, key_first_third,
             "output_axes.len() alone cannot tell {{0,1}} from {{0,2}}"
@@ -7754,8 +7761,8 @@ mod tests {
         let descending = rank3_identity_sum_op(&[1, 0]);
         let empty = BTreeMap::new();
 
-        let key_ascending = kernel_cache_key(&ascending, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
-        let key_descending = kernel_cache_key(&descending, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
+        let key_ascending = kernel_cache_key(&ascending, &empty, NumericPolicy::default()).expect("cache key builds");
+        let key_descending = kernel_cache_key(&descending, &empty, NumericPolicy::default()).expect("cache key builds");
         assert_ne!(
             key_ascending, key_descending,
             "the SEQUENCE order of output_axes selects which u.output_extents slot each dim reads"
@@ -7779,8 +7786,8 @@ mod tests {
         let mut q6k = BTreeMap::new();
         q6k.insert(weight_node, PackedCodec::Q6K);
 
-        let key_q4k = kernel_cache_key(&bound, &q4k, 'R', NumericPolicy::default()).expect("cache key builds");
-        let key_q6k = kernel_cache_key(&bound, &q6k, 'R', NumericPolicy::default()).expect("cache key builds");
+        let key_q4k = kernel_cache_key(&bound, &q4k, NumericPolicy::default()).expect("cache key builds");
+        let key_q6k = kernel_cache_key(&bound, &q6k, NumericPolicy::default()).expect("cache key builds");
         assert_ne!(
             key_q4k, key_q6k,
             "entry_name alone cannot see which codec an operand reads through"
@@ -7847,8 +7854,8 @@ mod tests {
             .expect("one bound emitted");
 
         let empty = BTreeMap::new();
-        let key_f32 = kernel_cache_key(&f32_bound, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
-        let key_f16 = kernel_cache_key(&f16_bound, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
+        let key_f32 = kernel_cache_key(&f32_bound, &empty, NumericPolicy::default()).expect("cache key builds");
+        let key_f16 = kernel_cache_key(&f16_bound, &empty, NumericPolicy::default()).expect("cache key builds");
         assert_ne!(
             key_f32, key_f16,
             "entry_name does not encode dtype on its own"
@@ -7869,8 +7876,8 @@ mod tests {
         let empty = BTreeMap::new();
 
         assert_eq!(
-            kernel_cache_key(&small, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
-            kernel_cache_key(&large, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&small, &empty, NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&large, &empty, NumericPolicy::default()).expect("cache key builds"),
             "a cache keyed on structure must still hit across concrete extents"
         );
     }
