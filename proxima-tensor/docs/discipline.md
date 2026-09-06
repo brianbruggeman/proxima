@@ -24067,3 +24067,121 @@ PROXIMA_MAX_TOKENS=10 PROXIMA_HEAD_PRIVATE_COPY=1 RUST_LOG=info "$BIN" \
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `test(interop): duplicate-head position and private-copy head arms` + this row | Arm C (private-copy `output.weight` bind) REFUTES the no-copy mapping's per-token page residency as the head's cost mechanism a second time (2.76 ms vs baseline 2.41 ms, no collapse toward the 0.45-0.66 ms isolated floor); Arm P (duplicate BEFORE layer 0) is directionally consistent with "the real head keeps most of the cost" (+0.68 ms combined) but not proven, and this repo's only per-op GPU timer (`execute_plan_op_timed`, separate command buffers per op) cannot split first-vs-last cost within a SHARED command buffer -- both duplicate and real head read ~397 us there, near the isolated floor, confirming the timer erases the very effect under test | 3 rounds interleaved A/P/C, CoV 1.25-1.30% per arm; 1 ablation run per arm (no repeat) | quiet gate (names-only, load-1 3.7-9.8, one ~2-minute wait for another slice's `cargo-nextest`) |
+
+## ROW 329 -- encoder split with real ROW-309-machinery stage-boundary timestamps: the split's own overhead scales with PER-DISPATCH count, not per-encoder, falsifying the "~2.4 ms fixed cost, subtract via a control" premise
+
+**Card:** `omega/src/metal.rs` (`Plan::encoder_split_at` field + `Plan::set_encoder_split_at` +
+`execute_plan_with_placements_dispatch_timed`'s stage-boundary branch generalized from
+one-encoder-per-position to a caller-chosen two-way split, reusing the SAME `MTLCounterSampleBuffer`
+machinery ROW 309 built -- no second timestamp path -- plus a `DispatchTimedOutcome` type alias
+clippy's `type_complexity` required, and a `GPU_EXEC_CALLS`/`GPU_EXEC_TICKS` counter bump around this
+function's own `commit`/`waitUntilCompleted`, closing ROW 309's own "no `gpu_exec_ms` for the
+profiled step" gap), `omega/tests/dispatch_timed_counter_sampling.rs` (updated for the new
+4-element return, plus a new `encoder_split_reports_two_nonzero_encoder_spans_and_zeroes_per_op_gpu_ns`
+test), `proxima-model-interop/src/generate.rs` (`PROXIMA_METAL_ENCODER_SPLIT_AT` env knob,
+`report_encoder_split` summary). Worktree `proxima-wt-r329`, branch
+`test/head-encoder-split-timestamps`, off `main` `f83cfa7`.
+
+**Mechanism verified before measuring.** `encoder_split_reports_two_nonzero_encoder_spans_and_zeroes_per_op_gpu_ns`
+(a synthetic 4-dispatch program, `PASS` on the real M1 Max) proves the split itself works: two real,
+nonzero GPU-timestamp-derived encoder spans, every per-position `OpGpuTiming::gpu_ns` reading `0`
+(never fabricated from the wrong sample layout). `cargo nextest run -p omega --features metal,instrument`:
+196 passed (was 177 pre-ROW-309-baseline plus this row's own two). Applying `set_encoder_split_at`
+had to move OUT of `evaluate_dispatch_timed_with_placements`'s own build closure and onto the
+resolved plan unconditionally: a `debug!` trace (`plan_encoder_split_at=None` reaching
+`execute_plan_with_placements_dispatch_timed` despite the closure setting it) showed
+`ServingConfig::kv_bucket_tokens` rounds several consecutive decode steps' KV extents onto the SAME
+plan-cache key, so the profiled step's plan is often one `evaluate_with_placements`'s own closure
+already inserted -- a build-time-only setter silently no-ops on that cache HIT. Fixed by calling
+`plan.set_encoder_split_at(..)` after the cache lookup, every call (safe: unlike `set_math_mode`,
+this field never invalidates `resolved_steps`).
+
+**Measured, 3 rounds interleaved A/B/C, `--release`, `PROXIMA_MAX_TOKENS=10`,
+`PROXIMA_METAL_DISPATCH_PROFILE_STEP=5` (step 5, ROW 309's own steady-state step), op_count=520
+(521 for arm B, the extra duplicate-head node), shared host under heavy unrelated load throughout
+(load-1 13-41 across the run, quiet-gate `pgrep -l` names-only EMPTY at every launch):
+
+| arm | enc-1 ms (mean) | enc-2 ms (mean) | sum ms (mean) | gpu_exec ms (mean) | enc-2 CoV |
+| --- | --- | --- | --- | --- | --- |
+| A (split at 519, encoder-2 = real head alone) | 1106.440 | 18.200 | 1124.641 | 27.692 | 0.69% |
+| B (`PROXIMA_DUPLICATE_HEAD=first`, split at 520, encoder-2 = real head alone, early duplicate inside encoder-1) | 1122.948 | 18.477 | 1141.425 | 28.053 | 0.74% |
+| C (split at 518, encoder-2 = final rmsnorm + head, control) | 1122.033 | 18.716 | 1140.749 | 29.293 | 1.27% (gpu_exec CoV 6.43%, round 3 hit a load spike -- see Residual) |
+
+**Reading, falls outside BOTH options this row's own brief pre-registered.** Neither "the head
+runs ~2 ms after 4 GB of traffic" nor "the head runs ~0.45 ms and the 2 ms sits in encoder-1's tail"
+holds. What the A/B/C table actually shows: encoder-1 (519 real dispatches, ONE encoder, arm A) costs
+1106 ms -- **2.132 ms/dispatch** (1106.440 / 519) -- essentially IDENTICAL to ROW 309's own
+one-encoder-per-position AVERAGE (1230.918 ms / 520 = 2.367 ms/dispatch, same order, same device,
+same sampling mode). Grouping 519 dispatches into a SINGLE stage-boundary-sampled encoder bought
+**zero savings** over ROW 309's original one-encoder-per-position fallback: the overhead ROW 309
+attributed to "one encoder per position" is, by this row's own direct A-vs-encoder-1 comparison,
+a PER-DISPATCH cost that persists inside a multi-dispatch encoder too, not a per-ENCODER fixed cost
+ROW 309's design (which always had encoder-count == dispatch-count, 1:1) could ever have
+distinguished from a real per-dispatch cost. Encoder-2, by contrast, holding only 1 (arm A) or 2
+(arm C) real dispatches, costs 18.200/18.716 ms -- roughly **8.5x** the 519-dispatch encoder's own
+per-dispatch rate for JUST its first one or two dispatches, meaning a newly-opened stage-boundary
+encoder pays a large near-constant "open" cost (visible only when the encoder is short) that a long
+encoder's per-dispatch average (2.132 ms) already amortizes into invisibility. Arm B (early duplicate
+touch, real head still alone in its own encoder-2) reads 18.477 ms, statistically indistinguishable
+from arm A's 18.200 ms (both well inside the ~0.28 ms 1-sigma band) -- the early duplicate changes
+NOTHING about the real head's reported cost, same direction as ROW 328's own reading but now
+measured with the real head genuinely isolated in its own encoder rather than sharing one with
+518 other dispatches.
+
+**The brief's own subtraction recipe is falsified by this row's own encoder-1 evidence.** "Split
+one op before the head as a control for the split's own fixed cost (~2.4 ms per ROW 309 --
+subtract)" assumed a flat, per-ENCODER overhead independent of how many dispatches that encoder
+holds. Arm C - Arm A on encoder-2 (18.716 - 18.200 = 0.516 ms) is the cost of ONE extra dispatch
+(final rmsnorm) added to a 1-dispatch encoder -- far below both this row's own per-dispatch
+encoder-1 rate (2.132 ms) and ROW 309's ~2.37 ms figure, while the ABSOLUTE encoder-2 level
+(~18 ms for 1-2 dispatches) is roughly 8x either of those per-dispatch rates. No single constant
+subtracted from arm A's 18.200 ms yields a number this row can call "the head's own ms" with any
+support from the rest of the table: subtracting ROW 309's ~2.37 ms gives ~15.8 ms, which is neither
+close to ROW 327's isolated no-copy floor (0.44-0.66 ms) nor to ROW 328's own ablation-derived
+2.41 ms, and this row has no THIRD, independent measurement to arbitrate between them. **ROW 329
+does not settle the head's own GPU ms** -- the encoder-split technique, on this device, cannot
+isolate a short tail region's real cost from the stage-boundary sampling mechanism's own dispatch-
+count-dependent and encoder-open-dependent overheads, both of which this row measured directly and
+neither of which is a flat, subtractable constant.
+
+**Residual, named not hidden.** (1) Round 3 of arm C's `gpu_exec_ms` (31.468 vs 28.205/28.205) is a
+visible load-spike outlier (host load-1 ranged 13-41 across this row's own run, well above the
+brief's <10 quiet-gate target for measurement rounds; `pgrep -l` names-only was EMPTY at every
+launch, but unrelated CPU load was not) -- included, not dropped, per this row's own "report the
+number that hurts" discipline; enc-2 CoV stayed under 1.3% despite it. (2) This row cannot explain
+WHY a newly-opened stage-boundary encoder's first 1-2 dispatches cost ~8x its own steady-state
+per-dispatch rate -- a GPU pipeline/counter-buffer warm-up cost is the plausible mechanism but is
+UNMEASURED here; the next instrumentation to close this gap is a THREE-way split (encoder-1 =
+everything except the last 5 ops, encoder-2 = 5 filler dispatches before the head, encoder-3 = the
+head alone) to see whether encoder-3's per-dispatch rate drops toward encoder-1's 2.132 ms once it
+is no longer the FIRST short encoder opened after 519 dispatches' worth of GPU queue depth. (3) The
+duplicate-head arm B's `op_count=521` (vs 520) was verified directly from this run's own
+`op_profile: ... op_count=521` line, not assumed.
+
+**Gates:** `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT 0, zero warnings.
+`cargo nextest run -p omega --features metal,instrument`: 196 tests run, 196 passed, 7 skipped, EXIT 0.
+`cargo nextest run -p omega --features metal` (instrument-off): 187 tests run, 187 passed, 7 skipped, EXIT 0.
+
+**Re-prove command** (release oracle, one measurer, quiet gate `pgrep -l` names-only confirmed empty
+immediately before each launch; host load-1 not clean this run, see Residual):
+```
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-r329
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-r329/target CARGO_TERM_COLOR=never \
+  cargo test --release -p proxima-model-interop --lib --features metal,instrument,cached-attention-streaming,metal-output-placement --no-run
+BIN=$(find target/release/deps -maxdepth 1 -name 'proxima_model_interop-*' -perm +111 ! -name '*.d' | head -1)
+PROXIMA_MAX_TOKENS=10 PROXIMA_METAL_DISPATCH_PROFILE_STEP=5 PROXIMA_METAL_ENCODER_SPLIT_AT=519 RUST_LOG=info "$BIN" \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --ignored --exact --test-threads=1 --nocapture
+PROXIMA_MAX_TOKENS=10 PROXIMA_DUPLICATE_HEAD=first PROXIMA_METAL_DISPATCH_PROFILE_STEP=5 PROXIMA_METAL_ENCODER_SPLIT_AT=520 RUST_LOG=info "$BIN" \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --ignored --exact --test-threads=1 --nocapture
+PROXIMA_MAX_TOKENS=10 PROXIMA_METAL_DISPATCH_PROFILE_STEP=5 PROXIMA_METAL_ENCODER_SPLIT_AT=518 RUST_LOG=info "$BIN" \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --ignored --exact --test-threads=1 --nocapture
+```
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | `feat(omega): encoder split with stage timestamps under instrument` + this row | Encoder-split mechanism lands and is proven (unit test + real oracle); falsifies the brief's own "~2.4 ms flat per-encoder cost, subtract via a control" premise -- encoder-1's 519-dispatch span costs 2.132 ms/dispatch, matching ROW 309's own per-position average almost exactly (no savings from grouping), while a short 1-2-dispatch encoder-2 costs ~18 ms regardless, ~8.5x that rate; ROW 329 does NOT settle the head's own ms | 3 rounds interleaved A/B/C; enc-2 CoV 0.69-1.27%, gpu_exec CoV up to 6.43% (one load-spike round, not dropped) | quiet gate (names-only) EMPTY at every launch; load-1 13-41 throughout (shared host, other agents' bursts) -- NOT clean, reported plainly |
