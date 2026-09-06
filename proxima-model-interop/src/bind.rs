@@ -3799,6 +3799,181 @@ mod real_openchat_file {
             "interpreter and independent dequantize-then-multiply diverged: max_diff={max_diff}"
         );
     }
+
+    /// FNV-1a over `generated_text`'s UTF-8 bytes -- no new dependency (the
+    /// `fnv` crate is this same eight-line algorithm behind a `Hasher` impl
+    /// this call site has no use for), just a stable digest so
+    /// [`decode_text_is_deterministic_across_repeated_runs`] can compare ten
+    /// runs' worth of text by eye without printing the whole string ten
+    /// times over.
+    #[cfg(feature = "metal")]
+    fn fnv1a_hash(text: &str) -> u64 {
+        const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        text.bytes()
+            .fold(OFFSET_BASIS, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(PRIME))
+    }
+
+    /// First index where `candidate` departs from `reference`, or `None`
+    /// when the two id sequences agree on their shared length (including
+    /// one being a prefix of the other, which greedy decode's own eos-stop
+    /// can legitimately produce even under identical sampling).
+    #[cfg(feature = "metal")]
+    fn first_divergent_token(reference: &[u32], candidate: &[u32]) -> Option<usize> {
+        reference
+            .iter()
+            .zip(candidate.iter())
+            .position(|(left, right)| left != right)
+    }
+
+    /// `PROXIMA_DETERMINISM_RUNS` -- how many repeated cached decode calls
+    /// [`decode_text_is_deterministic_across_repeated_runs`] drives against
+    /// the ONE loaded model, same env-knob-with-a-default convention as
+    /// [`decode_loop_max_tokens`].
+    #[cfg(feature = "metal")]
+    fn determinism_runs() -> usize {
+        std::env::var("PROXIMA_DETERMINISM_RUNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(10)
+    }
+
+    /// Same `PROXIMA_MAX_TOKENS` knob [`decode_loop_max_tokens`] reads, but
+    /// defaulting to 32 rather than 24 -- race-brief ROW 317's own token
+    /// budget -- kept as its own function rather than changing
+    /// [`decode_loop_max_tokens`]'s default, which the other decode tests in
+    /// this module already rely on.
+    #[cfg(feature = "metal")]
+    fn determinism_max_tokens() -> usize {
+        std::env::var("PROXIMA_MAX_TOKENS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(32)
+    }
+
+    /// RACE ROW 313/317: with three oracles overlapping on the GPU, one
+    /// fusion-ON, concurrent-dispatch run produced `"<unk>\n\ndef fibonacci("`
+    /// while every other run (loud or quiet) produced the canonical text --
+    /// a timing-dependent divergence on a path whose correctness rests on
+    /// the private `HazardTracker` (`omega::metal`) inserting a barrier at
+    /// every RAW/WAW/WAR hazard, so a missed hazard in `hazard_step` is a
+    /// live suspect.
+    ///
+    /// Loads the checkpoint ONCE, then drives
+    /// [`crate::generate::LoadedModel::run_decode_loop`]
+    /// [`determinism_runs`] times (default 10) with [`determinism_max_tokens`]
+    /// tokens (default 32) on the same oracle prompt ([`decode_loop_prompt`]),
+    /// hashing each run's `generated_text` with [`fnv1a_hash`] and reporting
+    /// the first token index where a run's ids diverge from run 0's. Reads
+    /// `PROXIMA_DISPATCH` through [`crate::test_support::dispatch_type_from_env`]
+    /// -- the same helper
+    /// [`runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`]
+    /// uses -- so the SAME test covers both the serial and concurrent
+    /// encoders; run it once per dispatch value under GPU contention from
+    /// `omega/tests/gpu_load_generator.rs`'s `gpu_load_generator` to settle
+    /// whether concurrent dispatch's barrier set is missing a hazard.
+    ///
+    /// Run under load (two commands; repeat the second with
+    /// `PROXIMA_DISPATCH=serial` to cover the other encoder):
+    /// ```text
+    /// nohup cargo test -p omega --release --features metal \
+    ///   gpu_load_generator -- --ignored --nocapture &
+    /// PROXIMA_DISPATCH=concurrent PROXIMA_MAX_TOKENS=32 PROXIMA_DETERMINISM_RUNS=10 \
+    ///   cargo test -p proxima-model-interop --release --features metal,instrument \
+    ///   decode_text_is_deterministic_across_repeated_runs -- --ignored --nocapture
+    /// ```
+    /// (repeat the harness command with `PROXIMA_DISPATCH=serial` for the
+    /// other encoder, against the same running load generator)
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
+    fn decode_text_is_deterministic_across_repeated_runs() {
+        let model_path = crate::test_support::openchat_gguf_path();
+        let path = std::path::Path::new(&model_path);
+        if !path.exists() {
+            eprintln!("skipping: no host-local openchat gguf fixture at {model_path}");
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local openchat gguf fixture");
+        prefault_if_requested(file_bytes);
+
+        let model = LoadedModel::load(&parsed, file_bytes)
+            .expect("load real openchat checkpoint through the public path");
+        let prompt = decode_loop_prompt();
+        let max_tokens = determinism_max_tokens();
+        let runs = determinism_runs();
+        let dispatch_label =
+            std::env::var("PROXIMA_DISPATCH").unwrap_or_else(|_| "concurrent".to_string());
+        let math_label =
+            std::env::var("PROXIMA_MATH_MODE").unwrap_or_else(|_| "relaxed".to_string());
+
+        #[cfg(target_os = "macos")]
+        let math_mode = math_mode_from_env();
+        #[cfg(target_os = "macos")]
+        let dispatch_type = dispatch_type_from_env();
+        let serving_config = ServingConfig {
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: crate::serving::GPU_LAYERS_ALL,
+            reasoning_budget: 0,
+            #[cfg(target_os = "macos")]
+            math_mode,
+            #[cfg(target_os = "macos")]
+            dispatch_type,
+            ..ServingConfig::default()
+        };
+
+        let mut reference_ids: Option<Vec<u32>> = None;
+        let mut hashes = Vec::with_capacity(runs);
+
+        for run_index in 0..runs {
+            let mut runtime = crate::generate::BackendRuntime::new(&serving_config);
+            let generated = model
+                .run_decode_loop(&prompt, max_tokens, &serving_config, &mut runtime)
+                .expect("generate through the metal backend");
+
+            #[cfg(all(feature = "instrument", target_os = "macos"))]
+            let barriers = omega::metal::metal_stage_totals().barriers_emitted;
+            #[cfg(not(all(feature = "instrument", target_os = "macos")))]
+            let barriers = 0_u64;
+
+            let hash = fnv1a_hash(&generated.1);
+            let divergence = match &reference_ids {
+                Some(reference) => first_divergent_token(reference, &generated.0),
+                None => {
+                    reference_ids = Some(generated.0.clone());
+                    None
+                }
+            };
+
+            std::println!(
+                "determinism_run run={run_index} hash={hash:016x} first_divergent_token={divergence:?} plan_hits={} barriers={barriers} generated_text={:?}",
+                runtime.plan_hits,
+                generated.1,
+            );
+            hashes.push(hash);
+        }
+
+        let mut distinct = hashes.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        let distinct_texts = distinct.len();
+
+        std::println!("distinct_texts={distinct_texts} dispatch={dispatch_label} math={math_label}");
+
+        assert_eq!(
+            distinct_texts, 1,
+            "decode produced {distinct_texts} distinct texts across {runs} runs at the same \
+             prompt/config -- a timing-dependent race on the {dispatch_label} dispatch path"
+        );
+    }
 }
 
 // -- Sources speculative-decode's acceptance factor k' off a real greedy
