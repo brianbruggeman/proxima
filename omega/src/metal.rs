@@ -598,11 +598,13 @@ impl Plan {
     }
 
     /// The plan-cache key [`resolve_steps`] computes for each program
-    /// position (`omega::msl::kernel_cache_key`'s own doc: a pure structural
-    /// fingerprint of that position's resolved `BoundOp`) -- exposed so a
+    /// position (`omega::msl::kernel_cache_key`'s own doc: the shared
+    /// structural + compile-option identity of that position's resolved
+    /// `BoundOp`, this plan's own [`MathMode`] included) -- exposed so a
     /// caller can assert exactly which compiled kernel variant a program
-    /// resolves to (operand order, reduced axis, packed-row shape) without
-    /// re-deriving `kernel_cache_key`'s own logic outside this crate.
+    /// resolves to (operand order, reduced axis, packed-row shape, math
+    /// mode) without re-deriving `kernel_cache_key`'s own logic outside this
+    /// crate.
     ///
     /// # Errors
     /// Propagates the same rejection `kernel_cache_key` raises for an
@@ -611,7 +613,10 @@ impl Plan {
         self.prepared
             .resolved
             .iter()
-            .map(|bound| kernel_cache_key(bound, &self.packed_operands).map_err(MetalError::from))
+            .map(|bound| {
+                kernel_cache_key(bound, &self.packed_operands, self.math_mode.cache_token())
+                    .map_err(MetalError::from)
+            })
             .collect()
     }
 }
@@ -3835,23 +3840,22 @@ fn pipeline_for(
     cache_key: &str,
     math_mode: MathMode,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-    // [`kernel_cache_key`] is a pure structural fingerprint of the `BoundOp`
-    // -- it knows nothing about compile options -- so the math mode is
-    // folded in HERE, the one place a cache key turns into a lookup, rather
-    // than teaching `msl.rs` about a Metal-only compile option. Two BoundOps
-    // agreeing on everything `kernel_cache_key` checks but compiled under
-    // different modes MUST NOT share a pipeline: `Safe`'s kernel body is
-    // byte-identical to `Relaxed`'s (`compile_pipeline` never touches
-    // source text, only `MTLCompileOptions`), so only the entry's own key
-    // can keep the two apart.
-    let mode_key = format!("{cache_key}{}", math_mode.cache_token());
-    if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(&mode_key).cloned()) {
-        trace!(cache_key = %mode_key, hit = true, "pipeline cache lookup");
+    // `cache_key` ([`kernel_cache_key`]) already carries the math-mode token
+    // as part of the shared identity (`crate::identity::kernel_identity`,
+    // via `MetalOnlyExtras::math_mode_token`) -- the caller's own
+    // `math_mode.cache_token()` fed straight into it, so there is no second
+    // fold to do here. Two BoundOps agreeing on everything else but compiled
+    // under different modes still never share a pipeline: `Safe`'s kernel
+    // body is byte-identical to `Relaxed`'s (`compile_pipeline` never
+    // touches source text, only `MTLCompileOptions`), so only the key's own
+    // token keeps the two apart.
+    if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(cache_key).cloned()) {
+        trace!(cache_key = %cache_key, hit = true, "pipeline cache lookup");
         #[cfg(feature = "instrument")]
         counter!(PIPELINE_HITS, 1);
         return Ok(pipeline);
     }
-    trace!(cache_key = %mode_key, hit = false, "pipeline cache lookup");
+    trace!(cache_key = %cache_key, hit = false, "pipeline cache lookup");
     #[cfg(feature = "instrument")]
     let compile_started = read_ticks();
     let kernel = emit(bound, packed_operands)?;
@@ -3862,7 +3866,7 @@ fn pipeline_for(
         counter!(PIPELINE_COMPILE_TICKS, elapsed_ticks(compile_started));
     }
     PIPELINE_CACHE.with(|cache| {
-        cache.borrow_mut().insert(mode_key, pipeline.clone());
+        cache.borrow_mut().insert(cache_key.to_string(), pipeline.clone());
     });
     Ok(pipeline)
 }
@@ -5357,15 +5361,10 @@ fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<
     }
     let mut steps = Vec::with_capacity(plan.prepared.resolved.len());
     for bound in &plan.prepared.resolved {
-        let cache_key = kernel_cache_key(bound, &plan.packed_operands)?;
+        let cache_key =
+            kernel_cache_key(bound, &plan.packed_operands, plan.math_mode.cache_token())?;
         let (bindings, grid) = kernel_dispatch_shape(bound, &plan.packed_operands)?;
-        let pipeline = pipeline_for(
-            device,
-            bound,
-            &plan.packed_operands,
-            &cache_key,
-            plan.math_mode,
-        )?;
+        let pipeline = pipeline_for(device, bound, &plan.packed_operands, &cache_key, plan.math_mode)?;
         steps.push(ResolvedStep {
             pipeline,
             bindings,
@@ -5438,7 +5437,7 @@ fn encode_op(
         // case, `plan_hits`/`gpu_exec`'s own row) `emit` itself is never
         // called; only a genuine miss inside `pipeline_for` pays for the
         // full render + compile.
-        let cache_key = kernel_cache_key(bound, packed_operands)?;
+        let cache_key = kernel_cache_key(bound, packed_operands, math_mode.cache_token())?;
         let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands)?;
         #[cfg(feature = "instrument")]
         {

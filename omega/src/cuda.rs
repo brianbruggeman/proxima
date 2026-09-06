@@ -62,10 +62,10 @@ use alloc::vec::Vec;
 
 use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp,
-    StepArg,
 };
 
 use crate::error::EmitError;
+use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
 use crate::msl::{Binding, PackedCodec, PackedOperands};
 
 /// Every lane of one NVIDIA warp — fixed at 32 on every CUDA-capable GPU
@@ -151,7 +151,7 @@ pub fn emit_cuda(
     packed_operands: &PackedOperands,
 ) -> Result<CudaKernel, EmitError> {
     validate(resolved)?;
-    let entry = entry_name(resolved);
+    let entry = entry_name(resolved, packed_operands);
     let quantized = operand_codecs(resolved, packed_operands);
     if quantized.contains(&Some(PackedCodec::Q3K)) {
         return Err(EmitError::CudaUnsupportedPackedCodec {
@@ -196,17 +196,6 @@ pub fn emit_cuda(
     })
 }
 
-fn operand_codecs(
-    resolved: &BoundOp,
-    packed_operands: &PackedOperands,
-) -> Vec<Option<PackedCodec>> {
-    resolved
-        .operands()
-        .iter()
-        .map(|(node, _, _)| packed_operands.get(node).copied())
-        .collect()
-}
-
 fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
     match dtype {
         DType::Float16 => Ok("__half"),
@@ -240,21 +229,6 @@ fn validate_body(node: NodeId, body: &ComposedBody) -> Result<(), EmitError> {
         }
     }
     Ok(())
-}
-
-/// The untouched-epilogue convention [`proxima_tensor::BoundOpKind::
-/// Reduce::epilogue_body`]'s own doc names: a leaf [`ScalarOp::Identity`]
-/// reading its own sole implicit slot, over zero real operands. Restated per
-/// backend module (`crate::msl` carries its own copy) because
-/// `proxima_tensor::cpu`'s private original is not reachable from here.
-fn reduce_epilogue_is_identity(
-    body: &ComposedBody,
-    operands: &[(NodeId, Layout, Option<Lookup>)],
-) -> bool {
-    operands.is_empty()
-        && body.steps.len() == 1
-        && body.steps[0].op == ScalarOp::Identity
-        && body.steps[0].args == [StepArg::Operand(0)]
 }
 
 fn validate(resolved: &BoundOp) -> Result<(), EmitError> {
@@ -446,143 +420,21 @@ fn shuffle_combine_expr(
     }
 }
 
-fn op_token(op: ScalarOp) -> &'static str {
-    match op {
-        ScalarOp::Identity => "identity",
-        ScalarOp::Add => "add",
-        ScalarOp::Subtract => "subtract",
-        ScalarOp::Multiply => "multiply",
-        ScalarOp::Divide => "divide",
-        ScalarOp::Maximum => "maximum",
-        ScalarOp::Minimum => "minimum",
-        ScalarOp::Negate => "negate",
-        ScalarOp::Reciprocal => "reciprocal",
-        ScalarOp::Exponential => "exponential",
-        ScalarOp::Logarithm => "logarithm",
-        ScalarOp::SquareRoot => "square_root",
-        ScalarOp::Tanh => "tanh",
-        ScalarOp::Erf => "erf",
-        ScalarOp::Greater => "greater",
-        ScalarOp::Equal => "equal",
-        ScalarOp::Select => "select",
-    }
-}
-
-fn init_token(init: ReduceInit) -> &'static str {
-    match init {
-        ReduceInit::Zero => "zero",
-        ReduceInit::One => "one",
-        ReduceInit::NegativeInfinity => "negative_infinity",
-        ReduceInit::PositiveInfinity => "positive_infinity",
-        ReduceInit::FirstElement => "first_element",
-    }
-}
-
-fn keep_token(keep: Keep) -> &'static str {
-    match keep {
-        Keep::Reduce => "reduce",
-        Keep::Scan => "scan",
-    }
-}
-
-fn is_leaf(body: &ComposedBody) -> bool {
-    body.steps.len() == 1
-        && body.steps[0].args.iter().enumerate().all(
-            |(index, arg)| matches!(arg, StepArg::Operand(operand) if *operand as usize == index),
-        )
-}
-
-fn body_fingerprint(body: &ComposedBody) -> String {
-    body.steps
-        .iter()
-        .map(|step| {
-            let mut token = String::from(op_token(step.op));
-            for arg in &step.args {
-                match arg {
-                    StepArg::Operand(index) => token.push_str(&format!("_o{index}")),
-                    StepArg::Step(index) => token.push_str(&format!("_s{index}")),
-                }
-            }
-            token
-        })
-        .collect::<Vec<_>>()
-        .join("__")
-}
-
-fn body_token(body: &ComposedBody) -> String {
-    if is_leaf(body) {
-        op_token(body.steps[0].op).into()
-    } else {
-        format!("fused_{}", body_fingerprint(body))
-    }
-}
-
-/// A structural fingerprint over rank/operand-count/body/(for a reduce)
-/// reduce-op/init/output-rank/gather-shape — the CUDA counterpart of
-/// `crate::msl::entry_name`.
-fn entry_name(resolved: &BoundOp) -> String {
-    let rank = resolved.extents.len();
-    let operand_count = resolved.operands().len();
-    let base = match &resolved.kind {
-        BoundOpKind::Elementwise { .. } => {
-            let body = body_token(resolved.element_body());
-            format!("omega_cuda_elementwise_r{rank}_n{operand_count}_{body}")
-        }
-        BoundOpKind::Reduce {
-            reduce_op,
-            init,
-            keep,
-            output_axes,
-            epilogue_body,
-            epilogue_operands,
-            ..
-        } => {
-            let body = body_token(resolved.element_body());
-            let kind = keep_token(*keep);
-            let reduce_body = op_token(*reduce_op);
-            let init = init_token(*init);
-            let output_rank = output_axes.len();
-            // A fused epilogue changes both the `Uniforms` layout (the extra
-            // `epilogue_operand_base`/`_strides` fields) and the body text
-            // (`push_reduce_epilogue_write`'s emitted tail) -- mirrors
-            // `crate::msl::entry_name`/`crate::wgsl::entry_name`'s own
-            // `epilogue` suffix, so a future CUDA driver's own kernel cache
-            // never collides two structurally-different reduces under one
-            // name the way `crate::wgsl::entry_name`'s own doc warns about.
-            let epilogue = if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
-                String::new()
-            } else {
-                format!(
-                    "_epi{}_{}",
-                    epilogue_operands.len(),
-                    body_token(epilogue_body)
-                )
-            };
-            format!(
-                "omega_cuda_{kind}_r{rank}_o{output_rank}_n{operand_count}_{body}_{reduce_body}_{init}{epilogue}"
-            )
-        }
-        BoundOpKind::Iota => format!("omega_cuda_iota_r{rank}"),
-        BoundOpKind::Constant { value } => {
-            format!("omega_cuda_constant_r{rank}_v{:08x}", value.to_bits())
-        }
-        // Never actually rendered: `emit_cuda`'s own kind-match returns
-        // `EmitError::CudaUnsupportedOpKind` for `CachedAttention` before
-        // this name is used for anything. A name is still produced (rather
-        // than panicking here) because this function runs before that later
-        // match, purely to satisfy exhaustiveness with a harmless value.
-        BoundOpKind::CachedAttention { .. } => format!("omega_cuda_cached_attention_r{rank}"),
-    };
-    let gather_bits: String = resolved
-        .operands()
-        .iter()
-        .map(|(_, _, gather)| if gather.is_some() { '1' } else { '0' })
-        .collect();
-    if gather_bits.contains('1') {
-        format!("{base}_g{gather_bits}")
-    } else {
-        base
-    }
+/// This language's own [`crate::identity::kernel_identity`] — see that
+/// module's doc for the full union of axes folded in and why. No CUDA
+/// driver exists yet (this crate emits source only), so nothing currently
+/// caches by this string, but it is still the name embedded literally in
+/// emitted CUDA source, and gains the same fix `crate::wgsl::entry_name`
+/// does: per-operand packed codec, which `crate::cuda`'s own `packed_
+/// element_expr` already renders a distinct body for, and dtype width
+/// class — this census's own finding, neither was folded in before.
+fn entry_name(resolved: &BoundOp, packed_operands: &PackedOperands) -> String {
+    crate::identity::kernel_identity(
+        crate::identity::KernelLanguage::Cuda,
+        resolved,
+        packed_operands,
+        crate::identity::MetalOnlyExtras::default(),
+    )
 }
 
 fn scalar_op_expr(op: ScalarOp, args: &[&str]) -> String {
@@ -2234,11 +2086,41 @@ mod tests {
     fn a_fused_reduce_epilogue_gives_a_distinct_entry_name_from_the_bare_reduce() {
         let fused = row_sum_plus_bias_op(4, 8);
         let bare = matmul_reduce_op(4, 8, ScalarOp::Add);
+        let packed = no_packed();
         assert_ne!(
-            entry_name(&fused),
-            entry_name(&bare),
+            entry_name(&fused, &packed),
+            entry_name(&bare, &packed),
             "a fused epilogue must never collide with the bare reduce's cache key \
              (crate::wgpu_driver::pipeline_for's own caching-by-name hazard)"
+        );
+    }
+
+    /// This census's own finding: `packed_element_expr` (this module's own
+    /// codec-dependent body renderer) already emitted a distinct body per
+    /// codec, but `entry_name` never said so before `crate::identity::
+    /// kernel_identity` folded the codec digits in for every language. A
+    /// future CUDA driver keying a kernel cache on this name alone would
+    /// have reused a `Q4_K`-compiled kernel's body against `Q5_K` bytes.
+    #[test]
+    fn packed_codec_changes_emitted_source_and_the_entry_name() {
+        let bound = matmul_reduce_op(4, 256, ScalarOp::Add);
+        let weight_node = bound.operands()[0].0;
+
+        let mut q4k = PackedOperands::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+        let mut q5k = PackedOperands::new();
+        q5k.insert(weight_node, PackedCodec::Q5K);
+
+        let kernel_q4k = emit_cuda(&bound, &q4k).expect("q4k emits");
+        let kernel_q5k = emit_cuda(&bound, &q5k).expect("q5k emits");
+
+        assert_ne!(
+            kernel_q4k.source, kernel_q5k.source,
+            "packed_element_expr must render a distinct body per codec"
+        );
+        assert_ne!(
+            kernel_q4k.entry, kernel_q5k.entry,
+            "two operands differing only in packed codec must never share one compiled kernel name"
         );
     }
 }
