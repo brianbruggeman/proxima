@@ -518,6 +518,22 @@ impl Plan {
         self.dispatch_type = dispatch_type;
     }
 
+    /// This plan's currently applied [`MathMode`] -- the read side of
+    /// [`Self::set_math_mode`], added so a caller (or a test) can prove a
+    /// build path actually applied a mode rather than only asserting that a
+    /// setter was called somewhere upstream.
+    #[must_use]
+    pub fn math_mode(&self) -> MathMode {
+        self.math_mode
+    }
+
+    /// This plan's currently applied [`DispatchType`] -- [`Self::math_mode`]'s
+    /// counterpart for [`Self::set_dispatch_type`].
+    #[must_use]
+    pub fn dispatch_type(&self) -> DispatchType {
+        self.dispatch_type
+    }
+
     /// Overrides this plan's ROW 329 encoder-split position from `None`
     /// (one stage-sampled encoder per position, ROW 309's original
     /// fallback). Safe to call any time before an
