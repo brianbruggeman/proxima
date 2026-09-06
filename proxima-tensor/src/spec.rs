@@ -628,23 +628,26 @@ impl RopePairing {
     /// (extent `pairs`) that is genuinely NARROWER than `source`'s own
     /// channel axis under [`Self::SplitHalf`] (`source` is `attn_head_dim`
     /// wide; `i` only ranges over `pairs = rotary_dim/2`). A bare `"i"`
-    /// would parse to a single coefficient-1, offset-0 term, which
-    /// `shape::infer`'s `unify_iteration_space` (`shape.rs:224-227`) reads
-    /// as "this operand's own axis size IS `i`'s extent" -- sizing `i` at
-    /// `source`'s full width instead of `cos_new`/`sin_new`'s `pairs` and
-    /// producing an `ExtentMismatch` the moment `pairs < attn_head_dim`
-    /// (partial rotary). `"i+0*i"` is the same address (`i*1 + i*0 == i`)
-    /// spelled as two terms so that check's `[term]`-slice match declines,
-    /// leaving `cos_new`/`sin_new` as the sole size-definer for `i`, same
-    /// as [`Self::Interleaved`]'s `"2*i"` already is (its coefficient-2
-    /// term never qualifies as a coefficient-1 single term either).
+    /// address is genuinely correct here -- `source` really is read
+    /// starting at the origin with a plain identity map -- but `i`'s true
+    /// extent is `pairs`, not `source`'s own on-disk width, whenever
+    /// `pairs < attn_head_dim` (partial rotary). `"i@{pairs}"` states that
+    /// directly via [`crate::map::AxisIndex::len`] (`parse_axis_expr`'s own
+    /// doc has the grammar): the address is `i`, plain; the extent fact is
+    /// `pairs`, separate. `cos_new`/`sin_new`'s own plain `"i"` (no `@`,
+    /// their own width already IS `pairs`) still resolves the same value, so
+    /// both agree without either lying about its arithmetic.
+    /// [`Self::Interleaved`]'s `"2*i"` needs no such annotation: its
+    /// coefficient-2 term already never qualifies as a size-definer (only a
+    /// `coeff == 1` single term does), so it was never in tension with
+    /// `cos_new`/`sin_new` the way a bare `"i"` was.
     fn offsets(self) -> (alloc::string::String, alloc::string::String) {
         match self {
             Self::Interleaved => (
                 alloc::string::String::from("2*i"),
                 alloc::string::String::from("2*i+1"),
             ),
-            Self::SplitHalf { pairs } => (alloc::string::String::from("i+0*i"), alloc::format!("i+{pairs}")),
+            Self::SplitHalf { pairs } => (alloc::format!("i@{pairs}"), alloc::format!("i+{pairs}")),
         }
     }
 }
