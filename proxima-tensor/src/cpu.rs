@@ -5080,6 +5080,15 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         None => None,
     };
     let new_upper_inclusive = dynamic_new_upper_inclusive.unwrap_or(*new_upper_inclusive);
+    // The runtime `cached_len` value is a live position count, never larger
+    // than the compiled buffer extent it indexes into -- a value at or past
+    // `new_key_rows` means the caller handed a stale or wrong-bucket length.
+    if dynamic_new_upper_inclusive.is_some() && new_upper_inclusive >= *new_key_rows as i64 {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "cached attention's runtime cached_len operand exceeds its buffer extent",
+        });
+    }
     let mut sources = operands.iter().take(8).map(|(node, layout, _)| {
         if layout.base != 0 || layout.strides.last().copied() != Some(1) {
             return Err(TensorError::NotLowerable {
