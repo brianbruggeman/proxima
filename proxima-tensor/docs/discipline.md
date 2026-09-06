@@ -25503,3 +25503,70 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `fix(interop): quality harness takes the math mode` + docs-only: `docs(tensor): row 356 quality at fast math` | ROW 353's gap closed: `math_mode` threaded through `supported_serving_config` -> `score_prompt` -> `quality_report` (`#[cfg(all(feature = "metal", target_os = "macos"))]`-gated parameter, `omega::MathMode`, no new type); a structural regression test proves the plumbing is live. Measured R (Relaxed, re-baselined on `8f796ce`) vs F (Fast): bit-identical on every quality column (exact 0.906250, top1 0.968750, kl_mean 0.001956, kl_max 0.026294, max_abs_logit_delta 1.240001) -- matches `omega::MathMode`'s own doc that Fast is indistinguishable from Relaxed on this kernel. Owner rule (exact >= R AND kl_max <= 2x R): F WOULD QUALIFY. No default flip -- ROW 353 already found no wall-clock benefit to trade against | single run per arm (deterministic teacher-forced comparison, not a timed bench -- no CoV axis); gates: clippy metal,instrument EXIT=0, clippy std EXIT=0, nextest metal,instrument 112/112 (32 skipped), nextest std 96/96 (25 skipped) | THREE-check gate empty/empty/load-1 1.92 before setup; rechecked empty/empty before the Fast run |
+
+## ROW 358 -- kind-filter ablation cannot isolate the packed-row matvec kind through this harness (prefill has zero of it); the three ablatable kinds close only half of ROW 357's ~5ms gap
+
+**Card:** none (measurement only, docs-only row). **Worktree/branch:** `proxima-wt-r358`, `docs/row-358-kind-ablation`, off `main` at `d5b741e` (ROW 357's own commit).
+
+**Question this row answers.** ROW 357's Metal System Trace could not resolve the ~5ms gap between the in-program `gpu_exec_ms` (21.07ms, ROW 355 pooled) and the bare packed-row-matvec-only sequence (15.85ms, ROW 354) below encoder granularity -- one `MTLComputeCommandEncoder` per command buffer. `PROXIMA_METAL_KIND_FILTER` (`omega/src/metal.rs:1771-1795`, `ablation_skip`, instrument builds only, vocabulary at `omega/src/metal.rs:1459-1470`) can skip dispatches by kind from inside the program instead. Which kind carries how much of that gap, and does the per-kind decomposition close against FULL?
+
+**Method.** Same harness as ROW 342/354/355 (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `--features metal,instrument`, `PROXIMA_MAX_TOKENS=8`, `--exact --ignored --nocapture --test-threads=1`). `git diff --stat 19010e8 main -- omega/src proxima-tensor/src` is empty, so ROW 352/355/357's own `r352-logs/oracle-A` (`19010e8`, nsg2/production) is reused unmodified -- confirmed still an `instrument` build by running it with a bogus kind (`PROXIMA_METAL_KIND_FILTER='!bogus_kind_xyz'`), which errors `Metal(UnknownKindFilterTerm { term: "bogus_kind_xyz" })` rather than silently ignoring it (a non-instrument build has no `KindFilter` parsing at all). One release binary, one round per cell (FULL, `!cached_attention`, `!elementwise`, `!reduce-cooperative`, `!iota`, `!reduce-packed-row-blocked`), 8 tokens, `gpu_exec_ms` at steps 3..7. Dispatch counts per kind read from the plan itself via the existing `PROXIMA_METAL_OP_PROFILE_STEP=3` diagnostic (`generate.rs:186`, `report_op_timings`/`op_profile_bucket`), which runs `evaluate_op_timed` (per-op command buffers) for exactly one step and prints an exhaustive `op_count`/`gpu_ms` table keyed by `classify_kind`'s own bucket -- the count is asserted from this table, not inferred from a flag.
+
+**Quiet gate.** THREE-check gate (names-only `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'`, `pgrep -fl 'while true' | grep -v pgrep`, load-1 < 10) run once before the 6 timed cells (both pgrep empty, load-1 1.87) -- PASSED, no retry needed. Re-checked after the timed runs and again before the docs commit (both pgrep empty, load-1 2.38).
+
+**`!reduce-packed-row-blocked` is infeasible through this harness -- not a text-degeneration case, a hard `Result::Err` before any decode step runs.** The run panics immediately (`finished in 0.12s`, no `token_breakdown` line ever printed) with `Metal(KindFilterMatchesNothing { filter: "!reduce-packed-row-blocked" })`. `validate_kind_filter` (`metal.rs:1543-1567`) runs on EVERY call to `execute_plan_with_placements`, including the harness's own PREFILL call (`new_count=31`, the first token) before any of steps 3..7 are reached, and rejects a filter that removes 0 or all of that call's own `prepared.resolved` ops. The prefill step batches 31 tokens through the SAME weight matrices the single-token decode steps use, but `classify_kind`'s `Reduce{keep:Reduce}` arm (`metal.rs:2993-3040`) checks the emitted kernel body's source markers, checking `"reduce-tiled-gemm"` (the `simdgroup_multiply_accumulate` marker) BEFORE `"reduce-packed-row-blocked"` (the `acc1_0`/`q4k_run8`/etc. markers) -- a batched matmul emits the tiled-gemm body, not the packed-row-blocked one, so prefill's own op population contains zero ops of the kind this cell asks to remove, independent of the fact that steps 3..7 (single-token decode) contain 224 of them. This is a real, load-bearing finding about the tool, not a workaround-needing bug: the filter is validated per-call against that call's own plan population, and prefill and decode steps populate different kind buckets for the identical weight set.
+
+**Dispatch count per kind, FULL, step=3 (`PROXIMA_METAL_OP_PROFILE_STEP=3`, `op_profile_bucket` lines, `r358-logs/op-profile-step3.log`):**
+
+| kind | op_count | bare gpu_ms (op-timed mode, not comparable to the ablation ms column below) |
+| --- | --- | --- |
+| cached_attention | 32 | 1.699 |
+| constant | 2 | 0.008 |
+| elementwise | 194 | 2.040 |
+| iota | 2 | 0.008 |
+| reduce-cooperative | 66 | 1.150 |
+| reduce-packed-row-blocked | 224 | 18.229 |
+| **total** | **520** | **23.133** |
+
+Counts sum to `op_count=520`, matching the total the FULL/ablated logs' own `op_setup_calls=520` (or the reduced count after a kind is skipped) already report. **The Q6_K output head classifies as `reduce-cooperative`, not `reduce-packed-row-blocked`** (`op_profile_top` rank=1: `node=2586 kind=reduce-cooperative weight_name=Some("output.weight")`) -- the brief's assumption that `!<packed-row matvec kind>` would include the head does not hold on this plan; the head's kernel body ends in `simd_sum(` (the cooperative-reduce marker) rather than the packed-row-blocked body's own markers, per `classify_kind`'s own precedence.
+
+**Data -- one round, 8 tokens, `gpu_exec_ms` at steps 3..7:**
+
+| cell | steps 3..7 (5 values, ms) | mean (ms) | FULL − cell (ms) |
+| --- | --- | --- | --- |
+| FULL (no filter) | 20.536, 20.561, 20.579, 20.547, 20.503 | 20.5452 | -- |
+| `!cached_attention` | 19.485, 19.516, 19.589, 19.614, 19.052 | 19.4512 | **+1.0940** |
+| `!elementwise` | 19.519, 20.117, 20.035, 20.081, 20.295 | 20.0092 | **+0.5360** |
+| `!reduce-cooperative` | 19.731, 19.875, 19.773, 19.844, 19.867 | 19.8181 | **+0.7271** |
+| `!iota` | 21.552, 21.645, 21.758, 21.810, 21.638 | 21.6807 | **-1.1355** |
+| `!reduce-packed-row-blocked` | infeasible (see above) | -- | -- |
+
+**Closure check -- does NOT close.** Summing the three kinds with a real, positive, above-noise delta (`cached_attention` 1.094 + `elementwise` 0.536 + `reduce-cooperative` 0.727 = **2.357 ms**) against ROW 357's own named gap (FULL 21.07ms pooled, ROW 355, minus bare 15.85ms, ROW 354, = **4.70ms**, and this row's own single-round FULL of 20.545ms minus bare = **4.70ms** also, coincidentally near-identical): the three ablatable non-matvec kinds account for barely half (2.357 / 4.70 = **50.1%**) of the gap. `!iota`'s -1.1355ms delta is noise, not a real cost -- `iota` is 2 ops at 0.008ms bare (op-timed table above), so a -1.14ms swing from removing it is two to three orders of magnitude larger than its own bare cost and is this row's own single-round, single-sample variance (no repeat rounds were budgeted; ROW 355's in-program CoV for `gpu_exec_ms` is 1.3-2.2% per round, i.e. roughly +/-0.27-0.45ms at this mean, which does not by itself explain a 1.14ms swing either -- named, not resolved, under this row's 30-minute budget). `constant` (2 ops, 0.008ms bare) was not separately ablated -- its own bare cost is negligible by the same op-timed measurement.
+
+**The residual, ~2.34-2.35ms (4.70 - 2.357), is the term the brief asked to name and this row's method cannot independently attribute to the packed-row matvec kind** -- `!reduce-packed-row-blocked` could not be run (see infeasibility finding above), so there is no ablation-based measurement of "matvecs slower in program" to set against ROW 354's bare 15.85ms. A DERIVED estimate (FULL 20.545 minus the three real per-kind deltas minus iota's own bare 0.008ms = **18.180ms** implied packed-row-blocked in-program cost, vs ROW 354's bare 15.85ms = **+2.33ms/+14.7%** implied slowdown) is arithmetically consistent with the residual by construction (it IS the residual, relabeled) and is NOT independent evidence -- it is reported as DERIVED, not MEASURED, per principle 18, and should not be read as a second confirmation of the same number.
+
+**Residual, named not hidden.** (1) The packed-row matvec kind's own in-program cost is UNMEASURED by this row's method -- the one ablation that would isolate it directly (`!reduce-packed-row-blocked`) cannot run through this harness because prefill's own plan population contains none of that kind (see the infeasibility finding); a fresh row would need either a harness that can skip prefill's own `validate_kind_filter` call (a source change, not attempted here) or a different isolation method entirely. (2) Single round, single 8-token run per cell -- no CoV, no repeat-round check; `!iota`'s -1.14ms delta is flagged as noise but not independently re-run to confirm. (3) Whether the ~2.34ms residual is barrier/hazard overhead between kind-adjacent dispatches that no single-kind ablation removes (the brief's own named hypothesis), CPU-side bookkeeping variance step-to-step (ROW 355's own named source for the full loop's higher CoV vs the bare ladder's), or packed-row-blocked dispatches genuinely running slower in-program than bare, is NOT decided by this row -- all three remain open. (4) `constant`'s 2 ops (0.008ms bare) were not separately ablated; folded into the "no further real cost" reading by inspection of its own bare `gpu_ms`, not by a dedicated ablation cell.
+
+**Gates.** Docs-only row; no functional source change (the kind-filter mechanism, `omega/src/metal.rs:1454-1795`, already existed before this row and expressed every kind this row needed, including the diagnostic-only `PROXIMA_METAL_OP_PROFILE_STEP` used for the count table -- no new label was added). `git status --porcelain` in the worktree, before this commit, shows only this file's edit and the untracked `r358-logs/` review directory.
+
+**Re-prove command (each cell):**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main (>= d5b741e)
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p proxima-model-interop --release --features metal,instrument --no-run
+BIN=$(find target/release/deps -name 'proxima_model_interop-*' -type f -perm +111)
+PROXIMA_MAX_TOKENS=8 PROXIMA_METAL_KIND_FILTER='!cached_attention' "$BIN" \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --exact --ignored --nocapture --test-threads=1
+PROXIMA_MAX_TOKENS=8 PROXIMA_METAL_OP_PROFILE_STEP=3 "$BIN" \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --exact --ignored --nocapture --test-threads=1
+```
+(expected: `!cached_attention` prints 8 `token_breakdown_metal` lines with `gpu_exec_ms` near 19.0-19.6 at steps 3..7, `kind_filter=!cached_attention`, `ablation=true`; the `PROXIMA_METAL_OP_PROFILE_STEP=3` run prints `op_profile_bucket` lines for all 6 kinds summing to `op_count=520`; `PROXIMA_METAL_KIND_FILTER='!reduce-packed-row-blocked'` panics before any `token_breakdown` line with `KindFilterMatchesNothing`.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | docs-only: `docs(tensor): row 358 per-kind in-program cost by ablation` | Kind-filter ablation (`!cached_attention`/`!elementwise`/`!reduce-cooperative`/`!iota`) against FULL isolates 2.357ms of ROW 357's ~4.70ms in-program-vs-bare gap to the three real kinds (1.094/0.536/0.727ms respectively, `!iota`'s -1.14ms is noise); the fourth planned cell, `!reduce-packed-row-blocked`, is infeasible through this harness -- `validate_kind_filter` rejects it at the PREFILL step (batched matmul classifies as `reduce-tiled-gemm`, zero packed-row-blocked ops in that call's own plan population), so the packed-row matvec kind's own in-program cost is not independently measured this row. Dispatch counts asserted from the plan via `PROXIMA_METAL_OP_PROFILE_STEP`: 520 total ops (32 cached_attention, 2 constant, 194 elementwise, 2 iota, 66 reduce-cooperative, 224 reduce-packed-row-blocked); the Q6_K output head classifies as `reduce-cooperative`, not packed-row-blocked, contrary to the brief's assumption. Residual ~2.34ms named, not attributed to any single term | 1 round, 8 tokens/cell, no CoV (single-round budget); dispatch-count table is a single deterministic read, not a timed measurement | THREE-check gate PASSED before the 6 timed cells (pgrep empty both patterns, load-1 1.87); re-checked after (load-1 2.38), no retry needed |
+
