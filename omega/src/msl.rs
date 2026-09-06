@@ -4060,7 +4060,17 @@ fn push_packed_row_blocked_body(
         let rows = codec.rows_per_simdgroup();
         source.push_str(&format!("    long group_first = output_index * {rows};\n"));
         source.push_str(&format!("    {element_type} sumf[{rows}];\n"));
-        if cfg!(feature = "metal-q4k-split-k") {
+        // when the seed and the algebraic identity are the textually same
+        // token (true for every op this path actually reaches: Add/Zero,
+        // Multiply/One, Maximum/NegativeInfinity, Minimum/PositiveInfinity),
+        // every lane's `sumf[q]` starts at the same value regardless of
+        // which lane it is -- the per-lane ternary is dead, a select over
+        // two identical constants, so emit a plain assignment instead.
+        if init_expr == identity {
+            source.push_str(&format!(
+                "    for (int q = 0; q < {rows}; ++q) {{ sumf[q] = {identity}; }}\n"
+            ));
+        } else if cfg!(feature = "metal-q4k-split-k") {
             // the true seed folds in exactly ONCE across the WHOLE
             // threadgroup, not once per simdgroup -- at split == 1 `sgitg`
             // is always `0`, so this collapses to the feature-off condition
