@@ -24180,8 +24180,67 @@ PROXIMA_MAX_TOKENS=10 PROXIMA_METAL_DISPATCH_PROFILE_STEP=5 PROXIMA_METAL_ENCODE
   --ignored --exact --test-threads=1 --nocapture
 ```
 
+## ROW 331 -- `decode_shape_roofline_ladder`'s isolated kernel bandwidth per real decode shape; the Q6_K `layer` "flake" is 100% reproducible within one process, and 8 of 10 families fail this arm's own parity gate, not just `layer`
+
+**Card:** `test(omega): ladder repeat mode dumps divergent rows` (`docs/row-331`, off `main`). **Worktree/branch:** `proxima-wt-r331`, `docs/row-331`.
+
+**Task.** ROW 310's per-family bandwidth table came from the in-program decode loop (concurrent-dispatch overlap, shapes averaged across mixed codecs). `decode_shape_roofline_ladder` (landed `fec5a53`, never before executed) isolates each of the 10 real per-family matvec shapes this checkpoint dispatches, through production's own `omega::metal::plan`/`execute_plan`, quiet and alone -- this row's first run of it. Separately, `ladder-parity-flake-read.md` (candidate 2) asked for a repeat-and-dump instrumentation on the Q6_K `layer` arm, which ROW 326 found failing parity once (`relative_error=0.0681405`) and passing on an immediate re-run (`1.39e-6`), called "nondeterministic" there.
+
+**Code added.** `run_shape_arm` (`omega/tests/matvec_roofline_ladder.rs`) gained an env-gated tail: `PROXIMA_LADDER_REPEAT=<n>` re-dispatches the SAME resolved plan `n` extra times and calls a new `repeat_dump_divergences` which checks EVERY repeat's per-row parity individually (not just the aggregate `check_parity` over the last repeat), printing the repeat index, tensor index, and the first 8 divergent rows (row, reference, observed, relative_error) for any repeat that diverges. No-op when the env var is unset, so `decode_shape_roofline_ladder`'s own run (below) is unaffected by this addition.
+
+**Gate.** Names-only `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'`, load-1<10, re-checked every 20s. Loud twice across this row's session (other slices' `cargo`/`rustc`/`cargo-nextest`/`proxima_model_i` builds and a determinism oracle, load-1 up to 31.9), cleared both times (load-1 8.55 and 8.67 respectively) before each build/run pair.
+
+**Part 1 -- `decode_shape_roofline_ladder` (5 timed repeats/arm, `PROXIMA_LADDER_REPEAT` unset):**
+
+| family | rows | K | codec | tensors | bytes | isolated GB/s | CoV% | ratio to 381.24 | ROW 310 in-program | ratio isolated/in-program | parity (relative_error) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| attn_q | 4096 | 4096 | Q4_K | 212 | 2,000,683,008 | 107.51 | 45.66 | 0.282 | noise-negative | n/a | 0.0000025 (PASS) |
+| attn_k | 1024 | 4096 | Q4_K | 848 | 2,000,683,008 | 78.59 | 34.81 | 0.206 | noise-negative | n/a | 0.0978096 (FAIL) |
+| attn_v | 1024 | 4096 | Q4_K | 848 | 2,000,683,008 | 76.01 | 48.41 | 0.199 | noise-negative | n/a | 0.1151728 (FAIL) |
+| attn_v_q5k | 1024 | 4096 | Q5_K | 694 | 2,001,207,296 | 77.67 | 35.05 | 0.204 | (not in ROW 310 table) | n/a | 0.0981249 (FAIL) |
+| attn_output | 4096 | 4096 | Q4_K | 212 | 2,000,683,008 | 103.17 | 48.99 | 0.271 | 144.94 | 0.712 | 0.0846453 (FAIL) |
+| ffn_gate | 14336 | 4096 | Q4_K | 61 | 2,014,838,784 | 155.94 | 39.91 | 0.409 | 236.55 | 0.659 | 0.0640952 (FAIL) |
+| ffn_up | 14336 | 4096 | Q4_K | 61 | 2,014,838,784 | 151.04 | 46.30 | 0.396 | 183.48 | 0.823 | 0.1256332 (FAIL) |
+| ffn_down | 4096 | 14336 | Q4_K | 61 | 2,014,838,784 | 160.47 | 45.22 | 0.421 | 200.46 | 0.801 | 0.0549641 (FAIL) |
+| ffn_down_q5k | 4096 | 14336 | Q5_K | 50 | 2,018,508,800 | 148.65 | 41.28 | 0.390 | (not in ROW 310 table) | n/a | 0.0426920 (FAIL) |
+| head | 32000 | 4096 | Q6_K | 19 | 2,042,880,000 | 192.95 | 48.54 | 0.506 | 41.63 | 4.635 | 0.0000025 (PASS) |
+
+The run's own final assertion: `test result: FAILED ... parity failed for 8 arm(s)` (`decode-shape.log`, 1554.99s wall). One sentence per family on what the isolated/in-program ratio implies, GB/s only (parity discussed separately below): `attn_q`/`attn_k`/`attn_v` have no ROW 310 comparator (ROW 310 itself measured them noise-negative in-program, CoV too high to trust); `attn_output` isolates to 71% of its in-program figure -- the opposite direction from `head`'s 4.6x, meaning `attn_output`'s in-program number benefits from something (overlap with concurrent dispatches, or a different kernel key per ROW 326's own finding) this isolated arm does not reproduce; `ffn_gate`/`ffn_up`/`ffn_down` isolate to 66-82% of their in-program figures, all in the SAME direction as `attn_output` -- production's concurrent-dispatch context appears to help these families' throughput, not hurt it, the reverse of the output head's own story; `head` isolates 4.6x ABOVE its in-program figure, consistent with ROW 326's finding that the ladder's head arm never compiled the same kernel as production's real head (different operand order and reduced-axis position in `kernel_cache_key`), so `head`'s 41.63 GB/s in-program number and this arm's 192.95 GB/s remain two measurements of two different dispatches, not a before/after pair.
+
+**Parity, the larger finding.** 8 of 10 families fail this arm's own `PARITY_MAX_REL_ERROR=1e-5` gate at 4.3-12.6% relative error -- an order of magnitude past a threshold-tuning gap (contrast ROW 321/322's head-arm story, where a `2e-6`-relative miss was hiding behind an absolute 1e-4 threshold; these errors are 20,000-60,000x larger than that ULP-scale case). Only `attn_q` (the FIRST arm to run, in a fresh thread) and `head` (the LAST of the eight `k=4096` arms) pass, both at `~2.5e-6` -- the same magnitude as the old ULP-scale case. The six FAILING `k=4096` arms sit strictly BETWEEN `attn_q` and `head` in call order; the two `k=14336` arms (`ffn_down`, `ffn_down_q5k`) also fail despite sharing a DIFFERENT activation buffer size (57,344 bytes) from every `k=4096` arm, and `ffn_down` is itself the FIRST call at that size -- so a pairwise same-activation-size resident-buffer collision (`ladder-parity-flake-read.md` candidate 1) does not cleanly explain every failing arm; `ffn_down`'s own failure as a first-of-its-size call is a residual against that theory as stated, not a confirmation.
+
+**Part 2 -- Q6_K `layer`/`head` flake dump (`PROXIMA_LADDER_REPEAT=20`, `q6k_head_and_layer_shape_roofline_ladder`):**
+
+| arm | rows | repeats | failing repeats | divergent rows/repeat | row values across ALL 20 repeats | verdict on "flake" |
+| --- | --- | --- | --- | --- | --- | --- |
+| head | 32000 | 20 | 0 | 0 | n/a (clean every repeat) | never diverges, within this one process |
+| layer | 4096 | 20 | 20 | 64 (every checked row) | BYTE-IDENTICAL reference/observed/relative_error at every row, every repeat (e.g. row 0: reference=15908.195 observed=16355.146 relative_error=0.025444437, unchanged across all 20 repeats) | NOT a within-process flake -- 100% reproducible, deterministic given this plan/blocks pair |
+
+**Correction to ROW 326's "nondeterministic" framing.** ROW 326 observed `layer` fail once (`0.0681405`) and pass once (`1.39e-6`) across TWO SEPARATE process invocations of the same test. This row's 20 repeats run INSIDE ONE process invocation, re-dispatching the SAME already-resolved plan without rebuilding it, and get the IDENTICAL wrong output every single time (down to the printed float, not just "still fails"). The two observations are not in conflict: they are consistent with a mechanism that is deterministic GIVEN one process's own heap-address/allocator state (this row's own evidence) but can differ ACROSS process invocations (ROW 326's own fail-once/pass-once pair, which this row's protocol cannot address since it never restarts the process). This is consistent with, but does not prove, `ladder-parity-flake-read.md` candidate 1 (a stale `RESIDENT_BUFFERS` cache hit keyed on a freed-then-reused `(pointer, length)` pair for the shared `activation` input, which depends on allocator address reuse and would vary run-to-run only across process restarts) -- it equally fits any other mechanism whose outcome is a pure function of this process's own memory layout. The direct-proof instrumentation candidate 1 itself names (a `debug!` in `upload_resident_copy` emitting `(pointer, byte_length, cache_hit)`) was NOT added this row; that remains the distinguishing step.
+
+**Residual, named not hidden.** (1) Part 1's 8-of-10 parity failure is a materially larger, previously unmeasured surface than the single `layer`-arm flake `ladder-parity-flake-read.md` and ROW 326 characterized -- this row does not root-cause it, only measures and reports it plainly. (2) `ffn_down`'s own failure as a first-of-its-activation-size call argues against a clean pairwise-collision explanation for every failing arm; some other or additional mechanism may be at play for the `k=14336` pair, not investigated here. (3) No fresh-process comparison was run for `layer` this row (only within-process repeats) -- whether `layer` is ALSO 100% reproducible on a fresh process invocation, or only stable within a process once one has occurred, is unmeasured. (4) The `RESIDENT_BUFFERS` `cache_hit` instrumentation candidate 2's own read names as the closing step was not added. (5) `attn_v_q5k`/`ffn_down_q5k` have no ROW 310 in-program comparator (not in that table) -- their isolated numbers stand alone.
+
+**Gates.** `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0.
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-row331-repro -b docs/row-331-repro main
+cd ../proxima-wt-row331-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --release --features metal --test matvec_roofline_ladder --no-run
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  -- --ignored --nocapture decode_shape_roofline_ladder
+PROXIMA_LADDER_REPEAT=20 CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  -- --ignored --nocapture q6k_head_and_layer_shape_roofline_ladder
+```
+(expected: both tests `FAILED`, exit 101; `decode_shape_roofline_ladder` lists 8 failing arms; the repeat run's `layer` arm prints identical divergent-row values across all 20 `PROXIMA_LADDER_REPEAT` iterations.)
+
 ### Changelog
 
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `feat(omega): encoder split with stage timestamps under instrument` + this row | Encoder-split mechanism lands and is proven (unit test + real oracle); falsifies the brief's own "~2.4 ms flat per-encoder cost, subtract via a control" premise -- encoder-1's 519-dispatch span costs 2.132 ms/dispatch, matching ROW 309's own per-position average almost exactly (no savings from grouping), while a short 1-2-dispatch encoder-2 costs ~18 ms regardless, ~8.5x that rate; ROW 329 does NOT settle the head's own ms | 3 rounds interleaved A/B/C; enc-2 CoV 0.69-1.27%, gpu_exec CoV up to 6.43% (one load-spike round, not dropped) | quiet gate (names-only) EMPTY at every launch; load-1 13-41 throughout (shared host, other agents' bursts) -- NOT clean, reported plainly |
+| 2026-09-06 | `test(omega): ladder repeat mode dumps divergent rows` + this row | First-ever run of `decode_shape_roofline_ladder`: isolated GB/s for all 10 real decode-matvec shapes, but 8 of 10 fail the arm's own parity gate at 4.3-12.6% relative error (only `attn_q`/`head` pass), a far larger surface than the single `layer`-arm flake previously known; a new `PROXIMA_LADDER_REPEAT` repeat-and-dump mode shows the Q6_K `layer` arm's "flake" (ROW 326) is 100% reproducible WITHIN one process (20/20 failing repeats, byte-identical divergent values every time) while `head` never diverges (0/20) -- refutes "nondeterministic" at the within-process granularity, consistent with but not proof of a process-lifetime-scoped mechanism (candidate 1's own resident-buffer cache_hit instrumentation still not added) | 1 run each (10-shape ladder: 5 timed repeats/arm; Q6_K flake dump: 20 extra per-row-checked repeats/arm) | quiet gate (names-only, load-1<10) loud twice (other slices' cargo/rustc/nextest/proxima_model_i), cleared both times before build/run |
