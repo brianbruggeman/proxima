@@ -240,6 +240,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
                 map::AxisIndex {
                     terms: vec![AxisTerm::projection(1)].into(),
                     offset: 0,
+                    len: None,
                 },
             ],
         },
@@ -296,6 +297,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
                 map::AxisIndex {
                     terms: vec![AxisTerm::projection(2)].into(),
                     offset: 0,
+                    len: None,
                 },
             ],
         },

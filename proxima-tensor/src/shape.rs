@@ -225,7 +225,15 @@ impl ShapeTable {
                     && term.coeff == 1
                     && axis.offset == 0
                 {
-                    let extent = operand_shape[axis_index];
+                    // `len`, when set, is the axis's true extent — a fact
+                    // distinct from `operand_shape[axis_index]` (that
+                    // operand's own on-disk width at this position, which
+                    // may be wider: a genuine prefix read). See
+                    // `AxisIndex::len`'s own doc.
+                    let extent = match &axis.len {
+                        Some(len) => resolve_extent(len, &self.symbols)?,
+                        None => operand_shape[axis_index],
+                    };
                     let slot = &mut resolved[term.axis as usize];
                     match *slot {
                         None => *slot = Some(extent),
@@ -260,8 +268,15 @@ impl ShapeTable {
                 if entry.skip_axis == Some(axis_index as u16) {
                     continue;
                 }
-                let is_pure_projection =
-                    matches!(axis.terms.as_slice(), [term] if term.coeff == 1) && axis.offset == 0;
+                // `len` forces this axis through the bounds check below even
+                // when its address is an otherwise-pure `coeff == 1`,
+                // `offset == 0` projection — it declared its own extent
+                // rather than borrowing the operand's on-disk width, so that
+                // width still needs validating, exactly like a nonzero
+                // offset already does.
+                let is_pure_projection = axis.len.is_none()
+                    && matches!(axis.terms.as_slice(), [term] if term.coeff == 1)
+                    && axis.offset == 0;
                 if is_pure_projection {
                     continue;
                 }
@@ -540,19 +555,23 @@ fn scatter_output_shape(
         .collect()
 }
 
+fn resolve_extent(extent: &crate::op::Extent, symbols: &[u64]) -> Result<u64, TensorError> {
+    match extent {
+        crate::op::Extent::Static(size) => Ok(u64::from(*size)),
+        crate::op::Extent::Symbolic(symbol) => symbols
+            .get(*symbol as usize)
+            .copied()
+            .ok_or(TensorError::UnboundSymbol { symbol: *symbol }),
+    }
+}
+
 fn resolve_leaf_shape(
     shape: &[crate::op::Extent],
     symbols: &[u64],
 ) -> Result<Vec<u64>, TensorError> {
     shape
         .iter()
-        .map(|extent| match extent {
-            crate::op::Extent::Static(size) => Ok(u64::from(*size)),
-            crate::op::Extent::Symbolic(symbol) => symbols
-                .get(*symbol as usize)
-                .copied()
-                .ok_or(TensorError::UnboundSymbol { symbol: *symbol }),
-        })
+        .map(|extent| resolve_extent(extent, symbols))
         .collect()
 }
 
@@ -565,6 +584,12 @@ fn resolve_leaf_shape(
 /// Re-deriving is a handful of lines over data [`ShapeTable`] already proved
 /// valid, versus a second parallel store on [`Shapes`] whose only consumer
 /// is op building.
+///
+/// Does not consult [`crate::map::AxisIndex::len`]: no construction site
+/// puts a `len`-marked axis on a [`Reduce`]'s `in_map` today (only
+/// `Op::Elementwise` operands need the partial-read case `len` exists for),
+/// and honoring it here would need `symbols` threaded into a function that
+/// re-derives from already-*resolved* [`Shapes`] specifically to avoid that.
 #[must_use]
 pub(crate) fn fold_iteration_extents(reduce: &Reduce, shapes: &Shapes) -> Vec<u64> {
     let pattern = reduce.in_map.affine();
@@ -765,6 +790,125 @@ mod tests {
             matches!(error, TensorError::ExtentMismatch { .. }),
             "{error}"
         );
+    }
+
+    /// The RoPE-shaped bug `AxisIndex::len` fixes, standalone: `source` is
+    /// read via a plain `i` (offset 0, coefficient 1) but is really only 4
+    /// wide of iteration, not its own on-disk width of 8 -- the shape
+    /// `RopePairing::SplitHalf`'s former `"i+0*i"` spelling faked by adding a
+    /// dead term. With `len` declared instead, `source`'s own width never
+    /// competes to define the axis, and `donor`'s independently-correct
+    /// extent (4) wins without an `ExtentMismatch` -- the same outcome
+    /// `disagreeing_operand_extents_are_rejected` (above) still refuses when
+    /// neither side says which one is the true donor.
+    #[test]
+    fn a_len_marked_axis_narrows_below_the_operands_own_width() {
+        let mut program = Vec::new();
+        let source = leaf(&mut program, &[Extent::Static(8)]);
+        let donor = leaf(&mut program, &[Extent::Static(4)]);
+
+        let source_map = IndexMap::Affine(map::IndexPattern {
+            iter_rank: 1,
+            axes: alloc::vec![map::AxisIndex {
+                terms: alloc::vec![AxisTerm::projection(0)].into_iter().collect(),
+                offset: 0,
+                len: Some(Extent::Static(4)),
+            }],
+        });
+        let donor_map = IndexMap::Affine(map::projection(1, &[0]));
+
+        let narrowed = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(source, source_map), (donor, donor_map)],
+                name: None,
+            },
+        );
+
+        let shapes =
+            infer(&program, &[]).expect("a declared len resolves without an ExtentMismatch");
+        assert_eq!(
+            shapes.of(narrowed),
+            &[4],
+            "the declared len (4), not source's own on-disk width (8)"
+        );
+    }
+
+    /// `len` states a fact, not a wish: declaring a length wider than the
+    /// operand's real storage still has to fit, exactly like a nonzero
+    /// offset already does.
+    #[test]
+    fn a_len_that_exceeds_the_operands_own_width_is_still_rejected() {
+        let mut program = Vec::new();
+        let source = leaf(&mut program, &[Extent::Static(4)]);
+
+        let source_map = IndexMap::Affine(map::IndexPattern {
+            iter_rank: 1,
+            axes: alloc::vec![map::AxisIndex {
+                terms: alloc::vec![AxisTerm::projection(0)].into_iter().collect(),
+                offset: 0,
+                len: Some(Extent::Static(5)),
+            }],
+        });
+
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(source, source_map)],
+                name: None,
+            },
+        );
+
+        let error = infer(&program, &[])
+            .expect_err("a declared len wider than the operand's real storage is rejected");
+        assert!(
+            matches!(error, TensorError::IndexOutOfBounds { .. }),
+            "{error}"
+        );
+    }
+
+    /// The RoPE single-node prerequisite: a node whose only read of an axis
+    /// is a genuine two-term compound (`2*i+p`, the same shape
+    /// `a_conv_window_within_bounds_infers` above already exercises) infers
+    /// correctly from two real, independent anchors -- no `+0*` or other
+    /// dummy-arithmetic anchor trick needed, because a multi-term axis was
+    /// already routed through `bounds_check` rather than competing to define
+    /// either `i` or `p`.
+    #[test]
+    fn a_compound_axis_infers_from_two_real_anchors_without_an_anchor_trick() {
+        let pairs = 3;
+        let mut program = Vec::new();
+        let x = leaf(&mut program, &[Extent::Static(pairs * 2)]);
+        let anchor_i = leaf(&mut program, &[Extent::Static(pairs)]);
+        let anchor_p = leaf(&mut program, &[Extent::Static(2)]);
+
+        let x_map = IndexMap::Affine(map::affine(
+            2,
+            &[(&[AxisTerm::scaled(0, 2), AxisTerm::scaled(1, 1)], 0)],
+        ));
+        let anchor_i_map = IndexMap::Affine(map::projection(2, &[0]));
+        let anchor_p_map = IndexMap::Affine(map::projection(2, &[1]));
+
+        let touched = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Select,
+                operands: alloc::vec![
+                    (x, x_map),
+                    (anchor_i, anchor_i_map),
+                    (anchor_p, anchor_p_map)
+                ],
+                name: None,
+            },
+        );
+
+        let shapes = infer(&program, &[]).expect("both anchors pin their own axis independently");
+        assert_eq!(shapes.of(touched), &[pairs as u64, 2]);
     }
 
     #[proxima::test]
@@ -1042,6 +1186,7 @@ mod tests {
                     map::AxisIndex {
                         terms: core::iter::once(AxisTerm::projection(1)).collect(),
                         offset: 0,
+                        len: None,
                     },
                 ],
             },

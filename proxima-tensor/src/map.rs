@@ -27,7 +27,7 @@ use alloc::vec::Vec;
 
 use smallvec::SmallVec;
 
-use crate::op::NodeId;
+use crate::op::{Extent, NodeId};
 
 /// Inline capacity for one axis's term list. Every axis this crate builds
 /// today has 1 term (a plain projection) or 2 (convolution's `stride +
@@ -58,11 +58,38 @@ impl AxisTerm {
 }
 
 /// One operand axis, as `sum(terms) + offset` over the iteration space.
+///
+/// `terms`/`offset` are the address fact — how to compute this axis's
+/// position in the operand from the iteration space. `len` is a second,
+/// independent fact: the axis's true iteration extent, for when the
+/// operand's own on-disk width at this position is wider than that (a
+/// genuine prefix read). The two used to be conflated:
+/// [`crate::shape::unify_iteration_space`] treated a single `coeff == 1`,
+/// `offset == 0` term as *both* "read this element" and "this operand's own
+/// width at this axis defines how many iterations there are", which only
+/// holds when the operand is read in full. A caller reading a genuine
+/// prefix of a wider operand had no way to say "read from the origin, but I
+/// do not own how many" except spelling the address as an
+/// algebraically-equal but differently-shaped expression (`i+0*i`) purely to
+/// make that single-term match fail — see `spec.rs`'s `parse_axis_expr` doc
+/// and `shape.rs`'s
+/// `an_offset_zero_slice_narrower_than_its_operand_is_still_ambiguous` test,
+/// which named this exact missing bit before it existed. `len`, when
+/// `Some`, states the axis's true length directly: `unify_iteration_space`
+/// uses its resolved value (not the operand's own shape) to size the
+/// iteration axis, and always bounds-checks this axis's address against the
+/// operand's real width, the same way a nonzero `offset` already forces a
+/// bounds check instead of a definer match.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 pub struct AxisIndex {
     pub terms: SmallVec<[AxisTerm; MAX_INLINE_TERMS]>,
     pub offset: i32,
+    /// The axis's true iteration extent, when it is narrower than the
+    /// operand's own on-disk width at this position. `None` keeps today's
+    /// convention: a pure `coeff == 1`, `offset == 0` single term defines
+    /// the iteration extent from the operand's own shape.
+    pub len: Option<Extent>,
 }
 
 /// Relates an iteration space of rank `iter_rank` to an operand's index space.
@@ -188,6 +215,7 @@ impl IndexMap {
         axes[gathered_dim as usize] = AxisIndex {
             terms: SmallVec::new(),
             offset: destination_extent as i32,
+            len: None,
         };
         Self::Computed {
             indices,
@@ -269,6 +297,7 @@ pub fn projection(iter_rank: u16, projected: &[u16]) -> IndexPattern {
         .map(|axis| AxisIndex {
             terms: core::iter::once(AxisTerm::projection(*axis)).collect(),
             offset: 0,
+            len: None,
         })
         .collect();
     IndexPattern { iter_rank, axes }
@@ -284,6 +313,7 @@ pub fn affine(iter_rank: u16, axes: &[(&[AxisTerm], i32)]) -> IndexPattern {
         .map(|(terms, offset)| AxisIndex {
             terms: terms.iter().copied().collect(),
             offset: *offset,
+            len: None,
         })
         .collect();
     IndexPattern { iter_rank, axes }
@@ -308,6 +338,7 @@ mod tests {
             axes: alloc::vec![AxisIndex {
                 terms: core::iter::once(AxisTerm::projection(0)).collect(),
                 offset: 0,
+                len: None,
             }],
         };
         let index_map = projection(2, &[1]);

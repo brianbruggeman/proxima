@@ -1662,12 +1662,14 @@ fn eliminate_masked_window_reduce(
                 .into_iter()
                 .collect(),
                 offset: 0,
+                len: None,
             }
         } else {
             let position = keep_axes.iter().position(|&kept| kept == widened)? as u16;
             AxisIndex {
                 terms: core::iter::once(AxisTerm::projection(position)).collect(),
                 offset: 0,
+                len: None,
             }
         };
         new_axes.push(new_axis);
@@ -1771,6 +1773,7 @@ fn remap_pattern(pattern: &IndexPattern, axis_map: &[u16], outer_iter_rank: u16)
                 })
                 .collect(),
             offset: axis_index.offset,
+            len: axis_index.len,
         })
         .collect();
     IndexPattern {
@@ -5147,6 +5150,7 @@ mod tests {
                 axes: alloc::vec![AxisIndex {
                     terms: SmallVec::from_slice(&[AxisTerm { axis: 0, coeff: -1 }]),
                     offset: 3,
+                    len: None,
                 }],
             });
             program[consumer_index] = Op::Elementwise {

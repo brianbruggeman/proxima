@@ -236,6 +236,7 @@ fn parse_operand_pattern(notation: &str) -> Result<IndexPattern, TensorError> {
                 Ok(AxisIndex {
                     terms: core::iter::once(AxisTerm::projection(axis)).collect(),
                     offset: 0,
+                    len: None,
                 })
             })
             .collect::<Result<Vec<AxisIndex>, TensorError>>()?
@@ -250,10 +251,27 @@ fn parse_operand_pattern(notation: &str) -> Result<IndexPattern, TensorError> {
 /// bare-integer constants, e.g. `2*i+1`. Constants fold into `offset` rather
 /// than becoming a term, since [`AxisTerm`] only carries a coefficient over
 /// an iteration axis.
+///
+/// A trailing `@length` (`"i@4"`) states [`AxisIndex::len`] directly: the
+/// axis's true iteration extent, when it is narrower than the operand's own
+/// width at this position. This is the address fact (`i`, everything before
+/// `@`) and the extent fact (`4`) spelled as two distinct pieces of syntax
+/// instead of one doing double duty — see [`AxisIndex`]'s own doc for why
+/// that distinction is the fix, not the arithmetic.
 fn parse_axis_expr(token: &str, space: &[char], notation: &str) -> Result<AxisIndex, TensorError> {
+    let (address, len) = match token.split_once('@') {
+        Some((address, length)) => {
+            let length: u32 = length
+                .parse()
+                .map_err(|_| TensorError::MalformedMap(notation.to_string()))?;
+            (address, Some(Extent::Static(length)))
+        }
+        None => (token, None),
+    };
+
     let mut terms: Vec<AxisTerm> = Vec::new();
     let mut offset: i32 = 0;
-    for (sign, part) in split_signed_terms(token) {
+    for (sign, part) in split_signed_terms(address) {
         if let Some((coeff_text, letter_text)) = part.split_once('*') {
             let coeff: i32 = coeff_text
                 .parse()
@@ -273,6 +291,7 @@ fn parse_axis_expr(token: &str, space: &[char], notation: &str) -> Result<AxisIn
     Ok(AxisIndex {
         terms: terms.into_iter().collect(),
         offset,
+        len,
     })
 }
 
@@ -518,6 +537,7 @@ fn build_base_pattern(rank: u16, projected: &[u16], gathered_dim: u16) -> IndexP
         .map(|axis| AxisIndex {
             terms: core::iter::once(AxisTerm::projection(*axis)).collect(),
             offset: 0,
+            len: None,
         })
         .collect();
     let insert_at = (gathered_dim as usize).min(axes.len());
@@ -761,6 +781,7 @@ fn embedding_lookup(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId
                 AxisIndex {
                     terms: core::iter::once(AxisTerm::projection(1)).collect(),
                     offset: 0,
+                    len: None,
                 },
             ],
         },
@@ -1445,10 +1466,12 @@ fn gathered_expert_product(
                 AxisIndex {
                     terms: core::iter::once(AxisTerm::projection(1)).collect(),
                     offset: 0,
+                    len: None,
                 },
                 AxisIndex {
                     terms: core::iter::once(AxisTerm::projection(2)).collect(),
                     offset: 0,
+                    len: None,
                 },
             ],
         },
@@ -5124,6 +5147,7 @@ fn causal_conv1d(
                 AxisIndex {
                     terms: core::iter::once(AxisTerm::projection(2)).collect(),
                     offset: 0,
+                    len: None,
                 },
             ],
         },
@@ -8286,6 +8310,7 @@ maps = [{ gather = "ids", index_map = "s->sd", map = "d->sd", dim = 0 }]
                     AxisIndex {
                         terms: core::iter::once(AxisTerm::projection(1)).collect(),
                         offset: 0,
+                        len: None,
                     },
                 ],
             },
