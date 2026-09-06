@@ -164,7 +164,7 @@ use proxima_gguf::types::GgmlType;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce,
-    ReduceInit, ScalarOp, append, bind, infer, map,
+    ReduceInit, ScalarOp, append, bind, correct_packed_matmul_layouts, infer, map,
 };
 
 /// Real GGUF checkpoint path, overridable via `PROXIMA_BENCH_GGUF_PATH` --
@@ -3200,7 +3200,17 @@ fn production_reduce_kernel(
     let activation_node = NodeId(1);
 
     let shapes = infer(&program, &[]).expect("production reduce program's shapes infer");
-    let bound_ops = bind(&program, &shapes, &sums).expect("production reduce program binds");
+    let mut bound_ops = bind(&program, &shapes, &sums).expect("production reduce program binds");
+    // `bind()` alone lays out the weight operand row-major over its DECLARED
+    // axis order (`correct_packed_matmul_layouts`'s own doc) -- wrong for a
+    // packed `Q4_K`/`Q6_K` weight's real on-disk bytes. `omega::metal::prepare`
+    // (`omega/src/metal.rs:3253`) always runs this correction between `bind`
+    // and `emit`; skipping it here made the emitted kernel fall off the
+    // packed-row fast path entirely (a from-scratch reproduction measured
+    // ~1.24s/token instead of ~17ms -- this call is what `run_shape_arm`/
+    // `run_head_arm` get for free through `omega::metal::plan`).
+    let packed_node_set: BTreeSet<NodeId> = [NodeId(0)].into_iter().collect();
+    correct_packed_matmul_layouts(&mut bound_ops, &packed_node_set);
     let bound = bound_ops
         .into_iter()
         .find(|op| op.node == sums[0])
