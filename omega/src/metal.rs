@@ -438,6 +438,28 @@ pub struct Plan {
     /// [`pack_uniforms`] would allocate every call.
     #[cfg(feature = "metal-plan-stable-buffers")]
     uniform_scratch: RefCell<Vec<u8>>,
+    /// [`execute_plan_with_placements`]'s per-node buffer map -- plan-owned
+    /// and NEVER rebuilt fresh (`BTreeMap::new()`) call-to-call, so its
+    /// already-allocated tree nodes are reused for every call's `insert`/
+    /// `remove` cycle instead of an empty map paying that allocation again
+    /// (ROW 303's residual). Every call still writes a fresh entry for every
+    /// block/position exactly as before this landing -- only WHERE the map
+    /// lives changed, so content correctness is unaffected regardless of
+    /// residency; [`Plan::block_identity`] layers a further, residency-gated
+    /// skip of the upload itself on top.
+    device_buffers: RefCell<BTreeMap<NodeId, DeviceBuffer>>,
+    /// Per-[`Prepared::block_nodes`]-position `(pointer, byte_length)` this
+    /// plan last saw for a RESIDENT block -- `None` for a position that is
+    /// not in [`Plan::resident_nodes`], or that has not been uploaded yet.
+    /// [`execute_plan_with_placements`] compares this against the CURRENT
+    /// call's own block identity to decide whether that position's entry in
+    /// [`Plan::device_buffers`] can be trusted as-is (no content hash: an
+    /// address match alone would wrongly reuse a freshly reallocated,
+    /// unrelated buffer that happens to land at a freed one's old address --
+    /// the RESIDENT gate is the caller's own promise that this address never
+    /// moves and never changes content, the same promise
+    /// [`Plan::mark_resident`]'s no-copy upload path already trusts).
+    block_identity: RefCell<Vec<Option<(usize, usize)>>>,
 }
 
 /// [`Plan::resolved_steps`]'s payload -- the mode it was built under, so a
@@ -507,6 +529,80 @@ fn resident_name(plan: &Plan, node: NodeId) -> Option<&str> {
         .contains(&node)
         .then(|| plan.program[node.0 as usize].name())
         .flatten()
+}
+
+/// A block's own `(pointer, byte_length)` -- every [`QuantizedBlock`] variant
+/// is a borrowed slice, so this is the address identity
+/// [`block_buffer_reusable`] compares, never the bytes themselves.
+fn block_identity_key(block: &QuantizedBlock<'_>) -> (usize, usize) {
+    match block {
+        QuantizedBlock::Float32(data) => (data.as_ptr().cast::<()>() as usize, size_of_val(*data)),
+        QuantizedBlock::Q4K(bytes)
+        | QuantizedBlock::Q5K(bytes)
+        | QuantizedBlock::Q3K(bytes)
+        | QuantizedBlock::Q6K(bytes)
+        | QuantizedBlock::Q8_0(bytes)
+        | QuantizedBlock::Q4_0(bytes)
+        | QuantizedBlock::Float16(bytes)
+        | QuantizedBlock::BFloat16(bytes) => (bytes.as_ptr().cast::<()>() as usize, bytes.len()),
+    }
+}
+
+/// Whether a RESIDENT block-input position's existing
+/// [`Plan::device_buffers`] entry can be trusted as-is this call, so
+/// [`execute_plan_with_placements`] can skip re-uploading it entirely.
+/// `resident` alone is not enough -- see [`Plan::block_identity`]'s own doc
+/// for why an address match still requires the caller's own residency
+/// promise before it is trusted, and why no content hash backs it up.
+fn block_buffer_reusable(
+    resident: bool,
+    previous: Option<(usize, usize)>,
+    current: (usize, usize),
+) -> bool {
+    resident && previous == Some(current)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod block_buffer_reusable_tests {
+    //! Pure, GPU-free proof of the reuse decision
+    //! [`execute_plan_with_placements`]'s block-upload loop relies on --
+    //! `plan_pipeline_alloc_count.rs` proves the allocation count this
+    //! decision buys end to end, on a real Metal device; this proves the
+    //! decision itself, so a regression here fails fast without a GPU.
+
+    use super::block_buffer_reusable;
+
+    #[test]
+    fn a_resident_block_at_the_same_address_and_length_is_reused() {
+        let identity = (0x1000, 64);
+        assert!(block_buffer_reusable(true, Some(identity), identity));
+    }
+
+    #[test]
+    fn a_resident_block_whose_address_moved_is_rebuilt() {
+        let previous = (0x1000, 64);
+        let current = (0x2000, 64);
+        assert!(!block_buffer_reusable(true, Some(previous), current));
+    }
+
+    #[test]
+    fn a_resident_block_whose_length_changed_is_rebuilt() {
+        let previous = (0x1000, 64);
+        let current = (0x1000, 128);
+        assert!(!block_buffer_reusable(true, Some(previous), current));
+    }
+
+    #[test]
+    fn a_non_resident_block_is_never_reused_even_at_the_same_address() {
+        let identity = (0x1000, 64);
+        assert!(!block_buffer_reusable(false, Some(identity), identity));
+    }
+
+    #[test]
+    fn a_first_call_with_no_recorded_identity_is_never_reused() {
+        assert!(!block_buffer_reusable(true, None, (0x1000, 64)));
+    }
 }
 
 impl Plan {
@@ -709,6 +805,8 @@ pub fn plan(
         hazard_state: RefCell::new(HazardState::new()),
         #[cfg(feature = "metal-plan-stable-buffers")]
         uniform_scratch: RefCell::new(Vec::new()),
+        device_buffers: RefCell::new(BTreeMap::new()),
+        block_identity: RefCell::new(Vec::new()),
     })
 }
 
@@ -914,15 +1012,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         }
     }
 
-    let evaluated = finish(
-        &plan.program,
-        &prepared.index_nodes,
-        &prepared.shapes,
-        &prepared.effective_outputs,
-        &device_buffers,
-        prepared.root,
-        &BTreeSet::new(),
-    )?;
+    let evaluated = finish(plan, &device_buffers, &BTreeSet::new(), None)?;
 
     // `OUTPUT_POOL_MAX_PER_BUCKET`: a buffer beyond the cap for its
     // `(bucket, dtype)` slot is dropped here (ordinary `Retained` drop, same
@@ -1488,6 +1578,15 @@ fn register_skipped_output(
     Ok(())
 }
 
+/// `recycle` is the same pool [`proxima_tensor::cpu::evaluate_with_scratch`]
+/// takes: a caller done reading a PREVIOUS call's `Evaluated` hands its
+/// storage back with [`Evaluated::into_scratch`], and this call pops one
+/// buffer from the pool (if any) to reuse for the root output's read-back
+/// instead of allocating fresh. An empty pool (every call before this
+/// landing was, implicitly) always allocates fresh, exactly as before -- see
+/// `finish`'s own doc for the exact conditions a popped buffer is actually
+/// reused under.
+///
 /// # Errors
 /// Propagates block-codec and Metal driver failures, same as [`execute_plan`].
 #[cfg(feature = "metal-output-placement")]
@@ -1496,6 +1595,7 @@ pub fn execute_plan_with_placements(
     blocks: &[QuantizedBlock<'_>],
     input_placements: &[(NodeId, &PlacedBuffer, usize)],
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
+    recycle: &mut Vec<Vec<f32>>,
 ) -> Result<Evaluated, MetalError> {
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
@@ -1517,12 +1617,23 @@ pub fn execute_plan_with_placements(
     resolve_steps(&device, plan)?;
     let resolved_steps = plan.resolved_steps.borrow();
 
-    let mut device_buffers: BTreeMap<NodeId, DeviceBuffer> = BTreeMap::new();
-    for ((node, block), dtype) in prepared
+    // plan-owned and never rebuilt fresh -- see `Plan::device_buffers`'s own
+    // doc for why this alone (independent of the per-node reuse skip below)
+    // already removes ROW 303's residual `BTreeMap::new()` allocation on a
+    // warm call: every key this loop and the position loop below touch is
+    // still written fresh every call exactly as before, only the map's own
+    // heap nodes now outlive one call instead of being dropped with it.
+    let mut device_buffers = plan.device_buffers.borrow_mut();
+    let mut block_identity = plan.block_identity.borrow_mut();
+    if block_identity.len() != prepared.block_nodes.len() {
+        block_identity.resize(prepared.block_nodes.len(), None);
+    }
+    for (index, ((node, block), dtype)) in prepared
         .block_nodes
         .iter()
         .zip(blocks.iter())
         .zip(plan.block_dtypes.iter())
+        .enumerate()
     {
         // an input-placed node skips the host round trip entirely: its
         // buffer is already on the device, owned by the caller, and this
@@ -1533,8 +1644,22 @@ pub fn execute_plan_with_placements(
         // read it generically, with no separate offset map required.
         if let Some((buffer, offset)) = input_placed.get(node) {
             device_buffers.insert(*node, ((*buffer).clone(), *offset));
+            block_identity[index] = None;
             continue;
         }
+        let current_identity = block_identity_key(block);
+        let resident = plan.resident_nodes.contains(node);
+        if block_buffer_reusable(resident, block_identity[index], current_identity)
+            && device_buffers.contains_key(node)
+        {
+            // this position's buffer is already correct in the plan-owned
+            // map from a PRIOR call (never retired -- see the retirement
+            // loop's own `resident_nodes` skip below) -- no upload, no
+            // `device_buffers` write, this call's only cost for this node
+            // is the identity comparison just made.
+            continue;
+        }
+        block_identity[index] = Some(current_identity);
         // an input-placed node above never reaches here, so `BLOCK_OFFERED_BYTES`
         // fires only for a block that genuinely takes the host round trip
         // below -- the same "offered for upload" meaning `execute_plan`'s own
@@ -1751,9 +1876,16 @@ pub fn execute_plan_with_placements(
         // node, input or output, is externally owned and always live, so it
         // is never dropped from this call's own bookkeeping map, regardless
         // of what `prepared.retires` (a per-program-only liveness sweep)
-        // says.
+        // says. A RESIDENT block node joins that exclusion for the same
+        // reason: [`Plan::mark_resident`]'s caller-owned promise means its
+        // buffer is live for the plan's whole life, and leaving its entry in
+        // [`Plan::device_buffers`] across calls is exactly what lets
+        // `block_buffer_reusable` skip re-uploading it next call.
         for retired in &prepared.retires[position] {
-            if input_placed.contains_key(retired) || output_placed.contains_key(retired) {
+            if input_placed.contains_key(retired)
+                || output_placed.contains_key(retired)
+                || plan.resident_nodes.contains(retired)
+            {
                 continue;
             }
             // a retired buffer's identity must not outlive it in the
@@ -1787,15 +1919,7 @@ pub fn execute_plan_with_placements(
     }
 
     let placed_output_nodes: BTreeSet<NodeId> = output_placed.keys().copied().collect();
-    finish(
-        &plan.program,
-        &prepared.index_nodes,
-        &prepared.shapes,
-        &prepared.effective_outputs,
-        &device_buffers,
-        prepared.root,
-        &placed_output_nodes,
-    )
+    finish(plan, &device_buffers, &placed_output_nodes, recycle.pop())
 }
 
 /// [`plan`] against a name-keyed block set — the shape a model binds its
@@ -1846,7 +1970,9 @@ pub fn execute_plan_named_with_placements(
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
 ) -> Result<Evaluated, MetalError> {
     let blocks = resolve_named_blocks(&plan.program, named)?;
-    execute_plan_with_placements(plan, &blocks, input_placements, output_placements)
+    // no scratch pool for this name-keyed convenience wrapper -- a caller
+    // wanting the recycle path calls `execute_plan_with_placements` directly.
+    execute_plan_with_placements(plan, &blocks, input_placements, output_placements, &mut Vec::new())
 }
 
 /// One [`BoundOp`]'s GPU-only execution time and the operand bytes it read,
@@ -2108,15 +2234,7 @@ pub fn execute_plan_op_timed(
         timings.push(timing);
     }
 
-    let evaluated = finish(
-        &plan.program,
-        &prepared.index_nodes,
-        &prepared.shapes,
-        &prepared.effective_outputs,
-        &device_buffers,
-        prepared.root,
-        &BTreeSet::new(),
-    )?;
+    let evaluated = finish(plan, &device_buffers, &BTreeSet::new(), None)?;
     Ok((evaluated, timings))
 }
 
@@ -2246,15 +2364,7 @@ pub fn execute_plan_with_placements_op_timed(
     }
 
     let placed_output_nodes: BTreeSet<NodeId> = output_placed.keys().copied().collect();
-    let evaluated = finish(
-        &plan.program,
-        &prepared.index_nodes,
-        &prepared.shapes,
-        &prepared.effective_outputs,
-        &device_buffers,
-        prepared.root,
-        &placed_output_nodes,
-    )?;
+    let evaluated = finish(plan, &device_buffers, &placed_output_nodes, None)?;
     Ok((evaluated, timings))
 }
 
@@ -2434,7 +2544,8 @@ pub fn execute_plan_with_placements_dispatch_timed(
         // production single-encoder submission with zero instrumentation
         // rather than refusing to run: `gpu_ns` stays `0` on every entry,
         // never fabricated, and `sampling_mode` names this plainly.
-        let evaluated = execute_plan_with_placements(plan, blocks, input_placements, output_placements)?;
+        let evaluated =
+            execute_plan_with_placements(plan, blocks, input_placements, output_placements, &mut Vec::new())?;
         let timings: Vec<OpGpuTiming> = prepared
             .resolved
             .iter()
@@ -2782,15 +2893,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
     }
 
     let placed_output_nodes: BTreeSet<NodeId> = output_placed.keys().copied().collect();
-    let evaluated = finish(
-        &plan.program,
-        &prepared.index_nodes,
-        &prepared.shapes,
-        &prepared.effective_outputs,
-        &device_buffers,
-        prepared.root,
-        &placed_output_nodes,
-    )?;
+    let evaluated = finish(plan, &device_buffers, &placed_output_nodes, None)?;
     let sampling_mode = if dispatch_boundary {
         "dispatch-boundary"
     } else {
@@ -3355,6 +3458,33 @@ fn push_extent_row(bytes: &mut Vec<u8>, extents: &[u64], width: usize) {
     }
 }
 
+/// [`push_extent_row`]'s gathered counterpart: `axes` indexes `extents` in
+/// AXIS order (a reduce's `output_axes`/reduction axes are a subset of
+/// `bound.extents`, not a contiguous prefix), so this reads `extents[axis]`
+/// directly per slot instead of [`pack_reduce_uniforms`] collecting the
+/// gather into a temporary `Vec<i64>` first (ROW 303's residual, this
+/// landing's own removal). `width` zero-pads past `axes.len()`, same
+/// contract as [`push_i64_row`].
+fn push_gathered_extent_row(bytes: &mut Vec<u8>, extents: &[u64], axes: &[u16], width: usize) {
+    for slot in 0..width {
+        let value = axes
+            .get(slot)
+            .map(|axis| extents[*axis as usize] as i64)
+            .unwrap_or(0);
+        push_i64(bytes, value);
+    }
+}
+
+/// The product [`push_gathered_extent_row`] would write, computed without
+/// materializing the row -- both `output_extents.iter().product()` and
+/// `reduction_extents.iter().product()` in [`pack_reduce_uniforms`] need
+/// exactly this, ahead of the row itself.
+fn gathered_extent_product(extents: &[u64], axes: &[u16]) -> i64 {
+    axes.iter()
+        .map(|axis| extents[*axis as usize] as i64)
+        .product()
+}
+
 /// Appends the four gather arrays every `Uniforms` struct declares last (via
 /// `crate::msl::push_gather_uniform_fields`) when `bound` has at least one
 /// gathered operand: `gather_index_base`, `gather_index_strides`,
@@ -3703,24 +3833,16 @@ fn pack_reduce_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) -> Result<(), Emit
     let reduce_axes = reduction_dims(bound, output_axes);
     let reduce_rank_len = reduce_axes.len().max(1);
 
-    // ROW 303 residual: these two stay temporary `Vec<i64>`s rather than
-    // `push_extent_row`'s direct-slice form -- unlike `bound.extents` itself,
-    // neither is a contiguous slice of `bound`'s own storage (each is an
-    // axis-indexed GATHER over it), so writing them in place would need a
-    // second scratch buffer this landing does not add.
-    let output_extents: Vec<i64> = output_axes
-        .iter()
-        .map(|axis| bound.extents[*axis as usize] as i64)
-        .collect();
-    let reduction_extents: Vec<i64> = reduce_axes
-        .iter()
-        .map(|axis| bound.extents[*axis as usize] as i64)
-        .collect();
-
-    push_i64(bytes, output_extents.iter().product());
-    push_i64(bytes, reduction_extents.iter().product());
-    push_i64_row(bytes, &output_extents, output_rank_len);
-    push_i64_row(bytes, &reduction_extents, reduce_rank_len);
+    // ROW 303 residual, removed by this landing: `output_extents`/
+    // `reduction_extents` used to be temporary `Vec<i64>`s built by
+    // gathering `bound.extents` through `output_axes`/`reduce_axes` --
+    // [`push_gathered_extent_row`]/[`gathered_extent_product`] read that
+    // same gather directly into `bytes` (or fold it into a product) without
+    // ever materializing the intermediate row.
+    push_i64(bytes, gathered_extent_product(&bound.extents, output_axes));
+    push_i64(bytes, gathered_extent_product(&bound.extents, &reduce_axes));
+    push_gathered_extent_row(bytes, &bound.extents, output_axes, output_rank_len);
+    push_gathered_extent_row(bytes, &bound.extents, &reduce_axes, reduce_rank_len);
     for (_, layout, _) in bound.operands() {
         push_i64(bytes, layout.base);
     }
@@ -5758,6 +5880,36 @@ fn read_back_as_device_f32(
     .to_vec()
 }
 
+/// [`read_back_as_device_f32`], writing into a caller-owned, reused `target`
+/// instead of returning a fresh `Vec` -- [`finish`]'s `recycle` parameter
+/// feeds this a buffer popped from [`execute_plan_with_placements`]'s own
+/// pool (a PREVIOUS `Evaluated`'s storage, given back via
+/// [`Evaluated::into_scratch`]) so the root output's warm-step read-back
+/// allocates nothing (ROW 303's residual). `target.clear()` keeps its
+/// capacity, so only a call whose output GREW past that capacity allocates.
+fn read_back_as_device_f32_into(
+    buffer: &ProtocolObject<dyn MTLBuffer>,
+    byte_offset: usize,
+    element_count: usize,
+    target: &mut Vec<f32>,
+) {
+    debug_assert!(
+        buffer.length() >= byte_offset + element_count * size_of::<f32>(),
+        "device buffer too small for a device-f32 read-back: buffer.length()={}, byte_offset={byte_offset}, element_count={element_count}",
+        buffer.length(),
+    );
+    let pointer = buffer.contents();
+    // SAFETY: see `read_back_as_device_f32`'s own doc -- identical sizing
+    // guarantee, just writing into `target` instead of collecting into a
+    // fresh `Vec`.
+    let slice = unsafe {
+        let base = pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f32>();
+        core::slice::from_raw_parts(base, element_count)
+    };
+    target.clear();
+    target.extend_from_slice(slice);
+}
+
 fn read_back_half(
     buffer: &ProtocolObject<dyn MTLBuffer>,
     byte_offset: usize,
@@ -5776,17 +5928,30 @@ fn read_back_half(
     narrow.iter().map(|value| value.to_f32()).collect()
 }
 
+/// `plan` supplies every field this used to take individually (`program`,
+/// `prepared.index_nodes`/`shapes`/`effective_outputs`/`root`) -- one
+/// argument instead of five, under clippy's `too_many_arguments` with
+/// `recycle` added by this landing.
 fn finish(
-    program: &[Op],
-    index_nodes: &BTreeSet<NodeId>,
-    shapes: &Shapes,
-    effective_outputs: &[NodeId],
+    plan: &Plan,
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
-    root: NodeId,
     caller_owned: &BTreeSet<NodeId>,
+    // A buffer popped from `execute_plan_with_placements`'s own recycle
+    // pool, if one was available -- reused ONLY for `root`'s read-back (the
+    // one output a caller always requests, `Evaluated::root`'s own doc) and
+    // only on the `read_back_as_device_f32`-shaped dtype path; every other
+    // output, and a `Float16` root, still allocates fresh exactly as before
+    // this landing.
+    recycle: Option<Vec<f32>>,
 ) -> Result<Evaluated, MetalError> {
+    let program = &plan.program;
+    let index_nodes = &plan.prepared.index_nodes;
+    let shapes = &plan.prepared.shapes;
+    let effective_outputs = &plan.prepared.effective_outputs;
+    let root = plan.prepared.root;
     let mut results = Vec::with_capacity(effective_outputs.len());
     let mut placed = BTreeSet::new();
+    let mut recycle = recycle;
     #[cfg(feature = "instrument")]
     let readback_started = read_ticks();
     for node in effective_outputs {
@@ -5818,7 +5983,22 @@ fn finish(
             // would silently return its buffer's UNRELATED leading bytes
             // instead of the bytes this node actually wrote.
             Some((buffer, offset)) => {
-                read_back(buffer, *offset, element_count(&shape), *node, dtype)?
+                let recyclable_dtype = matches!(
+                    dtype,
+                    DType::Float32
+                        | DType::BFloat16
+                        | DType::Bool
+                        | DType::Int8
+                        | DType::UInt8
+                        | DType::Int32
+                        | DType::UInt32
+                );
+                if *node == root && recyclable_dtype && let Some(mut target) = recycle.take() {
+                    read_back_as_device_f32_into(buffer, *offset, element_count(&shape), &mut target);
+                    target
+                } else {
+                    read_back(buffer, *offset, element_count(&shape), *node, dtype)?
+                }
             }
             None => Vec::new(),
         };
@@ -6305,6 +6485,7 @@ mod arena_tests {
             &[QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)],
             &[],
             &[],
+            &mut Vec::new(),
         )
         .expect("runs the chain against the arena-bound, plan-owned-uniform path");
 

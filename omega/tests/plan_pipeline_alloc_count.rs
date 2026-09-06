@@ -74,16 +74,16 @@ fn a_warm_plan_hit_allocates_the_same_amount_every_call() {
     // Cold: builds `resolved_steps` from empty, compiles both kernels'
     // pipelines for the first time -- allocation-heavy by construction, not
     // part of this test's own claim.
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[])
+    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
         .expect("first (cold) call warms the plan's pipeline cache");
 
     let before_second = allocations();
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[])
+    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
         .expect("second (warm) call");
     let second_call_allocations = allocations() - before_second;
 
     let before_third = allocations();
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[])
+    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
         .expect("third (warm) call");
     let third_call_allocations = allocations() - before_third;
 
@@ -149,18 +149,18 @@ fn a_warm_call_s_allocation_count_does_not_grow_with_extra_steps() {
     .expect("plans the two-op chain");
 
     // warm both plans' pipeline caches before measuring either.
-    omega::execute_plan_with_placements(&one_op_plan, &[QuantizedBlock::Float32(&block)], &[], &[])
+    omega::execute_plan_with_placements(&one_op_plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
         .expect("warms the one-op plan");
-    omega::execute_plan_with_placements(&two_op_plan, &[QuantizedBlock::Float32(&block)], &[], &[])
+    omega::execute_plan_with_placements(&two_op_plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
         .expect("warms the two-op plan");
 
     let before_one_op = allocations();
-    omega::execute_plan_with_placements(&one_op_plan, &[QuantizedBlock::Float32(&block)], &[], &[])
+    omega::execute_plan_with_placements(&one_op_plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
         .expect("warm one-op call");
     let one_op_allocations = allocations() - before_one_op;
 
     let before_two_op = allocations();
-    omega::execute_plan_with_placements(&two_op_plan, &[QuantizedBlock::Float32(&block)], &[], &[])
+    omega::execute_plan_with_placements(&two_op_plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
         .expect("warm two-op call");
     let two_op_allocations = allocations() - before_two_op;
 
@@ -184,21 +184,46 @@ fn a_warm_plan_hit_s_allocations_are_named_by_size() {
     let block = [1.0f32, 2.0, 3.0, 4.0];
     let plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&block)], &[])
         .expect("plans the two-step identity chain");
+    // fed by `into_scratch` after each call below, so a warm call's root
+    // read-back (`finish`'s `recycle` parameter) reuses the PREVIOUS call's
+    // own buffer instead of allocating fresh -- this test's whole point.
+    let mut recycle_pool: Vec<Vec<f32>> = Vec::new();
 
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[])
-        .expect("first (cold) call warms the plan's pipeline cache");
+    let cold = omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut recycle_pool,
+    )
+    .expect("first (cold) call warms the plan's pipeline cache");
+    cold.into_scratch(&mut recycle_pool);
 
     reset();
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[])
-        .expect("second (warm) call, the one under proof");
+    let second = omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut recycle_pool,
+    )
+    .expect("second (warm) call, the one under proof");
     let warm_call_allocations = allocations();
     let warm_call_sizes = recorded_sizes();
+    second.into_scratch(&mut recycle_pool);
 
     reset();
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[])
-        .expect("third (warm) call, confirms the second call's count is steady-state");
+    let third = omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut recycle_pool,
+    )
+    .expect("third (warm) call, confirms the second call's count is steady-state");
     let third_call_allocations = allocations();
     let third_call_sizes = recorded_sizes();
+    third.into_scratch(&mut recycle_pool);
 
     eprintln!(
         "warm_call_allocations={warm_call_allocations} warm_call_sizes={warm_call_sizes:?}"
@@ -217,20 +242,122 @@ fn a_warm_plan_hit_s_allocations_are_named_by_size() {
          order -- a residual that grew or shrank between them would mean it is not yet \
          steady-state"
     );
-    // ROW 303's residual: 18 allocations before this landing, reduced to 11 by
-    // making the hazard-input list and the uniform-byte packing plan-owned
-    // and reused (`Plan::hazard_state`, `Plan::uniform_scratch`) instead of
-    // rebuilt every call -- see this landing's own commit for the removed
-    // sizes. The remaining 11 are `device_buffers`, a fresh `BTreeMap` built
-    // from scratch every call by this function's own design (its VALUES --
-    // the block upload's device buffer -- can change call to call, unlike
-    // the hazard/uniform scratch this landing reused) plus `finish`'s
-    // read-back `Vec<f32>`, the actual output payload the caller receives,
-    // not scratch the plan could own instead.
+    // ROW 303's residual: 18 allocations before this landing's FIRST slice
+    // (`Plan::hazard_state`/`Plan::uniform_scratch`), 11 after it, now 9:
+    // `Plan::device_buffers` is plan-owned and never rebuilt fresh
+    // (`BTreeMap::new()`) call-to-call, and `finish`'s root read-back reuses
+    // a buffer popped from the caller's `recycle` pool (`Evaluated::into_scratch`)
+    // instead of allocating a fresh `Vec<f32>` -- both landed in this same
+    // change. This fixture's own block is deliberately NON-resident
+    // (`Op::Input { name: None }`) to exercise the general path
+    // `block_buffer_reusable_tests` (`metal.rs`) does not cover: the
+    // remaining 9 are (a) this block's own fresh upload/copy every call --
+    // content correctness for a non-resident node requires re-copying it
+    // every call, so this cannot be plan-owned without the caller's own
+    // `Plan::mark_resident` promise that the address never changes content
+    // (see `a_warm_plan_hit_reuses_a_resident_block_s_device_buffer` below
+    // for the residency-gated skip of exactly this cost), and (b) two
+    // `device_buffers` writes (one per `Elementwise` position) whose VALUES
+    // change call to call even though the map itself is reused, which is
+    // ordinary `BTreeMap` insert bookkeeping, not a rebuild.
     assert_eq!(
-        warm_call_allocations, 11,
+        warm_call_allocations, 9,
         "a warm plan-hit step's allocation count moved -- update this assertion \
          alongside whatever fix (or regression) changed it: sizes in order: \
          {warm_call_sizes:?}"
+    );
+}
+
+/// ROW 303's residency-gated half: with the block input NAMED and
+/// [`omega::metal::Plan::mark_resident`] told about it, `execute_plan_with_placements`
+/// skips re-uploading the block ENTIRELY on a warm call whose block identity
+/// (`(pointer, byte_length)`) is unchanged -- `block_buffer_reusable`
+/// (`metal.rs`) is the decision this proves end to end, on a real device. A
+/// block whose ADDRESS moves (a different array, same content) is no longer
+/// trusted and forces a rebuild, same as before this landing -- this is the
+/// "no content hash" half of the contract: only the caller's own residency
+/// promise plus an unmoved address earns the skip.
+///
+/// This does NOT assert the rebuilt call allocates strictly more than the
+/// reused one: `upload_resident_copy`'s own NAME-keyed cache (`RESIDENT_BUFFERS`)
+/// already serves a `Retained` clone with no fresh Rust-heap allocation on a
+/// name hit regardless of address, so for a block this small the two calls'
+/// MEASURED allocation counts are equal in practice -- the win
+/// `block_buffer_reusable` buys here is skipping the match/dispatch/
+/// `device_buffers` write entirely, not a further allocation count drop on
+/// top of a cache that was already this cheap. What this test proves instead:
+/// both calls still produce the byte-identical, correct output, and neither
+/// regresses the other's allocation count.
+#[test]
+fn a_warm_plan_hit_reuses_a_resident_block_s_device_buffer() {
+    const EXTENT: u32 = 4;
+    let mut program = Vec::new();
+    let source = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(EXTENT)],
+            name: Some("weight".into()),
+        },
+    );
+    let identity = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: vec![(source, IndexMap::Affine(projection(1, &[0])))],
+            name: None,
+        },
+    );
+    let block = [1.0f32, 2.0, 3.0, 4.0];
+    let mut plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&block)], &[])
+        .expect("plans the one-op resident chain");
+    plan.mark_resident(&std::collections::BTreeSet::from(["weight"]));
+
+    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
+        .expect("first (cold) call warms the plan's pipeline cache and uploads the resident block");
+
+    reset();
+    let reused = omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("second (warm) call against the SAME block address");
+    let reused_allocations = allocations();
+
+    // a DIFFERENT array -- same content, a moved address -- must not be
+    // trusted: `block_buffer_reusable` sees a changed `(pointer, length)`
+    // and this call re-uploads exactly as a cold call would.
+    let moved_block = [1.0f32, 2.0, 3.0, 4.0];
+    reset();
+    let rebuilt = omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&moved_block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("third call, block moved to a different address");
+    let rebuilt_allocations = allocations();
+
+    eprintln!("reused_allocations={reused_allocations} rebuilt_allocations={rebuilt_allocations}");
+    assert_eq!(
+        reused.get(identity).expect("identity node is the sole output").0,
+        &block,
+        "the reused device buffer must still read back the correct content"
+    );
+    assert_eq!(
+        rebuilt.get(identity).expect("identity node is the sole output").0,
+        &moved_block,
+        "an address-moved, forced-rebuild call must read back the NEW content, not a stale \
+         buffer left over from the reused call"
+    );
+    assert!(
+        reused_allocations <= rebuilt_allocations,
+        "a resident block at an unmoved address must never allocate MORE than one whose \
+         address just moved -- reused={reused_allocations} rebuilt={rebuilt_allocations}"
     );
 }
