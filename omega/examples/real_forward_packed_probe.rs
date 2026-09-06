@@ -220,7 +220,8 @@ fn main() {
         }
 
         let kernel =
-            omega::emit(op, &packed_operands).expect("the real forward's own bound ops emit");
+            omega::emit(op, &packed_operands, proxima_tensor::NumericPolicy::default())
+                .expect("the real forward's own bound ops emit");
         // `q4k_run8`/`q4k_element`'s own FUNCTION DEFINITIONS are always
         // part of the emitted prelude regardless of which path a given
         // reduce body takes, so the marker has to be the CALL SITE, not the

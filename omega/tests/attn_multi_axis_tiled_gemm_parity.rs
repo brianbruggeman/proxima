@@ -225,7 +225,7 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
         .iter()
         .find(|op| op.node == sum)
         .expect("the reduce node is bound");
-    let kernel = omega::emit(resolved, &packed_operands).expect("the synthetic program emits");
+    let kernel = omega::emit(resolved, &packed_operands, proxima_tensor::NumericPolicy::default()).expect("the synthetic program emits");
     assert!(
         kernel.source.contains("simdgroup_multiply_accumulate"),
         "degenerate gate: this shape must take the tiled-gemm path, not row-blocked or generic \
@@ -314,7 +314,7 @@ fn metal_decode_shaped_attention_matmul_stays_on_the_row_blocked_vector_path() {
         .iter()
         .find(|op| op.node == sum)
         .expect("the reduce node is bound");
-    let kernel = omega::emit(resolved, &packed_operands).expect("the synthetic program emits");
+    let kernel = omega::emit(resolved, &packed_operands, proxima_tensor::NumericPolicy::default()).expect("the synthetic program emits");
 
     assert!(
         !kernel.source.contains("simdgroup_multiply_accumulate"),

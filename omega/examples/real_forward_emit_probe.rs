@@ -85,7 +85,7 @@ fn main() {
     let mut entry_len_total = 0usize;
     let mut source_len_max = 0usize;
     for op in &bound {
-        match omega::emit(op, &no_packed) {
+        match omega::emit(op, &no_packed, proxima_tensor::NumericPolicy::default()) {
             Ok(kernel) => {
                 emitted += 1;
                 source_len_total += kernel.source.len();
