@@ -1111,6 +1111,7 @@ fn multi_tensor_matmul_program(
     rows: u32,
     k: u32,
     weight_dtype: DType,
+    activation_name: &str,
 ) -> (Vec<Op>, Vec<NodeId>) {
     let mut program = Vec::new();
     let weight_nodes: Vec<NodeId> = weight_names
@@ -1131,7 +1132,7 @@ fn multi_tensor_matmul_program(
         Op::Input {
             dtype: DType::Float32,
             shape: vec![Extent::Static(k), Extent::Static(1)],
-            name: Some("activation".into()),
+            name: Some(activation_name.to_string()),
         },
     );
     let mut sums = Vec::with_capacity(weight_nodes.len());
@@ -1437,7 +1438,8 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
     // plan()/execute_plan() entry point -- byte-identical emitted MSL by
     // construction, all WEIGHT_TENSOR_COUNT tensors in ONE program so
     // execute_plan encodes all of them into ONE command buffer. ----
-    let (program, sums) = multi_tensor_matmul_program(&weight_names, ROWS as u32, IN_DIM as u32, DType::UInt8);
+    let (program, sums) =
+        multi_tensor_matmul_program(&weight_names, ROWS as u32, IN_DIM as u32, DType::UInt8, "activation");
     let weight_slices: Vec<&[u8]> = ffn_tensors
         .iter()
         .map(|(_, tensor)| {
@@ -1789,7 +1791,19 @@ fn run_shape_arm(label: &str, codec: ShapeCodec, rows: usize, k: usize, tensor_c
     let cpu_reference =
         codec_cpu_reference_first_rows(codec, &weight_bytes[..rows * row_bytes], k, &activation);
 
-    let (program, sums) = multi_tensor_matmul_program(&weight_names, rows as u32, k as u32, DType::UInt8);
+    // ROW 332: `RESIDENT_BUFFERS` (`omega/src/metal.rs:4604-4622`) is a
+    // thread-local cache keyed by NAME plus a byte-length check, never by
+    // content -- sound only for the caller's OWN static weights
+    // (`Plan::mark_resident`'s own doc). `decode_shape_roofline_ladder` runs
+    // every [`DecodeShape`] arm in ONE test thread; a shared literal
+    // "activation" name across arms with DIFFERENT activation content but
+    // the SAME byte length (every k=4096 arm) silently served an earlier
+    // arm's stale activation bytes to a later arm's kernel. Naming the
+    // activation node per-`label` makes each arm's own resident entry
+    // distinct, so no arm can ever be served another arm's activation.
+    let activation_name = format!("{label}_activation");
+    let (program, sums) =
+        multi_tensor_matmul_program(&weight_names, rows as u32, k as u32, DType::UInt8, &activation_name);
     let weight_slices: Vec<&[u8]> = weight_bytes.chunks_exact(rows * row_bytes).collect();
     let mut blocks: Vec<QuantizedBlock<'_>> =
         weight_slices.iter().map(|slice| codec.quantized_block(slice)).collect();
@@ -1798,7 +1812,7 @@ fn run_shape_arm(label: &str, codec: ShapeCodec, rows: usize, k: usize, tensor_c
     let mut plan = omega::metal::plan(&program, &[], &blocks, &sums)
         .expect("plan resolves the synthetic matmul over every tensor");
     let mut resident_names: BTreeSet<&str> = weight_names.iter().map(String::as_str).collect();
-    resident_names.insert("activation");
+    resident_names.insert(activation_name.as_str());
     plan.mark_resident(&resident_names);
 
     let mut first_tensor_output: Vec<f32> = Vec::new();
@@ -2165,7 +2179,9 @@ fn head_program(
     weight_dtype: DType,
 ) -> (Vec<Op>, Vec<NodeId>) {
     match op_shape {
-        OpShape::LadderReduceLast => multi_tensor_matmul_program(weight_names, rows, k, weight_dtype),
+        OpShape::LadderReduceLast => {
+            multi_tensor_matmul_program(weight_names, rows, k, weight_dtype, "activation")
+        }
         OpShape::ProductionReduceMiddle => production_head_program(weight_names, rows, k, weight_dtype),
     }
 }
