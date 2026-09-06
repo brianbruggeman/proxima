@@ -550,20 +550,14 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     long weight_base[4];
     long other_base[4];
     long coord_q_cache[4][3];
+    long weight_row_stride = u.operand_strides[0][1];
+    long other_row_stride = u.operand_strides[1][1];
     for (int q = 0; q < 4; ++q) {
         long flat = group_first + q;
-        long remaining_q = flat;
         for (int d = 0; d < 3; ++d) { coord_q_cache[q][d] = 0; }
-        coord_q_cache[q][1] = remaining_q % u.output_extents[1]; remaining_q /= u.output_extents[1];
-        coord_q_cache[q][0] = remaining_q % u.output_extents[0]; remaining_q /= u.output_extents[0];
-        long wb = u.operand_base[0];
-        long ob = u.operand_base[1];
-        wb += coord_q_cache[q][0] * u.operand_strides[0][0];
-        ob += coord_q_cache[q][0] * u.operand_strides[1][0];
-        wb += coord_q_cache[q][1] * u.operand_strides[0][1];
-        ob += coord_q_cache[q][1] * u.operand_strides[1][1];
-        weight_base[q] = wb;
-        other_base[q] = ob;
+        coord_q_cache[q][1] = flat;
+        weight_base[q] = u.operand_base[0] + flat * weight_row_stride;
+        other_base[q] = u.operand_base[1] + flat * other_row_stride;
     }
     long other_stride = u.operand_strides[1][2];
     uint ix = (uint)lane / 8u;
