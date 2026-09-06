@@ -214,7 +214,7 @@ workgroup_size = 64
 # the cross-simdgroup online-softmax merge. Overridable per-build via
 # `OMEGA_ATTENTION_CONTEXT_CHUNKS_KEYS_PER_CHUNK` /
 # `OMEGA_ATTENTION_CONTEXT_CHUNKS_CAP`.
-keys_per_chunk = 64
+keys_per_chunk = 16
 cap = 4
 
 [packed_row_nsg]
