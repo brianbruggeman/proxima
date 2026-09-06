@@ -163,8 +163,8 @@ use proxima_gguf::quant::{QuantError, q4_k, q5_k, q6_k};
 use proxima_gguf::types::GgmlType;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, map,
+    BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce,
+    ReduceInit, ScalarOp, append, bind, infer, map,
 };
 
 /// Real GGUF checkpoint path, overridable via `PROXIMA_BENCH_GGUF_PATH` --
@@ -3018,6 +3018,17 @@ struct BareDispatchOp<'a> {
     uniform: &'a ProtocolObject<dyn MTLBuffer>,
     grid_threads: usize,
     threadgroup_width: usize,
+    /// Buffer-index this op's own compiled kernel expects each binding at --
+    /// `[0, 1, 2, 3]` (weight/activation/output/uniform) for every hand-
+    /// written `q4k_pair_dot`/`q6k_pair_dot` body arm (A-D), but PRODUCTION's
+    /// own emitted reduce declares operands activation-first
+    /// (`production_head_program`'s own doc), so arm E's [`Kernel::bindings`]
+    /// order differs and must be read off that kernel rather than assumed --
+    /// see [`production_reduce_kernel`]'s own doc.
+    weight_index: usize,
+    activation_index: usize,
+    output_index: usize,
+    uniform_index: usize,
 }
 
 /// Encodes `ops` in program order into ONE plain `computeCommandEncoder()`
@@ -3042,10 +3053,10 @@ fn time_bare_dispatch_sequence(
     for op in ops {
         encoder.setComputePipelineState(op.pipeline);
         unsafe {
-            encoder.setBuffer_offset_atIndex(Some(op.weight), op.weight_offset, 0);
-            encoder.setBuffer_offset_atIndex(Some(op.activation), 0, 1);
-            encoder.setBuffer_offset_atIndex(Some(output), 0, 2);
-            encoder.setBuffer_offset_atIndex(Some(op.uniform), 0, 3);
+            encoder.setBuffer_offset_atIndex(Some(op.weight), op.weight_offset, op.weight_index);
+            encoder.setBuffer_offset_atIndex(Some(op.activation), 0, op.activation_index);
+            encoder.setBuffer_offset_atIndex(Some(output), 0, op.output_index);
+            encoder.setBuffer_offset_atIndex(Some(op.uniform), 0, op.uniform_index);
         }
         let grid = MTLSize {
             width: op.grid_threads,
@@ -3064,6 +3075,177 @@ fn time_bare_dispatch_sequence(
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
     started.elapsed()
+}
+
+/// `reduction_dims` restated over public [`BoundOp`] fields --
+/// `omega::msl::reduction_dims` is `pub(crate)`, not exported, so
+/// [`pack_production_reduce_uniforms`] (this crate never sees the private
+/// packer either, ROW 344's own question) re-derives the identical axis set
+/// its own doc defines: every axis NOT in `output_axes`, ascending.
+fn reduction_dims_port(rank: usize, output_axes: &[u16]) -> Vec<u16> {
+    (0..rank as u16).filter(|axis| !output_axes.contains(axis)).collect()
+}
+
+fn push_i64(bytes: &mut Vec<u8>, value: i64) {
+    bytes.extend_from_slice(&value.to_ne_bytes());
+}
+
+fn push_i64_row(bytes: &mut Vec<u8>, values: &[i64], width: usize) {
+    for slot in 0..width {
+        push_i64(bytes, values.get(slot).copied().unwrap_or(0));
+    }
+}
+
+fn push_gathered_extent_row(bytes: &mut Vec<u8>, extents: &[u64], axes: &[u16], width: usize) {
+    for slot in 0..width {
+        let value = axes.get(slot).map(|axis| extents[*axis as usize] as i64).unwrap_or(0);
+        push_i64(bytes, value);
+    }
+}
+
+fn gathered_extent_product(extents: &[u64], axes: &[u16]) -> i64 {
+    axes.iter().map(|axis| extents[*axis as usize] as i64).product()
+}
+
+/// Ports `omega::metal::pack_reduce_uniforms` field-for-field over public
+/// [`BoundOp`] accessors -- that function is `omega`-private (this ladder is
+/// a separate integration-test crate, so it genuinely cannot call it), and
+/// ROW 344's own question needs the identical bytes production's own driver
+/// would pack for this fold, not an approximation. Mirrors the `Uniforms`
+/// struct `omega::msl::render_reduce` declares (`omega/src/msl.rs:3827-3833`'s
+/// own doc): `output_total`, `reduction_total`, `output_extents[..]`,
+/// `reduction_extents[..]`, `operand_base[..]`, `operand_strides[..][..]`,
+/// `out_base`, `out_strides[..]`. Sound only for the gather-free,
+/// epilogue-free, non-scatter fold [`production_reduce_kernel`] resolves --
+/// [`production_head_program`]'s own reduce never gathers, scatters, or
+/// fuses an epilogue, so every `assert!` below holds by construction, not by
+/// luck.
+fn pack_production_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
+    let BoundOpKind::Reduce {
+        output_axes,
+        out_layout,
+        epilogue_operands,
+        out_scatter,
+        ..
+    } = &bound.kind
+    else {
+        panic!("production reduce fold expected, found {}", bound.kind.name());
+    };
+    assert!(epilogue_operands.is_empty(), "epilogue-free fold expected for ROW 344's own head program");
+    assert!(out_scatter.is_none(), "affine (non-scatter) fold expected for ROW 344's own head program");
+    assert!(
+        bound.operands().iter().all(|(_, _, gather)| gather.is_none()),
+        "gather-free operands expected for ROW 344's own head program"
+    );
+
+    let rank_len = bound.extents.len().max(1);
+    let output_rank_len = output_axes.len().max(1);
+    let reduce_axes = reduction_dims_port(bound.extents.len(), output_axes);
+    let reduce_rank_len = reduce_axes.len().max(1);
+
+    let mut bytes = Vec::new();
+    push_i64(&mut bytes, gathered_extent_product(&bound.extents, output_axes));
+    push_i64(&mut bytes, gathered_extent_product(&bound.extents, &reduce_axes));
+    push_gathered_extent_row(&mut bytes, &bound.extents, output_axes, output_rank_len);
+    push_gathered_extent_row(&mut bytes, &bound.extents, &reduce_axes, reduce_rank_len);
+    for (_, layout, _) in bound.operands() {
+        push_i64(&mut bytes, layout.base);
+    }
+    for (_, layout, _) in bound.operands() {
+        push_i64_row(&mut bytes, &layout.strides, rank_len);
+    }
+    push_i64(&mut bytes, out_layout.base);
+    push_i64_row(&mut bytes, &out_layout.strides, rank_len);
+    bytes
+}
+
+/// PRODUCTION's own emitted kernel for one whole-token matvec shape, ready
+/// for [`time_bare_dispatch_sequence`]'s bare per-op encoding -- arm E's
+/// answer to arm C, the SAME `q4k_pair_dot`/`q6k_pair_dot`-free path
+/// [`run_shape_arm`]/[`run_head_arm`] already exercise through
+/// `omega::metal::plan`/`execute_plan`, but resolved and emitted directly
+/// (`proxima_tensor::{infer, bind}` then [`omega::emit`]) so THIS caller
+/// controls the dispatch (no hazard tracker, no arena, no plan cache) the
+/// same way arms A-D already do for the ladder's own hand-written body.
+/// Builds the exact `sd->sdv`/`dv->sdv` reduce-middle op
+/// [`production_head_program`] mirrors from `mistral_forward_program`'s own
+/// output head (activation operand first, weight second -- that function's
+/// own doc), which is why [`Kernel::bindings`] is read back rather than
+/// assumed: production's own operand order differs from this ladder's
+/// weight-first `q4k_pair_dot`/`q6k_pair_dot` convention.
+struct ProductionKernel {
+    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    uniform: Retained<ProtocolObject<dyn MTLBuffer>>,
+    weight_index: usize,
+    activation_index: usize,
+    output_index: usize,
+    uniform_index: usize,
+    grid_threads: usize,
+    threadgroup_width: usize,
+}
+
+fn production_reduce_kernel(
+    device: &ProtocolObject<dyn MTLDevice>,
+    codec: omega::PackedCodec,
+    rows: u32,
+    k: u32,
+) -> ProductionKernel {
+    let (program, sums) = production_head_program(&["weight".to_string()], rows, k, DType::UInt8);
+    // `production_head_program` declares the weight node(s) before
+    // `activation` (its own doc), so with exactly one weight name the input
+    // nodes are `NodeId(0)` (weight) then `NodeId(1)` (activation) --
+    // `proxima_tensor::append`'s own doc: a `NodeId` IS the node's position
+    // in `program`.
+    let weight_node = NodeId(0);
+    let activation_node = NodeId(1);
+
+    let shapes = infer(&program, &[]).expect("production reduce program's shapes infer");
+    let bound_ops = bind(&program, &shapes, &sums).expect("production reduce program binds");
+    let bound = bound_ops
+        .into_iter()
+        .find(|op| op.node == sums[0])
+        .expect("the head sum's own fused reduce is present in the bound program");
+
+    let packed_operands: omega::PackedOperands = BTreeMap::from([(weight_node, codec)]);
+    let kernel =
+        omega::emit(&bound, &packed_operands).expect("production reduce fold emits an MSL kernel");
+
+    let weight_index = kernel
+        .bindings
+        .iter()
+        .position(|binding| matches!(binding, omega::Binding::Input(node) if *node == weight_node))
+        .expect("weight binding present in the emitted kernel");
+    let activation_index = kernel
+        .bindings
+        .iter()
+        .position(|binding| matches!(binding, omega::Binding::Input(node) if *node == activation_node))
+        .expect("activation binding present in the emitted kernel");
+    let output_index = kernel
+        .bindings
+        .iter()
+        .position(|binding| matches!(binding, omega::Binding::Output(_)))
+        .expect("output binding present in the emitted kernel");
+    let uniform_index = kernel
+        .bindings
+        .iter()
+        .position(|binding| matches!(binding, omega::Binding::Uniforms))
+        .expect("uniforms binding present in the emitted kernel");
+
+    let uniform_bytes = pack_production_reduce_uniforms(&bound);
+    let uniform = shared_buffer_from_bytes(device, &uniform_bytes);
+    let pipeline = compile_pipeline(device, &kernel.source, &kernel.entry, MTLMathMode::Relaxed);
+    let threadgroup_width = kernel.grid.threadgroup_width.unwrap_or(64) as usize;
+
+    ProductionKernel {
+        pipeline,
+        uniform,
+        weight_index,
+        activation_index,
+        output_index,
+        uniform_index,
+        grid_threads: kernel.grid.threads as usize,
+        threadgroup_width,
+    }
 }
 
 /// One of the seven per-layer `Q4_K` matvec shapes a real decode token
@@ -3260,6 +3442,10 @@ fn whole_token_matvec_sequence_bare() {
                     uniform,
                     grid_threads: total_simdgroups * 32,
                     threadgroup_width,
+                    weight_index: 0,
+                    activation_index: 1,
+                    output_index: 2,
+                    uniform_index: 3,
                 });
             }
         }
@@ -3279,6 +3465,10 @@ fn whole_token_matvec_sequence_bare() {
             uniform: &uniform_4096,
             grid_threads: head_total_simdgroups * 32,
             threadgroup_width,
+            weight_index: 0,
+            activation_index: 1,
+            output_index: 2,
+            uniform_index: 3,
         });
 
         assert_eq!(ops.len(), WHOLE_TOKEN_LAYER_FAMILIES.len() * FFN_LAYERS + 1);
@@ -3301,4 +3491,85 @@ fn whole_token_matvec_sequence_bare() {
             gbps_stats.mean,
         );
     }
+
+    // ROW 344: arm E is the same 225-dispatch bare sequence as arms A-D, but
+    // every pipeline is PRODUCTION's own emitted kernel
+    // ([`production_reduce_kernel`]) instead of this ladder's hand-written
+    // `q4k_pair_dot`/`q6k_pair_dot` body -- the question ROW 339-343 never
+    // answered: is the emitted body itself as fast as `pair_dot` bare, or is
+    // production's ggml-port default (`metal-q4k-ggml-port`, in the default
+    // `metal` feature list) the loss this whole-token gap has been carrying?
+    // Fixed at `MTLMathMode::Relaxed`, matching arm C -- production has no
+    // `nsg`/math knob a caller selects per dispatch the way arms A-D's
+    // hand-compiled pipelines do; its own compiled shape is whatever
+    // `omega::emit` renders today.
+    println!(
+        "=== ROW 344: whole decode token bare, PRODUCTION's own emitted kernel per shape \
+         (arm E vs arm C's q4k_pair_dot/q6k_pair_dot body) ==="
+    );
+
+    let family_kernels: Vec<_> = WHOLE_TOKEN_LAYER_FAMILIES
+        .iter()
+        .map(|family| {
+            production_reduce_kernel(&device, omega::PackedCodec::Q4K, family.rows as u32, family.k as u32)
+        })
+        .collect();
+    let head_kernel =
+        production_reduce_kernel(&device, omega::PackedCodec::Q6K, WHOLE_TOKEN_HEAD_ROWS as u32, WHOLE_TOKEN_HEAD_K as u32);
+
+    let mut production_ops: Vec<BareDispatchOp<'_>> =
+        Vec::with_capacity(WHOLE_TOKEN_LAYER_FAMILIES.len() * FFN_LAYERS + 1);
+    for layer in 0..FFN_LAYERS {
+        for ((family, (weight_buffer, offsets)), kernel) in
+            WHOLE_TOKEN_LAYER_FAMILIES.iter().zip(&family_buffers).zip(&family_kernels)
+        {
+            let activation = if family.k == 4096 { &activation_4096_buffer } else { &activation_14336_buffer };
+            production_ops.push(BareDispatchOp {
+                pipeline: &kernel.pipeline,
+                weight: weight_buffer,
+                weight_offset: offsets[layer],
+                activation,
+                uniform: &kernel.uniform,
+                grid_threads: kernel.grid_threads,
+                threadgroup_width: kernel.threadgroup_width,
+                weight_index: kernel.weight_index,
+                activation_index: kernel.activation_index,
+                output_index: kernel.output_index,
+                uniform_index: kernel.uniform_index,
+            });
+        }
+    }
+    production_ops.push(BareDispatchOp {
+        pipeline: &head_kernel.pipeline,
+        weight: &head_buffer,
+        weight_offset: 0,
+        activation: &activation_4096_buffer,
+        uniform: &head_kernel.uniform,
+        grid_threads: head_kernel.grid_threads,
+        threadgroup_width: head_kernel.threadgroup_width,
+        weight_index: head_kernel.weight_index,
+        activation_index: head_kernel.activation_index,
+        output_index: head_kernel.output_index,
+        uniform_index: head_kernel.uniform_index,
+    });
+    assert_eq!(production_ops.len(), WHOLE_TOKEN_LAYER_FAMILIES.len() * FFN_LAYERS + 1);
+
+    let elapsed_samples =
+        warmed_up_samples(|| time_bare_dispatch_sequence(&queue, &output, &production_ops));
+    let ms_samples: Vec<f64> = elapsed_samples.iter().map(Duration::as_secs_f64).map(|s| s * 1e3).collect();
+    let ms_stats = sample_stats(&ms_samples);
+    let gbps_samples_vec = gbps_samples(&elapsed_samples, total_timed_bytes);
+    let gbps_stats = sample_stats(&gbps_samples_vec);
+    println!(
+        "arm=E_production_emitted_body_nsg2_relaxed dispatches={} bytes={total_timed_bytes} \
+         median_ms={:.3} min_ms={:.3} max_ms={:.3} cov_pct={:.2} ms_samples={ms_samples:?} \
+         median_gbps={:.2} mean_gbps={:.2}",
+        production_ops.len(),
+        ms_stats.median,
+        ms_stats.min,
+        ms_stats.max,
+        ms_stats.cov_pct,
+        gbps_stats.median,
+        gbps_stats.mean,
+    );
 }
