@@ -148,8 +148,7 @@ use objc2_metal::{
 
 use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_gguf::quant::q4_k;
-use proxima_gguf::quant::q6_k;
+use proxima_gguf::quant::{QuantError, q4_k, q5_k, q6_k};
 use proxima_gguf::types::GgmlType;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
@@ -461,10 +460,28 @@ const _: () = assert!(
 /// `proxima-tensor/docs/discipline.md`), decimal GB/s -- reported alongside
 /// every Q6_K shape arm's own GB/s as a ratio, not re-measured here.
 const DEVICE_CEILING_GBPS: f64 = 381.24;
-/// ROW 319's in-program measurement of llama's ported `Q6_K` kernel on the
-/// real `output.weight` dispatch (2.38 ms for 107.5 MB) -- the number this
-/// arm's isolated measurement is checked against.
-const ROW_319_IN_PROGRAM_GBPS: f64 = 45.0;
+/// ROW 310's own in-program per-family bandwidth table
+/// (`proxima-tensor/docs/discipline.md:23058-23068`, the in-buffer ablation
+/// `cost = FULL - arm` / `bytes` / `GB/s`), restated here as a small lookup
+/// so [`run_shape_arm`] can print each isolated arm's GB/s beside the
+/// in-program number for the SAME family on the SAME line -- never averaged
+/// or combined into one derived number (guiding-principles §18/§19: these
+/// are two independent MEASUREMENTs of two different dispatch contexts,
+/// concurrent-overlapped-in-program vs isolated-in-this-file). `attn_q`/
+/// `attn_k`/`attn_v` are `None` -- ROW 310 measured them noise-negative
+/// (`attn_q`'s own CoV 12.75% blew through this campaign's 5% bound), not
+/// zero throughput; a `None` here reads as "not comparable", never as "0
+/// GB/s". `head` names `output.weight`'s own row (`Q6_K`, 41.63 GB/s).
+const ROW_310_IN_PROGRAM_GBPS: &[(&str, Option<f64>)] = &[
+    ("attn_q", None),
+    ("attn_k", None),
+    ("attn_v", None),
+    ("head", Some(41.63)),
+    ("attn_output", Some(144.94)),
+    ("ffn_up", Some(183.48)),
+    ("ffn_down", Some(200.46)),
+    ("ffn_gate", Some(236.55)),
+];
 
 const REPEATS: usize = 5;
 const PARITY_ROWS: usize = 64;
@@ -1606,20 +1623,96 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
     );
 }
 
-/// Synthesizes `tensor_count` distinct `Q6_K`-encoded tensors, each
-/// `[rows, k]`, through the SAME encoder production's own real `Q6_K`
-/// tensors are quantized with (`proxima_gguf::quant::q6_k::quantize`) --
-/// guiding-principles §9's fallback for the one case in this file where the
-/// real artifact (`output.weight`) exists only ONCE in the checkpoint, not
-/// in the quantity (19/146) this harness's amortization floor needs. Each
-/// tensor gets its own [`Lcg`] seed (`seed_base + tensor_index`) so no two
-/// tensors are bit-identical and a GPU cache cannot serve one tensor's read
-/// from another's -- the same "distinct tensors" posture the real `Q4_K`
-/// arms above get for free from 32 real, distinct checkpoint tensors. One
-/// row's worth of `f32` (`k` elements) is reused per row rather than
-/// materializing the whole tensor in `f32` first, so peak host memory stays
-/// at the quantized output size, not `4x` that.
-fn synth_q6k_weight_bytes(seed_base: u64, tensor_count: usize, rows: usize, row_bytes: usize, k: usize) -> Vec<u8> {
+/// The three K-quant codecs a real decode step actually dispatches through
+/// Metal on this checkpoint (`Q4_K` for every uniformly-quantized family,
+/// `Q5_K` for the llama.cpp-inserted per-layer quality bump on 4 of 32
+/// `attn_v`/`ffn_down` tensors, `Q6_K` for the lone `output.weight` head --
+/// `proxima-tensor/docs/discipline.md` ROW 87's own printed inventory,
+/// cross-checked live against `omega::msl::emit`'s `PackedCodec::Q5K` arm
+/// (`omega/src/msl.rs:4516-4527`, `q5k_pair_dot` selected the same way
+/// `q4k_pair_dot`/`q6k_pair_dot` are) -- Metal has a real production kernel
+/// for all three today, superseding the stale "no q5_k/q6_k unpack kernel"
+/// claim `FFN_TENSOR_KINDS`'s own doc above restates from an earlier row).
+/// One enum dispatching each codec's own `proxima_gguf::quant` module and
+/// `QuantizedBlock` variant, instead of three near-identical copies of every
+/// synth/reference/arm function below (guiding-principles §1: the shape is
+/// the same, only the codec's own block size and functions differ).
+#[derive(Clone, Copy)]
+enum ShapeCodec {
+    Q4K,
+    Q5K,
+    Q6K,
+}
+
+impl ShapeCodec {
+    const fn name(self) -> &'static str {
+        match self {
+            ShapeCodec::Q4K => "Q4_K",
+            ShapeCodec::Q5K => "Q5_K",
+            ShapeCodec::Q6K => "Q6_K",
+        }
+    }
+
+    const fn qk_k(self) -> usize {
+        match self {
+            ShapeCodec::Q4K => q4_k::QK_K,
+            ShapeCodec::Q5K => q5_k::QK_K,
+            ShapeCodec::Q6K => q6_k::QK_K,
+        }
+    }
+
+    const fn block_bytes(self) -> usize {
+        match self {
+            ShapeCodec::Q4K => q4_k::BLOCK_BYTES,
+            ShapeCodec::Q5K => q5_k::BLOCK_BYTES,
+            ShapeCodec::Q6K => q6_k::BLOCK_BYTES,
+        }
+    }
+
+    fn row_bytes(self, k: usize) -> usize {
+        (k / self.qk_k()) * self.block_bytes()
+    }
+
+    fn quantize(self, input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
+        match self {
+            ShapeCodec::Q4K => q4_k::quantize(input, output),
+            ShapeCodec::Q5K => q5_k::quantize(input, output),
+            ShapeCodec::Q6K => q6_k::quantize(input, output),
+        }
+    }
+
+    fn dequantize(self, data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
+        match self {
+            ShapeCodec::Q4K => q4_k::dequantize(data, output),
+            ShapeCodec::Q5K => q5_k::dequantize(data, output),
+            ShapeCodec::Q6K => q6_k::dequantize(data, output),
+        }
+    }
+
+    fn quantized_block(self, bytes: &[u8]) -> QuantizedBlock<'_> {
+        match self {
+            ShapeCodec::Q4K => QuantizedBlock::Q4K(bytes),
+            ShapeCodec::Q5K => QuantizedBlock::Q5K(bytes),
+            ShapeCodec::Q6K => QuantizedBlock::Q6K(bytes),
+        }
+    }
+}
+
+/// Synthesizes `tensor_count` distinct `codec`-encoded tensors, each
+/// `[rows, k]`, through the SAME encoder production's own real weights of
+/// that codec are quantized with (`proxima_gguf::quant::{q4_k,q5_k,q6_k}::quantize`)
+/// -- guiding-principles §9's fallback for shapes this checkpoint carries in
+/// a quantity (1 `output.weight`, or a `Q5_K`-mixed 4/32 per family) below
+/// this harness's own amortization floor. Each tensor gets its own [`Lcg`]
+/// seed (`seed_base + tensor_index`) so no two tensors are bit-identical and
+/// a GPU cache cannot serve one tensor's read from another's -- the same
+/// "distinct tensors" posture the real `Q4_K` ffn_up/ffn_gate arms above get
+/// for free from 32 real, distinct checkpoint tensors. One row's worth of
+/// `f32` (`k` elements) is reused per row rather than materializing the
+/// whole tensor in `f32` first, so peak host memory stays at the quantized
+/// output size, not `4x` that.
+fn synth_weight_bytes(codec: ShapeCodec, seed_base: u64, tensor_count: usize, rows: usize, k: usize) -> Vec<u8> {
+    let row_bytes = codec.row_bytes(k);
     let tensor_bytes = rows * row_bytes;
     let mut bytes = vec![0u8; tensor_bytes * tensor_count];
     let mut row_f32 = vec![0.0f32; k];
@@ -1629,69 +1722,81 @@ fn synth_q6k_weight_bytes(seed_base: u64, tensor_count: usize, rows: usize, row_
             for value in row_f32.iter_mut() {
                 *value = lcg.next_unit() * 4.0 - 2.0;
             }
-            q6_k::quantize(&row_f32, row_blocks).expect("row length is a whole multiple of QK_K");
+            codec
+                .quantize(&row_f32, row_blocks)
+                .expect("row length is a whole multiple of the codec's own QK_K");
         }
     }
     bytes
 }
 
 /// CPU oracle for the first [`PARITY_ROWS`] rows of the FIRST synthesized
-/// tensor -- same posture as [`cpu_reference_first_rows`], `Q6_K`'s own
-/// `dequantize`/dot-product instead of `Q4_K`'s.
-fn q6k_cpu_reference_first_rows(first_tensor_bytes: &[u8], row_bytes: usize, k: usize, activation: &[f32]) -> Vec<f32> {
+/// tensor -- same posture as [`cpu_reference_first_rows`], `codec`'s own
+/// `dequantize`/dot-product instead of a fixed `Q4_K`/`Q6_K` call.
+fn codec_cpu_reference_first_rows(
+    codec: ShapeCodec,
+    first_tensor_bytes: &[u8],
+    k: usize,
+    activation: &[f32],
+) -> Vec<f32> {
+    let row_bytes = codec.row_bytes(k);
     let mut reference = Vec::with_capacity(PARITY_ROWS);
     let mut dequantized_row = vec![0.0f32; k];
     for row_blocks in first_tensor_bytes[..PARITY_ROWS * row_bytes].chunks_exact(row_bytes) {
-        q6_k::dequantize(row_blocks, &mut dequantized_row).expect("a whole number of q6_k super-blocks per row");
+        codec
+            .dequantize(row_blocks, &mut dequantized_row)
+            .expect("a whole number of the codec's own super-blocks per row");
         let dot: f32 = dequantized_row.iter().zip(activation.iter()).map(|(weight, act)| weight * act).sum();
         reference.push(dot);
     }
     reference
 }
 
-/// Runs one `Q6_K` shape arm: synthesizes `tensor_count` distinct
-/// `[rows, IN_DIM]` tensors, dispatches PRODUCTION's own emitted `Q6_K`
-/// kernel over all of them through `omega::metal::plan`/`execute_plan` --
-/// the SAME public entry point `L3_baseline` uses for `Q4_K` above, so the
-/// MSL text is whatever `omega::msl::emit` renders today (byte-identical to
-/// production by construction) and the dispatch geometry
-/// (`packed_row_dispatch`, `Q6K`'s `rows_per_simdgroup() == 1`,
-/// `omega/src/msl.rs:1148`, `nsg2` default-on) is production's, never
-/// hand-assembled here -- and reports GB/s plus CoV over [`REPEATS`], with
-/// ratios to ROW 319's in-program 45 GB/s and to the 381.24 GB/s device
-/// ceiling (ROW 296), so an in-isolation vs in-program gap reads directly
-/// off this arm's own printed line. Reports its parity failure, if any, as a
-/// return value rather than panicking, so the caller can run every shape arm
-/// and fail once at the end listing all of them ([`check_parity`]'s own doc).
+/// Runs one isolated decode-matvec shape arm: synthesizes `tensor_count`
+/// distinct `[rows, k]` tensors of `codec`, dispatches PRODUCTION's own
+/// emitted kernel for that codec over all of them through
+/// `omega::metal::plan`/`execute_plan` -- the SAME public entry point
+/// `L3_baseline` uses for `Q4_K` above, so the MSL text is whatever
+/// `omega::msl::emit` renders today (byte-identical to production by
+/// construction) and the dispatch geometry is production's, never
+/// hand-assembled here -- and reports rows/k/codec/tensors/bytes/GB/s/CoV
+/// plus the ratio to the 381.24 GB/s device ceiling (ROW 296), so an
+/// in-isolation vs in-program gap reads directly off this arm's own printed
+/// line next to [`ROW_310_IN_PROGRAM_GBPS`]'s number for the same family.
+/// Reports its parity failure, if any, as a return value rather than
+/// panicking, so the caller can run every shape arm and fail once at the
+/// end listing all of them ([`check_parity`]'s own doc). Generalizes the
+/// prior `run_q6k_shape_arm` (one codec parameter instead of a second copy
+/// per codec, guiding-principles §1).
 #[must_use]
-fn run_q6k_shape_arm(label: &str, rows: usize, tensor_count: usize, seed_base: u64) -> Option<String> {
-    let row_bytes = Q6K_ROW_BYTES;
+fn run_shape_arm(label: &str, codec: ShapeCodec, rows: usize, k: usize, tensor_count: usize, seed_base: u64) -> Option<String> {
+    let row_bytes = codec.row_bytes(k);
     let tensor_bytes = (rows * row_bytes) as u64;
     let total_timed_bytes = tensor_bytes * tensor_count as u64;
+    let codec_name = codec.name();
     println!(
-        "=== q6_k shape arm {label}: rows={rows} k={IN_DIM} tensors={tensor_count} \
+        "=== decode shape arm {label}: rows={rows} k={k} codec={codec_name} tensors={tensor_count} \
          tensor_bytes={tensor_bytes} total_timed_bytes={total_timed_bytes} \
-         (production Q6_K kernel via omega::metal::plan/execute_plan) ==="
+         (production kernel via omega::metal::plan/execute_plan) ==="
     );
 
-    let weight_bytes = synth_q6k_weight_bytes(seed_base, tensor_count, rows, row_bytes, IN_DIM);
-    let weight_names: Vec<String> = (0..tensor_count).map(|index| format!("q6k_{label}_{index}")).collect();
+    let weight_bytes = synth_weight_bytes(codec, seed_base, tensor_count, rows, k);
+    let weight_names: Vec<String> = (0..tensor_count).map(|index| format!("{label}_{index}")).collect();
 
     let mut activation_lcg = Lcg(seed_base + 999);
-    let activation: Vec<f32> = (0..IN_DIM).map(|_| activation_lcg.next_unit() * 4.0 - 2.0).collect();
+    let activation: Vec<f32> = (0..k).map(|_| activation_lcg.next_unit() * 4.0 - 2.0).collect();
 
     let cpu_reference =
-        q6k_cpu_reference_first_rows(&weight_bytes[..rows * row_bytes], row_bytes, IN_DIM, &activation);
+        codec_cpu_reference_first_rows(codec, &weight_bytes[..rows * row_bytes], k, &activation);
 
-    let (program, sums) =
-        multi_tensor_matmul_program(&weight_names, rows as u32, IN_DIM as u32, DType::UInt8);
+    let (program, sums) = multi_tensor_matmul_program(&weight_names, rows as u32, k as u32, DType::UInt8);
     let weight_slices: Vec<&[u8]> = weight_bytes.chunks_exact(rows * row_bytes).collect();
     let mut blocks: Vec<QuantizedBlock<'_>> =
-        weight_slices.iter().map(|slice| QuantizedBlock::Q6K(slice)).collect();
+        weight_slices.iter().map(|slice| codec.quantized_block(slice)).collect();
     blocks.push(QuantizedBlock::Float32(&activation));
 
     let mut plan = omega::metal::plan(&program, &[], &blocks, &sums)
-        .expect("plan resolves the synthetic q6_k matmul over every tensor");
+        .expect("plan resolves the synthetic matmul over every tensor");
     let mut resident_names: BTreeSet<&str> = weight_names.iter().map(String::as_str).collect();
     resident_names.insert("activation");
     plan.mark_resident(&resident_names);
@@ -1701,7 +1806,7 @@ fn run_q6k_shape_arm(label: &str, rows: usize, tensor_count: usize, seed_base: u
     for _ in 0..REPEATS {
         let started = Instant::now();
         let evaluated = omega::metal::execute_plan(&plan, &blocks)
-            .expect("execute_plan runs the synthetic q6_k matmul over every tensor");
+            .expect("execute_plan runs the synthetic matmul over every tensor");
         elapsed_samples.push(started.elapsed());
         first_tensor_output = evaluated
             .get(sums[0])
@@ -1710,15 +1815,28 @@ fn run_q6k_shape_arm(label: &str, rows: usize, tensor_count: usize, seed_base: u
     }
     let samples = gbps_samples(&elapsed_samples, total_timed_bytes);
     let (mean, cov) = mean_and_cov(&samples);
+    let ratio_to_ceiling = mean / DEVICE_CEILING_GBPS;
     println!(
-        "arm=Q6K_{label} rows={rows} tensors={tensor_count} mean_gbps={mean:.2} cov_pct={cov:.2} \
-         samples={samples:?} bytes={total_timed_bytes} ratio_to_row319_in_program={:.3} \
-         ratio_to_device_ceiling={:.3}",
-        mean / ROW_319_IN_PROGRAM_GBPS,
-        mean / DEVICE_CEILING_GBPS,
+        "arm={label} rows={rows} k={k} codec={codec_name} tensors={tensor_count} bytes={total_timed_bytes} \
+         mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?} ratio_to_device_ceiling={ratio_to_ceiling:.3}"
     );
+    if let Some((_, row_310_gbps)) =
+        ROW_310_IN_PROGRAM_GBPS.iter().find(|(family, _)| *family == label)
+    {
+        match row_310_gbps {
+            Some(in_program) => println!(
+                "summary family={label}: isolated={mean:.2} GB/s vs ROW 310 in-program={in_program:.2} \
+                 GB/s (ratio isolated/in_program={:.3})",
+                mean / in_program
+            ),
+            None => println!(
+                "summary family={label}: isolated={mean:.2} GB/s vs ROW 310 in-program=noise-negative \
+                 (not comparable, see ROW 310's own CoV note)"
+            ),
+        }
+    }
     check_parity(
-        &format!("Q6K_{label} vs cpu_reference"),
+        &format!("{label} ({codec_name}) vs cpu_reference"),
         &first_tensor_output[..PARITY_ROWS],
         &cpu_reference,
     )
@@ -1740,12 +1858,97 @@ fn run_q6k_shape_arm(label: &str, rows: usize, tensor_count: usize, seed_base: u
 #[ignore = "synthesizes ~2 GB of q6_k bytes per arm through the real encoder and needs a real metal device"]
 fn q6k_head_and_layer_shape_roofline_ladder() {
     let parity_failures: Vec<String> = [
-        run_q6k_shape_arm("head", Q6K_HEAD_ROWS, Q6K_HEAD_TENSOR_COUNT, 4096),
-        run_q6k_shape_arm("layer", Q6K_LAYER_ROWS, Q6K_LAYER_TENSOR_COUNT, 8192),
+        run_shape_arm("head", ShapeCodec::Q6K, Q6K_HEAD_ROWS, IN_DIM, Q6K_HEAD_TENSOR_COUNT, 4096),
+        run_shape_arm("layer", ShapeCodec::Q6K, Q6K_LAYER_ROWS, IN_DIM, Q6K_LAYER_TENSOR_COUNT, 8192),
     ]
     .into_iter()
     .flatten()
     .collect();
+
+    assert!(
+        parity_failures.is_empty(),
+        "parity failed for {} arm(s): {parity_failures:#?}",
+        parity_failures.len()
+    );
+}
+
+// ---- decode-shape ladder: one arm per real matvec shape a decode step
+// actually dispatches on this checkpoint (openchat-3.5-1210.Q4_K_S.gguf,
+// Mistral-7B GQA architecture: n_heads=32, n_kv_heads=8, head_dim=128,
+// hidden=4096, ffn_dim=14336), isolated from ROW 310's concurrent-dispatch
+// overlap and, for `attn_v`/`ffn_down`, from the shared-buffer measurement
+// this checkpoint's own mixed codec (`Q4_K` x28 + `Q5_K` x4 of 32 layers,
+// `proxima-tensor/docs/discipline.md` ROW 87's own printed inventory) would
+// otherwise average into one number. ROW 296/322 measured only the `Q6_K`
+// head shape in isolation before this; every other family below is new. ----
+
+/// One (family, codec, rows, k) shape this checkpoint's decode step
+/// dispatches for real, per `proxima-model-interop`'s own weight binding
+/// (`bind.rs`) and this checkpoint's GQA shape (`k`/`v` project to
+/// `n_kv_heads * head_dim = 8 * 128 = 1024`, not the full 4096 `q`/`o` use).
+/// `attn_v`/`ffn_down` each appear twice -- once per real codec this
+/// checkpoint mixes for that family -- so neither codec's isolated
+/// bandwidth is silently averaged away.
+struct DecodeShape {
+    family: &'static str,
+    codec: ShapeCodec,
+    rows: usize,
+    k: usize,
+    seed: u64,
+}
+
+const DECODE_SHAPES: &[DecodeShape] = &[
+    DecodeShape { family: "attn_q", codec: ShapeCodec::Q4K, rows: 4096, k: 4096, seed: 10_000 },
+    DecodeShape { family: "attn_k", codec: ShapeCodec::Q4K, rows: 1024, k: 4096, seed: 20_000 },
+    DecodeShape { family: "attn_v", codec: ShapeCodec::Q4K, rows: 1024, k: 4096, seed: 30_000 },
+    DecodeShape { family: "attn_v_q5k", codec: ShapeCodec::Q5K, rows: 1024, k: 4096, seed: 30_500 },
+    DecodeShape { family: "attn_output", codec: ShapeCodec::Q4K, rows: 4096, k: 4096, seed: 40_000 },
+    DecodeShape { family: "ffn_gate", codec: ShapeCodec::Q4K, rows: 14_336, k: 4096, seed: 50_000 },
+    DecodeShape { family: "ffn_up", codec: ShapeCodec::Q4K, rows: 14_336, k: 4096, seed: 60_000 },
+    DecodeShape { family: "ffn_down", codec: ShapeCodec::Q4K, rows: 4096, k: 14_336, seed: 70_000 },
+    DecodeShape { family: "ffn_down_q5k", codec: ShapeCodec::Q5K, rows: 4096, k: 14_336, seed: 70_500 },
+    DecodeShape { family: "head", codec: ShapeCodec::Q6K, rows: 32_000, k: 4096, seed: 80_000 },
+];
+
+/// Same amortization-floor reasoning as [`Q6K_HEAD_TENSOR_COUNT`]: the
+/// smallest tensor count that still clears [`MIN_TIMED_BYTES`] (2 GB
+/// decimal) for this shape's own byte size, per shape rather than one fixed
+/// count for every family (a `ffn_gate` tensor is ~117 MB, an `attn_k`
+/// tensor is ~9 MB -- a shared count would either starve the small shapes
+/// below the floor or move tens of GB for the large ones).
+fn tensor_count_for_shape(shape: &DecodeShape) -> usize {
+    let tensor_bytes = (shape.rows * shape.codec.row_bytes(shape.k)) as u64;
+    MIN_TIMED_BYTES.div_ceil(tensor_bytes) as usize
+}
+
+/// Isolated, per-shape bandwidth for every real decode matvec this
+/// checkpoint dispatches -- the KERNEL's own speed per shape, quiet and
+/// isolated, as a follow-up to ROW 310's in-buffer ablation (confounded by
+/// concurrent-dispatch overlap) and ROW 296/322 (measured only the `Q6_K`
+/// head shape in isolation). Each arm calls the SAME [`run_shape_arm`] the
+/// `Q6_K`-only ladder above now also calls -- one function generalized over
+/// codec and shape, not one per family.
+///
+/// `#[ignore]`d: synthesizes real quantized bytes through the real encoder
+/// for every one of [`DECODE_SHAPES`] (CPU-bound minutes of work) and needs
+/// a real Metal device, same posture as this file's other synthetic-data
+/// arms above.
+#[test]
+#[ignore = "synthesizes real quantized bytes per shape through the real encoder and needs a real metal device"]
+fn decode_shape_roofline_ladder() {
+    println!(
+        "=== decode-shape roofline ladder: {} real per-family matvec shapes, isolated, quiet \
+         (device ceiling {DEVICE_CEILING_GBPS:.2} GB/s, ROW 296) ===",
+        DECODE_SHAPES.len()
+    );
+
+    let parity_failures: Vec<String> = DECODE_SHAPES
+        .iter()
+        .filter_map(|shape| {
+            let tensor_count = tensor_count_for_shape(shape);
+            run_shape_arm(shape.family, shape.codec, shape.rows, shape.k, tensor_count, shape.seed)
+        })
+        .collect();
 
     assert!(
         parity_failures.is_empty(),
