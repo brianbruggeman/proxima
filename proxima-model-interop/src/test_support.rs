@@ -46,3 +46,18 @@ pub(crate) fn openchat_gguf_path() -> String {
     std::env::var("PROXIMA_OPENCHAT_GGUF")
         .unwrap_or_else(|_| crate::serving::ServingConfig::default().model_path.to_string())
 }
+
+/// `PROXIMA_QWEN3_GGUF` read the same way [`openchat_gguf_path`] reads
+/// `PROXIMA_OPENCHAT_GGUF`: unset keeps every caller pointed at this
+/// host-local Qwen3-1.7B `Q4_K_M` checkpoint (dense `qwen3` architecture,
+/// `attn_q_norm`/`attn_k_norm` present at every layer, so it routes through
+/// `RopePairing::SplitHalf` -- `proxima-tensor/src/spec.rs:660`). No
+/// `ServingConfig` default exists for a second model family the way
+/// openchat has one, so this constant path is the closest analog.
+pub(crate) fn qwen3_gguf_path() -> String {
+    std::env::var("PROXIMA_QWEN3_GGUF").unwrap_or_else(|_| {
+        "/Users/brianbruggeman/.ollama/models/blobs/\
+         sha256-3d0b790534fe4b79525fc3692950408dca41171676ed7e21db57af5c65ef6ab6"
+            .to_string()
+    })
+}

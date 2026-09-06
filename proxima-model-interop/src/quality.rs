@@ -966,3 +966,285 @@ mod real_openchat_file {
         assert!(report.max_abs_logit_delta.is_finite(), "max_abs_logit_delta must be a real number");
     }
 }
+
+// -- Real-data proof, Qwen3 split-half RoPE: the same `MappedGguf`/
+// `open_model`/`quality_report` shape `real_openchat_file` above already
+// proves out, pointed at a checkpoint whose `qwen3.*` KV block and
+// per-layer `attn_q_norm`/`attn_k_norm` tensors route
+// `crate::bind::checkpoint_has_qk_norm` to `true`, which in turn routes
+// `proxima_tensor::spec::RopePairing` to `SplitHalf { pairs }`
+// (`proxima-tensor/src/spec.rs:660`) instead of openchat's interleaved
+// pairing -- this module exercises that arm specifically, not a second
+// copy of the openchat coverage. `LoadedModel::load` takes the same
+// architecture-name-agnostic path both checkpoints go through
+// (`generate.rs`'s `load_inner` only special-cases `general.architecture
+// == "qwen35"`, never `"qwen3"`), so no qwen3-specific loader exists or is
+// needed here.
+#[cfg(all(test, feature = "metal"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod real_qwen3_file {
+    use core::ffi::c_void;
+    use std::os::fd::AsFd;
+
+    use alloc::vec::Vec;
+
+    use crate::generate::LoadedModel;
+    use crate::serving::GPU_LAYERS_ALL;
+
+    use super::{Prompt, parse_prompts_jsonl, quality_report};
+    #[cfg(feature = "instrument")]
+    use super::print_quality_report;
+
+    /// This module's own copy of
+    /// [`super::real_openchat_file::quality_max_tokens`] -- same env var
+    /// and default, kept local because the source function is private to
+    /// its own sibling module, not this one.
+    fn quality_max_tokens() -> usize {
+        std::env::var("PROXIMA_MAX_TOKENS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(8)
+    }
+
+    /// This module's own copy of
+    /// [`super::real_openchat_file::quality_prompt_count`].
+    fn quality_prompt_count() -> usize {
+        std::env::var("PROXIMA_QUALITY_PROMPTS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(8)
+    }
+
+    /// This module's own copy of
+    /// [`super::real_openchat_file::load_quality_prompts`] -- prompt
+    /// content is architecture-agnostic, so the same shipped fixture is
+    /// reused as-is (principle 9: real data, no qwen3-specific fixture).
+    fn load_quality_prompts() -> Vec<Prompt> {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/quality_prompts.jsonl"
+        ))
+        .expect("quality_prompts.jsonl fixture ships in-tree");
+        let mut prompts = parse_prompts_jsonl(&bytes).expect("shipped fixture is well-formed jsonl");
+        prompts.truncate(quality_prompt_count());
+        prompts
+    }
+
+    /// Same read-only `mmap` [`super::real_openchat_file::MappedGguf`] uses,
+    /// kept as its own copy here for the same reason that module's own doc
+    /// gives (opening/mapping a file is the IO step this crate's module docs
+    /// disclaim) rather than sharing one type across two `#[cfg(test)]`
+    /// modules that are otherwise siblings, never callers of each other.
+    struct MappedGguf {
+        base: *mut u8,
+        len: usize,
+        _file: std::fs::File,
+    }
+
+    impl MappedGguf {
+        fn open(path: &std::path::Path) -> std::io::Result<Self> {
+            let file = std::fs::File::open(path)?;
+            let len =
+                usize::try_from(file.metadata()?.len()).expect("fixture file length fits in usize");
+            // SAFETY: `len` matches the just-opened file's own length; `file`
+            // is kept alive in `_file` for as long as `base` is used, and the
+            // mapping is read-only/private so no writer can observe or race it.
+            let base = unsafe {
+                rustix::mm::mmap(
+                    core::ptr::null_mut(),
+                    len,
+                    rustix::mm::ProtFlags::READ,
+                    rustix::mm::MapFlags::PRIVATE,
+                    file.as_fd(),
+                    0,
+                )
+            }
+            .expect("mmap host-local qwen3 gguf fixture")
+            .cast::<u8>();
+            Ok(Self {
+                base,
+                len,
+                _file: file,
+            })
+        }
+
+        fn as_slice(&self) -> &[u8] {
+            // SAFETY: `base` points at `len` bytes mapped for `self`'s whole
+            // lifetime; this borrows `self` immutably, so nothing can unmap
+            // the region while the returned slice is alive.
+            unsafe { core::slice::from_raw_parts(self.base, self.len) }
+        }
+    }
+
+    impl Drop for MappedGguf {
+        fn drop(&mut self) {
+            // SAFETY: `base`/`len` are exactly what `open`'s `mmap` call
+            // returned; nothing else unmaps this region.
+            let _ = unsafe { rustix::mm::munmap(self.base.cast::<c_void>(), self.len) };
+        }
+    }
+
+    /// Opens the host-local checkpoint through the same public path
+    /// [`super::real_openchat_file::open_model`] uses -- `LoadedModel::load`
+    /// is architecture-name-agnostic, so this is not a qwen3-specific
+    /// loader, just this module's own copy of the same two calls.
+    fn open_model(mapped: &MappedGguf) -> LoadedModel<'_> {
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local qwen3 gguf fixture");
+        LoadedModel::load(&parsed, file_bytes)
+            .expect("load real qwen3 checkpoint through the public path")
+    }
+
+    /// The degenerate control: `variant` is the SAME [`LoadedModel`] as
+    /// `reference`, on the SAME backend (Metal, [`GPU_LAYERS_ALL`]) -- both
+    /// sides then run the identical forward at every compared step, so
+    /// `exact_match_rate` must be exactly `1.0`. This control never touches
+    /// CPU at all: it proves the `SplitHalf` RoPE path did not desync
+    /// Metal-only invariants, not that CPU and Metal agree -- the next test
+    /// is the one that actually checks that.
+    #[test]
+    #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
+    fn qwen3_split_half_rope_default_vs_default_is_the_degenerate_control() {
+        let model_path = crate::test_support::qwen3_gguf_path();
+        let path = std::path::Path::new(&model_path);
+        if !path.exists() {
+            eprintln!("skipping: no host-local qwen3 gguf fixture at {model_path}");
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local qwen3 gguf fixture");
+        let model = open_model(&mapped);
+        let prompts = load_quality_prompts();
+        let max_tokens = quality_max_tokens();
+
+        let report = quality_report(
+            &model,
+            GPU_LAYERS_ALL,
+            &model,
+            GPU_LAYERS_ALL,
+            &prompts,
+            max_tokens,
+            #[cfg(target_os = "macos")]
+            crate::test_support::math_mode_from_env(),
+        )
+        .expect("quality_report against the same qwen3 model and backend on both sides");
+
+        #[cfg(feature = "instrument")]
+        print_quality_report(&report);
+
+        assert_eq!(report.prompts, prompts.len(), "every prompt in the set must produce a row");
+        assert_eq!(
+            report.exact_match_rate, 1.0,
+            "identical model and backend on both sides must match every compared token exactly"
+        );
+    }
+
+    /// The real cross-backend comparison on the `SplitHalf` RoPE path:
+    /// `reference` is the CPU forward (`gpu_layers: 0`), `variant` is the
+    /// Metal forward ([`GPU_LAYERS_ALL`]), both against the SAME loaded
+    /// qwen3 checkpoint -- this is the finding, not a pass/fail on a
+    /// specific drift number, so the only assertions are that every prompt
+    /// produced a row and every reported metric is finite. The printed
+    /// `quality_summary` line itself is the result this test reports.
+    #[test]
+    #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
+    fn qwen3_split_half_rope_metal_vs_cpu_reports_real_drift() {
+        let model_path = crate::test_support::qwen3_gguf_path();
+        let path = std::path::Path::new(&model_path);
+        if !path.exists() {
+            eprintln!("skipping: no host-local qwen3 gguf fixture at {model_path}");
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local qwen3 gguf fixture");
+        let model = open_model(&mapped);
+        let prompts = load_quality_prompts();
+        let max_tokens = quality_max_tokens();
+
+        let report = quality_report(
+            &model,
+            0,
+            &model,
+            GPU_LAYERS_ALL,
+            &prompts,
+            max_tokens,
+            #[cfg(target_os = "macos")]
+            crate::test_support::math_mode_from_env(),
+        )
+        .expect("quality_report against a qwen3 CPU reference and a Metal variant");
+
+        #[cfg(feature = "instrument")]
+        print_quality_report(&report);
+
+        std::println!(
+            "qwen3_quality_summary exact_match_rate={} top1_agreement_rate={} kl_mean={} kl_max={} max_abs_logit_delta={}",
+            report.exact_match_rate,
+            report.top1_agreement_rate,
+            report.kl_mean,
+            report.kl_max,
+            report.max_abs_logit_delta,
+        );
+
+        assert_eq!(report.prompts, prompts.len(), "every prompt in the set must produce a row");
+        assert!(report.exact_match_rate.is_finite(), "exact_match_rate must be a real number");
+        assert!(report.top1_agreement_rate.is_finite(), "top1_agreement_rate must be a real number");
+        assert!(report.kl_mean.is_finite(), "kl_mean must be a real number");
+        assert!(report.kl_max.is_finite(), "kl_max must be a real number");
+        assert!(report.max_abs_logit_delta.is_finite(), "max_abs_logit_delta must be a real number");
+    }
+
+    /// The direct check: greedy 8-token decode of the SAME prompt through
+    /// the SAME cached decode loop
+    /// (`real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`
+    /// drives), once on CPU (`gpu_layers: 0`) and once on Metal
+    /// ([`GPU_LAYERS_ALL`]) -- asserts the generated token id sequences are
+    /// bit-for-bit identical, not merely close. Distinct from the two
+    /// `quality_report`-based tests above: those score aggregate
+    /// drift metrics over many teacher-forced steps, this one runs the
+    /// crate's real autoregressive `LoadedModel::run_decode_loop` on both
+    /// backends and diffs its own greedy sampling decisions end to end.
+    #[test]
+    #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
+    fn qwen3_split_half_rope_cpu_and_metal_greedy_decode_match() {
+        let model_path = crate::test_support::qwen3_gguf_path();
+        let path = std::path::Path::new(&model_path);
+        if !path.exists() {
+            eprintln!("skipping: no host-local qwen3 gguf fixture at {model_path}");
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local qwen3 gguf fixture");
+        let model = open_model(&mapped);
+        let prompt = "The capital of France is";
+        let max_tokens = 8;
+
+        let cpu_config = crate::generate::supported_serving_config(
+            0,
+            #[cfg(target_os = "macos")]
+            crate::test_support::math_mode_from_env(),
+        );
+        let mut cpu_runtime = crate::generate::BackendRuntime::new(&cpu_config);
+        let (cpu_ids, cpu_text, _) = model
+            .run_decode_loop(prompt, max_tokens, &cpu_config, &mut cpu_runtime)
+            .expect("cpu greedy decode for the qwen3 split-half rope prompt");
+
+        let metal_config = crate::generate::supported_serving_config(
+            GPU_LAYERS_ALL,
+            #[cfg(target_os = "macos")]
+            crate::test_support::math_mode_from_env(),
+        );
+        let mut metal_runtime = crate::generate::BackendRuntime::new(&metal_config);
+        let (metal_ids, metal_text, _) = model
+            .run_decode_loop(prompt, max_tokens, &metal_config, &mut metal_runtime)
+            .expect("metal greedy decode for the qwen3 split-half rope prompt");
+
+        std::println!("qwen3_cpu_decode ids={cpu_ids:?} text={cpu_text:?}");
+        std::println!("qwen3_metal_decode ids={metal_ids:?} text={metal_text:?}");
+
+        assert_eq!(
+            cpu_ids, metal_ids,
+            "cpu and metal greedy decode must pick the identical token id sequence on the split-half rope path"
+        );
+    }
+}
