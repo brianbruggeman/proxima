@@ -623,7 +623,13 @@ pub fn plan(
         counter!(PREPARE_CALLS, 1);
         counter!(PREPARE_TICKS, elapsed_ticks(prepare_started));
     }
-    let packed_operands = packed_operands_of(&prepared.block_nodes, blocks);
+    // `prepare` already built this attribution once, off the same `blocks`
+    // argument, checked count- and shape-consistent against `block_nodes`
+    // (ROW 327) -- cloning it here instead of re-zipping `block_nodes`
+    // against `blocks` a second time is what keeps this field and
+    // `prepared`'s own from being two independent computations that could
+    // silently drift apart.
+    let packed_operands = prepared.packed_operands.clone();
     let block_dtypes = prepared
         .block_nodes
         .iter()
@@ -2725,6 +2731,12 @@ struct Prepared {
     shapes: Shapes,
     effective_outputs: Vec<NodeId>,
     block_nodes: Vec<NodeId>,
+    /// The single, ROW-327-fixed attribution of `block_nodes` to codecs --
+    /// computed once here, by [`packed_operands_of`], off blocks already
+    /// checked count- and shape-consistent against `block_nodes` (see this
+    /// function's own doc). [`plan`] reuses this instead of recomputing it
+    /// a second time against the same `blocks` argument.
+    packed_operands: PackedOperands,
     resolved: Vec<BoundOp>,
     retires: Vec<Vec<NodeId>>,
     /// Every node referenced as a gather's `indices` anywhere in the
@@ -2820,37 +2832,21 @@ fn prepare(
     outputs: &[NodeId],
 ) -> Result<Prepared, MetalError> {
     let shapes = infer(program, symbols)?;
-    let packed_operands = packed_operands_of(&block_node_ids(program), blocks);
-    // every packed codec's declared dtype is the "these are bytes" marker
-    // `reject_unsupported_gpu_dtype`'s own doc already claims as its
-    // exemption's rationale -- not just the codecs `packed_operands` above
-    // has a kernel for, so any future codec added to `QuantizedBlock` before
-    // it has an unpack kernel here still gets the right dtype exemption
-    // rather than an unrelated "not float" rejection.
-    let packed_operand_nodes: BTreeSet<NodeId> = block_node_ids(program)
-        .iter()
-        .zip(blocks.iter())
-        .filter(|(_, block)| !matches!(block, QuantizedBlock::Float32(_)))
-        .map(|(node, _)| *node)
-        .collect();
-    reject_unsupported_gpu_dtype(program, &packed_operand_nodes)?;
 
-    let root = program
-        .len()
-        .checked_sub(1)
-        .map(|last| NodeId(last as u32))
-        .ok_or(TensorError::Empty)?;
-    for output in outputs {
-        if output.0 as usize >= program.len() {
-            return Err(TensorError::UnknownOutput(*output).into());
-        }
-    }
-    let effective_outputs = if outputs.is_empty() {
-        alloc::vec![root]
-    } else {
-        outputs.to_vec()
-    };
-
+    // ROW 327: `block_nodes[i]` is the ONLY node `blocks[i]` may be
+    // attributed to -- this crate's positional contract, identical to
+    // `proxima_tensor::cpu::evaluate`'s (see `execute`'s own doc). Every
+    // classification below (`packed_operands_of`, the dtype gate, per-node
+    // shape) reads off this ONE pairing; validating it here, before any of
+    // them run, is what stops a caller's node/block order mismatch from
+    // surfacing as an unrelated downstream rejection -- a Q6_K block bound
+    // to the wrong node used to reach `reject_unsupported_gpu_dtype`
+    // (`NotLowerable`, no mention of block order) instead of the precise,
+    // node-carrying `InputCountMismatch`/`InputSizeMismatch` below. A
+    // same-shape swap between two quantized nodes is still undetectable
+    // from bytes alone -- callers with more than one packed input should
+    // bind by name via [`plan_named`]/[`resolve_named_blocks`], which
+    // resolves this pairing from `Op::name` instead of argument order.
     let block_nodes = block_node_ids(program);
     if blocks.len() != block_nodes.len() {
         return Err(TensorError::InputCountMismatch {
@@ -2871,6 +2867,35 @@ fn prepare(
             .into());
         }
     }
+
+    let packed_operands = packed_operands_of(&block_nodes, blocks);
+    // every packed codec's declared dtype is the "these are bytes" marker
+    // `reject_unsupported_gpu_dtype`'s own doc already claims as its
+    // exemption's rationale -- not just the codecs `packed_operands` above
+    // has a kernel for, so any future codec added to `QuantizedBlock` before
+    // it has an unpack kernel here still gets the right dtype exemption
+    // rather than an unrelated "not float" rejection. Reads
+    // `packed_operands`'s own keys rather than re-zipping `block_nodes`
+    // against `blocks` a second time, so this set can never disagree with
+    // the codec table above on which nodes are packed.
+    let packed_operand_nodes: BTreeSet<NodeId> = packed_operands.keys().copied().collect();
+    reject_unsupported_gpu_dtype(program, &packed_operand_nodes)?;
+
+    let root = program
+        .len()
+        .checked_sub(1)
+        .map(|last| NodeId(last as u32))
+        .ok_or(TensorError::Empty)?;
+    for output in outputs {
+        if output.0 as usize >= program.len() {
+            return Err(TensorError::UnknownOutput(*output).into());
+        }
+    }
+    let effective_outputs = if outputs.is_empty() {
+        alloc::vec![root]
+    } else {
+        outputs.to_vec()
+    };
 
     let mut resolved = bind(program, &shapes, &effective_outputs)?;
     // A stateless driver has no persistent arena to skip a dead slot inside
@@ -2919,6 +2944,7 @@ fn prepare(
         shapes,
         effective_outputs,
         block_nodes,
+        packed_operands,
         resolved,
         retires,
         index_nodes,
@@ -6321,6 +6347,160 @@ mod arena_tests {
             stage_zero_uniform, stage_two_uniform,
             "two ops with identical uniform bytes must still get DISTINCT plan-owned buffers"
         );
+    }
+}
+
+/// ROW 327: [`prepare`] attributes each [`QuantizedBlock`] in `blocks` to
+/// the node at the same position in [`block_node_ids`]'s output -- this
+/// crate's documented positional contract (`execute`'s own doc: "`blocks`
+/// binds `Op::Input` inputs positionally"). A caller whose `blocks` order
+/// disagrees with its own program's declaration order used to have that
+/// mismatch surface as an unrelated `NotLowerable` from
+/// `reject_unsupported_gpu_dtype` (whichever node lost its packed
+/// classification), because the per-node shape check ran AFTER the packed
+/// classification and the dtype gate. These tests pin the fix: the shape
+/// check now runs first, so a mismatch reports the exact node and its
+/// element-count disagreement directly.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod block_node_attribution_tests {
+    use alloc::vec;
+
+    use proxima_tensor::{
+        DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
+        TensorError, append, projection,
+    };
+
+    use super::{MetalError, plan};
+
+    /// `activation -> weight -> product -> sum`: the activation node is
+    /// declared FIRST (`NodeId(0)`), the quantized weight node SECOND
+    /// (`NodeId(1)`) -- the reverse of the order a caller who lists `blocks`
+    /// weight-first (a natural "formula" reading order) would need. Returns
+    /// the program and both nodes in DECLARATION order.
+    fn activation_first_matmul_program(
+        tokens: u32,
+        out_dim: u32,
+        in_dim: u32,
+    ) -> (Vec<Op>, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(tokens), Extent::Static(in_dim)],
+                name: None,
+            },
+        );
+        let weight = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::UInt8,
+                shape: vec![Extent::Static(out_dim), Extent::Static(in_dim)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight, IndexMap::Affine(projection(3, &[1, 2]))),
+                    (activation, IndexMap::Affine(projection(3, &[0, 2]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        (program, activation, weight)
+    }
+
+    /// The ROW 327 repro: `blocks` lists the weight FIRST even though the
+    /// program declares the activation first. The activation's declared
+    /// shape (16x16=256 elements) is engineered to equal one Q6_K
+    /// super-block's decode count (256), so the misattributed pair
+    /// (activation node, weight's Q6_K block) passes the per-node shape
+    /// check silently -- exactly the "silently attributed" half of ROW
+    /// 327 -- and the mismatch only becomes visible at the SECOND pair
+    /// (weight node, activation's Float32 block: declared 8x16=128 elements
+    /// vs. the 256 actually handed). Before the fix that second pair was
+    /// never reached with a useful diagnostic: `packed_operands_of` and
+    /// `reject_unsupported_gpu_dtype` ran first and rejected the weight node
+    /// with `NotLowerable` (a dtype complaint, not an ordering one).
+    #[test]
+    fn weight_first_blocks_against_activation_first_program_names_the_true_node() {
+        let (program, _activation, weight) = activation_first_matmul_program(16, 8, 16);
+        let activation_data = [0.0f32; 256]; // 16 tokens * 16 in_dim
+        let packed_weight = [0u8; 210]; // one Q6_K super-block, decodes to 256 elements
+
+        // MISORDERED: weight's block first, activation's block second --
+        // `block_node_ids(&program)` is `[activation, weight]`, so this is
+        // the opposite order.
+        let blocks = [
+            QuantizedBlock::Q6K(&packed_weight),
+            QuantizedBlock::Float32(&activation_data),
+        ];
+
+        let error = match plan(&program, &[], &blocks, &[]) {
+            Ok(_) => panic!("misordered blocks must never silently plan"),
+            Err(error) => error,
+        };
+
+        match error {
+            MetalError::Tensor(TensorError::InputSizeMismatch {
+                node,
+                expected,
+                found,
+            }) => {
+                assert_eq!(
+                    node, weight,
+                    "the weight node -- 8x16=128 declared elements -- must be the node \
+                     named, not a downstream node the misattribution happened to also \
+                     affect"
+                );
+                assert_eq!(expected, 128, "weight's own declared element count");
+                assert_eq!(
+                    found, 256,
+                    "the activation's Float32 block landed on the weight node, carrying \
+                     the ACTIVATION's element count"
+                );
+            }
+            other => panic!(
+                "expected InputSizeMismatch naming node {weight:?} once the shape check \
+                 runs before packed classification; got {other:?} instead"
+            ),
+        }
+    }
+
+    /// Same shape as above, correctly ordered blocks (activation first,
+    /// matching `block_node_ids`'s `[activation, weight]` declaration
+    /// order): must plan cleanly, proving the fix only rejects genuine
+    /// mismatches, never a correctly-ordered call.
+    #[test]
+    fn declaration_ordered_blocks_plan_cleanly() {
+        let (program, _activation, _weight) = activation_first_matmul_program(16, 16, 16);
+        let activation_data = [0.0f32; 256]; // 16 tokens * 16 in_dim
+        let packed_weight = [0u8; 210]; // one Q6_K super-block, decodes to 256 = 16 * 16
+
+        let blocks = [
+            QuantizedBlock::Float32(&activation_data),
+            QuantizedBlock::Q6K(&packed_weight),
+        ];
+
+        plan(&program, &[], &blocks, &[]).expect("declaration-ordered blocks must plan");
     }
 }
 
