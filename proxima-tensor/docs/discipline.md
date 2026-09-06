@@ -24746,3 +24746,63 @@ Per-round `gpu_exec_ms` means agree with the pooled figures within their own CoV
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | docs-only: `docs(tensor): row 341 steady state at 64 tokens` | Measured `gpu_exec_ms` over the full 64-token decode instead of the usual 8-token oracle run: scoreboard window (steps 3..7) 25.879 ms rises to 26.567 ms (8..31) to 28.032 ms (32..63), +8.3% end to end, well beyond CoV -- the rise is real and monotonic (consistent with per-token cost growing with `cached_len_before`), but it is a RISE not a fall, so per the brief's own rule the scoreboard window of record is unchanged; llama's own `-n 8` vs `-n 32` shows no equivalent rise (57.71 vs 57.60 t/s, inside CoV) | 3 rounds, 64 steps/round; pooled CoV 0.26-1.63% per window except step_wall_ms's 32..63 window (13.15%, traced to a single reproducible step-34 CPU-side outlier, residual not resolved) | quiet gate (names-only, no `-f`) EMPTY before build and before every timed run; load-1 14.25 pre-build (no matching process, tolerated), 4.64 pre-llama-bench |
+
+## ROW 342 -- the context-length rise IS `cached_attention`: it dispatches with zero parallelism over the KV axis, unlike llama's own vec kernel
+
+**Card:** `docs(tensor): row 342 attention cost vs context length` (off `main` at `408bb9d`). **Worktree/branch:** `proxima-wt-r342`, `test/attention-cost-vs-context`.
+
+**Correction to ROWs 338-341's absolute numbers.** PID 16470, a `while true` loop in a different debugger's worktree (`proxima-wt-r337`) repeatedly invoking `proxima_model_interop`'s Metal cached-decode test, was running continuously (confirmed via `ps -p 16470 -o etime,time,command`: 3h52m elapsed, 105 min accumulated CPU) for the ENTIRE window ROWs 338-341 were measured in, and is invisible to a `pgrep` snapshot because it exits and respawns between samples. The coordinator killed it after this row's own quiet-gate check first failed (load-1 28.83, then 14-16 across three re-checks) and confirmed it was an orphan. **ROWs 338-341's absolute `gpu_exec_ms`/GB/s numbers were measured against a live, uncontrolled second GPU workload and are suspect** -- their own internal comparisons (arm vs arm, cell vs cell, within the same contaminated run) likely still hold since every arm in those rows paid the same contamination, but no absolute number from those rows should be read as this host's clean ceiling. This row's FULL cell, run after the loop was killed and the gate cleared (pgrep empty, load-1 6.33), is the **first clean 64-token series** in this sequence.
+
+**Question this row answers.** ROW 341 found `gpu_exec_ms` rises monotonically with context (25.88 ms at steps 3..7 to 28.03 ms at steps 32..63, +8.3%) while llama-bench shows no equivalent rise between `-n 8` and `-n 32`, and KV bytes cannot explain it (60 tokens x 256 KB/token K+V across 32 layers = 16 MB = 40 us at 381 GB/s, not the observed ~2 ms). Which macro-op kind carries that growth?
+
+**Method.** `PROXIMA_METAL_KIND_FILTER` (`omega/src/metal.rs:1715-1783`, vocabulary at `omega/src/metal.rs:1459-1470`) drops every dispatch `classify_kind` buckets under a named kind, replacing its output with whatever garbage the skipped write leaves -- output is wrong under any `!kind` run, timing is not (ROW 308's own method). Same harness as ROW 341 (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `--features metal,instrument`, `PROXIMA_MAX_TOKENS=64`, `--exact --ignored --nocapture --test-threads=1`), one release build, one round per cell (FULL, `!cached_attention`, `!reduce-cooperative`, `!elementwise`).
+
+**Quiet gate.** First check (before any setup): `pgrep -l 'proxima_model_i|llama-bench|oracle-|gpu_load_genera|matvec_roofline|nextest|cargo-nextest'` EMPTY but load-1 28.83 -- FAILED (>10). Traced to PID 16470 (above); the main loop killed it. Re-checked twice more during read-only mechanism work (load-1 15.48, then 14.25, still failing) before the coordinator confirmed the kill. Final check immediately before the release build: pgrep EMPTY, load-1 6.52 -- PASSED. Re-checked immediately before the 4 timed runs (a release build had just finished): pgrep EMPTY, load-1 6.33 -- PASSED. Held quiet throughout all 4 runs (post-run check: load-1 4.71).
+
+**Data -- one round each, 64 steps, `gpu_exec_ms` mean +/- population sd within window:**
+
+| kind removed | steps 3..7 mean (sd, CoV%) | steps 32..63 mean (sd, CoV%) | growth (ms) |
+| --- | --- | --- | --- |
+| (FULL, no filter) | 26.190 (0.215, 0.82%) | 28.075 (0.389, 1.38%) | **+1.885** |
+| `!cached_attention` | 23.735 (0.223, 0.94%) | 23.629 (0.306, 1.29%) | **-0.106** |
+| `!reduce-cooperative` | 25.431 (0.051, 0.20%) | 27.297 (0.558, 2.04%) | +1.866 |
+| `!elementwise` | 24.618 (0.065, 0.27%) | 26.740 (0.430, 1.61%) | +2.122 |
+
+Removing `cached_attention` is the ONLY ablation that flattens the growth -- its residual (-0.106 ms) sits inside the combined window sd (0.22-0.31 ms) at both ends, i.e. no rise at all. `!reduce-cooperative` and `!elementwise` both leave growth statistically indistinguishable from FULL's own 1.885 ms (1.866, 2.122 ms respectively, all far outside their own per-window sd of 0.05-0.56 ms). **`cached_attention` is the kind whose cost scales with context; the other two do not.**
+
+**Mechanism -- ours (`omega/src/msl.rs`, `omega/src/metal.rs`).** `render_cached_attention`'s emitted kernel body has exactly one loop over the context axis, and it is serial: `omega/src/msl.rs:3012`, `for (long key = 0; key < cached_key_rows + new_key_rows; key++) { ... }` -- trip count equals the full KV context length, executed identically by every simdgroup, no `continue`-free stride over `key`. Dispatch geometry never touches that axis: `tiled_gemm_threadgroup_width`'s `CachedAttention` arm (`omega/src/msl.rs:5444-5446`) sizes the threadgroup at `query_groups * SIMD_WIDTH` (`query_groups` is the GQA fan-out, a small constant independent of context), and `pack_cached_attention_uniforms` (`omega/src/metal.rs:3785-3791`) sizes the dispatch grid at `product(extents) / head_dim` = `query_rows * kv_heads * query_groups` -- query positions only. **The context length appears nowhere in how many workers are dispatched, only as a runtime loop bound inside each worker.** Adding a context token adds one serial iteration per simdgroup, uncompensated by any added parallelism.
+
+**Mechanism -- llama.cpp (`ggml-metal.metal`, `ggml-metal.m`).** `kernel_flash_attn_ext_vec`'s context loop (`ggml-metal.metal:4016-4017`): `for (int ic0 = 0; ic0 < args.ne11; ic0 += C*nsg) { const int ic = ic0 + C*sgitg; ... }` -- each of the `nsg` simdgroups in a threadgroup starts at a different offset (`sgitg*C`) and strides by `C*nsg`, i.e. the simdgroups **partition the context range** among themselves; per-simdgroup trip count is `ne11/(C*nsg)`, not `ne11`. `nsg` itself is chosen per-dispatch at `ggml-metal.m:4900`: `MAX(2, MIN(nsgmax, MIN(ne11/ncpsg, maxTotalThreadsPerThreadgroup/32)))`, rounded to a power of 2 -- **`nsg` scales up with context length** (`ne11/ncpsg`) until it saturates against a threadgroup-memory-budget search (`ggml-metal.m:4889-4897`) or the hardware occupancy cap. llama assigns more workers to cover more context; proxima assigns the same fixed `query_groups` workers regardless of context and lets the loop bound grow.
+
+**Projection -- DERIVED from ROW 341's measured slope (35.8 us/context-token: +2.15 ms over ~60 tokens of context, steps 3..7 to 32..63), NOT a fresh measurement of `cached_attention` alone at those lengths:**
+
+- context 512: +36 us x ~504 tokens ~= +18.1 ms -> gpu_exec ~= **44.0 ms/token** (~1.7x this row's clean FULL baseline of 26.19 ms)
+- context 2048: +36 us x ~2040 tokens ~= +73.4 ms -> gpu_exec ~= **99.3 ms/token** (~3.8x)
+
+This linear extrapolation assumes the serial-loop shape holds unchanged out to 2048 tokens (supported by the mechanism read: nothing in `msl.rs:3012`'s loop changes shape with context) and that `cached_attention` remains the sole context-scaling kind (supported by this row's own ablation, which is a comprehensive one-shape check, not a per-context-length one) -- a direct `cached_attention`-only timing at 512/2048 tokens context would close this gap and is the natural next row.
+
+**The one edit that would give the attention op parallelism over context** (design sentence, not code): split `render_cached_attention`'s `key` loop across multiple simdgroups per `(query_row, kv_head)` threadgroup the way llama's vec kernel does -- widen `tiled_gemm_threadgroup_width`'s `CachedAttention` arm from `query_groups * SIMD_WIDTH` to `query_groups * context_chunks * SIMD_WIDTH` (chunks scaled with `cached_key_rows + new_key_rows`, capped by occupancy), give each simdgroup a disjoint key range with its own running max/sum, and add a small cross-simdgroup online-softmax merge through `threadgroup` memory after the loop instead of before the final normalize.
+
+**Residual, named not hidden.** (1) The ablation isolates the KIND, not the specific line inside `render_cached_attention`'s body -- the loop at `msl.rs:3012` is read as the mechanism, not independently timed in isolation from the rest of the kernel (the K/V cooperative-load and softmax-combine work inside the same loop also scale with context, and this row's data cannot separate their individual shares). (2) The projection is a single-slope linear extrapolation from a 60-token window (ROW 341); no cell in this row measures `cached_attention` in isolation at 512 or 2048 tokens context. (3) llama's own `nsg` scaling saturates at a hardware cap this row does not measure -- at sufficiently large context llama's growth would stop being flat too, just at a much higher context length, unmeasured here.
+
+**Gates.** Docs-only row; the only "source" touched was an environment variable already wired at `omega/src/metal.rs:1715-1783` before this row (ROW 308's own kind-filter mechanism) -- no clippy/nextest run, consistent with ROW 341's own gate posture for a docs-and-measurement-only row.
+
+**Re-prove command (each cell):**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-row342-repro -b test/row-342-repro main
+cd ../proxima-wt-row342-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p proxima-model-interop --release --features metal,instrument --lib --no-run \
+  -- --exact bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+BIN=$(find target/release/deps -name 'proxima_model_interop-*' -type f -perm +111)
+PROXIMA_MAX_TOKENS=64 "$BIN" bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache --exact --ignored --nocapture --test-threads=1
+PROXIMA_MAX_TOKENS=64 PROXIMA_METAL_KIND_FILTER='!cached_attention' "$BIN" bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache --exact --ignored --nocapture --test-threads=1
+```
+(expected: ~1m45s release build once, then 4 runs of ~1-2s each; each run prints 64 `token_breakdown_metal` lines to parse `gpu_exec_ms` from.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | docs-only: `docs(tensor): row 342 attention cost vs context length` | Kind-filter ablation across FULL/`!cached_attention`/`!reduce-cooperative`/`!elementwise` isolates ROW 341's context-length rise to `cached_attention`: removing it flattens growth from +1.885 ms (FULL) to -0.106 ms (within noise); the other two kinds leave growth unchanged (+1.866, +2.122 ms). Mechanism: `msl.rs:3012`'s context loop is serial with zero dispatch-side parallelism over context (`metal.rs:3785-3791` grids over query positions only), unlike llama's `kernel_flash_attn_ext_vec` (`ggml-metal.metal:4016`), whose `nsg` simdgroups partition the context range and whose count scales with context (`ggml-metal.m:4900`) | 1 round/cell, 64 steps/round; per-window CoV 0.20-2.04% | quiet gate FAILED at load-1 28.83 (traced to an orphaned loop, PID 16470, in another worktree; killed by the coordinator), re-verified PASSING (pgrep empty, load-1 6.33-6.52) immediately before the release build and again before all 4 timed runs; held quiet throughout (post-run load-1 4.71) |
