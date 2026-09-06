@@ -4156,6 +4156,7 @@ dependencies = [
  "loom",
  "proptest",
  "proxima",
+ "proxima-build",
  "proxima-clock",
  "proxima-primitives",
  "serde",

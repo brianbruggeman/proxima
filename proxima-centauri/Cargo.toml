@@ -84,7 +84,7 @@ harness = false
 required-features = ["aead-chacha20poly1305"]
 
 [build-dependencies]
-toml.workspace = true
+proxima-build.workspace = true
 
 [[bench]]
 name = "bench_cycles"
