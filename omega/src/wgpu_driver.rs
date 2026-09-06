@@ -480,6 +480,7 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     let BoundOpKind::Reduce {
         output_axes,
         out_layout,
+        epilogue_operands,
         ..
     } = &bound.kind
     else {
@@ -516,6 +517,19 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     }
     push_i32(&mut bytes, out_layout.base as i32);
     push_i32_row(&mut bytes, &out_layout.strides, rank_len);
+    // `crate::wgsl::render_reduce`/`render_reduce_cooperative`'s own
+    // `Uniforms` struct declares these fields ONLY when `epilogue_operands`
+    // is non-empty (byte-identical to before epilogue fusion existed
+    // otherwise), so this must stay conditional on the exact same test --
+    // mirrors `crate::metal::pack_reduce_uniforms`'s own epilogue block.
+    if !epilogue_operands.is_empty() {
+        for (_, layout, _) in epilogue_operands {
+            push_i32(&mut bytes, layout.base as i32);
+        }
+        for (_, layout, _) in epilogue_operands {
+            push_i32_row(&mut bytes, &layout.strides, output_rank_len);
+        }
+    }
     push_gather_uniforms(&mut bytes, bound, rank_len);
     Ok(bytes)
 }

@@ -28,11 +28,15 @@ use support::{as_named_blocks, real_forward_fixture};
 use omega::backend::{BackendError, Engine, GpuDriver, execute_plan_named, plan_named};
 
 /// `reduce-epilogue-fusion`'s bind-time pass fuses ANY sole elementwise
-/// consumer of a reduce, program-wide, and the wgsl v1 emitter has no
-/// renderer for the resulting `BoundOpKind::Reduce::epilogue_body` yet
-/// (`crate::wgsl::validate`'s own gate, the same "no renderer, reject"
-/// contract Metal's own tiled-GEMM gap takes -- see
-/// `EmitError::EpilogueNotSupported`'s doc). Not a wgpu regression: a caller
+/// consumer of a reduce, program-wide. `render_reduce`/
+/// `render_reduce_cooperative` (this crate's `Keep::Reduce` renderers) fold
+/// the resulting `BoundOpKind::Reduce::epilogue_body` into their output write
+/// now (`crate::wgsl::push_reduce_epilogue_write`, ROW 294) -- see
+/// `wgsl_reduce_epilogue_fusion_parity.rs` for the dedicated parity gate.
+/// `render_scan` has no such write hook yet (`crate::wgsl::validate`'s own
+/// gate, the same "no renderer, reject" contract Metal's own tiled-GEMM gap
+/// takes), so this helper still exists for the one shape a fusion candidate
+/// could theoretically land on a scan. Not a wgpu regression: a caller
 /// treats this as a named decline, same shape this file's own adapter-limit
 /// skips already take.
 fn is_epilogue_rejection(error: &BackendError) -> bool {
