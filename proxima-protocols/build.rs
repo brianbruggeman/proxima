@@ -20,61 +20,21 @@ mod http1_codec_sizing {
 
     use std::env;
     use std::fs;
-    use std::path::PathBuf;
 
-    use toml::Value;
-
-    fn require_nonzero(name: &str, value: u64) -> u64 {
-        assert!(value > 0, "{name} must be non-zero; got {value}");
-        value
-    }
-
-    fn require_usize(name: &str, value: u64) -> usize {
-        usize::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows usize"))
-    }
-
-    fn get_int(table: &Value, section: &str, key: &str) -> u64 {
-        let raw = table
-            .get(section)
-            .and_then(|sec| sec.get(key))
-            .and_then(Value::as_integer)
-            .unwrap_or_else(|| {
-                panic!("http1_codec.toml: missing or non-integer [{section}].{key}")
-            });
-        u64::try_from(raw)
-            .unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-    }
-
-    fn resolve(table: &Value, section: &str, key: &str) -> u64 {
-        let env_name = format!(
-            "PROXIMA_PROTOCOLS_HTTP1_CODEC_{}_{}",
-            section.to_ascii_uppercase(),
-            key.to_ascii_uppercase()
-        );
-        println!("cargo:rerun-if-env-changed={env_name}");
-        if let Ok(raw) = env::var(&env_name) {
-            return raw
-                .parse()
-                .unwrap_or_else(|err| panic!("{env_name} = {raw}: {err}"));
-        }
-        get_int(table, section, key)
-    }
+    use proxima_build::sizing::{require_nonzero, SizingSource};
 
     #[allow(clippy::expect_used)]
     pub(super) fn emit_sizing_consts(out_dir: &std::path::Path) {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-        let toml_path = PathBuf::from(&manifest_dir).join("http1_codec.toml");
-        println!("cargo:rerun-if-changed=http1_codec.toml");
+        let source =
+            SizingSource::load(&manifest_dir, "http1_codec.toml", "PROXIMA_PROTOCOLS_HTTP1_CODEC")
+                .unwrap_or_else(|err| panic!("{err}"));
 
-        let text = fs::read_to_string(&toml_path)
-            .unwrap_or_else(|err| panic!("read {}: {err}", toml_path.display()));
-        let root: Value = text
-            .parse()
-            .unwrap_or_else(|err| panic!("parse {}: {err}", toml_path.display()));
-
-        let header_inline_cap = require_usize(
+        let header_inline_cap = require_nonzero(
             "header.inline_cap",
-            require_nonzero("header.inline_cap", resolve(&root, "header", "inline_cap")),
+            source
+                .resolve_int("header", "inline_cap")
+                .unwrap_or_else(|err| panic!("{err}")),
         );
 
         let body = format!(
@@ -98,16 +58,10 @@ mod http3_codec_sizing {
 
     use std::env;
     use std::fs;
-    use std::path::PathBuf;
 
-    use toml::Value;
+    use proxima_build::sizing::{require_nonzero, SizingSource};
 
-    fn require_nonzero(name: &str, value: u64) -> u64 {
-        assert!(value > 0, "{name} must be non-zero; got {value}");
-        value
-    }
-
-    fn require_pow2(name: &str, value: u64) -> u64 {
+    fn require_pow2(name: &str, value: usize) -> usize {
         assert!(
             value.is_power_of_two(),
             "{name} must be a power of two (heapless::FnvIndexMap requirement); got {value}"
@@ -115,91 +69,43 @@ mod http3_codec_sizing {
         value
     }
 
-    fn require_usize(name: &str, value: u64) -> usize {
-        usize::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows usize"))
-    }
-
-    fn get_int(table: &Value, section: &str, key: &str) -> u64 {
-        let raw = table
-            .get(section)
-            .and_then(|sec| sec.get(key))
-            .and_then(Value::as_integer)
-            .unwrap_or_else(|| {
-                panic!("http3_codec.toml: missing or non-integer [{section}].{key}")
-            });
-        u64::try_from(raw)
-            .unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-    }
-
-    fn resolve(table: &Value, section: &str, key: &str) -> u64 {
-        let env_name = format!(
-            "PROXIMA_PROTOCOLS_HTTP3_CODEC_{}_{}",
-            section.to_ascii_uppercase(),
-            key.to_ascii_uppercase()
-        );
-        println!("cargo:rerun-if-env-changed={env_name}");
-        if let Ok(raw) = env::var(&env_name) {
-            return raw
-                .parse()
-                .unwrap_or_else(|err| panic!("{env_name} = {raw}: {err}"));
-        }
-        get_int(table, section, key)
-    }
-
     #[allow(clippy::expect_used)]
     pub(super) fn emit_sizing_consts(out_dir: &std::path::Path) {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-        let toml_path = PathBuf::from(&manifest_dir).join("http3_codec.toml");
-        println!("cargo:rerun-if-changed=http3_codec.toml");
+        let source =
+            SizingSource::load(&manifest_dir, "http3_codec.toml", "PROXIMA_PROTOCOLS_HTTP3_CODEC")
+                .unwrap_or_else(|err| panic!("{err}"));
+        let resolve = |section: &str, key: &str| {
+            source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
+        };
 
-        let text = fs::read_to_string(&toml_path)
-            .unwrap_or_else(|err| panic!("read {}: {err}", toml_path.display()));
-        let root: Value = text
-            .parse()
-            .unwrap_or_else(|err| panic!("parse {}: {err}", toml_path.display()));
-
-        let server_max_concurrent_requests = require_usize(
+        let server_max_concurrent_requests = require_pow2(
             "server.max_concurrent_requests",
-            require_pow2(
+            require_nonzero(
                 "server.max_concurrent_requests",
-                require_nonzero(
-                    "server.max_concurrent_requests",
-                    resolve(&root, "server", "max_concurrent_requests"),
-                ),
+                resolve("server", "max_concurrent_requests"),
             ),
         );
-        let client_max_concurrent_requests = require_usize(
+        let client_max_concurrent_requests = require_pow2(
             "client.max_concurrent_requests",
-            require_pow2(
+            require_nonzero(
                 "client.max_concurrent_requests",
-                require_nonzero(
-                    "client.max_concurrent_requests",
-                    resolve(&root, "client", "max_concurrent_requests"),
-                ),
+                resolve("client", "max_concurrent_requests"),
             ),
         );
 
-        let qpack_decode_bounded_scratch_len = require_usize(
+        let qpack_decode_bounded_scratch_len = require_nonzero(
             "qpack.decode_bounded_scratch_len",
-            require_nonzero(
-                "qpack.decode_bounded_scratch_len",
-                resolve(&root, "qpack", "decode_bounded_scratch_len"),
-            ),
+            resolve("qpack", "decode_bounded_scratch_len"),
         );
 
-        let part_source_arena_len = require_usize(
+        let part_source_arena_len = require_nonzero(
             "qpack.part_source_arena_len",
-            require_nonzero(
-                "qpack.part_source_arena_len",
-                resolve(&root, "qpack", "part_source_arena_len"),
-            ),
+            resolve("qpack", "part_source_arena_len"),
         );
-        let part_source_max_headers = require_usize(
+        let part_source_max_headers = require_nonzero(
             "qpack.part_source_max_headers",
-            require_nonzero(
-                "qpack.part_source_max_headers",
-                resolve(&root, "qpack", "part_source_max_headers"),
-            ),
+            resolve("qpack", "part_source_max_headers"),
         );
 
         let body = format!(
@@ -228,16 +134,10 @@ mod quic_sizing {
 
     use std::env;
     use std::fs;
-    use std::path::PathBuf;
 
-    use toml::Value;
+    use proxima_build::sizing::{require_nonneg, require_nonzero, SizingSource};
 
-    fn require_nonzero(name: &str, value: u64) -> u64 {
-        assert!(value > 0, "{name} must be non-zero; got {value}");
-        value
-    }
-
-    fn require_pow2(name: &str, value: u64) -> u64 {
+    fn require_pow2(name: &str, value: usize) -> usize {
         assert!(
             value.is_power_of_two(),
             "{name} must be a power of two (heapless::FnvIndexMap requirement); got {value}"
@@ -245,226 +145,124 @@ mod quic_sizing {
         value
     }
 
-    fn require_usize(name: &str, value: u64) -> usize {
-        usize::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows usize"))
-    }
-
-    fn get_int(table: &Value, section: &str, key: &str) -> u64 {
-        let raw = table
-            .get(section)
-            .and_then(|sec| sec.get(key))
-            .and_then(Value::as_integer)
-            .unwrap_or_else(|| panic!("quic.toml: missing or non-integer [{section}].{key}"));
-        u64::try_from(raw)
-            .unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-    }
-
-    /// Read `(section, key)` from the TOML, then apply the optional
-    /// `PROXIMA_PROTOCOLS_QUIC_<SECTION>_<KEY>` env-var override.
-    fn resolve(table: &Value, section: &str, key: &str) -> u64 {
-        let env_name = format!(
-            "PROXIMA_PROTOCOLS_QUIC_{}_{}",
-            section.to_ascii_uppercase(),
-            key.to_ascii_uppercase()
-        );
-        println!("cargo:rerun-if-env-changed={env_name}");
-        if let Ok(raw) = env::var(&env_name) {
-            return raw
-                .parse()
-                .unwrap_or_else(|err| panic!("{env_name} = {raw}: {err}"));
-        }
-        get_int(table, section, key)
-    }
-
     #[allow(clippy::expect_used)]
     pub(super) fn emit_sizing_consts(out_dir: &std::path::Path) {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-        let toml_path = PathBuf::from(&manifest_dir).join("quic.toml");
-        println!("cargo:rerun-if-changed=quic.toml");
+        let source = SizingSource::load(&manifest_dir, "quic.toml", "PROXIMA_PROTOCOLS_QUIC")
+            .unwrap_or_else(|err| panic!("{err}"));
+        let resolve = |section: &str, key: &str| {
+            source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
+        };
 
-        let text = fs::read_to_string(&toml_path)
-            .unwrap_or_else(|err| panic!("read {}: {err}", toml_path.display()));
-        let root: Value = text
-            .parse()
-            .unwrap_or_else(|err| panic!("parse {}: {err}", toml_path.display()));
-
-        let streams_max_bidi = require_usize(
+        let streams_max_bidi = require_pow2(
             "streams.max_concurrent_bidi",
-            require_pow2(
+            require_nonzero(
                 "streams.max_concurrent_bidi",
-                require_nonzero(
-                    "streams.max_concurrent_bidi",
-                    resolve(&root, "streams", "max_concurrent_bidi"),
-                ),
+                resolve("streams", "max_concurrent_bidi"),
             ),
         );
-        let streams_max_uni = require_usize(
+        let streams_max_uni = require_pow2(
             "streams.max_concurrent_uni",
-            require_pow2(
+            require_nonzero(
                 "streams.max_concurrent_uni",
-                require_nonzero(
-                    "streams.max_concurrent_uni",
-                    resolve(&root, "streams", "max_concurrent_uni"),
-                ),
+                resolve("streams", "max_concurrent_uni"),
             ),
         );
-        let streams_send_inline = require_usize(
+        let streams_send_inline = require_nonzero(
             "streams.send_buffer_inline_bytes",
-            require_nonzero(
-                "streams.send_buffer_inline_bytes",
-                resolve(&root, "streams", "send_buffer_inline_bytes"),
-            ),
+            resolve("streams", "send_buffer_inline_bytes"),
         );
-        let streams_recv_inline = require_usize(
+        let streams_recv_inline = require_nonzero(
             "streams.recv_buffer_inline_bytes",
-            require_nonzero(
-                "streams.recv_buffer_inline_bytes",
-                resolve(&root, "streams", "recv_buffer_inline_bytes"),
-            ),
+            resolve("streams", "recv_buffer_inline_bytes"),
         );
-        let streams_reassembly_max_fragments = require_usize(
+        let streams_reassembly_max_fragments = require_nonzero(
             "streams.reassembly_max_fragments",
-            require_nonzero(
-                "streams.reassembly_max_fragments",
-                resolve(&root, "streams", "reassembly_max_fragments"),
-            ),
+            resolve("streams", "reassembly_max_fragments"),
         );
-        let streams_reassembly_fragment_inline_bytes = require_usize(
+        let streams_reassembly_fragment_inline_bytes = require_nonzero(
             "streams.reassembly_fragment_inline_bytes",
-            require_nonzero(
-                "streams.reassembly_fragment_inline_bytes",
-                resolve(&root, "streams", "reassembly_fragment_inline_bytes"),
-            ),
+            resolve("streams", "reassembly_fragment_inline_bytes"),
         );
-        let connection_cid_queue_cap = require_usize(
+        let connection_cid_queue_cap = require_nonzero(
             "connection.cid_queue_cap",
-            require_nonzero(
-                "connection.cid_queue_cap",
-                resolve(&root, "connection", "cid_queue_cap"),
-            ),
+            resolve("connection", "cid_queue_cap"),
         );
-        let connection_vn_max_offered_versions = require_usize(
+        let connection_vn_max_offered_versions = require_nonzero(
             "connection.vn_max_offered_versions",
-            require_nonzero(
-                "connection.vn_max_offered_versions",
-                resolve(&root, "connection", "vn_max_offered_versions"),
-            ),
+            resolve("connection", "vn_max_offered_versions"),
         );
-        let ack_max_ranges = require_usize(
-            "ack.max_ranges",
-            require_nonzero("ack.max_ranges", resolve(&root, "ack", "max_ranges")),
-        );
+        let ack_max_ranges = require_nonzero("ack.max_ranges", resolve("ack", "max_ranges"));
         let ack_default_max_ack_delay_micros =
-            resolve(&root, "ack", "default_max_ack_delay_micros");
-        let loss_max_sent_packets = require_usize(
-            "loss.max_sent_packets",
-            require_nonzero(
-                "loss.max_sent_packets",
-                resolve(&root, "loss", "max_sent_packets"),
-            ),
+            require_nonneg("ack.default_max_ack_delay_micros", resolve("ack", "default_max_ack_delay_micros"));
+        let loss_max_sent_packets =
+            require_nonzero("loss.max_sent_packets", resolve("loss", "max_sent_packets"));
+        let loss_max_loss_burst =
+            require_nonzero("loss.max_loss_burst", resolve("loss", "max_loss_burst"));
+        let key_update_min_initiation_interval_micros = require_nonneg(
+            "key_update.min_initiation_interval_micros",
+            resolve("key_update", "min_initiation_interval_micros"),
         );
-        let loss_max_loss_burst = require_usize(
-            "loss.max_loss_burst",
-            require_nonzero(
-                "loss.max_loss_burst",
-                resolve(&root, "loss", "max_loss_burst"),
-            ),
-        );
-        let key_update_min_initiation_interval_micros =
-            resolve(&root, "key_update", "min_initiation_interval_micros");
-        let path_max_outstanding_challenges = require_usize(
+        let path_max_outstanding_challenges = require_nonzero(
             "path.max_outstanding_challenges",
-            require_nonzero(
-                "path.max_outstanding_challenges",
-                resolve(&root, "path", "max_outstanding_challenges"),
-            ),
+            resolve("path", "max_outstanding_challenges"),
         );
         let bbr_min_rtt_filter_window_micros =
-            resolve(&root, "bbr", "min_rtt_filter_window_micros");
-        let endpoint_dcid_table_cap = require_usize(
+            require_nonneg("bbr.min_rtt_filter_window_micros", resolve("bbr", "min_rtt_filter_window_micros"));
+        let endpoint_dcid_table_cap = require_pow2(
             "endpoint.dcid_table_cap",
-            require_pow2(
+            require_nonzero(
                 "endpoint.dcid_table_cap",
-                require_nonzero(
-                    "endpoint.dcid_table_cap",
-                    resolve(&root, "endpoint", "dcid_table_cap"),
-                ),
+                resolve("endpoint", "dcid_table_cap"),
             ),
         );
-        let endpoint_max_udp_payload_size = require_usize(
-            "endpoint.max_udp_payload_size",
-            resolve(&root, "endpoint", "max_udp_payload_size"),
-        );
-        let zero_rtt_max_resumption_ticket_len = require_usize(
+        let endpoint_max_udp_payload_size =
+            require_nonneg("endpoint.max_udp_payload_size", resolve("endpoint", "max_udp_payload_size"));
+        let zero_rtt_max_resumption_ticket_len = require_nonzero(
             "zero_rtt.max_resumption_ticket_len",
-            require_nonzero(
-                "zero_rtt.max_resumption_ticket_len",
-                resolve(&root, "zero_rtt", "max_resumption_ticket_len"),
-            ),
+            resolve("zero_rtt", "max_resumption_ticket_len"),
         );
-        let multipath_max_paths_per_connection = require_usize(
+        let multipath_max_paths_per_connection = require_nonzero(
             "multipath.max_paths_per_connection",
-            require_nonzero(
-                "multipath.max_paths_per_connection",
-                resolve(&root, "multipath", "max_paths_per_connection"),
-            ),
+            resolve("multipath", "max_paths_per_connection"),
         );
-        let retry_token_max_token_len = require_usize(
+        let retry_token_max_token_len = require_nonzero(
             "retry_token.max_token_len",
-            require_nonzero(
-                "retry_token.max_token_len",
-                resolve(&root, "retry_token", "max_token_len"),
-            ),
+            resolve("retry_token", "max_token_len"),
         );
-        let retry_token_max_client_addr_len = require_usize(
+        let retry_token_max_client_addr_len = require_nonzero(
             "retry_token.max_client_addr_len",
-            require_nonzero(
-                "retry_token.max_client_addr_len",
-                resolve(&root, "retry_token", "max_client_addr_len"),
-            ),
+            resolve("retry_token", "max_client_addr_len"),
         );
-        let retry_token_max_cid_len = require_usize(
+        let retry_token_max_cid_len = require_nonzero(
             "retry_token.max_cid_len",
-            require_nonzero(
-                "retry_token.max_cid_len",
-                resolve(&root, "retry_token", "max_cid_len"),
-            ),
+            resolve("retry_token", "max_cid_len"),
         );
-        let datagram_send_queue_cap = require_usize(
+        let datagram_send_queue_cap = require_nonzero(
             "datagram.send_queue_cap",
-            require_nonzero(
-                "datagram.send_queue_cap",
-                resolve(&root, "datagram", "send_queue_cap"),
-            ),
+            resolve("datagram", "send_queue_cap"),
         );
-        let datagram_recv_queue_cap = require_usize(
+        let datagram_recv_queue_cap = require_nonzero(
             "datagram.recv_queue_cap",
-            require_nonzero(
-                "datagram.recv_queue_cap",
-                resolve(&root, "datagram", "recv_queue_cap"),
-            ),
+            resolve("datagram", "recv_queue_cap"),
         );
-        let datagram_local_max_datagram_frame_size =
-            resolve(&root, "datagram", "local_max_datagram_frame_size");
+        let datagram_local_max_datagram_frame_size = require_nonneg(
+            "datagram.local_max_datagram_frame_size",
+            resolve("datagram", "local_max_datagram_frame_size"),
+        );
 
-        let handshake_early_data_max_bytes = require_usize(
+        let handshake_early_data_max_bytes = require_nonzero(
             "handshake.early_data_max_bytes",
-            require_nonzero(
-                "handshake.early_data_max_bytes",
-                resolve(&root, "handshake", "early_data_max_bytes"),
-            ),
+            resolve("handshake", "early_data_max_bytes"),
         );
-        let handshake_early_data_max_datagrams = require_usize(
+        let handshake_early_data_max_datagrams = require_nonzero(
             "handshake.early_data_max_datagrams",
-            require_nonzero(
-                "handshake.early_data_max_datagrams",
-                resolve(&root, "handshake", "early_data_max_datagrams"),
-            ),
+            resolve("handshake", "early_data_max_datagrams"),
         );
         let handshake_early_data_hold_micros =
-            resolve(&root, "handshake", "early_data_hold_micros");
+            require_nonneg("handshake.early_data_hold_micros", resolve("handshake", "early_data_hold_micros"));
         let handshake_completion_micros =
-            resolve(&root, "handshake", "handshake_completion_micros");
+            require_nonneg("handshake.handshake_completion_micros", resolve("handshake", "handshake_completion_micros"));
 
         let out = format!(
             "// AUTO-GENERATED by build.rs from quic.toml. DO NOT EDIT.\n\
