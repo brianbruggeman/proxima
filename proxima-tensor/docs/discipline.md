@@ -25647,3 +25647,78 @@ GGUF=/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/open
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | docs-only: `docs(tensor): row 359 llama bare matvec per shape vs its token` | Read `make_test_cases_perf` before measuring: llama's `test-backend-ops` perf CLI exposes exactly one of our eight decode shapes (`m=4096,k=14336`, an exact match for `ffn_down`), so llama's full bare-matvec-token sum is UNMEASURED, not ~0 or ~13-14ms as the brief's own framing anticipated. Real per-tensor quant types read from the gguf header (not assumed): `attn_v`/`ffn_down` are Q5_K, not Q4_K. On the one comparable shape, llama's bare kernel (144.48 us/run, MEASURED) beats ours (224.17 us/run, DERIVED from ROW 336) by 1.55x -- a plausible-not-proven pointer toward kernel-level cost as (part of) the residual, consistent with ROW 358's own 50/50 split. Surfaced a second, unplanned residual: our own DERIVED per-shape sum (25.571 ms) overshoots our own MEASURED whole-token bare sequence (ROW 354, 15.845 ms) by 61% -- isolated per-shape arms do not compose additively into the real packed sequence, an open mechanism gap | 1 round per invocation, no CoV on `test-backend-ops` (perf mode reports one number per run); `llama-bench` CoV 1.19% (5 repeats) | THREE-check gate PASSED before both invocations (pgrep empty both patterns, load-1 3.10 then 2.78); no retry needed |
 
+## ROW 360 -- apples-to-apples per-shape table, all eight decode shapes, both programs MEASURED: llama's bare kernel beats ours on every shape (1.17x-1.91x), worst on the small attention shapes; neither program's isolated per-shape sum composes into its own real token
+
+**Card:** none (measurement only, docs-only row). **Worktree/branch:** `proxima-wt-r360`, `docs/row-360-per-shape`, off `main` at `3e5f233` (ROW 359's own commit). Temporary edit to `/Users/brianbruggeman/repos/others/llama.cpp/tests/test-backend-ops.cpp` (eight added `test_mul_mat` perf cases), reverted after measurement -- confirmed clean before and after; nothing landed there.
+
+**Question this row answers.** ROW 359 found llama's stock `test-backend-ops perf` list exposes only one of our eight decode shapes. This row adds the other seven as a temporary, reverted edit (owner's standing directive: use the llama code base) so both halves of the per-shape table are MEASURED, not DERIVED-from-a-stale-row: (A) llama's bare kernel on all eight shapes, (B) our bare kernel on all eight shapes with the CURRENT emitted body (main >= `3e5f233`, direct addressing default-on since ROW ~351, post-dating ROW 336's own numbers which this row does not reuse).
+
+**(A) llama.cpp temporary edit.** `git status --porcelain tests/test-backend-ops.cpp` empty before editing. Eight `test_mul_mat(type_a, GGML_TYPE_F32, m, 1, k, {1,1}, {1,1})` cases added to `make_test_cases_perf` (before the `im2col` loop, `tests/test-backend-ops.cpp:4636` pre-edit), one per shape, types per ROW 359's gguf-header read (`Q4_K` for attn_q/attn_k/attn_output/ffn_gate/ffn_up, `Q5_K` for attn_v/ffn_down, `Q6_K` for the head), `n=1` (decode), argument order matching the existing `ffn_down`-shaped case exactly. Environment note (unrelated to this edit, pre-existing on this host): the cached CMake `CMAKE_OSX_SYSROOT`/`CURL_LIBRARY_RELEASE` still pointed at a since-removed `MacOSX15.5.sdk` (an Xcode update moved the SDK to `MacOSX26.2.sdk` between sessions); reconfigured with `cmake -S . -B build -UCURL_LIBRARY_RELEASE -UCURL_INCLUDE_DIR -Upkgcfg_lib_PC_CURL_curl` (picks up the live `xcrun --show-sdk-path` automatically) before the build would link. Built `test-backend-ops` only (`cmake --build build --target test-backend-ops -j8`, exit 0). Quiet gate: names-only pgrep empty, `while true` pgrep empty, load-1 10.38 -> one 30s retry -> 6.86 (< 10, per this brief's own one-retry allowance).
+
+Two invocations, one round each (no CoV; `test-backend-ops` perf mode reports one number per run, same posture as ROW 359):
+- `./build/bin/test-backend-ops perf -b Metal -o MUL_MAT -p 'k=4096'` -- catches attn_q/attn_k/attn_v/attn_output/ffn_gate/ffn_up/head (`r360-logs/perf-k4096-broad.log`).
+- `./build/bin/test-backend-ops perf -b Metal -o MUL_MAT -p 'm=4096,n=1,k=14336'` -- catches ffn_down (`r360-logs/perf-k14336.log`); its `q5_K,m=4096` line (143.88 us/run) matches ROW 359's own independent measurement of the same shape (144.48 us/run) to within 0.4%, a same-session cross-check the filter regex's own non-contiguous-substring quirk (`regex_search` needs the fields adjacent in `vars()`'s print order; `type_b=f32,n=1,k=X` never matches because `m=...` sits between `type_b` and `n` in the printed string) forced discovering.
+
+Reverted: `git checkout -- tests/test-backend-ops.cpp`, rebuilt the target (exit 0), `git status --porcelain tests/test-backend-ops.cpp` empty again (pasted below). No commit in llama.cpp.
+
+**(B) our bare kernel, current emitted body.** `decode_shape_roofline_ladder` (`omega/tests/matvec_roofline_ladder.rs:2295`) already carries all eight required families (plus `attn_v_q5k`/`ffn_down_q5k`, the checkpoint's real mixed-codec variants for those two -- no missing shape, no harness edit needed). Quiet gate (names-only pgrep empty, `while true` pgrep empty, load-1 4.47) passed once before the run; `CARGO_TARGET_DIR=.../proxima-wt-r360/target cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder -- --ignored --nocapture decode_shape_roofline_ladder`, `test result: ok. 1 passed`, all 10 arms parity-clean (`relative_error` 1.7e-6 to 4.3e-6 against the CPU oracle, same band ROW 335/336 report), 1527.38s wall, median-of-7 per arm per the harness's own warm-up-then-`REPEATS=7` discipline (ROW 335). Full log: `r360-logs/decode_shape_roofline_ladder.log`.
+
+**Per-shape table -- both programs MEASURED, same host, same session:**
+
+| shape | type | bytes | llama us/run | llama GB/s | ours us/run | ours GB/s | ratio (ours/llama) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| attn_q | Q4_K | 9,437,184 | 33.70 | 280.04 | 59.20 | 159.41 | 1.76x |
+| attn_k | Q4_K | 2,359,296 | 12.60 | 187.25 | 22.30 | 105.82 | 1.77x |
+| attn_v | Q5_K | 2,883,584 | 14.65 | 196.83 | 28.04 | 102.83 | 1.91x |
+| attn_output | Q4_K | 9,437,184 | 33.73 | 279.79 | 59.29 | 159.16 | 1.76x |
+| ffn_gate | Q4_K | 33,030,144 | 103.45 | 319.29 | 163.29 | 202.28 | 1.58x |
+| ffn_up | Q4_K | 33,030,144 | 104.48 | 316.14 | 155.09 | 212.98 | 1.48x |
+| ffn_down | Q5_K | 40,370,176 | 143.88 | 280.58 | 201.51 | 200.34 | 1.40x |
+| head | Q6_K | 107,526,720 | 387.47 | 277.51 | 454.74 | 236.46 | 1.17x |
+
+`ours us/run` is DERIVED from `ours GB/s` (the harness's own MEASURED median) and this row's own MEASURED byte sizes (`us = bytes / (GB/s * 1000)`), same convention ROW 359 used for its one comparable shape; `ours GB/s` itself is a first-class MEASUREMENT this row adds (ROW 336's own numbers, pre-direct-addressing, are not reused anywhere in this table).
+
+**Sum x32 layers + head, both programs:**
+
+- llama: per-layer sum (7 shapes) = 446.49 us; x32 + head = 446.49*32 + 387.47 = 14,675.15 us = **14.6752 ms**.
+- ours: per-layer sum (7 shapes) = 688.72 us; x32 + head = 688.72*32 + 454.74 = 22,493.62 us = **22.4936 ms**.
+
+**Overheads.**
+- llama: full-token denominator (ROW 359, llama-bench) 17.4764 ms − bare per-shape sum 14.6752 ms = **2.8013 ms overhead** (structural: KV-cache indexing, RoPE, softmax, sampling, and every non-matvec dispatch around the 8 bare kernels).
+- ours: full in-program token (ROW 355/358) 20.55 ms − bare per-shape sum 22.4936 ms = **−1.9436 ms** -- NEGATIVE. Our isolated per-shape sum exceeds our own real whole-token time. This is not a measurement error in either number (both are independently MEASURED elsewhere: ROW 355/358's 20.55 ms is the real in-program token, this row's 22.494 ms is eight independently-isolated bare-kernel arms) -- it means isolated single-shape dispatch pays a per-arm fixed cost (own command buffer, own `execute_plan` call, no sharing with a neighboring dispatch) that the real packed sequence, which shares one execute-plan call and one command-buffer-commit cadence across all ~225 dispatches (ROW 359's own note), does not pay per shape. An "overhead" number computed this way is not meaningful for our program; it is reported as the direct answer to the brief's own question, together with why it is negative, rather than silently reframed to look positive.
+- Against ROW 354's own MEASURED whole-token bare-kernel sequence (15.845 ms, a single shared-dispatch run, not eight isolated ones): this row's per-shape sum (22.494 ms) overshoots it by **6.649 ms (42.0%)**. **This is smaller than ROW 359's own 61% overshoot on the same comparison** (25.571 ms vs 15.845 ms, DERIVED from stale ROW 336 numbers) -- consistent with direct addressing (landed after ROW 336, before this row) closing part of the isolated-arm gap, but the sum still does NOT compose additively into the real packed-sequence number. The mechanism ROW 359 named (isolated dispatch cost != shared-sequence dispatch cost) still holds; direct addressing improved the per-arm kernel body, not the isolation-vs-sharing gap itself.
+
+**Where the gap is, per shape, and what the bytes say about the ceiling.** Device ceiling (ROW 296) is 381.24 GB/s. llama's own GB/s sits in a comparatively narrow, high band across every shape size (187-319 GB/s, 49-84% of ceiling) -- even its smallest tensors (`attn_k`/`attn_v`, ~2.4-2.9 MB) hold 187-197 GB/s. Ours spans a much wider, lower band (103-236 GB/s, 27-62% of ceiling), and the width tracks tensor size directly: the four SMALLEST-tensor shapes (`attn_q`/`attn_k`/`attn_v`/`attn_output`, 2.4-9.4 MB) are where the ratio is WORST (1.76x-1.91x, `attn_v` worst at 1.91x) and where our own GB/s (103-159) is furthest below llama's (187-280) -- both programs pay a per-dispatch fixed cost on small tensors, but ours is proportionally larger. The four LARGEST-tensor shapes (`ffn_gate`/`ffn_up`/`ffn_down`/`head`, 33-108 MB) are where the ratio is BEST (1.17x-1.58x, `head` best at 1.17x) -- transfer time dominates over per-dispatch overhead for both programs at this size, so the gap narrows toward parity. This reads as a per-dispatch fixed-cost gap concentrated at small tensor sizes, not a uniform per-byte throughput gap -- consistent with, and sharpening, ROW 359's single-shape (`ffn_down`, mid-size, 1.40x here vs its own 1.55x with slightly different rounding) finding into a size-dependent pattern across all eight shapes.
+
+**Residual, named not hidden.** (1) The negative "our overhead" number above is the headline residual of this row: isolated per-shape sums cannot answer "what fraction of our real token is non-matvec overhead" the way llama's positive 2.80 ms answer can, because our own isolation methodology inflates the denominator past the real token. Closing this (measuring bare per-shape cost WITHOUT isolating each shape into its own dispatch/command-buffer, i.e. inside the real shared-sequence harness ROW 354 already runs) is the direct next-row question this one surfaces but does not answer. (2) One round per llama shape (no CoV, `test-backend-ops`' own limitation, same as ROW 359); one full run per our-side shape (CoV 0.86-7.15% across arms, `attn_output` highest at 7.15%, still under this file's own 10% ROW-335 threshold for 6/10 arms historically, here 7/8 of the shapes this row uses are under 10%). (3) `attn_v`/`ffn_down` each have two real codec variants in this checkpoint (Q4_K and Q5_K); this row uses the REAL-codec arm (`attn_v_q5k`, `ffn_down_q5k`) for both, matching the byte sizes ROW 359 read from the gguf header, and does not report the Q4_K variant of either (available in the same log, not part of this checkpoint's real mix). (4) No hardware-counter or per-dispatch decomposition of either program's kernels was attempted this row -- both sides are reported at the same opaque bare-kernel granularity ROW 354/359 already use.
+
+**Gates.** Docs-only row; harness (`omega/tests/matvec_roofline_ladder.rs`) unchanged (all eight shapes already covered by `DECODE_SHAPES`), so no clippy/nextest gate applies per this brief's own instruction ("only if the harness changed"). `git status --porcelain` in this worktree, before this commit, shows only this file's edit and the untracked `r360-logs/` review directory.
+
+**Re-prove command (each measurement):**
+```sh
+cd /Users/brianbruggeman/repos/others/llama.cpp
+git status --porcelain tests/test-backend-ops.cpp   # must be empty first
+# (re-apply the eight test_mul_mat cases from this row's own diff, temporarily)
+cmake --build build --target test-backend-ops -j8
+./build/bin/test-backend-ops perf -b Metal -o MUL_MAT -p 'k=4096'
+./build/bin/test-backend-ops perf -b Metal -o MUL_MAT -p 'm=4096,n=1,k=14336'
+git checkout -- tests/test-backend-ops.cpp && cmake --build build --target test-backend-ops -j8
+
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=/tmp/proxima-r360-reprove cargo test -p omega --release --features metal,instrument \
+  --test matvec_roofline_ladder -- --ignored --nocapture decode_shape_roofline_ladder
+```
+(expected: llama's `k=4096` invocation prints 6 distinct MUL_MAT lines plus the head's Q6_K line spliced by Metal teardown logging; the `k=14336` invocation's `q5_K,m=4096` line near 144 us/run; `decode_shape_roofline_ladder` prints `test result: ok. 1 passed`, 10 arms, each `median_gbps` within its own CoV band of this row's table.)
+
+**llama.cpp porcelain after revert:**
+```
+$ git -C /Users/brianbruggeman/repos/others/llama.cpp status --porcelain tests/test-backend-ops.cpp
+(empty)
+```
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | docs-only: `docs(tensor): row 360 per-shape bare matvec llama vs ours` | First apples-to-apples per-shape table across all eight decode shapes, both programs MEASURED (llama via a temporary, reverted `test-backend-ops.cpp` edit adding the seven missing shapes; ours via `decode_shape_roofline_ladder` re-run under current main >= `3e5f233`, direct addressing default-on, superseding ROW 336's stale numbers ROW 359 flagged). llama beats ours on every shape, 1.17x (`head`) to 1.91x (`attn_v`) -- gap concentrated on the four smallest-tensor shapes (per-dispatch fixed cost), narrowing on the four largest (transfer-time-dominated). llama's own token overhead (17.4764 − 14.6752 = 2.80 ms) is a clean positive number; ours (20.55 − 22.4936 = −1.94 ms) is NEGATIVE because isolated per-shape dispatch does not compose into the real shared-sequence token (ROW 359's own mechanism, now confirmed across all 8 shapes, not just 1) -- against ROW 354's shared-sequence bare measurement (15.845 ms) our sum overshoots by 42.0%, down from ROW 359's 61% (stale numbers), consistent with direct addressing narrowing but not closing the isolation-vs-sharing gap | llama: 1 round/shape (tool limitation); ours: full 10-arm run, median-of-7/arm, CoV 0.86-7.15% on the 8 shapes used | llama invocations: THREE-check gate PASSED after one 30s retry (load-1 10.38 -> 6.86); ours: THREE-check gate PASSED on first check (load-1 4.47) |
+
