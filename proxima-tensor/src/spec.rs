@@ -2332,6 +2332,12 @@ pub fn mistral_forward_program(
 /// nothing more.
 pub type CachedLayerRoots = (NodeId, NodeId, NodeId);
 
+/// [`mistral_single_range_cached_forward_program`]'s own return shape:
+/// the lowered program, its `logits` root, one [`CachedLayerRoots`] per
+/// layer, and ROW 326's `duplicate_head` scratch output (`Some` only when
+/// that flag is set -- see the function's own doc).
+type SingleRangeForwardProgram = (Vec<Op>, NodeId, Vec<CachedLayerRoots>, Option<NodeId>);
+
 /// `append_qwen35_dense_attention_layer`'s own per-position cache roots --
 /// [`CachedLayerRoots`]'s 4-wide counterpart, one extra [`NodeId`] for the
 /// partial-rotary remainder [`CachedLayerRoots`] has no room for: `k_first`/
@@ -3961,6 +3967,24 @@ fn append_mistral_single_range_cached_layer(
 /// branch): the mixture-of-experts FFN this function's counterpart also
 /// supports is orthogonal to the attention-merge this function exists to
 /// prove, and duplicating that branch here would test nothing new.
+// ROW 326 diagnostic: `duplicate_head` mirrors `gate_before_up`'s own
+// mechanism (a plain, always-compiled bool a caller sets, production call
+// sites pass a fixed literal) rather than a `#[cfg(test)]` item, because
+// `#[cfg(test)]` on a `proxima-tensor` item is invisible cross-crate to
+// `omega`/`proxima-model-interop`, which is where the Metal measurement
+// this flag exists for actually runs. `true` appends a second, identical
+// `output.weight` reduce reusing this call's own `normed_final`/`lm_head`,
+// returned as the 4th tuple element so a caller can add it to a `Plan`'s
+// requested outputs -- otherwise graph pruning drops it as unreachable
+// dead code, same as any other unread node. `false` (every production call
+// site) is byte-identical to this function's behavior before the flag
+// existed.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one architecture hyperparameter per positional arg, matching every other \
+              forward-program builder in this file (see the other `too_many_arguments` \
+              call sites above); `duplicate_head` is the 8th and last"
+)]
 pub fn mistral_single_range_cached_forward_program(
     vocab: u32,
     embedding: u32,
@@ -3969,7 +3993,8 @@ pub fn mistral_single_range_cached_forward_program(
     kv_heads: u32,
     head_dim: u32,
     block_count: u32,
-) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>), TensorError> {
+    duplicate_head: bool,
+) -> Result<SingleRangeForwardProgram, TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
 
@@ -4181,7 +4206,28 @@ pub fn mistral_single_range_cached_forward_program(
         "sv->sdv",
     )?;
 
-    Ok((program, logits, cache_roots))
+    let duplicate_head_scratch = if duplicate_head {
+        let scratch_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")],
+        )?;
+        let scratch_reduce = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            scratch_product,
+            "sdv->sdv",
+            "sv->sdv",
+        )?;
+        Some(scratch_reduce)
+    } else {
+        None
+    };
+
+    Ok((program, logits, cache_roots, duplicate_head_scratch))
 }
 
 /// [`append_mistral_cached_layer`]'s mixture-of-experts counterpart, the
@@ -10788,10 +10834,12 @@ value = 1.0
                 .len()
         };
         let single_range_nodes_of = |block_count: u32| {
-            mistral_single_range_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, block_count)
-                .expect("the single-range cached forward pass lowers to a program")
-                .0
-                .len()
+            mistral_single_range_cached_forward_program(
+                32_002, 4096, 14336, 32, 8, 128, block_count, false,
+            )
+            .expect("the single-range cached forward pass lowers to a program")
+            .0
+            .len()
         };
         let two_range_per_layer = two_range_nodes_of(2) - two_range_nodes_of(1);
         let single_range_per_layer = single_range_nodes_of(2) - single_range_nodes_of(1);
@@ -10821,8 +10869,8 @@ value = 1.0
         .expect("the two-range cached program binds")
         .len();
 
-        let (single_range_program, single_range_logits, single_range_roots) =
-            mistral_single_range_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+        let (single_range_program, single_range_logits, single_range_roots, _) =
+            mistral_single_range_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32, false)
                 .expect("the single-range cached forward pass lowers to a program");
         let mut single_range_outputs = alloc::vec![single_range_logits];
         for (even, odd, value) in &single_range_roots {
@@ -11089,7 +11137,7 @@ value = 1.0
             // MERGED cache (prior positions plus this call's own, folded
             // in by hand the way write-placement would fold them in at
             // runtime).
-            let (single_range_program, single_range_root, _) =
+            let (single_range_program, single_range_root, _, _) =
                 mistral_single_range_cached_forward_program(
                     VOCAB as u32,
                     EMBEDDING as u32,
@@ -11098,6 +11146,7 @@ value = 1.0
                     KV_HEADS as u32,
                     HEAD_DIM as u32,
                     BLOCK_COUNT,
+                    false,
                 )
                 .expect("single-range cached forward pass lowers");
             let cached_len_scalar = alloc::vec![cached_len as f32];
@@ -11358,7 +11407,7 @@ value = 1.0
             max_error
         }
 
-        let (program, root, _) = mistral_single_range_cached_forward_program(
+        let (program, root, _, _) = mistral_single_range_cached_forward_program(
             VOCAB,
             EMBEDDING,
             FEED_FORWARD,
@@ -11366,6 +11415,7 @@ value = 1.0
             KV_HEADS,
             HEAD_DIM,
             BLOCK_COUNT,
+            false,
         )
         .expect("single-range cached forward pass lowers");
 
@@ -11506,7 +11556,7 @@ value = 1.0
                 kv_seed += 3;
             }
 
-            let (program, root, _) = mistral_single_range_cached_forward_program(
+            let (program, root, _, _) = mistral_single_range_cached_forward_program(
                 VOCAB as u32,
                 EMBEDDING as u32,
                 FEED_FORWARD as u32,
@@ -11514,6 +11564,7 @@ value = 1.0
                 KV_HEADS as u32,
                 HEAD_DIM as u32,
                 BLOCK_COUNT,
+                false,
             )
             .expect("single-range cached forward pass lowers");
 
