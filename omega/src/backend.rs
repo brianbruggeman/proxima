@@ -68,7 +68,7 @@
 
 use std::sync::OnceLock;
 
-use proxima_tensor::{Evaluated, NodeId, Op, QuantizedBlock, TensorError};
+use proxima_tensor::{Evaluated, NodeId, NumericPolicy, Op, QuantizedBlock, TensorError};
 
 #[cfg(feature = "cpu")]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
@@ -526,6 +526,33 @@ pub fn set_dispatch_type(plan: &mut Plan, dispatch_type: metal::DispatchType) {
         Plan::Cpu(_) => {}
         #[cfg(all(feature = "metal", target_os = "macos"))]
         Plan::Metal(metal_plan) => metal_plan.set_dispatch_type(dispatch_type),
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(_) => {}
+        #[cfg(not(any(
+            feature = "cpu",
+            all(feature = "metal", target_os = "macos"),
+            feature = "wgpu-backend"
+        )))]
+        _ => match *plan {},
+    }
+}
+
+/// Sets [`NumericPolicy`] on [`Plan::Metal`] -- see
+/// [`metal::Plan::set_numeric_policy`]'s own doc for the ladder this
+/// governs and why it is the richer, orthogonal axis next to
+/// [`metal::MathMode`]. A no-op on every other arm, same reasoning as
+/// [`set_math_mode`]: `Plan::Cpu`'s interpreter and v1's `WgpuPlan` have no
+/// analogous knob. Gated on `metal`+macos to match `set_math_mode`/
+/// `set_dispatch_type`'s own gate, even though [`NumericPolicy`] itself is
+/// unconditionally available -- every call site threading it in today only
+/// exists inside that same gate.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub fn set_numeric_policy(plan: &mut Plan, numeric_policy: NumericPolicy) {
+    match plan {
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(_) => {}
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        Plan::Metal(metal_plan) => metal_plan.set_numeric_policy(numeric_policy),
         #[cfg(feature = "wgpu-backend")]
         Plan::Wgpu(_) => {}
         #[cfg(not(any(
