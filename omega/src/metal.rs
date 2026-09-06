@@ -285,6 +285,23 @@ pub enum MetalError {
     /// only ever shows up as "removed nothing").
     #[error("kind filter {filter:?} matched zero dispatches in this plan")]
     KindFilterMatchesNothing { filter: String },
+    /// [`upload_resident_copy`]'s own contract, made typed rather than
+    /// silently violated: [`Plan::mark_resident`]'s doc says a resident
+    /// NAME's host buffer is "bound once at load and never mutated again",
+    /// so a legitimate caller only ever offers the same host pointer and
+    /// byte length under a given name. A hit under `name` whose offered
+    /// host pointer or byte length differs from what was cached is a
+    /// caller bug (ROW 331/332's shape, reproduced at the driver level): a
+    /// second, unrelated host allocation reused a name a serving loop had
+    /// already marked resident.
+    #[error(
+        "resident name {name:?} rebound to a different host buffer (cached len={cached_len}, offered len={offered_len})"
+    )]
+    ResidentNameRebound {
+        name: String,
+        cached_len: usize,
+        offered_len: usize,
+    },
 }
 /// This thread's Metal device paired with its command queue — both created
 /// once per thread rather than per [`execute`] call.
@@ -4560,8 +4577,8 @@ fn upload_block_as_float(
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
         counter!(BLOCK_NOCOPY_BOUND_BYTES, byte_length as u64);
-        if resident_name.is_some() {
-            return upload_block_no_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
+        if let Some(name) = resident_name {
+            return upload_block_no_copy(device, name, pointer, byte_length).map(|buffer| (buffer, 0));
         }
         return upload_block_no_copy_uncached(device, pointer, byte_length)
             .map(|buffer| (buffer, 0));
@@ -4599,8 +4616,8 @@ fn upload_packed_bytes(
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
         counter!(BLOCK_NOCOPY_BOUND_BYTES, byte_length as u64);
-        if resident_name.is_some() {
-            return upload_block_no_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
+        if let Some(name) = resident_name {
+            return upload_block_no_copy(device, name, pointer, byte_length).map(|buffer| (buffer, 0));
         }
         return upload_block_no_copy_uncached(device, pointer, byte_length)
             .map(|buffer| (buffer, 0));
@@ -4646,6 +4663,15 @@ pub fn register_checkpoint_mapping(bytes: &[u8]) {
     }
     let base = bytes.as_ptr() as usize;
     CHECKPOINT_MAPPING.with(|mapping| *mapping.borrow_mut() = Some((base, bytes.len())));
+    // this call is the caller EXPLICITLY declaring a new resident identity
+    // for `CHECKPOINT_MAPPING_NOCOPY_NAME` -- drop whatever `NOCOPY_BUFFERS`
+    // cached under that name for the PRIOR registration so the next
+    // `checkpoint_mapping_offset` upload is a fresh, correctly-checked
+    // entry rather than a `ResidentNameRebound` error against a mapping
+    // this function itself just superseded.
+    NOCOPY_BUFFERS.with(|cache| {
+        cache.borrow_mut().remove(CHECKPOINT_MAPPING_NOCOPY_NAME);
+    });
 }
 
 /// Counts uploads served by addressing the shared checkpoint-mapping buffer
@@ -4685,10 +4711,25 @@ fn checkpoint_mapping_offset(
     counter!(MAPPING_OFFSET_UPLOADS, 1);
     counter!(BLOCK_OFFSET_BOUND_BYTES, byte_length as u64);
     Some(
-        upload_block_no_copy(device, base as *const c_void, rounded_length)
-            .map(|buffer| (buffer, address - base)),
+        upload_block_no_copy(
+            device,
+            CHECKPOINT_MAPPING_NOCOPY_NAME,
+            base as *const c_void,
+            rounded_length,
+        )
+        .map(|buffer| (buffer, address - base)),
     )
 }
+
+/// The single [`NOCOPY_BUFFERS`] identity [`checkpoint_mapping_offset`]
+/// caches under -- sound because [`CHECKPOINT_MAPPING`] itself is a single
+/// thread-local slot (never more than one registration live at a time), so
+/// this name never collides across two DIFFERENT live mappings the way a
+/// per-tensor or per-weight name would need to. [`register_checkpoint_mapping`]
+/// drops any stale entry under this name before installing a new mapping, so
+/// a re-registration is a deliberate cache invalidation, never a
+/// [`MetalError::ResidentNameRebound`].
+const CHECKPOINT_MAPPING_NOCOPY_NAME: &str = "__checkpoint_mapping__";
 
 thread_local! {
     /// No-copy block buffers, keyed by the exact host range they wrap.
@@ -4700,29 +4741,63 @@ thread_local! {
     /// that scales with BYTES, which is exactly what made it invisible in a
     /// bytes-normalized probe.
     ///
-    /// CALLER PRECONDITION, enforced at the call site via `resident`, not
-    /// (yet) a type: a cached wrapper aliases the caller's pages and Metal
-    /// does NOT own them, so the host range `(pointer, len)` must stay
-    /// mapped, and must never be reused by a DIFFERENT allocation, for as
-    /// long as this thread keeps using omega. `upload_block_as_float` and
-    /// `upload_packed_bytes` only route into this cache when
-    /// [`Plan::mark_resident`] already proved that for the node's own
-    /// address -- true for mmap'd GGUF weights, false for an ephemeral,
-    /// growing buffer (a KV-cache row, say) whose page-aligned address is a
-    /// coincidence of a page-boundary crossing, not a lifetime proof. A
-    /// page-aligned but non-resident block takes
+    /// Keyed on the resident NAME [`Plan::mark_resident`] proved static for
+    /// this node, never on `(pointer, byte_length)` alone -- ROW 334's own
+    /// shape: an address-only key let a freed arm's `Vec<u8>` and a LATER,
+    /// unrelated arm's same-byte-size `Vec<u8>` collide at the identical
+    /// address, serving the later arm 100% stale bytes. `upload_block_no_copy`
+    /// checks the offered pointer and byte length against what this name was
+    /// first uploaded with on every lookup and refuses to serve a mismatch
+    /// (see that function's own doc) -- the same contract
+    /// [`upload_resident_copy`]/[`RESIDENT_BUFFERS`] enforce for the copy
+    /// path, applied here to the no-copy path. See
+    /// `proxima-tensor/docs/discipline.md` ROW 70/334.
+    ///
+    /// `upload_block_as_float` and `upload_packed_bytes` only route into this
+    /// cache when [`Plan::mark_resident`] already proved a name for the
+    /// node's own address -- true for mmap'd GGUF weights, false for an
+    /// ephemeral, growing buffer (a KV-cache row, say) whose page-aligned
+    /// address is a coincidence of a page-boundary crossing, not a lifetime
+    /// proof. A page-aligned but non-resident (unnamed) block takes
     /// `upload_block_no_copy_uncached` instead: still zero-copy for this one
     /// `execute` call (sound for the same `waitUntilCompleted` reason), just
-    /// never remembered past it. See `proxima-tensor/docs/discipline.md`
-    /// ROW 70.
+    /// never remembered past it, and never inserted here.
     ///
     /// Reuse is otherwise safe on the data-freshness axis precisely BECAUSE
     /// it is no-copy: writes through the caller's own slice are visible to
     /// the GPU, so a wrapper never goes stale. Copying uploads are
     /// deliberately NOT cached — those snapshot the data, and reuse would
     /// serve a stale snapshot.
-    static NOCOPY_BUFFERS: RefCell<BTreeMap<(usize, usize), MetalBuffer>> =
+    static NOCOPY_BUFFERS: RefCell<BTreeMap<String, (usize, usize, MetalBuffer)>> =
         RefCell::new(BTreeMap::new());
+}
+
+/// Shared identity check both the no-copy and resident-copy caches enforce:
+/// a `name` hit is served only when the OFFERED host pointer and byte length
+/// match what this name was first cached with; any other name hit is
+/// [`MetalError::ResidentNameRebound`], never a stale serve and never a
+/// silent replace. Composes with [`RESIDENT_BUFFERS`]/[`upload_resident_copy`]
+/// and [`NOCOPY_BUFFERS`]/[`upload_block_no_copy`], the two callers that own
+/// their own separate maps (different soundness arguments -- see each map's
+/// own doc) but share this one lookup rule.
+fn resident_name_lookup(
+    cache: &RefCell<BTreeMap<String, (usize, usize, MetalBuffer)>>,
+    name: &str,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Result<Option<MetalBuffer>, MetalError> {
+    let offered_address = pointer as usize;
+    let Some((cached_address, cached_length, buffer)) = cache.borrow().get(name).cloned() else {
+        return Ok(None);
+    };
+    if cached_address == offered_address && cached_length == byte_length {
+        return Ok(Some(buffer));
+    }
+    Err(MetalError::ResidentNameRebound {
+        name: name.to_string(),
+        cached_len: cached_length,
+        offered_len: byte_length,
+    })
 }
 
 /// Counts entries `NOCOPY_BUFFERS` actually holds right now — the direct
@@ -4748,22 +4823,34 @@ pub static NOCOPY_BUFFER_REUSES: Counter = Counter::new("omega.metal.upload_bloc
 /// [`upload_block_as_float`]'s caller-owned slice's borrow can end.
 ///
 /// Cached in [`NOCOPY_BUFFERS`] — reachable ONLY when the caller already
-/// classified this address `resident` (see the call sites in
-/// [`upload_block_as_float`]/[`upload_packed_bytes`]); a non-resident
-/// page-aligned block takes [`upload_block_no_copy_uncached`] instead, which
-/// shares this function's Metal call but never remembers the wrapper.
+/// classified this address `resident` under `name` (see the call sites in
+/// [`upload_block_as_float`]/[`upload_packed_bytes`]/[`checkpoint_mapping_offset`]);
+/// a non-resident page-aligned block takes [`upload_block_no_copy_uncached`]
+/// instead, which shares this function's Metal call but never remembers the
+/// wrapper -- an unnamed upload is never cached here. A `name` hit whose
+/// offered pointer or byte length disagrees with what is cached is a caller
+/// contract violation ([`Plan::mark_resident`]'s doc), not a fresher version
+/// of the same buffer, so it is [`MetalError::ResidentNameRebound`], never a
+/// stale hit and never a silent re-upload. See [`resident_name_lookup`] and
+/// [`NOCOPY_BUFFERS`]'s own doc.
 fn upload_block_no_copy(
     device: &ProtocolObject<dyn MTLDevice>,
+    name: &str,
     pointer: *const c_void,
     byte_length: usize,
 ) -> Result<MetalBuffer, MetalError> {
-    let key = (pointer as usize, byte_length);
-    if let Some(existing) = NOCOPY_BUFFERS.with(|cache| cache.borrow().get(&key).cloned()) {
+    if let Some(existing) =
+        NOCOPY_BUFFERS.with(|cache| resident_name_lookup(cache, name, pointer, byte_length))?
+    {
         counter!(NOCOPY_BUFFER_REUSES, 1);
         return Ok(existing);
     }
     let buffer = create_no_copy_buffer(device, pointer, byte_length)?;
-    NOCOPY_BUFFERS.with(|cache| cache.borrow_mut().insert(key, buffer.clone()));
+    NOCOPY_BUFFERS.with(|cache| {
+        cache
+            .borrow_mut()
+            .insert(name.to_string(), (pointer as usize, byte_length, buffer.clone()))
+    });
     Ok(buffer)
 }
 
@@ -4843,14 +4930,22 @@ thread_local! {
     /// SNAPSHOT taken at first upload, which is sound only because the
     /// caller already proved -- by name, once, in `mark_resident` -- that
     /// the NAME holds a model weight nothing overwrites again. Keyed on that
-    /// name, never on `(pointer, byte_length)`: a host address is a property
-    /// of an allocation's LIFETIME, and a short-lived buffer (an activation
-    /// vector, say) can be freed and a same-sized, differently-contented
-    /// allocation can land at the identical address on a later call --
-    /// `mark_resident`'s own proof is about the NAME the caller declared
-    /// static, not about any address that name's data happened to occupy
-    /// once. See `proxima-tensor/docs/discipline.md` ROW 70.
-    static RESIDENT_BUFFERS: RefCell<BTreeMap<String, (usize, MetalBuffer)>> =
+    /// name, never on `(pointer, byte_length)` alone: a host address is a
+    /// property of an allocation's LIFETIME, and a short-lived buffer (an
+    /// activation vector, say) can be freed and a same-sized,
+    /// differently-contented allocation can land at the identical address on
+    /// a later call -- `mark_resident`'s own proof is about the NAME the
+    /// caller declared static, not about any address that name's data
+    /// happened to occupy once. See `proxima-tensor/docs/discipline.md` ROW 70.
+    ///
+    /// The stored `(usize, usize, MetalBuffer)` is the host pointer and byte
+    /// length this entry was uploaded from, alongside the device copy --
+    /// ROW 332's shape was a caller marking a DIFFERENT host buffer resident
+    /// under a REUSED name, which a name-only lookup cannot distinguish from
+    /// a legitimate cache hit. [`upload_resident_copy`] checks both against
+    /// what the caller offers on every lookup and refuses to serve a
+    /// mismatch -- see that function's own doc.
+    static RESIDENT_BUFFERS: RefCell<BTreeMap<String, (usize, usize, MetalBuffer)>> =
         RefCell::new(BTreeMap::new());
 }
 
@@ -4881,21 +4976,27 @@ pub fn resident_cache_len() -> usize {
 /// the buffer it creates and hand the SAME one back next time the SAME
 /// `name` shows up -- sound only because that classification, not an
 /// address guess, is what proves the bytes behind `name` never change
-/// again. A byte-length mismatch under a repeated name is a caller contract
-/// violation (the module doc's residency precondition), not something this
-/// cache can silently paper over, so it is treated as a miss and the entry
-/// is replaced rather than served.
+/// again.
+///
+/// [`Plan::mark_resident`]'s doc is the contract this enforces: under a
+/// legitimate caller, a resident name's host pointer and byte length never
+/// change once bound. A `name` hit whose OFFERED host pointer or byte length
+/// disagrees with what is cached is therefore not a fresher version of the
+/// same weight -- it is a different host allocation that happened to reuse a
+/// name a serving loop already marked resident (ROW 331/332's shape). This
+/// cache cannot tell "the weight changed" from "the caller has a bug" (the
+/// module doc's residency precondition rules the former case out), so it
+/// never guesses: it refuses to serve, and never silently replaces the
+/// cached entry, via [`MetalError::ResidentNameRebound`].
 fn upload_resident_copy(
     device: &ProtocolObject<dyn MTLDevice>,
     name: &str,
     pointer: *const c_void,
     byte_length: usize,
 ) -> Result<MetalBuffer, MetalError> {
-    if let Some(existing) = RESIDENT_BUFFERS.with(|cache| {
-        cache.borrow().get(name).and_then(|(cached_length, buffer)| {
-            (*cached_length == byte_length).then(|| buffer.clone())
-        })
-    }) {
+    if let Some(existing) =
+        RESIDENT_BUFFERS.with(|cache| resident_name_lookup(cache, name, pointer, byte_length))?
+    {
         counter!(RESIDENT_BUFFER_REUSES, 1);
         return Ok(existing);
     }
@@ -4905,7 +5006,7 @@ fn upload_resident_copy(
     RESIDENT_BUFFERS.with(|cache| {
         cache
             .borrow_mut()
-            .insert(name.to_string(), (byte_length, buffer.clone()))
+            .insert(name.to_string(), (pointer as usize, byte_length, buffer.clone()))
     });
     Ok(buffer)
 }
@@ -5010,6 +5111,205 @@ mod resident_buffer_cache_tests {
             .expect("second upload of the same name must hit the cache");
         assert_eq!(super::RESIDENT_BUFFER_REUSES.get(), reuses_before + 1);
         assert_eq!(resident_cache_len(), 1);
+    }
+
+    #[test]
+    fn a_resident_name_rebound_to_a_different_host_pointer_is_rejected() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_resident_cache_for_test();
+
+        let first_host_buffer = vec![4.0_f32; 4096];
+        let byte_length = size_of_val(first_host_buffer.as_slice());
+        upload_resident_copy(
+            &device,
+            "resident_weight_rebound",
+            first_host_buffer.as_ptr().cast(),
+            byte_length,
+        )
+        .expect("first upload establishes the cached entry");
+
+        // a second, unrelated host allocation of the SAME length reusing the
+        // SAME name -- exactly ROW 331/332's shape, reproduced at the driver
+        // level instead of relying on a harness never naming two arms alike.
+        let second_host_buffer = vec![5.0_f32; 4096];
+        let uploads_before = super::RESIDENT_BUFFER_UPLOADS.get();
+        let reuses_before = super::RESIDENT_BUFFER_REUSES.get();
+        let error = upload_resident_copy(
+            &device,
+            "resident_weight_rebound",
+            second_host_buffer.as_ptr().cast(),
+            byte_length,
+        )
+        .expect_err("a different host pointer under the same name must never be served");
+
+        assert!(matches!(
+            error,
+            super::MetalError::ResidentNameRebound { .. }
+        ));
+        assert_eq!(super::RESIDENT_BUFFER_UPLOADS.get(), uploads_before);
+        assert_eq!(super::RESIDENT_BUFFER_REUSES.get(), reuses_before);
+        assert_eq!(resident_cache_len(), 1);
+    }
+
+    #[test]
+    fn a_resident_name_rebound_to_a_different_length_is_rejected() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_resident_cache_for_test();
+
+        let host_buffer = vec![6.0_f32; 4096];
+        let pointer = host_buffer.as_ptr().cast();
+        let full_length = size_of_val(host_buffer.as_slice());
+        upload_resident_copy(&device, "resident_weight_grown", pointer, full_length)
+            .expect("first upload establishes the cached entry");
+
+        let uploads_before = super::RESIDENT_BUFFER_UPLOADS.get();
+        let reuses_before = super::RESIDENT_BUFFER_REUSES.get();
+        let error = upload_resident_copy(&device, "resident_weight_grown", pointer, full_length / 2)
+            .expect_err("a different byte length under the same name must never be served");
+
+        assert!(matches!(
+            error,
+            super::MetalError::ResidentNameRebound { .. }
+        ));
+        assert_eq!(super::RESIDENT_BUFFER_UPLOADS.get(), uploads_before);
+        assert_eq!(super::RESIDENT_BUFFER_REUSES.get(), reuses_before);
+        assert_eq!(resident_cache_len(), 1);
+    }
+}
+
+#[cfg(test)]
+fn reset_nocopy_cache_for_test() {
+    NOCOPY_BUFFERS.with(|cache| cache.borrow_mut().clear());
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod nocopy_buffer_cache_tests {
+    use core::mem::size_of;
+
+    use proxima_tensor::AlignedBuffer;
+
+    use super::{
+        device_and_queue, nocopy_cache_len, page_size, reset_nocopy_cache_for_test,
+        upload_block_no_copy, upload_block_no_copy_uncached,
+    };
+
+    #[test]
+    fn the_same_nocopy_name_still_hits_the_cache() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_nocopy_cache_for_test();
+
+        let page = page_size();
+        let buffer =
+            AlignedBuffer::new(page / size_of::<f32>(), page).expect("page-aligned test buffer");
+        let pointer = buffer.as_ptr().cast();
+        let byte_length = buffer.len() * size_of::<f32>();
+
+        upload_block_no_copy(&device, "nocopy_weight_stable", pointer, byte_length)
+            .expect("first upload for a stable no-copy name");
+        assert_eq!(nocopy_cache_len(), 1);
+
+        let reuses_before = super::NOCOPY_BUFFER_REUSES.get();
+        upload_block_no_copy(&device, "nocopy_weight_stable", pointer, byte_length)
+            .expect("second upload of the same name must hit the cache");
+        assert_eq!(super::NOCOPY_BUFFER_REUSES.get(), reuses_before + 1);
+        assert_eq!(nocopy_cache_len(), 1);
+    }
+
+    #[test]
+    fn a_nocopy_name_rebound_to_a_different_host_pointer_is_rejected() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_nocopy_cache_for_test();
+
+        let page = page_size();
+        let first_buffer =
+            AlignedBuffer::new(page / size_of::<f32>(), page).expect("page-aligned test buffer");
+        let byte_length = first_buffer.len() * size_of::<f32>();
+        upload_block_no_copy(
+            &device,
+            "nocopy_weight_rebound",
+            first_buffer.as_ptr().cast(),
+            byte_length,
+        )
+        .expect("first upload establishes the cached entry");
+
+        // a second, unrelated page-aligned host allocation of the SAME
+        // length reusing the SAME name -- ROW 334's own shape (a freed
+        // ladder arm's `Vec<u8>` reused by a later arm at the identical
+        // address), reproduced at the driver level instead of relying on a
+        // test harness never marking an ephemeral buffer resident under a
+        // reused name.
+        let second_buffer =
+            AlignedBuffer::new(page / size_of::<f32>(), page).expect("page-aligned test buffer");
+        let reuses_before = super::NOCOPY_BUFFER_REUSES.get();
+        let error = upload_block_no_copy(
+            &device,
+            "nocopy_weight_rebound",
+            second_buffer.as_ptr().cast(),
+            byte_length,
+        )
+        .expect_err("a different host pointer under the same name must never be served");
+
+        assert!(matches!(error, super::MetalError::ResidentNameRebound { .. }));
+        assert_eq!(super::NOCOPY_BUFFER_REUSES.get(), reuses_before);
+        assert_eq!(nocopy_cache_len(), 1);
+    }
+
+    #[test]
+    fn a_nocopy_name_rebound_to_a_different_length_is_rejected() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_nocopy_cache_for_test();
+
+        let page = page_size();
+        let buffer = AlignedBuffer::new(2 * page / size_of::<f32>(), page)
+            .expect("page-aligned test buffer");
+        let pointer = buffer.as_ptr().cast();
+        let full_length = buffer.len() * size_of::<f32>();
+        upload_block_no_copy(&device, "nocopy_weight_grown", pointer, full_length)
+            .expect("first upload establishes the cached entry");
+
+        let reuses_before = super::NOCOPY_BUFFER_REUSES.get();
+        let error = upload_block_no_copy(&device, "nocopy_weight_grown", pointer, full_length / 2)
+            .expect_err("a different byte length under the same name must never be served");
+
+        assert!(matches!(error, super::MetalError::ResidentNameRebound { .. }));
+        assert_eq!(super::NOCOPY_BUFFER_REUSES.get(), reuses_before);
+        assert_eq!(nocopy_cache_len(), 1);
+    }
+
+    #[test]
+    fn an_unnamed_upload_is_never_cached() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_nocopy_cache_for_test();
+
+        let page = page_size();
+        let buffer =
+            AlignedBuffer::new(page / size_of::<f32>(), page).expect("page-aligned test buffer");
+        let pointer = buffer.as_ptr().cast();
+        let byte_length = buffer.len() * size_of::<f32>();
+
+        upload_block_no_copy_uncached(&device, pointer, byte_length)
+            .expect("first uncached upload");
+        upload_block_no_copy_uncached(&device, pointer, byte_length)
+            .expect("second uncached upload of the identical range");
+
+        assert_eq!(
+            nocopy_cache_len(),
+            0,
+            "an unnamed (uncached) upload must never populate NOCOPY_BUFFERS"
+        );
     }
 }
 
