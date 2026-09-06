@@ -5576,7 +5576,7 @@ fn l2norm(
 /// more [`ScalarOp::Multiply`] against the un-gated input. No dedicated
 /// `Sigmoid`/`Silu` [`ScalarOp`] exists, matching that chain's own precedent
 /// for an activation this crate composes rather than mints.
-fn silu(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
+pub(crate) fn silu(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
     let target = map.rsplit("->").next().unwrap_or(map);
     let one_map = alloc::format!("->{target}");
     let neg_x = elementwise(program, DType::Float32, ScalarOp::Negate, &[(x, map)])?;
