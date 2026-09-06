@@ -19943,7 +19943,7 @@ Executor-internal graph-execution/diagnostic code, not sans-IO -- principle §11
 
 **PENDING, not this session: a dedicated quiet-box pass (coordinator-committed, "one dedicated sealed pass with nothing else on the machine once the build-heavy agents drain") for every cell marked UNMEASURED/CONTAMINATED above** -- the per-node table's absolute us/step column, the AMX nano's GMAC/s table (with a corrected home-turf arm -- the scalar reference in `amx_nano.rs` is not valid and needs replacing with either the crate's own tuned kernel via its public `evaluate_named` surface or a properly cache-blocked scalar loop), and the torch t=1/t=8 p50/mean/CoV. This row's own re-provable, unmeasured-but-recorded deliverable is intentionally incomplete on throughput and complete on mechanism, counts, and ratios.
 
-## ROW 237 -- node 90's 17.6x gap was never a BLAS-missing gap: it was a redundant broadcast materialization in the adjoint, and deleting it (not wiring cblas) closed it to ~1.36x
+## ROW 237b -- node 90's 17.6x gap was never a BLAS-missing gap: it was a redundant broadcast materialization in the adjoint, and deleting it (not wiring cblas) closed it to ~1.36x
 
 **NOTE:** ROWs 234-236 are contended -- three agents each independently wrote a "ROW 234" this session on sibling branches (`perf/train-parity`, `perf/metal-simdgroup-geometry`, `perf/decode-orchestration`) off the same base. This row is deliberately numbered past all three; renumber 234-236 when those branches land on `perf/train-parity`.
 
