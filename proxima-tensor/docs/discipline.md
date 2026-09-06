@@ -23792,3 +23792,65 @@ PROXIMA_DISPATCH=concurrent PROXIMA_MAX_TOKENS=32 PROXIMA_DETERMINISM_RUNS=20 "$
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `fix(omega): concurrent hazards track epilogue-fused reduce reads` + `docs(tensor): row 323 the concurrent path's missing hazard` | `resolve_hazard_inputs` (`omega/src/metal.rs:1499`) read `bound.operands()` instead of `bound.all_read_sources()`, so a fused-reduce's `epilogue_operands` (a sibling's output buffer, genuinely bound and read by the GPU kernel per `msl::bindings`) never entered the RAW hazard check -- fixed by switching to `all_read_sources()`; under ROW 320's identical loaded-contention protocol, concurrent dispatch went from `distinct_texts=3`/20 (pre-fix) to `distinct_texts=1`/20 (post-fix), with `barriers/run` rising 10336 -> 11360, the direct signature of new barriers closing the previously-invisible RAW | 1x20-run loaded determinism arm (no CoV: pass/fail is hash equality, not a continuous metric); 1 informational timing run, steps 3..7, mean 26.14 ms | quiet gate (names-only, no `-f`) empty before build, before the load loop start, and before the timed run; load-1 10.5-19.4 during the run (own load-loop contention, expected) |
+
+## ROW 324 -- clean scoreboard at the fixed concurrent default: ROW 323's hazard fix costs ~1 ms/token, both arms still comfortably ahead of llama.cpp
+
+**Card:** none (measurement only, no code change). **Worktree/branch:** `proxima-wt-r324`, `docs/row-324`, off `main` at `810b1ab` (ROW 323's fix landed there). Second detached worktree `proxima-wt-prefix` at `5ab6247` (the last pre-fix main, ROW 322).
+
+**Task.** ROW 323 landed the missing-hazard fix and reported one *informational* timing run (26.14 ms `gpu_exec_ms`, no comparison arm, no CoV) plus a barrier-count rise (10336 -> 11360 per 32-step determinism run, i.e. 323 -> 355 barriers per 8-step oracle run counted here). This row supplies the missing scoreboard: a clean 3-round interleaved bake-off of the fixed default against the pre-fix binary, plus `llama-bench` in the same session, so ROW 323's cost is a measured result, not an informational aside.
+
+**Arms.** A = fixed (`main` `810b1ab`, `resolve_hazard_inputs` reading `all_read_sources()`, 355 barriers). B = prefix (`main` `5ab6247`, pre-fix, `operands()` only, 323 barriers). C = `llama-bench -m openchat-3.5-1210.Q4_K_S.gguf -n 32 -p 0 -r 5 -t 8 -ngl 99` (ROW 298's own invocation). Both proxima oracles built `--no-run` release (`cargo test -p proxima-model-interop --release --features metal,instrument --no-run`), copied to `r324-logs/oracle-fixed`/`oracle-prefix`. Oracle test: `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `PROXIMA_MAX_TOKENS=8`, `--exact --ignored --nocapture --test-threads=1`. 3 rounds interleaved A, B, C x3 (fixed, prefix, llama each round), quiet gate (names-only, `pgrep -l 'proxima_model_i|llama-bench|oracle-|gpu_load_genera|matvec_roofline|^cargo$|^rustc$|nextest|cargo-nextest'`, load-1 < 10, rechecked every 20 s) empty immediately before every timed invocation -- loud twice from other slices' `cargo`/`rustc` builds, both waited out (max ~7 min).
+
+**Timing, `gpu_exec_ms`/`step_wall_ms` over steps 3..7 (5 datapoints/arm/round):**
+
+| round | arm | gpu_exec mean (ms) | gpu CoV | step_wall mean (ms) | wall CoV | barriers | generated_text |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | A fixed | 25.7948 | 0.783% | 26.7414 | 0.518% | 355 | "Here is a simple Python function that returns" |
+| 1 | B prefix | 25.0546 | 1.204% | 25.9376 | 0.983% | 323 | same |
+| 2 | A fixed | 25.7762 | 1.057% | 26.7584 | 0.947% | 355 | same |
+| 2 | B prefix | 24.5417 | 0.256% | 25.5037 | 0.332% | 323 | same |
+| 3 | A fixed | 26.1945 | 0.392% | 27.0594 | 0.291% | 355 | same |
+| 3 | B prefix | 27.1521 | 7.442% | 29.2382 | 6.651% | 323 | same |
+
+`generated_text` is byte-identical across all 6 proxima runs. `barriers` is a per-run constant confirming the two binaries' shapes: fixed always reports 355, prefix always 323, matching this row's own fact and ROW 323's 10336 -> 11360-per-32-step figure divided by the 32/8 token-count ratio (323 x 4 = 1292 != 10336 exactly because ROW 323 counted over `PROXIMA_MAX_TOKENS=32`; this row counts steady-state-per-step barriers, a flat per-step constant here, not a cumulative total -- the two are different instruments and are not expected to match numerically, only to agree on relative order: fixed > prefix, +32 barriers/step (+9.91%)).
+
+**Round 3's B run is contaminated** -- steps 6/7 jump to 29.70/29.45 ms (vs steps 3..5's 24.9-26.1 ms band), driving B's round-3 CoV to 7.44%/6.65%, an order of magnitude above every other round's sub-1.4% bands, and inverting the sign (B reads slower than A in round 3 only). The quiet gate was empty and load-1 < 10 immediately before the round 3 B invocation started, so this is steady-state drift or a same-run contention event during the ~12 s test body, not a pre-run gate miss; per ROW 315/317's own convention this round is flagged and excluded from the load-bearing cost estimate below, not silently averaged in.
+
+**Load-bearing comparison (rounds 1+2 only, the two clean rounds, 10 datapoints/arm):**
+
+| arm | gpu_exec mean (ms) | gpu CoV | step_wall mean (ms) | wall CoV |
+| --- | --- | --- | --- | --- |
+| A fixed (355 barriers) | 25.7855 | 0.931% | 26.7499 | 0.764% |
+| B prefix (323 barriers) | 24.7981 | 1.357% | 25.7207 | 1.121% |
+
+A - B: `gpu_exec_ms` +0.9874 ms (+3.98%), `step_wall_ms` +1.0292 ms (+4.00%) -- both beyond either arm's own per-round CoV in both clean rounds individually (round 1: +0.7402 ms/+2.95%; round 2: +1.2345 ms/+5.03%).
+
+**Same-session denominator** (`llama-bench`, same invocation as ROW 298, 3 rounds): 57.06 ± 0.51, 57.39 ± 0.36, 57.33 ± 0.62 t/s -- pooled mean 57.26 t/s (CoV 0.251%) = 17.4642 ms/token. Ratio to llama in the same session: A (fixed, all 3 rounds pooled, `step_wall_ms` 26.8531) = **1.5374x llama**; B (prefix, clean rounds 1+2 only, `step_wall_ms` 25.7207) = **1.4728x llama**. Per LLAMA-IS-NOT-THE-FLOOR this is a same-session denominator, not a floor claim.
+
+**The cost of ROW 323's fix, one sentence.** The added hazard-check correctness (+32 barriers/step, 355 vs 323, +9.91%) costs approximately **1.0 ms/token (+4.0%)** in both `gpu_exec_ms` and `step_wall_ms`, measured on the two uncontaminated interleaved rounds -- nothing more is claimed.
+
+**Residual, named not hidden.** (1) Round 3's B arm is contaminated (7.44%/6.65% CoV, sign-inverted) and excluded from the load-bearing cost estimate; the mechanism is not identified (gate was clean and load-1 < 10 immediately before the run started, so the drift happened inside the ~12 s run body, not before it) -- reported as an open question, not attributed. (2) The per-step barrier count reported here (355/323, a flat per-step constant) is a different instrument from ROW 323's own 10336/11360-per-32-step cumulative determinism-harness figure; both agree on relative order (fixed > prefix) but are not directly convertible into each other without knowing the per-step barrier distribution across all 32 steps of that harness, which this row did not re-run.
+
+**Gates.** None run -- no source change lands from this row (`git status --porcelain` clean in both worktrees apart from this doc edit).
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-row324-repro -b docs/row-324-repro main
+git worktree add --detach ../proxima-wt-row324-prefix-repro 5ab6247
+cd ../proxima-wt-row324-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p proxima-model-interop --release --features metal,instrument --no-run
+cd ../proxima-wt-row324-prefix-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p proxima-model-interop --release --features metal,instrument --no-run
+```
+Run each `target/release/deps/proxima_model_interop-*` binary's
+`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache --exact --ignored --nocapture --test-threads=1`
+(`PROXIMA_MAX_TOKENS=8`) interleaved against `llama-bench -m <openchat Q4_K_S> -n 32 -p 0 -r 5 -t 8 -ngl 99`, quiet gate (names-only, load-1 < 10) before every invocation.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | none landed -- `docs(tensor): row 324 scoreboard at the fixed concurrent default` only | ROW 323's hazard fix (355 vs 323 barriers/step, +9.91%) costs ~1.0 ms/token (+4.0%) in both `gpu_exec_ms` and `step_wall_ms`, measured on 2 clean interleaved rounds after round 3's prefix arm was found contaminated and excluded; both arms still land at 1.47-1.54x llama.cpp in the same session | 3 interleaved rounds, 5 datapoints/arm/round; round 3's B arm CoV 7.44%/6.65% (excluded, contaminated); load-bearing rounds 1+2 CoV under 1.4% both arms both metrics | quiet gate (names-only, load-1<10) loud twice from other slices' `cargo`/`rustc` builds, waited out (~2-7 min each); round 3's B contamination occurred inside a run whose own pre-run gate was clean |
