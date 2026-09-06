@@ -5314,6 +5314,42 @@ mod tests {
             matches!(kind, BoundOpKind::Reduce { epilogue_operands, .. } if !epilogue_operands.is_empty())
         }
 
+        /// Structural invariant every fusion pass must preserve: every
+        /// [`NodeId`] any resolved op's [`BoundOp::all_read_sources`] names
+        /// must either be an [`Op::Input`] leaf (which never gets its own
+        /// [`BoundOp`], per [`BoundOpKind`]'s own doc) or still be one of
+        /// `resolved`'s own [`BoundOp::node`]s. A fusion pass that absorbs a
+        /// producer (`reduce_epilogue_fusion`'s own `absorbed` set) but
+        /// leaves some OTHER operand slot still pointing at that now-gone
+        /// producer would pass every count/shape assertion while reading a
+        /// buffer that was never materialized — exactly the dangling-slot
+        /// bug `compose_reduce_epilogue` had when it substituted only the
+        /// FIRST matching operand instead of every occurrence.
+        fn assert_no_dangling_operand_references(program: &[Op], resolved: &[BoundOp]) {
+            let live_nodes: BTreeSet<NodeId> = resolved.iter().map(|bound| bound.node).collect();
+            let is_leaf_input =
+                |node: &NodeId| matches!(program.get(node.0 as usize), Some(Op::Input { .. }));
+            for bound in resolved {
+                for (source, _, gather) in bound.all_read_sources() {
+                    assert!(
+                        live_nodes.contains(source) || is_leaf_input(source),
+                        "node {:?} reads {source:?}, which no BoundOp in the resolved list produces \
+                         and which is not an Op::Input leaf",
+                        bound.node
+                    );
+                    if let Some(lookup) = gather {
+                        assert!(
+                            live_nodes.contains(&lookup.indices) || is_leaf_input(&lookup.indices),
+                            "node {:?} gathers through {:?}, which no BoundOp in the resolved list \
+                             produces and which is not an Op::Input leaf",
+                            bound.node,
+                            lookup.indices
+                        );
+                    }
+                }
+            }
+        }
+
         #[test]
         fn reduce_then_residual_add_fuses_into_one_epilogued_reduce() {
             let (program, reduced, consumer, _x, extra_x_use) = reduce_then_residual_add_program();
@@ -6058,11 +6094,11 @@ mod tests {
         /// read at plain identity (neither re-broadcasts) — the SAME class
         /// of fix as RMSNorm's first round, per this module's own
         /// `reduce_epilogue_fusion` doc, needing no `epilogue_broadcast_axes`
-        /// at all. Proves the resolved-op candidate match (not a name or
-        /// shape special case) is what fuses it: nothing here names
-        /// `gate`/`up`/`silu`, only the algebraic shape
-        /// [`find_epilogue_source`] and [`epilogue_broadcast_axes_for`]
-        /// already match.
+        /// at all. Calls [`crate::spec::silu`] itself — the PRODUCTION
+        /// builder, not a stand-in — so this proves the fold survives the
+        /// real expression's double read of `gate` (once bare, once inside
+        /// `exp(-gate)`, both through the SAME identity projection), which a
+        /// `Tanh(gate)`-shaped fixture (reading `gate` once) never exercised.
         #[test]
         fn silu_gate_times_up_fuses_both_reduces_bit_for_bit() {
             const K: u32 = 4;
@@ -6070,7 +6106,6 @@ mod tests {
             let mut program = Vec::new();
             let identity_2d = || IndexMap::Affine(map::projection(2, &[0, 1]));
             let keep_last = || IndexMap::Affine(map::projection(2, &[1]));
-            let identity_1d = || IndexMap::Affine(map::projection(1, &[0]));
 
             let fold = |program: &mut Vec<Op>, weight: NodeId| {
                 append(
@@ -6088,6 +6123,14 @@ mod tests {
                 )
             };
 
+            let one = append(
+                &mut program,
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: Vec::new(),
+                    value: 1.0,
+                },
+            );
             let gate_weight = append(
                 &mut program,
                 Op::Input {
@@ -6106,21 +6149,17 @@ mod tests {
                 },
             );
             let up = fold(&mut program, up_weight);
-            let silu_gate = append(
-                &mut program,
-                Op::Elementwise {
-                    dtype: DType::Float32,
-                    body: ScalarOp::Tanh,
-                    operands: alloc::vec![(gate, identity_1d())],
-                    name: None,
-                },
-            );
+            let silu_gate =
+                crate::spec::silu(&mut program, gate, one, "n->n").expect("production silu builds");
             let output = append(
                 &mut program,
                 Op::Elementwise {
                     dtype: DType::Float32,
                     body: ScalarOp::Multiply,
-                    operands: alloc::vec![(silu_gate, identity_1d()), (up, identity_1d())],
+                    operands: alloc::vec![
+                        (silu_gate, IndexMap::Affine(map::projection(1, &[0]))),
+                        (up, IndexMap::Affine(map::projection(1, &[0]))),
+                    ],
                     name: None,
                 },
             );
@@ -6130,7 +6169,7 @@ mod tests {
             let fused = bind(&program, &shapes, &[output]).expect("fused silu*up binds");
 
             // One of the two reduces (whichever `find_epilogue_source` picks
-            // first) absorbs the WHOLE `Tanh(gate) * up` tail into its own
+            // first) absorbs the WHOLE `silu(gate) * up` tail into its own
             // epilogue, reading the OTHER reduce's still-materialized output
             // as a plain (non-broadcast) epilogue operand — the exact
             // "bias, residual, gate" shape `BoundOpKind::Reduce::epilogue_
@@ -6149,8 +6188,9 @@ mod tests {
             );
             assert!(
                 fused.iter().any(|bound| has_real_epilogue(&bound.kind)),
-                "one of the two reduces must carry the fused Tanh(gate) * up epilogue, got {fused:?}"
+                "one of the two reduces must carry the fused silu(gate) * up epilogue, got {fused:?}"
             );
+            assert_no_dangling_operand_references(&program, &fused);
 
             let mut lcg = Lcg(11);
             let inputs = alloc::vec![
@@ -6174,6 +6214,81 @@ mod tests {
                 plain_buffers[output.0 as usize],
                 "SiLU(gate) * up must be bit-identical fused vs unfused"
             );
+        }
+
+        /// The genuine conflict [`find_epilogue_source`] must still decline:
+        /// TWO operand slots of ONE consumer name the SAME reduce fold, but
+        /// through DIFFERENT projections — here plain identity and a
+        /// fully-broadcast (stride-0) read of the same source — the
+        /// "gate = paired[..,0,..]" / "up = paired[..,1,..]" parity-split
+        /// shape [`find_epilogue_source`]'s own doc names. Unlike the SiLU
+        /// case above (same source, SAME projection, twice), this must NOT
+        /// fuse: the epilogue model has room for exactly one addressing of
+        /// the fold's result, and two different ones cannot both be "the
+        /// reduce's value for this output element".
+        #[test]
+        fn a_reduce_read_twice_through_different_projections_does_not_fuse() {
+            const K: u32 = 4;
+            const N: u32 = 5;
+            let mut program = Vec::new();
+            let identity_2d = || IndexMap::Affine(map::projection(2, &[0, 1]));
+            let keep_last = || IndexMap::Affine(map::projection(2, &[1]));
+            let identity_1d = || IndexMap::Affine(map::projection(1, &[0]));
+            let broadcast_1d = || {
+                IndexMap::Affine(crate::map::IndexPattern {
+                    iter_rank: 1,
+                    axes: alloc::vec![crate::map::AxisIndex::default()],
+                })
+            };
+
+            let weight = append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(K), Extent::Static(N)],
+                    name: None,
+                },
+            );
+            let reduced = append(
+                &mut program,
+                Op::Reduce(Reduce {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: weight,
+                    in_map: identity_2d(),
+                    out_map: keep_last(),
+                    keep: Keep::Reduce,
+                    name: None,
+                }),
+            );
+            let output = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![(reduced, identity_1d()), (reduced, broadcast_1d())],
+                    name: None,
+                },
+            );
+
+            let shapes = shape::infer(&program, &[]).expect("different-projection program infers");
+            let plain =
+                bind_plain(&program, &shapes, &[output]).expect("unfused different-projection binds");
+            let fused = bind(&program, &shapes, &[output]).expect("bind with fusion enabled still binds");
+
+            assert_eq!(
+                fused.len(),
+                plain.len(),
+                "two different projections of the same reduce must decline the fold, plain={} fused={:?}",
+                plain.len(),
+                fused
+            );
+            assert!(
+                fused.iter().all(|bound| !has_real_epilogue(&bound.kind)),
+                "no reduce may carry a fused epilogue here, got {fused:?}"
+            );
+            assert_no_dangling_operand_references(&program, &fused);
         }
     }
 }
