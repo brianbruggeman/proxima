@@ -4226,20 +4226,20 @@ fn push_packed_row_blocked_body(
             && cfg!(feature = "metal-q4k-single-fetch")
             && !cfg!(feature = "metal-q4k-split-k");
         // `metal-q4k-ggml-port` (default-off): the verbatim ggml transcription,
-        // see [`push_q4k_ggml_port_body`]'s own doc. Requires `plain_product`
-        // (float-only scale-deferred shape, the same gate `q4k_pair_dot`'s own
-        // arm below needs) and takes priority over it -- both target the exact
-        // same design point, and when this feature is on it is the one under
-        // test. Not `metal-q4k-split-k`-aware, same posture as
-        // `push_q4k_single_fetch_body` above and for the identical reason: its
-        // `ib` loop has no `sgitg`/`split` stride of its own. ALSO requires
-        // the codec itself be `Q4K`: `push_q4k_ggml_port_body` transcribes
-        // ggml's `kernel_mul_mv_q4_K_f32_impl` byte-for-byte -- fixed
-        // `blk+4`/`blk+16` scale/qs offsets and a 4-bit-nibble-only decode
-        // with no `qh` high-bit plane, which is `Q4_K`'s block layout, not
-        // `Q5_K`'s. `plain_product` alone is not codec-specific (it is also
-        // true for `Q5_K` once `metal-q5k-pair-dot` is on, and that feature
-        // rides along inside the `metal` umbrella every `metal-q4k-ggml-port`
+        // see [`push_q4k_ggml_port_body`]/[`push_q6k_ggml_port_body`]'s own
+        // docs. Requires `plain_product` (float-only scale-deferred shape,
+        // the same gate `q4k_pair_dot`'s own arm below needs) and takes
+        // priority over it -- both target the exact same design point, and
+        // when this feature is on it is the one under test. Not
+        // `metal-q4k-split-k`-aware, same posture as `push_q4k_single_fetch_body`
+        // above and for the identical reason: its `ib` loop has no
+        // `sgitg`/`split` stride of its own. ALSO requires the codec be one
+        // this file has a verbatim ggml body for (`Q4K`, `Q6K`): each of
+        // `push_q4k_ggml_port_body`/`push_q6k_ggml_port_body` transcribes a
+        // SPECIFIC ggml kernel's own fixed byte offsets and decode shape.
+        // `plain_product` alone is not codec-specific (it is also true for
+        // `Q5_K` once `metal-q5k-pair-dot` is on, and that feature rides
+        // along inside the `metal` umbrella every `metal-q4k-ggml-port`
         // build already carries) -- without this guard, enabling
         // `metal-q4k-ggml-port` silently routed every packed-row `Q5_K`
         // matmul through the `Q4_K`-shaped body too (found via
@@ -4247,10 +4247,12 @@ fn push_packed_row_blocked_body(
         // relative=0.977, essentially uncorrelated output -- the qh plane was
         // simply never read).
         let use_ggml_port = plain_product
-            && matches!(codec, PackedCodec::Q4K)
+            && matches!(codec, PackedCodec::Q4K | PackedCodec::Q6K)
             && cfg!(feature = "metal-q4k-ggml-port")
             && !cfg!(feature = "metal-q4k-split-k");
-        if use_ggml_port {
+        if use_ggml_port && matches!(codec, PackedCodec::Q6K) {
+            push_q6k_ggml_port_body(source, weight, other, rows, block_bytes, other_stride_is_one);
+        } else if use_ggml_port {
             push_q4k_ggml_port_body(source, weight, other, rows, block_bytes, other_stride_is_one);
         } else if use_single_fetch {
             push_q4k_single_fetch_body(
@@ -4784,16 +4786,30 @@ fn push_q4k_single_fetch_body(
 /// proves it is 1, see the caller's own `other_stride_is_one` doc) applies
 /// identically to both instead of drifting.
 fn push_q4k_plain_product_y4_address(source: &mut String, other: usize, other_stride_is_one: bool) {
+    push_packed_row_plain_product_y4_address(source, other, other_stride_is_one, "64u * iq + 8u * ir");
+}
+
+/// [`push_q4k_plain_product_y4_address`] generalized to any ggml-port body's
+/// own lane-derived activation offset -- [`push_q6k_ggml_port_body`] shares
+/// this instead of a second copy of the address arithmetic, passing
+/// `"128u * ip + l0"` (llama's `y_offset`, `ggml-metal.metal:5383`) in place
+/// of `Q4_K`'s `"64u * iq + 8u * ir"`.
+fn push_packed_row_plain_product_y4_address(
+    source: &mut String,
+    other: usize,
+    other_stride_is_one: bool,
+    lane_offset: &str,
+) {
     if other_stride_is_one {
         source.push_str(&format!(
             "    long y4_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS};\n"
         ));
-        source.push_str(&format!("    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} + (long)(64u * iq + 8u * ir);\n"));
+        source.push_str(&format!("    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} + (long)({lane_offset});\n"));
     } else {
         source.push_str(&format!(
             "    long y4_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
         ));
-        source.push_str(&format!("    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"));
+        source.push_str(&format!("    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)({lane_offset}) * other_stride;\n"));
     }
 }
 
@@ -4981,6 +4997,132 @@ fn push_q4k_ggml_port_body(
     );
     source.push_str(
         "                      dmin * (sumy0 * (float)sc8_2 + sumy1 * (float)sc8_3 + sumy2 * (float)sc8_6 + sumy3 * (float)sc8_7);\n",
+    );
+    source.push_str("        }\n");
+    source.push_str(&format!(
+        "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
+    ));
+    source.push_str("        y4 += y4_step;\n");
+    source.push_str("    }\n");
+}
+
+// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
+// master/LICENSE) `kernel_mul_mv_q6_K_f32_impl<1,2,32>`
+// (ggml-metal.metal:5340-5433), transcribed line-for-line onto this crate's
+// operand-base/stride addressing, the same posture as
+// [`push_q4k_ggml_port_body`].
+//
+// Copyright (c) 2023-2024 The ggml authors. MIT-licensed; see THIRD_PARTY.md.
+//
+/// `metal-q4k-ggml-port` (default-off, same feature `push_q4k_ggml_port_body`
+/// answers to -- ROW 316 named the feature after the first codec it ported,
+/// not the mechanism): a VERBATIM port of ggml's
+/// `kernel_mul_mv_q6_K_f32_impl<nr0=1, nsg=2, nw=32>`
+/// (`ggml-metal.metal:5340-5433`).
+///
+/// Lane variable mapping, llama -> this function (`ggml-metal.metal:5376-5385`):
+/// `tid = tiisg/2` -> `tid = lane/2u`; `ix = tiisg%2` -> `ix = lane%2u`;
+/// `ip = tid/8` -> `ip = tid/8u`; `il = tid%8` -> `il = tid%8u`;
+/// `l0 = 4*il` -> `l0 = 4u*il`; `y_offset = 128*ip+l0` -> the `lane_offset`
+/// this shares with [`push_packed_row_plain_product_y4_address`];
+/// `q_offset_l = 64*ip+l0`/`q_offset_h = 32*ip+l0` -> identical names;
+/// `is = 8*ip+l0/16` -> identical name. `N_R0_Q6_K = 1`
+/// (`ggml-metal-impl.h:38`) collapses ggml's own `row`/`nr0` loop to a
+/// single iteration, still written as `for q in 0..rows` so this stays in
+/// step with [`PackedCodec::rows_per_simdgroup`] rather than baking `1` in
+/// the way `push_q4k_ggml_port_body` bakes `4`.
+///
+/// Super-block iteration (`ggml-metal.metal:5387`): `for (i = ix; i < nb; i
+/// += 2)` -- stride `2` (`N_SIMDWIDTH/2` lanes-per-super-block-half), not
+/// `Q4_K`'s stride `4`.
+///
+/// 6-bit reconstruct (`ggml-metal.metal:5409-5412`): `kmask1=0x03`,
+/// `kmask2=0x0C`, `kmask3=0x30`, `kmask4=0xC0`, folded directly into the
+/// nibble OR with no runtime shift beyond what each mask already leaves in
+/// place, then `- 32` (`Q6_K` has no `dmin` term at all, unlike `Q4_K`/`Q5_K`
+/// -- ggml's own `sumf[row] += dall * (...)` has a single scale multiply,
+/// no minimum subtraction).
+///
+/// SIMD reduction: unchanged from every other row-blocked arm, handled by
+/// the shared `push_packed_row_combine_and_write` tail this function's
+/// caller still invokes after it returns.
+#[allow(clippy::too_many_arguments)]
+fn push_q6k_ggml_port_body(
+    source: &mut String,
+    weight: usize,
+    other: usize,
+    rows: usize,
+    block_bytes: usize,
+    other_stride_is_one: bool,
+) {
+    source.push_str("    uint tid = (uint)lane / 2u;\n");
+    source.push_str("    uint ix = (uint)lane % 2u;\n");
+    source.push_str("    uint ip = tid / 8u;\n");
+    source.push_str("    uint il = tid % 8u;\n");
+    source.push_str("    uint l0 = 4u * il;\n");
+    source.push_str("    uint is = 8u * ip + l0 / 16u;\n");
+    source.push_str("    uint q_offset_l = 64u * ip + l0;\n");
+    source.push_str("    uint q_offset_h = 32u * ip + l0;\n");
+    source.push_str(&format!(
+        "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
+    ));
+    source.push_str("    float yl[16];\n");
+    source.push_str("    int ib_first = (int)ix;\n    int ib_step = 2;\n");
+    source.push_str(&format!(
+        "    long blk_step = (long)ib_step * {block_bytes};\n"
+    ));
+    source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
+    source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ib_first) * {block_bytes};\n"
+    ));
+    source.push_str("    }\n");
+    push_packed_row_plain_product_y4_address(source, other, other_stride_is_one, "128u * ip + l0");
+    source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
+    if other_stride_is_one {
+        source.push_str("        for (uint l = 0u; l < 4u; ++l) {\n            yl[4u * l + 0u] = y4[l]; yl[4u * l + 1u] = y4[l + 32u]; yl[4u * l + 2u] = y4[l + 64u]; yl[4u * l + 3u] = y4[l + 96u];\n        }\n");
+    } else {
+        source.push_str("        for (uint l = 0u; l < 4u; ++l) {\n            yl[4u * l + 0u] = y4[(long)l * other_stride]; yl[4u * l + 1u] = y4[(long)(l + 32u) * other_stride]; yl[4u * l + 2u] = y4[(long)(l + 64u) * other_stride]; yl[4u * l + 3u] = y4[(long)(l + 96u) * other_stride];\n        }\n");
+    }
+    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str("            device const uchar *blk = blk_ptr[q];\n");
+    source.push_str("            device const uchar *ql = blk;\n");
+    source.push_str("            device const uchar *qh = blk + 128u;\n");
+    source.push_str("            device const uchar *sc = blk + 192u + is;\n");
+    source.push_str("            device const half *dh = (device const half *)(blk + 208u);\n");
+    source.push_str("            float dall = (float)dh[0];\n");
+    source.push_str(
+        "            float sums0 = 0.0f; float sums1 = 0.0f; float sums2 = 0.0f; float sums3 = 0.0f;\n",
+    );
+    source.push_str("            for (uint l = 0u; l < 4u; ++l) {\n");
+    source.push_str("                uchar q1l = ql[q_offset_l + l];\n");
+    source.push_str("                uchar q2l = ql[q_offset_l + 32u + l];\n");
+    source.push_str("                uchar qhl = qh[q_offset_h + l];\n");
+    source.push_str(
+        "                uint q_lo0 = (uint)(q1l & 0x0Fu) | (((uint)qhl & 0x03u) << 4u);\n",
+    );
+    source.push_str(
+        "                uint q_lo1 = (uint)(q2l & 0x0Fu) | (((uint)qhl & 0x0Cu) << 2u);\n",
+    );
+    source.push_str("                uint q_hi0 = (uint)(q1l >> 4u) | ((uint)qhl & 0x30u);\n");
+    source.push_str(
+        "                uint q_hi1 = (uint)(q2l >> 4u) | (((uint)qhl & 0xC0u) >> 2u);\n",
+    );
+    source.push_str(
+        "                sums0 += yl[4u * l + 0u] * (float)((int)q_lo0 - 32);\n",
+    );
+    source.push_str(
+        "                sums1 += yl[4u * l + 1u] * (float)((int)q_lo1 - 32);\n",
+    );
+    source.push_str(
+        "                sums2 += yl[4u * l + 2u] * (float)((int)q_hi0 - 32);\n",
+    );
+    source.push_str(
+        "                sums3 += yl[4u * l + 3u] * (float)((int)q_hi1 - 32);\n",
+    );
+    source.push_str("            }\n");
+    source.push_str(
+        "            sumf[q] = sumf[q] + dall * (sums0 * (float)(char)sc[0] + sums1 * (float)(char)sc[2] + sums2 * (float)(char)sc[4] + sums3 * (float)(char)sc[6]);\n",
     );
     source.push_str("        }\n");
     source.push_str(&format!(
