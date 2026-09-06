@@ -590,19 +590,31 @@ fn resolve_leaf_shape(
 /// `Op::Elementwise` operands need the partial-read case `len` exists for),
 /// and honoring it here would need `symbols` threaded into a function that
 /// re-derives from already-*resolved* [`Shapes`] specifically to avoid that.
-#[must_use]
-pub(crate) fn fold_iteration_extents(reduce: &Reduce, shapes: &Shapes) -> Vec<u64> {
+/// A `len`-marked axis is rejected with [`TensorError::ReduceLenAxisUnsupported`]
+/// rather than silently folded from the operand's own on-disk width, which
+/// would be wrong whenever `len` narrows it.
+pub(crate) fn fold_iteration_extents(
+    node: NodeId,
+    reduce: &Reduce,
+    shapes: &Shapes,
+) -> Result<Vec<u64>, TensorError> {
     let pattern = reduce.in_map.affine();
     let mut resolved = vec![0u64; pattern.iter_rank as usize];
     let operand_shape = shapes.of(reduce.operand);
     for (axis_index, axis) in pattern.axes.iter().enumerate() {
+        if axis.len.is_some() {
+            return Err(TensorError::ReduceLenAxisUnsupported {
+                node,
+                dim: axis_index as u16,
+            });
+        }
         if let [term] = axis.terms.as_slice()
             && term.coeff == 1
         {
             resolved[term.axis as usize] = operand_shape[axis_index];
         }
     }
-    resolved
+    Ok(resolved)
 }
 
 /// Batch driver: `new` / `push` each expression / `finish`, over the whole
@@ -665,6 +677,45 @@ mod tests {
             }),
         );
         (program, product, sum)
+    }
+
+    /// `fold_iteration_extents` re-derives from the operand's on-disk
+    /// shape and cannot honor a `len` override without the symbol table
+    /// (see the function's own doc) — a `len`-marked axis on a reduce's
+    /// `in_map` must be rejected, not silently folded from the operand's
+    /// wider on-disk width.
+    #[test]
+    fn fold_iteration_extents_rejects_a_len_marked_axis() {
+        let mut program = Vec::new();
+        let operand = leaf(&mut program, &[Extent::Static(5)]);
+        let in_map = IndexMap::Affine(map::IndexPattern {
+            iter_rank: 1,
+            axes: alloc::vec![map::AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(0)).collect(),
+                offset: 0,
+                len: Some(Extent::Static(3)),
+            }],
+        });
+        let reduce = Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand,
+            in_map,
+            out_map: IndexMap::Affine(map::projection(1, &[])),
+            keep: Keep::Reduce,
+            name: None,
+        };
+        let node = append(&mut program, Op::Reduce(reduce.clone()));
+        let shapes =
+            infer(&program, &[]).expect("a len-marked reduce axis still infers an output shape");
+
+        let error = fold_iteration_extents(node, &reduce, &shapes)
+            .expect_err("fold_iteration_extents must reject a len-marked axis");
+        assert!(
+            matches!(error, TensorError::ReduceLenAxisUnsupported { dim: 0, .. }),
+            "{error}"
+        );
     }
 
     #[test]
