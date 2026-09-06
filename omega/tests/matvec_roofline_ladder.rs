@@ -780,6 +780,72 @@ kernel void q4k_matvec_empty(
 }
 "#;
 
+/// `L3_SHAPE_KERNEL_BODY`'s own `Q6_K` counterpart, for
+/// [`whole_token_matvec_sequence_bare`]'s output-head dispatch: identical
+/// lane/simdgroup assignment and per-block loop shape, `144ul` (`Q4_K`'s own
+/// [`omega::msl::Q4K_BLOCK_BYTES`]) swapped for `210ul`
+/// (`omega::msl::Q6K_BLOCK_BYTES`) and `q4k_pair_dot` swapped for
+/// `q6k_pair_dot` (`omega::msl::Q6K_PAIR_DOT_MSL`, same `(block, iq, ir, yl,
+/// yh)` signature per that constant's own doc) -- not restated body text,
+/// only the block stride and the callee name differ.
+const Q6K_L3_SHAPE_KERNEL_BODY: &str = r#"
+kernel void q6k_matvec_l3_shape(
+    device const uchar* weight [[buffer(0)]],
+    device const float* activation [[buffer(1)]],
+    device float* row_sums [[buffer(2)]],
+    constant uint64_t& blocks_per_row [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint threads_per_tg [[threads_per_threadgroup]])
+{
+    uint simdgroups_per_tg = threads_per_tg / 32u;
+    uint sgitg = tid / 32u;
+    uint lane = tid % 32u;
+    uint simdgroup_index = tgid * simdgroups_per_tg + sgitg;
+    uint group_first = simdgroup_index * 4u;
+
+    uint ix = lane / 8u;
+    uint it = lane % 8u;
+    uint iq = it / 4u;
+    uint ir = it % 4u;
+    uint low_index = 64u * iq + 8u * ir;
+    uint ib_first = ix;
+    uint ib_step = 4u;
+
+    ulong blk_step = (ulong)ib_step * 210ul;
+    device const uchar* blk_ptr[4];
+    for (uint q = 0u; q < 4u; ++q) {
+        blk_ptr[q] = weight + (ulong)(group_first + q) * (ulong)blocks_per_row * 210ul
+            + (ulong)ib_first * 210ul;
+    }
+    device const float* y4 = activation + (ulong)ib_first * 256ul + (ulong)(64u * iq + 8u * ir);
+    ulong y4_step = (ulong)ib_step * 256ul;
+
+    float sumf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float yl[16];
+    float yh[16];
+    for (uint ib = ib_first; ib < (uint)blocks_per_row; ib += ib_step) {
+        for (uint i = 0u; i < 8u; ++i) {
+            yl[i] = y4[i];
+            yl[i + 8u] = y4[i + 32u];
+            yh[i] = y4[i + 128u];
+            yh[i + 8u] = y4[i + 160u];
+        }
+        for (uint q = 0u; q < 4u; ++q) {
+            sumf[q] += q6k_pair_dot(blk_ptr[q], iq, ir, yl, yh);
+            blk_ptr[q] += blk_step;
+        }
+        y4 += y4_step;
+    }
+    for (uint q = 0u; q < 4u; ++q) {
+        float total = simd_sum(sumf[q]);
+        if (lane == 0u) {
+            row_sums[group_first + q] = total;
+        }
+    }
+}
+"#;
+
 /// same `#include`/`using namespace` preamble `omega::msl::emit` itself
 /// prepends before `Q4K_UNPACK_MSL` (`omega/src/msl.rs:2355-2356`) --
 /// `Q4K_UNPACK_MSL` is bare body text, not a compilable translation unit on
@@ -796,6 +862,14 @@ fn l2_source() -> String {
 
 fn l3_shape_source() -> String {
     format!("{METAL_PREAMBLE}{}\n{L3_SHAPE_KERNEL_BODY}", omega::msl::Q4K_UNPACK_MSL)
+}
+
+fn q6k_l3_shape_source() -> String {
+    format!(
+        "{METAL_PREAMBLE}{}\n{}\n{Q6K_L3_SHAPE_KERNEL_BODY}",
+        omega::msl::Q6K_UNPACK_MSL,
+        omega::msl::Q6K_PAIR_DOT_MSL
+    )
 }
 
 // ---- device plumbing (per-binary copies, same posture as
@@ -2926,4 +3000,295 @@ fn head_buffer_kind_by_kernel_variant() {
         "parity failed for {} arm(s): {parity_failures:#?}",
         parity_failures.len()
     );
+}
+
+/// One dispatch inside [`time_bare_dispatch_sequence`]'s own timed command
+/// buffer -- everything [`time_batch_l3_shape_threads`] binds per repeat
+/// (`weight@0`, `activation@1`, `output@2`, `uniform@3`), but per-DISPATCH
+/// rather than per-BATCH-of-the-same-shape, so a heterogeneous program
+/// (varying `rows`/`k`/codec/pipeline across dispatches, ROW 339's own whole
+/// decode token) can be expressed. Each field is a distinct real Metal
+/// binding or geometry parameter this dispatch needs; splitting them further
+/// would not reduce what the caller supplies.
+struct BareDispatchOp<'a> {
+    pipeline: &'a ProtocolObject<dyn MTLComputePipelineState>,
+    weight: &'a ProtocolObject<dyn MTLBuffer>,
+    weight_offset: usize,
+    activation: &'a ProtocolObject<dyn MTLBuffer>,
+    uniform: &'a ProtocolObject<dyn MTLBuffer>,
+    grid_threads: usize,
+    threadgroup_width: usize,
+}
+
+/// Encodes `ops` in program order into ONE plain `computeCommandEncoder()`
+/// -- no `HazardTrackingModeUntracked` buffers, no `memoryBarrierWithScope`,
+/// no plan cache, no uniform arena: llama.cpp's own default serial encoder,
+/// the same posture [`time_batch_l3_shape_threads`] already uses for a
+/// homogeneous batch, generalized here to a per-dispatch pipeline/shape so a
+/// whole token's mixed-shape op sequence can be timed as ONE command buffer
+/// (ROW 339's module doc). `setComputePipelineState` is called on every
+/// dispatch, matching `omega::metal::encode_op`'s own per-op call
+/// (`omega/src/metal.rs:6047`) regardless of whether the previous dispatch
+/// used the same pipeline.
+fn time_bare_dispatch_sequence(
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    output: &ProtocolObject<dyn MTLBuffer>,
+    ops: &[BareDispatchOp<'_>],
+) -> Duration {
+    let command_buffer = queue.commandBuffer().expect("command buffer");
+    let encoder = command_buffer
+        .computeCommandEncoder()
+        .expect("command buffer refused to hand out a compute encoder");
+    for op in ops {
+        encoder.setComputePipelineState(op.pipeline);
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(op.weight), op.weight_offset, 0);
+            encoder.setBuffer_offset_atIndex(Some(op.activation), 0, 1);
+            encoder.setBuffer_offset_atIndex(Some(output), 0, 2);
+            encoder.setBuffer_offset_atIndex(Some(op.uniform), 0, 3);
+        }
+        let grid = MTLSize {
+            width: op.grid_threads,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroup = MTLSize {
+            width: op.threadgroup_width,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
+    }
+    encoder.endEncoding();
+    let started = Instant::now();
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    started.elapsed()
+}
+
+/// One of the seven per-layer `Q4_K` matvec shapes a real decode token
+/// dispatches, in llama's own program order (`q`, `k`, `v`, `o`, `gate`,
+/// `up`, `down`) -- rows/k restated from [`DECODE_SHAPES`]'s own Mistral-7B
+/// GQA shapes, `Q4_K` for every one of them (this ladder's own doc: the
+/// 4-of-32 real `Q5_K` `attn_v`/`ffn_down` layers are a detail this bare
+/// dispatch count does not need to absorb).
+struct WholeTokenLayerFamily {
+    name: &'static str,
+    rows: usize,
+    k: usize,
+    seed: u64,
+}
+
+const WHOLE_TOKEN_LAYER_FAMILIES: [WholeTokenLayerFamily; 7] = [
+    WholeTokenLayerFamily { name: "q", rows: 4096, k: 4096, seed: 100_000 },
+    WholeTokenLayerFamily { name: "k", rows: 1024, k: 4096, seed: 200_000 },
+    WholeTokenLayerFamily { name: "v", rows: 1024, k: 4096, seed: 300_000 },
+    WholeTokenLayerFamily { name: "o", rows: 4096, k: 4096, seed: 400_000 },
+    WholeTokenLayerFamily { name: "gate", rows: 14_336, k: 4096, seed: 500_000 },
+    WholeTokenLayerFamily { name: "up", rows: 14_336, k: 4096, seed: 600_000 },
+    WholeTokenLayerFamily { name: "down", rows: 4096, k: 14_336, seed: 700_000 },
+];
+
+const WHOLE_TOKEN_HEAD_ROWS: usize = 32_000;
+const WHOLE_TOKEN_HEAD_K: usize = 4096;
+
+/// One dispatch-geometry arm for [`whole_token_matvec_sequence_bare`]: Arm A
+/// is production's own DEFAULT compiled shape (1 simdgroup/threadgroup,
+/// `MTLMathMode::Safe` -- the same default this file's L3 shape sweep names
+/// `is_production_default`, line 1610-1612 above); Arm B is ROW 337/338's
+/// packed-row sweep mechanism (`nsg=4`, `MTLMathMode::Fast`) applied to the
+/// SAME whole-token sequence, so the two arms differ ONLY in compiled
+/// pipeline/dispatch geometry, never in which ops run or how they are
+/// encoded.
+struct WholeTokenArm {
+    name: &'static str,
+    simdgroups_per_tg: usize,
+    math: MTLMathMode,
+}
+
+const WHOLE_TOKEN_ARMS: [WholeTokenArm; 2] = [
+    WholeTokenArm { name: "A_llama_encoding_production_kernel", simdgroups_per_tg: 1, math: MTLMathMode::Safe },
+    WholeTokenArm { name: "B_llama_encoding_nsg4_fast", simdgroups_per_tg: 4, math: MTLMathMode::Fast },
+];
+
+/// ROW 339: does llama.cpp's own SERIAL encoding (one plain
+/// `computeCommandEncoder()`, no hazard tracker, no `memoryBarrier`, no
+/// uniform arena, no plan cache -- [`time_bare_dispatch_sequence`]'s own
+/// doc) turn our matching-in-isolation kernels (ROW 336/338: `ffn_up` 236
+/// GB/s, head 232 GB/s) into a WHOLE decode token near llama's 17.5 ms, or
+/// does it stay near the in-program 22.64 ms (ROW 308) even with none of
+/// production's own machinery in the way? Encodes the full per-layer
+/// dispatch sequence (`q`, `k`, `v`, `o`, `gate`, `up`, `down` x 32 layers,
+/// then `head` once -- 225 dispatches, this module doc's own count) into
+/// ONE command buffer per token and times `commit()`-`waitUntilCompleted()`
+/// around it, same discipline every other arm in this file uses
+/// ([`warmed_up_samples`]): one untimed warm-up token, then [`REPEATS`]
+/// timed tokens.
+///
+/// Every layer's `q`/`k`/`v`/`o`/`gate`/`up`/`down` weight is a genuinely
+/// DISTINCT synthesized tensor (`seed_base + layer`,
+/// [`synth_weight_bytes_parallel`]'s own per-tensor `Lcg` seed), packed
+/// layer-major into ONE `StorageModeShared` buffer per family and uploaded
+/// exactly once (`shared_buffer_from_bytes` copies at creation and is never
+/// touched again -- [`run_shape_arm_sweep`]'s own zero-uploads-on-a-timed-
+/// repeat invariant, satisfied here by construction the same way). Output is
+/// never read back -- this arm times dispatch cost only, not correctness
+/// (this function's own doc), so every dispatch's `row_sums` write lands in
+/// the SAME shared scratch buffer regardless of the writing shape's own row
+/// count.
+///
+/// `#[ignore]`d: CPU-bound minutes synthesizing real quantized bytes for a
+/// full 7B-parameter-shaped program, and needs a real Metal device, same
+/// posture as every other synthetic-data arm in this file.
+#[test]
+#[ignore = "synthesizes real quantized bytes for a whole decode token and needs a real metal device"]
+fn whole_token_matvec_sequence_bare() {
+    let device = MTLCreateSystemDefaultDevice().expect("a Metal device is available on this host");
+    let queue = device.newCommandQueue().expect("device creates a command queue");
+
+    type FamilyBuffer = (Retained<ProtocolObject<dyn MTLBuffer>>, Vec<usize>);
+    let family_buffers: Vec<FamilyBuffer> =
+        WHOLE_TOKEN_LAYER_FAMILIES
+            .iter()
+            .map(|family| {
+                let row_bytes = ShapeCodec::Q4K.row_bytes(family.k);
+                let tensor_bytes = family.rows * row_bytes;
+                let bytes = synth_weight_bytes_parallel(
+                    ShapeCodec::Q4K,
+                    family.seed,
+                    FFN_LAYERS,
+                    family.k,
+                    tensor_bytes,
+                );
+                let offsets: Vec<usize> = (0..FFN_LAYERS).map(|layer| layer * tensor_bytes).collect();
+                (shared_buffer_from_bytes(&device, &bytes), offsets)
+            })
+            .collect();
+
+    let head_row_bytes = ShapeCodec::Q6K.row_bytes(WHOLE_TOKEN_HEAD_K);
+    let head_tensor_bytes = WHOLE_TOKEN_HEAD_ROWS * head_row_bytes;
+    let head_bytes =
+        synth_weight_bytes_parallel(ShapeCodec::Q6K, 900_000, 1, WHOLE_TOKEN_HEAD_K, head_tensor_bytes);
+    let head_buffer = shared_buffer_from_bytes(&device, &head_bytes);
+
+    let mut activation_lcg_4096 = Lcg(1);
+    let activation_4096: Vec<f32> = (0..4096).map(|_| activation_lcg_4096.next_unit() * 4.0 - 2.0).collect();
+    let activation_4096_bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(
+            activation_4096.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(activation_4096.as_slice()),
+        )
+    };
+    let activation_4096_buffer = shared_buffer_from_bytes(&device, activation_4096_bytes);
+
+    let mut activation_lcg_14336 = Lcg(2);
+    let activation_14336: Vec<f32> =
+        (0..14_336).map(|_| activation_lcg_14336.next_unit() * 4.0 - 2.0).collect();
+    let activation_14336_bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(
+            activation_14336.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(activation_14336.as_slice()),
+        )
+    };
+    let activation_14336_buffer = shared_buffer_from_bytes(&device, activation_14336_bytes);
+
+    let uniform_4096 = uniform_u64(&device, (4096 / Q4K_BLOCK_ELEMENTS) as u64);
+    let uniform_14336 = uniform_u64(&device, (14_336 / Q4K_BLOCK_ELEMENTS) as u64);
+
+    let output = device
+        .newBufferWithLength_options(WHOLE_TOKEN_HEAD_ROWS * size_of::<f32>(), MTLResourceOptions::StorageModeShared)
+        .expect("device allocates the whole-token scratch output buffer");
+
+    let total_timed_bytes: u64 = WHOLE_TOKEN_LAYER_FAMILIES
+        .iter()
+        .map(|family| {
+            let row_bytes = ShapeCodec::Q4K.row_bytes(family.k);
+            (family.rows * row_bytes * FFN_LAYERS) as u64
+        })
+        .sum::<u64>()
+        + head_tensor_bytes as u64;
+
+    println!(
+        "=== ROW 339: whole decode token, {} dispatches (32 layers x 7 + head), {total_timed_bytes} bytes, \
+         llama's own serial encoding, no hazard tracker/barrier/arena/plan cache ===",
+        WHOLE_TOKEN_LAYER_FAMILIES.len() * FFN_LAYERS + 1
+    );
+
+    let q4k_shape_source_text = l3_shape_source();
+    let q6k_shape_source_text = q6k_l3_shape_source();
+
+    for arm in WHOLE_TOKEN_ARMS {
+        let q4k_pipeline =
+            compile_pipeline(&device, &q4k_shape_source_text, "q4k_matvec_l3_shape", arm.math);
+        let q6k_pipeline =
+            compile_pipeline(&device, &q6k_shape_source_text, "q6k_matvec_l3_shape", arm.math);
+        let threadgroup_width = arm.simdgroups_per_tg * 32;
+
+        let mut ops: Vec<BareDispatchOp<'_>> =
+            Vec::with_capacity(WHOLE_TOKEN_LAYER_FAMILIES.len() * FFN_LAYERS + 1);
+        for layer in 0..FFN_LAYERS {
+            for (family, (weight_buffer, offsets)) in WHOLE_TOKEN_LAYER_FAMILIES.iter().zip(&family_buffers) {
+                let total_simdgroups = family.rows / PACKED_ROWS_PER_GROUP;
+                assert_eq!(
+                    total_simdgroups % arm.simdgroups_per_tg,
+                    0,
+                    "{}: rows must divide evenly by simdgroups_per_tg={} for arm {}",
+                    family.name,
+                    arm.simdgroups_per_tg,
+                    arm.name
+                );
+                let (activation, uniform) = if family.k == 4096 {
+                    (&activation_4096_buffer, &uniform_4096)
+                } else {
+                    (&activation_14336_buffer, &uniform_14336)
+                };
+                ops.push(BareDispatchOp {
+                    pipeline: &q4k_pipeline,
+                    weight: weight_buffer,
+                    weight_offset: offsets[layer],
+                    activation,
+                    uniform,
+                    grid_threads: total_simdgroups * 32,
+                    threadgroup_width,
+                });
+            }
+        }
+        let head_total_simdgroups = WHOLE_TOKEN_HEAD_ROWS / PACKED_ROWS_PER_GROUP;
+        assert_eq!(
+            head_total_simdgroups % arm.simdgroups_per_tg,
+            0,
+            "head: rows must divide evenly by simdgroups_per_tg={} for arm {}",
+            arm.simdgroups_per_tg,
+            arm.name
+        );
+        ops.push(BareDispatchOp {
+            pipeline: &q6k_pipeline,
+            weight: &head_buffer,
+            weight_offset: 0,
+            activation: &activation_4096_buffer,
+            uniform: &uniform_4096,
+            grid_threads: head_total_simdgroups * 32,
+            threadgroup_width,
+        });
+
+        assert_eq!(ops.len(), WHOLE_TOKEN_LAYER_FAMILIES.len() * FFN_LAYERS + 1);
+
+        let elapsed_samples = warmed_up_samples(|| time_bare_dispatch_sequence(&queue, &output, &ops));
+        let ms_samples: Vec<f64> = elapsed_samples.iter().map(Duration::as_secs_f64).map(|s| s * 1e3).collect();
+        let ms_stats = sample_stats(&ms_samples);
+        let gbps_samples_vec = gbps_samples(&elapsed_samples, total_timed_bytes);
+        let gbps_stats = sample_stats(&gbps_samples_vec);
+        println!(
+            "arm={} dispatches={} bytes={total_timed_bytes} median_ms={:.3} min_ms={:.3} max_ms={:.3} \
+             cov_pct={:.2} ms_samples={ms_samples:?} median_gbps={:.2} mean_gbps={:.2}",
+            arm.name,
+            ops.len(),
+            ms_stats.median,
+            ms_stats.min,
+            ms_stats.max,
+            ms_stats.cov_pct,
+            gbps_stats.median,
+            gbps_stats.mean,
+        );
+    }
 }
