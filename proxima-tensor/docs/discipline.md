@@ -23726,3 +23726,69 @@ CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-q6align/target CA
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | `test(omega): print relative-to-peak error for the q6k head parity check` (no kernel-body change -- the alignment hypothesis this row was asked to fix turned out to be false) | the "odd block -> misaligned `ushort` load" hypothesis is false (`210` is even, every block start and every fixed sub-offset used is even, so every `ushort`/`half` load in both Q6_K bodies is 2-byte aligned for every `ib`); no code fix landed because none is needed -- converting to byte loads would be strictly more instructions for identical output. Added a `batch_peak_abs`/`relative_to_peak` print to the head arm showing its `0.029` absolute parity miss is `2e-6` relative to a `17379`-magnitude output, below float32's own ULP at that scale. A fresh quiet-gate run of the unmodified arm read 230.78 GB/s (CoV 1.6%) on its converged tail vs ROW 321's 38.13 GB/s (CoV 59%, no convergence) -- same arm, same code, 4-6x apart, read as evidence the 5-sample mean (including a cold-start dispatch) is not yet a stable estimator | 1 run, 5 repeats (head only); CoV 49.08% overall / ~1.6% excluding sample 1 | quiet gate (names-only, load-1<10) clean at build and at run start (load-1 7.58 -> transient 14.31 -> 9.86, one 20s re-check); a second confirmation round could not be scheduled inside the 30-minute budget once the ROW 320 `proxima_model_i` oracle began looping persistently |
+
+## ROW 323 -- the concurrent path's missing hazard named: `resolve_hazard_inputs` read `operands()` instead of `all_read_sources()`, dropping a fused reduce's `epilogue_operands` from the RAW check
+
+**Card:** `fix(omega): concurrent hazards track epilogue-fused reduce reads` (`fix/concurrent-missing-hazard`, off `main` at `5ab6247`). **Worktree/branch:** `proxima-wt-hazard`, `fix/concurrent-missing-hazard`.
+
+**Question.** ROW 320 reproduced ROW 313's divergence under a second decode oracle's GPU contention (concurrent 2/20, serial 0/20, concurrent-unloaded 0/10) but named no specific hazard pair -- "the tracker is missing a barrier the serial path does not need" was the working theory, not a proof. This row's task: name the missing hazard by census, fix it with the smallest correct change, and verify with the same determinism harness under the same load.
+
+**Census** (every buffer a `Concurrent`-dispatch op can touch vs what the tracker sees, `hazard-logs/census.md`):
+
+| item | what the GPU dispatch actually reads/writes | what `resolve_hazard_inputs` fed the tracker | tracked? |
+| --- | --- | --- | --- |
+| op inputs | `bound.operands()` | `bound.operands()` | yes |
+| **fused reduce epilogue operands** | `bound.all_read_sources()` == `operands().chain(epilogue_operands)` -- `omega/src/msl.rs:1571-1579`'s `bindings()` binds one `Binding::Input` per `all_read_sources()` entry, with its own comment: "`all_read_sources`, not `operands` -- a `BoundOpKind::Reduce` with a fused epilogue reads its `epilogue_operands` too" | `bound.operands()` ONLY (`omega/src/metal.rs:1499`, pre-fix) | **NO -- MISSING** |
+| CachedAttention K/V | live directly in `BoundOpKind::CachedAttention::operands` (`proxima-tensor/src/bind.rs:240-241`), not a side channel | `bound.operands()` | yes |
+| plan-stable arena aliasing | `BufferArena` (`metal.rs:4718-4727`) reuses a slot only after the prior occupant retired, never sub-ranges it -- one physical buffer per slot, pointer-identity tracking sees it correctly | pointer identity via `Retained::as_ptr` | yes |
+| plan uniforms | `plan_uniform_buffer` (`metal.rs:4980-4987`) hands back one buffer PER POSITION, built once by `build_plan_uniforms` before the encode loop starts -- never rewritten mid-command-buffer | not a shared mutable region under `metal-plan-stable-buffers` | yes |
+| logits/output readback | `execute_plan_with_placements` always `waitUntilCompleted`s before returning | n/a | yes |
+
+**The gap, exact.** `execute_plan_with_placements`'s `Concurrent` branch resolved `hazard_inputs` from `bound.operands()` only (`omega/src/metal.rs:1499`, pre-fix). But the dispatch this hazard check guards binds more buffers than that: a `BoundOpKind::Reduce` with a fused epilogue has its kernel read a sibling's output buffer through `epilogue_operands`, bound at index `operand_count..operand_count+epilogue_operand_count` (`kernel_signature`'s `epi{index}` params, `omega/src/msl.rs`). `bindings()` already knew this (`all_read_sources`, not `operands` -- its own comment says so) but the hazard-check call site never matched it, so a reduce whose epilogue reads a just-written sibling buffer could pass `needs_barrier == false` and race the still-in-flight write: a RAW hazard invisible to the tracker. `proxima_tensor::bind::BoundOp::all_read_sources` already exists for exactly this class of bug (added for the CPU liveness pass, `bind.rs:385-401`) -- no new type needed.
+
+**Fix.** `omega/src/metal.rs:1497-1501`, one line:
+
+```rust
+let hazard_inputs = resolve_hazard_inputs(
+    bound.all_read_sources().map(|(operand, _, _)| *operand),
+    &device_buffers,
+)?;
+```
+
+(was `bound.operands().iter().map(|(operand, _, _)| *operand)`). Build: `cargo build -p omega --features metal,instrument`, EXIT 0.
+
+**Verify.** Same protocol as ROW 320: contention generator `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (`PROXIMA_MAX_TOKENS=64`) looped in the background (`proxima_model_i`, expected in this slice's quiet gate), harness `decode_text_is_deterministic_across_repeated_runs` (`PROXIMA_DISPATCH=concurrent PROXIMA_MAX_TOKENS=32 PROXIMA_DETERMINISM_RUNS=20`), release binary, `--test-threads=1`.
+
+| run | hash | first_divergent_token | barriers |
+| --- | --- | --- | --- |
+| 0-19 (all 20) | `9e539d6c8e27b5a1` (identical every run) | None (every run) | 11360 (every run) |
+
+`distinct_texts=1` across all 20 loaded runs (vs ROW 320's `distinct_texts=3` pre-fix under the identical contention protocol). `generated_text` matches ROW 320's own canonical text ("Here is a simple Python function that returns the nth Fibonacci number using recursion:..."). **Barriers/run rose from ROW 320's 10336 to 11360** -- the fix inserts new barriers exactly where the epilogue-operand RAW was previously invisible, the direct evidence this is the hazard that was missing, not a coincidental change.
+
+**Gates.** `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT 0. `cargo nextest run -p omega --features metal`: `180 tests run: 180 passed, 5 skipped` (includes `reduce_epilogue_fusion_parity::the_fused_epilogue_is_byte_identical_across_twenty_dispatches` and `::the_fused_epilogue_holds_parity_at_every_kv_capacity_bucket_padding`, both green). Both re-run clean after rebasing onto `main`@`5ab6247` (ROW 322 landed concurrently, touching `omega/src/msl.rs`'s Q6_K loads -- no conflict, disjoint file).
+
+**Timing, informational only (one run, not a bake-off).** Landed default (`concurrent`), oracle `runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `PROXIMA_MAX_TOKENS=8`, quiet gate empty (names-only, no `-f`) immediately before the run. `gpu_exec_ms` steps 3..7: 26.084, 26.130, 25.995, 26.207, 26.296 -- mean 26.14 ms, `generated_text="Here is a simple Python function that returns"`. No prior same-shape same-token-count arm exists in this doc to diff against; this is a single informational read at the landed default, not a claim of a performance delta from the fix (the fix's cost is more barriers, which by construction only serialize dispatches that were racing, not a general slowdown of every step).
+
+**Residual, named not hidden.** (1) This row did not re-run the ROW 320 serial-encoder arm or the unloaded concurrent control -- the loaded concurrent arm alone (0/20, barriers changed) is the load-bearing evidence for this specific fix; a full 3-block re-run at the same N as ROW 320 would strengthen it further but was out of this row's 30-minute budget once the two ~7-minute 20-run harnesses were accounted for. (2) The timing run above is a single sample, not a bake-off against pre-fix barrier count's wall-clock cost -- informational per the brief, not a performance claim.
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-hazard-repro -b fix/concurrent-missing-hazard-repro main
+cd ../proxima-wt-hazard-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p proxima-model-interop --release --features metal,instrument --no-run
+BIN=$(find target/release/deps -maxdepth 1 -name 'proxima_model_interop-*' -perm -u+x)
+nohup bash -c "while true; do PROXIMA_MAX_TOKENS=64 \"$BIN\" \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --exact --ignored --nocapture --test-threads=1; done" &
+PROXIMA_DISPATCH=concurrent PROXIMA_MAX_TOKENS=32 PROXIMA_DETERMINISM_RUNS=20 "$BIN" \
+  bind::real_openchat_file::decode_text_is_deterministic_across_repeated_runs \
+  --exact --ignored --nocapture --test-threads=1
+```
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | `fix(omega): concurrent hazards track epilogue-fused reduce reads` + `docs(tensor): row 323 the concurrent path's missing hazard` | `resolve_hazard_inputs` (`omega/src/metal.rs:1499`) read `bound.operands()` instead of `bound.all_read_sources()`, so a fused-reduce's `epilogue_operands` (a sibling's output buffer, genuinely bound and read by the GPU kernel per `msl::bindings`) never entered the RAW hazard check -- fixed by switching to `all_read_sources()`; under ROW 320's identical loaded-contention protocol, concurrent dispatch went from `distinct_texts=3`/20 (pre-fix) to `distinct_texts=1`/20 (post-fix), with `barriers/run` rising 10336 -> 11360, the direct signature of new barriers closing the previously-invisible RAW | 1x20-run loaded determinism arm (no CoV: pass/fail is hash equality, not a continuous metric); 1 informational timing run, steps 3..7, mean 26.14 ms | quiet gate (names-only, no `-f`) empty before build, before the load loop start, and before the timed run; load-1 10.5-19.4 during the run (own load-loop contention, expected) |
