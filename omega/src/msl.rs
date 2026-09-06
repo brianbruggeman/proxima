@@ -1127,6 +1127,28 @@ impl PackedCodec {
             PackedCodec::Q3K | PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K
         )
     }
+
+    /// Output rows one SIMD group folds at once in the row-blocked packed
+    /// path (`push_packed_row_blocked_body`'s generic `else` arm and
+    /// `push_packed_row_multi_row_body`; NOT `push_q4k_single_fetch_body`/
+    /// `push_q4k_ggml_port_body`, which are `Q4_K`-only and keep `4` baked
+    /// into their own `lane % 8u` arithmetic regardless of this value —
+    /// [`PACKED_ROWS_PER_GROUP`]'s doc). `Q6_K` decodes three raw-byte
+    /// fields per element (`ql`, `qh`, `scale`) versus `Q4_K`'s effectively
+    /// two, so batching 4 rows' worth of `sumf[q]` accumulators plus
+    /// per-row `weight_base[q]`/`other_base[q]` state costs more live
+    /// registers per lane for `Q6_K` than the same batching costs `Q4_K` —
+    /// matches ggml's own choice (`N_R0_Q6_K = 1`, `N_R0_Q4_K = 4`,
+    /// `ggml-metal-impl.h:32-39`). The lane assignment itself (`ix`/`it`/
+    /// `slot` spreading all 32 lanes across the reduction axis) does not
+    /// depend on this value — it only controls how many output rows share
+    /// one activation load.
+    pub(crate) const fn rows_per_simdgroup(self) -> usize {
+        match self {
+            PackedCodec::Q6K => 1,
+            _ => PACKED_ROWS_PER_GROUP,
+        }
+    }
 }
 
 /// Every packed operand a bound program has, keyed by [`NodeId`] to its
@@ -2174,7 +2196,7 @@ fn tiled_gemm_threadgroups(
 
 /// Split-K factor for a row-blocked packed matmul with `rows` OUTPUT rows
 /// (`output_total`), dispatching `base_simdgroups` simdgroups
-/// (`rows.div_ceil(PACKED_ROWS_PER_GROUP)`) -- how many simdgroups per
+/// (`rows.div_ceil(codec.rows_per_simdgroup())`) -- how many simdgroups per
 /// threadgroup cooperate on ONE row-group's reduction axis so the
 /// dispatch's total simdgroup count reaches
 /// [`crate::sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`], capped at
@@ -2217,18 +2239,18 @@ fn packed_row_split_factor(_base_simdgroups: u64, _rows: u64) -> u64 {
 }
 
 /// Single source of truth for the row-blocked packed path's base simdgroup
-/// count (one per [`PACKED_ROWS_PER_GROUP`] feature rows, tiled again by
-/// `ceil(token_total / crate::sized::PACKED_ROW_ACTIVATION_GROUP)` once more
-/// than one activation row folds per streamed weight row) and its derived
-/// split-K factor -- both [`grid_threads`] and
+/// count (one per [`PackedCodec::rows_per_simdgroup`] feature rows, tiled
+/// again by `ceil(token_total / crate::sized::PACKED_ROW_ACTIVATION_GROUP)`
+/// once more than one activation row folds per streamed weight row) and its
+/// derived split-K factor -- both [`grid_threads`] and
 /// [`tiled_gemm_threadgroup_width`] need the SAME pair, and
 /// [`PackedRowBlock`]'s own doc already names the hazard of two independent
 /// call sites silently disagreeing. `token_total == 1` (no distinct token
 /// axis, or exactly one activation row) collapses the token factor to `1`,
 /// so a caller passing `feature_total` for the whole output and `token_total
 /// == 1` gets today's byte-identical single-row dispatch shape.
-fn packed_row_dispatch(feature_total: u64, token_total: u64) -> (u64, u64) {
-    let base = feature_total.div_ceil(PACKED_ROWS_PER_GROUP as u64);
+fn packed_row_dispatch(feature_total: u64, token_total: u64, codec: PackedCodec) -> (u64, u64) {
+    let base = feature_total.div_ceil(codec.rows_per_simdgroup() as u64);
     let split = packed_row_split_factor(base, feature_total);
     let token_groups = token_total.div_ceil(crate::sized::PACKED_ROW_ACTIVATION_GROUP);
     (base * token_groups, split)
@@ -2279,8 +2301,8 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Result
                         .product(),
                 )?
             } else if let Some(block) = packed_row_block(resolved, quantized) {
-                // one simdgroup per PACKED_ROWS_PER_GROUP feature rows,
-                // times the split-K factor (1 = no-op unless
+                // one simdgroup per `block.codec.rows_per_simdgroup()`
+                // feature rows, times the split-K factor (1 = no-op unless
                 // `metal-q4k-split-k` is active AND this shape is below the
                 // target simdgroup count), tiled again by
                 // `ceil(token_total / PACKED_ROW_ACTIVATION_GROUP)` once
@@ -2293,7 +2315,7 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Result
                     .map(|&axis| resolved.extents[axis as usize])
                     .product();
                 let token_total = packed_row_block_token_total(&block, &resolved.extents);
-                let (base, split) = packed_row_dispatch(feature_total, token_total);
+                let (base, split) = packed_row_dispatch(feature_total, token_total, block.codec);
                 base * SIMD_WIDTH * split
             } else if reduce_is_cooperative(resolved) {
                 // one cooperative-reduce threadgroup per output element,
@@ -3880,7 +3902,7 @@ fn push_packed_row_multi_row_body(
     let feature_axes = &block.feature_axes;
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
-    let rows = PACKED_ROWS_PER_GROUP;
+    let rows = block.codec.rows_per_simdgroup();
     let cap = crate::sized::PACKED_ROW_ACTIVATION_GROUP as usize;
     let (init_expr, _) = fold_init_tokens(init);
     let identity = cooperative_identity_token(resolved.node, reduce_op)?;
@@ -4077,15 +4099,15 @@ fn push_packed_row_blocked_body(
     // algebraic identity, so `simd_*` can combine them unconditionally.
     let (init_expr, _) = fold_init_tokens(init);
     let identity = cooperative_identity_token(resolved.node, reduce_op)?;
-    // ROW-BLOCKED PACKED PATH. One SIMD group folds PACKED_ROWS_PER_GROUP
-    // output rows at once so the activation's run of 8 values is loaded into
-    // registers ONCE and reused across all of them — ggml's `float
-    // sumf[nr0]` with `N_R0_Q4_K 4`. Combined with the super-block header
-    // amortization below, the per-element cost becomes one byte load, one
-    // mask, one fma (`docs/discipline.md` ROW 74).
+    // ROW-BLOCKED PACKED PATH. One SIMD group folds `codec.rows_per_
+    // simdgroup()` output rows at once so the activation's run of 8 values
+    // is loaded into registers ONCE and reused across all of them — ggml's
+    // `float sumf[nr0]` (`N_R0_Q4_K 4`, `N_R0_Q6_K 1`). Combined with the
+    // super-block header amortization below, the per-element cost becomes
+    // one byte load, one mask, one fma (`docs/discipline.md` ROW 74).
     {
         let run = Q4K_BLOCK_ELEMENTS / SIMD_WIDTH as usize;
-        let rows = PACKED_ROWS_PER_GROUP;
+        let rows = codec.rows_per_simdgroup();
         source.push_str(&format!("    long group_first = output_index * {rows};\n"));
         source.push_str(&format!("    {element_type} sumf[{rows}];\n"));
         if cfg!(feature = "metal-q4k-split-k") {
@@ -5390,7 +5412,7 @@ fn tiled_gemm_threadgroup_width(
                 .map(|&axis| resolved.extents[axis as usize])
                 .product();
             let token_total = packed_row_block_token_total(&block, &resolved.extents);
-            let (_base, split) = packed_row_dispatch(feature_total, token_total);
+            let (_base, split) = packed_row_dispatch(feature_total, token_total, block.codec);
             // `metal-packed-row-nsg2`'s own `nsg=2` geometry (ggml's
             // `N_SG_Q4_K`, `ggml-metal-impl.h:33`) has to be applied HERE,
             // not in the `#[cfg(feature = "metal-packed-row-nsg2")]` arm
@@ -7792,7 +7814,7 @@ mod tests {
     #[cfg(feature = "metal-q4k-split-k")]
     #[test]
     fn split_k_engages_for_a_1024_row_op_and_declines_for_a_14336_row_op() {
-        let (base_starved, split_starved) = packed_row_dispatch(1024, 1);
+        let (base_starved, split_starved) = packed_row_dispatch(1024, 1, PackedCodec::Q4K);
         assert!(
             split_starved > 1,
             "a 1024-row op (attn_k/attn_v shape) must engage split-K under the default \
@@ -7800,7 +7822,7 @@ mod tests {
              base_simdgroups={base_starved}"
         );
 
-        let (base_wide, split_wide) = packed_row_dispatch(14336, 1);
+        let (base_wide, split_wide) = packed_row_dispatch(14336, 1, PackedCodec::Q4K);
         assert_eq!(
             split_wide, 1,
             "a 14336-row op (ffn_up/ffn_gate shape) must stay split-K's no-op factor: got \
@@ -7935,7 +7957,7 @@ mod tests {
             .map(|&axis| bound.extents[axis as usize])
             .product();
         let token_total = packed_row_block_token_total(&block, &bound.extents);
-        let (_base, split) = packed_row_dispatch(feature_total, token_total);
+        let (_base, split) = packed_row_dispatch(feature_total, token_total, block.codec);
         let expected_width = SIMD_WIDTH * split * packed_row_nsg_factor();
 
         let width = tiled_gemm_threadgroup_width(&bound, &quantized)
