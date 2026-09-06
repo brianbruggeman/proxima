@@ -682,6 +682,180 @@ smaller checkpoint — residual, not traced further. The 0.81x-if-bandwidth-hold
 REFUTED: a smaller-byte codec does not buy time until its dequant kernel itself reaches the device
 ceiling; bytes levers (Q3_K/elision) are gated on a codec kernel at the ceiling, not assumed free.
 
+## 1.7 Fifth wave results (2026-09-05/06)
+
+**Scoreboard, at the fixed concurrent default:**
+
+| lane | ms/token | ratio to llama.cpp | provenance |
+|---|---|---|---|
+| floor (4.169 GB/token at the quiet device ceiling, unchanged from §1.6) | 10.92 | -- | MEASURED, ROW 302 |
+| llama.cpp, same session | 17.4642 | 1.00x | MEASURED, ROW 324 (`llama-bench`, pooled 3 rounds, 57.26 t/s, CoV 0.251%) |
+| ours, pre-fix (`main` `5ab6247`, hazard fix not yet landed) | 25.7207 | 1.4728x | MEASURED, ROW 324 (arm B "prefix", rounds 1+2 only — round 3 contaminated and excluded) |
+| ours, `main` `357eeb2` (post ROW-323 hazard fix, correct under contention) | 26.8531 | 1.5374x | MEASURED, ROW 324 (arm A "fixed", all 3 clean rounds pooled, `step_wall_ms`) |
+
+The fixed default is 1.0429 ms/token (+4.4%, `step_wall_ms`) slower than the pre-fix binary it
+replaces and 1.54x llama.cpp in the same session — both numbers move in the direction correctness
+costs, not the direction §1.6's 147 GB/s / 39%-of-ceiling framing pointed, because the feature-flag
+stack under both binaries changed between §1.6 and this wave (`metal-packed-row-nsg2` and
+`metal-q4k-ggml-port` flipped default-on, ROW 311/315, after §1.6 was written) — §1.6's own "ours"
+row is superseded, not merely re-measured; see the correction below.
+
+**What moved it.** Three landed changes compose into the current default, cumulative, cited by the
+row that measured each in isolation: (1) `Relaxed` math mode (ROW 297, landed before §1.6, carried
+forward); (2) `metal-packed-row-nsg2` (ROW 311: threadgroup count halved at every packed-row matvec
+shape, `gpu_exec_ms` -0.86%, inside CoV but never a loss across 4 arms — flips default-on under the
+owner's less-work rule); (3) llama's branchless Q4_K decode port, fixed and default-on (ROW 315: the
+pre-fix body regressed 15.04% at ROW 311 against a body later found to carry 32 stray 64-bit
+multiplies/iteration; `2969311` removed them; the fixed body then beats the default body in every
+valid round, 6.3% at matched steady state; ROW 316's clean 3-round re-measure with the missing
+quality run supplied puts the pooled win at **-6.77%** `gpu_exec_ms` / -6.40% `step_wall_ms`, no
+quality regression on any of `exact_match`/`top1`/`kl_mean`/`kl_max`/`max_abs_logit_delta` against
+either the port-off arm or the ROW 304 baseline).
+
+**What it cost.** ROW 323's hazard fix (`resolve_hazard_inputs` reading `bound.operands()` instead
+of `bound.all_read_sources()`, dropping a fused reduce's `epilogue_operands` from the RAW check) adds
+32 barriers/step (355 vs 323, +9.91%) and costs **~1.0 ms/token (+4.0%)** in both `gpu_exec_ms` and
+`step_wall_ms`, measured on ROW 324's two clean interleaved rounds after round 3's pre-fix arm was
+found contaminated and excluded. The fix is not optional: it closes a real, reproduced text
+divergence under GPU contention (below), not a hypothetical one.
+
+**The race, five rows to root cause.** ROW 313 (quiet bake-off of `reduce-epilogue-fusion`) hit
+GPU contention from an unnamed process and one contaminated round produced `"<unk>\n\ndef
+fibonacci("` instead of the canonical text — flagged as an open question, not attributed to any
+feature. ROW 318 tried to reproduce it with a single streaming-Metal-buffer contention generator at
+N=40 (10 concurrent-loaded, 10 serial-loaded, 20 concurrent-loaded, 10 concurrent-unloaded control)
+and found zero divergences — a negative result, not a refutation, since a single streaming-copy loop
+may not recreate the specific overlap ROW 313 saw. ROW 320 changed the contention generator to a
+SECOND full decode oracle (its own command buffers, arena, plan cache, readback) and reproduced the
+failure signature twice in 20 loaded concurrent runs (`distinct_texts=3`, one run reproducing ROW
+313's exact `<unk>` shape) while serial dispatch under identical contention stayed at
+`distinct_texts=1` across 20 runs — also fixing a separate always-reads-zero bug in the harness's own
+`barriers_emitted` counter (a snapshot-and-reset counter read twice, `bind.rs:3943`). ROW 323 named
+the exact gap by census: `execute_plan_with_placements`'s `Concurrent` branch fed
+`resolve_hazard_inputs` from `bound.operands()` only, but a `BoundOpKind::Reduce` with a fused
+epilogue reads a sibling's output buffer through `epilogue_operands` too (`bindings()` already knew
+this via `all_read_sources()` — the hazard-check call site never matched it) — a RAW hazard invisible
+to the tracker. The one-line fix (`bound.all_read_sources()` in place of `bound.operands()`) took
+`distinct_texts` from 3/20 to 1/20 under ROW 320's identical protocol, with barriers rising 10336 to
+11360 per 32-step determinism run — the direct signature of new barriers closing the previously
+invisible RAW. `15774be` (`refactor(omega): hazard set is derived from the dispatch bindings`)
+generalizes ROW 323's one-line fix into a class fix: the hazard set is derived from the same
+`all_read_sources()`/bindings path everywhere a dispatch's inputs are enumerated, not re-special-cased
+at each call site.
+
+**Measured not-levers, with numbers (none flipped a default):** serial dispatch (ROW 312) costs
+8.3-9.0% more `step_wall_ms`/`gpu_exec_ms` than concurrent on this op graph, beyond both arms' CoV —
+concurrent stays default. `reduce-epilogue-fusion` ON vs OFF (ROW 313, only round 3 of 3 was
+genuinely quiet) ties at +1.18%/+0.50% (ON slower), an order of magnitude under ROW 312's own
+confirmed-regression threshold — no flip, ON stays default. The Q6_K output-head pair-dot body vs
+the pre-pair-dot packed-row/serial-reduce body (ROW 314) ties: B is 1.6% slower, inside B's own
+2.578% CoV band — no change. `PACKED_ROWS_PER_GROUP` becoming per-codec (`rows_per_simdgroup() == 1`
+for Q6_K, ROW 317) is the one exception that landed unconditionally rather than behind a flip: never
+slower across 6 full-decode runs, ~2.3% faster beyond CoV in one of three rounds — kept as landed,
+not gated by a feature. The paired gate-up reduce over a concatenated weight operand (`8281d73`,
+default off) lands with net dispatch count unchanged and is parked, not evaluated further this wave.
+
+**The output head: still unexplained, 7% of the step, every instrument exhausted.** ROW 319 (llama's
+`kernel_mul_mv_q6_K_f32` ported and default-on) cuts the head's own ablation-isolated cost 9.6%
+(45.09 to 40.75 GB/s inverted — i.e. 2.6377 to 2.3841 ms) with no quality regression beyond the
+owner's 2x `kl_max` kill threshold. But the head's in-program cost (1.9-2.4 ms, ROWs 319/321/322/
+325/326/327/328/329) never approaches its own isolated-kernel floor (0.44-0.66 ms, ROW 322's
+converged tail / ROW 327's `real_no_copy` steady state): ROW 325 refuted OS/GPU page residency as
+the mechanism (four arms — default, whole-mapping prefault, whole-mapping `mlock`, narrow-range
+touch — land within 1% of each other, including the arm that mechanically proved the entire 4.14 GB
+mapping pinned resident via `phys_footprint_bytes` jumping to 4.3 GB); ROW 326 found the ladder's own
+head arm never compiled the same kernel as production (differing operand order and reduced-axis
+position in `kernel_cache_key`), so its 231 GB/s was never a valid floor for this gap, and a
+duplicate head immediately after the real one costs only 0.41 ms marginal against the first head's
+2.19 ms (~84% of the cost paid once, not per-dispatch); ROW 327's 2x2 (kernel variant x buffer kind)
+found all four cells cluster at 192-244 GB/s once warm, ruling out both axes in steady state; ROW 328
+independently re-refuted no-copy-mapping residency via a different lever (a private, driver-owned
+copy of the head's bytes costs 2.76 ms, no collapse toward the isolated floor) and found this repo's
+only per-op GPU timer (`execute_plan_op_timed`, one command buffer per op) erases the very effect
+under test, since isolating an op into its own buffer removes the "preceded by 4 GB of shared-buffer
+traffic" condition that is itself a live hypothesis; ROW 329 built a real encoder-split with
+ROW-309's own stage-boundary GPU timestamps and falsified the brief's own subtraction premise (a flat
+~2.4 ms per-encoder cost to subtract) — a 519-dispatch encoder costs 2.132 ms/dispatch, matching
+ROW 309's own average almost exactly (no savings from grouping), while a short 1-2-dispatch encoder
+costs ~18 ms regardless, ~8.5x that per-dispatch rate, meaning the "cost" scales with being a SHORT,
+newly-opened encoder, not with which op it contains. Parked at 7% of the decode step (2.2-2.8 ms of
+25.7-27.0 ms), with every one of five distinct instruments (residency, buffer-kind, kernel-variant,
+per-op timing, encoder-split) run against it and none naming the mechanism.
+
+**The per-shape ladder, ROW 331: numbers VOID, correctness gap is the finding.** The first-ever run
+of `decode_shape_roofline_ladder` (isolating each of the 10 real per-family matvec shapes through
+production's own `plan`/`execute_plan`) failed its own parity gate on 8 of 10 families at 4.3-12.6%
+relative error — an order of magnitude past a threshold-tuning gap, not the ULP-scale near-miss ROW
+321/322 found for the head arm. Only `attn_q` (first arm to run) and `head` (last of the eight
+`k=4096` arms) pass, both at ~2.5e-6. The GB/s numbers this row reports (attn_q 107.51, attn_k 78.59,
+attn_v 76.01, attn_output 103.17, ffn_gate 155.94, ffn_up 151.04, ffn_down 160.47, head 192.95, plus
+two Q5_K variants) are reported as measured but are **not usable as a per-shape bandwidth table** —
+8 of 10 carry a correctness gap this row does not root-cause, and the root cause is not a clean
+pairwise-activation-size collision (`ffn_down`, itself the first call at its own activation size,
+also fails). Separately, the same row's `PROXIMA_LADDER_REPEAT=20` mode found the Q6_K `layer` arm's
+parity "flake" (ROW 326: failed once, passed once, across two process invocations) is 100%
+reproducible WITHIN one process (20/20 failing repeats, byte-identical divergent values every
+repeat) while `head` never diverges (0/20) — this corrects ROW 326's "nondeterministic" framing to
+"deterministic given one process's own memory layout, but can differ across process restarts,"
+consistent with (not proof of) a stale resident-buffer cache keyed on a reused `(pointer, length)`
+pair; the direct-proof instrumentation this implies was not added.
+
+**The llama.cpp kernel read (`llama-kernel-read.md`, summarized).** Same inner loop (identical lane
+spread `ix=lane/8, it=lane%8`, identical stride-4 `ib` loop, identical `ushort`-width weight loads,
+identical `simd_sum`/lane-0-write reduction, identical K-loop iteration counts) — three structural
+differences, all now measured rather than assumed: (1) threadgroup occupancy, 1 simdgroup/threadgroup
+on the pre-ROW-311 default vs llama's 2 (ROW 311, flipped); (2) scale/min decode, 4 branchy
+`q4k_scale_min` calls/iteration vs llama's 1 branchless 16-bit-mask decode covering all 4 sub-blocks
+(ROW 315, flipped once the extra-multiply regression was fixed); (3) dispatch encoding, `Concurrent`
++ explicit hazard barriers vs llama's `Serial` default with zero manual barriers (ROW 312, measured
+and NOT flipped — serial loses by 8.3-9.0% on this op graph, the opposite of what porting llama's
+own choice would predict, because most of this op graph's 520 dispatches form a genuine dependency
+chain that concurrent's scheduling freedom actually exploits).
+
+**The hygiene landed alongside the above, no default behavior change:** 5 commits turned unreachable
+match arms into returned errors across every emitter (metal driver, msl, wgpu_driver, wgsl, cuda —
+39 arms total); `87f8dcb` made one sizing-constant generator shared by `omega` and `proxima-tensor`
+(previously two copies); `e52497b` split the `metal-core` feature so the emitter compiles without the
+driver; `19644b3` revived the byte-identity gate to follow the default metal body set (it had gone
+stale against ROW 311's own nsg2 flip and would have silently stopped compiling under any `metal`
+build); `b437895`/`2b0ad73`/`c0742a3` keyed the resident-buffer cache and packed-operand attribution
+by plan residency and node id respectively, not host pointer or position (both of the latter were
+live correctness hazards under buffer reuse); `d8f6f70`/`ed1ef96` made one block-element-count
+function both drivers call, and `0a284cd` made every codec's block size read from `proxima-gguf`
+instead of a restated constant; `7312713`/`21aab01` made the reduce epilogue one shared emission path
+across `msl`, `wgsl`, and `cuda` instead of msl-only.
+
+**Process findings, one paragraph each.** ROW 298-300's own loud-oracle landing (documented in
+§1.6) hid a 23% Safe-path regression for three rows before ROW 300 found its own `Safe`-labelled arms
+had silently run `Relaxed` throughout, because the oracle read a stale env-var name — a process
+finding restated here because this wave repeats its shape: ROW 313's contaminated rounds 1-2 (15-30x
+slower than round 3, on a GPU-side timer, with an empty named-process gate) show the same class of
+failure, an external GPU consumer invisible to a name-only `pgrep` filter, this time caught within
+the row rather than three rows later. ROW 313/315's own oracle-renaming convention (copying a release
+binary to `oracle-A`/`oracle-B`/`oracle-D` for interleaved bake-offs) escaped the quiet gate's
+name-only pattern list twice in the same session — two different slices independently renamed their
+own oracles the same way, and neither slice's gate pattern included the other's convention, until
+ROW 314/315 cross-checked log timestamps across slices and widened the pattern to `|oracle-`. ROW
+328 found two pre-existing test failures on unmodified `main`@`9684b3f`
+(`single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape`,
+`cached_attention_rewrite_replaces_the_bound_attention_subgraph`) while running its own regression
+gate — confirmed via `git stash` to be unrelated to that row's own edit, reproduced on a producer
+crate's test suite that a consumer's feature set (the one ROW 328 was gating under) had never
+exercised, the same class of gap the land-brief's own gate instructions (`44a830b`) exist to close.
+Multiple rows this wave (321, 328, 329, 331) report agent-worktree sandboxing to a checkout state
+that predates the row being measured, requiring an explicit `git stash`/rebase/re-clone step before
+the row's own gate could trust its baseline — reported per-row, not consolidated into one fix here.
+
+**Correction to §1.6.** §1.6's own scoreboard row (line 622, "ours, decode program (main, `Relaxed`
+default) | 28.25-28.34 | 147 | 39%") described the default BEFORE `metal-packed-row-nsg2` (ROW 311)
+and the fixed `metal-q4k-ggml-port` (ROW 315) flipped default-on and BEFORE ROW 323's hazard-check
+fix — none of those three changes existed when §1.6 was written. That row is superseded by this
+section's own scoreboard table, not merely re-measured: the current default is faster on the
+matvec kernel path (two independent wins, ROW 311 + ROW 315/316) and slower overall by the amount
+ROW 323's correctness fix costs (~1.0 ms/token), netting to 26.8531 ms/token (1.5374x llama.cpp,
+ROW 324) against §1.6's 28.25-28.34 ms/token (147 GB/s, 39% of the then-current 381.24 GB/s ceiling)
+computed against a default that no longer exists.
+
 ## 2. The diagnosis, built formally (V0-V8)
 
 The default is no verdict. What follows is a proposal built by the admissibility procedure so
