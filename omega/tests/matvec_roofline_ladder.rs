@@ -3383,26 +3383,76 @@ const WHOLE_TOKEN_ARMS: [WholeTokenArm; 4] = [
 /// `#[ignore]`d: CPU-bound minutes synthesizing real quantized bytes for a
 /// full 7B-parameter-shaped program, and needs a real Metal device, same
 /// posture as every other synthetic-data arm in this file.
-/// ROW 361: llama's own `test-backend-ops perf` number per shape is
-/// AMORTIZED -- `n_runs` copies of the SAME op duplicated into one graph
-/// (`tests/test-backend-ops.cpp:675-677`), one `ggml_backend_graph_compute`
-/// call per timed sample (`:704`), `us/run = total_time_us / total_runs`
-/// (`:718`). ROW 360's per-shape ladder (`decode_shape_roofline_ladder`) is
-/// ISOLATED -- one dispatch per timed sample, its own command-buffer
-/// commit/wait -- which is why its per-shape sum overshoots our own
-/// measured whole-token sequence (ROW 354). This function restricts
-/// [`whole_token_matvec_sequence_bare`]'s own 225-dispatch, one-command-
-/// buffer construction to ONE family's dispatches (its 32 per-layer
-/// dispatches, or the head's 1), so the resulting number is AMORTIZED the
-/// same way llama's is -- comparable to ROW 360's llama column, not to ROW
-/// 360's isolated "ours" column. `attn_v`/`ffn_down` are synthesized as
-/// `Q5_K` for every one of their dispatches (this checkpoint's real codec
-/// for those two families, ROW 63's inventory: 4 of 32 layers; this cell
-/// reports a clean single-codec number rather than mixing Q4_K/Q5_K bytes).
+/// Same encoding as [`time_bare_dispatch_sequence`], but also reads the
+/// command buffer's own `GPUStartTime`/`GPUEndTime` (`omega::metal`'s own
+/// pattern, `omega/src/metal.rs:2144-2145`) so ROW 361's cells can report
+/// device-side execution time SEPARATELY from the wall-clock
+/// `commit()`-`waitUntilCompleted()` bracket, which also includes host-side
+/// encoding and (for other callers of `execute_plan`) output readback --
+/// `execute_plan`'s own timer (`omega/src/metal.rs:912` builds the command
+/// buffer before iterating ops; its ROW-354-referenced wall bracket is not
+/// itself broken out into host/device/readback shares, which is why this
+/// function reports both numbers rather than assuming the wall bracket IS
+/// the device time).
+fn time_bare_dispatch_sequence_with_gpu_time(
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    output: &ProtocolObject<dyn MTLBuffer>,
+    ops: &[BareDispatchOp<'_>],
+) -> (Duration, f64) {
+    let command_buffer = queue.commandBuffer().expect("command buffer");
+    let encoder = command_buffer
+        .computeCommandEncoder()
+        .expect("command buffer refused to hand out a compute encoder");
+    for op in ops {
+        encoder.setComputePipelineState(op.pipeline);
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(op.weight), op.weight_offset, op.weight_index);
+            encoder.setBuffer_offset_atIndex(Some(op.activation), 0, op.activation_index);
+            encoder.setBuffer_offset_atIndex(Some(output), 0, op.output_index);
+            encoder.setBuffer_offset_atIndex(Some(op.uniform), 0, op.uniform_index);
+        }
+        let grid = MTLSize { width: op.grid_threads, height: 1, depth: 1 };
+        let threadgroup = MTLSize { width: op.threadgroup_width, height: 1, depth: 1 };
+        encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
+    }
+    encoder.endEncoding();
+    let started = Instant::now();
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    let wall = started.elapsed();
+    let gpu_ms = ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e3).max(0.0);
+    (wall, gpu_ms)
+}
+
+/// ROW 361 correction (owner review): [`decode_shape_roofline_ladder`]
+/// (ROW 360's "ours" column) ALREADY batches one shape's dispatches into a
+/// single command buffer -- `execute_plan` opens the buffer before its own
+/// op loop (`omega/src/metal.rs:912`) -- so ROW 360's per-shape overshoot is
+/// NOT a one-dispatch-per-buffer artifact; this function does not claim to
+/// be "amortized for the first time". What it DOES add: (1) this ladder's
+/// hand-encoded bare sequence (no plan cache, no hazard tracker, no uniform
+/// arena -- the same construction [`whole_token_matvec_sequence_bare`]'s
+/// arm E uses for the real 225-dispatch token) restricted to ONE family, so
+/// its number is directly comparable to that whole-token construction; (2)
+/// a device-side GPU-time reading beside the wall bracket
+/// (`time_bare_dispatch_sequence_with_gpu_time`'s own doc), since ROW 360's
+/// timer wraps `execute_plan` end to end and does not itself separate
+/// host-side encode / device execution / readback; (3) an optional
+/// `same_tensor` mode: llama's own `test-backend-ops` duplicates the SAME
+/// tensor reference `n_runs` times into one graph (`tests/test-backend-
+/// ops.cpp:674`), so its small shapes (2.4-9 MB) may be served from SLC
+/// rather than DRAM on every repeat, while this ladder's default mode
+/// synthesizes `dispatch_count` DISTINCT tensors (`ladder.rs`'s own
+/// `synth_weight_bytes_parallel` per-tensor `Lcg` seed) -- a genuinely
+/// different working set. `attn_v`/`ffn_down` are synthesized as `Q5_K`
+/// (this checkpoint's real codec for those two families on 4 of 32 layers,
+/// `discipline.md:7338`'s inventory); this cell reports a clean
+/// single-codec number, not a per-layer blend.
 fn run_row361_family_amortized(
     device: &ProtocolObject<dyn MTLDevice>,
     queue: &ProtocolObject<dyn MTLCommandQueue>,
     family_name: &str,
+    same_tensor: bool,
 ) {
     let (label, codec, packed_codec, rows, k, seed, dispatch_count) = if family_name == "head" {
         (
@@ -3428,15 +3478,21 @@ fn run_row361_family_amortized(
     let row_bytes = codec.row_bytes(k);
     let tensor_bytes = rows * row_bytes;
     let total_timed_bytes = (tensor_bytes * dispatch_count) as u64;
+    let synth_tensor_count = if same_tensor { 1 } else { dispatch_count };
     println!(
-        "=== ROW 361 amortized family={label} codec={} rows={rows} k={k} dispatches={dispatch_count} \
-         bytes={total_timed_bytes} (one command buffer, production's own emitted kernel) ===",
+        "=== ROW 361 family={label} codec={} rows={rows} k={k} dispatches={dispatch_count} \
+         same_tensor={same_tensor} bytes={total_timed_bytes} \
+         (one command buffer, production's own emitted kernel) ===",
         codec.name()
     );
 
-    let weight_bytes = synth_weight_bytes_parallel(codec, seed, dispatch_count, k, tensor_bytes);
+    let weight_bytes = synth_weight_bytes_parallel(codec, seed, synth_tensor_count, k, tensor_bytes);
     let weight_buffer = shared_buffer_from_bytes(device, &weight_bytes);
-    let offsets: Vec<usize> = (0..dispatch_count).map(|index| index * tensor_bytes).collect();
+    let offsets: Vec<usize> = if same_tensor {
+        vec![0; dispatch_count]
+    } else {
+        (0..dispatch_count).map(|index| index * tensor_bytes).collect()
+    };
 
     let mut activation_lcg = Lcg(seed + 999);
     let activation: Vec<f32> = (0..k).map(|_| activation_lcg.next_unit() * 4.0 - 2.0).collect();
@@ -3470,16 +3526,36 @@ fn run_row361_family_amortized(
         })
         .collect();
 
-    let elapsed_samples = warmed_up_samples(|| time_bare_dispatch_sequence(queue, &output, &ops));
-    let ms_samples: Vec<f64> = elapsed_samples.iter().map(Duration::as_secs_f64).map(|s| s * 1e3).collect();
+    let mut wall_samples = Vec::with_capacity(REPEATS);
+    let mut gpu_ms_samples = Vec::with_capacity(REPEATS);
+    let dispatch_once = || time_bare_dispatch_sequence_with_gpu_time(queue, &output, &ops);
+    dispatch_once();
+    for _ in 0..REPEATS {
+        let (wall, gpu_ms) = dispatch_once();
+        wall_samples.push(wall);
+        gpu_ms_samples.push(gpu_ms);
+    }
+
+    let ms_samples: Vec<f64> = wall_samples.iter().map(Duration::as_secs_f64).map(|s| s * 1e3).collect();
     let ms_stats = sample_stats(&ms_samples);
-    let gbps_samples_vec = gbps_samples(&elapsed_samples, total_timed_bytes);
+    let gbps_samples_vec = gbps_samples(&wall_samples, total_timed_bytes);
     let gbps_stats = sample_stats(&gbps_samples_vec);
     let us_per_dispatch = ms_stats.median * 1000.0 / dispatch_count as f64;
+
+    let gpu_ms_stats = sample_stats(&gpu_ms_samples);
+    let gpu_gbps_samples: Vec<f64> =
+        gpu_ms_samples.iter().map(|ms| total_timed_bytes as f64 / (ms / 1e3) / 1e9).collect();
+    let gpu_gbps_stats = sample_stats(&gpu_gbps_samples);
+    let gpu_us_per_dispatch = gpu_ms_stats.median * 1000.0 / dispatch_count as f64;
+
     println!(
-        "arm=ROW361_family_{label} codec={} dispatches={dispatch_count} bytes={total_timed_bytes} \
-         median_ms={:.3} min_ms={:.3} max_ms={:.3} cov_pct={:.2} ms_samples={ms_samples:?} \
-         median_gbps={:.2} mean_gbps={:.2} us_per_dispatch={us_per_dispatch:.2}",
+        "arm=ROW361_family_{label}_{} codec={} dispatches={dispatch_count} bytes={total_timed_bytes} \
+         wall_median_ms={:.3} wall_min_ms={:.3} wall_max_ms={:.3} wall_cov_pct={:.2} \
+         wall_ms_samples={ms_samples:?} wall_median_gbps={:.2} wall_mean_gbps={:.2} \
+         wall_us_per_dispatch={us_per_dispatch:.2} gpu_median_ms={:.3} gpu_min_ms={:.3} \
+         gpu_max_ms={:.3} gpu_cov_pct={:.2} gpu_ms_samples={gpu_ms_samples:?} \
+         gpu_median_gbps={:.2} gpu_us_per_dispatch={gpu_us_per_dispatch:.2}",
+        if same_tensor { "same_tensor" } else { "distinct_tensor" },
         codec.name(),
         ms_stats.median,
         ms_stats.min,
@@ -3487,6 +3563,11 @@ fn run_row361_family_amortized(
         ms_stats.cov_pct,
         gbps_stats.median,
         gbps_stats.mean,
+        gpu_ms_stats.median,
+        gpu_ms_stats.min,
+        gpu_ms_stats.max,
+        gpu_ms_stats.cov_pct,
+        gpu_gbps_stats.median,
     );
 }
 
@@ -3504,7 +3585,8 @@ fn whole_token_matvec_sequence_bare() {
     // column rather than its isolated "ours" column. Additive: unset,
     // this function's behavior is byte-for-byte the same as before.
     if let Some(family_name) = std::env::var("ROW361_FAMILY").ok().filter(|value| !value.is_empty()) {
-        run_row361_family_amortized(&device, &queue, &family_name);
+        let same_tensor = std::env::var_os("ROW361_SAME_TENSOR").is_some();
+        run_row361_family_amortized(&device, &queue, &family_name, same_tensor);
         return;
     }
 
