@@ -23891,3 +23891,72 @@ Run each `target/release/deps/proxima_model_interop-*` binary's
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | none landed -- `docs(tensor): row 324 scoreboard at the fixed concurrent default` only | ROW 323's hazard fix (355 vs 323 barriers/step, +9.91%) costs ~1.0 ms/token (+4.0%) in both `gpu_exec_ms` and `step_wall_ms`, measured on 2 clean interleaved rounds after round 3's prefix arm was found contaminated and excluded; both arms still land at 1.47-1.54x llama.cpp in the same session | 3 interleaved rounds, 5 datapoints/arm/round; round 3's B arm CoV 7.44%/6.65% (excluded, contaminated); load-bearing rounds 1+2 CoV under 1.4% both arms both metrics | quiet gate (names-only, load-1<10) loud twice from other slices' `cargo`/`rustc` builds, waited out (~2-7 min each); round 3's B contamination occurred inside a run whose own pre-run gate was clean |
+
+## ROW 326 -- the output head's kernel key: the ladder never measured production's own compiled kernel, and a duplicate head shows ~85% of the cost is paid once, not per-dispatch
+
+**Card:** `test(interop): duplicate-head hook for the decode program` + `docs(tensor): row 326 the output head's kernel key and a duplicate head` (`test/head-kernel-key-and-duplicate`, off `main` at `b993257`). **Worktree/branch:** `proxima-wt-r326`, `test/head-kernel-key-and-duplicate`.
+
+**Question.** ROW 325 refuted OS/GPU page residency as the source of the output head's 1.9-2.4 ms unaccounted in-program cost. Two candidates remained: (1) the program's head dispatch is not the same compiled kernel/geometry as ROW 322's ladder arm (a `kernel_cache_key` divergence the read-only pass missed), or (2) the head is slow only because it is the program's LAST dispatch (exposed tail/drain), testable by duplicating it.
+
+**Step 1 -- the key.** `pipeline_for`'s own `trace!("pipeline cache lookup", cache_key, hit)` (`omega/src/metal.rs:3661/3666`) fires the miss event with the FULL `kernel_cache_key`; a temporary `trace!` alongside `kernel_dispatch_shape`'s call site in `resolve_steps` (`omega/src/metal.rs:5042`, the actual per-token-decode resolution path -- NOT `encode_op`'s own uncached branch, which the single-token decode path never reaches once `resolve_steps` has cached the step) captured both the key and the dispatch geometry. Oracle: release `proxima-model-interop` build, `RUST_LOG`-equivalent filter `omega::metal=trace,debug` (temporarily raised in `bind.rs`'s `install_stdout_telemetry`, reverted after capture), `PROXIMA_MAX_TOKENS=2`, test `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache --ignored --nocapture`. Ladder: `omega/tests/matvec_roofline_ladder.rs`'s `q6k_head_and_layer_shape_roofline_ladder` (`--ignored`), a temporary `Recorder`/drain call installed inline (reverted after capture) to surface the same trace events.
+
+Both captured on the single-token decode step / head arm (rows=32000, k=4096, `Q6_K`), math-mode suffix stripped:
+
+| | oracle (production decode step) | ladder (`q6k_head_and_layer_shape_roofline_ladder`, head arm) |
+| --- | --- | --- |
+| `kernel_cache_key` | `omega_reduce_r3_o2_n2_multiply_add_zero_floatf6B1_ax_0_2_w64` | `omega_reduce_r3_o2_n2_multiply_add_zero_float6fB1_ax_0_1_w64` |
+| operand codec order | `f6` (activation first, `Q6_K` weight second) | `6f` (`Q6_K` weight first, activation second) |
+| output axes | `_ax_0_2` (reduced axis is the MIDDLE axis, 1) | `_ax_0_1` (reduced axis is the LAST axis, 2) |
+| structural routing / stride / width | `B1...w64` (packed-row-block, single-token, unit-stride, cooperative width 64) | `B1...w64` -- identical |
+| `grid_threads` | 1,024,064 | 1,024,000 |
+| `grid_threadgroup_width` | `Some(64)` | `Some(64)` -- identical |
+
+**The keys differ**, on two markers `kernel_cache_key`'s own doc (`omega/src/msl.rs:1254-1345`) names explicitly: the operand codec order (which operand `push_packed_row_blocked_body` treats as the weight vs the broadcast operand) and the output-axis list (which axis is reduced -- production reduces the MIDDLE axis of a `[seq, embedding, vocab]` intermediate, `sdv->sdv`/`sv->sdv` in `mistral_single_range_cached_forward_program`'s own einsum strings, `proxima-tensor/src/spec.rs:4181-4195`; the ladder's `multi_tensor_matmul_program` reduces the LAST axis of a `[row, 1, k]` intermediate, `omega/tests/matvec_roofline_ladder.rs:1122-1147`). Two ops disagreeing on either marker never share a compiled pipeline (`kernel_cache_key`'s whole reason to exist). **The grid_threads gap (1,024,064 vs 1,024,000, exactly 64 = 2 rows x 32 lanes) is a real vocab-size mismatch, not a kernel effect**: the ladder's `Q6K_HEAD_ROWS = 32_000` is a round-number approximation (that constant's own doc says only "the same `k`"), while the real checkpoint's vocab is 32,002 (`proxima-tensor/src/spec.rs`'s own `32_002` test literal for this exact shape) -- 0.006% more data, immaterial to a 45 vs 231 GB/s gap.
+
+**Step 2 -- the duplicate.** `mistral_single_range_cached_forward_program` (`proxima-tensor/src/spec.rs:3976`) gained a `duplicate_head: bool` parameter mirroring `gate_before_up`'s own mechanism (a plain, always-compiled bool a caller sets; every production call site passes `false`, byte-identical to before) rather than `#[cfg(test)]`, because `#[cfg(test)]` on a `proxima-tensor` item is invisible cross-crate to `omega`/`proxima-model-interop`, where the Metal measurement runs. `true` appends a second, identical `output.weight` reduce reusing the SAME `normed_final`/`lm_head` nodes, returned as a new 4th tuple element (`Option<NodeId>`, `SingleRangeForwardProgram` type alias) so a caller can add it to a `Plan`'s requested outputs -- otherwise graph pruning drops it as unread dead code. `proxima-model-interop/src/generate.rs`'s `build_single_range_program` reads a new `PROXIMA_DUPLICATE_HEAD=1` env knob (same convention as `PROXIMA_PREFAULT`/`PROXIMA_MLOCK`), threads the scratch `NodeId` through `SingleRangeProgram`, and `run_decode_loop_placed_kv`'s per-step `roots` (requested-outputs) list pushes it when present.
+
+Oracle, release, `PROXIMA_MAX_TOKENS=10` (long enough to clear the `plan_hits > 0` bucketing assertion and reach steady state), 3 rounds interleaved A (unset) / B (`PROXIMA_DUPLICATE_HEAD=1`), quiet gate (names-only, load-1 < 10) immediately before every run. `gpu_exec_ms` steps 3..7 (`token_breakdown_metal`), mean of 5 samples/arm/round:
+
+| round | A mean (ms) | B mean (ms) | B - A (ms) |
+| --- | --- | --- | --- |
+| 1 | 25.4814 | 25.9688 | 0.4874 |
+| 2 | 26.2378 | 26.5640 | 0.3262 |
+| 3 | 25.5215 | 25.9312 | 0.4097 |
+| **mean** | **25.7469** | **26.1547** | **0.4078** |
+
+One `PROXIMA_METAL_KIND_FILTER='!family:output'` ablation on B (both the real head and the duplicate share the same first-named operand, `output.weight`, so the family filter drops both in one pass): steps 3..7 mean `gpu_exec_ms` = **23.5552**, `generated_text` degenerates to `"<unk><unk>..."` (confirms both head dispatches were skipped, consistent with ROW 319's own read of `register_skipped_output`).
+
+**Reading.** A (one head) minus the ablation (zero heads) = 25.7469 - 23.5552 = **2.1917 ms** for the FIRST head dispatch -- matching ROW 319/325's own 1.9-2.4 ms framing. B (two heads) minus A (one head) = **0.4078 ms** for the SECOND, back-to-back, byte-identical head dispatch. The marginal duplicate costs roughly 5.4x less than the first: **~84% of the head's attributed cost (1.78 of 2.19 ms) is paid once, on the first reference to that dispatch/buffer within the command buffer, not as a per-dispatch or sustained-bandwidth cost** -- a duplicate immediately after reads the identical bytes near the ~0.4-0.5 ms per-dispatch floor ROW 289 already measured for an empty/trivial dispatch, not near the first head's 2.2 ms.
+
+**Decision.** The keys differ -- candidate 1 confirmed by data: the ladder's `q6k_head_and_layer_shape_roofline_ladder` never dispatched the same compiled kernel as the real decode program's head (different operand order, different reduced-axis position), so ROW 322's 230.78 GB/s / 0.47 ms is not evidence of what the production head's OWN kernel achieves in isolation, and is not a valid floor for this gap. The duplicate-head measurement independently rules out "terminal position alone, at a flat per-dispatch cost" as sufficient (0.41 ms marginal, far below the 1.9-2.4 ms total) and instead localizes the bulk of the cost to a first-touch-in-command-buffer effect specific to this dispatch/buffer pairing.
+
+**Residual, named not hidden.** Two mechanisms are now on the table together and this row does not adjudicate between them: (a) the mis-keyed kernel itself may render genuinely different (possibly less efficient) MSL for production's axis layout than `msl.rs`'s row-blocked body renders for the ladder's layout -- not read here, `push_packed_row_blocked_body`'s actual generated source for each key was not diffed; (b) the ~1.78 ms first-touch cost visible in the A-minus-ablation/duplicate-delta arithmetic could be Metal-side per-command-buffer resource-residency or argument-table setup for a buffer referenced exactly once, a layer ROW 325's OS/GPU page-residency arms (`mlock`, `madvise`) cannot see or move, since it is scoped to the command buffer, not the process. Next slice: diff the two kernels' actual rendered MSL bodies for the two keys above, and/or reorder the head to a NON-terminal, NON-first position (rather than duplicating it) to separate "first reference to this specific buffer" from "first reference in program order" as the more precise mechanism.
+
+**Gates.** `cargo check -p proxima-tensor -p omega -p proxima-model-interop --release --features metal,instrument,std --all-targets`: EXIT 0. `cargo clippy -p proxima-tensor -p omega -p proxima-model-interop --release --features metal,instrument,std --all-targets -- -D warnings`: EXIT 0 (after adding `#[allow(clippy::too_many_arguments)]` with a stated reason, matching this file's own existing convention at seven other call sites, and a `SingleRangeForwardProgram` type alias for the now-4-wide return tuple). `cargo nextest run -p proxima-tensor --release`: 509 passed, 8 skipped. `cargo nextest run -p omega --release --features metal`: 182 passed, 5 skipped. `cargo nextest run -p proxima-model-interop --release --features metal,instrument,std`: 110 passed, 29 skipped (the real-checkpoint `#[ignore]`d tests, including this row's own oracle, correctly excluded from the default sweep).
+
+**Second, unrelated bug noticed in passing:** `q6k_head_and_layer_shape_roofline_ladder`'s "layer" arm (rows=4096) failed its own parity gate on one of two runs in this session (`relative_error=0.0681405` vs the `1e-5` threshold, first run only; the immediate re-run passed at `1.39e-6`) -- nondeterministic parity failure in that arm, not investigated further here, out of this row's scope.
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-row326-repro -b docs/row-326-repro main
+cd ../proxima-wt-row326-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p proxima-model-interop --release --features metal,instrument,std --lib --no-run
+BIN=$(find target/release/deps -maxdepth 1 -name 'proxima_model_interop-*' -perm -u+x)
+PROXIMA_MAX_TOKENS=10 "$BIN" \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --exact --ignored --nocapture --test-threads=1
+PROXIMA_MAX_TOKENS=10 PROXIMA_DUPLICATE_HEAD=1 "$BIN" \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --exact --ignored --nocapture --test-threads=1
+PROXIMA_MAX_TOKENS=10 PROXIMA_DUPLICATE_HEAD=1 PROXIMA_METAL_KIND_FILTER='!family:output' "$BIN" \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --exact --ignored --nocapture --test-threads=1
+```
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | `test(interop): duplicate-head hook for the decode program` + `docs(tensor): row 326 the output head's kernel key and a duplicate head` | Two candidates decided with data: the ladder's own head arm never compiled the same kernel as production (differing operand order `f6`/`6f` and reduced-axis position `_ax_0_2`/`_ax_0_1` in `kernel_cache_key`), so its 231 GB/s is not a valid floor for this gap; a duplicate head costs only 0.41 ms marginal vs the first head's 2.19 ms (ablation-derived), meaning ~84% of the head's cost is paid once per command buffer, not per dispatch | 3 interleaved A/B rounds, 5 datapoints/arm/round, plus 1 ablation run; no CoV computed here (means only, matching the brief's own table shape) | quiet gate (names-only, load-1<10) loud twice from other slices' `cargo`/`rustc`/`cargo-nextest` builds (load-1 up to 33.06), waited out (~2-8 min each) |
