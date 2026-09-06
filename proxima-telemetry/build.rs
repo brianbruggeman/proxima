@@ -24,63 +24,20 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use toml::Value;
-
-fn get_int(table: &Value, section: &str, key: &str) -> u64 {
-    let raw = table
-        .get(section)
-        .and_then(|sec| sec.get(key))
-        .and_then(Value::as_integer)
-        .unwrap_or_else(|| {
-            panic!("proxima-telemetry.toml: missing or non-integer [{section}].{key}")
-        });
-    u64::try_from(raw).unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-}
-
-/// Read `(section, key)` from the TOML, then apply the optional
-/// `PROXIMA_TELEMETRY_<SECTION>_<KEY>` env-var override.
-fn resolve(table: &Value, section: &str, key: &str) -> u64 {
-    let env_name = format!(
-        "PROXIMA_TELEMETRY_{}_{}",
-        section.to_ascii_uppercase(),
-        key.to_ascii_uppercase()
-    );
-    println!("cargo:rerun-if-env-changed={env_name}");
-    if let Ok(raw) = env::var(&env_name) {
-        return raw
-            .parse()
-            .unwrap_or_else(|err| panic!("{env_name} = {raw}: {err}"));
-    }
-    get_int(table, section, key)
-}
-
-fn require_nonzero(name: &str, value: u64) -> u64 {
-    assert!(value > 0, "{name} must be non-zero; got {value}");
-    value
-}
-
-fn require_usize(name: &str, value: u64) -> usize {
-    usize::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows usize"))
-}
+use proxima_build::sizing::{require_nonzero, SizingError, SizingSource};
 
 /// Resolve the compile-time emit floor: `[emit] max_level` (a level name) with a
 /// `PROXIMA_TELEMETRY_EMIT_MAX_LEVEL` env override, mapped to proxima severity.
-/// `trace` (1) keeps everything; `off` (255) compiles out all emits.
-fn resolve_emit_floor(table: &Value) -> u8 {
-    let env_name = "PROXIMA_TELEMETRY_EMIT_MAX_LEVEL";
-    println!("cargo:rerun-if-env-changed={env_name}");
-    let name = env::var(env_name).ok().or_else(|| {
-        table
-            .get("emit")
-            .and_then(|section| section.get("max_level"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    });
-    match name
-        .unwrap_or_else(|| "trace".to_string())
-        .to_ascii_lowercase()
-        .as_str()
-    {
+/// `trace` (1) keeps everything; `off` (255) compiles out all emits. The key
+/// is optional (unlike every other resolved key here): missing anywhere
+/// defaults to `"trace"`, matching the pre-`SizingSource` fallback.
+fn resolve_emit_floor(source: &SizingSource) -> u8 {
+    let name = match source.resolve_str("emit", "max_level") {
+        Ok(value) => value,
+        Err(SizingError::MissingStr { .. }) => "trace".to_string(),
+        Err(err) => panic!("{err}"),
+    };
+    match name.to_ascii_lowercase().as_str() {
         "trace" => 1,
         "debug" => 5,
         "info" => 9,
@@ -97,56 +54,31 @@ fn resolve_emit_floor(table: &Value) -> u8 {
 #[allow(clippy::expect_used)]
 fn emit_sizing_consts(out_dir: &Path) {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-    let toml_path = PathBuf::from(&manifest_dir).join("proxima-telemetry.toml");
-    println!("cargo:rerun-if-changed=proxima-telemetry.toml");
+    let source = SizingSource::load(&manifest_dir, "proxima-telemetry.toml", "PROXIMA_TELEMETRY")
+        .unwrap_or_else(|err| panic!("{err}"));
+    let resolve = |section: &str, key: &str| {
+        source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
+    };
 
-    let text = fs::read_to_string(&toml_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", toml_path.display()));
-    let root: Value = text
-        .parse()
-        .unwrap_or_else(|err| panic!("parse {}: {err}", toml_path.display()));
-
-    let drain_batch = require_usize(
-        "drain.batch",
-        require_nonzero("drain.batch", resolve(&root, "drain", "batch")),
-    );
-    let assist_batch = require_usize(
-        "drain.assist_batch",
-        require_nonzero(
-            "drain.assist_batch",
-            resolve(&root, "drain", "assist_batch"),
-        ),
-    );
+    let drain_batch = require_nonzero("drain.batch", resolve("drain", "batch"));
+    let assist_batch = require_nonzero("drain.assist_batch", resolve("drain", "assist_batch"));
     let flush_interval_micros = require_nonzero(
         "pump.flush_interval_micros",
-        resolve(&root, "pump", "flush_interval_micros"),
+        resolve("pump", "flush_interval_micros"),
     );
-    let emit_floor = resolve_emit_floor(&root);
+    let emit_floor = resolve_emit_floor(&source);
     // unified-instrument compile-time defaults (the no_std+no_alloc config floor).
-    let instrument_metrics = resolve(&root, "instrument", "metrics") != 0;
-    let instrument_default_budget_micros = resolve(&root, "instrument", "default_budget_micros");
-    let sink_capacity_bytes = require_usize(
-        "sink.capacity_bytes",
-        require_nonzero(
-            "sink.capacity_bytes",
-            resolve(&root, "sink", "capacity_bytes"),
-        ),
-    );
+    let instrument_metrics = resolve("instrument", "metrics") != 0;
+    let instrument_default_budget_micros = resolve("instrument", "default_budget_micros");
+    let sink_capacity_bytes =
+        require_nonzero("sink.capacity_bytes", resolve("sink", "capacity_bytes"));
     // error-elevation caps (feature `elevation`): bound the per-trace replay
     // buffer's memory. Always emitted; consumed only under the feature.
-    let elevation_max_traces = require_usize(
-        "elevation.max_traces",
-        require_nonzero(
-            "elevation.max_traces",
-            resolve(&root, "elevation", "max_traces"),
-        ),
-    );
-    let elevation_per_trace_ring = require_usize(
+    let elevation_max_traces =
+        require_nonzero("elevation.max_traces", resolve("elevation", "max_traces"));
+    let elevation_per_trace_ring = require_nonzero(
         "elevation.per_trace_ring",
-        require_nonzero(
-            "elevation.per_trace_ring",
-            resolve(&root, "elevation", "per_trace_ring"),
-        ),
+        resolve("elevation", "per_trace_ring"),
     );
 
     let out = format!(
@@ -181,59 +113,21 @@ fn emit_sizing_consts(out_dir: &Path) {
     fs::write(&out_path, out).unwrap_or_else(|err| panic!("write {}: {err}", out_path.display()));
 }
 
-fn log_buffer_get_int(table: &Value, section: &str, key: &str) -> u64 {
-    let raw = table
-        .get(section)
-        .and_then(|sec| sec.get(key))
-        .and_then(Value::as_integer)
-        .unwrap_or_else(|| {
-            panic!("proxima-log-buffer.toml: missing or non-integer [{section}].{key}")
-        });
-    u64::try_from(raw).unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-}
-
-/// Read `(section, key)` from the log-buffer TOML, then apply the optional
-/// `PROXIMA_LOG_BUFFER_<SECTION>_<KEY>` env-var override.
-fn log_buffer_resolve(table: &Value, section: &str, key: &str) -> u64 {
-    let env_name = format!(
-        "PROXIMA_LOG_BUFFER_{}_{}",
-        section.to_ascii_uppercase(),
-        key.to_ascii_uppercase()
-    );
-    println!("cargo:rerun-if-env-changed={env_name}");
-    if let Ok(raw) = env::var(&env_name) {
-        return raw
-            .parse()
-            .unwrap_or_else(|err| panic!("{env_name} = {raw}: {err}"));
-    }
-    log_buffer_get_int(table, section, key)
-}
-
 #[allow(clippy::expect_used)]
 fn emit_log_buffer_sizing_consts(out_dir: &Path) {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-    let toml_path = PathBuf::from(&manifest_dir).join("proxima-log-buffer.toml");
-    println!("cargo:rerun-if-changed=proxima-log-buffer.toml");
+    let source = SizingSource::load(&manifest_dir, "proxima-log-buffer.toml", "PROXIMA_LOG_BUFFER")
+        .unwrap_or_else(|err| panic!("{err}"));
 
-    let text = fs::read_to_string(&toml_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", toml_path.display()));
-    let root: Value = text
-        .parse()
-        .unwrap_or_else(|err| panic!("parse {}: {err}", toml_path.display()));
-
-    let capacity = require_usize(
+    let capacity = require_nonzero(
         "buffer.capacity",
-        require_nonzero(
-            "buffer.capacity",
-            log_buffer_resolve(&root, "buffer", "capacity"),
-        ),
+        source.resolve_int("buffer", "capacity").unwrap_or_else(|err| panic!("{err}")),
     );
-    let live_tail_channel_capacity = require_usize(
+    let live_tail_channel_capacity = require_nonzero(
         "live_tail.channel_capacity",
-        require_nonzero(
-            "live_tail.channel_capacity",
-            log_buffer_resolve(&root, "live_tail", "channel_capacity"),
-        ),
+        source
+            .resolve_int("live_tail", "channel_capacity")
+            .unwrap_or_else(|err| panic!("{err}")),
     );
 
     let out = format!(
