@@ -94,6 +94,8 @@ if [ "${1:-}" = "--list" ]; then
     done
     printf '   [cell4] all-features\n'
     cell_count=$((cell_count + 1))
+    printf '   [cell5] metal-core on x86_64-unknown-linux-gnu (check only, no driver, no execution)\n'
+    cell_count=$((cell_count + 1))
     printf '   [cell6] default clippy\n'
     printf '   [cell6] all-features clippy\n'
     cell_count=$((cell_count + 2))
@@ -160,6 +162,21 @@ run_clippy_cell() {
     fi
 }
 
+run_check_cell() {
+    local label="$1"
+    shift
+    wait_for_quiet
+    printf '\n== %s ==\ncargo check -p %s %s\n' "${label}" "${crate}" "$*"
+    if cargo check -p "${crate}" "$@"; then
+        printf '   GREEN: %s\n' "${label}"
+        passed=$((passed + 1))
+    else
+        printf '   RED: %s\n' "${label}"
+        failed=$((failed + 1))
+        failures+=("${label}: cargo check failed")
+    fi
+}
+
 skip_cell() {
     local label="$1"
     local reason="$2"
@@ -200,6 +217,16 @@ done
 # ---------------------------------------------------------------------
 printf '\n== [cell 4] --all-features ==\n'
 run_nextest_cell "cell4: all-features" --all-features
+
+# ---------------------------------------------------------------------
+# cell 5: metal-core builds emitter-only on a non-macOS target -- no metal
+# driver, no objc2, so it is a `cargo check` (there is nothing to nextest
+# without a driver, and this host cannot execute a cross-compiled linux
+# binary anyway). Requires `rustup target add x86_64-unknown-linux-gnu`.
+# ---------------------------------------------------------------------
+printf '\n== [cell 5] metal-core on x86_64-unknown-linux-gnu ==\n'
+run_check_cell "cell5: metal-core linux" \
+    --no-default-features --features metal-core --target x86_64-unknown-linux-gnu
 
 # ---------------------------------------------------------------------
 # cell 6: clippy on cells 2 and 4's feature sets

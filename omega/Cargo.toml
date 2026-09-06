@@ -39,6 +39,15 @@ reduce-epilogue-fusion = ["proxima-tensor/reduce-epilogue-fusion"]
 # entry points, so a caller depends on omega alone and never on a specific
 # backend crate.
 cpu = ["std", "proxima-tensor/std"]
+# The MSL emitter and planner (`msl.rs`'s `kernel_cache_key`/
+# `kernel_dispatch_shape`, plus every unconditional `classify_*`/
+# `packed_row_*` function they call) with none of `metal`'s objc2/Metal
+# driver dependencies -- alloc-tier pure string/`BoundOp` logic, so it builds
+# on any target, including non-macOS (`cargo check -p omega
+# --no-default-features --features metal-core --target
+# x86_64-unknown-linux-gnu`). `metal` below depends on this rather than
+# duplicating it, so the driver-only build still sees the same emitter.
+metal-core = ["alloc"]
 # Runtime Metal execution driver (src/metal.rs, macOS-only via
 # `target_os = "macos"` on the module itself). `proxima-tensor/std` is turned
 # on here because the parity test binary links proxima-tensor's
@@ -114,6 +123,7 @@ cpu = ["std", "proxima-tensor/std"]
 # not by this change).
 metal = [
     "std",
+    "metal-core",
     "dep:objc2",
     "dep:objc2-metal",
     "dep:objc2-foundation",
