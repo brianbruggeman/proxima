@@ -50,6 +50,10 @@
 //! - `PACKED_ROW_NSG` (`metal-packed-row-nsg2`/`metal-q4k-ggml-port`-only)
 //!   — simdgroups per threadgroup for the row-blocked packed path; see
 //!   `omega-runtime.toml`'s `[packed_row_nsg]`.
+//! - [`ATTENTION_CONTEXT_KEYS_PER_CHUNK`]/[`ATTENTION_CONTEXT_CHUNK_CAP`]
+//!   (always compiled) — `crate::msl::context_chunks_for`'s divisor and
+//!   ceiling for splitting cached-attention's key range across simdgroups;
+//!   see `omega-runtime.toml`'s `[attention_context_chunks]`.
 //!
 //! `msl` (this module's own crate) is alloc-tier and target-independent --
 //! emission never touches a device -- so [`SIMD_WIDTH`] is visible at every

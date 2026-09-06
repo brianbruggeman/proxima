@@ -200,6 +200,23 @@ transient_cap = 172_812_125
 # Overridable per-build via `OMEGA_WGSL_WORKGROUP_SIZE`.
 workgroup_size = 64
 
+[attention_context_chunks]
+# `render_cached_attention`'s key range, split across this many simdgroups
+# per `(query_row, kv_head, group)` threadgroup -- llama.cpp's own
+# `kernel_flash_attn_ext_vec` stride partition
+# (ggml-metal.metal:4016-4017, `ic0 += C*nsg`), ported to this kernel's
+# per-key loop (`C=1` here, since the body already iterates one key at a
+# time rather than llama's KV-block width). `chunks =
+# clamp(ceil(context_length / keys_per_chunk), 1, cap)` --
+# `msl::context_chunks_for`. Raising `keys_per_chunk` lowers chunk count
+# (less parallelism, less merge overhead); raising `cap` allows more
+# simdgroups on long contexts at the cost of more `threadgroup` memory for
+# the cross-simdgroup online-softmax merge. Overridable per-build via
+# `OMEGA_ATTENTION_CONTEXT_CHUNKS_KEYS_PER_CHUNK` /
+# `OMEGA_ATTENTION_CONTEXT_CHUNKS_CAP`.
+keys_per_chunk = 64
+cap = 4
+
 [packed_row_nsg]
 # `tiled_gemm_threadgroup_width`'s nsg multiplier for the packed
 # row-blocked path, shared by `metal-packed-row-nsg2` and
