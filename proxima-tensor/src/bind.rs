@@ -3336,8 +3336,8 @@ mod tests {
     #[test]
     #[cfg(feature = "cached-attention-streaming")]
     fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape() {
-        let (program, logits, cache_roots) = crate::spec::mistral_single_range_cached_forward_program(
-            32_002, 4096, 14336, 32, 8, 128, 32,
+        let (program, logits, cache_roots, _) = crate::spec::mistral_single_range_cached_forward_program(
+            32_002, 4096, 14336, 32, 8, 128, 32, false,
         )
         .expect("openchat-shaped single-range forward pass lowers to a program");
         let mut outputs = alloc::vec![logits];
@@ -3382,8 +3382,8 @@ mod tests {
     #[test]
     #[cfg(feature = "cached-attention-streaming")]
     fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
-        let (program, logits, cache_roots) =
-            crate::spec::mistral_single_range_cached_forward_program(32, 16, 24, 4, 2, 4, 1)
+        let (program, logits, cache_roots, _) =
+            crate::spec::mistral_single_range_cached_forward_program(32, 16, 24, 4, 2, 4, 1, false)
                 .expect("single-range fixture builds");
         let mut outputs = alloc::vec![logits];
         for (even, odd, value) in &cache_roots {
@@ -5104,9 +5104,9 @@ mod tests {
         /// numbers without re-deriving them from the dispatch census.
         #[test]
         fn reduce_epilogue_fusion_shrinks_the_real_openchat_single_range_program() {
-            let (program, logits, cache_roots) =
+            let (program, logits, cache_roots, _) =
                 crate::spec::mistral_single_range_cached_forward_program(
-                    32_002, 4096, 14336, 32, 8, 128, 32,
+                    32_002, 4096, 14336, 32, 8, 128, 32, false,
                 )
                 .expect("openchat-shaped single-range forward pass lowers to a program");
             let mut outputs = alloc::vec![logits];
@@ -5182,9 +5182,10 @@ mod tests {
             let pairs = (HEAD_DIM / 2) as usize;
             let group = (QUERY_HEADS / KV_HEADS) as usize;
 
-            let (program, logits, cache_roots) =
+            let (program, logits, cache_roots, _) =
                 crate::spec::mistral_single_range_cached_forward_program(
                     VOCAB, EMBEDDING, FEED_FORWARD, QUERY_HEADS, KV_HEADS, HEAD_DIM, BLOCK_COUNT,
+                    false,
                 )
                 .expect("single-range cached forward pass lowers");
             let mut outputs = alloc::vec![logits];

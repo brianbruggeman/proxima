@@ -143,7 +143,7 @@ pub fn real_single_range_forward_fixture_with_padding(
     const HEAD_DIM: u32 = 16;
     const LAYERS: u32 = 2;
 
-    let (program, logits_root, cache_roots) = mistral_single_range_cached_forward_program(
+    let (program, logits_root, cache_roots, _) = mistral_single_range_cached_forward_program(
         VOCAB,
         EMBEDDING,
         FEED_FORWARD,
@@ -151,6 +151,7 @@ pub fn real_single_range_forward_fixture_with_padding(
         KV_HEADS,
         HEAD_DIM,
         LAYERS,
+        false,
     )
     .expect("the single-range forward program builds");
 

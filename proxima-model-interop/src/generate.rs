@@ -673,6 +673,12 @@ struct SingleRangeProgram {
     logits_root: NodeId,
     cache_roots: Vec<CachedLayerRoots>,
     cache_input_nodes: Vec<(NodeId, NodeId, NodeId)>,
+    /// ROW 326 diagnostic: `Some` only when `PROXIMA_DUPLICATE_HEAD=1` was
+    /// set at load time (`build_single_range_program`'s own doc) -- a
+    /// second, identical `output.weight` reduce added to this call's own
+    /// requested outputs so its GPU cost is directly measurable as the
+    /// A/B delta against a normal run. `None` in every production run.
+    duplicate_head_scratch: Option<NodeId>,
 }
 
 /// Scans `program` for the [`Op::Input`] node named `name` -- the input-side
@@ -709,15 +715,22 @@ fn build_single_range_program(
     if architecture.expert_count != 0 {
         return Ok(None);
     }
-    let (program, logits_root, cache_roots) = mistral_single_range_cached_forward_program(
-        architecture.vocab,
-        architecture.embedding,
-        architecture.feed_forward,
-        architecture.query_heads,
-        architecture.kv_heads,
-        architecture.head_dim,
-        architecture.block_count,
-    )?;
+    // ROW 326 diagnostic: same env-knob convention as `PROXIMA_PREFAULT`/
+    // `PROXIMA_MLOCK` (`proxima-model-interop/src/bind.rs`'s
+    // `real_openchat_file` module) -- unset in every production run, so
+    // `duplicate_head` is `false` on every path but this one opt-in probe.
+    let duplicate_head = std::env::var("PROXIMA_DUPLICATE_HEAD").is_ok_and(|value| value == "1");
+    let (program, logits_root, cache_roots, duplicate_head_scratch) =
+        mistral_single_range_cached_forward_program(
+            architecture.vocab,
+            architecture.embedding,
+            architecture.feed_forward,
+            architecture.query_heads,
+            architecture.kv_heads,
+            architecture.head_dim,
+            architecture.block_count,
+            duplicate_head,
+        )?;
     let block_count = architecture.block_count as usize;
     let mut cache_input_nodes = Vec::with_capacity(block_count);
     for layer in 0..block_count {
@@ -731,6 +744,7 @@ fn build_single_range_program(
         logits_root,
         cache_roots,
         cache_input_nodes,
+        duplicate_head_scratch,
     }))
 }
 
@@ -2671,8 +2685,11 @@ impl<'file> LoadedModel<'file> {
                 // `cache_roots` entry) already relies on this; this arm was
                 // missing it.
                 let mut roots: Vec<NodeId> =
-                    Vec::with_capacity(1 + single_range.cache_roots.len() * 3);
+                    Vec::with_capacity(2 + single_range.cache_roots.len() * 3);
                 roots.push(single_range.logits_root);
+                if let Some(scratch) = single_range.duplicate_head_scratch {
+                    roots.push(scratch);
+                }
                 for (even, odd, value) in &single_range.cache_roots {
                     roots.push(*even);
                     roots.push(*odd);
