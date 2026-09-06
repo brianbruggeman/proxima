@@ -2746,16 +2746,17 @@ mod real_openchat_file {
     #[cfg(feature = "instrument")]
     use proxima_telemetry::recorder::Recorder;
 
-    use crate::generate::{LoadedModel, LogitsSink};
+    use crate::generate::LoadedModel;
+    #[cfg(feature = "metal")]
+    use crate::generate::LogitsSink;
     use crate::loader::prefault;
     use crate::serving::ServingConfig;
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use crate::test_support::{dispatch_type_from_env, math_mode_from_env};
 
-    use super::{
-        ParsedGguf, architecture_from_metadata, bind_all_weights, find_tensor,
-        gguf_tensor_as_f32,
-    };
+    use super::{architecture_from_metadata, bind_all_weights, gguf_tensor_as_f32};
+    #[cfg(feature = "metal")]
+    use super::{ParsedGguf, find_tensor};
 
     /// A read-only `mmap` of the fixture file (rustix, already a workspace
     /// dependency used the same way by `proxima-storage/src/dax/region.rs`
@@ -2843,6 +2844,7 @@ mod real_openchat_file {
     /// under memory pressure; `mlock` does. Reuses [`rustix::mm`], already a
     /// workspace dependency (`MappedGguf::open`'s own `rustix::mm::mmap`
     /// above), rather than adding a new one.
+    #[cfg(feature = "metal")]
     fn mlock_if_requested(file_bytes: &[u8]) -> bool {
         let enabled = std::env::var("PROXIMA_MLOCK").is_ok_and(|value| value == "1");
         if enabled && !file_bytes.is_empty() {
@@ -2871,6 +2873,7 @@ mod real_openchat_file {
     /// the same accessors [`gguf_tensor_as_packed_block`] binds through, so
     /// this touches exactly the bytes the GPU upload later reads -- no
     /// separate range computation to drift out of sync with bind's own.
+    #[cfg(feature = "metal")]
     fn touch_output_weight_if_requested(parsed: &ParsedGguf, file_bytes: &[u8]) -> bool {
         let enabled = std::env::var("PROXIMA_TOUCH_OUTPUT").is_ok_and(|value| value == "1");
         if enabled {
