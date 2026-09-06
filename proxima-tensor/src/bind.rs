@@ -325,6 +325,25 @@ pub enum BoundOpKind {
         /// `epilogue_body`'s own doc for why the fold's result is an
         /// implicit, un-listed argument rather than an entry here.
         epilogue_operands: BoundOperands,
+        /// Axes of `extents` this fold's own `output_axes` excludes but
+        /// `epilogue_body` still walks — the "broadcast-reduce" epilogue
+        /// shape an RMSNorm-style `x * inv_rms` tail needs, where the
+        /// CONSUMER re-broadcasts the fold's scalar result back over the
+        /// very axis the fold reduced away. Empty for the default identity
+        /// epilogue and for the pre-existing PLAIN epilogue shape (a
+        /// bias/residual/gate tail whose own iteration space already equals
+        /// `output_axes`'s shape with no further axis to re-broadcast over):
+        /// `output_axes` alone already names that epilogue's iteration
+        /// space, so `node_output_len`/`apply_reduce_epilogue`
+        /// (`crate::cpu`) walk it unchanged when this is empty. When
+        /// non-empty, both instead walk `output_axes` UNION
+        /// `epilogue_broadcast_axes` (i.e. `extents` in full), addressing
+        /// the fold's own already-computed scalar through a genuine
+        /// broadcast (stride `0`) on every axis named here. A backend with
+        /// no broadcast-reduce renderer must reject a non-empty value at
+        /// bind time rather than emit a wrong kernel (`omega::msl`'s own
+        /// `EmitError` does this for Metal).
+        epilogue_broadcast_axes: SmallVec<[u16; MAX_INLINE_RANK]>,
     },
     /// The resolved counterpart of [`Op::Iota`]: no operands, no body — an
     /// executor derives every output value straight from its own position
@@ -585,6 +604,7 @@ impl BoundOp {
                 out_scatter,
                 epilogue_body,
                 epilogue_operands,
+                epilogue_broadcast_axes,
             } => BoundOpKind::Reduce {
                 element_body: element_body.clone(),
                 reduce_op: *reduce_op,
@@ -613,6 +633,11 @@ impl BoundOp {
                 // here, regardless of which full-space axis `split_axis`
                 // itself names.
                 epilogue_operands: rebase_operands(epilogue_operands, 0, chunk_start),
+                // `split_axis` never returns `Some` for a broadcast-reduce
+                // epilogue (chunk-splitting a fold that ALSO re-broadcasts
+                // over an axis is not implemented), so this stays a plain
+                // clone rather than needing its own rebase.
+                epilogue_broadcast_axes: epilogue_broadcast_axes.clone(),
             },
             // unreachable in practice: `split_axis` returns `None` for
             // `Iota`, so `split`/`split_aligned` never call this for one —
@@ -1218,6 +1243,7 @@ fn build_reduce_op(
             // `BoundOp` here already exists.
             epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
             epilogue_operands: Vec::new(),
+            epilogue_broadcast_axes: SmallVec::new(),
         },
     })
 }
@@ -2796,7 +2822,7 @@ pub fn bind_with_fusion(
     #[cfg(feature = "reduce-epilogue-fusion")]
     {
         admit(numeric_policy, NumericRewrite::ReduceEpilogueFusion)?;
-        reduce_epilogue_fusion(program, shapes, built, outputs)
+        reduce_epilogue_fusion(built, outputs)
     }
     #[cfg(not(feature = "reduce-epilogue-fusion"))]
     Ok(built)
@@ -2873,115 +2899,131 @@ fn bind_cached_attention_fusion(
     }
 }
 
-/// Every node `expr` reads, counting `IndexMap::Computed`'s own `indices`
-/// operand alongside the ordinary operand it rides with — the same walk
-/// [`live::annotate`]'s own private `uses` does, duplicated rather than
-/// exported because [`reduce_epilogue_reference_counts`] wants a plain
-/// per-node COUNT over the whole program rather than a last-use POSITION,
-/// a different enough reduction over the same walk that sharing one
-/// function would need an extra closure parameter for no real reuse.
+/// Is `bound` a still-un-scattered `Keep::Reduce` fold — the only
+/// [`BoundOpKind`] a consumer's epilogue can ever absorb (`out_scatter`'s own
+/// doc: a scatter's destination is data-dependent, never a plain identity or
+/// broadcast projection a consumer could read through).
 #[cfg(feature = "reduce-epilogue-fusion")]
-fn push_op_references(expr: &Op, into: &mut Vec<NodeId>) {
-    match expr {
-        Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
-        Op::Elementwise { operands, .. } => {
-            for (node, map) in operands {
-                into.push(*node);
-                push_indices_node_ref(map, into);
+fn is_epilogue_fusable_reduce(bound: &BoundOp) -> bool {
+    matches!(
+        bound.kind,
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            out_scatter: None,
+            ..
+        }
+    )
+}
+
+/// One flag per [`NodeId`] this program can name, `true` exactly for a
+/// [`is_epilogue_fusable_reduce`] node — [`find_epilogue_source`]'s own
+/// lookup table, sized once per [`reduce_epilogue_fusion`] pass rather than
+/// re-scanned per candidate.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn reduce_epilogue_source_flags(resolved: &[BoundOp]) -> Vec<bool> {
+    let node_count = resolved
+        .iter()
+        .map(|bound| bound.node.0 as usize + 1)
+        .max()
+        .unwrap_or(0);
+    let mut flags = vec![false; node_count];
+    for bound in resolved {
+        if is_epilogue_fusable_reduce(bound) {
+            flags[bound.node.0 as usize] = true;
+        }
+    }
+    flags
+}
+
+/// How many times each [`NodeId`] this program can name is read by ANY
+/// resolved op's [`BoundOp::all_read_sources`] — [`reduce_epilogue_fusion`]'s
+/// own liveness gate (condition (b): "no OTHER consumer"), computed over the
+/// ALREADY-FUSED op list so a node absorbed into a `ComposedBody` upstream
+/// (never its own [`BoundOp`]) correctly counts zero rather than needing a
+/// separate raw-`Op` walk.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn resolved_reference_counts(resolved: &[BoundOp]) -> BTreeMap<NodeId, u32> {
+    let mut counts = BTreeMap::new();
+    for bound in resolved {
+        for (source, _, gather) in bound.all_read_sources() {
+            *counts.entry(*source).or_insert(0u32) += 1;
+            if let Some(lookup) = gather {
+                *counts.entry(lookup.indices).or_insert(0u32) += 1;
             }
-        }
-        Op::Reduce(reduce) => {
-            into.push(reduce.operand);
-            push_indices_node_ref(&reduce.in_map, into);
-            push_indices_node_ref(&reduce.out_map, into);
-        }
-    }
-}
-
-#[cfg(feature = "reduce-epilogue-fusion")]
-fn push_indices_node_ref(map: &IndexMap, into: &mut Vec<NodeId>) {
-    if let IndexMap::Computed { indices, .. } = map {
-        into.push(*indices);
-    }
-}
-
-/// How many times each program position is read anywhere else in `program`
-/// — [`reduce_epilogue_fusion`]'s own liveness gate needs a plain count
-/// (condition (b): "no OTHER consumer"), which is a different question from
-/// [`live::annotate`]'s "which position is the LAST use" (a node referenced
-/// twice still has exactly one last-use position, but is not sole-consumed).
-#[cfg(feature = "reduce-epilogue-fusion")]
-fn reduce_epilogue_reference_counts(program: &[Op]) -> Vec<u32> {
-    let mut counts = vec![0u32; program.len()];
-    let mut references = Vec::new();
-    for expr in program {
-        references.clear();
-        push_op_references(expr, &mut references);
-        for node in &references {
-            counts[node.0 as usize] += 1;
         }
     }
     counts
 }
 
-/// One (consumer, reduce) pair [`reduce_epilogue_fusion`] will merge:
-/// `consumer` is an [`Op::Elementwise`] whose sole `Op::Reduce` operand is
-/// `reduce`, satisfying every condition [`BoundOpKind::Reduce::epilogue_body`]'s
-/// own doc states. Structural over `Op`/`ScalarOp`/`IndexMap` only — no
-/// model-specific shape or name ever enters this match, so any program with
-/// this exact algebraic shape fuses, real openchat layer or synthetic test
-/// fixture alike.
+/// The one reduce-fold operand `consumer` can absorb into its epilogue, if
+/// any: the first operand among `consumer.operands()` — no gather (a
+/// gathered read is data-dependent, `apply_reduce_epilogue`'s own doc names
+/// this unsupported) — whose node is [`reduce_epilogue_source_flags`]-true.
+/// Structural over [`BoundOp`]/[`Layout`] only, at the RESOLVED level — this
+/// is what lets the match see straight through however many raw `Op` steps
+/// ordinary chain-fusion already folded into `consumer`'s own
+/// [`ComposedBody`], the exact one-hop limitation a raw-`Op`-level scan hits
+/// (a multi-step tail between the fold and its real, final consumer is
+/// already ONE [`BoundOp`] by the time this runs, keyed at the final
+/// consumer's own [`NodeId`], not at whichever raw op happened to sit
+/// directly after the reduce).
 #[cfg(feature = "reduce-epilogue-fusion")]
-fn reduce_epilogue_candidates(
-    program: &[Op],
-    shapes: &Shapes,
-    outputs: &[NodeId],
-) -> Vec<(NodeId, NodeId)> {
-    let reference_counts = reduce_epilogue_reference_counts(program);
+fn find_epilogue_source(consumer: &BoundOp, reduce_flags: &[bool]) -> Option<NodeId> {
+    let BoundOpKind::Elementwise { operands, .. } = &consumer.kind else {
+        return None;
+    };
+    if operands.iter().any(|(_, _, gather)| gather.is_some()) {
+        return None; // no renderer/evaluator supports a gathered epilogue read.
+    }
+    let mut found: Option<NodeId> = None;
+    for (node, _, _) in operands {
+        if !reduce_flags.get(node.0 as usize).copied().unwrap_or(false) {
+            continue;
+        }
+        match found {
+            None => found = Some(*node),
+            // Two DIFFERENT slots reading the SAME reduce, at (possibly)
+            // two DIFFERENT projections — a parity-selecting split like
+            // "gate = paired[..,0,..]" / "up = paired[..,1,..]" both landing
+            // in one consumer. `compose_reduce_epilogue`'s own "implicit
+            // fold-result slot" model has room for exactly ONE such read;
+            // absorbing the fold here would silently drop whichever
+            // occurrence isn't picked as the sentinel while still trying to
+            // read the fold's now-gone standalone buffer for the other one.
+            // Decline the whole consumer rather than guess which read wins.
+            Some(existing) if existing == *node => return None,
+            Some(_) => {}
+        }
+    }
+    found
+}
+
+/// One (consumer, reduce) pair a single [`reduce_epilogue_fusion`] pass will
+/// merge: `consumer` is a resolved [`BoundOpKind::Elementwise`] whose sole
+/// reduce-fold operand (per [`find_epilogue_source`]) is `source`, `source`
+/// has no OTHER reader anywhere in `resolved` and is not itself a required
+/// output. Whether that operand is read broadcast (the `[s,d]`-shaped
+/// "broadcast-reduce" epilogue an RMSNorm-shaped `x * inv_rms` tail needs) or
+/// at plain identity (the pre-existing bias/residual epilogue shape) is
+/// immaterial here — [`compose_reduce_epilogue`] widens correctly either way
+/// from the two [`BoundOp`]s' own recorded extents, never from a name or
+/// shape special-cased in this match.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn reduce_epilogue_candidates(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<(NodeId, NodeId)> {
+    let reduce_flags = reduce_epilogue_source_flags(resolved);
+    let reference_counts = resolved_reference_counts(resolved);
     let mut candidates = Vec::new();
-    for (position, expr) in program.iter().enumerate() {
-        let Op::Elementwise { operands, .. } = expr else {
+    for bound in resolved {
+        let Some(source) = find_epilogue_source(bound, &reduce_flags) else {
             continue;
         };
-        let consumer = NodeId(position as u32);
-        let mut reduce_source = None;
-        for (operand_node, map) in operands {
-            let Some(Op::Reduce(reduce)) = program.get(operand_node.0 as usize) else {
-                continue;
-            };
-            if reduce.out_map.is_data_dependent() {
-                continue; // (c): a scatter's destination is data-dependent.
-            }
-            if reference_counts[operand_node.0 as usize] != 1 {
-                continue; // (b): some OTHER op still reads this fold's output.
-            }
-            if outputs.contains(operand_node) {
-                continue; // (b): a requested output must still materialize on its own.
-            }
-            if shapes.of(consumer) != shapes.of(*operand_node) {
-                continue; // (a): iteration space must equal the fold's output space.
-            }
-            if !is_identity_projection(map) || map.affine().axes.len() != shapes.of(*operand_node).len()
-            {
-                continue; // (a): the fold's own output must be read at full identity, no broadcast.
-            }
-            reduce_source = Some(*operand_node);
-            break;
+        if reference_counts.get(&source).copied().unwrap_or(0) != 1 {
+            continue; // (b): some OTHER op still reads this fold's output.
         }
-        let Some(source) = reduce_source else {
-            continue;
-        };
-        // (a): every OTHER operand (bias, residual, gate — full-rank or
-        // broadcast alike) must also be identity-or-broadcast; a gathered or
-        // strided operand forces the whole consumer to materialize normally
-        // instead of becoming an epilogue.
-        let every_operand_identity = operands
-            .iter()
-            .all(|(_, map)| !map.is_data_dependent() && is_identity_projection(map));
-        if !every_operand_identity {
-            continue;
+        if outputs.contains(&source) {
+            continue; // (b): a requested output must still materialize on its own.
         }
-        candidates.push((consumer, source));
+        candidates.push((bound.node, source));
     }
     candidates
 }
@@ -2991,122 +3033,288 @@ fn reduce_epilogue_candidates(
 /// [`reduce_epilogue_candidates`] match becomes one merged [`BoundOp`] whose
 /// `node` is the CONSUMER's id (see [`BoundOpKind::Reduce::epilogue_body`]'s
 /// own doc for why), replacing both the standalone reduce and the standalone
-/// consumer `resolved` already held. A backend with no epilogue renderer
-/// must reject a non-default `epilogue_body`/`epilogue_operands` at bind
-/// time rather than call this at all with the feature compiled in against
-/// data it cannot render — the same capability contract `fuse_cached_
-/// attention: false` already gives wgpu/cuda for `CachedAttention`.
+/// consumer `resolved` already held. Runs to a FIXPOINT (bounded by
+/// `resolved.len()`, so it always terminates — each round strictly shrinks
+/// the op count or stops) because an RMSNorm-shaped tail needs TWO rounds:
+/// round one absorbs the plain `mean/eps/sqrt/reciprocal` chain into the
+/// fold itself (a PLAIN epilogue, output shape unchanged); only after that
+/// does the fold's own `NodeId` carry `Keep::Reduce` for
+/// [`find_epilogue_source`] to match `x * inv_rms`'s BROADCAST read in round
+/// two. A backend with no epilogue renderer must reject a non-default
+/// `epilogue_body`/`epilogue_operands` at bind time rather than call this at
+/// all with the feature compiled in against data it cannot render — the same
+/// capability contract `fuse_cached_attention: false` already gives
+/// wgpu/cuda for `CachedAttention`.
 #[cfg(feature = "reduce-epilogue-fusion")]
 fn reduce_epilogue_fusion(
-    program: &[Op],
-    shapes: &Shapes,
-    resolved: Vec<BoundOp>,
+    mut resolved: Vec<BoundOp>,
     outputs: &[NodeId],
 ) -> Result<Vec<BoundOp>, TensorError> {
-    let candidates = reduce_epilogue_candidates(program, shapes, outputs);
-    if candidates.is_empty() {
-        return Ok(resolved);
-    }
-    let by_node: BTreeMap<NodeId, &BoundOp> =
-        resolved.iter().map(|bound| (bound.node, bound)).collect();
-    let mut fused_by_consumer: BTreeMap<NodeId, BoundOp> = BTreeMap::new();
-    let mut absorbed: BTreeSet<NodeId> = BTreeSet::new();
-    for (consumer, source) in candidates {
-        let Some(reduce_bound) = by_node.get(&source) else {
-            continue;
-        };
-        let Some(consumer_bound) = by_node.get(&consumer) else {
-            continue;
-        };
-        let BoundOpKind::Reduce {
-            element_body,
-            reduce_op,
-            init,
-            keep,
-            operands,
-            output_axes,
-            out_layout,
-            out_scatter: None,
-            ..
-        } = &reduce_bound.kind
-        else {
-            continue; // window-elimination or a prior pass already rewrote this reduce away.
-        };
-        let BoundOpKind::Elementwise {
-            body: consumer_body,
-            operands: consumer_operands,
-        } = &consumer_bound.kind
-        else {
-            continue;
-        };
-        let Some((epilogue_body, epilogue_operands)) =
-            fold_epilogue_operand(consumer_body, consumer_operands, source)
-        else {
-            continue;
-        };
-        let fused = BoundOp {
-            node: consumer,
-            dtype: consumer_bound.dtype,
-            extents: reduce_bound.extents.clone(),
-            kind: BoundOpKind::Reduce {
-                element_body: element_body.clone(),
-                reduce_op: *reduce_op,
-                init: *init,
-                keep: *keep,
-                operands: operands.clone(),
-                output_axes: output_axes.clone(),
-                out_layout: out_layout.clone(),
-                out_scatter: None,
-                epilogue_body,
-                epilogue_operands,
-            },
-        };
-        fused_by_consumer.insert(consumer, fused);
-        absorbed.insert(source);
-    }
-    if fused_by_consumer.is_empty() {
-        return Ok(resolved);
-    }
-    let mut rewritten = Vec::with_capacity(resolved.len());
-    for bound in resolved {
-        if let Some(fused) = fused_by_consumer.remove(&bound.node) {
-            rewritten.push(fused);
-        } else if !absorbed.contains(&bound.node) {
-            rewritten.push(bound);
+    for _ in 0..resolved.len() {
+        let candidates = reduce_epilogue_candidates(&resolved, outputs);
+        if candidates.is_empty() {
+            return Ok(resolved);
         }
+        let by_node: BTreeMap<NodeId, &BoundOp> =
+            resolved.iter().map(|bound| (bound.node, bound)).collect();
+        let mut fused_by_consumer: BTreeMap<NodeId, BoundOp> = BTreeMap::new();
+        let mut absorbed: BTreeSet<NodeId> = BTreeSet::new();
+        for (consumer, source) in candidates {
+            if absorbed.contains(&consumer) || absorbed.contains(&source) {
+                continue; // already spoken for by another pair this same round.
+            }
+            let Some(reduce_bound) = by_node.get(&source).copied() else {
+                continue;
+            };
+            let Some(consumer_bound) = by_node.get(&consumer).copied() else {
+                continue;
+            };
+            let BoundOpKind::Reduce {
+                element_body,
+                reduce_op,
+                init,
+                keep,
+                operands,
+                output_axes,
+                out_layout,
+                out_scatter: None,
+                epilogue_body: inner_epilogue_body,
+                epilogue_operands: inner_epilogue_operands,
+                ..
+            } = &reduce_bound.kind
+            else {
+                continue; // window-elimination or a prior pass already rewrote this reduce away.
+            };
+            let Some(broadcast_axes) = epilogue_broadcast_axes_for(
+                output_axes,
+                &reduce_bound.extents,
+                &consumer_bound.extents,
+            ) else {
+                continue; // (a): consumer must either preserve the fold's own output shape or re-broadcast the WHOLE pre-reduction shape, nothing in between.
+            };
+            let BoundOpKind::Elementwise {
+                operands: consumer_operands,
+                ..
+            } = &consumer_bound.kind
+            else {
+                continue;
+            };
+            let Some((_, source_layout, source_gather)) = consumer_operands
+                .iter()
+                .find(|(node, _, _)| *node == source)
+            else {
+                continue;
+            };
+            if source_gather.is_some()
+                || !reads_reduce_output_identically(source_layout, out_layout, output_axes)
+            {
+                continue; // (a): the fold's own output must be read at genuine identity/broadcast, never gathered or permuted.
+            }
+            let Some((epilogue_body, epilogue_operands)) = compose_reduce_epilogue(
+                output_axes,
+                reduce_bound.extents.len(),
+                inner_epilogue_body,
+                inner_epilogue_operands,
+                consumer_bound,
+                source,
+            ) else {
+                continue;
+            };
+            let fused = BoundOp {
+                node: consumer,
+                dtype: consumer_bound.dtype,
+                extents: reduce_bound.extents.clone(),
+                kind: BoundOpKind::Reduce {
+                    element_body: element_body.clone(),
+                    reduce_op: *reduce_op,
+                    init: *init,
+                    keep: *keep,
+                    operands: operands.clone(),
+                    output_axes: output_axes.clone(),
+                    out_layout: out_layout.clone(),
+                    out_scatter: None,
+                    epilogue_body,
+                    epilogue_operands,
+                    epilogue_broadcast_axes: broadcast_axes,
+                },
+            };
+            fused_by_consumer.insert(consumer, fused);
+            absorbed.insert(source);
+        }
+        if fused_by_consumer.is_empty() {
+            return Ok(resolved);
+        }
+        let mut rewritten = Vec::with_capacity(resolved.len());
+        for bound in resolved {
+            if let Some(fused) = fused_by_consumer.remove(&bound.node) {
+                rewritten.push(fused);
+            } else if !absorbed.contains(&bound.node) {
+                rewritten.push(bound);
+            }
+        }
+        resolved = rewritten;
     }
-    Ok(rewritten)
+    Ok(resolved)
 }
 
-/// Removes `source`'s own operand slot from `consumer_operands`, renumbers
-/// every [`StepArg::Operand`] in `consumer_body` to match the shrunk operand
-/// list, and points whatever referenced the removed slot at the new
-/// sentinel index (`consumer_operands.len() - 1`, i.e. one past the end of
-/// the RESULT list) — [`BoundOpKind::Reduce::epilogue_body`]'s own
-/// "implicit fold-result argument" convention. Returns `None` if `source`
-/// does not appear in `consumer_operands` at all (should not happen for a
-/// [`reduce_epilogue_candidates`] match, but this stays a checked rewrite
-/// rather than an indexing panic).
+/// Which [`BoundOpKind::Reduce::epilogue_broadcast_axes`] value `consumer`'s
+/// own fusion needs, or `None` to reject the whole candidate: `Some(empty)`
+/// when `consumer_extents` already equals the fold's own OUTPUT shape (the
+/// pre-existing, shape-preserving PLAIN epilogue — `output_axes`'s own
+/// projection of `reduce_extents`, no axis to re-broadcast over); `Some` of
+/// every axis `output_axes` excludes when `consumer_extents` equals the
+/// fold's FULL pre-reduction shape instead (the broadcast-reduce shape an
+/// RMSNorm-style `x * inv_rms` tail needs); `None` for anything else (a
+/// shape this rule was never meant to admit — e.g. a consumer that reads a
+/// PARTIAL sub-broadcast of the reduced axes).
 #[cfg(feature = "reduce-epilogue-fusion")]
-fn fold_epilogue_operand(
-    consumer_body: &ComposedBody,
-    consumer_operands: &BoundOperands,
+fn epilogue_broadcast_axes_for(
+    output_axes: &[u16],
+    reduce_extents: &[u64],
+    consumer_extents: &[u64],
+) -> Option<SmallVec<[u16; MAX_INLINE_RANK]>> {
+    let projected: Vec<u64> = output_axes
+        .iter()
+        .map(|&axis| reduce_extents[axis as usize])
+        .collect();
+    if consumer_extents == projected.as_slice() {
+        return Some(SmallVec::new());
+    }
+    if consumer_extents == reduce_extents && reduce_extents.len() > output_axes.len() {
+        let broadcast_axes = (0..reduce_extents.len() as u16)
+            .filter(|axis| !output_axes.contains(axis))
+            .collect();
+        return Some(broadcast_axes);
+    }
+    None
+}
+
+/// Is `consumer_layout` a genuine identity-or-broadcast read of `source`'s
+/// own materialized output — same per-axis stride as `out_layout` on every
+/// `output_axes` entry, and stride `0` (a true broadcast, never a permuted
+/// or reversed walk) on every OTHER axis `consumer_layout` names. Rejects
+/// exactly the shape `a_strided_consumer_map_does_not_fuse` proves: a
+/// same-SHAPE but reversed/offset read (`coeff: -1`) has the right rank and
+/// element count but the WRONG stride, so [`epilogue_broadcast_axes_for`]'s
+/// shape-only check alone would wrongly admit it.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn reads_reduce_output_identically(
+    consumer_layout: &Layout,
+    out_layout: &Layout,
+    output_axes: &[u16],
+) -> bool {
+    if consumer_layout.base != out_layout.base {
+        return false;
+    }
+    if consumer_layout.strides.len() == output_axes.len() {
+        // A plain (shape-preserving) read: `consumer_layout` is compact,
+        // rank `output_axes.len()`, LOCAL-indexed in `output_axes`'s own
+        // order — compare position `index` against `out_layout`'s (full-
+        // rank) stride at the GLOBAL axis `output_axes[index]` names.
+        return output_axes
+            .iter()
+            .enumerate()
+            .all(|(index, &axis)| consumer_layout.stride(index as u16) == out_layout.stride(axis));
+    }
+    // A broadcast-reduce read: `consumer_layout` is full rank, GLOBAL-indexed
+    // the same as `out_layout` itself — every `output_axes` entry must carry
+    // `out_layout`'s own real stride, every OTHER axis must be a genuine
+    // broadcast (stride `0`), never a permuted or reversed walk.
+    (0..consumer_layout.strides.len() as u16).all(|axis| {
+        if output_axes.contains(&axis) {
+            consumer_layout.stride(axis) == out_layout.stride(axis)
+        } else {
+            consumer_layout.stride(axis) == 0
+        }
+    })
+}
+
+/// Re-addresses `layout` (recorded at `output_axes.len()` rank, the reduce's
+/// own OUTPUT-axis coordinate space) into `full_rank` coordinates: every
+/// axis in `output_axes` keeps its own stride at its real position, every
+/// OTHER axis (the reduce's own reduced axis, among others) gets stride `0`
+/// — a genuine broadcast, since the fold's OWN result never varied along
+/// that axis in the first place. A no-op in the common case
+/// (`layout.strides.len() == full_rank` already) because a PLAIN, non-
+/// broadcast prior epilogue's own operands are already recorded at the same
+/// rank the fold's `extents` always carries.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn broadcast_extend_operand(layout: &Layout, output_axes: &[u16], full_rank: usize) -> Layout {
+    if layout.strides.len() == full_rank {
+        return layout.clone();
+    }
+    let mut strides = SmallVec::<[i64; MAX_INLINE_RANK]>::from_elem(0, full_rank);
+    for (index, &axis) in output_axes.iter().enumerate() {
+        if let Some(&stride) = layout.strides.get(index) {
+            strides[axis as usize] = stride;
+        }
+    }
+    Layout {
+        base: layout.base,
+        strides,
+    }
+}
+
+/// Grafts `consumer`'s own body onto `source`'s fold, composing through
+/// whatever epilogue `source` already carries (`inner_epilogue_body`/
+/// `inner_epilogue_operands` — the default identity leaf over zero operands
+/// on a fold's first fusion, per [`BoundOpKind::Reduce::epilogue_body`]'s own
+/// "no epilogue" convention, or a real prior epilogue on a SECOND round —
+/// see [`reduce_epilogue_fusion`]'s own doc for why RMSNorm needs both).
+/// `full_rank` is the FUSED op's own `extents.len()` (always `source`'s own
+/// pre-reduction rank, per [`BoundOp::extents`]'s own doc); every inner
+/// operand is broadcast-extended to it via [`broadcast_extend_operand`] so a
+/// broadcast-reduce round (`consumer`'s own extents equal to `full_rank`,
+/// e.g. RMSNorm's `[s, d]`) and a plain round (`consumer`'s own extents equal
+/// to `output_axes`'s smaller projected shape) compose identically: both
+/// [`Layout`]s an executor reads are already expressed in the SAME
+/// coordinate space `consumer` itself walks, so [`crate::cpu::apply_body`]
+/// never needs to know which round produced them.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn compose_reduce_epilogue(
+    output_axes: &[u16],
+    full_rank: usize,
+    inner_epilogue_body: &ComposedBody,
+    inner_epilogue_operands: &BoundOperands,
+    consumer: &BoundOp,
     source: NodeId,
 ) -> Option<(ComposedBody, BoundOperands)> {
-    let source_index = consumer_operands
+    let BoundOpKind::Elementwise {
+        body: outer_body,
+        operands: outer_operands,
+    } = &consumer.kind
+    else {
+        return None;
+    };
+    let source_index = outer_operands
         .iter()
         .position(|(node, _, _)| *node == source)?;
+
     let mut new_operands = BoundOperands::new();
-    let mut remap: Vec<u16> = vec![0; consumer_operands.len()];
-    for (index, operand) in consumer_operands.iter().enumerate() {
+    let mut outer_remap: Vec<u16> = vec![0; outer_operands.len()];
+    for (index, operand) in outer_operands.iter().enumerate() {
         if index == source_index {
-            continue; // never read back through `remap` — the match arm below special-cases it.
+            continue; // replaced below by the inner fold's own implicit result.
         }
-        remap[index] = new_operands.len() as u16;
+        outer_remap[index] = new_operands.len() as u16;
         new_operands.push(operand.clone());
     }
-    let fold_result_index = new_operands.len() as u16;
-    let steps = consumer_body
+    let outer_len = new_operands.len();
+
+    let inner_remap: Vec<u16> = (0..inner_epilogue_operands.len())
+        .map(|index| (outer_len + index) as u16)
+        .collect();
+    for (node, layout, gather) in inner_epilogue_operands {
+        new_operands.push((
+            *node,
+            broadcast_extend_operand(layout, output_axes, full_rank),
+            gather.clone(),
+        ));
+    }
+    let raw_fold_slot = new_operands.len() as u16;
+    let inner_step_count = inner_epilogue_body.steps.len() as u16;
+
+    let mut steps: Vec<BodyStep> = inner_epilogue_body
         .steps
         .iter()
         .map(|step| BodyStep {
@@ -3117,10 +3325,10 @@ fn fold_epilogue_operand(
                 .map(|arg| match arg {
                     StepArg::Operand(index) => {
                         let old = *index as usize;
-                        if old == source_index {
-                            StepArg::Operand(fold_result_index)
+                        if old == inner_epilogue_operands.len() {
+                            StepArg::Operand(raw_fold_slot)
                         } else {
-                            StepArg::Operand(remap[old])
+                            StepArg::Operand(inner_remap[old])
                         }
                     }
                     StepArg::Step(step_index) => StepArg::Step(*step_index),
@@ -3128,6 +3336,26 @@ fn fold_epilogue_operand(
                 .collect(),
         })
         .collect();
+    for step in &outer_body.steps {
+        steps.push(BodyStep {
+            op: step.op,
+            args: step
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    StepArg::Operand(index) => {
+                        let old = *index as usize;
+                        if old == source_index {
+                            StepArg::Step(inner_step_count - 1)
+                        } else {
+                            StepArg::Operand(outer_remap[old])
+                        }
+                    }
+                    StepArg::Step(step_index) => StepArg::Step(*step_index + inner_step_count),
+                })
+                .collect(),
+        });
+    }
     Some((ComposedBody { steps }, new_operands))
 }
 
@@ -3268,6 +3496,7 @@ mod tests {
             out_scatter: None,
             epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
             epilogue_operands: Vec::new(),
+            epilogue_broadcast_axes: SmallVec::new(),
         };
         let reduce_scan = BoundOpKind::Reduce {
             element_body: ComposedBody::leaf(ScalarOp::Identity),
@@ -3283,6 +3512,7 @@ mod tests {
             out_scatter: None,
             epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
             epilogue_operands: Vec::new(),
+            epilogue_broadcast_axes: SmallVec::new(),
         };
 
         assert_eq!(cached_attention.name(), "cached_attention");
@@ -5345,6 +5575,29 @@ mod tests {
                 epilogue_count > 0,
                 "the real openchat shape must produce at least one epilogued reduce"
             );
+            // MEASURED (not derived) on this checkout: 619 -> 490, a 129-op
+            // drop. The resolved-op candidate match (this module's own
+            // `reduce_epilogue_candidates`, which sees straight through
+            // `BoundOpBuilder`'s own chain-fusion) widened the prior
+            // raw-`Op`-level one-hop rule's 619 -> 523 (96-op) result: every
+            // RMSNorm's own `mean/eps/sqrt/reciprocal` PLAIN epilogue round
+            // now also chains into a SECOND, broadcast-reduce round
+            // (`x * inv_rms`), and every `SiLU(gate) * up`-shaped tail (two
+            // independent reduces feeding one consumer) now fuses too, where
+            // the raw-`Op`-level rule dropped both to the composed-body
+            // absorption this module's own doc names. A regression here
+            // means one of those two classes stopped firing, not merely
+            // "fewer than before".
+            assert_eq!(
+                attention_only.len(),
+                619,
+                "cached-attention-only baseline shifted; re-derive before trusting the epilogue delta below"
+            );
+            assert_eq!(
+                with_epilogue.len(),
+                490,
+                "reduce-epilogue-fusion's own op count regressed from the measured 490"
+            );
         }
 
         /// The same `mistral_single_range_cached_forward_program` builder the
@@ -5562,6 +5815,322 @@ mod tests {
                      max_abs_error={max_abs_error} max_rel_error={max_rel_error}"
                 );
             }
+        }
+
+        /// `specs/mistral_layer.toml`'s own RMSNorm, node for node
+        /// (`crate::spec`'s own private `rmsnorm` helper mirrors this exact
+        /// shape): `x: [seq, dim]` reduced over `dim` into `mean_square:
+        /// [seq]`, then `x * inv_rms` re-BROADCASTS that scalar back over
+        /// `dim` — the "broadcast-reduce" epilogue
+        /// [`BoundOpKind::Reduce::epilogue_broadcast_axes`]'s own doc names.
+        fn rmsnorm_program(seq: u32, dim: u32) -> (Vec<Op>, NodeId, NodeId) {
+            let mut program = Vec::new();
+            let full = || IndexMap::Affine(map::projection(2, &[0, 1]));
+            let keep_seq = || IndexMap::Affine(map::projection(1, &[0]));
+            let broadcast_scalar_seq = || IndexMap::Affine(map::projection(1, &[]));
+            let broadcast_seq_over_dim = || IndexMap::Affine(map::projection(2, &[0]));
+            let broadcast_dim_over_seq = || IndexMap::Affine(map::projection(2, &[1]));
+
+            let x = append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(seq), Extent::Static(dim)],
+                    name: None,
+                },
+            );
+            let gamma = append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(dim)],
+                    name: None,
+                },
+            );
+            let inv_dim = append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: Vec::new(),
+                    name: None,
+                },
+            );
+            let eps = append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: Vec::new(),
+                    name: None,
+                },
+            );
+            let squared = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![(x, full()), (x, full())],
+                    name: None,
+                },
+            );
+            let sum_squares = append(
+                &mut program,
+                Op::Reduce(Reduce {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: squared,
+                    in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                    out_map: IndexMap::Affine(map::projection(2, &[0])),
+                    keep: Keep::Reduce,
+                    name: None,
+                }),
+            );
+            let mean_square = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![(sum_squares, keep_seq()), (inv_dim, broadcast_scalar_seq())],
+                    name: None,
+                },
+            );
+            let mean_square_eps = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    operands: alloc::vec![(mean_square, keep_seq()), (eps, broadcast_scalar_seq())],
+                    name: None,
+                },
+            );
+            let rms = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::SquareRoot,
+                    operands: alloc::vec![(mean_square_eps, keep_seq())],
+                    name: None,
+                },
+            );
+            let inv_rms = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Reciprocal,
+                    operands: alloc::vec![(rms, keep_seq())],
+                    name: None,
+                },
+            );
+            let normed = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![(x, full()), (inv_rms, broadcast_seq_over_dim())],
+                    name: None,
+                },
+            );
+            let scaled = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![(normed, full()), (gamma, broadcast_dim_over_seq())],
+                    name: None,
+                },
+            );
+            (program, x, scaled)
+        }
+
+        /// RMSNorm's broadcast-reduce epilogue, bit-for-bit: `bind_plain`
+        /// (no fusion at all — every op materializes standalone, the ground
+        /// truth) against `bind` (`reduce-epilogue-fusion` on) at both a
+        /// single-token (`[1, 4096]`) and a multi-token (`[7, 4096]`) shape —
+        /// real BGE/Mistral hidden width, real-valued input from
+        /// [`Lcg`], never the all-ones/all-zeros fixture that hides a
+        /// broadcast-vs-reduce addressing bug. Runs `apply_body`'s own
+        /// `f32` arithmetic in the SAME per-step order both ways (the fused
+        /// path evaluates the identical composed steps this module's own
+        /// `compose_reduce_epilogue` grafted, never a re-associated
+        /// expression), so exact equality is the correct bar, not a
+        /// tolerance band.
+        #[test]
+        fn rmsnorm_broadcast_reduce_epilogue_matches_bit_for_bit() {
+            for seq in [1u32, 7u32] {
+                const DIM: u32 = 4096;
+                let (program, x, scaled) = rmsnorm_program(seq, DIM);
+                let shapes = shape::infer(&program, &[]).expect("rmsnorm program infers");
+                let plain =
+                    bind_plain(&program, &shapes, &[scaled]).expect("unfused rmsnorm binds");
+                let fused = bind(&program, &shapes, &[scaled]).expect("fused rmsnorm binds");
+
+                let fused_epilogue_count = fused
+                    .iter()
+                    .filter(|bound| has_real_epilogue(&bound.kind))
+                    .count();
+                assert_eq!(
+                    fused_epilogue_count, 1,
+                    "seq={seq}: RMSNorm's whole tail must collapse into ONE epilogued reduce, got {fused:?}"
+                );
+                assert_eq!(
+                    fused.len(),
+                    plain.len() - 1,
+                    "seq={seq}: RMSNorm's TWO-round fusion (mean/eps/sqrt/reciprocal into the \
+                     fold, then x * inv_rms's own broadcast-reduce epilogue on top) must land in ONE \
+                     BoundOp fewer than the already chain-fused plain program, plain={} fused={:?}",
+                    plain.len(),
+                    fused
+                );
+
+                let mut lcg = Lcg(seq as u64 * 97 + 3);
+                let x_data: Vec<f32> = (0..(seq as u64 * DIM as u64) as usize).map(|_| lcg.next_unit()).collect();
+                let gamma_data: Vec<f32> = (0..DIM as usize).map(|_| lcg.next_unit()).collect();
+                let inputs = alloc::vec![
+                    (x, x_data),
+                    (NodeId(1), gamma_data),
+                    (NodeId(2), alloc::vec![1.0f32 / DIM as f32]),
+                    (NodeId(3), alloc::vec![1e-5f32]),
+                ];
+
+                let plain_buffers = run_resolved(program.len(), &plain, inputs.clone());
+                let fused_buffers = run_resolved(program.len(), &fused, inputs);
+
+                let plain_output = plain_buffers[scaled.0 as usize]
+                    .as_ref()
+                    .expect("unfused rmsnorm output present");
+                let fused_output = fused_buffers[scaled.0 as usize]
+                    .as_ref()
+                    .expect("fused rmsnorm output present");
+                assert_eq!(
+                    fused_output, plain_output,
+                    "seq={seq}: broadcast-reduce epilogue must be bit-identical to the unfused chain"
+                );
+            }
+        }
+
+        /// `SiLU(gate) * up`, SwiGLU's own tail, shape-reduced to the
+        /// algebra that actually matters: TWO independent `[K, N] -> [N]`
+        /// folds (`gate`/`up`, the exact `reduce_then_residual_add_program`
+        /// shape above, each its own weight input) feed ONE consumer, each
+        /// read at plain identity (neither re-broadcasts) — the SAME class
+        /// of fix as RMSNorm's first round, per this module's own
+        /// `reduce_epilogue_fusion` doc, needing no `epilogue_broadcast_axes`
+        /// at all. Proves the resolved-op candidate match (not a name or
+        /// shape special case) is what fuses it: nothing here names
+        /// `gate`/`up`/`silu`, only the algebraic shape
+        /// [`find_epilogue_source`] and [`epilogue_broadcast_axes_for`]
+        /// already match.
+        #[test]
+        fn silu_gate_times_up_fuses_both_reduces_bit_for_bit() {
+            const K: u32 = 4;
+            const N: u32 = 5;
+            let mut program = Vec::new();
+            let identity_2d = || IndexMap::Affine(map::projection(2, &[0, 1]));
+            let keep_last = || IndexMap::Affine(map::projection(2, &[1]));
+            let identity_1d = || IndexMap::Affine(map::projection(1, &[0]));
+
+            let fold = |program: &mut Vec<Op>, weight: NodeId| {
+                append(
+                    program,
+                    Op::Reduce(Reduce {
+                        dtype: DType::Float32,
+                        body: ScalarOp::Add,
+                        init: ReduceInit::Zero,
+                        operand: weight,
+                        in_map: identity_2d(),
+                        out_map: keep_last(),
+                        keep: Keep::Reduce,
+                        name: None,
+                    }),
+                )
+            };
+
+            let gate_weight = append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(K), Extent::Static(N)],
+                    name: None,
+                },
+            );
+            let gate = fold(&mut program, gate_weight);
+            let up_weight = append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(K), Extent::Static(N)],
+                    name: None,
+                },
+            );
+            let up = fold(&mut program, up_weight);
+            let silu_gate = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Tanh,
+                    operands: alloc::vec![(gate, identity_1d())],
+                    name: None,
+                },
+            );
+            let output = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![(silu_gate, identity_1d()), (up, identity_1d())],
+                    name: None,
+                },
+            );
+
+            let shapes = shape::infer(&program, &[]).expect("silu*up program infers");
+            let plain = bind_plain(&program, &shapes, &[output]).expect("unfused silu*up binds");
+            let fused = bind(&program, &shapes, &[output]).expect("fused silu*up binds");
+
+            // One of the two reduces (whichever `find_epilogue_source` picks
+            // first) absorbs the WHOLE `Tanh(gate) * up` tail into its own
+            // epilogue, reading the OTHER reduce's still-materialized output
+            // as a plain (non-broadcast) epilogue operand — the exact
+            // "bias, residual, gate" shape `BoundOpKind::Reduce::epilogue_
+            // body`'s own doc names for an "OTHER" operand. Only ONE
+            // standalone reduce disappears; the other legitimately survives,
+            // exactly as `a_reduce_with_two_consumers_does_not_fuse` already
+            // proves for the "second reader elsewhere" case, and this test's
+            // own comment names for "second reader is a fused epilogue".
+            assert_eq!(
+                fused.len(),
+                plain.len() - 1,
+                "the fused tail must land in ONE BoundOp fewer than the plain program, \
+                 plain={} fused={:?}",
+                plain.len(),
+                fused
+            );
+            assert!(
+                fused.iter().any(|bound| has_real_epilogue(&bound.kind)),
+                "one of the two reduces must carry the fused Tanh(gate) * up epilogue, got {fused:?}"
+            );
+
+            let mut lcg = Lcg(11);
+            let inputs = alloc::vec![
+                (
+                    gate_weight,
+                    (0..(K as u64 * N as u64) as usize)
+                        .map(|_| lcg.next_unit())
+                        .collect::<Vec<_>>()
+                ),
+                (
+                    up_weight,
+                    (0..(K as u64 * N as u64) as usize)
+                        .map(|_| lcg.next_unit())
+                        .collect::<Vec<_>>()
+                ),
+            ];
+            let plain_buffers = run_resolved(program.len(), &plain, inputs.clone());
+            let fused_buffers = run_resolved(program.len(), &fused, inputs);
+            assert_eq!(
+                fused_buffers[output.0 as usize],
+                plain_buffers[output.0 as usize],
+                "SiLU(gate) * up must be bit-identical fused vs unfused"
+            );
         }
     }
 }

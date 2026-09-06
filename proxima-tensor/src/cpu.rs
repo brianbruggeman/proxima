@@ -4969,6 +4969,7 @@ fn apply_reduce_epilogue<B: Deref<Target = [f32]>>(
         out_layout,
         epilogue_body,
         epilogue_operands,
+        epilogue_broadcast_axes,
         ..
     } = &resolved.kind
     else {
@@ -4990,6 +4991,43 @@ fn apply_reduce_epilogue<B: Deref<Target = [f32]>>(
         })
         .collect::<Result<_, _>>()?;
 
+    if epilogue_broadcast_axes.is_empty() {
+        apply_plain_reduce_epilogue(
+            resolved,
+            output_axes,
+            out_layout,
+            epilogue_body,
+            epilogue_operands,
+            &operand_buffers,
+            output,
+        );
+    } else {
+        apply_broadcast_reduce_epilogue(
+            resolved,
+            output_axes,
+            out_layout,
+            epilogue_body,
+            epilogue_operands,
+            &operand_buffers,
+            output,
+        );
+    }
+    Ok(())
+}
+
+/// The pre-existing, shape-preserving epilogue: walks
+/// [`BoundOpKind::Reduce::output_axes`]'s own (smaller) iteration space,
+/// reading and writing the SAME `output` slot the fold itself wrote —
+/// unchanged from before `epilogue_broadcast_axes` existed.
+fn apply_plain_reduce_epilogue(
+    resolved: &BoundOp,
+    output_axes: &[u16],
+    out_layout: &bind::Layout,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, bind::Layout, Option<bind::Lookup>)],
+    operand_buffers: &[&[f32]],
+    output: &mut [f32],
+) {
     let extents_local: Vec<u64> = output_axes
         .iter()
         .map(|&axis| resolved.extents[axis as usize])
@@ -5012,7 +5050,55 @@ fn apply_reduce_epilogue<B: Deref<Target = [f32]>>(
         operand_values[epilogue_operands.len()] = output[offset];
         output[offset] = apply_body(epilogue_body, &operand_values, &mut step_values);
     }
-    Ok(())
+}
+
+/// The "broadcast-reduce" epilogue (`epilogue_broadcast_axes`'s own doc): the
+/// fold's own scalar result — materialized by `run_reduce`/`run_scan` into
+/// exactly the first `fold_len` slots of `output`, per `out_layout`'s own
+/// (smaller) addressing — is copied into `fold_scratch` FIRST, since the
+/// write loop below overwrites `output` in place at a DIFFERENT (larger)
+/// stride and would otherwise clobber a not-yet-read fold value out from
+/// under a later coordinate sharing its physical slot. After the copy, this
+/// walks the CONSUMER's own full `resolved.extents` space (RMSNorm's own
+/// `[s, d]`, not the fold's smaller `[s]`), re-reading the fold's value at
+/// each position via `out_layout` projected onto `output_axes` alone — a
+/// genuine broadcast over every `epilogue_broadcast_axes` entry, since that
+/// projection ignores them entirely.
+fn apply_broadcast_reduce_epilogue(
+    resolved: &BoundOp,
+    output_axes: &[u16],
+    out_layout: &bind::Layout,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, bind::Layout, Option<bind::Lookup>)],
+    operand_buffers: &[&[f32]],
+    output: &mut [f32],
+) {
+    let fold_extents: Vec<u64> = output_axes
+        .iter()
+        .map(|&axis| resolved.extents[axis as usize])
+        .collect();
+    let fold_len = odometer_len(&fold_extents) as usize;
+    let fold_scratch: Vec<f32> = output[..fold_len].to_vec();
+
+    let mut full_coordinate = vec![0u64; resolved.extents.len()];
+    let mut operand_values = vec![0.0f32; epilogue_operands.len() + 1];
+    let mut step_values = vec![0.0f32; epilogue_body.steps.len()];
+
+    for flat in 0..odometer_len(&resolved.extents) {
+        unflatten_into(flat, &resolved.extents, &mut full_coordinate);
+        // `out_layout` is full rank (`resolved.extents.len()`, per its own
+        // doc) with stride `0` on every axis NOT in `output_axes` — the
+        // fold's own broadcast addressing — so reading it at the FULL
+        // coordinate lands on the same compact `[0, fold_len)` range
+        // `run_reduce`/`run_scan` themselves wrote, regardless of this
+        // position's value on a broadcast axis.
+        let fold_offset = out_layout.offset_of(&full_coordinate) as usize;
+        for (slot, (_, layout, _)) in epilogue_operands.iter().enumerate() {
+            operand_values[slot] = operand_buffers[slot][layout.offset_of(&full_coordinate) as usize];
+        }
+        operand_values[epilogue_operands.len()] = fold_scratch[fold_offset];
+        output[flat as usize] = apply_body(epilogue_body, &operand_values, &mut step_values);
+    }
 }
 
 /// The untouched default an executor must treat as "no epilogue": a leaf
@@ -5224,6 +5310,19 @@ fn node_output_len(resolved: &BoundOp) -> usize {
                 .product();
             non_scattered_product as usize * target.extent as usize
         }
+        // A non-empty `epilogue_broadcast_axes` (the "broadcast-reduce"
+        // epilogue shape — see `bind::BoundOpKind::Reduce::epilogue_
+        // broadcast_axes`'s own doc) re-broadcasts the fold's scalar back
+        // over an axis the fold itself reduced away, so the MATERIALIZED
+        // output this op writes is the full `extents` product, not just the
+        // fold's own smaller `output_axes` shape — `apply_reduce_epilogue`
+        // walks that same full space.
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            out_scatter: None,
+            epilogue_broadcast_axes,
+            ..
+        } if !epilogue_broadcast_axes.is_empty() => element_count(&resolved.extents),
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
             output_axes,
@@ -19661,6 +19760,7 @@ mod tests {
                     steps: alloc::vec![step(ScalarOp::Identity, &[StepArg::Operand(0)])],
                 },
                 epilogue_operands: Vec::new(),
+                epilogue_broadcast_axes: smallvec::smallvec![],
             },
         };
 
