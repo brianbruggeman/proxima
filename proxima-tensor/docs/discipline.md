@@ -24659,3 +24659,45 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `test(omega): whole-token matvec sequence as bare serial dispatches` + this row | New whole-token bare-dispatch test: 225 dispatches/token encoded into ONE plain serial `computeCommandEncoder()` (llama's own encoding), zero of production's own machinery (no hazard tracker, no barrier, no plan cache, no uniform arena) | Arm A (production default kernel) 23.153 ms/token, essentially equal to ROW 308's 22.64 ms in-program matvec cost -- the 9 ms gap to llama's 17.5 ms is NOT structural, it survives with no structure present; Arm B (nsg=4, fast) 16.949 ms/token, 27.8% faster than Arm A and under llama's own total | 1 full run, 7 timed tokens/arm, CoV 0.17-0.19% | quiet gate (`pgrep -l` process-name list) EMPTY, load-1 6.70, confirmed before any build or measurement |
+
+## ROW 340 -- whole decode token, the ACTUAL production cell (nsg=2/relaxed), correcting ROW 339's mislabeled Arm A
+
+**Card:** `docs(tensor): row 340 production-cell whole-token bare dispatches` + `test(omega): row-340 nsg2 arms for whole-token bare dispatch` (off `main` at `2985e53`). **Worktree/branch:** `proxima-wt-r340`, `docs/row-340-production-cell`.
+
+**Defect being corrected.** ROW 339's Arm A was labeled "production's default kernel" but was compiled at `nsg=1`/`MTLMathMode::Safe` -- that is the L3 shape sweep's OWN default arm (`omega/tests/matvec_roofline_ladder.rs:1610-1612`), not production's compiled default. Production's actual default cell is `nsg=2`/`MTLMathMode::Relaxed` (ROW 297/311). ROW 339 therefore compared llama's encoding against the SAFE regime (23.15 ms) and a swept cell (nsg=4/fast, 16.95 ms), and concluded "the 9 ms gap is the kernel" without ever timing the cell production actually ships. ROW 338 measured nsg=2/relaxed within ~2% of nsg=4/fast on the `ffn_up` shape alone (236 vs 240 GB/s) -- close enough that ROW 339's conclusion could flip once the real production cell is timed at whole-token scale.
+
+**Test edge, this row.** Extended `WHOLE_TOKEN_ARMS` (`omega/tests/matvec_roofline_ladder.rs`) from 2 to 4 entries -- no new dispatch/encode/measurement machinery, `whole_token_matvec_sequence_bare`'s own arm loop (`omega/tests/matvec_roofline_ladder.rs:3220-3293`) already iterates the array, so adding the array entries is the whole edit. Arm C = `nsg=2`, `MTLMathMode::Relaxed` -- the actual production cell. Arm D = `nsg=2`, `MTLMathMode::Fast` -- holds `nsg` fixed at the production value and swaps only math mode, isolating math from `nsg` on top of C.
+
+**Quiet gate.** `pgrep -l 'proxima_model_i|llama-bench|oracle-|gpu_load_genera|matvec_roofline|^cargo$|^rustc$|nextest|cargo-nextest'` EMPTY, load-1 4.75 at first check; re-verified EMPTY with load-1 7.33 immediately before the timed run (load had transiently risen to 14.45 from this row's own `--release` build finishing, confirmed no matching process was running, then settled before the measurement started).
+
+**Data -- one quiet run, all four arms, 7 timed tokens each (1 untimed warm-up token dropped), 225 dispatches/token, 4,033,388,544 bytes/token:**
+
+| arm | dispatch geometry | median ms/token | min-max ms | CoV % | median GB/s |
+| --- | --- | --- | --- | --- | --- |
+| A (llama's encoding, L3-sweep default, mislabeled "production" in ROW 339) | nsg=1, `MTLMathMode::Safe`, `dispatchThreads` | 23.168 | 23.147-23.222 | 0.10 | 174.10 |
+| B (llama's encoding, ROW 337/338's swept best cell) | nsg=4, `MTLMathMode::Fast`, `dispatchThreads` | 16.963 | 16.907-16.984 | 0.15 | 237.78 |
+| C (llama's encoding, ACTUAL production cell) | nsg=2, `MTLMathMode::Relaxed`, `dispatchThreads` | 17.283 | 17.264-17.318 | 0.10 | 233.38 |
+| D (llama's encoding, production nsg held, math swapped) | nsg=2, `MTLMathMode::Fast`, `dispatchThreads` | 17.247 | 17.218-17.314 | 0.18 | 233.86 |
+
+**The sentence the numbers settle.** Arm C measures 17.283 ms/token, 233.38 GB/s -- 1.9% off llama.cpp's own 17.45 ms total and within 1.9% of Arm B's swept cell, NOT within reach of Arm A's 23.168 ms. **ROW 339's conclusion is RETRACTED for the cell production actually ships:** at nsg=2/relaxed, the bare production kernels already match llama.cpp at whole-token scale, so the 9 ms gap ROW 339 attributed to "the kernel" is program STRUCTURE (production's own machinery -- hazard tracker, memory barriers, plan cache, uniform arena, concurrent encoder -- sitting between these already-fast kernels and the 22.64 ms in-program cost ROW 308 measured), not a property of the compiled kernel itself. Arm D (17.247 ms) confirms math mode alone is not the lever at `nsg=2` -- swapping Relaxed for Fast moves the number by 0.2%, inside this row's own CoV -- so `nsg` is the axis that separates ROW 339's mislabeled Arm A (nsg=1, 23.168 ms) from every nsg>=2 cell (B/C/D, 16.96-17.28 ms), consistent with ROW 338's own nsg-not-math finding on the single-shape `ffn_up` cell.
+
+**Residual, named not hidden.** Same residuals as ROW 339: synthesized weights, not the real checkpoint's 4-of-32 `Q5_K` layers; output never read back, no whole-token parity claim (per-shape parity lives in ROW 336/337/338). This row does not re-run production's own in-program path with production's machinery restored at nsg=2/relaxed -- confirming the 22.64 ms in-program figure specifically at this cell (rather than assuming ROW 308's number, which was measured at whatever cell was default when ROW 308 ran) is unmeasured here and would close the loop fully.
+
+**Gates.** `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test -p omega --release --features metal --test matvec_roofline_ladder -- --ignored --exact whole_token_matvec_sequence_bare --nocapture`: EXIT 0, `test result: ok. 1 passed`.
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-row340-repro -b docs/row-340-repro main
+cd ../proxima-wt-row340-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --release --test matvec_roofline_ladder --features metal \
+  -- --ignored --exact whole_token_matvec_sequence_bare --nocapture
+```
+(expected: ~1m30s release build + ~1 minute run on a host comparable to this row's M1 Max -- 4 arms x 8 command buffers (1 warm-up + 7 timed) each.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | `test(omega): row-340 nsg2 arms for whole-token bare dispatch` + this row | Added Arm C (nsg=2/relaxed, the actual production cell ROW 339 never timed) and Arm D (nsg=2/fast) to `WHOLE_TOKEN_ARMS`, no new dispatch machinery | Arm C 17.283 ms/token (233.38 GB/s), 1.9% off llama.cpp's 17.45 ms and within 1.9% of Arm B's swept cell -- retracts ROW 339's "9 ms is the kernel" for the cell production ships; the 9 ms gap is program structure at nsg>=2, and Arm A's nsg=1 was never production's default | 1 full run, 7 timed tokens/arm, CoV 0.10-0.18% | quiet gate (`pgrep -l` process-name list) EMPTY, load-1 4.75 pre-build / 7.33 pre-run, re-verified after the release build's own transient load spike settled |
