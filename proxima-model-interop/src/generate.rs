@@ -988,12 +988,25 @@ fn qwen35_ssm_shape(architecture: &crate::qwen35::Qwen35Architecture) -> Qwen35S
 pub(crate) enum LogitsSink<'sink> {
     Discard,
     Collect(&'sink mut Vec<Vec<f32>>),
+    /// `real_openchat_file::decode_text_is_deterministic_across_repeated_runs`'s
+    /// own sink: test-only, so it stays `#[cfg(test)]` rather than dead code
+    /// in the non-test lib build.
+    #[cfg(test)]
+    SumBarriers(&'sink mut u64),
 }
 
 impl LogitsSink<'_> {
-    fn observe(&mut self, logits: &[f32]) {
-        if let Self::Collect(buffer) = self {
-            buffer.push(logits.to_vec());
+    /// `barriers_step` is this step's own `MetalStageTotals::barriers_emitted`
+    /// (already read once, snapshot-and-reset, by the caller's `metal_stage`
+    /// local) -- callers outside `feature = "instrument", feature = "metal",
+    /// target_os = "macos"` pass `0`, matching every run where the counter
+    /// itself never exists.
+    fn observe(&mut self, logits: &[f32], _barriers_step: u64) {
+        match self {
+            Self::Discard => {}
+            Self::Collect(buffer) => buffer.push(logits.to_vec()),
+            #[cfg(test)]
+            Self::SumBarriers(total) => **total += _barriers_step,
         }
     }
 }
@@ -2283,7 +2296,11 @@ impl<'file> LoadedModel<'file> {
                             node: self.logits_root,
                         })?;
                 let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
-                logits_sink.observe(last_position);
+                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                let barriers_step = metal_stage.barriers_emitted;
+                #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
+                let barriers_step = 0_u64;
+                logits_sink.observe(last_position, barriers_step);
 
                 #[cfg(feature = "instrument")]
                 let greedy_pick_started = read_ticks();
@@ -2770,7 +2787,11 @@ impl<'file> LoadedModel<'file> {
                     },
                 )?;
                 let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
-                logits_sink.observe(last_position);
+                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                let barriers_step = metal_stage.barriers_emitted;
+                #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
+                let barriers_step = 0_u64;
+                logits_sink.observe(last_position, barriers_step);
 
                 #[cfg(feature = "instrument")]
                 let greedy_pick_started = read_ticks();
