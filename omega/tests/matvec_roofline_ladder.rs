@@ -468,7 +468,24 @@ const ROW_319_IN_PROGRAM_GBPS: f64 = 45.0;
 
 const REPEATS: usize = 5;
 const PARITY_ROWS: usize = 64;
-const PARITY_MAX_ABS_ERROR: f32 = 1e-4;
+
+/// Parity is measured relative to the batch's own peak reference magnitude,
+/// never as a fixed absolute bound -- a per-row-relative check explodes near
+/// zero crossings, and a fixed absolute check breaks the other way once
+/// output magnitude climbs (workspace rule: normalize by the BATCH PEAK).
+/// ROW 321/322 hit exactly that failure mode: the Q6_K head arm's reference
+/// output peaks near 17379 (a 4096-term dot product), its `max_abs_error`
+/// (0.029) is `2e-6` relative to that peak -- below float32's own
+/// representable ULP at that magnitude (`17379 * 1.19e-7 ~= 0.002`) -- yet
+/// the old fixed `1e-4` absolute gate panicked on it regardless, aborting
+/// the test before the `layer` arm ever ran. `1e-5` is the tightest
+/// power-of-ten bound above every arm's own measured relative error in this
+/// file: the Q4_K arms (`L3_baseline`/`L3_shape` vs `cpu_reference`) measure
+/// `max_abs_error=1.9073486e-6` against a real-checkpoint reference peak of
+/// `1.5504022` -- `1.23e-6` relative -- and the Q6_K head arm measures
+/// `1.69e-6` relative (`0.029296875 / 17379.0879`); both sit an order of
+/// magnitude below this bound.
+const PARITY_MAX_REL_ERROR: f32 = 1e-5;
 
 // ---- L0: pure streaming, production's addressing, no dequant ----
 
@@ -1150,18 +1167,31 @@ fn cpu_reference_first_rows(weight_bytes: &[u8], activation: &[f32]) -> Vec<f32>
     reference
 }
 
-fn assert_parity(label: &str, actual: &[f32], expected: &[f32]) {
+/// Checks one arm's parity against its reference batch and reports, never
+/// panics -- so a failing arm does not stop every arm after it from
+/// dispatching and reporting its own bandwidth (module doc, [`PARITY_MAX_REL_ERROR`]).
+/// Returns `Some(failure message)` when the batch-peak-relative error exceeds
+/// [`PARITY_MAX_REL_ERROR`]; callers collect every `Some` across all their
+/// arms and fail the test once, at the end, listing all of them.
+fn check_parity(label: &str, actual: &[f32], expected: &[f32]) -> Option<String> {
     assert_eq!(actual.len(), expected.len(), "{label}: degenerate gate, row counts differ");
     let mut max_abs_error = 0.0f32;
+    let mut batch_peak = 0.0f32;
     for (&got, &want) in actual.iter().zip(expected.iter()) {
         assert!(got.is_finite(), "{label}: produced a non-finite value: {got}");
         max_abs_error = max_abs_error.max((got - want).abs());
+        batch_peak = batch_peak.max(want.abs());
     }
-    eprintln!("{label}: max_abs_error={max_abs_error}");
-    assert!(
-        max_abs_error <= PARITY_MAX_ABS_ERROR,
-        "{label}: max_abs_error={max_abs_error} exceeds {PARITY_MAX_ABS_ERROR}"
+    let relative_error = max_abs_error / batch_peak.max(f32::EPSILON);
+    println!(
+        "{label}: max_abs_error={max_abs_error} batch_peak_abs={batch_peak} relative_error={relative_error}"
     );
+    (relative_error > PARITY_MAX_REL_ERROR).then(|| {
+        format!(
+            "{label}: relative_error={relative_error} (max_abs_error={max_abs_error}, \
+             batch_peak_abs={batch_peak}) exceeds PARITY_MAX_REL_ERROR={PARITY_MAX_REL_ERROR}"
+        )
+    })
 }
 
 fn read_f32_buffer(buffer: &ProtocolObject<dyn MTLBuffer>, count: usize) -> Vec<f32> {
@@ -1268,6 +1298,7 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
     );
 
     let mut ladder_gbps: BTreeMap<&'static str, f64> = BTreeMap::new();
+    let mut parity_failures: Vec<String> = Vec::new();
 
     // ---- L0 ----
     let l0_pipeline = compile_pipeline(
@@ -1429,11 +1460,11 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         );
         ladder_gbps.insert("L3_baseline", mean);
     }
-    assert_parity(
+    parity_failures.extend(check_parity(
         "L3_baseline vs cpu_reference",
         &l3_baseline_layer0_up[..PARITY_ROWS],
         &cpu_reference,
-    );
+    ));
 
     // ---- L3 shape sweep: same q4k_pair_dot body, hand-dispatched, varying
     // simdgroups/threadgroup, dispatchThreads vs dispatchThreadgroups, and
@@ -1521,16 +1552,16 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
             }
         }
     }
-    assert_parity(
+    parity_failures.extend(check_parity(
         "L3_shape default arm vs cpu_reference",
         &default_shape_layer0_up[..PARITY_ROWS],
         &cpu_reference,
-    );
-    assert_parity(
+    ));
+    parity_failures.extend(check_parity(
         "L3_shape default arm vs L3_baseline",
         &default_shape_layer0_up[..PARITY_ROWS],
         &l3_baseline_layer0_up[..PARITY_ROWS],
-    );
+    ));
 
     // ---- empty: WEIGHT_TENSOR_COUNT no-op dispatches, one command buffer
     // -- the fixed per-dispatch cost every bandwidth arm above pays
@@ -1567,6 +1598,12 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         "L0={l0:.2} L1={l1:.2} L2={l2:.2} L3_shape={l3_shape:.2} L3_baseline={l3_base:.2} GB/s"
     );
     println!("L1/L0={:.3} L2/L1={:.3} L3_shape/L2={:.3}", l1 / l0, l2 / l1, l3_shape / l2);
+
+    assert!(
+        parity_failures.is_empty(),
+        "parity failed for {} arm(s): {parity_failures:#?}",
+        parity_failures.len()
+    );
 }
 
 /// Synthesizes `tensor_count` distinct `Q6_K`-encoded tensors, each
@@ -1623,8 +1660,11 @@ fn q6k_cpu_reference_first_rows(first_tensor_bytes: &[u8], row_bytes: usize, k: 
 /// hand-assembled here -- and reports GB/s plus CoV over [`REPEATS`], with
 /// ratios to ROW 319's in-program 45 GB/s and to the 381.24 GB/s device
 /// ceiling (ROW 296), so an in-isolation vs in-program gap reads directly
-/// off this arm's own printed line.
-fn run_q6k_shape_arm(label: &str, rows: usize, tensor_count: usize, seed_base: u64) {
+/// off this arm's own printed line. Reports its parity failure, if any, as a
+/// return value rather than panicking, so the caller can run every shape arm
+/// and fail once at the end listing all of them ([`check_parity`]'s own doc).
+#[must_use]
+fn run_q6k_shape_arm(label: &str, rows: usize, tensor_count: usize, seed_base: u64) -> Option<String> {
     let row_bytes = Q6K_ROW_BYTES;
     let tensor_bytes = (rows * row_bytes) as u64;
     let total_timed_bytes = tensor_bytes * tensor_count as u64;
@@ -1677,24 +1717,11 @@ fn run_q6k_shape_arm(label: &str, rows: usize, tensor_count: usize, seed_base: u
         mean / ROW_319_IN_PROGRAM_GBPS,
         mean / DEVICE_CEILING_GBPS,
     );
-    // ROW 322: the shared PARITY_MAX_ABS_ERROR (1e-4) is an absolute bound --
-    // this print makes the batch's own output magnitude visible so an
-    // absolute-vs-relative read is a fact, not a guess.
-    let batch_peak = cpu_reference.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
-    let max_abs_error = first_tensor_output[..PARITY_ROWS]
-        .iter()
-        .zip(cpu_reference.iter())
-        .fold(0.0f32, |max_error, (got, want)| max_error.max((got - want).abs()));
-    println!(
-        "Q6K_{label} batch_peak_abs={batch_peak:.4} max_abs_error={max_abs_error:.4} \
-         relative_to_peak={:.6}",
-        max_abs_error / batch_peak.max(f32::EPSILON),
-    );
-    assert_parity(
+    check_parity(
         &format!("Q6K_{label} vs cpu_reference"),
         &first_tensor_output[..PARITY_ROWS],
         &cpu_reference,
-    );
+    )
 }
 
 /// Isolates the output head's `Q6_K` shape (rows=32000, k=4096) from any
@@ -1712,6 +1739,17 @@ fn run_q6k_shape_arm(label: &str, rows: usize, tensor_count: usize, seed_base: u
 #[test]
 #[ignore = "synthesizes ~2 GB of q6_k bytes per arm through the real encoder and needs a real metal device"]
 fn q6k_head_and_layer_shape_roofline_ladder() {
-    run_q6k_shape_arm("head", Q6K_HEAD_ROWS, Q6K_HEAD_TENSOR_COUNT, 4096);
-    run_q6k_shape_arm("layer", Q6K_LAYER_ROWS, Q6K_LAYER_TENSOR_COUNT, 8192);
+    let parity_failures: Vec<String> = [
+        run_q6k_shape_arm("head", Q6K_HEAD_ROWS, Q6K_HEAD_TENSOR_COUNT, 4096),
+        run_q6k_shape_arm("layer", Q6K_LAYER_ROWS, Q6K_LAYER_TENSOR_COUNT, 8192),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    assert!(
+        parity_failures.is_empty(),
+        "parity failed for {} arm(s): {parity_failures:#?}",
+        parity_failures.len()
+    );
 }
