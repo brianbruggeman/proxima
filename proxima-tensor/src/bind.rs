@@ -907,7 +907,7 @@ impl BoundOpBuilder {
                 }
 
                 let (element_body, operands) = if fuses {
-                    let reduce_extent: u64 = shape::fold_iteration_extents(reduce, shapes)
+                    let reduce_extent: u64 = shape::fold_iteration_extents(node, reduce, shapes)?
                         .iter()
                         .product();
                     self.quarantine_broadcast_operands(
@@ -942,7 +942,7 @@ impl BoundOpBuilder {
                 push_ready(
                     &mut emitted,
                     node,
-                    build_reduce_op(node, reduce, shapes, element_body, operands),
+                    build_reduce_op(node, reduce, shapes, element_body, operands)?,
                 )?;
             }
         }
@@ -1174,7 +1174,7 @@ fn build_reduce_op(
     shapes: &Shapes,
     element_body: ComposedBody,
     operands: BoundOperands,
-) -> BoundOp {
+) -> Result<BoundOp, TensorError> {
     let out_pattern = reduce.out_map.affine();
     let output_axes = pure_projection_axes(out_pattern);
     let (out_layout, out_scatter) = match &reduce.out_map {
@@ -1199,10 +1199,10 @@ fn build_reduce_op(
             (out_layout, Some(lookup))
         }
     };
-    BoundOp {
+    Ok(BoundOp {
         node,
         dtype: reduce.dtype,
-        extents: shape::fold_iteration_extents(reduce, shapes),
+        extents: shape::fold_iteration_extents(node, reduce, shapes)?,
         kind: BoundOpKind::Reduce {
             element_body,
             reduce_op: reduce.body,
@@ -1219,7 +1219,7 @@ fn build_reduce_op(
             epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
             epilogue_operands: Vec::new(),
         },
-    }
+    })
 }
 
 /// [`layout_of`]'s counterpart for a scatter `out_map`'s `base` pattern:

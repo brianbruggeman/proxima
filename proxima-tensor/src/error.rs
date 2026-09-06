@@ -252,4 +252,14 @@ pub enum TensorError {
         minimum: NumericPolicy,
         granted: NumericPolicy,
     },
+
+    /// [`crate::shape::fold_iteration_extents`] re-derives a [`crate::op::Reduce`]'s
+    /// iteration extents from its already-resolved operand shape and does not
+    /// thread the symbol table needed to resolve a [`crate::map::AxisIndex::len`]
+    /// override — see that function's own doc. A `len`-marked axis on a
+    /// reduce's `in_map` is rejected here rather than silently read from the
+    /// operand's on-disk width, which would be wrong whenever `len` differs
+    /// from it (the exact prefix-read case `len` exists for).
+    #[error("node {node} reduce iteration dim {dim} declares a len override, which reduce folding does not consult")]
+    ReduceLenAxisUnsupported { node: NodeId, dim: u16 },
 }
