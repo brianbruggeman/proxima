@@ -2959,11 +2959,17 @@ fn msl_literal(value: f32) -> String {
 /// `(query_row, kv_head, group)` triple's key range across -- llama.cpp's
 /// `kernel_flash_attn_ext_vec` (ggml-metal.metal:4016-4017) partitions the
 /// context across `nsg` simdgroups with a stride of `C*nsg`; this ports the
-/// same stride partition to a `C=1` per-key loop. `context_length` is the
-/// bind-time `cached_key_rows + new_key_rows` (the same static fields the
-/// kernel body already bakes as `constexpr`), so this is a build-time-
-/// configurable but bind-time-deterministic function of shape alone --
-/// never a runtime read. See `omega-runtime.toml`'s
+/// same stride partition to a `C=1` per-key loop. This is CHUNK SIZING, a
+/// compile-time partitioning decision, and it stays bound to the compiled
+/// range extent `cached_key_rows + new_key_rows` (the same static fields the
+/// kernel body bakes as `constexpr`) -- a build-time-configurable but
+/// bind-time-deterministic function of shape alone, never a runtime read.
+/// This is a SEPARATE decision from the per-simdgroup stride LOOP's own
+/// upper bound (`render_cached_attention`'s `last_key`), which as of the
+/// merged-KV fix reads the live runtime prefix when one is carried (the
+/// ninth operand) rather than always walking the full compiled extent.
+/// Neither value is "the context length": one sizes the partition, the
+/// other bounds each partition's own walk. See `omega-runtime.toml`'s
 /// `[attention_context_chunks]` for the two knobs.
 ///
 /// A chunk count above 1 folds partial online-softmax state across
@@ -3075,16 +3081,44 @@ fn render_cached_attention(
     // `query_row` -- see this function's doc. `tid`/`group_width` below are
     // therefore derivable from the existing `group`/`lane` split without a
     // new `[[thread_position_in_threadgroup]]` kernel parameter.
+    // Two distinct decisions, both fed by the bind-time `cached_key_rows` /
+    // `new_key_rows` fields but not the same computation: CHUNK SIZING
+    // (`context_chunks`, immediately below -- how many simdgroups share this
+    // key range) versus the per-simdgroup stride LOOP's own upper bound
+    // (`last_key`, below that). A merged-KV bind that declares its empty
+    // cached half as `cached_key_rows: 0` (rather than duplicating the
+    // capacity into it) changes what this line feeds `context_chunks_for`,
+    // which can change the chunk count -- a repartitioning, not merely a
+    // loop-bound change.
     let context_chunks = context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy);
+    // The stride loop's live upper bound: every key past this point would
+    // hit the `relative > new_upper` / `relative < cached_lower` `continue`
+    // on every remaining iteration within THIS simdgroup's own assigned
+    // subset (both bands are monotone in `key`), so stopping here changes
+    // no arithmetic and no read this simdgroup would have skipped anyway --
+    // it removes iteration/address/control overhead, not any accumulate or
+    // K/V load, and the dead-band checks already preceded every load and
+    // multiply-add in the loop this replaces. This does NOT halve dispatched
+    // work: chunks stride-interleave keys across simdgroups, so a "fake"
+    // key was never confined to one simdgroup's idle range, and this bound
+    // is evaluated per simdgroup, independently of the chunk-sizing decision
+    // above. `new_key_rows` is still the compiled buffer extent (the read
+    // bound never moves); only the iteration count does.
+    let last_key_decl = if dynamic_cached_len {
+        "long last_key = cached_key_rows + min(new_key_rows - 1L, query_row + new_upper);\n"
+    } else {
+        "long last_key = cached_key_rows + new_key_rows - 1L;\n"
+    };
     if context_chunks <= 1 {
         source.push_str("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }\n");
+        source.push_str(&format!("    {last_key_decl}"));
         // Each lane reads its own K/V elements straight from device memory
         // into registers, llama.cpp's `kernel_flash_attn_ext_vec` shape
         // (ggml-metal.metal:4037-4058 for K, the V accumulate mirrors it) --
         // no `threadgroup` staging, so no barrier is needed inside the loop:
         // nothing is shared across lanes or simdgroups until `simd_sum`
         // reduces the per-lane partial dot product within this simdgroup.
-        source.push_str("    for (long key = 0; key < cached_key_rows + new_key_rows; key++) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n");
+        source.push_str("    for (long key = 0; key <= last_key; key++) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n");
         source.push_str(&format!("    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n}}\n"));
     } else {
         // `context_chunks` simdgroups per (query_row, kv_head, group) triple
@@ -3105,7 +3139,8 @@ fn render_cached_attention(
         source.push_str(&format!(
             "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long context_chunks = {context_chunks};\n    long query_index = vector_index / context_chunks;\n    long chunk = vector_index % context_chunks;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    long local_group_index = group * context_chunks + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
         ));
-        source.push_str("    for (long key = chunk; key < cached_key_rows + new_key_rows; key += context_chunks) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n");
+        source.push_str(&format!("    {last_key_decl}"));
+        source.push_str("    for (long key = chunk; key <= last_key; key += context_chunks) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n");
         // Single cross-simdgroup merge: each chunk's own (max, sum,
         // weighted) is the same online-softmax state the `chunks<=1` body
         // already computes over its own key subset; combining them is the
