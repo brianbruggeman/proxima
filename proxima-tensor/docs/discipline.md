@@ -23372,3 +23372,58 @@ Run each release binary's `bind::real_openchat_file::runs_the_cached_decode_loop
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | none landed -- `docs(tensor): row 314 q6_k head body a/b` only | B (packed-row/serial-reduce) is 1.6% SLOWER than A (pair-dot, current default), inside B's own 2.578% CoV band -- no separation, A stays as-is | 3 interleaved rounds/arm (15 datapoints/arm) after discarding a contaminated first set; CoV 0.718%/2.578% | first set contaminated by another slice's renamed oracle process outside the name-only pgrep filter (discarded); second set's quiet gate (`pgrep -fl` full-command) empty, load-1 < 12, no timestamp overlap with sibling slices |
 | 2026-09-05 | `perf(omega): ggml port q4_k body default-on after the quiet bake-off` + `docs(tensor): row 315 fixed ggml port body vs default` | fixed body (post-2969311 stride-1 activation path) beats default body's `gpu_exec_ms` in every valid round (25.0 vs 464.3 ms round 1; 24.97 vs 26.66 ms, -6.3%, round 2 re-run at matched steady state; 376.1 vs 448.8 ms round 3); `generated_text` identical across all 7 valid runs; round 2's original arm-A run (95.6% CoV, one divergent `generated_text`) was found contaminated by a real-time overlap with another slice's oracle and discarded, re-run clean; ROW 311's prior +15.04% finding was against the pre-fix body and is void | 3 interleaved rounds (round 2 re-run after contamination), 5 datapoints/arm/round; pooled CoV 65.4%/121.4% (steady-state-warmup-tail-dominated, flagged not hidden), matched-steady-state round CoV 0.6%/1.0% | quiet gate initially `pgrep -l -i 'proxima_model_i|llama-bench'` missed two other slices' renamed oracle binaries (`oracle-*`), confirmed via cross-slice log timestamp overlap and corrected to add `|oracle-`; re-run round 2 confirmed quiet under the corrected gate, load-1 3.5-3.6 |
+| 2026-09-06 | none landed -- `docs(tensor): row 316 quality and clean re-measure of the branchless decode default` only | ROW 315's default flip supplied a clean re-measure and its first quality run: default-on port (A) beats port-off (B) on every quality axis and every timing round, no contamination this time | 3 interleaved rounds, 5 datapoints/arm/round, pooled n=15/arm; pooled CoV 0.94%/0.95% (gpu_exec), 0.62%/0.62% (step_wall) -- both arms, both metrics, all under 1% | quiet gate (names-only, `|oracle-` included) empty and load-1 < 10 (down to single digits) confirmed immediately before every timed run; one round1-B gate check found load-1 24.61 (no measurement process running) and the run was held until a 20 s poll brought it to 8.47 before proceeding |
+
+## ROW 316 -- clean re-measure of the ggml-port Q4_K default (ROW 315) plus its first quality run: default-on wins on both axes
+
+**Card:** none (measurement only, no card). **Worktree/branch:** `proxima-wt-r316`, `docs/row-316`, off `main` at `7f5d467` (ROW 315's flip already landed there).
+
+**Task.** ROW 315 flipped `metal-q4k-ggml-port` default-on off one clean paired round (D 24.97 vs A 26.66 ms gpu_exec, -6.3%) plus two contaminated/steady-state-lagged rounds, and shipped with no quality run at all. This row supplies both: a clean 3-round interleaved re-measure with no contamination this time, and the first `real_openchat_file` quality comparison of the new default against the port held off.
+
+**Arms.** A = current default (`metal,instrument`, port on, matches main's shipped shape). B = port held off (same features, `metal-q4k-ggml-port` temporarily dropped from both `omega/Cargo.toml`'s and `proxima-model-interop/Cargo.toml`'s `metal = [...]` lists, reverted via `git stash`/`git stash drop` after the OFF binary was copied out -- worktree returned to the tracked default). Same two release test binaries copied to `r316-logs/oracle-A` and `r316-logs/oracle-B` per this row's own protocol (added to the quiet-gate pattern up front this time).
+
+**Quality** (`PROXIMA_QUALITY_PROMPTS=8 PROXIMA_MAX_TOKENS=8 PROXIMA_MATH_MODE=relaxed`, release, `--features metal,instrument`, real openchat-3.5-1210.Q4_K_S.gguf, `quality::real_openchat_file::metal_vs_cpu_reports_real_drift`, quiet gate empty before each run):
+
+| arm | exact_match | top1 | kl_mean | kl_max | max_abs_logit_delta |
+| --- | --- | --- | --- | --- | --- |
+| ROW 304 baseline (Relaxed) | 0.906250 | 0.968750 | 0.002110 | 0.032024 | 1.474228 |
+| A -- port ON (current default) | 0.906250 | 0.984375 | 0.001852 | 0.024258 | 1.190912 |
+| B -- port OFF | 0.906250 | 0.968750 | 0.002422 | 0.031307 | 2.398836 |
+
+`exact_match` is identical across all three (both arms diverge from CPU reference on the same single prompt, `math-02`, at the same step, same as ROW 304). A beats B and beats the ROW 304 baseline on every other column: higher `top1`, lower `kl_mean`, lower `kl_max`, and a `max_abs_logit_delta` roughly half of B's. The branchless decode is not a quality regression against either the port-off arm or the pre-315 baseline -- if anything, on this 8x8 sample it reads slightly cleaner, plausibly because the ggml-ported scale decode removes an accumulated rounding path the branchy default body carries, though a single 8x8 sample is not enough to call that a proven mechanism (residual, named not hidden).
+
+**Timing** (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, release test binaries built `--no-run` with `metal,instrument`, `PROXIMA_MAX_TOKENS` unset (24 tokens), invoked directly, `--test-threads=1`; 3 rounds interleaved A,B,A,B,A,B; quiet gate -- names-only `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest|oracle-'`, load-1 < 10, rechecked every 20 s -- empty immediately before every run; `gpu_exec_ms`/`step_wall_ms` over steps 3..7, 5 datapoints/arm/round):
+
+| round | arm | gpu_exec mean (ms) | gpu CoV | step_wall mean (ms) | wall CoV | generated_text |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | A | 24.8833 | 0.18% | 25.8867 | 0.15% | "Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```" |
+| 1 | B | 26.5010 | 0.47% | 27.5011 | 0.50% | same |
+| 2 | A | 25.3355 | 0.27% | 26.1312 | 0.25% | same |
+| 2 | B | 26.9798 | 0.23% | 27.7712 | 0.17% | same |
+| 3 | A | 24.8487 | 0.41% | 25.7749 | 0.28% | same |
+| 3 | B | 27.0324 | 0.28% | 27.8363 | 0.24% | same |
+
+`generated_text` is byte-identical across all 6 runs. A beats B's `gpu_exec_ms` mean in every round (-6.10%, -6.09%, -8.08%) and every round's per-arm CoV is under 0.5% -- no steady-state lag and no cross-slice contamination this time (unlike ROW 315's round 1/round 3, and unlike ROW 315's original round 2 before its re-run). Pooled over all 3 rounds (15 datapoints/arm): A `gpu_exec_ms` mean 25.0225 ms (CoV 0.94%), B mean 26.8378 ms (CoV 0.95%) -- A beats B by 6.77% pooled, consistent with every individual round. `step_wall_ms` pooled: A 25.9309 ms (CoV 0.62%), B 27.7029 ms (CoV 0.62%) -- A beats B by 6.40% pooled.
+
+**Same-session denominator** (`llama-bench -m <openchat Q4_K_S> -p 0 -n 32 -r 5 -b 2048 -ub 512 -t 8 -o md`, quiet gate empty, load-1 3.81 immediately before): 57.20 +/- 0.58 t/s = 17.4825 ms/token. Ratio to llama in the same session: A `step_wall_ms` 25.9309 / 17.4825 = **1.483x llama**; B 27.7029 / 17.4825 = 1.585x llama. Per LLAMA-IS-NOT-THE-FLOOR, this ratio is a denominator for this session's comparison, not a floor claim -- no device-ceiling/bytes-per-token derivation was run this row.
+
+**Decision (owner's rule: text identical AND wall not worse beyond CoV, plus this row's quality gate: new default not worse than port-off beyond ROW 304's own spread).** Quality: A does not regress against B or against ROW 304 on any column -- it is strictly better on `top1`/`kl_mean`/`kl_max`/`max_abs_logit_delta` and tied on `exact_match`. Timing: A beats B in every one of 3 clean interleaved rounds, all CoV under 1%, no contamination. **Nothing changes.** `metal-q4k-ggml-port` stays default-on exactly as ROW 315 left it; this row is a clean re-measure plus the missing quality run, not a flip.
+
+**Residual, named not hidden.** (1) The quality sample is 8 prompts x 8 tokens, the same size ROW 304 used -- a single divergent prompt (`math-02`) dominates every aggregate metric's spread in both arms, so "A reads cleaner than B" is a measured result at this sample size, not a proven general property of the branchless decode; a larger prompt set would tighten the claim. (2) `step_wall_ms` includes CPU-side per-step overhead beyond `gpu_exec_ms` (position-input build, greedy pick, KV bookkeeping) that this row did not separately attribute between arms -- the two metrics move together here (6.10-8.08% vs 6.40% pooled) so the CPU-side share is small and stable across arms at this shape, but that was observed, not decomposed.
+
+**Gates.** `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: skipped this row (no source changed, doc-only row; ROW 315's own commit already carries the feature-flag clippy pass). `cargo build -p proxima-model-interop --release --features metal,instrument --tests`: EXIT=0 (both the A and B feature shapes built clean).
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=<scratch> CARGO_TERM_COLOR=never cargo build --release -p proxima-model-interop --features metal,instrument --tests
+# copy the resulting proxima_model_interop-* binary to oracle-A
+# temporarily drop "metal-q4k-ggml-port" from omega/Cargo.toml's and
+# proxima-model-interop/Cargo.toml's `metal = [...]` lists, rebuild, copy to
+# oracle-B, then `git checkout -- omega/Cargo.toml proxima-model-interop/Cargo.toml`
+PROXIMA_QUALITY_PROMPTS=8 PROXIMA_MAX_TOKENS=8 PROXIMA_MATH_MODE=relaxed <oracle> \
+  quality::real_openchat_file::metal_vs_cpu_reports_real_drift --exact --ignored --nocapture
+<oracle> bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --exact --ignored --nocapture --test-threads=1
+```
+Quiet gate (names-only, `|oracle-` included, load-1 < 10) immediately before every timed invocation.
