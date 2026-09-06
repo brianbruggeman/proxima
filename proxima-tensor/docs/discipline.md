@@ -23463,6 +23463,61 @@ CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-q6rows/target CAR
 ```
 Run the resulting `target/release/deps/proxima_model_interop-*` binary's `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache --exact --ignored --nocapture --test-threads=1` against an equivalent binary built from `main` pre-this-row, interleaved, quiet gate before each invocation.
 
+## ROW 318 -- decode text held deterministic under sustained GPU contention on both encoders; ROW 313's divergence did not reproduce at N=40
+
+**Card:** none (a reproduction attempt, no code change). **Worktree/branch:** `proxima-wt-race`, `docs/row-318-determinism`, off `main` at `312d0c8`.
+
+**Question.** ROW 313 (main `25563da`) saw one concurrent-dispatch decode run out of many produce `"<unk>\n\ndef fibonacci("` while three oracles contended for the GPU. Is decode text deterministic under GPU load on each encoder (concurrent, serial)?
+
+**Setup.** Contention generator: `omega/tests/gpu_load_generator.rs`'s `#[ignore]`d `gpu_load_generator` test (a 2 GB Metal buffer, looping for `PROXIMA_LOAD_SECONDS`), run `PROXIMA_LOAD_SECONDS=600` in the background for the duration of arms 1-3. Oracle: `proxima-model-interop`'s `bind::real_openchat_file::decode_text_is_deterministic_across_repeated_runs` (`--features metal,instrument`, `PROXIMA_MAX_TOKENS=32`), which runs the decode loop `PROXIMA_DETERMINISM_RUNS` times, hashes `generated_text` per run (FNV-1a), and reports `plan_hits`, `barriers_emitted` (gated `feature = "instrument"` and `target_os = "macos"`, `bind.rs:3942-3945`), and the first divergent token index against run 0's token ids (`bind.rs:3822`, `3948-3954`).
+
+**Quiet gate.** Names-only pgrep (`llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest|gpu_load_gener`) empty and load-1 < 10 confirmed before starting (load-1 8.47 at pass, after one 30 s recheck from an initial 11.64).
+
+**Runs.**
+
+| block | encoder | load | runs | distinct_texts | divergent runs (first token idx) | hash |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | concurrent | yes | 10 | 1 | none | `9e539d6c8e27b5a1` (all 10) |
+| 2 | serial | yes | 10 | 1 | none | `9e539d6c8e27b5a1` (all 10) |
+| 3 | concurrent | yes (through run ~15 of 20; generator's 600 s window elapsed mid-arm) | 20 | 1 | none | `9e539d6c8e27b5a1` (all 20) |
+| 4 | concurrent | no (control, generator confirmed dead via pgrep before starting) | 10 | 1 | none | `9e539d6c8e27b5a1` (all 10) |
+
+All 40 runs across all 4 blocks produced byte-identical `generated_text`:
+`"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```python\ndef fibonacci(n"`
+(32 tokens, truncated by the token budget, not EOS). `plan_hits=29` and `barriers_emitted=0` on every one of the 40 runs, in every arm including concurrent-under-load.
+
+**Load evidence (uptime before/after each block, load-1/5/15):**
+
+| block | before | after |
+| --- | --- | --- |
+| 1 concurrent+load | 7.26 / 11.07 / 11.52 | 18.80 / 15.14 / 13.11 |
+| 2 serial+load | 17.21 / 14.92 / 13.05 | 3.47 / 9.27 / 11.02 |
+| 3 concurrent+load(20) | 3.35 / 9.15 / 10.96 | 2.07 / 4.89 / 8.40 |
+| 4 concurrent, control | 5.95 / 5.61 / 8.60 | 7.52 / 7.57 / 9.07 |
+
+The generator itself reported a clean exit mid-block-3: `gpu_load_generator iterations=42589 elapsed_s=600.0 buffer_bytes=2000000000`, `test result: ok`, confirmed via pgrep before block 4 started -- so block 3's later runs (roughly run 15-19 of 20, by elapsed-time proportion of its 293.02 s wall) ran unloaded, and block 4 is a genuine no-load control on top of that.
+
+**Residual, named not hidden.** `barriers_emitted` read 0 on every single run in every arm, including the two loaded concurrent arms where the HazardTracker path is exercised. This row did not determine why -- either the concurrent decode shape used here (32-token single-prompt greedy decode, no fusion-off/on axis exercised, `PROXIMA_METAL_KIND_FILTER` unset) never triggers a hazard requiring an explicit barrier at this instrumentation point, or the counter this test reads is not wired to the code path this test exercises. Distinguishing those is out of scope for this row (no code was read/changed on the counter's wiring); it is reported as an open question, not asserted as either.
+
+**Mechanism.** Not established -- this is a negative result. Concurrent-under-load, serial-under-load, and concurrent-unloaded all produced identical text across 40 runs; ROW 313's divergence event is unreproduced at this N, under this contention shape (a single streaming Metal buffer loop), this prompt, and this token budget. This neither confirms nor rules out a missed hazard in the concurrent barrier set: a single 2 GB streaming-copy contention generator may not recreate the specific overlap (three oracles' own decode dispatches contending on the same command queue) that ROW 313 observed, and 40 runs is not enough to bound a rare race to below observable probability. No default flip follows from this row.
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-race-repro -b docs/row-318-repro main
+cd ../proxima-wt-race-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --release --features metal --test gpu_load_generator --no-run
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p proxima-model-interop --release --features metal,instrument --no-run
+CARGO_TARGET_DIR=$(pwd)/target PROXIMA_LOAD_SECONDS=600 nohup \
+  cargo test -p omega --release --features metal --test gpu_load_generator -- --ignored --nocapture &
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  PROXIMA_DISPATCH=concurrent PROXIMA_MAX_TOKENS=32 PROXIMA_DETERMINISM_RUNS=10 \
+  cargo test -p proxima-model-interop --release --features metal,instrument \
+  decode_text_is_deterministic_across_repeated_runs -- --ignored --nocapture
+```
+
 ### Changelog
 
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
@@ -23471,3 +23526,4 @@ Run the resulting `target/release/deps/proxima_model_interop-*` binary's `bind::
 | 2026-09-05 | `perf(omega): ggml port q4_k body default-on after the quiet bake-off` + `docs(tensor): row 315 fixed ggml port body vs default` | fixed body (post-2969311 stride-1 activation path) beats default body's `gpu_exec_ms` in every valid round (25.0 vs 464.3 ms round 1; 24.97 vs 26.66 ms, -6.3%, round 2 re-run at matched steady state; 376.1 vs 448.8 ms round 3); `generated_text` identical across all 7 valid runs; round 2's original arm-A run (95.6% CoV, one divergent `generated_text`) was found contaminated by a real-time overlap with another slice's oracle and discarded, re-run clean; ROW 311's prior +15.04% finding was against the pre-fix body and is void | 3 interleaved rounds (round 2 re-run after contamination), 5 datapoints/arm/round; pooled CoV 65.4%/121.4% (steady-state-warmup-tail-dominated, flagged not hidden), matched-steady-state round CoV 0.6%/1.0% | quiet gate initially `pgrep -l -i 'proxima_model_i|llama-bench'` missed two other slices' renamed oracle binaries (`oracle-*`), confirmed via cross-slice log timestamp overlap and corrected to add `|oracle-`; re-run round 2 confirmed quiet under the corrected gate, load-1 3.5-3.6 |
 | 2026-09-06 | none landed -- `docs(tensor): row 316 quality and clean re-measure of the branchless decode default` only | ROW 315's default flip supplied a clean re-measure and its first quality run: default-on port (A) beats port-off (B) on every quality axis and every timing round, no contamination this time | 3 interleaved rounds, 5 datapoints/arm/round, pooled n=15/arm; pooled CoV 0.94%/0.95% (gpu_exec), 0.62%/0.62% (step_wall) -- both arms, both metrics, all under 1% | quiet gate (names-only, `|oracle-` included) empty and load-1 < 10 (down to single digits) confirmed immediately before every timed run; one round1-B gate check found load-1 24.61 (no measurement process running) and the run was held until a 20 s poll brought it to 8.47 before proceeding |
 | 2026-09-06 | `perf(omega): rows per simdgroup is a per-codec value; q6_k streams one row` + `docs(tensor): row 317 q6_k one row per simdgroup on the output head` | Q6_K's row-blocked matmul now streams 1 output row/simdgroup (`N_R0_Q6_K`, matching llama.cpp) instead of 4 (shared unconditionally with Q4_K/Q5_K/Q3_K before this row); B (rows=1) beats A (rows=4, prior default) in every one of 3 interleaved rounds, 2.26% beyond both arms' CoV in round 2, within noise in rounds 1/3; `generated_text` identical across all 6 decode runs and both single-run ablations | 3 interleaved rounds, 5 datapoints/arm/round (15 pooled); pooled CoV A 1.06%/B 0.98% (pooled gap 1.07% sits inside pooled CoV, per-round gap in round 2 does not); ablation (one run/arm) head cost 2.825ms(A)->2.763ms(B) | quiet gate (names-only + `oracle-`, load-1<10) checked before every round; box was loud (load-1 20-32, concurrent builders) for ~9 of the allotted 10 minutes before the bench window opened clean |
+| 2026-09-05 | none landed -- `docs(tensor): row 318 decode determinism under gpu load, both encoders` only | ROW 313's one-off `"<unk>\n\ndef fibonacci("` divergence did not reproduce at N=40 (10 concurrent-loaded, 10 serial-loaded, 20 concurrent-loaded, 10 concurrent-unloaded control) -- all 40 runs hashed identical, `distinct_texts=1` in every arm | 4 arms, 10/10/20/10 runs; single-run-per-config protocol (no repeated rounds), so no CoV computed; `barriers_emitted=0` and `plan_hits=29` constant across all 40 runs, flagged as a residual not explained by this row | GPU contention generator (`omega/tests/gpu_load_generator.rs`, 2 GB buffer, `PROXIMA_LOAD_SECONDS=600`) held concurrently for arms 1-3; load-1 climbed to 18.8 during arm 1, dropped to 3.5-9.3 during arms 2-3 as the generator's 600 s window ran out mid-arm-3; arm 4 (control) ran fully unloaded after the generator's own clean exit (600.17 s, 42589 iterations) was confirmed dead via pgrep |
