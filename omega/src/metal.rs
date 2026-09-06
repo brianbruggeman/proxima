@@ -471,7 +471,21 @@ impl Plan {
             .copied()
             .collect();
     }
+}
 
+/// The name [`Plan::mark_resident`] proved this node's block input is bound
+/// to for the life of the served model, or `None` when the node was never
+/// classified resident. This is the identity [`upload_resident_copy`] caches
+/// on -- see that function's own doc for why a host address cannot serve as
+/// this identity instead.
+fn resident_name(plan: &Plan, node: NodeId) -> Option<&str> {
+    plan.resident_nodes
+        .contains(&node)
+        .then(|| plan.program[node.0 as usize].name())
+        .flatten()
+}
+
+impl Plan {
     /// Overrides this plan's [`MathMode`] from [`MathMode::default`]
     /// (`Relaxed`). Safe to call any time before an `execute_plan*` call --
     /// `pipeline_for`'s cache key folds the mode in, so switching a plan's
@@ -681,9 +695,11 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             // partition identity that proves no path is uninstrumented.
             counter!(BLOCK_OFFERED_BYTES, block_byte_len(block) as u64);
         }
-        let resident = plan.resident_nodes.contains(node);
+        let resident_name = resident_name(plan, *node);
         let buffer = match block {
-            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            QuantizedBlock::Float32(data) => {
+                upload_block(&device, data, *node, *dtype, resident_name)?
+            }
             // `Float16`/`BFloat16` upload their bytes UNCHANGED, same as
             // every packed codec above -- there is no host-side narrowing
             // step (unlike `upload_block`'s `Float32 -> Float16` path,
@@ -702,7 +718,9 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
             | QuantizedBlock::Float16(bytes)
-            | QuantizedBlock::BFloat16(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+            | QuantizedBlock::BFloat16(bytes) => {
+                upload_packed_bytes(&device, bytes, resident_name)?
+            }
         };
         device_buffers.insert(*node, buffer);
     }
@@ -1412,9 +1430,11 @@ pub fn execute_plan_with_placements(
             counter!(BLOCK_UPLOAD_CALLS, 1);
             counter!(BLOCK_OFFERED_BYTES, block_byte_len(block) as u64);
         }
-        let resident = plan.resident_nodes.contains(node);
+        let resident_name = resident_name(plan, *node);
         let buffer = match block {
-            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            QuantizedBlock::Float32(data) => {
+                upload_block(&device, data, *node, *dtype, resident_name)?
+            }
             // `Q3_K` uploads its raw super-block bytes unchanged, same as
             // every other packed codec below -- `msl::PackedCodec::Q3K`'s
             // own unpack kernel (`q3k_element`) reads them at the GPU side.
@@ -1425,7 +1445,9 @@ pub fn execute_plan_with_placements(
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
             | QuantizedBlock::Float16(bytes)
-            | QuantizedBlock::BFloat16(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+            | QuantizedBlock::BFloat16(bytes) => {
+                upload_packed_bytes(&device, bytes, resident_name)?
+            }
         };
         device_buffers.insert(*node, buffer);
     }
@@ -1903,9 +1925,11 @@ pub fn execute_plan_op_timed(
         .zip(blocks.iter())
         .zip(plan.block_dtypes.iter())
     {
-        let resident = plan.resident_nodes.contains(node);
+        let resident_name = resident_name(plan, *node);
         let buffer = match block {
-            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            QuantizedBlock::Float32(data) => {
+                upload_block(&device, data, *node, *dtype, resident_name)?
+            }
             // `Float16`/`BFloat16` upload their bytes UNCHANGED, same as
             // every packed codec above -- there is no host-side narrowing
             // step (unlike `upload_block`'s `Float32 -> Float16` path,
@@ -1924,7 +1948,9 @@ pub fn execute_plan_op_timed(
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
             | QuantizedBlock::Float16(bytes)
-            | QuantizedBlock::BFloat16(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+            | QuantizedBlock::BFloat16(bytes) => {
+                upload_packed_bytes(&device, bytes, resident_name)?
+            }
         };
         device_buffers.insert(*node, buffer);
     }
@@ -2040,9 +2066,11 @@ pub fn execute_plan_with_placements_op_timed(
             counter!(BLOCK_UPLOAD_CALLS, 1);
             counter!(BLOCK_OFFERED_BYTES, block_byte_len(block) as u64);
         }
-        let resident = plan.resident_nodes.contains(node);
+        let resident_name = resident_name(plan, *node);
         let buffer = match block {
-            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            QuantizedBlock::Float32(data) => {
+                upload_block(&device, data, *node, *dtype, resident_name)?
+            }
             // `Q3_K` uploads its raw super-block bytes unchanged, same as
             // every other packed codec below -- `msl::PackedCodec::Q3K`'s
             // own unpack kernel (`q3k_element`) reads them at the GPU side.
@@ -2053,7 +2081,9 @@ pub fn execute_plan_with_placements_op_timed(
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
             | QuantizedBlock::Float16(bytes)
-            | QuantizedBlock::BFloat16(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+            | QuantizedBlock::BFloat16(bytes) => {
+                upload_packed_bytes(&device, bytes, resident_name)?
+            }
         };
         device_buffers.insert(*node, buffer);
     }
@@ -2229,9 +2259,11 @@ pub fn execute_plan_with_placements_dispatch_timed(
             counter!(BLOCK_UPLOAD_CALLS, 1);
             counter!(BLOCK_OFFERED_BYTES, block_byte_len(block) as u64);
         }
-        let resident = plan.resident_nodes.contains(node);
+        let resident_name = resident_name(plan, *node);
         let buffer = match block {
-            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            QuantizedBlock::Float32(data) => {
+                upload_block(&device, data, *node, *dtype, resident_name)?
+            }
             QuantizedBlock::Q3K(bytes)
             | QuantizedBlock::Q4K(bytes)
             | QuantizedBlock::Q5K(bytes)
@@ -2239,7 +2271,9 @@ pub fn execute_plan_with_placements_dispatch_timed(
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
             | QuantizedBlock::Float16(bytes)
-            | QuantizedBlock::BFloat16(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+            | QuantizedBlock::BFloat16(bytes) => {
+                upload_packed_bytes(&device, bytes, resident_name)?
+            }
         };
         device_buffers.insert(*node, buffer);
     }
@@ -4100,7 +4134,7 @@ fn upload_block(
     data: &[f32],
     node: NodeId,
     dtype: DType,
-    resident: bool,
+    resident_name: Option<&str>,
 ) -> Result<(MetalBuffer, usize), MetalError> {
     match dtype {
         // unreached by every program this driver compiles today (none
@@ -4115,7 +4149,7 @@ fn upload_block(
         | DType::Int8
         | DType::UInt8
         | DType::Int32
-        | DType::UInt32 => upload_block_as_float(device, data, resident),
+        | DType::UInt32 => upload_block_as_float(device, data, resident_name),
         DType::Int16
         | DType::UInt16
         | DType::Int64
@@ -4137,18 +4171,18 @@ fn upload_block(
 /// for why a misaligned RESIDENT block still gets a cache, just a different
 /// one than the no-copy path's.
 ///
-/// CACHING the wrapper this creates is gated on `resident`, not on
+/// CACHING the wrapper this creates is gated on `resident_name`, not on
 /// `is_page_aligned` alone: page alignment is a property of an ADDRESS, not
 /// of a LIFETIME, and `(pointer, byte_length)` is exactly the key an
 /// ephemeral, growing buffer (a KV-cache row, say) can reuse after a
 /// realloc moves a DIFFERENT allocation onto the same range. Only
-/// `mark_resident`'s "this address holds a model weight nothing overwrites
-/// again" proof licenses remembering the wrapper past this one call -- see
-/// `proxima-tensor/docs/discipline.md` ROW 70.
+/// `mark_resident`'s own NAME proof licenses remembering a buffer past this
+/// one call -- see [`upload_resident_copy`]'s own doc for why that cache
+/// keys on the name itself, never the address.
 fn upload_block_as_float(
     device: &ProtocolObject<dyn MTLDevice>,
     data: &[f32],
-    resident: bool,
+    resident_name: Option<&str>,
 ) -> Result<(MetalBuffer, usize), MetalError> {
     if data.is_empty() {
         return allocate_buffer(device, 0, DType::Float32).map(|buffer| (buffer, 0));
@@ -4158,7 +4192,7 @@ fn upload_block_as_float(
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
         counter!(BLOCK_NOCOPY_BOUND_BYTES, byte_length as u64);
-        if resident {
+        if resident_name.is_some() {
             return upload_block_no_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
         }
         return upload_block_no_copy_uncached(device, pointer, byte_length)
@@ -4168,8 +4202,8 @@ fn upload_block_as_float(
         return result;
     }
     counter!(BLOCK_COPIED_BYTES, byte_length as u64);
-    if resident {
-        return upload_resident_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
+    if let Some(name) = resident_name {
+        return upload_resident_copy(device, name, pointer, byte_length).map(|buffer| (buffer, 0));
     }
     counter!(COPYING_BUFFER_UPLOADS, 1);
     upload_block_copy(device, pointer, byte_length).map(|buffer| (buffer, 0))
@@ -4180,13 +4214,14 @@ fn upload_block_as_float(
 /// packed against 14.5 GB as `f16`; decode is a weight sweep, so that 3.56x
 /// in traffic IS the token rate. Reuses the same page-aligned no-copy path
 /// [`upload_block_as_float`] uses, since a memory-mapped GGUF tensor is very
-/// often already page-aligned. `resident` is the same "caller's own static
-/// weight" classification [`upload_block_as_float`] takes; a packed weight
-/// too misaligned for the no-copy path takes the same resident-copy cache.
+/// often already page-aligned. `resident_name` is the same "caller's own
+/// static weight" classification [`upload_block_as_float`] takes; a packed
+/// weight too misaligned for the no-copy path takes the same resident-copy
+/// cache.
 fn upload_packed_bytes(
     device: &ProtocolObject<dyn MTLDevice>,
     bytes: &[u8],
-    resident: bool,
+    resident_name: Option<&str>,
 ) -> Result<(MetalBuffer, usize), MetalError> {
     if bytes.is_empty() {
         return allocate_buffer(device, 0, DType::Float32).map(|buffer| (buffer, 0));
@@ -4196,7 +4231,7 @@ fn upload_packed_bytes(
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
         counter!(BLOCK_NOCOPY_BOUND_BYTES, byte_length as u64);
-        if resident {
+        if resident_name.is_some() {
             return upload_block_no_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
         }
         return upload_block_no_copy_uncached(device, pointer, byte_length)
@@ -4206,8 +4241,8 @@ fn upload_packed_bytes(
         return result;
     }
     counter!(BLOCK_COPIED_BYTES, byte_length as u64);
-    if resident {
-        return upload_resident_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
+    if let Some(name) = resident_name {
+        return upload_resident_copy(device, name, pointer, byte_length).map(|buffer| (buffer, 0));
     }
     counter!(COPYING_BUFFER_UPLOADS, 1);
     upload_block_copy(device, pointer, byte_length).map(|buffer| (buffer, 0))
@@ -4439,10 +4474,15 @@ thread_local! {
     /// address (never stale by construction); this cache instead reuses a
     /// SNAPSHOT taken at first upload, which is sound only because the
     /// caller already proved -- by name, once, in `mark_resident` -- that
-    /// the address holds a model weight nothing overwrites again. Keeping
-    /// them apart keeps that distinction visible at the call site instead of
-    /// folding two different proofs into one lookup.
-    static RESIDENT_BUFFERS: RefCell<BTreeMap<(usize, usize), MetalBuffer>> =
+    /// the NAME holds a model weight nothing overwrites again. Keyed on that
+    /// name, never on `(pointer, byte_length)`: a host address is a property
+    /// of an allocation's LIFETIME, and a short-lived buffer (an activation
+    /// vector, say) can be freed and a same-sized, differently-contented
+    /// allocation can land at the identical address on a later call --
+    /// `mark_resident`'s own proof is about the NAME the caller declared
+    /// static, not about any address that name's data happened to occupy
+    /// once. See `proxima-tensor/docs/discipline.md` ROW 70.
+    static RESIDENT_BUFFERS: RefCell<BTreeMap<String, (usize, MetalBuffer)>> =
         RefCell::new(BTreeMap::new());
 }
 
@@ -4456,28 +4496,153 @@ pub static RESIDENT_BUFFER_UPLOADS: Counter =
 pub static RESIDENT_BUFFER_REUSES: Counter =
     Counter::new("omega.metal.upload_block.resident_reuse");
 
+/// Entries [`RESIDENT_BUFFERS`] holds right now -- the direct witness that
+/// residency reuse tracks the caller's declared NAME set, not the address
+/// space: this stays exactly the plan's resident-name count across repeated
+/// `execute_plan` calls for the same names, regardless of how many times the
+/// host allocator has reused an address underneath them.
+#[must_use]
+pub fn resident_cache_len() -> usize {
+    RESIDENT_BUFFERS.with(|cache| cache.borrow().len())
+}
+
 /// The copy-path counterpart to [`upload_block_no_copy`]: called only for a
 /// block [`upload_block_as_float`]/[`upload_packed_bytes`] already found
-/// misaligned AND [`Plan::mark_resident`] already classified as static, so
-/// unlike [`upload_block_copy`] this one is allowed to remember the buffer it
-/// creates and hand the SAME one back next time the SAME `(pointer, len)`
-/// shows up -- sound only because that classification, not an address guess,
-/// is what proves the bytes behind `pointer` never change again.
+/// misaligned AND [`Plan::mark_resident`] already classified `name` as
+/// static, so unlike [`upload_block_copy`] this one is allowed to remember
+/// the buffer it creates and hand the SAME one back next time the SAME
+/// `name` shows up -- sound only because that classification, not an
+/// address guess, is what proves the bytes behind `name` never change
+/// again. A byte-length mismatch under a repeated name is a caller contract
+/// violation (the module doc's residency precondition), not something this
+/// cache can silently paper over, so it is treated as a miss and the entry
+/// is replaced rather than served.
 fn upload_resident_copy(
     device: &ProtocolObject<dyn MTLDevice>,
+    name: &str,
     pointer: *const c_void,
     byte_length: usize,
 ) -> Result<MetalBuffer, MetalError> {
-    let key = (pointer as usize, byte_length);
-    if let Some(existing) = RESIDENT_BUFFERS.with(|cache| cache.borrow().get(&key).cloned()) {
+    if let Some(existing) = RESIDENT_BUFFERS.with(|cache| {
+        cache.borrow().get(name).and_then(|(cached_length, buffer)| {
+            (*cached_length == byte_length).then(|| buffer.clone())
+        })
+    }) {
         counter!(RESIDENT_BUFFER_REUSES, 1);
         return Ok(existing);
     }
     counter!(COPYING_BUFFER_UPLOADS, 1);
     counter!(RESIDENT_BUFFER_UPLOADS, 1);
     let buffer = upload_block_copy(device, pointer, byte_length)?;
-    RESIDENT_BUFFERS.with(|cache| cache.borrow_mut().insert(key, buffer.clone()));
+    RESIDENT_BUFFERS.with(|cache| {
+        cache
+            .borrow_mut()
+            .insert(name.to_string(), (byte_length, buffer.clone()))
+    });
     Ok(buffer)
+}
+
+#[cfg(test)]
+fn reset_resident_cache_for_test() {
+    RESIDENT_BUFFERS.with(|cache| cache.borrow_mut().clear());
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod resident_buffer_cache_tests {
+    use core::mem::size_of_val;
+
+    use super::{
+        MetalBuffer, device_and_queue, read_back_as_device_f32, reset_resident_cache_for_test,
+        resident_cache_len, upload_block_copy, upload_resident_copy,
+    };
+
+    fn pre_fix_address_keyed_lookup(
+        cache: &mut alloc::collections::BTreeMap<(usize, usize), MetalBuffer>,
+        device: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>,
+        pointer: *const core::ffi::c_void,
+        byte_length: usize,
+    ) -> MetalBuffer {
+        let key = (pointer as usize, byte_length);
+        if let Some(existing) = cache.get(&key) {
+            return existing.clone();
+        }
+        let buffer = upload_block_copy(device, pointer, byte_length).expect("pre-fix copy upload");
+        cache.insert(key, buffer.clone());
+        buffer
+    }
+
+    #[test]
+    fn pre_fix_address_keyed_cache_served_stale_content_across_names() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        let mut pre_fix_cache = alloc::collections::BTreeMap::new();
+
+        let mut host_buffer = vec![1.0_f32; 4096];
+        let pointer = host_buffer.as_ptr().cast();
+        let byte_length = size_of_val(host_buffer.as_slice());
+
+        let first = pre_fix_address_keyed_lookup(&mut pre_fix_cache, &device, pointer, byte_length);
+        let first_content = read_back_as_device_f32(&first, 0, host_buffer.len());
+        assert_eq!(first_content, vec![1.0_f32; 4096]);
+
+        host_buffer.fill(2.0_f32);
+        let second =
+            pre_fix_address_keyed_lookup(&mut pre_fix_cache, &device, pointer, byte_length);
+        let second_content = read_back_as_device_f32(&second, 0, host_buffer.len());
+        assert_eq!(second_content, vec![1.0_f32; 4096]);
+    }
+
+    #[test]
+    fn name_keyed_cache_never_serves_a_different_names_content() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_resident_cache_for_test();
+
+        let mut host_buffer = vec![1.0_f32; 4096];
+        let pointer = host_buffer.as_ptr().cast();
+        let byte_length = size_of_val(host_buffer.as_slice());
+
+        let first = upload_resident_copy(&device, "resident_weight_one", pointer, byte_length)
+            .expect("first resident upload");
+        assert_eq!(
+            read_back_as_device_f32(&first, 0, host_buffer.len()),
+            vec![1.0_f32; 4096]
+        );
+
+        host_buffer.fill(2.0_f32);
+        let second = upload_resident_copy(&device, "resident_weight_two", pointer, byte_length)
+            .expect("second resident upload under a different name");
+        assert_eq!(
+            read_back_as_device_f32(&second, 0, host_buffer.len()),
+            vec![2.0_f32; 4096]
+        );
+        assert_eq!(resident_cache_len(), 2);
+    }
+
+    #[test]
+    fn the_same_resident_name_still_hits_the_cache() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_resident_cache_for_test();
+
+        let host_buffer = vec![3.0_f32; 4096];
+        let pointer = host_buffer.as_ptr().cast();
+        let byte_length = size_of_val(host_buffer.as_slice());
+
+        upload_resident_copy(&device, "resident_weight_stable", pointer, byte_length)
+            .expect("first upload for a stable resident name");
+        assert_eq!(resident_cache_len(), 1);
+
+        let reuses_before = super::RESIDENT_BUFFER_REUSES.get();
+        upload_resident_copy(&device, "resident_weight_stable", pointer, byte_length)
+            .expect("second upload of the same name must hit the cache");
+        assert_eq!(super::RESIDENT_BUFFER_REUSES.get(), reuses_before + 1);
+        assert_eq!(resident_cache_len(), 1);
+    }
 }
 
 /// Always copies — see the module doc's "Host buffer upload" section for
@@ -5536,7 +5701,7 @@ mod operand_tensor_bytes_tests {
         let tensor_bytes = &mapping_bytes[tensor_offset..tensor_offset + Q4K_BLOCK_BYTES];
 
         let (buffer, bound_offset) =
-            upload_packed_bytes(&device, tensor_bytes, false).expect("checkpoint-mapping upload");
+            upload_packed_bytes(&device, tensor_bytes, None).expect("checkpoint-mapping upload");
 
         assert_eq!(
             bound_offset, tensor_offset,
