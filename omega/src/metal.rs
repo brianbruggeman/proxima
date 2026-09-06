@@ -1495,8 +1495,14 @@ pub fn execute_plan_with_placements(
             // than pay the resolve/record bookkeeping for barriers that
             // would never fire.
             let resolved_output: Option<DeviceBuffer> = if dispatch_type == DispatchType::Concurrent {
+                // `all_read_sources`, not `operands` -- a `BoundOpKind::Reduce`
+                // with a fused epilogue reads its `epilogue_operands` too
+                // (`msl::bindings` binds one `Binding::Input` per entry, the
+                // exact set the kernel actually reads), so the hazard set
+                // must see every one of them or a RAW against a sibling's
+                // still-in-flight write goes unbarriered.
                 let hazard_inputs = resolve_hazard_inputs(
-                    bound.operands().iter().map(|(operand, _, _)| *operand),
+                    bound.all_read_sources().map(|(operand, _, _)| *operand),
                     &device_buffers,
                 )?;
                 // resolved ONCE, before the hazard check, from the exact same
