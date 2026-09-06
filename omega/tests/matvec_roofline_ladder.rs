@@ -1811,9 +1811,45 @@ fn run_shape_arm(label: &str, codec: ShapeCodec, rows: usize, k: usize, tensor_c
 
     let mut plan = omega::metal::plan(&program, &[], &blocks, &sums)
         .expect("plan resolves the synthetic matmul over every tensor");
-    let mut resident_names: BTreeSet<&str> = weight_names.iter().map(String::as_str).collect();
+    // ROW 334: weight nodes are deliberately NOT marked resident. Every
+    // per-arm weight tensor here is a fresh `Vec<u8>` (`synth_weight_bytes`)
+    // this function itself allocates and drops -- the OPPOSITE of
+    // `Plan::mark_resident`'s own documented precondition ("the caller's OWN
+    // static data -- model weights bound once at load and never mutated
+    // again"). This shape's own byte size (a multiple of the host page size
+    // for every arm in `DECODE_SHAPES`) sends every weight chunk through the
+    // page-aligned no-copy path either way (`omega::metal::upload_packed_bytes`),
+    // so marking it resident bought no real saving -- only routed it into
+    // `NOCOPY_BUFFERS`, a cache keyed on `(pointer, byte_length)` alone, NEVER
+    // on the name `mark_resident` proved unique. When one arm's `Vec` is
+    // freed and the NEXT arm's same-byte-size `Vec` lands at the identical
+    // address (`malloc`/`mmap` handing back a just-freed large region, which
+    // this ladder's own second-of-a-same-byte-size-pair arms hit every time:
+    // ROW 333's `attn_v`/`attn_output`/`ffn_up`/`ffn_down`), that cache
+    // serves the PRIOR arm's stale weight bytes under the new arm's own
+    // fresh, uniquely-named plan -- proven directly by this row's own
+    // `nocopy_uploads`/`nocopy_reuses` counters (`r334-logs/repro-realscale.log`:
+    // `attn_output`'s `nocopy_reuses` equals its own `nocopy_uploads`, 1060
+    // of 1060 -- every single weight touch this arm made was served from
+    // `attn_q`'s addresses, zero fresh uploads). Leaving weight nodes
+    // unmarked routes them to `upload_block_no_copy_uncached` instead --
+    // still zero-copy for this call, just never remembered past it, which is
+    // exactly right for a buffer this function itself frees a few lines
+    // below. The activation node stays resident (label-unique since ROW
+    // 332): it is small enough in every `DECODE_SHAPES` arm to take the
+    // NAME-keyed `RESIDENT_BUFFERS` copy path instead (this row's own
+    // `resident_uploads`/`resident_reuses` counters show it there, never in
+    // `NOCOPY_BUFFERS`), where the per-label name this file already gives it
+    // is the correct, sufficient guard.
+    let mut resident_names: BTreeSet<&str> = BTreeSet::new();
     resident_names.insert(activation_name.as_str());
     plan.mark_resident(&resident_names);
+
+    // ROW 334 repro instrumentation: reset every stage counter right before
+    // this arm's own timed repeats so the totals read below attribute
+    // cleanly to THIS arm, never a prior one in the same process.
+    #[cfg(feature = "instrument")]
+    let _ = omega::metal::metal_stage_totals();
 
     let mut first_tensor_output: Vec<f32> = Vec::new();
     let mut elapsed_samples = Vec::with_capacity(REPEATS);
@@ -1826,6 +1862,25 @@ fn run_shape_arm(label: &str, codec: ShapeCodec, rows: usize, k: usize, tensor_c
             .get(sums[0])
             .map(|(data, _)| data.to_vec())
             .expect("first tensor's own reduce node is a requested output");
+    }
+    // ROW 334: `resident_uploads`/`resident_reuses` witness the NAME-keyed
+    // `RESIDENT_BUFFERS` copy path (ROW 332's own fix); `nocopy_uploads`/
+    // `nocopy_reuses` witness the ADDRESS-keyed `NOCOPY_BUFFERS` cache --
+    // the one `mark_resident`'s own name uniqueness cannot touch, since that
+    // cache never reads the name at all (`omega/src/metal.rs`'s own
+    // `upload_block_no_copy`).
+    #[cfg(feature = "instrument")]
+    {
+        let totals = omega::metal::metal_stage_totals();
+        println!(
+            "arm={label} stage_totals: nocopy_uploads={} nocopy_reuses={} resident_uploads={} \
+             resident_reuses={} copying_uploads={}",
+            totals.nocopy_uploads,
+            totals.nocopy_reuses,
+            totals.resident_uploads,
+            totals.resident_reuses,
+            totals.copying_uploads
+        );
     }
     let samples = gbps_samples(&elapsed_samples, total_timed_bytes);
     let (mean, cov) = mean_and_cov(&samples);
@@ -2009,6 +2064,15 @@ const DECODE_SHAPES: &[DecodeShape] = &[
 /// tensor is ~9 MB -- a shared count would either starve the small shapes
 /// below the floor or move tens of GB for the large ones).
 fn tensor_count_for_shape(shape: &DecodeShape) -> usize {
+    // ROW 334's own repro tool -- overrides every shape's real per-family
+    // tensor count with a single small value so the resident-cache
+    // collision this row root-causes reproduces in seconds instead of the
+    // ~25 minutes/arm a real tensor count (61-848) costs. Test-edge only:
+    // no production path reads this, and `decode_shape_roofline_ladder`
+    // itself (the real-scale gate) never sets it.
+    if let Ok(raw) = std::env::var("PROXIMA_LADDER_TENSORS") {
+        return raw.parse().expect("PROXIMA_LADDER_TENSORS must be a positive integer");
+    }
     let tensor_bytes = (shape.rows * shape.codec.row_bytes(shape.k)) as u64;
     MIN_TIMED_BYTES.div_ceil(tensor_bytes) as usize
 }
@@ -2047,6 +2111,62 @@ fn decode_shape_roofline_ladder() {
         "parity failed for {} arm(s): {parity_failures:#?}",
         parity_failures.len()
     );
+}
+
+/// ROW 334's own repro tool -- `attn_q` (PASS) then `attn_output` (FAIL,
+/// ROW 333), same shape (rows=4096, k=4096, Q4_K), REAL tensor count (212,
+/// `tensor_count_for_shape`'s own value for this shape), the second-of-pair
+/// signature ROW 333's table shows on every same-byte-size arm pair. Two
+/// arms only -- not the full 10-arm, ~25-minute `decode_shape_roofline_ladder`
+/// -- so this reproduces or clears in the time one arm's own real-scale run
+/// costs.
+#[test]
+#[ignore = "synthesizes real quantized bytes through the real encoder and needs a real metal device"]
+fn row334_attn_q_then_attn_output_real_scale() {
+    let attn_q = DECODE_SHAPES.iter().find(|shape| shape.family == "attn_q").expect("attn_q shape exists");
+    let attn_output = DECODE_SHAPES
+        .iter()
+        .find(|shape| shape.family == "attn_output")
+        .expect("attn_output shape exists");
+    let failures: Vec<String> = [attn_q, attn_output]
+        .into_iter()
+        .filter_map(|shape| {
+            let tensor_count = tensor_count_for_shape(shape);
+            run_shape_arm(shape.family, shape.codec, shape.rows, shape.k, tensor_count, shape.seed)
+        })
+        .collect();
+    assert!(failures.is_empty(), "parity failed for {} arm(s): {failures:#?}", failures.len());
+}
+
+/// ROW 334's own verification pass: the exact four arms ROW 333's full-scale
+/// run found failing (`attn_v`, `attn_output`, `ffn_up`, `ffn_down`), at
+/// their REAL per-family tensor counts, run as ONE pass (not the full
+/// 10-arm ladder -- the other six arms already passed at full scale and this
+/// fix touches no path any of them exercise differently). `ffn_up` directly
+/// precedes `ffn_down` here, the SAME same-byte-size adjacency
+/// (`rows*row_bytes(k)` is identical for `ffn_gate`/`ffn_up`/`ffn_down`, this
+/// file's own `tensor_count_for_shape` doc) that exposed the bug this row
+/// fixes, so this run still exercises the adversarial ordering, not just the
+/// arms in isolation.
+#[test]
+#[ignore = "synthesizes real quantized bytes through the real encoder and needs a real metal device"]
+fn row334_four_failing_arms_real_scale() {
+    let families = ["attn_v", "attn_output", "ffn_up", "ffn_down"];
+    let shapes: Vec<&DecodeShape> = families
+        .iter()
+        .map(|family| {
+            DECODE_SHAPES.iter().find(|shape| shape.family == *family).expect("family exists in DECODE_SHAPES")
+        })
+        .collect();
+    let failures: Vec<String> = shapes
+        .into_iter()
+        .filter_map(|shape| {
+            let tensor_count = tensor_count_for_shape(shape);
+            run_shape_arm(shape.family, shape.codec, shape.rows, shape.k, tensor_count, shape.seed)
+        })
+        .collect();
+
+    assert!(failures.is_empty(), "parity failed for {} arm(s): {failures:#?}", failures.len());
 }
 
 // ---- ROW 327: output-head buffer-kind vs kernel-variant ladder ----
@@ -2266,7 +2386,20 @@ fn run_head_arm(
 
     let mut plan = omega::metal::plan(&program, &[], &blocks, &sums)
         .expect("plan resolves the output-head matmul over every weight input");
-    let mut resident_names: BTreeSet<&str> = weight_names.iter().map(String::as_str).collect();
+    // ROW 334: weight nodes are resident-eligible ONLY for `RealNoCopy` --
+    // that branch aliases the SAME real, mmap'd, process-lifetime tensor
+    // bytes on every call (`ShapeCodec::Q6K.quantized_block(tensor_bytes)`
+    // repeated `tensor_count` times), exactly `Plan::mark_resident`'s own
+    // documented precondition. `Synthesized` allocates a fresh `Vec<u8>`
+    // this function itself drops on return -- the same shape of bug
+    // `run_shape_arm` had (see that function's own ROW 334 comment): a
+    // later call at the SAME `rows`/`k`/`tensor_count` can land its own
+    // fresh `Vec` at the address `NOCOPY_BUFFERS` still has cached under,
+    // and get served the PRIOR call's stale weight bytes.
+    let mut resident_names: BTreeSet<&str> = match buffer_kind {
+        HeadBufferKind::RealNoCopy { .. } => weight_names.iter().map(String::as_str).collect(),
+        HeadBufferKind::Synthesized => BTreeSet::new(),
+    };
     resident_names.insert("activation");
     plan.mark_resident(&resident_names);
     let keys = plan.kernel_keys().expect("every resolved position emits a kernel key");
