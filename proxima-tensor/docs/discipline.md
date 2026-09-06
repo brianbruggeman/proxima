@@ -25279,3 +25279,50 @@ PROXIMA_MAX_TOKENS=64 target/release/deps/proxima_model_interop-<hash> \
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | docs-only: `docs(tensor): row 352 scoreboard with direct row addressing` | ROW 351's direct row addressing confirmed on the full cached-decode loop: `gpu_exec_ms` pooled A 21.271/21.520/21.666 ms vs B 25.787/26.001/26.213 ms at 3..7/8..31/32..63 (-17.51%/-17.23%/-17.35%, beyond CoV every window). `step_wall_ms` A 21.978/22.427 ms (step 34 excluded) at 3..7/32..63 = 1.2499x/1.2755x llama (56.87 t/s, 17.5847 ms/token, same-session denominator). Output byte-identical across all 6 runs. Confirmatory row (ROW 351 already landed); owner rule (less work + same output + wall not worse) keeps A as default | 3 rounds interleaved, 64 steps/round; pooled CoV A 0.49-2.06% (`gpu_exec_ms`), B 0.89-1.55%; `step_wall_ms` 32..63 CoV 21.00%/9.79% traced to the reproducible step-34 CPU-side outlier (ROW 341's own unresolved residual), 1.74%/1.29% with it excluded | THREE-check gate (names-only pgrep, while-true pgrep, load-1<10) failed on load-1 alone once (15.78, no matching process), cleared after one 30 s wait (9.64); held quiet through all 6 runs and the `llama-bench` denominator run |
+
+## ROW 353 -- fast math in the decode oracle: text byte-identical, wall flat, quality gate UNMEASURED (harness never reads the env var) -- NO FLIP
+
+**Card:** none (measurement only). **Worktree/branch:** `proxima-wt-r353`, `docs/row-353-fast-math`, off `main` at `19010e8` (ROW 352's own commit; base sha confirmed identical to `r352-logs/oracle-A`, so that release binary was reused rather than rebuilt).
+
+**Question this row answers.** `PROXIMA_MATH_MODE=fast` (`MathMode::Fast`, `proxima-model-interop/src/test_support.rs`'s `math_mode_from_env`) is selectable at the `bind.rs` test edge (`math_mode_from_env` called at `bind.rs:3666`/`4432`, default `relaxed` on unset/unparseable). Does flipping the decode-loop oracle from `relaxed` to `fast` change the 64-token output, move `gpu_exec_ms`/`step_wall_ms`, and hold quality within ROW 316's `R` baseline (exact >= 0.906, kl_max <= 0.048)?
+
+**Method.** Same harness as ROW 342/343/345/347/352 (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `PROXIMA_MAX_TOKENS=64`, `--ignored --nocapture --test-threads 1`), against `r352-logs/oracle-A` (release binary built at `19010e8`, reused unmodified since `git rev-parse --short main` == `19010e8` in this worktree too). Six cells, interleaved R, F, R, F, R, F (`PROXIMA_MATH_MODE=relaxed|fast`), logs at `r353-logs/round{1,2,3}-{R,F}.log`.
+
+**Quiet gate.** THREE-check gate (names-only `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'`, `pgrep -fl 'while true' | grep -v pgrep`, load-1 < 10) run once before the timed runs: both pgrep checks empty, load-1 1.77. No retry needed.
+
+**Data -- `gpu_exec_ms`/`step_wall_ms` pooled over 3 rounds (15 datapoints at 3..7, 96 at 32..63; 32..63 `step_wall_ms` excludes the reproducible step-34 CPU-side outlier ROW 341/347/352 already named, n=93 of 96):**
+
+| arm | gpu_exec 3..7 (ms) | gpu_exec 32..63 (ms) | step_wall 3..7 (ms) | step_wall 32..63 excl. step 34 (ms) |
+| --- | --- | --- | --- | --- |
+| R (relaxed) | mean 21.066, CoV 1.63% | mean 21.523 | mean 21.831 | mean 22.299, CoV 0.19% |
+| F (fast) | mean 20.982, CoV 1.30% | mean 21.711 | mean 21.752 | mean 22.456, CoV 0.43% |
+
+`generated_text` (md5 over the `generated_text=` field alone) is byte-identical across all 6 runs, both arms: `84c7519e6bffea98476fefd9d545a0fc` -- no divergent token to name.
+
+**Result.** `gpu_exec_ms` (the pure kernel-time metric) is flat within combined CoV: -0.40% at 3..7, +0.87% at 32..63, both smaller than either arm's own CoV band (1.3-1.6%). `step_wall_ms` (32..63, step 34 excluded) is +0.70% F vs R (22.456 vs 22.299 ms) -- a few multiples of R's own 0.19% CoV but F's own CoV is 0.43%, and the absolute gap (0.16 ms) is inside the noise this harness has shown at every prior row (ROW 352's own A/B CoV ran 0.49-2.06%). Read together with a flat `gpu_exec_ms`, this reads as noise, not a fast-math wall regression, though it is not a clean beyond-all-CoV pass either.
+
+**Quality gate: UNMEASURED, not "held" -- traced to a real gap in the harness, not skipped.** `PROXIMA_MATH_MODE`/`math_mode_from_env` is read at exactly two call sites, both in `bind.rs` (`bind.rs:3666`, `bind.rs:4432`); `grep -rn math_mode proxima-model-interop/src/*.rs` shows the quality harness's own path never touches it. `quality::tests::metal_vs_cpu_reports_real_drift` (`quality.rs:826`) calls `quality_report` (`quality.rs:353`) -> `score_prompt` (`quality.rs:238`) -> `supported_serving_config` (`generate.rs:1397`), which builds every `ServingConfig` as `..ServingConfig::default()` (`generate.rs:1406`), and `ServingConfig::default`'s own body hardcodes `math_mode: MathMode::Relaxed` unconditionally (`serving.rs:221`). Setting `PROXIMA_MATH_MODE=fast` before running the quality test therefore produces byte-identical numbers to ROW 316's own `R` baseline -- not because Fast math is safe, but because the test never runs Fast math regardless of the env var. Reporting those numbers as an "F" quality score would be a fabricated measurement (principle 18: a DERIVED/assumed number may never stand in for a mechanism); this row declines to run it rather than misreport it, and instead states the gap: plumbing `math_mode` into `quality_report`'s config requires either a public-signature change (`quality_report` is `pub fn`, consumed by 3 test sites including `q3_k_m_variant_against_q4_k_s_reference_reports_real_drift`) or a parallel test-only config-builder in `quality.rs`'s own `mod tests` -- neither is a same-row fix inside a 30-minute measurement budget without risking an unreviewed API change.
+
+**Owner rule applied.** Three inputs: text identical -- YES (measured, 6/6 runs). Wall not worse beyond CoV -- BORDERLINE-HOLDS (`gpu_exec_ms` flat; `step_wall_ms` +0.70% is a few CoV-multiples but sub-millisecond and consistent with this harness's established noise floor). Quality within baseline -- UNMEASURED (mechanism proven above: the harness structurally cannot exercise Fast math without a source change). The owner rule requires ALL THREE to hold before flipping the default; one is unmeasured, so **NO FLIP**. `MathMode::Fast` is not made the default plan value in `omega/src/metal.rs` this row.
+
+**Residual, named not hidden.** (1) The quality gap above is the load-bearing residual: this row cannot certify Fast math's numerical safety, only that it doesn't move wall-clock or change greedy-decode output on one 64-token prompt. (2) `step_wall_ms`'s +0.70% at 32..63 is unexplained beyond "consistent with prior noise" -- no per-op profile isolates whether Fast math's relaxed reciprocal/rsqrt approximations touch a CPU-side code path (unlikely; the flag only affects GPU kernel selection) or this is pure scheduling jitter. (3) Only one prompt (the `bind.rs` decode-loop fixture) and one token budget (64) were exercised; no claim extends past this shape. (4) The quality-harness gap identified here (`math_mode` not plumbed through `quality_report`) is a standing fix this row surfaces but does not land -- next slice that revisits fast math should either extend `quality_report`'s signature or add a `mod tests`-local config-builder, whichever a design pass picks.
+
+**Gates.** Docs-only row; no functional source change in this row's own diff (no flip landed, so the gated clippy/nextest/interop commands in the fast-math-oracle brief's flip branch do not apply). `git status --porcelain` in the worktree, before the docs commit, shows only this file's edit.
+
+**Re-prove command (each cell):**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main (>= 19010e8)
+PROXIMA_MAX_TOKENS=64 PROXIMA_MATH_MODE=relaxed  r352-logs/oracle-A \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --ignored --nocapture --test-threads 1
+PROXIMA_MAX_TOKENS=64 PROXIMA_MATH_MODE=fast r352-logs/oracle-A \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --ignored --nocapture --test-threads 1
+```
+(expected: `generated_text` md5 `84c7519e6bffea98476fefd9d545a0fc` both arms; `gpu_exec_ms` near 21.1/21.5 ms at 3..7/32..63 both arms.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | docs-only: `docs(tensor): row 353 fast math oracle` | Fast vs relaxed math on the decode-loop oracle (`19010e8`): `gpu_exec_ms` flat (-0.40%/+0.87% at 3..7/32..63, within combined CoV); `step_wall_ms` +0.70% at 32..63 (step 34 excluded), borderline but sub-CoV-multiple and consistent with prior-row noise floor. Text byte-identical across all 6 runs (md5 `84c7519e6bffea98476fefd9d545a0fc`). Quality gate UNMEASURED: `math_mode_from_env` is read only at `bind.rs:3666`/`4432`, never by `quality_report`'s path (`supported_serving_config`, `generate.rs:1397`, hardcodes `MathMode::Relaxed` via `ServingConfig::default`, `serving.rs:221`) -- running the quality test under `PROXIMA_MATH_MODE=fast` would silently reproduce the `R` baseline, not measure Fast math, so this row declines to fabricate that number. Owner rule needs all three inputs to hold; one is unmeasured. **NO FLIP** -- `MathMode::Fast` is not made the default in `omega/src/metal.rs` | 3 rounds interleaved, 64 steps/round; `gpu_exec_ms` CoV R 1.63%/F 1.30% at 3..7; `step_wall_ms` 32..63 (step 34 excluded) CoV R 0.19%/F 0.43% | THREE-check gate empty/empty/1.77 before the timed runs; no retry needed |
