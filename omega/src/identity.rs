@@ -107,10 +107,38 @@ pub(crate) struct MetalOnlyExtras {
     /// non-unit render different literals baked into the row-base source
     /// text and must never share a cache entry.
     pub packed_row_block_direct_axis: Option<u16>,
-    /// `MathMode::cache_token()` for the `Plan` compiling this op — folded
-    /// in here instead of at `metal::pipeline_for`, so a `Safe`- and a
-    /// `Relaxed`-compiled kernel never share a `PIPELINE_CACHE` entry.
-    pub math_mode_token: Option<char>,
+    /// [`numeric_policy_cache_token`] for the `Plan` compiling this op —
+    /// folded in here instead of `MathMode::cache_token()` (what this field
+    /// held before): `NumericPolicy` is a 4-rung ladder,
+    /// `metal::numeric_policy_as_metal_math_mode` collapses two adjacent
+    /// rungs onto the same `MathMode` (`BitExact` and
+    /// `FusedNoReassociation` both compile `Safe`), so the `MathMode` token
+    /// alone could not tell a `BitExact`-compiled kernel apart from a
+    /// `FusedNoReassociation`-compiled one. The policy token is strictly
+    /// finer than the math-mode token it replaces and subsumes it
+    /// completely — every op below folds `numeric_policy` into its cache
+    /// key ONLY through this field, never a separate math-mode token.
+    pub numeric_policy_token: Option<char>,
+}
+
+/// `numeric_policy`'s single-character identity token — one letter per
+/// rung on the `BitExact < FusedNoReassociation < ReassociationPermitted <
+/// FastMath` ladder (`proxima_tensor::NumericPolicy`'s own doc), so two
+/// `Plan`s agreeing on every structural field but compiled under different
+/// policies never share a `PIPELINE_CACHE` entry ([`MetalOnlyExtras::
+/// numeric_policy_token`]'s own doc explains why this replaced the coarser
+/// `MathMode` token). `NumericPolicy` is `#[non_exhaustive]`, so the
+/// wildcard arm folds any future rung above `FastMath` onto `'F'` — the
+/// same "future rung compiles under the topmost mode" posture
+/// `metal::numeric_policy_as_metal_math_mode` already takes.
+#[must_use]
+pub(crate) const fn numeric_policy_cache_token(policy: NumericPolicy) -> char {
+    match policy {
+        NumericPolicy::BitExact => 'B',
+        NumericPolicy::FusedNoReassociation => 'N',
+        NumericPolicy::ReassociationPermitted => 'R',
+        _ => 'F',
+    }
 }
 
 fn is_leaf(body: &ComposedBody) -> bool {
@@ -387,9 +415,47 @@ pub(crate) fn kernel_identity(
         identity.push_str("_w");
         identity.push_str(&width.to_string());
     }
-    if let Some(token) = metal.math_mode_token {
+    if let Some(token) = metal.numeric_policy_token {
         identity.push(token);
     }
 
     identity
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod numeric_policy_cache_token_tests {
+    //! [`super::MetalOnlyExtras::numeric_policy_token`]'s cache-key fold
+    //! depends on exactly one fact: the 4 [`NumericPolicy`] rungs never
+    //! collide on their token, so two `Plan`s agreeing on every structural
+    //! field [`super::kernel_identity`] checks still resolve to distinct
+    //! `PIPELINE_CACHE` entries when they disagree on numeric policy --
+    //! this replaces `metal::math_mode_cache_key_tests`, which proved the
+    //! same fact for the coarser, now-removed `MathMode` token.
+
+    use proxima_tensor::NumericPolicy;
+
+    use super::numeric_policy_cache_token;
+
+    #[test]
+    fn all_four_rungs_produce_distinct_tokens() {
+        let tokens = [
+            numeric_policy_cache_token(NumericPolicy::BitExact),
+            numeric_policy_cache_token(NumericPolicy::FusedNoReassociation),
+            numeric_policy_cache_token(NumericPolicy::ReassociationPermitted),
+            numeric_policy_cache_token(NumericPolicy::FastMath),
+        ];
+        for (left_index, left_token) in tokens.iter().enumerate() {
+            for (right_index, right_token) in tokens.iter().enumerate() {
+                if left_index != right_index {
+                    assert_ne!(
+                        left_token, right_token,
+                        "NumericPolicy rungs {left_index} and {right_index} must never \
+                         share a cache token, or two Plans compiled under different \
+                         policies could share one PIPELINE_CACHE entry"
+                    );
+                }
+            }
+        }
+    }
 }

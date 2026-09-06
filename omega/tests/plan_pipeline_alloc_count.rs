@@ -361,3 +361,79 @@ fn a_warm_plan_hit_reuses_a_resident_block_s_device_buffer() {
          address just moved -- reused={reused_allocations} rebuilt={rebuilt_allocations}"
     );
 }
+
+/// The owner's finding on this branch: `resolve_steps` (`metal.rs`) used to
+/// invalidate `plan.resolved_steps` only when `MathMode` changed --
+/// `metal::numeric_policy_as_metal_math_mode` projects BOTH `BitExact` and
+/// `FusedNoReassociation` onto the SAME `MathMode::Safe`, so switching
+/// between those two policies on an already-resolved plan left the
+/// math-mode-keyed check believing nothing had changed, and it returned
+/// early before `kernel_cache_key` (and therefore the numeric-policy token
+/// this branch folded into it) was ever consulted again. `ResolvedSteps`
+/// now keys staleness on `numeric_policy` itself -- this proves the plan
+/// re-resolves across exactly that transition, on a real device, by the
+/// same allocation-count technique the rest of this file uses: a rebuild
+/// call pays `kernel_cache_key`/`kernel_dispatch_shape`/`pipeline_for`
+/// again and allocates more than a steady-state warm call; a stale-check
+/// bug would make this call look identically cheap to the warm baseline.
+#[test]
+fn a_numeric_policy_change_that_leaves_math_mode_unchanged_still_re_resolves() {
+    const EXTENT: u32 = 4;
+    let (program, _root) = two_step_identity_chain(EXTENT);
+    let block = [1.0f32, 2.0, 3.0, 4.0];
+    let mut plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&block)], &[])
+        .expect("plans the two-step identity chain");
+
+    plan.set_numeric_policy(proxima_tensor::NumericPolicy::FusedNoReassociation);
+    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
+        .expect("cold call resolves under FusedNoReassociation");
+    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
+        .expect("first warm call under FusedNoReassociation");
+
+    let before_warm_baseline = allocations();
+    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
+        .expect("second warm call establishes the steady-state floor");
+    let warm_baseline_allocations = allocations() - before_warm_baseline;
+
+    assert_eq!(
+        plan.math_mode(),
+        omega::MathMode::Safe,
+        "FusedNoReassociation must project to MathMode::Safe -- see \
+         metal::numeric_policy_as_metal_math_mode's own doc table"
+    );
+    plan.set_numeric_policy(proxima_tensor::NumericPolicy::BitExact);
+    assert_eq!(
+        plan.math_mode(),
+        omega::MathMode::Safe,
+        "math mode must stay Safe across this transition, or this test is not exercising \
+         the case a math-mode-keyed staleness check would have missed"
+    );
+
+    let before_transition = allocations();
+    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
+        .expect("first call after the numeric-policy change");
+    let transition_call_allocations = allocations() - before_transition;
+
+    eprintln!(
+        "warm_baseline_allocations={warm_baseline_allocations} \
+         transition_call_allocations={transition_call_allocations}"
+    );
+    assert!(
+        transition_call_allocations > warm_baseline_allocations,
+        "a numeric-policy change that leaves math_mode unchanged must still force a \
+         resolve_steps rebuild -- a math-mode-keyed staleness check would silently skip \
+         this and keep serving pipelines resolved for the OLD policy: \
+         baseline={warm_baseline_allocations} transition={transition_call_allocations}"
+    );
+
+    let before_second_warm = allocations();
+    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
+        .expect("second call after the policy change, steady-state again");
+    let second_warm_allocations = allocations() - before_second_warm;
+
+    assert_eq!(
+        second_warm_allocations, warm_baseline_allocations,
+        "once re-resolved under the new policy, the plan must return to the SAME \
+         warm-call allocation floor it held before the transition"
+    );
+}

@@ -489,11 +489,17 @@ pub struct Plan {
     block_identity: RefCell<Vec<Option<(usize, usize)>>>,
 }
 
-/// [`Plan::resolved_steps`]'s payload -- the mode it was built under, so a
-/// later [`Plan::set_math_mode`] call is detected and triggers a rebuild
-/// rather than silently serving stale pipelines for the old mode.
+/// [`Plan::resolved_steps`]'s payload -- the [`NumericPolicy`] it was built
+/// under, so a later [`Plan::set_numeric_policy`] OR [`Plan::set_math_mode`]
+/// call is detected and triggers a rebuild rather than silently serving
+/// stale pipelines for the old policy. Keyed on `numeric_policy`, not
+/// `math_mode`: `numeric_policy_as_metal_math_mode` collapses `BitExact`
+/// and `FusedNoReassociation` onto the same `MathMode::Safe` (see that
+/// function's own doc table), so a `math_mode`-keyed staleness check would
+/// miss a `BitExact -> FusedNoReassociation` transition entirely and keep
+/// serving pipelines resolved for the wrong policy.
 struct ResolvedSteps {
-    math_mode: MathMode,
+    numeric_policy: NumericPolicy,
     steps: Vec<ResolvedStep>,
 }
 
@@ -641,20 +647,22 @@ impl Plan {
     ///
     /// [`MathMode`] is a 3-rung compiler flag; [`NumericPolicy`] is the
     /// richer, orthogonal axis this plan actually gates rewrites on (see
-    /// [`Self::set_numeric_policy`]). This narrows the legacy 3-rung call
-    /// into the canonical representative point on that richer axis --
-    /// `Safe -> BitExact`, `Relaxed -> FusedNoReassociation`, `Fast ->
-    /// ReassociationPermitted` (the conservative pick between
-    /// `ReassociationPermitted`/`FastMath`, both of which compile under
-    /// `Fast`) -- so a caller using only the old API still gets the numeric
-    /// gate its intent implies, never a silent mismatch between the two
-    /// fields.
+    /// [`Self::set_numeric_policy`]). This projects the legacy 3-rung call
+    /// onto what Metal's compiler actually admits under each mode --
+    /// `Safe -> BitExact`, `Relaxed -> ReassociationPermitted`, `Fast ->
+    /// FastMath`. Metal's `MTLMathMode::Relaxed` documents that it permits
+    /// reassociation and contraction and only preserves NaN/inf handling
+    /// (see [`MathMode`]'s own doc for the header reference); ROW 296-362
+    /// measured every context-chunk-merge cell under `Relaxed`, so a
+    /// caller using only the old API still gets the rewrite the branch
+    /// landed, never a silent narrowing back to `FusedNoReassociation`
+    /// that this projection used to apply.
     pub fn set_math_mode(&mut self, math_mode: MathMode) {
         self.math_mode = math_mode;
         self.numeric_policy = match math_mode {
             MathMode::Safe => NumericPolicy::BitExact,
-            MathMode::Relaxed => NumericPolicy::FusedNoReassociation,
-            MathMode::Fast => NumericPolicy::ReassociationPermitted,
+            MathMode::Relaxed => NumericPolicy::ReassociationPermitted,
+            MathMode::Fast => NumericPolicy::FastMath,
         };
     }
 
@@ -784,13 +792,8 @@ impl Plan {
             .resolved
             .iter()
             .map(|bound| {
-                kernel_cache_key(
-                    bound,
-                    &self.packed_operands,
-                    self.math_mode.cache_token(),
-                    self.numeric_policy,
-                )
-                .map_err(MetalError::from)
+                kernel_cache_key(bound, &self.packed_operands, self.numeric_policy)
+                    .map_err(MetalError::from)
             })
             .collect()
     }
@@ -4022,6 +4025,18 @@ fn nserror_description(error: &NSError) -> String {
 /// `compile_pipeline` and folds into `pipeline_for`'s cache key so a
 /// `Safe`-compiled kernel is never handed to a caller that asked for
 /// `Relaxed` or `Fast`, or the reverse.
+///
+/// `objc2_metal::MTLMathMode`'s own doc (`MTLLibrary.rs`, upstreaming
+/// [Apple's `MTLMathMode`](https://developer.apple.com/documentation/metal/mtlmathmode))
+/// states the three rungs in these exact words: `Safe` "disables unsafe
+/// floating-point optimizations"; `Relaxed` "allows aggressive, unsafe
+/// floating-point optimizations but preserves infs and nans"; `Fast`
+/// "allows aggressive, unsafe floating-point optimizations" with no such
+/// preservation. `Relaxed`'s wording -- aggressive optimization, NaN/inf
+/// preserved -- is exactly [`NumericPolicy::ReassociationPermitted`]:
+/// reordering an associative fold is permitted, nothing beyond it (no
+/// approximate transcendentals) is. See [`Self::set_math_mode`] for the
+/// full projection table both directions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MathMode {
     /// IEEE-safe float math -- bit-parity with
@@ -4050,18 +4065,6 @@ impl MathMode {
             MathMode::Fast => MTLMathMode::Fast,
         }
     }
-
-    /// The character [`pipeline_for`] appends to a structural
-    /// [`kernel_cache_key`] so the three modes never share a compiled
-    /// pipeline -- kept next to [`Self::as_mtl`] so the two mappings this
-    /// type owns (device value, cache-key token) cannot drift apart.
-    const fn cache_token(self) -> char {
-        match self {
-            MathMode::Safe => 'S',
-            MathMode::Relaxed => 'R',
-            MathMode::Fast => 'F',
-        }
-    }
 }
 
 /// `MTLCompileOptions.mathMode` only distinguishes 3 rungs -- a compiler
@@ -4069,20 +4072,29 @@ impl MathMode {
 /// richer, orthogonal question: which algebra `bind`/the emitter are
 /// permitted to choose in the first place (chunk count, contraction,
 /// reduction order). [`MathMode`] is this narrower projection, not a
-/// duplicate ladder -- `ReassociationPermitted` and `FastMath` both compile
-/// under Metal's `Fast`, since Metal has no rung between them. A free
-/// function, not an inherent `impl NumericPolicy` -- `NumericPolicy` is
-/// defined in `proxima-tensor`, and the orphan rule forbids an inherent
+/// duplicate ladder. The two directions of the mapping are NOT mirror
+/// images of each other, because Metal has 3 rungs and [`NumericPolicy`]
+/// has 4:
+///
+/// | `NumericPolicy` (4 rungs)   | [`Self::set_math_mode`] input | this fn's output |
+/// |------------------------------|--------------------------------|-------------------|
+/// | `BitExact`                   | `Safe`                          | `Safe`            |
+/// | `FusedNoReassociation`        | (unreachable via `set_math_mode`) | `Safe` (down --  no Metal rung sits here; `Safe` is the nearest rung that never over-grants) |
+/// | `ReassociationPermitted`      | `Relaxed`                       | `Relaxed`         |
+/// | `FastMath`                    | `Fast`                          | `Fast`            |
+///
+/// A free function, not an inherent `impl NumericPolicy` -- `NumericPolicy`
+/// is defined in `proxima-tensor`, and the orphan rule forbids an inherent
 /// `impl` for a foreign type from this crate.
 #[must_use]
 const fn numeric_policy_as_metal_math_mode(policy: NumericPolicy) -> MathMode {
     match policy {
-        NumericPolicy::BitExact => MathMode::Safe,
-        NumericPolicy::FusedNoReassociation => MathMode::Relaxed,
-        // `ReassociationPermitted | FastMath`, and any rung a future,
-        // non-exhaustive addition to `NumericPolicy` introduces above them on
-        // the ladder -- Metal has no rung past `Fast`, so everything at or
-        // above `ReassociationPermitted` compiles under it.
+        NumericPolicy::BitExact | NumericPolicy::FusedNoReassociation => MathMode::Safe,
+        NumericPolicy::ReassociationPermitted => MathMode::Relaxed,
+        // `FastMath`, and any rung a future, non-exhaustive addition to
+        // `NumericPolicy` introduces above it on the ladder -- Metal has no
+        // rung past `Fast`, so everything at or above `FastMath` compiles
+        // under it.
         _ => MathMode::Fast,
     }
 }
@@ -4123,37 +4135,6 @@ impl DispatchType {
     }
 }
 
-#[cfg(test)]
-mod math_mode_cache_key_tests {
-    //! [`pipeline_for`]'s cache key is `format!("{cache_key}{}",
-    //! math_mode.cache_token())` -- this proves the one fact that
-    //! invariant depends on: the three live [`MathMode`] variants never
-    //! collide on that token, so two `Plan`s agreeing on every structural
-    //! field [`kernel_cache_key`] checks still resolve to distinct
-    //! [`PIPELINE_CACHE`] entries when they disagree on math mode.
-
-    use super::MathMode;
-
-    #[test]
-    fn safe_relaxed_and_fast_produce_distinct_pipeline_cache_keys() {
-        let structural_key = "elementwise_f32S_ax_0";
-        let safe_key = format!("{structural_key}{}", MathMode::Safe.cache_token());
-        let relaxed_key = format!("{structural_key}{}", MathMode::Relaxed.cache_token());
-        let fast_key = format!("{structural_key}{}", MathMode::Fast.cache_token());
-        assert_ne!(
-            safe_key, relaxed_key,
-            "Safe and Relaxed must never share a compiled pipeline"
-        );
-        assert_ne!(
-            safe_key, fast_key,
-            "Safe and Fast must never share a compiled pipeline"
-        );
-        assert_ne!(
-            relaxed_key, fast_key,
-            "Relaxed and Fast must never share a compiled pipeline"
-        );
-    }
-}
 
 fn compile_pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
@@ -4206,15 +4187,17 @@ fn pipeline_for(
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-    // `cache_key` ([`kernel_cache_key`]) already carries the math-mode token
-    // as part of the shared identity (`crate::identity::kernel_identity`,
-    // via `MetalOnlyExtras::math_mode_token`) -- the caller's own
-    // `math_mode.cache_token()` fed straight into it, so there is no second
-    // fold to do here. Two BoundOps agreeing on everything else but compiled
-    // under different modes still never share a pipeline: `Safe`'s kernel
-    // body is byte-identical to `Relaxed`'s (`compile_pipeline` never
-    // touches source text, only `MTLCompileOptions`), so only the key's own
-    // token keeps the two apart.
+    // `cache_key` ([`kernel_cache_key`]) already carries the numeric-policy
+    // token as part of the shared identity (`crate::identity::
+    // kernel_identity`, via `MetalOnlyExtras::numeric_policy_token`) --
+    // `numeric_policy` fed straight into it, so there is no second fold to
+    // do here. Two BoundOps agreeing on everything else but compiled under
+    // different policies still never share a pipeline: `Safe`'s kernel body
+    // is byte-identical to `Relaxed`'s (`compile_pipeline` never touches
+    // source text, only `MTLCompileOptions`), so only the key's own token
+    // keeps the two apart -- and, per `numeric_policy_as_metal_math_mode`'s
+    // doc table, the token is keyed on the finer `NumericPolicy`, not the
+    // coarser `MathMode`, because two policies can share one `MathMode`.
     if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(cache_key).cloned()) {
         trace!(cache_key = %cache_key, hit = true, "pipeline cache lookup");
         #[cfg(feature = "instrument")]
@@ -5994,29 +5977,25 @@ fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Result<Option<&MetalBu
 }
 
 /// Builds `plan.resolved_steps` on its first call, or when
-/// [`Plan::set_math_mode`] moved the mode since the last build -- every
-/// later call for the SAME mode is a no-op. Called once per
-/// [`execute_plan_with_placements`] invocation, before that function's own
-/// per-position loop, so a plan-cache HIT never pays [`kernel_cache_key`]
-/// or [`kernel_dispatch_shape`] again: the loop below indexes
-/// `plan.resolved_steps` by position instead.
+/// [`Plan::set_numeric_policy`] (or [`Plan::set_math_mode`], which also
+/// moves `numeric_policy` -- see its own doc) moved the policy since the
+/// last build -- every later call for the SAME policy is a no-op. Called
+/// once per [`execute_plan_with_placements`] invocation, before that
+/// function's own per-position loop, so a plan-cache HIT never pays
+/// [`kernel_cache_key`] or [`kernel_dispatch_shape`] again: the loop below
+/// indexes `plan.resolved_steps` by position instead.
 fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<(), MetalError> {
     let stale = plan
         .resolved_steps
         .borrow()
         .as_ref()
-        .is_none_or(|resolved| resolved.math_mode != plan.math_mode);
+        .is_none_or(|resolved| resolved.numeric_policy != plan.numeric_policy);
     if !stale {
         return Ok(());
     }
     let mut steps = Vec::with_capacity(plan.prepared.resolved.len());
     for bound in &plan.prepared.resolved {
-        let cache_key = kernel_cache_key(
-            bound,
-            &plan.packed_operands,
-            plan.math_mode.cache_token(),
-            plan.numeric_policy,
-        )?;
+        let cache_key = kernel_cache_key(bound, &plan.packed_operands, plan.numeric_policy)?;
         let (bindings, grid) =
             kernel_dispatch_shape(bound, &plan.packed_operands, plan.numeric_policy)?;
         let pipeline = pipeline_for(
@@ -6034,7 +6013,7 @@ fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<
         });
     }
     *plan.resolved_steps.borrow_mut() = Some(ResolvedSteps {
-        math_mode: plan.math_mode,
+        numeric_policy: plan.numeric_policy,
         steps,
     });
     Ok(())
@@ -6108,8 +6087,7 @@ fn encode_op(
         // case, `plan_hits`/`gpu_exec`'s own row) `emit` itself is never
         // called; only a genuine miss inside `pipeline_for` pays for the
         // full render + compile.
-        let cache_key =
-            kernel_cache_key(bound, packed_operands, math_mode.cache_token(), numeric_policy)?;
+        let cache_key = kernel_cache_key(bound, packed_operands, numeric_policy)?;
         let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
         #[cfg(feature = "instrument")]
         {
