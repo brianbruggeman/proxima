@@ -1,4 +1,5 @@
 use crate::dtype::DType;
+use crate::numeric::{NumericPolicy, NumericRewrite};
 use crate::op::{NodeId, ScalarOp};
 
 /// Every fault [`shape::infer`](crate::shape::infer) and the rest of the
@@ -242,4 +243,13 @@ pub enum TensorError {
     /// meaningful modulus.
     #[error("full_attention_interval must be >= 1, got {full_attention_interval}")]
     InvalidFullAttentionInterval { full_attention_interval: u32 },
+
+    /// [`crate::numeric::admit`] rejected a rewrite: `granted` is below
+    /// `rewrite`'s [`crate::numeric::NumericRewrite::minimum_level`].
+    #[error("{rewrite:?} needs numeric policy >= {minimum:?}, caller granted {granted:?}")]
+    NumericPolicyTooStrict {
+        rewrite: NumericRewrite,
+        minimum: NumericPolicy,
+        granted: NumericPolicy,
+    },
 }

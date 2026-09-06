@@ -38,8 +38,8 @@ use core::mem::size_of;
 use std::sync::mpsc;
 
 use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes,
-    TensorError, bind_with_fusion, infer, prune_dead, resolve_named_blocks,
+    BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, NumericPolicy, Op,
+    QuantizedBlock, Shapes, TensorError, bind_with_fusion, infer, prune_dead, resolve_named_blocks,
 };
 
 use crate::error::EmitError;
@@ -333,7 +333,13 @@ pub fn plan(
     // `BoundOpKind::CachedAttention` yet -- the fused rewrite is a
     // Metal/CPU-only optimization until wgpu grows one.
     let resolved = prune_dead(
-        bind_with_fusion(program, &shapes, &effective_outputs, false)?,
+        bind_with_fusion(
+            program,
+            &shapes,
+            &effective_outputs,
+            false,
+            NumericPolicy::default(),
+        )?,
         &effective_outputs,
     );
     let (device, queue, caps) = acquire_device()?;
