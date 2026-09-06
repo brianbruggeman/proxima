@@ -1010,9 +1010,10 @@ pub(crate) enum LogitsSink<'sink> {
     Discard,
     Collect(&'sink mut Vec<Vec<f32>>),
     /// `real_openchat_file::decode_text_is_deterministic_across_repeated_runs`'s
-    /// own sink: test-only, so it stays `#[cfg(test)]` rather than dead code
-    /// in the non-test lib build.
-    #[cfg(test)]
+    /// own sink: that test is `#[cfg(feature = "metal")]`, so this variant
+    /// carries the same gate (plus `test`) rather than sitting dead in a
+    /// `std`-only test build.
+    #[cfg(all(test, feature = "metal"))]
     SumBarriers(&'sink mut u64),
 }
 
@@ -1026,7 +1027,7 @@ impl LogitsSink<'_> {
         match self {
             Self::Discard => {}
             Self::Collect(buffer) => buffer.push(logits.to_vec()),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "metal"))]
             Self::SumBarriers(total) => **total += _barriers_step,
         }
     }
