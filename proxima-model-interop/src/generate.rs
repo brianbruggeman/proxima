@@ -137,6 +137,44 @@ use crate::serving::apply_serving_config;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 const OP_PROFILE_TOP_N: usize = 20;
 
+/// ROW 329: `PROXIMA_METAL_ENCODER_SPLIT_AT`, read the same
+/// unset-means-off, one-env-var-per-diagnostic-knob convention as
+/// `PROXIMA_DUPLICATE_HEAD`/`PROXIMA_METAL_OP_PROFILE_STEP` above --
+/// `None` (unset, or unparseable) keeps
+/// `execute_plan_with_placements_dispatch_timed`'s ROW 309 default
+/// (one stage-boundary encoder per position); `Some(position)` ends the
+/// compute encoder immediately before that plan position and opens a
+/// second one for the rest of the program, in the SAME command buffer.
+#[cfg(all(feature = "metal-output-placement", feature = "instrument", target_os = "macos"))]
+fn encoder_split_at_from_env() -> Option<usize> {
+    std::env::var("PROXIMA_METAL_ENCODER_SPLIT_AT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+/// ROW 329's own summary line: the two ROW-309-machinery encoder GPU
+/// durations `execute_plan_with_placements_dispatch_timed` reports when
+/// [`encoder_split_at_from_env`] named a split, their sum, and that
+/// step's own `gpu_exec_ms` (now recorded for this diagnostic path too --
+/// see that function's own doc) for a same-step comparison ROW 309 could
+/// not make (its own diagnostic step recorded no `gpu_exec_ms` at all).
+/// Asserts nothing -- this is a print, the same "informational, not a
+/// gate" contract [`report_op_timings`] already has for this crate's
+/// other diagnostic-only knobs.
+#[cfg(all(feature = "metal-output-placement", feature = "instrument", target_os = "macos"))]
+fn report_encoder_split(step: usize, encoder_split_ns: (u64, u64), gpu_exec_ns: u64) {
+    let (encoder_one_ns, encoder_two_ns) = encoder_split_ns;
+    let ms = |nanos: u64| nanos as f64 / 1e6;
+    info!(
+        step = step as u64,
+        encoder_one_gpu_ms = ms(encoder_one_ns),
+        encoder_two_gpu_ms = ms(encoder_two_ns),
+        sum_gpu_ms = ms(encoder_one_ns + encoder_two_ns),
+        gpu_exec_ms = ms(gpu_exec_ns),
+        "encoder_split: row 329 two-encoder gpu attribution inside the decode buffer"
+    );
+}
+
 /// Prints the per-op GPU attribution `run_decode_loop`'s
 /// `PROXIMA_METAL_OP_PROFILE_STEP` branch gathers for exactly one decode
 /// step: the op count and summed GPU time (asserting the count so a
@@ -1536,7 +1574,19 @@ impl BackendRuntime {
     /// 298's own finding says does not reproduce the batched buffer's
     /// cost). Reachable only behind `instrument` and only from
     /// `run_decode_loop_placed_kv`'s own `PROXIMA_METAL_DISPATCH_PROFILE_STEP`
-    /// branch.
+    /// branch. That same call site also reads `PROXIMA_METAL_ENCODER_SPLIT_AT`
+    /// (ROW 329, same one-env-var-per-diagnostic convention as
+    /// `PROXIMA_DUPLICATE_HEAD`/`PROXIMA_METAL_OP_PROFILE_STEP` above) and
+    /// applies it to the resolved plan via
+    /// [`omega::metal::Plan::set_encoder_split_at`] AFTER the cache lookup
+    /// below, never inside the build closure: measured directly (a
+    /// `debug!` trace that showed `plan_encoder_split_at=None` reaching
+    /// [`omega::metal::execute_plan_with_placements_dispatch_timed`] despite
+    /// this call setting it), `ServingConfig::kv_bucket_tokens` rounds
+    /// several consecutive steps' KV extents onto the SAME cache key, so
+    /// the plan this call's own step reuses is often one
+    /// [`Self::evaluate_with_placements`]'s closure already inserted --
+    /// build-time-only would silently no-op on that hit.
     #[cfg(all(
         feature = "metal-output-placement",
         feature = "instrument",
@@ -1552,7 +1602,7 @@ impl BackendRuntime {
         resident_names: &BTreeSet<&str>,
         input_placements: &[(NodeId, &PlacedBuffer, usize)],
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
-    ) -> Result<(Evaluated, Vec<OpGpuTiming>, &'static str), InteropError> {
+    ) -> Result<omega::metal::DispatchTimedOutcome, InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
@@ -1565,6 +1615,17 @@ impl BackendRuntime {
                 Ok(plan)
             },
         )?;
+        // Applied AFTER the cache lookup, not inside the build closure above:
+        // this shape's `Plan` is just as likely to have been inserted by
+        // `Self::evaluate_with_placements`'s own closure (a HIT here on a
+        // step where `PROXIMA_METAL_DISPATCH_PROFILE_STEP` was unset, since
+        // `ServingConfig::kv_bucket_tokens` rounds several consecutive
+        // steps' KV extents to the SAME cache key) as by this function's
+        // own closure -- a build-time-only `set_encoder_split_at` call
+        // would silently no-op on that hit path. Cheap and always correct
+        // to set unconditionally: unlike `set_math_mode`, this field never
+        // invalidates `resolved_steps` (this same function's own doc).
+        plan.set_encoder_split_at(encoder_split_at_from_env());
         Ok(execute_plan_named_with_placements_dispatch_timed(
             plan,
             named,
@@ -2705,6 +2766,15 @@ impl<'file> LoadedModel<'file> {
                 }
                 #[cfg(feature = "instrument")]
                 let evaluate_started = read_ticks();
+                // ROW 329: this step's `execute_plan_with_placements_dispatch_timed`
+                // encoder-split result, if the branch below actually took it
+                // -- read out here (not inside the match arm) because
+                // `report_encoder_split`'s own `gpu_exec_ms` needs
+                // `metal_stage_totals`'s post-match snapshot, the same
+                // snapshot-and-reset value `emit_token_breakdown_metal`
+                // reads a few lines below, never a second counter read.
+                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                let mut encoder_split_ns: Option<(u64, u64)> = None;
                 // `PROXIMA_METAL_OP_PROFILE_STEP` -- same diagnostic-only,
                 // `instrument`-gated, default-off convention as
                 // `run_decode_loop`'s own branch above (that one's doc has
@@ -2747,7 +2817,7 @@ impl<'file> LoadedModel<'file> {
                         .and_then(|value| value.parse::<usize>().ok())
                         == Some(_step) =>
                     {
-                        let (evaluated, timings, sampling_mode) = runtime
+                        let (evaluated, timings, sampling_mode, split_ns) = runtime
                             .evaluate_dispatch_timed_with_placements(
                                 &single_range.program,
                                 &symbols,
@@ -2763,6 +2833,7 @@ impl<'file> LoadedModel<'file> {
                             "dispatch_profile: per-dispatch gpu-timestamp sampling mode"
                         );
                         report_op_timings(_step, &timings);
+                        encoder_split_ns = split_ns;
                         evaluated
                     }
                     _ => runtime.evaluate_with_placements(
@@ -2802,6 +2873,14 @@ impl<'file> LoadedModel<'file> {
                 // one-time cost after step 0, never a hardcoded zero.
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 let metal_stage = metal_stage_totals();
+                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                if let Some(split_ns) = encoder_split_ns {
+                    report_encoder_split(
+                        _step,
+                        split_ns,
+                        ticks_to_nanos(metal_stage.gpu_exec_ticks),
+                    );
+                }
                 #[cfg(feature = "instrument")]
                 let cached_len_before_step = cached_len;
                 cached_len = merged_len;

@@ -56,13 +56,18 @@ fn every_dispatch_gets_a_timing_and_a_named_sampling_mode() {
         .expect("plans the two-dispatch program");
 
     let input = vec![1.0f32; EXTENT as usize];
-    let (_evaluated, timings, sampling_mode) = omega::execute_plan_with_placements_dispatch_timed(
-        &plan,
-        &[QuantizedBlock::Float32(&input)],
-        &[],
-        &[],
-    )
-    .expect("dispatch-timed execution runs on a real Metal device");
+    let (_evaluated, timings, sampling_mode, encoder_split_ns) =
+        omega::execute_plan_with_placements_dispatch_timed(
+            &plan,
+            &[QuantizedBlock::Float32(&input)],
+            &[],
+            &[],
+        )
+        .expect("dispatch-timed execution runs on a real Metal device");
+    assert!(
+        encoder_split_ns.is_none(),
+        "a plan with no `set_encoder_split_at` call must report `None`, never a fabricated split"
+    );
 
     assert!(
         !timings.is_empty(),
@@ -86,4 +91,56 @@ fn every_dispatch_gets_a_timing_and_a_named_sampling_mode() {
              gpu_ns was 0 -- a degenerate empty profile reads as RED, not quiet"
         );
     }
+}
+
+/// ROW 329: [`omega::metal::Plan::set_encoder_split_at`] ends the compute
+/// encoder before the named position and opens a second one, instead of
+/// ROW 309's original one-encoder-per-position stage-boundary fallback.
+/// On this device (`AtStageBoundary`, not `AtDispatchBoundary`) that means
+/// exactly two GPU-side stage-boundary samples instead of one per
+/// position: this test asserts `encoder_split_ns` comes back `Some` with
+/// both halves nonzero when the mode is not `"unsupported"`, and that
+/// every per-position `OpGpuTiming::gpu_ns` reads `0` -- the split
+/// samples describe encoder-level spans, not per-op ones, and this
+/// function never fabricates a per-op number it did not measure.
+#[test]
+fn encoder_split_reports_two_nonzero_encoder_spans_and_zeroes_per_op_gpu_ns() {
+    const EXTENT: u32 = 8;
+    let bodies = [ScalarOp::Identity, ScalarOp::Negate, ScalarOp::Identity, ScalarOp::Negate];
+    let (program, output) = chained_unary_program(EXTENT, &bodies);
+    let mut plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&[0.0; EXTENT as usize])], &[output])
+        .expect("plans the four-dispatch program");
+
+    let input = vec![1.0f32; EXTENT as usize];
+    plan.set_encoder_split_at(Some(1));
+    let (_evaluated, timings, sampling_mode, encoder_split_ns) =
+        omega::execute_plan_with_placements_dispatch_timed(
+            &plan,
+            &[QuantizedBlock::Float32(&input)],
+            &[],
+            &[],
+        )
+        .expect("split dispatch-timed execution runs on a real Metal device");
+
+    if sampling_mode == "unsupported" {
+        assert!(
+            encoder_split_ns.is_none(),
+            "an unsupported device must report no split timing, never a fabricated one"
+        );
+        return;
+    }
+
+    let (encoder_one_ns, encoder_two_ns) = encoder_split_ns.expect(
+        "a split position on a device with real counter-sampling support must report both \
+         encoder spans",
+    );
+    assert!(
+        encoder_one_ns > 0 && encoder_two_ns > 0,
+        "both encoder spans must carry real GPU time on a supported device, got \
+         encoder_one_ns={encoder_one_ns} encoder_two_ns={encoder_two_ns}"
+    );
+    assert!(
+        timings.iter().all(|timing| timing.gpu_ns == 0),
+        "split mode's three encoder-level samples must never be misread as per-position ones"
+    );
 }
