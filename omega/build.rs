@@ -278,6 +278,21 @@ fn emit_sizing_consts() {
         ));
     }
 
+    let attention_context_chunks_keys_per_chunk = require_nonzero(
+        "attention_context_chunks.keys_per_chunk",
+        resolve_int(&root, "attention_context_chunks", "keys_per_chunk"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_CONTEXT_KEYS_PER_CHUNK: u64 = {attention_context_chunks_keys_per_chunk};\n"
+    ));
+    let attention_context_chunks_cap = require_nonzero(
+        "attention_context_chunks.cap",
+        resolve_int(&root, "attention_context_chunks", "cap"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_CONTEXT_CHUNK_CAP: u64 = {attention_context_chunks_cap};\n"
+    ));
+
     let workgroup_size = require_nonzero(
         "wgsl.workgroup_size",
         resolve_int(&root, "wgsl", "workgroup_size"),
