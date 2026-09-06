@@ -52,6 +52,24 @@ pub enum SizingError {
         section: String,
         key: String,
     },
+    #[error("{toml}: missing or non-string [{section}].{key}", toml = .toml.display())]
+    MissingStr {
+        toml: PathBuf,
+        section: String,
+        key: String,
+    },
+    #[error("{toml}: missing or non-bool [{section}].{key}", toml = .toml.display())]
+    MissingBool {
+        toml: PathBuf,
+        section: String,
+        key: String,
+    },
+    #[error("{env_name}={raw} must parse as bool: {source}")]
+    EnvBool {
+        env_name: String,
+        raw: String,
+        source: std::str::ParseBoolError,
+    },
     #[error("{env_name}={raw} must parse as i64: {source}")]
     EnvInt {
         env_name: String,
@@ -157,6 +175,60 @@ impl SizingSource {
                 .and_then(|section_value| section_value.get(key))
                 .and_then(Value::as_float)
                 .ok_or_else(|| SizingError::MissingFloat {
+                    toml: self.toml_path.clone(),
+                    section: section.to_owned(),
+                    key: key.to_owned(),
+                }),
+        }
+    }
+
+    /// Like [`Self::resolve_int`], but for a string key. Returns an owned
+    /// `String` because the override value (when present) only lives as
+    /// long as the `env::var` call, so a borrowed form can't outlive it.
+    ///
+    /// # Errors
+    ///
+    /// [`SizingError::MissingStr`] if neither the override nor the TOML key
+    /// is present.
+    pub fn resolve_str(&self, section: &str, key: &str) -> Result<String> {
+        let env_name = self.env_name(section, key);
+        println!("cargo:rerun-if-env-changed={env_name}");
+        match env::var(&env_name) {
+            Ok(raw) => Ok(raw),
+            Err(_) => self
+                .table
+                .get(section)
+                .and_then(|section_value| section_value.get(key))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| SizingError::MissingStr {
+                    toml: self.toml_path.clone(),
+                    section: section.to_owned(),
+                    key: key.to_owned(),
+                }),
+        }
+    }
+
+    /// Like [`Self::resolve_int`], but for a boolean key.
+    ///
+    /// # Errors
+    ///
+    /// [`SizingError::EnvBool`] if the override is set but does not parse;
+    /// [`SizingError::MissingBool`] if neither the override nor the TOML key
+    /// is present.
+    pub fn resolve_bool(&self, section: &str, key: &str) -> Result<bool> {
+        let env_name = self.env_name(section, key);
+        println!("cargo:rerun-if-env-changed={env_name}");
+        match env::var(&env_name) {
+            Ok(raw) => raw
+                .parse::<bool>()
+                .map_err(|source| SizingError::EnvBool { env_name, raw, source }),
+            Err(_) => self
+                .table
+                .get(section)
+                .and_then(|section_value| section_value.get(key))
+                .and_then(Value::as_bool)
+                .ok_or_else(|| SizingError::MissingBool {
                     toml: self.toml_path.clone(),
                     section: section.to_owned(),
                     key: key.to_owned(),
