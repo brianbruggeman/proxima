@@ -824,6 +824,73 @@ pub(crate) fn bind_matmul_weight_as<'file>(
     Ok(())
 }
 
+/// ROW 328 diagnostic knob: `PROXIMA_HEAD_PRIVATE_COPY=1`, unset in every
+/// production run. Same env-var convention as `PROXIMA_PREFAULT`/
+/// `PROXIMA_MLOCK` (this module's `real_openchat_file` submodule).
+#[cfg(feature = "std")]
+fn head_private_copy_requested() -> bool {
+    std::env::var("PROXIMA_HEAD_PRIVATE_COPY").is_ok_and(|value| value == "1")
+}
+
+/// [`bind_matmul_weight`]'s ROW 328 counterpart: binds the SAME packed
+/// bytes through [`BoundWeights::packed_owned`] (an owned `Vec<u8>` copy)
+/// instead of [`BoundWeights::packed`] (a zero-copy borrow into
+/// `file_bytes`) -- the existing split [`PackedOwnedKind`]'s own doc
+/// already describes for [`bind_moe_expert_weights`]'s restack fallback,
+/// reused here rather than adding a second owned-bytes mechanism. Same
+/// shape, same quantization codec, same compiled kernel; the only
+/// difference downstream is the buffer's address: a `packed_owned` copy
+/// never falls inside `omega::metal::register_checkpoint_mapping`'s
+/// registered mmap range, so the driver's `checkpoint_mapping_offset`
+/// no-copy lookup misses and it uploads a private/resident copy instead --
+/// exactly the isolation this row's private-copy arm needs.
+///
+/// A codec [`PackedOwnedKind`] has no tag for (`Q3_K`, `Q4_0`, `F16`,
+/// `BFloat16`) falls back to the normal zero-copy [`bind_matmul_weight`]
+/// bind unchanged, so this knob never fails a checkpoint whose head is not
+/// one of the four `PackedOwnedKind` codecs -- it only changes behavior for
+/// the `Q6_K` shape this row's own openchat fixture actually has.
+///
+/// # Errors
+///
+/// See [`bind_matmul_weight`].
+#[cfg(feature = "std")]
+fn bind_matmul_weight_private_copy<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    source_name: &str,
+    target_name: alloc::string::String,
+    out_dim: usize,
+    in_dim: usize,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    match gguf_tensor_as_packed_block(parsed, file_bytes, source_name) {
+        Ok(proxima_tensor::cpu::QuantizedBlock::Float32(_)) | Err(_) => {
+            let decoded = gguf_tensor_as_f32(parsed, file_bytes, source_name)?;
+            state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
+            let transposed = transpose_out_in_to_in_out(&decoded, source_name, out_dim, in_dim)?;
+            state.owned.push((target_name, transposed));
+        }
+        Ok(block) => {
+            let owned = match block {
+                proxima_tensor::cpu::QuantizedBlock::Q4K(bytes) => Some((bytes, PackedOwnedKind::Q4K)),
+                proxima_tensor::cpu::QuantizedBlock::Q5K(bytes) => Some((bytes, PackedOwnedKind::Q5K)),
+                proxima_tensor::cpu::QuantizedBlock::Q6K(bytes) => Some((bytes, PackedOwnedKind::Q6K)),
+                proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes) => Some((bytes, PackedOwnedKind::Q8_0)),
+                _ => None,
+            };
+            match owned {
+                Some((bytes, kind)) => {
+                    state.resident_bytes += bytes.len();
+                    state.packed_owned.push((target_name, bytes.to_vec(), kind));
+                }
+                None => state.packed.push((target_name, block)),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Row-major transpose of one `[expert_count, out_dim, in_dim]` stack into
 /// `[expert_count, in_dim, out_dim]`, expert-by-expert, via the same
 /// [`transpose_out_in_to_in_out`] a dense matmul weight already uses --
@@ -1237,14 +1304,26 @@ pub(crate) fn bind_all_weights<'file>(
     // tied output projection already uses (`lfm2.rs:544-545`) -- not a new
     // bind path, just reached from the plain dense/MoE loop too.
     if find_tensor(parsed, "output.weight").is_ok() {
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            "output.weight".into(),
-            vocab,
-            embedding,
-            &mut state,
-        )?;
+        if head_private_copy_requested() {
+            bind_matmul_weight_private_copy(
+                parsed,
+                file_bytes,
+                "output.weight",
+                "output.weight".into(),
+                vocab,
+                embedding,
+                &mut state,
+            )?;
+        } else {
+            bind_matmul_weight(
+                parsed,
+                file_bytes,
+                "output.weight".into(),
+                vocab,
+                embedding,
+                &mut state,
+            )?;
+        }
     } else {
         bind_matmul_weight_as(
             parsed,
