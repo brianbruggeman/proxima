@@ -268,8 +268,17 @@ pub(crate) fn kernel_identity(
             } else {
                 signed_name_part(*new_upper_inclusive)
             };
+            // `context_chunks` is already a deterministic function of
+            // `cached_key_rows + new_key_rows` (`crate::msl::
+            // context_chunks_for`), both already folded into this
+            // identity above -- naming it explicitly here means a future
+            // change to the sizing config's divisor/cap still shows up as
+            // a distinct cache key rather than silently reusing a pipeline
+            // compiled for the wrong chunk count.
+            let context_chunks =
+                crate::msl::context_chunks_for(*cached_key_rows + *new_key_rows);
             format!(
-                "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}",
+                "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{context_chunks}",
                 scale.to_bits(),
                 signed_name_part(*cached_lower_inclusive),
             )
