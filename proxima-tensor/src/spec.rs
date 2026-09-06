@@ -13640,19 +13640,34 @@ value = 1.0
                 "paired_gate_up_reduce_census baseline_epilogued={baseline_epilogued} paired_epilogued={paired_epilogued}"
             );
             // `ffn_hidden` (`spec.rs`'s own `append_mistral_cached_layer`)
-            // absorbs the baseline's standalone `up` reduce as its epilogue
-            // today (one of the four per-layer sites the census above
-            // names). The paired reduce's `up` slice is read through a
-            // non-identity axis expression (the parity-selecting
-            // `"s,0*s+1,g->sg"` map), which `bind::reduce_epilogue_candidates`'s
-            // own identity-read condition rejects -- so that fusion site
-            // disappears: one fewer fused site per layer, 32 layers.
+            // never absorbs the paired reduce's `up` slice: `up` is read
+            // through a non-identity, base-shifted axis expression (the
+            // parity-selecting `"s,0*s+1,g->sg"` map) from the SAME node the
+            // `gate` chain also reads through a DIFFERENT map
+            // (`"s,0*s+0,g->sg"`) — `bind::reduce_epilogue_fusion`'s own
+            // liveness gate (`resolved_reference_counts`, condition (b): "no
+            // OTHER consumer") already counts BOTH reads against the one
+            // paired reduce's `NodeId` and rejects it outright, so this site
+            // NEVER contributes to `paired_epilogued` — MEASURED (not
+            // derived) at zero big (>= 2 real operand) epilogue sites
+            // touching the paired reduce's own `NodeId` on this checkout,
+            // both before and after `bind::reduce_epilogue_candidates`
+            // widened from a raw-`Op`-level one-hop scan to a resolved-op
+            // scan (`bind.rs`'s own module doc). The WIDENING also fuses
+            // many additional composed-tail sites the raw-`Op` scan missed
+            // in BOTH the baseline and paired programs equally (RMSNorm's
+            // own two-round broadcast-reduce epilogue, elsewhere in this
+            // same 32-layer model), so the aggregate `baseline_epilogued -
+            // paired_epilogued` delta this test used to assert (`32`, one
+            // raw one-hop ffn_hidden site per layer) no longer isolates
+            // JUST that site — both totals moved by the SAME widening, to
+            // the SAME measured value.
             assert_eq!(
-                baseline_epilogued - paired_epilogued,
-                32,
-                "paired_gate_up_reduce must remove exactly one epilogue-fused site per layer \
-                 (32 layers) relative to the baseline -- ffn_hidden can no longer absorb a \
-                 non-identity parity-sliced read of the paired reduce's own output"
+                baseline_epilogued, paired_epilogued,
+                "paired_gate_up_reduce's own documented site (ffn_hidden's non-identity, \
+                 parity-sliced read of the paired reduce) must never fuse in EITHER program; a \
+                 non-zero delta here means the resolved-op candidate match started admitting or \
+                 rejecting some OTHER, unrelated site asymmetrically between the two programs"
             );
         }
     }

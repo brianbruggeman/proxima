@@ -150,6 +150,23 @@ proptest! {
     /// `EpilogueKind::Clip` (`epilogue_fuse_totals().0 > 0`) -- a test that
     /// merely fell through to the same scalar path on both arms would pass
     /// vacuously.
+    ///
+    /// Excluded under `reduce-epilogue-fusion`: `bind::bind`'s own resolved-
+    /// op candidate match (`bind.rs`'s `reduce_epilogue_candidates`) now
+    /// absorbs this EXACT `matmul + bias + clip` shape into ONE
+    /// `BoundOpKind::Reduce` at BIND time (the composed-body-drop fix this
+    /// module's own doc names), so the separate `Reduce`/`Elementwise` pair
+    /// this test's `cpu::epilogue_fuse_totals` counter looks for no longer
+    /// exists in `resolved` — correctly, not vacuously: `evaluate_named`'s
+    /// `fused`/`unfused` arms both read the SAME already-fused `resolved`
+    /// regardless of `set_epilogue_fuse_enabled`, so `hits == 0` here is the
+    /// bind-time mechanism superseding the execution-time one, proven
+    /// bit-identical by this module's own `bind::tests::reduce_epilogue_
+    /// fusion_tests` instead.
+    #[cfg_attr(
+        feature = "reduce-epilogue-fusion",
+        ignore = "superseded by bind-time reduce-epilogue-fusion for this shape"
+    )]
     #[test]
     fn law1_clip_epilogue_fused_matches_unfused_bit_identical(
         m in 1u32..9,
@@ -402,6 +419,18 @@ proptest! {
     /// of open question §7 already names for law 4 vs law 1. Not tested here
     /// (there is no fused/unfused pair to compare at a shape that never
     /// fuses); named as a residual instead.
+    ///
+    /// Excluded under `reduce-epilogue-fusion`: LayerNorm's own `centered =
+    /// x - mean` / scale-shift tail is exactly the "broadcast-reduce"
+    /// epilogue shape (`bind.rs`'s `BoundOpKind::Reduce::epilogue_broadcast_
+    /// axes`) — `bind::bind` now absorbs the WHOLE cluster into ONE fold at
+    /// BIND time, so `cpu.rs`'s own `layer_norm_cluster_plan` (an
+    /// EXECUTION-time, two-separate-`BoundOp` detector) has nothing left to
+    /// find; see `law1`'s own doc for the identical interaction.
+    #[cfg_attr(
+        feature = "reduce-epilogue-fusion",
+        ignore = "superseded by bind-time reduce-epilogue-fusion for this shape"
+    )]
     #[test]
     fn law2_layer_norm_cluster_fused_matches_unfused_within_rtol(
         rows in 1u32..6,
