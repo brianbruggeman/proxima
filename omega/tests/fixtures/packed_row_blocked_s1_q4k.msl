@@ -568,10 +568,11 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     long other_stride = u.operand_strides[1][2];
     uint ix = (uint)lane / 8u;
     uint it = (uint)lane % 8u;
-    uint slot = it * 32u;
-    uint iq = it / 4u; uint ir = it % 4u;
-    float yl[16]; float yh[16];
+    uint iq = it / 4u;
+    uint ir = it % 4u;
     int super_blocks = (int)u.reduction_total / 256;
+    float yl[16];
+    float yh[16];
     int ib_first = (int)ix;
     int ib_step = 4;
     long blk_step = (long)ib_step * 144;
@@ -582,10 +583,48 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     long y4_step = (long)ib_step * 256;
     device const float *y4 = in1 + other_base[0] + (long)ib_first * 256 + (long)(64u * iq + 8u * ir);
     for (int ib = ib_first; ib < super_blocks; ib += ib_step) {
-        for (uint i = 0u; i < 8u; ++i) { yl[i] = y4[i]; yl[i + 8u] = y4[i + 32u]; yh[i] = y4[i + 128u]; yh[i + 8u] = y4[i + 160u]; }
+        float sumy0 = 0.0f; float sumy1 = 0.0f; float sumy2 = 0.0f; float sumy3 = 0.0f;
+        for (uint i = 0u; i < 8u; ++i) {
+            yl[i] = y4[i]; sumy0 += yl[i];
+            yl[i + 8u] = y4[i + 32u]; sumy1 += yl[i + 8u];
+            yh[i] = y4[i + 128u]; sumy2 += yh[i];
+            yh[i + 8u] = y4[i + 160u]; sumy3 += yh[i + 8u];
+        }
         for (int q = 0; q < 4; ++q) {
             device const uchar *blk = blk_ptr[q];
-            sumf[q] = sumf[q] + q4k_pair_dot(blk, iq, ir, yl, yh);
+            device const ushort *sc = (device const ushort *)(blk + 4) + iq;
+            device const ushort *q1 = (device const ushort *)(blk + 16) + 16u * iq + 4u * ir;
+            device const ushort *q2 = q1 + 32;
+            device const half *dh = (device const half *)blk;
+            ushort sc16_0 = sc[0] & (ushort)0x3f3fu;
+            ushort sc16_1 = sc[2] & (ushort)0x3f3fu;
+            ushort sc16_2 = (ushort)(((sc[4] >> 0) & (ushort)0x0f0fu) | ((sc[0] & (ushort)0xc0c0u) >> 2));
+            ushort sc16_3 = (ushort)(((sc[4] >> 4) & (ushort)0x0f0fu) | ((sc[2] & (ushort)0xc0c0u) >> 2));
+            uchar sc8_0 = (uchar)(sc16_0 & 0xffu); uchar sc8_1 = (uchar)(sc16_0 >> 8);
+            uchar sc8_2 = (uchar)(sc16_1 & 0xffu); uchar sc8_3 = (uchar)(sc16_1 >> 8);
+            uchar sc8_4 = (uchar)(sc16_2 & 0xffu); uchar sc8_5 = (uchar)(sc16_2 >> 8);
+            uchar sc8_6 = (uchar)(sc16_3 & 0xffu); uchar sc8_7 = (uchar)(sc16_3 >> 8);
+            float acc1_0 = 0.0f; float acc1_1 = 0.0f; float acc1_2 = 0.0f; float acc1_3 = 0.0f;
+            float acc2_0 = 0.0f; float acc2_1 = 0.0f; float acc2_2 = 0.0f; float acc2_3 = 0.0f;
+            for (uint i = 0u; i < 4u; ++i) {
+                ushort word1 = q1[i];
+                ushort word2 = q2[i];
+                acc1_0 += yl[2u * i + 0u] * (float)(word1 & (ushort)0x000Fu);
+                acc1_1 += yl[2u * i + 1u] * (float)(word1 & (ushort)0x0F00u);
+                acc1_2 += yl[2u * i + 8u] * (float)(word1 & (ushort)0x00F0u);
+                acc1_3 += yl[2u * i + 9u] * (float)(word1 & (ushort)0xF000u);
+                acc2_0 += yh[2u * i + 0u] * (float)(word2 & (ushort)0x000Fu);
+                acc2_1 += yh[2u * i + 1u] * (float)(word2 & (ushort)0x0F00u);
+                acc2_2 += yh[2u * i + 8u] * (float)(word2 & (ushort)0x00F0u);
+                acc2_3 += yh[2u * i + 9u] * (float)(word2 & (ushort)0xF000u);
+            }
+            float dall = (float)dh[0];
+            float dmin = (float)dh[1];
+            sumf[q] = sumf[q] + dall * ((acc1_0 + (1.0f/256.0f) * acc1_1) * (float)sc8_0 +
+                                       (acc1_2 + (1.0f/256.0f) * acc1_3) * (float)sc8_1 * (1.0f/16.0f) +
+                                       (acc2_0 + (1.0f/256.0f) * acc2_1) * (float)sc8_4 +
+                                       (acc2_2 + (1.0f/256.0f) * acc2_3) * (float)sc8_5 * (1.0f/16.0f)) -
+                      dmin * (sumy0 * (float)sc8_2 + sumy1 * (float)sc8_3 + sumy2 * (float)sc8_6 + sumy3 * (float)sc8_7);
         }
         for (int q = 0; q < 4; ++q) { blk_ptr[q] += blk_step; }
         y4 += y4_step;
