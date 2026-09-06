@@ -20,7 +20,9 @@
 // re-create the very duplication this shared module exists to avoid.
 #![allow(dead_code)]
 
-use proxima_tensor::spec::{mistral_cached_forward_program, mistral_single_range_cached_forward_program};
+use proxima_tensor::spec::{
+    DuplicateHeadPosition, mistral_cached_forward_program, mistral_single_range_cached_forward_program,
+};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NodeId, Op, QuantizedBlock, block_node_ids, infer};
 
@@ -151,7 +153,7 @@ pub fn real_single_range_forward_fixture_with_padding(
         KV_HEADS,
         HEAD_DIM,
         LAYERS,
-        false,
+        DuplicateHeadPosition::None,
     )
     .expect("the single-range forward program builds");
 

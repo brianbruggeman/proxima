@@ -2334,9 +2334,30 @@ pub type CachedLayerRoots = (NodeId, NodeId, NodeId);
 
 /// [`mistral_single_range_cached_forward_program`]'s own return shape:
 /// the lowered program, its `logits` root, one [`CachedLayerRoots`] per
-/// layer, and ROW 326's `duplicate_head` scratch output (`Some` only when
-/// that flag is set -- see the function's own doc).
+/// layer, and ROW 326/328's [`DuplicateHeadPosition`] scratch output
+/// (`Some` only when that position is not [`DuplicateHeadPosition::None`]
+/// -- see the function's own doc).
 type SingleRangeForwardProgram = (Vec<Op>, NodeId, Vec<CachedLayerRoots>, Option<NodeId>);
+
+/// Where, if anywhere, the ROW 326/328 diagnostic duplicate `output.weight`
+/// reduce is emitted relative to the real head -- ROW 328 turns ROW 326's
+/// original bool into this 3-way position to test whether the ~1.8ms head
+/// cost follows a fixed slot in program order or the first GPU touch of the
+/// `output.weight` range after 4 GB of other layer traffic has streamed
+/// through the same no-copy mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DuplicateHeadPosition {
+    /// no scratch reduce -- every production checkpoint.
+    #[default]
+    None,
+    /// scratch reduce reads `x`, the raw embedding lookup output, before
+    /// layer 0 runs -- first dispatch of the token, `output.weight` is
+    /// touched before any other per-layer weight this token.
+    Before,
+    /// scratch reduce reads `normed_final` immediately after the real
+    /// head -- last dispatch of the token, ROW 326's original behavior.
+    After,
+}
 
 /// `append_qwen35_dense_attention_layer`'s own per-position cache roots --
 /// [`CachedLayerRoots`]'s 4-wide counterpart, one extra [`NodeId`] for the
@@ -3967,18 +3988,20 @@ fn append_mistral_single_range_cached_layer(
 /// branch): the mixture-of-experts FFN this function's counterpart also
 /// supports is orthogonal to the attention-merge this function exists to
 /// prove, and duplicating that branch here would test nothing new.
-// ROW 326 diagnostic: `duplicate_head` mirrors `gate_before_up`'s own
-// mechanism (a plain, always-compiled bool a caller sets, production call
-// sites pass a fixed literal) rather than a `#[cfg(test)]` item, because
-// `#[cfg(test)]` on a `proxima-tensor` item is invisible cross-crate to
-// `omega`/`proxima-model-interop`, which is where the Metal measurement
-// this flag exists for actually runs. `true` appends a second, identical
-// `output.weight` reduce reusing this call's own `normed_final`/`lm_head`,
-// returned as the 4th tuple element so a caller can add it to a `Plan`'s
-// requested outputs -- otherwise graph pruning drops it as unreachable
-// dead code, same as any other unread node. `false` (every production call
-// site) is byte-identical to this function's behavior before the flag
-// existed.
+// ROW 326/328 diagnostic: `duplicate_head` mirrors `gate_before_up`'s own
+// mechanism (a plain, always-compiled parameter a caller sets, production
+// call sites pass a fixed literal) rather than a `#[cfg(test)]` item,
+// because `#[cfg(test)]` on a `proxima-tensor` item is invisible
+// cross-crate to `omega`/`proxima-model-interop`, which is where the
+// Metal measurement this flag exists for actually runs.
+// [`DuplicateHeadPosition::Before`]/`After` each append a second,
+// identical `output.weight` reduce reusing this call's own `lm_head`
+// (against `x`, the raw embedding, for `Before`; against `normed_final`
+// for `After`), returned as the 4th tuple element so a caller can add it
+// to a `Plan`'s requested outputs -- otherwise graph pruning drops it as
+// unreachable dead code, same as any other unread node.
+// [`DuplicateHeadPosition::None`] (every production call site) is
+// byte-identical to this function's behavior before the flag existed.
 #[allow(
     clippy::too_many_arguments,
     reason = "one architecture hyperparameter per positional arg, matching every other \
@@ -3993,7 +4016,7 @@ pub fn mistral_single_range_cached_forward_program(
     kv_heads: u32,
     head_dim: u32,
     block_count: u32,
-    duplicate_head: bool,
+    duplicate_head: DuplicateHeadPosition,
 ) -> Result<SingleRangeForwardProgram, TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
@@ -4013,6 +4036,30 @@ pub fn mistral_single_range_cached_forward_program(
         "token_embd.weight",
     );
     let mut x = embedding_lookup(&mut program, table, ids);
+
+    // ROW 328: a SEPARATE, early `output.weight` `Op::Input` -- not a
+    // second reference to the one declared before the real head below.
+    // `resolve_named_blocks` (`proxima-tensor/src/cpu.rs`) resolves every
+    // `Op::Input` node by NAME independently, so two nodes sharing the name
+    // `output.weight` both bind to the same weight bytes with no special
+    // casing; declaring a second one here (instead of hoisting the single
+    // existing declaration) keeps the `None`/`After` program's own node
+    // sequence byte-for-byte identical to before this row -- hoisting the
+    // one declaration shifted every later `NodeId` by one and changed
+    // `cached_attention_single_range_candidates`' fused bound-op count for
+    // EVERY position, not just `Before` (`619` -> `523`, a regression this
+    // row's own gate caught before it landed).
+    let duplicate_head_scratch_before = if duplicate_head == DuplicateHeadPosition::Before {
+        let lm_head_before = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
+            "output.weight",
+        );
+        Some(duplicate_head_reduce(&mut program, x, lm_head_before)?)
+    } else {
+        None
+    };
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
     let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
@@ -4190,44 +4237,45 @@ pub fn mistral_single_range_cached_forward_program(
         alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
         "output.weight",
     );
-    let logits_product = elementwise(
-        &mut program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")],
-    )?;
-    let logits = reduce(
-        &mut program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        logits_product,
-        "sdv->sdv",
-        "sv->sdv",
-    )?;
+    let logits = duplicate_head_reduce(&mut program, normed_final, lm_head)?;
 
-    let duplicate_head_scratch = if duplicate_head {
-        let scratch_product = elementwise(
-            &mut program,
-            DType::Float32,
-            ScalarOp::Multiply,
-            &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")],
-        )?;
-        let scratch_reduce = reduce(
-            &mut program,
-            DType::Float32,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            scratch_product,
-            "sdv->sdv",
-            "sv->sdv",
-        )?;
-        Some(scratch_reduce)
-    } else {
-        None
+    let duplicate_head_scratch = match duplicate_head {
+        DuplicateHeadPosition::None => None,
+        DuplicateHeadPosition::Before => duplicate_head_scratch_before,
+        DuplicateHeadPosition::After => {
+            Some(duplicate_head_reduce(&mut program, normed_final, lm_head)?)
+        }
     };
 
     Ok((program, logits, cache_roots, duplicate_head_scratch))
+}
+
+/// `sum_d(activation[s, d] * lm_head[d, v])` -- the vocab-projection
+/// multiply-reduce pair both the real head and every
+/// [`DuplicateHeadPosition`] scratch reduce share, factored out so ROW 328's
+/// `Before`/`After` positions differ only in which activation node (`x`
+/// pre-layer-0 vs `normed_final` post-layer-31) they read, never in the
+/// reduce shape itself.
+fn duplicate_head_reduce(
+    program: &mut Vec<Op>,
+    activation: NodeId,
+    lm_head: NodeId,
+) -> Result<NodeId, TensorError> {
+    let product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(activation, "sd->sdv"), (lm_head, "dv->sdv")],
+    )?;
+    reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        "sdv->sdv",
+        "sv->sdv",
+    )
 }
 
 /// [`append_mistral_cached_layer`]'s mixture-of-experts counterpart, the
@@ -10835,7 +10883,14 @@ value = 1.0
         };
         let single_range_nodes_of = |block_count: u32| {
             mistral_single_range_cached_forward_program(
-                32_002, 4096, 14336, 32, 8, 128, block_count, false,
+                32_002,
+                4096,
+                14336,
+                32,
+                8,
+                128,
+                block_count,
+                DuplicateHeadPosition::None,
             )
             .expect("the single-range cached forward pass lowers to a program")
             .0
@@ -10870,8 +10925,17 @@ value = 1.0
         .len();
 
         let (single_range_program, single_range_logits, single_range_roots, _) =
-            mistral_single_range_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32, false)
-                .expect("the single-range cached forward pass lowers to a program");
+            mistral_single_range_cached_forward_program(
+                32_002,
+                4096,
+                14336,
+                32,
+                8,
+                128,
+                32,
+                DuplicateHeadPosition::None,
+            )
+            .expect("the single-range cached forward pass lowers to a program");
         let mut single_range_outputs = alloc::vec![single_range_logits];
         for (even, odd, value) in &single_range_roots {
             single_range_outputs.extend_from_slice(&[*even, *odd, *value]);
@@ -11146,7 +11210,7 @@ value = 1.0
                     KV_HEADS as u32,
                     HEAD_DIM as u32,
                     BLOCK_COUNT,
-                    false,
+                    DuplicateHeadPosition::None,
                 )
                 .expect("single-range cached forward pass lowers");
             let cached_len_scalar = alloc::vec![cached_len as f32];
@@ -11415,7 +11479,7 @@ value = 1.0
             KV_HEADS,
             HEAD_DIM,
             BLOCK_COUNT,
-            false,
+            DuplicateHeadPosition::None,
         )
         .expect("single-range cached forward pass lowers");
 
@@ -11564,7 +11628,7 @@ value = 1.0
                 KV_HEADS as u32,
                 HEAD_DIM as u32,
                 BLOCK_COUNT,
-                false,
+                DuplicateHeadPosition::None,
             )
             .expect("single-range cached forward pass lowers");
 

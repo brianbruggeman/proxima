@@ -122,7 +122,7 @@ use proxima_telemetry::{debug, info};
 #[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-use proxima_tensor::spec::mistral_single_range_cached_forward_program;
+use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_forward_program};
 
 use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
 use crate::error::InteropError;
@@ -715,11 +715,18 @@ fn build_single_range_program(
     if architecture.expert_count != 0 {
         return Ok(None);
     }
-    // ROW 326 diagnostic: same env-knob convention as `PROXIMA_PREFAULT`/
+    // ROW 326/328 diagnostic: same env-knob convention as `PROXIMA_PREFAULT`/
     // `PROXIMA_MLOCK` (`proxima-model-interop/src/bind.rs`'s
     // `real_openchat_file` module) -- unset in every production run, so
-    // `duplicate_head` is `false` on every path but this one opt-in probe.
-    let duplicate_head = std::env::var("PROXIMA_DUPLICATE_HEAD").is_ok_and(|value| value == "1");
+    // `duplicate_head` is `DuplicateHeadPosition::None` on every path but
+    // this one opt-in probe. `1` reproduces ROW 326's original after-the-
+    // real-head position; `first` is ROW 328's new before-layer-0 position
+    // (`DuplicateHeadPosition`'s own doc has the mechanism each arm tests).
+    let duplicate_head = match std::env::var("PROXIMA_DUPLICATE_HEAD").as_deref() {
+        Ok("1") => DuplicateHeadPosition::After,
+        Ok("first") => DuplicateHeadPosition::Before,
+        _ => DuplicateHeadPosition::None,
+    };
     let (program, logits_root, cache_roots, duplicate_head_scratch) =
         mistral_single_range_cached_forward_program(
             architecture.vocab,
