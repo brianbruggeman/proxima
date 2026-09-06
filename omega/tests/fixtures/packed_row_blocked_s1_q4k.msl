@@ -549,19 +549,19 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     for (int q = 0; q < 4; ++q) { sumf[q] = (lane == 0u) ? (0.0f) : (0.0f); }
     long weight_base[4];
     long other_base[4];
+    long coord_q_cache[4][3];
     for (int q = 0; q < 4; ++q) {
         long flat = group_first + q;
         long remaining_q = flat;
-        long coord_q[3];
-        for (int d = 0; d < 3; ++d) { coord_q[d] = 0; }
-        coord_q[1] = remaining_q % u.output_extents[1]; remaining_q /= u.output_extents[1];
-        coord_q[0] = remaining_q % u.output_extents[0]; remaining_q /= u.output_extents[0];
+        for (int d = 0; d < 3; ++d) { coord_q_cache[q][d] = 0; }
+        coord_q_cache[q][1] = remaining_q % u.output_extents[1]; remaining_q /= u.output_extents[1];
+        coord_q_cache[q][0] = remaining_q % u.output_extents[0]; remaining_q /= u.output_extents[0];
         long wb = u.operand_base[0];
         long ob = u.operand_base[1];
-        wb += coord_q[0] * u.operand_strides[0][0];
-        ob += coord_q[0] * u.operand_strides[1][0];
-        wb += coord_q[1] * u.operand_strides[0][1];
-        ob += coord_q[1] * u.operand_strides[1][1];
+        wb += coord_q_cache[q][0] * u.operand_strides[0][0];
+        ob += coord_q_cache[q][0] * u.operand_strides[1][0];
+        wb += coord_q_cache[q][1] * u.operand_strides[0][1];
+        ob += coord_q_cache[q][1] * u.operand_strides[1][1];
         weight_base[q] = wb;
         other_base[q] = ob;
     }
@@ -633,15 +633,10 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         float reduced = simd_sum(sumf[q]);
         long flat = group_first + q;
         if (lane == 0u && flat < u.output_total) {
-            long remaining_q = flat;
-            long coord_q[3];
-            for (int d = 0; d < 3; ++d) { coord_q[d] = 0; }
-            coord_q[1] = remaining_q % u.output_extents[1]; remaining_q /= u.output_extents[1];
-            coord_q[0] = remaining_q % u.output_extents[0]; remaining_q /= u.output_extents[0];
             long out_offset = u.out_base;
-            out_offset += coord_q[0] * u.out_strides[0];
-            out_offset += coord_q[1] * u.out_strides[1];
-            out_offset += coord_q[2] * u.out_strides[2];
+            out_offset += coord_q_cache[q][0] * u.out_strides[0];
+            out_offset += coord_q_cache[q][1] * u.out_strides[1];
+            out_offset += coord_q_cache[q][2] * u.out_strides[2];
             out[out_offset] = reduced;
         }
     }

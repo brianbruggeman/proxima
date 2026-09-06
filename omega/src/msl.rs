@@ -3632,6 +3632,15 @@ fn push_q4k_product_reduce_body(source: &mut String, sub: usize, run: usize, ele
 /// `sumf[q]` and write the output. `metal-q4k-split-k`-off arm -- exactly
 /// [`push_packed_row_blocked_body`]'s original tail, one simdgroup per
 /// row-group, lane 0 writes straight from the SIMD combine.
+///
+/// Reads `coord_q_cache[q]`, NOT a fresh `flat % / u.output_extents` decode:
+/// the preamble above (`push_packed_row_blocked_body`'s own `weight_base`/
+/// `other_base` loop) already derives that same coordinate, per `q`, to
+/// address the weight/activation operands -- `flat = group_first + q` is
+/// identical in both places, so re-running the same division/modulo chain a
+/// second time here just to re-derive `coord_q` was paying the ladder-vs-
+/// production gap's own named cost twice per thread for zero new
+/// information (`docs/bench-campaigns/2026-09-03-gpu-one-risc/design-2026-09-04/kernel-body-diff.md`).
 #[cfg(not(feature = "metal-q4k-split-k"))]
 #[allow(clippy::too_many_arguments)]
 fn push_packed_row_combine_and_write(
@@ -3640,7 +3649,6 @@ fn push_packed_row_combine_and_write(
     reduce_op: ScalarOp,
     rows: usize,
     rank: usize,
-    rank_len: usize,
     output_axes: &[u16],
     element_type: &str,
     epilogue_body: &ComposedBody,
@@ -3653,20 +3661,10 @@ fn push_packed_row_combine_and_write(
     ));
     source.push_str("        long flat = group_first + q;\n");
     source.push_str("        if (lane == 0u && flat < u.output_total) {\n");
-    source.push_str("            long remaining_q = flat;\n");
-    source.push_str(&format!("            long coord_q[{rank_len}];\n"));
-    source.push_str(&format!(
-        "            for (int d = 0; d < {rank}; ++d) {{ coord_q[d] = 0; }}\n"
-    ));
-    for (index, dim) in output_axes.iter().enumerate().rev() {
-        source.push_str(&format!(
-            "            coord_q[{dim}] = remaining_q % u.output_extents[{index}]; remaining_q /= u.output_extents[{index}];\n"
-        ));
-    }
     source.push_str("            long out_offset = u.out_base;\n");
     for dim in 0..rank {
         source.push_str(&format!(
-            "            out_offset += coord_q[{dim}] * u.out_strides[{dim}];\n"
+            "            out_offset += coord_q_cache[q][{dim}] * u.out_strides[{dim}];\n"
         ));
     }
     push_reduce_epilogue_write(
@@ -3676,7 +3674,7 @@ fn push_packed_row_combine_and_write(
         output_axes.len(),
         element_type,
         "            ",
-        |dim| format!("coord_q[{}]", output_axes[dim]),
+        |dim| format!("coord_q_cache[q][{}]", output_axes[dim]),
         "reduced",
         "out_offset",
     );
@@ -3711,7 +3709,6 @@ fn push_packed_row_combine_and_write(
     reduce_op: ScalarOp,
     rows: usize,
     rank: usize,
-    rank_len: usize,
     output_axes: &[u16],
     element_type: &str,
     epilogue_body: &ComposedBody,
@@ -3740,20 +3737,10 @@ fn push_packed_row_combine_and_write(
     source.push_str("            }\n");
     source.push_str("            long flat = group_first + q;\n");
     source.push_str("            if (flat < u.output_total) {\n");
-    source.push_str("                long remaining_q = flat;\n");
-    source.push_str(&format!("                long coord_q[{rank_len}];\n"));
-    source.push_str(&format!(
-        "                for (int d = 0; d < {rank}; ++d) {{ coord_q[d] = 0; }}\n"
-    ));
-    for (index, dim) in output_axes.iter().enumerate().rev() {
-        source.push_str(&format!(
-            "                coord_q[{dim}] = remaining_q % u.output_extents[{index}]; remaining_q /= u.output_extents[{index}];\n"
-        ));
-    }
     source.push_str("                long out_offset = u.out_base;\n");
     for dim in 0..rank {
         source.push_str(&format!(
-            "                out_offset += coord_q[{dim}] * u.out_strides[{dim}];\n"
+            "                out_offset += coord_q_cache[q][{dim}] * u.out_strides[{dim}];\n"
         ));
     }
     push_reduce_epilogue_write(
@@ -3763,7 +3750,7 @@ fn push_packed_row_combine_and_write(
         output_axes.len(),
         element_type,
         "                ",
-        |dim| format!("coord_q[{}]", output_axes[dim]),
+        |dim| format!("coord_q_cache[q][{}]", output_axes[dim]),
         "total",
         "out_offset",
     );
@@ -4033,16 +4020,26 @@ fn push_packed_row_blocked_body(
         }
         source.push_str(&format!("    long weight_base[{rows}];\n"));
         source.push_str(&format!("    long other_base[{rows}];\n"));
+        // `coord_q_cache[q]` -- kept past this loop, not a scratch local --
+        // is the SAME `flat = group_first + q` decode
+        // `push_packed_row_combine_and_write`'s epilogue needs for the
+        // output-write coordinate; caching it here instead of re-running the
+        // `%`/`/` chain against `u.output_extents` a second time in the
+        // epilogue is the fix for the ladder-vs-production kernel-body gap
+        // this op's own diff found (`docs/bench-campaigns/2026-09-03-gpu-one-
+        // risc/design-2026-09-04/kernel-body-diff.md`): the ladder's hand-
+        // written dispatch never had a second uniform-driven coordinate
+        // decode to pay, because it never had a first one either.
+        source.push_str(&format!("    long coord_q_cache[{rows}][{rank_len}];\n"));
         source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
         source.push_str("        long flat = group_first + q;\n");
         source.push_str("        long remaining_q = flat;\n");
-        source.push_str(&format!("        long coord_q[{rank_len}];\n"));
         source.push_str(&format!(
-            "        for (int d = 0; d < {rank}; ++d) {{ coord_q[d] = 0; }}\n"
+            "        for (int d = 0; d < {rank}; ++d) {{ coord_q_cache[q][d] = 0; }}\n"
         ));
         for (index, dim) in output_axes.iter().enumerate().rev() {
             source.push_str(&format!(
-                "        coord_q[{dim}] = remaining_q % u.output_extents[{index}]; remaining_q /= u.output_extents[{index}];\n"
+                "        coord_q_cache[q][{dim}] = remaining_q % u.output_extents[{index}]; remaining_q /= u.output_extents[{index}];\n"
             ));
         }
         source.push_str(&format!("        long wb = u.operand_base[{weight}];\n"));
@@ -4055,10 +4052,10 @@ fn push_packed_row_blocked_body(
         // correct and simpler set to walk here regardless of reduce rank.
         for &dim in output_axes {
             source.push_str(&format!(
-                "        wb += coord_q[{dim}] * u.operand_strides[{weight}][{dim}];\n"
+                "        wb += coord_q_cache[q][{dim}] * u.operand_strides[{weight}][{dim}];\n"
             ));
             source.push_str(&format!(
-                "        ob += coord_q[{dim}] * u.operand_strides[{other}][{dim}];\n"
+                "        ob += coord_q_cache[q][{dim}] * u.operand_strides[{other}][{dim}];\n"
             ));
         }
         source.push_str("        weight_base[q] = wb;\n");
@@ -4509,7 +4506,6 @@ fn push_packed_row_blocked_body(
             reduce_op,
             rows,
             rank,
-            rank_len,
             output_axes,
             element_type,
             epilogue_body,
