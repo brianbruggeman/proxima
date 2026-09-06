@@ -160,6 +160,41 @@ fn element_count(shape: &[u64]) -> usize {
     shape.iter().product::<u64>() as usize
 }
 
+/// Element count of one bound block, whatever codec carries it — the wgpu
+/// driver's counterpart of `crate::metal::block_element_count`. A packed
+/// codec's element count is derived from its own block geometry, never from
+/// `bytes.len()` — packed bytes and elements are not the same unit (a
+/// `Q4_K` super-block is 144 bytes carrying 256 elements).
+fn packed_block_element_count(block: &QuantizedBlock<'_>) -> usize {
+    match block {
+        QuantizedBlock::Float32(data) => data.len(),
+        QuantizedBlock::Q3K(bytes) => {
+            (bytes.len() / crate::msl::Q3K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS
+        }
+        QuantizedBlock::Q4K(bytes) => {
+            (bytes.len() / crate::msl::Q4K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS
+        }
+        QuantizedBlock::Q6K(bytes) => {
+            (bytes.len() / crate::msl::Q6K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS
+        }
+        QuantizedBlock::Q5K(bytes) => {
+            (bytes.len() / crate::msl::Q5K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS
+        }
+        QuantizedBlock::Q8_0(bytes) => {
+            (bytes.len() / crate::msl::Q8_0_BLOCK_BYTES) * crate::msl::Q8_0_BLOCK_ELEMENTS
+        }
+        QuantizedBlock::Q4_0(bytes) => {
+            (bytes.len() / crate::msl::Q4_0_BLOCK_BYTES) * crate::msl::Q4_0_BLOCK_ELEMENTS
+        }
+        QuantizedBlock::Float16(bytes) => {
+            (bytes.len() / crate::msl::FLOAT16_BLOCK_BYTES) * crate::msl::FLOAT16_BLOCK_ELEMENTS
+        }
+        QuantizedBlock::BFloat16(bytes) => {
+            (bytes.len() / crate::msl::BFLOAT16_BLOCK_BYTES) * crate::msl::BFLOAT16_BLOCK_ELEMENTS
+        }
+    }
+}
+
 /// The raw packed bytes underneath any non-`Float32` [`QuantizedBlock`]
 /// variant — every one of them wraps a `&[u8]` (see that type's own doc), so
 /// this is a match, not a computation.
@@ -286,6 +321,37 @@ pub fn plan(
     outputs: &[NodeId],
 ) -> Result<WgpuPlan, WgpuError> {
     let shapes = infer(program, symbols)?;
+
+    // ROW 327 (mirrors `crate::metal::prepare`'s own fix): `block_nodes[i]`
+    // is the ONLY node `blocks[i]` may be attributed to -- this crate's
+    // positional contract, identical to `crate::metal::execute`'s own doc.
+    // Validating that pairing here, BEFORE `packed_operands_of` classifies
+    // each block by codec, is what stops a caller's node/block order
+    // mismatch from surfacing as an unrelated downstream rejection
+    // (`WgpuError::UnsupportedBlock` naming the wrong node) instead of the
+    // precise, node-carrying `InputCountMismatch`/`InputSizeMismatch` below.
+    let block_nodes = block_node_ids(program);
+    if blocks.len() != block_nodes.len() {
+        return Err(TensorError::InputCountMismatch {
+            expected: block_nodes.len(),
+            found: blocks.len(),
+        }
+        .into());
+    }
+    for (node, block) in block_nodes.iter().zip(blocks.iter()) {
+        let expected = element_count(shapes.of(*node));
+        let found = packed_block_element_count(block);
+        if found != expected {
+            return Err(TensorError::InputSizeMismatch {
+                node: *node,
+                expected,
+                found,
+            }
+            .into());
+        }
+    }
+
+    let packed_operands = packed_operands_of(&block_nodes, blocks);
     let root = program
         .len()
         .checked_sub(1)
@@ -305,8 +371,6 @@ pub fn plan(
         bind_with_fusion(program, &shapes, &effective_outputs, false)?,
         &effective_outputs,
     );
-    let block_nodes = block_node_ids(program);
-    let packed_operands = packed_operands_of(&block_nodes, blocks);
     let (device, queue, caps) = acquire_device()?;
     Ok(WgpuPlan {
         device,
@@ -987,5 +1051,153 @@ mod tests {
                 ..
             }
         ));
+    }
+}
+
+/// ROW 327: [`plan`] attributes each [`QuantizedBlock`] in `blocks` to the
+/// node at the same position in [`block_node_ids`]'s output -- this crate's
+/// documented positional contract, mirroring `crate::metal`'s own
+/// `block_node_attribution_tests`. A caller whose `blocks` order disagrees
+/// with its own program's declaration order used to have that mismatch
+/// surface as an unrelated `WgpuError::UnsupportedBlock` (whichever node
+/// lost its packed classification) instead of the precise, node-carrying
+/// `InputSizeMismatch` these tests pin.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod block_node_attribution_tests {
+    use alloc::vec;
+
+    use proxima_tensor::{
+        DType, Extent, IndexMap, Keep, Reduce, ReduceInit, ScalarOp, TensorError, append,
+        projection,
+    };
+
+    use super::{NodeId, Op, QuantizedBlock, WgpuError, plan};
+
+    /// `activation -> weight -> product -> sum`: the activation node is
+    /// declared FIRST (`NodeId(0)`), the quantized weight node SECOND
+    /// (`NodeId(1)`) -- the reverse of the order a caller who lists `blocks`
+    /// weight-first (a natural "formula" reading order) would need. Returns
+    /// the program and both nodes in DECLARATION order.
+    fn activation_first_matmul_program(
+        tokens: u32,
+        out_dim: u32,
+        in_dim: u32,
+    ) -> (Vec<Op>, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(tokens), Extent::Static(in_dim)],
+                name: None,
+            },
+        );
+        let weight = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::UInt8,
+                shape: vec![Extent::Static(out_dim), Extent::Static(in_dim)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight, IndexMap::Affine(projection(3, &[1, 2]))),
+                    (activation, IndexMap::Affine(projection(3, &[0, 2]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        (program, activation, weight)
+    }
+
+    /// The ROW 327 repro: `blocks` lists the weight FIRST even though the
+    /// program declares the activation first. The activation's declared
+    /// shape (16x16=256 elements) is engineered to equal one Q6_K
+    /// super-block's decode count (256), so the misattributed pair
+    /// (activation node, weight's Q6_K block) passes the per-node shape
+    /// check silently -- exactly the "silently attributed" half of ROW
+    /// 327 -- and the mismatch only becomes visible at the SECOND pair
+    /// (weight node, activation's Float32 block: declared 8x16=128 elements
+    /// vs. the 256 actually handed).
+    #[test]
+    fn weight_first_blocks_against_activation_first_program_names_the_true_node() {
+        let (program, _activation, weight) = activation_first_matmul_program(16, 8, 16);
+        let activation_data = [0.0f32; 256]; // 16 tokens * 16 in_dim
+        let packed_weight = [0u8; 210]; // one Q6_K super-block, decodes to 256 elements
+
+        // MISORDERED: weight's block first, activation's block second --
+        // `block_node_ids(&program)` is `[activation, weight]`, so this is
+        // the opposite order.
+        let blocks = [
+            QuantizedBlock::Q6K(&packed_weight),
+            QuantizedBlock::Float32(&activation_data),
+        ];
+
+        let error = match plan(&program, &[], &blocks, &[]) {
+            Ok(_) => panic!("misordered blocks must never silently plan"),
+            Err(error) => error,
+        };
+
+        match error {
+            WgpuError::Tensor(TensorError::InputSizeMismatch {
+                node,
+                expected,
+                found,
+            }) => {
+                assert_eq!(
+                    node, weight,
+                    "the weight node -- 8x16=128 declared elements -- must be the node \
+                     named, not a downstream node the misattribution happened to also \
+                     affect"
+                );
+                assert_eq!(expected, 128, "weight's own declared element count");
+                assert_eq!(
+                    found, 256,
+                    "the activation's Float32 block landed on the weight node, carrying \
+                     the ACTIVATION's element count"
+                );
+            }
+            other => panic!(
+                "expected InputSizeMismatch naming node {weight:?} once the shape check \
+                 runs before packed classification; got {other:?} instead"
+            ),
+        }
+    }
+
+    /// Same shape as above, correctly ordered blocks (activation first,
+    /// matching `block_node_ids`'s `[activation, weight]` declaration
+    /// order): must plan cleanly, proving the fix only rejects genuine
+    /// mismatches, never a correctly-ordered call.
+    #[test]
+    fn declaration_ordered_blocks_plan_cleanly() {
+        let (program, _activation, _weight) = activation_first_matmul_program(16, 16, 16);
+        let activation_data = [0.0f32; 256]; // 16 tokens * 16 in_dim
+        let packed_weight = [0u8; 210]; // one Q6_K super-block, decodes to 256 = 16 * 16
+
+        let blocks = [
+            QuantizedBlock::Float32(&activation_data),
+            QuantizedBlock::Q6K(&packed_weight),
+        ];
+
+        plan(&program, &[], &blocks, &[]).expect("declaration-ordered blocks must plan");
     }
 }
