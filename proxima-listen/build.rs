@@ -18,88 +18,42 @@ use std::path::PathBuf;
 mod listen {
     use std::env;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
-    use toml::Value;
+    use proxima_build::sizing::{require_nonzero, SizingSource};
 
-    fn get_int(table: &Value, section: &str, key: &str) -> u64 {
-        let raw = table
-            .get(section)
-            .and_then(|sec| sec.get(key))
-            .and_then(Value::as_integer)
-            .unwrap_or_else(|| {
-                panic!("proxima-listen.toml: missing or non-integer [{section}].{key}")
-            });
-        u64::try_from(raw)
-            .unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-    }
-
-    /// Read `(section, key)` from the TOML, then apply the optional
-    /// `PROXIMA_LISTEN_<SECTION>_<KEY>` env-var override.
-    fn resolve(table: &Value, section: &str, key: &str) -> u64 {
-        let env_name = format!(
-            "PROXIMA_LISTEN_{}_{}",
-            section.to_ascii_uppercase(),
-            key.to_ascii_uppercase()
-        );
-        println!("cargo:rerun-if-env-changed={env_name}");
-        if let Ok(raw) = env::var(&env_name) {
-            return raw
-                .parse()
-                .unwrap_or_else(|err| panic!("{env_name} = {raw}: {err}"));
-        }
-        get_int(table, section, key)
-    }
-
-    fn require_nonzero(name: &str, value: u64) -> u64 {
-        assert!(value > 0, "{name} must be non-zero; got {value}");
-        value
-    }
-
-    fn require_i32(name: &str, value: u64) -> i32 {
+    fn require_i32(name: &str, value: usize) -> i32 {
         i32::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows i32"))
     }
 
-    fn require_usize(name: &str, value: u64) -> usize {
-        usize::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows usize"))
-    }
-
-    fn require_u16(name: &str, value: u64) -> u16 {
+    fn require_u16(name: &str, value: usize) -> u16 {
         u16::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows u16"))
     }
 
     #[allow(clippy::expect_used)]
     pub fn emit_sizing_consts(out_dir: &Path) {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-        let toml_path = PathBuf::from(&manifest_dir).join("proxima-listen.toml");
-        println!("cargo:rerun-if-changed=proxima-listen.toml");
+        let source = SizingSource::load(&manifest_dir, "proxima-listen.toml", "PROXIMA_LISTEN")
+            .unwrap_or_else(|err| panic!("{err}"));
+        let resolve = |section: &str, key: &str| {
+            source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
+        };
 
-        let text = fs::read_to_string(&toml_path)
-            .unwrap_or_else(|err| panic!("read {}: {err}", toml_path.display()));
-        let root: Value = text
-            .parse()
-            .unwrap_or_else(|err| panic!("parse {}: {err}", toml_path.display()));
-
-        let backlog = require_i32(
-            "listener.backlog",
-            require_nonzero("listener.backlog", resolve(&root, "listener", "backlog")),
-        );
+        let backlog =
+            require_i32("listener.backlog", require_nonzero("listener.backlog", resolve("listener", "backlog")));
         let drain_timeout_ms = require_nonzero(
             "listener.drain_timeout_ms",
-            resolve(&root, "listener", "drain_timeout_ms"),
+            resolve("listener", "drain_timeout_ms"),
         );
-        let any_max_probe_prefix_bytes = require_usize(
+        let any_max_probe_prefix_bytes = require_nonzero(
             "any.max_probe_prefix_bytes",
-            require_nonzero(
-                "any.max_probe_prefix_bytes",
-                resolve(&root, "any", "max_probe_prefix_bytes"),
-            ),
+            resolve("any", "max_probe_prefix_bytes"),
         );
         let any_deny_priority_default = require_u16(
             "any.any_deny_priority_default",
             require_nonzero(
                 "any.any_deny_priority_default",
-                resolve(&root, "any", "any_deny_priority_default"),
+                resolve("any", "any_deny_priority_default"),
             ),
         );
 
@@ -132,93 +86,35 @@ mod listen {
 mod listeners_stream {
     use std::env;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
-    use toml::Value;
-
-    fn get_str<'table>(table: &'table Value, section: &str, key: &str) -> &'table str {
-        table
-            .get(section)
-            .and_then(|sec| sec.get(key))
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| {
-                panic!("proxima-listeners-stream.toml: missing or non-string [{section}].{key}")
-            })
-    }
-
-    fn get_int(table: &Value, section: &str, key: &str) -> u64 {
-        let raw = table
-            .get(section)
-            .and_then(|sec| sec.get(key))
-            .and_then(Value::as_integer)
-            .unwrap_or_else(|| {
-                panic!("proxima-listeners-stream.toml: missing or non-integer [{section}].{key}")
-            });
-        u64::try_from(raw)
-            .unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-    }
-
-    fn env_name(section: &str, key: &str) -> String {
-        format!(
-            "PROXIMA_LISTENERS_STREAM_{}_{}",
-            section.to_ascii_uppercase(),
-            key.to_ascii_uppercase()
-        )
-    }
-
-    fn resolve_str(table: &Value, section: &str, key: &str) -> String {
-        let name = env_name(section, key);
-        println!("cargo:rerun-if-env-changed={name}");
-        env::var(&name).unwrap_or_else(|_| get_str(table, section, key).to_string())
-    }
-
-    fn resolve_int(table: &Value, section: &str, key: &str) -> u64 {
-        let name = env_name(section, key);
-        println!("cargo:rerun-if-env-changed={name}");
-        if let Ok(raw) = env::var(&name) {
-            return raw
-                .parse()
-                .unwrap_or_else(|err| panic!("{name} = {raw}: {err}"));
-        }
-        get_int(table, section, key)
-    }
-
-    fn require_nonzero(name: &str, value: u64) -> u64 {
-        assert!(value > 0, "{name} must be non-zero; got {value}");
-        value
-    }
-
-    fn require_usize(name: &str, value: u64) -> usize {
-        usize::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows usize"))
-    }
+    use proxima_build::sizing::{require_nonzero, SizingSource};
 
     #[allow(clippy::expect_used)]
     pub fn emit_sizing_consts(out_dir: &Path) {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-        let toml_path = PathBuf::from(&manifest_dir).join("proxima-listeners-stream.toml");
-        println!("cargo:rerun-if-changed=proxima-listeners-stream.toml");
+        let source = SizingSource::load(
+            &manifest_dir,
+            "proxima-listeners-stream.toml",
+            "PROXIMA_LISTENERS_STREAM",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
 
-        let text = fs::read_to_string(&toml_path)
-            .unwrap_or_else(|err| panic!("read {}: {err}", toml_path.display()));
-        let root: Value = text
-            .parse()
-            .unwrap_or_else(|err| panic!("parse {}: {err}", toml_path.display()));
-
-        let method = resolve_str(&root, "listener", "method");
-        let path = resolve_str(&root, "listener", "path");
-        let chunk_bytes = require_usize(
+        let method = source
+            .resolve_str("listener", "method")
+            .unwrap_or_else(|err| panic!("{err}"));
+        let path = source.resolve_str("listener", "path").unwrap_or_else(|err| panic!("{err}"));
+        let chunk_bytes = require_nonzero(
             "listener.chunk_bytes",
-            require_nonzero(
-                "listener.chunk_bytes",
-                resolve_int(&root, "listener", "chunk_bytes"),
-            ),
+            source
+                .resolve_int("listener", "chunk_bytes")
+                .unwrap_or_else(|err| panic!("{err}")),
         );
-        let release_channel_capacity = require_usize(
+        let release_channel_capacity = require_nonzero(
             "listener.release_channel_capacity",
-            require_nonzero(
-                "listener.release_channel_capacity",
-                resolve_int(&root, "listener", "release_channel_capacity"),
-            ),
+            source
+                .resolve_int("listener", "release_channel_capacity")
+                .unwrap_or_else(|err| panic!("{err}")),
         );
 
         let out = format!(
@@ -247,85 +143,11 @@ mod listeners_stream {
 mod admission_core {
     use std::env;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
-    use toml::Value;
+    use proxima_build::sizing::{require_nonzero, SizingSource};
 
-    fn get_int(table: &Value, section: &str, key: &str) -> u64 {
-        let raw = table
-            .get(section)
-            .and_then(|sec| sec.get(key))
-            .and_then(Value::as_integer)
-            .unwrap_or_else(|| {
-                panic!("proxima-listen-core.toml: missing or non-integer [{section}].{key}")
-            });
-        u64::try_from(raw)
-            .unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-    }
-
-    /// Read `(section, key)` from the TOML, then apply the optional
-    /// `PROXIMA_LISTEN_CORE_<SECTION>_<KEY>` env-var override.
-    fn resolve(table: &Value, section: &str, key: &str) -> u64 {
-        let env_name = format!(
-            "PROXIMA_LISTEN_CORE_{}_{}",
-            section.to_ascii_uppercase(),
-            key.to_ascii_uppercase()
-        );
-        println!("cargo:rerun-if-env-changed={env_name}");
-        if let Ok(raw) = env::var(&env_name) {
-            return raw
-                .parse()
-                .unwrap_or_else(|err| panic!("{env_name} = {raw}: {err}"));
-        }
-        get_int(table, section, key)
-    }
-
-    fn get_nested_int(table: &Value, section: &str, subsection: &str, key: &str) -> u64 {
-        let raw = table
-            .get(section)
-            .and_then(|sec| sec.get(subsection))
-            .and_then(|sub| sub.get(key))
-            .and_then(Value::as_integer)
-            .unwrap_or_else(|| {
-                panic!(
-                    "proxima-listen-core.toml: missing or non-integer [{section}.{subsection}].{key}"
-                )
-            });
-        u64::try_from(raw).unwrap_or_else(|_| {
-            panic!("[{section}.{subsection}].{key} = {raw} must be non-negative")
-        })
-    }
-
-    /// Read `(section, subsection, key)` from the TOML, then apply the
-    /// optional `PROXIMA_LISTEN_CORE_<SECTION>_<SUBSECTION>_<KEY>` env-var
-    /// override — the same mechanical convention `resolve` uses, extended
-    /// one level for a nested `[section.subsection]` table.
-    fn resolve_nested(table: &Value, section: &str, subsection: &str, key: &str) -> u64 {
-        let env_name = format!(
-            "PROXIMA_LISTEN_CORE_{}_{}_{}",
-            section.to_ascii_uppercase(),
-            subsection.to_ascii_uppercase(),
-            key.to_ascii_uppercase()
-        );
-        println!("cargo:rerun-if-env-changed={env_name}");
-        if let Ok(raw) = env::var(&env_name) {
-            return raw
-                .parse()
-                .unwrap_or_else(|err| panic!("{env_name} = {raw}: {err}"));
-        }
-        get_nested_int(table, section, subsection, key)
-    }
-
-    fn require_nonzero(name: &str, value: u64) -> u64 {
-        assert!(value > 0, "{name} must be non-zero; got {value}");
-        value
-    }
-
-    fn require_usize(name: &str, value: u64) -> usize {
-        usize::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows usize"))
-    }
-
-    fn require_u32(name: &str, value: u64) -> u32 {
+    fn require_u32(name: &str, value: usize) -> u32 {
         u32::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows u32"))
     }
 
@@ -340,47 +162,38 @@ mod admission_core {
     #[allow(clippy::expect_used)]
     pub fn emit_sizing_consts(out_dir: &Path) {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-        let toml_path = PathBuf::from(&manifest_dir).join("proxima-listen-core.toml");
-        println!("cargo:rerun-if-changed=proxima-listen-core.toml");
-
-        let text = fs::read_to_string(&toml_path)
-            .unwrap_or_else(|err| panic!("read {}: {err}", toml_path.display()));
-        let root: Value = text
-            .parse()
-            .unwrap_or_else(|err| panic!("parse {}: {err}", toml_path.display()));
+        let source =
+            SizingSource::load(&manifest_dir, "proxima-listen-core.toml", "PROXIMA_LISTEN_CORE")
+                .unwrap_or_else(|err| panic!("{err}"));
+        let resolve = |section: &str, key: &str| {
+            source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
+        };
+        let resolve_nested = |section: &str, subsection: &str, key: &str| {
+            source
+                .resolve_nested_int(section, subsection, key)
+                .unwrap_or_else(|err| panic!("{err}"))
+        };
 
         let table_cap = require_power_of_two(
             "admission.table_cap",
-            require_usize(
-                "admission.table_cap",
-                require_nonzero(
-                    "admission.table_cap",
-                    resolve(&root, "admission", "table_cap"),
-                ),
-            ),
+            require_nonzero("admission.table_cap", resolve("admission", "table_cap")),
         );
         let peer_table_cap = require_power_of_two(
             "admission.peer_table_cap",
-            require_usize(
+            require_nonzero(
                 "admission.peer_table_cap",
-                require_nonzero(
-                    "admission.peer_table_cap",
-                    resolve(&root, "admission", "peer_table_cap"),
-                ),
+                resolve("admission", "peer_table_cap"),
             ),
         );
-        let per_peer_cap = require_usize(
+        let per_peer_cap = require_nonzero(
             "admission.per_peer_cap",
-            require_nonzero(
-                "admission.per_peer_cap",
-                resolve(&root, "admission", "per_peer_cap"),
-            ),
+            resolve("admission", "per_peer_cap"),
         );
         let blacklist_deny_strike_threshold = require_u32(
             "admission.blacklist.deny_strike_threshold",
             require_nonzero(
                 "admission.blacklist.deny_strike_threshold",
-                resolve_nested(&root, "admission", "blacklist", "deny_strike_threshold"),
+                resolve_nested("admission", "blacklist", "deny_strike_threshold"),
             ),
         );
         let blacklist_unclassifiable_strike_threshold = require_u32(
@@ -388,7 +201,6 @@ mod admission_core {
             require_nonzero(
                 "admission.blacklist.unclassifiable_strike_threshold",
                 resolve_nested(
-                    &root,
                     "admission",
                     "blacklist",
                     "unclassifiable_strike_threshold",
@@ -397,11 +209,11 @@ mod admission_core {
         );
         let blacklist_strike_window_ms = require_nonzero(
             "admission.blacklist.strike_window_ms",
-            resolve_nested(&root, "admission", "blacklist", "strike_window_ms"),
+            resolve_nested("admission", "blacklist", "strike_window_ms"),
         );
         let blacklist_ban_duration_ms = require_nonzero(
             "admission.blacklist.ban_duration_ms",
-            resolve_nested(&root, "admission", "blacklist", "ban_duration_ms"),
+            resolve_nested("admission", "blacklist", "ban_duration_ms"),
         );
 
         let out = format!(

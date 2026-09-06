@@ -4465,6 +4465,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "heapless 0.9.3",
  "proxima",
+ "proxima-build",
  "proxima-codec",
  "proxima-core",
  "proxima-net",
@@ -4479,7 +4480,6 @@ dependencies = [
  "temp-env",
  "tempfile",
  "tokio",
- "toml 0.8.23",
 ]
 
 [[package]]
@@ -4988,6 +4988,7 @@ dependencies = [
  "prometheus 0.14.0",
  "prost",
  "proxima",
+ "proxima-build",
  "proxima-clock",
  "proxima-core",
  "proxima-macros",
@@ -5004,7 +5005,6 @@ dependencies = [
  "thiserror 2.0.19",
  "thread_local",
  "tokio",
- "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
 ]

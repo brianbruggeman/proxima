@@ -11,7 +11,7 @@ readme.workspace = true
 build = "build.rs"
 
 [build-dependencies]
-toml = { workspace = true }
+proxima-build.workspace = true
 
 [dependencies]
 # Base (no_std + no_alloc) tier: the `admission` FSM core and the `preface`
