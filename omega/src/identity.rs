@@ -98,6 +98,15 @@ pub(crate) struct MetalOnlyExtras {
     /// on the reduce axis — `Some` only when `packed_row_block` matched at
     /// all (`push_packed_row_blocked_body`'s stride-free specialization).
     pub packed_row_block_stride_is_one: Option<bool>,
+    /// The single non-unit output axis `push_packed_row_group_bases` used
+    /// for direct row addressing (ROW 350/351), when it found exactly one —
+    /// `None` when the generic N-D coordinate decomposition was rendered
+    /// instead (no `packed_row_block` match, a multi-row `M` block, or more
+    /// than one non-unit output axis). The axis index, not just a bool: two
+    /// bindings sharing rank/`output_axes` but disagreeing on WHICH axis is
+    /// non-unit render different literals baked into the row-base source
+    /// text and must never share a cache entry.
+    pub packed_row_block_direct_axis: Option<u16>,
     /// `MathMode::cache_token()` for the `Plan` compiling this op — folded
     /// in here instead of at `metal::pipeline_for`, so a `Safe`- and a
     /// `Relaxed`-compiled kernel never share a `PIPELINE_CACHE` entry.
@@ -368,6 +377,10 @@ pub(crate) fn kernel_identity(
     }
     if let Some(stride_is_one) = metal.packed_row_block_stride_is_one {
         identity.push(if stride_is_one { '1' } else { 'N' });
+    }
+    if let Some(axis) = metal.packed_row_block_direct_axis {
+        identity.push_str("_da");
+        identity.push_str(&axis.to_string());
     }
     if let Some(width) = metal.cooperative_width {
         identity.push_str("_w");

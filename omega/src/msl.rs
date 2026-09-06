@@ -1262,6 +1262,29 @@ fn packed_row_block_stride_is_one(
     )
 }
 
+/// Whether [`push_packed_row_group_bases`] rendered the direct single-axis
+/// row addressing for this op, and on which axis — `None` when it did not
+/// (no `packed_row_block` match, or a multi-row `M` block, which always
+/// takes the generic path; see [`packed_row_direct_output_axis`]'s own doc).
+#[cfg(any(test, feature = "metal-core"))]
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
+)]
+fn packed_row_block_direct_axis(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+) -> Option<u16> {
+    let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
+        return None;
+    };
+    let block = packed_row_block(resolved, quantized)?;
+    if packed_row_block_token_total(&block, &resolved.extents) > 1 {
+        return None;
+    }
+    packed_row_direct_output_axis(resolved, output_axes)
+}
+
 /// Cheap structural + compile-option identity for the kernel [`emit`] would
 /// produce from `resolved` — built without ever rendering the MSL body
 /// text, so a caller can decide whether a pipeline compile is needed before
@@ -1308,6 +1331,7 @@ pub(crate) fn kernel_cache_key(
         cooperative_width: tiled_gemm_threadgroup_width(resolved, &quantized),
         packed_row_block_shape: Some(packed_row_block_shape_token(resolved, &quantized)),
         packed_row_block_stride_is_one: packed_row_block_stride_is_one(resolved, &quantized),
+        packed_row_block_direct_axis: packed_row_block_direct_axis(resolved, &quantized),
         math_mode_token: Some(math_mode_token),
     };
     Ok(crate::identity::kernel_identity(
@@ -4005,6 +4029,102 @@ fn push_packed_row_multi_row_body(
     Ok(())
 }
 
+/// The sole output axis whose bound extent is `> 1`, when every OTHER
+/// output axis is degenerate (extent `1`) -- the decode-matvec shape
+/// `docs/discipline.md` ROW 350 measured (`output_extents = [1, rows]`).
+/// `None` when zero or more than one output axis is non-unit, so the
+/// generic N-D coordinate decomposition
+/// [`push_packed_row_group_bases`]'s `else` arm renders stays correct for
+/// every shape this does not apply to (batched decode, multi-row `M`
+/// blocks routed through [`push_packed_row_multi_row_body`] instead, etc).
+fn packed_row_direct_output_axis(resolved: &BoundOp, output_axes: &[u16]) -> Option<u16> {
+    let mut found = None;
+    for &axis in output_axes {
+        if resolved.extents[axis as usize] > 1 {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(axis);
+        }
+    }
+    found
+}
+
+/// Renders `weight_base[q]`/`other_base[q]`/`coord_q_cache[q]` for one
+/// row-blocked group -- the ONE place every [`push_packed_row_blocked_body`]
+/// body variant (the default/mask-fma arm, [`push_q4k_ggml_port_body`],
+/// [`push_q6k_ggml_port_body`]) gets its row addressing from, since all
+/// three run this preamble before branching on which reduce body to emit.
+/// ROW 350 named the generic `%`/`/` decomposition against
+/// `u.output_extents`/`u.operand_strides` as 16 division-class instructions
+/// per thread that are a provable no-op whenever [`packed_row_direct_output_axis`]
+/// finds exactly one non-unit output axis (the decode matvec, `s=1`) --
+/// this is the SAME emit-time specialization pattern the `other_stride_is_one`
+/// stride-free arm above already applies, done here for the row-base
+/// addresses instead of the activation stride.
+fn push_packed_row_group_bases(
+    source: &mut String,
+    resolved: &BoundOp,
+    output_axes: &[u16],
+    rank: usize,
+    rows: usize,
+    weight: usize,
+    other: usize,
+) {
+    if let Some(axis) = packed_row_direct_output_axis(resolved, output_axes) {
+        source.push_str(&format!(
+            "    long weight_row_stride = u.operand_strides[{weight}][{axis}];\n"
+        ));
+        source.push_str(&format!(
+            "    long other_row_stride = u.operand_strides[{other}][{axis}];\n"
+        ));
+        source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+        source.push_str("        long flat = group_first + q;\n");
+        source.push_str(&format!(
+            "        for (int d = 0; d < {rank}; ++d) {{ coord_q_cache[q][d] = 0; }}\n"
+        ));
+        source.push_str(&format!("        coord_q_cache[q][{axis}] = flat;\n"));
+        source.push_str(&format!(
+            "        weight_base[q] = u.operand_base[{weight}] + flat * weight_row_stride;\n"
+        ));
+        source.push_str(&format!(
+            "        other_base[q] = u.operand_base[{other}] + flat * other_row_stride;\n"
+        ));
+        source.push_str("    }\n");
+        return;
+    }
+    source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str("        long flat = group_first + q;\n");
+    source.push_str("        long remaining_q = flat;\n");
+    source.push_str(&format!(
+        "        for (int d = 0; d < {rank}; ++d) {{ coord_q_cache[q][d] = 0; }}\n"
+    ));
+    for (index, dim) in output_axes.iter().enumerate().rev() {
+        source.push_str(&format!(
+            "        coord_q_cache[q][{dim}] = remaining_q % u.output_extents[{index}]; remaining_q /= u.output_extents[{index}];\n"
+        ));
+    }
+    source.push_str(&format!("        long wb = u.operand_base[{weight}];\n"));
+    source.push_str(&format!("        long ob = u.operand_base[{other}];\n"));
+    // Iterate the OUTPUT axes directly rather than `0..rank` minus one
+    // excluded dim: `reduce_dim` is now the innermost of possibly SEVERAL
+    // folded reduce dims (see `classify_packed_row_block`'s contiguous-fold
+    // check), so `output_axes` -- already the exact complement of every
+    // reduce dim, however many there are -- is the correct and simpler set
+    // to walk here regardless of reduce rank.
+    for &dim in output_axes {
+        source.push_str(&format!(
+            "        wb += coord_q_cache[q][{dim}] * u.operand_strides[{weight}][{dim}];\n"
+        ));
+        source.push_str(&format!(
+            "        ob += coord_q_cache[q][{dim}] * u.operand_strides[{other}][{dim}];\n"
+        ));
+    }
+    source.push_str("        weight_base[q] = wb;\n");
+    source.push_str("        other_base[q] = ob;\n");
+    source.push_str("    }\n");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_packed_row_blocked_body(
     source: &mut String,
@@ -4096,36 +4216,9 @@ fn push_packed_row_blocked_body(
         // written dispatch never had a second uniform-driven coordinate
         // decode to pay, because it never had a first one either.
         source.push_str(&format!("    long coord_q_cache[{rows}][{rank_len}];\n"));
-        source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
-        source.push_str("        long flat = group_first + q;\n");
-        source.push_str("        long remaining_q = flat;\n");
-        source.push_str(&format!(
-            "        for (int d = 0; d < {rank}; ++d) {{ coord_q_cache[q][d] = 0; }}\n"
-        ));
-        for (index, dim) in output_axes.iter().enumerate().rev() {
-            source.push_str(&format!(
-                "        coord_q_cache[q][{dim}] = remaining_q % u.output_extents[{index}]; remaining_q /= u.output_extents[{index}];\n"
-            ));
-        }
-        source.push_str(&format!("        long wb = u.operand_base[{weight}];\n"));
-        source.push_str(&format!("        long ob = u.operand_base[{other}];\n"));
-        // Iterate the OUTPUT axes directly rather than `0..rank` minus one
-        // excluded dim: `reduce_dim` is now the innermost of possibly
-        // SEVERAL folded reduce dims (see `classify_packed_row_block`'s
-        // contiguous-fold check), so `output_axes` — already the exact
-        // complement of every reduce dim, however many there are — is the
-        // correct and simpler set to walk here regardless of reduce rank.
-        for &dim in output_axes {
-            source.push_str(&format!(
-                "        wb += coord_q_cache[q][{dim}] * u.operand_strides[{weight}][{dim}];\n"
-            ));
-            source.push_str(&format!(
-                "        ob += coord_q_cache[q][{dim}] * u.operand_strides[{other}][{dim}];\n"
-            ));
-        }
-        source.push_str("        weight_base[q] = wb;\n");
-        source.push_str("        other_base[q] = ob;\n");
-        source.push_str("    }\n");
+        push_packed_row_group_bases(
+            source, resolved, output_axes, rank, rows, weight, other,
+        );
         // STRIDE-FREE SPECIALIZATION (`docs/discipline.md` perf/packed-row-
         // addressing row): ggml's own row-blocked kernel assumes a
         // contiguous activation and addresses it with pure element offsets
