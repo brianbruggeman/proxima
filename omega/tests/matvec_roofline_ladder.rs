@@ -3184,6 +3184,38 @@ struct ProductionKernel {
     threadgroup_width: usize,
 }
 
+/// ROW 350 bisection: the emitted kernel's generic N-D coordinate
+/// decomposition (`coord_q_cache`, mod/div against `u.output_extents`) is
+/// provably a no-op for this test's shape -- the output is rank-2 `[1,
+/// rows]`, so the leading "sequence" axis is always extent 1 and every
+/// `% output_extents[0]` / `/ output_extents[0]` in the generated text
+/// yields `0`/no-change for every thread, and the FIRST mod/div pair
+/// (`% output_extents[1]` / `/ output_extents[1]`) always yields
+/// `flat`/`0` for the same reason (`flat < rows` always). This rewrite
+/// replaces that decomposition with the direct single-axis addressing the
+/// hand-written ladder kernel already uses, to measure whether the 16
+/// division-class ops/thread it removes is where the 5.3ms gap lives.
+/// Applied as a POST-EMIT string rewrite (not a change to `omega/src`) so
+/// this stays a measurement, not a landed fix.
+fn row350_direct_addressing_rewrite(source: &str) -> String {
+    let setup_old = "    long weight_base[4];\n    long other_base[4];\n    long coord_q_cache[4][3];\n    for (int q = 0; q < 4; ++q) {\n        long flat = group_first + q;\n        long remaining_q = flat;\n        for (int d = 0; d < 3; ++d) { coord_q_cache[q][d] = 0; }\n        coord_q_cache[q][2] = remaining_q % u.output_extents[1]; remaining_q /= u.output_extents[1];\n        coord_q_cache[q][0] = remaining_q % u.output_extents[0]; remaining_q /= u.output_extents[0];\n        long wb = u.operand_base[1];\n        long ob = u.operand_base[0];\n        wb += coord_q_cache[q][0] * u.operand_strides[1][0];\n        ob += coord_q_cache[q][0] * u.operand_strides[0][0];\n        wb += coord_q_cache[q][2] * u.operand_strides[1][2];\n        ob += coord_q_cache[q][2] * u.operand_strides[0][2];\n        weight_base[q] = wb;\n        other_base[q] = ob;\n    }\n";
+    let setup_new = "    long weight_base[4];\n    long other_base[4];\n    for (int q = 0; q < 4; ++q) {\n        long flat = group_first + q;\n        weight_base[q] = u.operand_base[1] + flat * u.operand_strides[1][2];\n        other_base[q] = u.operand_base[0] + flat * u.operand_strides[0][2];\n    }\n";
+    let output_old = "    for (int q = 0; q < 4; ++q) {\n        float reduced = simd_sum(sumf[q]);\n        long flat = group_first + q;\n        if (lane == 0u && flat < u.output_total) {\n            long out_offset = u.out_base;\n            out_offset += coord_q_cache[q][0] * u.out_strides[0];\n            out_offset += coord_q_cache[q][1] * u.out_strides[1];\n            out_offset += coord_q_cache[q][2] * u.out_strides[2];\n            out[out_offset] = reduced;\n        }\n    }\n}\n";
+    let output_new = "    for (int q = 0; q < 4; ++q) {\n        float reduced = simd_sum(sumf[q]);\n        long flat = group_first + q;\n        if (lane == 0u && flat < u.output_total) {\n            long out_offset = u.out_base + flat * u.out_strides[2];\n            out[out_offset] = reduced;\n        }\n    }\n}\n";
+    assert!(source.contains(setup_old), "row350 setup pattern not found in emitted source");
+    assert!(source.contains(output_old), "row350 output pattern not found in emitted source");
+    source.replace(setup_old, setup_new).replace(output_old, output_new)
+}
+
+/// ROW 350 cell selector: `0` = baseline (byte-identical to production's own
+/// `omega::emit` output, no rewrite -- the default so this test's normal runs
+/// are unaffected), `1` = [`row350_direct_addressing_rewrite`] applied to
+/// every Q4K family kernel's source before compiling (measured 22.71ms ->
+/// 17.67ms, see `docs/discipline.md` ROW 350). Flipped by hand between timed
+/// bisection runs -- this is a measurement knob, not a runtime config
+/// surface, and ships default-`0` (inert).
+const ROW350_CELL: u32 = 0;
+
 fn production_reduce_kernel(
     device: &ProtocolObject<dyn MTLDevice>,
     codec: omega::PackedCodec,
@@ -3243,7 +3275,16 @@ fn production_reduce_kernel(
 
     let uniform_bytes = pack_production_reduce_uniforms(&bound);
     let uniform = shared_buffer_from_bytes(device, &uniform_bytes);
-    let pipeline = compile_pipeline(device, &kernel.source, &kernel.entry, MTLMathMode::Relaxed);
+    // Q6K's head kernel does not share this wrapper's exact text (its own
+    // preamble differs enough that the byte-exact `setup_old`/`output_old`
+    // patterns below do not match it) -- the rewrite targets the Q4K FFN
+    // shapes only, which is 224 of this test's 225 dispatches anyway.
+    let source = if ROW350_CELL == 1 && matches!(codec, omega::PackedCodec::Q4K) {
+        row350_direct_addressing_rewrite(&kernel.source)
+    } else {
+        kernel.source.clone()
+    };
+    let pipeline = compile_pipeline(device, &source, &kernel.entry, MTLMathMode::Relaxed);
     let threadgroup_width = kernel.grid.threadgroup_width.unwrap_or(64) as usize;
 
     ProductionKernel {
