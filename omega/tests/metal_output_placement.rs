@@ -62,6 +62,7 @@ fn a_placed_buffer_holds_both_runs_data_at_their_own_offsets() {
         &[QuantizedBlock::Float32(&first_run)],
         &[],
         &[(identity_node, &buffer, 0)],
+        &mut Vec::new(),
     )
     .expect("first run writes into the placed buffer at offset 0");
 
@@ -71,6 +72,7 @@ fn a_placed_buffer_holds_both_runs_data_at_their_own_offsets() {
         &[QuantizedBlock::Float32(&second_run)],
         &[],
         &[(identity_node, &buffer, SECOND_RUN_OFFSET)],
+        &mut Vec::new(),
     )
     .expect("second run, against the SAME plan and buffer, writes at a non-zero offset");
 
@@ -130,6 +132,7 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
         &[QuantizedBlock::Float32(&prefix)],
         &[],
         &[(seed_node, &buffer, 0)],
+        &mut Vec::new(),
     )
     .expect("seeds the buffer's prefix in its own prior call");
 
@@ -209,6 +212,7 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
         ],
         &[(cache_in, &buffer, 0)],
         &[(row_out, &buffer, ROW_OFFSET)],
+        &mut Vec::new(),
     )
     .expect("op A's write and op B's read of the same buffer execute in one call");
 

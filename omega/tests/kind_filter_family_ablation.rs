@@ -141,7 +141,7 @@ fn ran_flags(
         Some(value) => unsafe { std::env::set_var("PROXIMA_METAL_KIND_FILTER", value) },
         None => unsafe { std::env::remove_var("PROXIMA_METAL_KIND_FILTER") },
     }
-    let result = omega::execute_plan_with_placements(&plan, &quantized, &[], &[]);
+    let result = omega::execute_plan_with_placements(&plan, &quantized, &[], &[], &mut Vec::new());
     // SAFETY: same as above, still under `_guard`.
     unsafe { std::env::remove_var("PROXIMA_METAL_KIND_FILTER") };
 
