@@ -388,6 +388,20 @@ pub struct Plan {
     /// until a caller overrides it with [`Plan::set_dispatch_type`]. See
     /// [`DispatchType`]'s own doc for the measured rationale (ROW 311/312).
     dispatch_type: DispatchType,
+    /// ROW 329 diagnostic: when `Some(position)`,
+    /// [`execute_plan_with_placements_dispatch_timed`]'s stage-boundary
+    /// fallback (the only branch this device's own `AtStageBoundary`-only
+    /// support ever takes, ROW 309's own finding) ends its compute encoder
+    /// immediately BEFORE this plan position and opens a second one for the
+    /// remainder, instead of ROW 309's original one-encoder-per-position
+    /// fallback -- exactly the "one encoder per kind group" degradation
+    /// that row's own doc named, generalized from size-1 groups to a
+    /// caller-chosen two-way split. `None` (the default) keeps that
+    /// original per-position behavior. Never invalidates `resolved_steps`:
+    /// which encoder a dispatch lands in does not change its compiled
+    /// pipeline.
+    #[cfg(feature = "instrument")]
+    encoder_split_at: Option<usize>,
     /// CARD 6.5: whole-buffer, size-class-reused device output buffers for
     /// every position in `prepared.resolved`. Built lazily, on the first
     /// call that actually consults a placement (`arena_placement`) --
@@ -502,6 +516,17 @@ impl Plan {
     /// of which encoder dispatch mode runs them.
     pub fn set_dispatch_type(&mut self, dispatch_type: DispatchType) {
         self.dispatch_type = dispatch_type;
+    }
+
+    /// Overrides this plan's ROW 329 encoder-split position from `None`
+    /// (one stage-sampled encoder per position, ROW 309's original
+    /// fallback). Safe to call any time before an
+    /// [`execute_plan_with_placements_dispatch_timed`] call; every other
+    /// executor -- including this same function's `AtDispatchBoundary`
+    /// branch, on a device that has it -- ignores this field entirely.
+    #[cfg(feature = "instrument")]
+    pub fn set_encoder_split_at(&mut self, position: Option<usize>) {
+        self.encoder_split_at = position;
     }
 
     /// The arena's live-bytes high-water mark reached while it was built --
@@ -643,6 +668,8 @@ pub fn plan(
         resident_nodes: BTreeSet::new(),
         math_mode: MathMode::default(),
         dispatch_type: DispatchType::default(),
+        #[cfg(feature = "instrument")]
+        encoder_split_at: None,
         #[cfg(feature = "metal-plan-stable-buffers")]
         arena: core::cell::OnceCell::new(),
         #[cfg(feature = "metal-plan-stable-buffers")]
@@ -2213,10 +2240,27 @@ fn timestamp_counter_set(
 /// is [`OpGpuTiming`], the same type [`execute_plan_with_placements_op_timed`]
 /// already returns.
 ///
-/// Returns `(evaluated, per_position_timings, sampling_mode)`, where
-/// `sampling_mode` is `"dispatch-boundary"`, `"stage-boundary"`, or
+/// [`execute_plan_with_placements_dispatch_timed`]/
+/// [`execute_plan_named_with_placements_dispatch_timed`]'s own return
+/// shape, named only because clippy's `type_complexity` lint requires it
+/// for a four-element tuple -- not a new abstraction, the same
+/// `DispatchMeta`-alias precedent ROW 309 already set for this function's
+/// internals, just applied to its public return type too.
+#[cfg(all(feature = "metal-output-placement", feature = "instrument"))]
+pub type DispatchTimedOutcome = (Evaluated, Vec<OpGpuTiming>, &'static str, Option<(u64, u64)>);
+
+/// Returns `(evaluated, per_position_timings, sampling_mode, encoder_split_ns)`,
+/// where `sampling_mode` is `"dispatch-boundary"`, `"stage-boundary"`, or
 /// `"unsupported"` -- in the last case every `gpu_ns` is `0`, never
-/// fabricated.
+/// fabricated -- and `encoder_split_ns` is `Some((encoder_1_ns,
+/// encoder_2_ns))` exactly when [`Plan::set_encoder_split_at`] named a
+/// split position AND the stage-boundary branch actually ran (ROW 329):
+/// three `MTLCounterSampleBuffer` samples (buffer start, encoder-1 end,
+/// encoder-2 end) replace `per_position_timings`' own per-position samples
+/// for this call, so every `OpGpuTiming::gpu_ns` reads `0` when this is
+/// `Some` -- the same "never fabricated" contract `"unsupported"` already
+/// carries, extended to a case where per-op attribution genuinely was not
+/// sampled, not just unsupported by the device.
 ///
 /// # Errors
 /// Same as [`execute_plan_with_placements`], plus a [`MetalError`] if the
@@ -2228,7 +2272,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
     blocks: &[QuantizedBlock<'_>],
     input_placements: &[(NodeId, &PlacedBuffer, usize)],
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
-) -> Result<(Evaluated, Vec<OpGpuTiming>, &'static str), MetalError> {
+) -> Result<DispatchTimedOutcome, MetalError> {
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
     let input_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = input_placements
@@ -2307,15 +2351,31 @@ pub fn execute_plan_with_placements_dispatch_timed(
                 packed_row_block_rejection: None,
             })
             .collect();
-        return Ok((evaluated, timings, "unsupported"));
+        return Ok((evaluated, timings, "unsupported", None));
+    };
+
+    let dispatch_boundary = sampling_point == objc2_metal::MTLCounterSamplingPoint::AtDispatchBoundary;
+    // ROW 329: the split feature only applies to the stage-boundary
+    // fallback this device (M1 Max) actually takes -- a device that
+    // supports `AtDispatchBoundary` already gets per-DISPATCH granularity
+    // from `shared_encoder`'s manual `sampleCountersInBuffer` calls below,
+    // with no per-encoder overhead to economize on, so `encoder_split_at`
+    // is ignored there rather than silently reinterpreted.
+    let split_at = if dispatch_boundary {
+        None
+    } else {
+        plan.encoder_split_at
     };
 
     let sample_descriptor = objc2_metal::MTLCounterSampleBufferDescriptor::new();
     sample_descriptor.setCounterSet(Some(&counter_set));
-    // SAFETY: `2 * position_count` is a plain arithmetic value, well under
-    // any device's `maxBufferLength`-scale sample-buffer limits for the
-    // per-token dispatch counts this workspace's own decode programs emit.
-    unsafe { sample_descriptor.setSampleCount((2 * position_count) as NSUInteger) };
+    // Three samples (buffer start, encoder-1 end, encoder-2 end) when
+    // split, else the original one-pair-per-position sizing. SAFETY: both
+    // counts are plain arithmetic, well under any device's
+    // `maxBufferLength`-scale sample-buffer limits for the per-token
+    // dispatch counts this workspace's own decode programs emit.
+    let sample_count: usize = if split_at.is_some() { 3 } else { 2 * position_count };
+    unsafe { sample_descriptor.setSampleCount(sample_count as NSUInteger) };
     let sample_buffer = device
         .newCounterSampleBufferWithDescriptor_error(&sample_descriptor)
         .map_err(|error| MetalError::CompileFailed {
@@ -2328,7 +2388,6 @@ pub fn execute_plan_with_placements_dispatch_timed(
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
 
-    let dispatch_boundary = sampling_point == objc2_metal::MTLCounterSamplingPoint::AtDispatchBoundary;
     let shared_encoder = if dispatch_boundary {
         Some(
             command_buffer
@@ -2340,6 +2399,12 @@ pub fn execute_plan_with_placements_dispatch_timed(
     } else {
         None
     };
+    // ROW 329: the stage-boundary encoder currently open, carried across
+    // loop iterations so a split group's encoder stays open for every
+    // position inside it -- `None` until the loop's first iteration
+    // creates one. Unused (stays `None` the whole call) when
+    // `dispatch_boundary` is true, since `shared_encoder` covers that case.
+    let mut stage_encoder: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>> = None;
 
     // one tuple per position: `(node, kind, operand_bytes, bound_buffer_bytes,
     // weight_name, operand_count, packed_codec, packed_kernel_variant)` --
@@ -2412,19 +2477,50 @@ pub fn execute_plan_with_placements_dispatch_timed(
         let encoder = match &shared_encoder {
             Some(encoder) => encoder.clone(),
             None => {
-                let descriptor = objc2_metal::MTLComputePassDescriptor::computePassDescriptor();
-                let attachment = unsafe { descriptor.sampleBufferAttachments().objectAtIndexedSubscript(0) };
-                attachment.setSampleBuffer(Some(&sample_buffer));
-                unsafe {
-                    attachment.setStartOfEncoderSampleIndex((2 * position) as NSUInteger);
-                    attachment.setEndOfEncoderSampleIndex((2 * position + 1) as NSUInteger);
+                // ROW 329: without a split, every position opens (and, below,
+                // immediately closes) its own encoder -- ROW 309's original
+                // fallback. With a split, a new encoder opens only at
+                // position 0 and at `split_at` itself, and stays open for
+                // every position in between (closed just before the NEXT
+                // new encoder opens, or after the loop for the last group).
+                let needs_new_encoder = match split_at {
+                    None => true,
+                    Some(split) => position == 0 || position == split,
+                };
+                // A group's non-boundary positions reuse the encoder a prior
+                // iteration in this SAME group already opened -- `None` here
+                // (rather than an `expect`) falls through to opening a fresh
+                // one instead of panicking, which cannot happen given
+                // `needs_new_encoder`'s own boundary check above but costs
+                // nothing to make self-healing rather than load-bearing.
+                if let Some(existing) = (!needs_new_encoder).then(|| stage_encoder.clone()).flatten() {
+                    existing
+                } else {
+                    if let Some(previous) = stage_encoder.take() {
+                        previous.endEncoding();
+                    }
+                    let descriptor = objc2_metal::MTLComputePassDescriptor::computePassDescriptor();
+                    let attachment =
+                        unsafe { descriptor.sampleBufferAttachments().objectAtIndexedSubscript(0) };
+                    attachment.setSampleBuffer(Some(&sample_buffer));
+                    let (start_index, end_index) = match split_at {
+                        None => (2 * position, 2 * position + 1),
+                        Some(split) if position == split => (objc2_metal::MTLCounterDontSample, 2),
+                        Some(_) => (0, 1),
+                    };
+                    unsafe {
+                        attachment.setStartOfEncoderSampleIndex(start_index as NSUInteger);
+                        attachment.setEndOfEncoderSampleIndex(end_index as NSUInteger);
+                    }
+                    let opened = command_buffer
+                        .computeCommandEncoderWithDescriptor(&descriptor)
+                        .ok_or_else(|| MetalError::CompileFailed {
+                            log: "command buffer refused to hand out a stage-sampled compute encoder"
+                                .to_string(),
+                        })?;
+                    stage_encoder = Some(opened.clone());
+                    opened
                 }
-                command_buffer
-                    .computeCommandEncoderWithDescriptor(&descriptor)
-                    .ok_or_else(|| MetalError::CompileFailed {
-                        log: "command buffer refused to hand out a stage-sampled compute encoder"
-                            .to_string(),
-                    })?
             }
         };
 
@@ -2457,8 +2553,20 @@ pub fn execute_plan_with_placements_dispatch_timed(
                 );
             }
         }
-        if shared_encoder.is_none() {
-            encoder.endEncoding();
+        // ROW 329: a non-split stage-boundary encoder still closes here,
+        // right after its one dispatch -- `needs_new_encoder` was always
+        // `true` for it above, so `stage_encoder` holds exactly this
+        // encoder and the very next iteration's `previous.endEncoding()`
+        // (or, on the last position, the post-loop drain below) would
+        // otherwise be the only place it closes. Closing immediately
+        // instead reproduces ROW 309's original per-position timing
+        // exactly, rather than silently widening every reported encoder by
+        // one dispatch's worth of retire bookkeeping.
+        if shared_encoder.is_none()
+            && split_at.is_none()
+            && let Some(open) = stage_encoder.take()
+        {
+            open.endEncoding();
         }
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
@@ -2473,9 +2581,28 @@ pub fn execute_plan_with_placements_dispatch_timed(
     if let Some(encoder) = &shared_encoder {
         encoder.endEncoding();
     }
+    // ROW 329: the last group's stage-boundary encoder (split mode's
+    // encoder-2, or a non-split call that somehow left one open) never hit
+    // the per-iteration close above.
+    if let Some(open) = stage_encoder.take() {
+        open.endEncoding();
+    }
 
+    // Same CPU-wall-clock-around-commit-and-wait shape
+    // `execute_plan_with_placements`'s own `GPU_EXEC_TICKS` counter uses --
+    // ROW 309 found this diagnostic path left `gpu_exec_ms` unrecorded for
+    // its own step (the production path's counter bump never runs when
+    // this function replaces it), so a caller comparing this call's
+    // encoder-split totals against `gpu_exec_ms` had no same-step number to
+    // compare against. Wiring the identical counter here closes that gap
+    // with no second timing mechanism: it is the same `cpu_gpu_start`/
+    // `cpu_gpu_end` bracket this function already takes for its own
+    // nanosecond calibration, just also fed to the shared counter.
+    let gpu_exec_started = read_ticks();
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
+    counter!(GPU_EXEC_CALLS, 1);
+    counter!(GPU_EXEC_TICKS, elapsed_ticks(gpu_exec_started));
     let cpu_gpu_end = sample_timestamps(&device);
 
     for (bound, fault_buffer, gathers) in &pending_faults {
@@ -2488,10 +2615,10 @@ pub fn execute_plan_with_placements_dispatch_timed(
 
     let range = objc2_foundation::NSRange {
         location: 0,
-        length: (2 * position_count) as NSUInteger,
+        length: sample_count as NSUInteger,
     };
     // SAFETY: `range` is bounds-checked by construction above (it spans
-    // exactly the `2 * position_count` samples this call itself wrote);
+    // exactly the `sample_count` samples this call itself wrote);
     // `resolveCounterRange`'s own unsafety is the driver's undocumented
     // out-of-range behavior, which this range cannot trigger.
     let resolved = unsafe { sample_buffer.resolveCounterRange(range) }.ok_or_else(|| {
@@ -2500,14 +2627,42 @@ pub fn execute_plan_with_placements_dispatch_timed(
         }
     })?;
     let raw = resolved.to_vec();
-    let mut timings = Vec::with_capacity(position_count);
-    for (position, meta) in metas.into_iter().enumerate() {
-        let start = read_timestamp(&raw, 2 * position);
-        let end = read_timestamp(&raw, 2 * position + 1);
-        let gpu_ns = if start == u64::MAX || end == u64::MAX {
+    // ROW 329: split mode's three samples describe two ENCODER-level spans,
+    // not `position_count` per-position ones -- reading them as
+    // `2 * position` pairs (the non-split layout) would read past index 2
+    // for every position beyond the first and silently attribute garbage
+    // `gpu_ns`. Every `OpGpuTiming::gpu_ns` stays `0` here instead, same as
+    // `"unsupported"` -- never fabricated -- and `encoder_split_ns` below
+    // carries the real, encoder-granularity numbers this call actually
+    // sampled.
+    let encoder_split_ns = split_at.map(|_| {
+        let buffer_start = read_timestamp(&raw, 0);
+        let encoder_one_end = read_timestamp(&raw, 1);
+        let encoder_two_end = read_timestamp(&raw, 2);
+        let encoder_one_ns = if buffer_start == u64::MAX || encoder_one_end == u64::MAX {
             0
         } else {
-            (end.wrapping_sub(start) as f64 * ns_per_gpu_tick).max(0.0) as u64
+            (encoder_one_end.wrapping_sub(buffer_start) as f64 * ns_per_gpu_tick).max(0.0) as u64
+        };
+        let encoder_two_ns = if encoder_one_end == u64::MAX || encoder_two_end == u64::MAX {
+            0
+        } else {
+            (encoder_two_end.wrapping_sub(encoder_one_end) as f64 * ns_per_gpu_tick).max(0.0) as u64
+        };
+        (encoder_one_ns, encoder_two_ns)
+    });
+    let mut timings = Vec::with_capacity(position_count);
+    for (position, meta) in metas.into_iter().enumerate() {
+        let gpu_ns = if split_at.is_some() {
+            0
+        } else {
+            let start = read_timestamp(&raw, 2 * position);
+            let end = read_timestamp(&raw, 2 * position + 1);
+            if start == u64::MAX || end == u64::MAX {
+                0
+            } else {
+                (end.wrapping_sub(start) as f64 * ns_per_gpu_tick).max(0.0) as u64
+            }
         };
         let (node, kind, operand_bytes, bound_buffer_bytes, weight_name, operand_count, packed_codec, packed_kernel_variant) =
             meta;
@@ -2540,7 +2695,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
     } else {
         "stage-boundary"
     };
-    Ok((evaluated, timings, sampling_mode))
+    Ok((evaluated, timings, sampling_mode, encoder_split_ns))
 }
 
 /// One `(cpuTimestamp, gpuTimestamp)` reading via
@@ -2588,7 +2743,7 @@ pub fn execute_plan_named_with_placements_dispatch_timed(
     named: &[(&str, QuantizedBlock<'_>)],
     input_placements: &[(NodeId, &PlacedBuffer, usize)],
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
-) -> Result<(Evaluated, Vec<OpGpuTiming>, &'static str), MetalError> {
+) -> Result<DispatchTimedOutcome, MetalError> {
     let blocks = resolve_named_blocks(&plan.program, named)?;
     execute_plan_with_placements_dispatch_timed(plan, &blocks, input_placements, output_placements)
 }
