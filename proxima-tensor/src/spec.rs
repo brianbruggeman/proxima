@@ -13644,30 +13644,35 @@ value = 1.0
             // through a non-identity, base-shifted axis expression (the
             // parity-selecting `"s,0*s+1,g->sg"` map) from the SAME node the
             // `gate` chain also reads through a DIFFERENT map
-            // (`"s,0*s+0,g->sg"`) — `bind::reduce_epilogue_fusion`'s own
-            // liveness gate (`resolved_reference_counts`, condition (b): "no
-            // OTHER consumer") already counts BOTH reads against the one
-            // paired reduce's `NodeId` and rejects it outright, so this site
-            // NEVER contributes to `paired_epilogued` — MEASURED (not
-            // derived) at zero big (>= 2 real operand) epilogue sites
-            // touching the paired reduce's own `NodeId` on this checkout,
-            // both before and after `bind::reduce_epilogue_candidates`
-            // widened from a raw-`Op`-level one-hop scan to a resolved-op
-            // scan (`bind.rs`'s own module doc). The WIDENING also fuses
-            // many additional composed-tail sites the raw-`Op` scan missed
-            // in BOTH the baseline and paired programs equally (RMSNorm's
-            // own two-round broadcast-reduce epilogue, elsewhere in this
-            // same 32-layer model), so the aggregate `baseline_epilogued -
-            // paired_epilogued` delta this test used to assert (`32`, one
-            // raw one-hop ffn_hidden site per layer) no longer isolates
-            // JUST that site — both totals moved by the SAME widening, to
-            // the SAME measured value.
+            // (`"s,0*s+0,g->sg"`) — `find_epilogue_source`'s own decline for
+            // two DIFFERENT projections of the same source. That site is
+            // still MEASURED at zero fusion in EITHER program.
+            //
+            // The 32-op (one-per-layer) delta below is NEW, and it is
+            // correct, not a leak: `find_epilogue_source`/
+            // `resolved_reference_counts` used to also reject a consumer's
+            // own REPEATED read of the SAME source through the SAME
+            // projection (production SiLU reads `gate` once bare, once
+            // inside `exp(-gate)`), so the `silu(gate) * up` tail never fused
+            // onto `gate`'s own reduce in EITHER program. Fixing that bug
+            // lets the baseline program's `gate`/`up` -- two INDEPENDENT
+            // `Op::Reduce`s -- absorb that tail once per layer (`+32`
+            // epilogued reduces). The paired program cannot gain the same
+            // fusion: its `gate`/`up` share ONE `Op::Reduce`, read through
+            // the two DIFFERENT parity-split projections above, so the SAME
+            // consumer names that one reduce through two different
+            // projections and `find_epilogue_source` correctly declines it,
+            // exactly as the un-widened site always did. The 32-op delta is
+            // therefore precisely paired_gate_up_reduce's own structural
+            // cost: sharing one reduce forecloses an epilogue fusion the
+            // unpaired baseline can still take.
             assert_eq!(
-                baseline_epilogued, paired_epilogued,
-                "paired_gate_up_reduce's own documented site (ffn_hidden's non-identity, \
-                 parity-sliced read of the paired reduce) must never fuse in EITHER program; a \
-                 non-zero delta here means the resolved-op candidate match started admitting or \
-                 rejecting some OTHER, unrelated site asymmetrically between the two programs"
+                baseline_epilogued - paired_epilogued,
+                32,
+                "paired_gate_up_reduce's shared reduce must foreclose exactly one SiLU-tail \
+                 epilogue fusion per layer (32 layers) relative to the baseline's two \
+                 independent reduces; a different delta means some OTHER site started \
+                 admitting or rejecting asymmetrically between the two programs"
             );
         }
     }
