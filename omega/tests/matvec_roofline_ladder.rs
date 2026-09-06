@@ -1677,6 +1677,19 @@ fn run_q6k_shape_arm(label: &str, rows: usize, tensor_count: usize, seed_base: u
         mean / ROW_319_IN_PROGRAM_GBPS,
         mean / DEVICE_CEILING_GBPS,
     );
+    // ROW 322: the shared PARITY_MAX_ABS_ERROR (1e-4) is an absolute bound --
+    // this print makes the batch's own output magnitude visible so an
+    // absolute-vs-relative read is a fact, not a guess.
+    let batch_peak = cpu_reference.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+    let max_abs_error = first_tensor_output[..PARITY_ROWS]
+        .iter()
+        .zip(cpu_reference.iter())
+        .fold(0.0f32, |max_error, (got, want)| max_error.max((got - want).abs()));
+    println!(
+        "Q6K_{label} batch_peak_abs={batch_peak:.4} max_abs_error={max_abs_error:.4} \
+         relative_to_peak={:.6}",
+        max_abs_error / batch_peak.max(f32::EPSILON),
+    );
     assert_parity(
         &format!("Q6K_{label} vs cpu_reference"),
         &first_tensor_output[..PARITY_ROWS],
