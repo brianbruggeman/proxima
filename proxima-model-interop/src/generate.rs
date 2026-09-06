@@ -852,6 +852,37 @@ impl<'file> LoadedModel<'file> {
     /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
     /// can fail with.
     pub fn load(parsed: &ParsedGguf, file_bytes: &'file [u8]) -> Result<Self, InteropError> {
+        Self::load_inner(parsed, file_bytes, false)
+    }
+
+    /// [`Self::load`] with the paired gate/up reduce
+    /// (`proxima_tensor::spec::append_mistral_cached_layer`'s
+    /// `paired_gate_up_reduce`) flipped on: one `Op::Reduce` per layer over
+    /// `blk.{layer}.ffn_gate_up.weight` (`crate::bind::bind_matmul_weight_paired`)
+    /// in place of today's two independent `ffn_gate`/`ffn_up` matvecs.
+    /// `false` at [`Self::load`] reproduces this crate's forward program
+    /// byte-for-byte; this constructor is the seam a caller (or a future
+    /// [`crate::serving::ServingConfig`] field) flips to measure the other
+    /// side. No effect on a `qwen35` checkpoint (that branch never reads
+    /// this flag) or a mixture-of-experts checkpoint (routed FFN weights are
+    /// untouched by this flag either way).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::load`].
+    pub fn load_with_paired_gate_up_reduce(
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        paired_gate_up_reduce: bool,
+    ) -> Result<Self, InteropError> {
+        Self::load_inner(parsed, file_bytes, paired_gate_up_reduce)
+    }
+
+    fn load_inner(
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        paired_gate_up_reduce: bool,
+    ) -> Result<Self, InteropError> {
         // registers `file_bytes` -- the checkpoint's own mmap, page-aligned
         // at its base by construction -- as the single mapping every packed
         // tensor's borrowed slice can be addressed into by OFFSET instead of
@@ -913,7 +944,8 @@ impl<'file> LoadedModel<'file> {
 
         let architecture = architecture_from_metadata(parsed)?;
         let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
-        let weights = bind_all_weights(parsed, file_bytes, &architecture)?;
+        let weights =
+            bind_all_weights(parsed, file_bytes, &architecture, paired_gate_up_reduce)?;
         // `architecture.expert_count`/`expert_used_count` read `0` for every
         // dense checkpoint (`ModelArchitecture`'s own doc), which selects
         // exactly the dense program this crate has always built -- a
@@ -935,9 +967,24 @@ impl<'file> LoadedModel<'file> {
             architecture.expert_count,
             architecture.expert_used_count,
             qk_norm,
+            paired_gate_up_reduce,
         )?;
+        // `mistral_single_range_cached_forward_program`'s own `w_gate`/`w_up`
+        // leaves (`build_single_range_program`) do not know about
+        // `paired_gate_up_reduce` yet -- `LoadedModel::run_decode_loop_observed`'s
+        // placed-KV fast path would try to read `blk.{layer}.ffn_gate.weight`
+        // against a `weights` set that, under this flag, only ever binds
+        // `blk.{layer}.ffn_gate_up.weight`. Forcing `None` here falls
+        // through to the two-range decode loop below, which DOES thread the
+        // flag correctly, rather than a `Metal(Tensor(UnboundInputName(..)))`
+        // panic -- the correct, paired-aware path over a crash, until the
+        // placed-KV builder gains the same flag.
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let single_range = build_single_range_program(&architecture)?;
+        let single_range = if paired_gate_up_reduce {
+            None
+        } else {
+            build_single_range_program(&architecture)?
+        };
         Ok(Self {
             weights,
             architecture,
@@ -1002,6 +1049,7 @@ impl<'file> LoadedModel<'file> {
             architecture.block_count,
             architecture.expert_count,
             architecture.expert_used_count,
+            false,
             false,
         )?;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

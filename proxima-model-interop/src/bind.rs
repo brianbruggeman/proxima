@@ -824,6 +824,85 @@ pub(crate) fn bind_matmul_weight_as<'file>(
     Ok(())
 }
 
+/// Binds `gate_name`/`up_name` (`blk.{layer}.ffn_gate.weight`/
+/// `blk.{layer}.ffn_up.weight`) as ONE packed operand under `target_name`
+/// (`blk.{layer}.ffn_gate_up.weight`) -- the loader half of
+/// `proxima_tensor::spec::append_mistral_cached_layer`'s
+/// `paired_gate_up_reduce` flag. Requires both tensors share one packed
+/// codec (checked, not assumed): the paired reduce's single
+/// [`proxima_tensor::cpu::QuantizedBlock`] can only speak one packed format.
+///
+/// Zero-copy when `up_name` starts exactly where `gate_name` ends -- true
+/// for every layer of the real openchat checkpoint
+/// (`proxima-gguf/src/tests.rs`'s `ffn_gate_and_up_adjacency_per_layer`,
+/// which this function's own doc cites as the check a caller runs before
+/// relying on this path staying zero-copy for a DIFFERENT checkpoint). A gap
+/// falls back to one owned concatenation ([`BoundWeights::packed_owned`],
+/// the same mechanism [`bind_moe_expert_weights`]'s restack fallback uses),
+/// paid once at load time, never on the hot path.
+///
+/// # Errors
+///
+/// [`InteropError::UnknownTensor`] if either tensor is missing;
+/// [`InteropError::Gguf`] if either tensor's declared byte range doesn't fit
+/// `file_bytes`; [`InteropError::UnrepresentableGgmlType`] if the two
+/// tensors' codecs disagree, or if their shared codec has no packed decoder
+/// this crate carries.
+#[cfg(feature = "std")]
+pub(crate) fn bind_matmul_weight_paired<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    gate_name: &str,
+    up_name: &str,
+    target_name: alloc::string::String,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    let gate_tensor = find_tensor(parsed, gate_name)?;
+    let up_tensor = find_tensor(parsed, up_name)?;
+    if gate_tensor.ggml_type != up_tensor.ggml_type {
+        return Err(InteropError::UnrepresentableGgmlType {
+            tensor: gate_name.into(),
+            ggml_type: gate_tensor.ggml_type,
+        });
+    }
+    let codec = gate_tensor.ggml_type;
+    let file_len = file_bytes.len() as u64;
+    let gate_range = parsed.tensor_data_range(gate_tensor, file_len)?;
+    let up_range = parsed.tensor_data_range(up_tensor, file_len)?;
+
+    if up_range.start == gate_range.end {
+        let bytes = &file_bytes[gate_range.start as usize..up_range.end as usize];
+        let block = match codec {
+            GgmlType::Q4_K => proxima_tensor::cpu::QuantizedBlock::Q4K(bytes),
+            GgmlType::Q5_K => proxima_tensor::cpu::QuantizedBlock::Q5K(bytes),
+            GgmlType::Q3_K => proxima_tensor::cpu::QuantizedBlock::Q3K(bytes),
+            GgmlType::Q6_K => proxima_tensor::cpu::QuantizedBlock::Q6K(bytes),
+            GgmlType::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes),
+            other => {
+                return Err(InteropError::UnrepresentableGgmlType {
+                    tensor: gate_name.into(),
+                    ggml_type: other,
+                });
+            }
+        };
+        state.packed.push((target_name, block));
+    } else {
+        let kind =
+            PackedOwnedKind::from_ggml_type(codec).ok_or(InteropError::UnrepresentableGgmlType {
+                tensor: gate_name.into(),
+                ggml_type: codec,
+            })?;
+        let gate_bytes = &file_bytes[gate_range.start as usize..gate_range.end as usize];
+        let up_bytes = &file_bytes[up_range.start as usize..up_range.end as usize];
+        let mut owned = vec![0u8; gate_bytes.len() + up_bytes.len()];
+        owned[..gate_bytes.len()].copy_from_slice(gate_bytes);
+        owned[gate_bytes.len()..].copy_from_slice(up_bytes);
+        state.resident_bytes += owned.len();
+        state.packed_owned.push((target_name, owned, kind));
+    }
+    Ok(())
+}
+
 /// ROW 328 diagnostic knob: `PROXIMA_HEAD_PRIVATE_COPY=1`, unset in every
 /// production run. Same env-var convention as `PROXIMA_PREFAULT`/
 /// `PROXIMA_MLOCK` (this module's `real_openchat_file` submodule).
@@ -1157,6 +1236,7 @@ pub(crate) fn bind_all_weights<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     architecture: &ModelArchitecture,
+    paired_gate_up_reduce: bool,
 ) -> Result<BoundWeights<'file>, InteropError> {
     let mut state = BoundWeights {
         resident_bytes: file_bytes.len(),
@@ -1242,22 +1322,33 @@ pub(crate) fn bind_all_weights<'file>(
         }
 
         if architecture.expert_count == 0 {
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                alloc::format!("blk.{layer}.ffn_gate.weight"),
-                feed_forward,
-                embedding,
-                &mut state,
-            )?;
-            bind_matmul_weight(
-                parsed,
-                file_bytes,
-                alloc::format!("blk.{layer}.ffn_up.weight"),
-                feed_forward,
-                embedding,
-                &mut state,
-            )?;
+            if paired_gate_up_reduce {
+                bind_matmul_weight_paired(
+                    parsed,
+                    file_bytes,
+                    &alloc::format!("blk.{layer}.ffn_gate.weight"),
+                    &alloc::format!("blk.{layer}.ffn_up.weight"),
+                    alloc::format!("blk.{layer}.ffn_gate_up.weight"),
+                    &mut state,
+                )?;
+            } else {
+                bind_matmul_weight(
+                    parsed,
+                    file_bytes,
+                    alloc::format!("blk.{layer}.ffn_gate.weight"),
+                    feed_forward,
+                    embedding,
+                    &mut state,
+                )?;
+                bind_matmul_weight(
+                    parsed,
+                    file_bytes,
+                    alloc::format!("blk.{layer}.ffn_up.weight"),
+                    feed_forward,
+                    embedding,
+                    &mut state,
+                )?;
+            }
             bind_matmul_weight(
                 parsed,
                 file_bytes,
@@ -3065,6 +3156,68 @@ mod real_openchat_file {
         );
     }
 
+    /// Byte-identity oracle for `proxima_tensor::spec::append_mistral_cached_layer`'s
+    /// `paired_gate_up_reduce` flag: [`LoadedModel::load`] (`false`) against
+    /// [`LoadedModel::load_with_paired_gate_up_reduce`] (`true`), same real
+    /// checkpoint, same prompt, `PROXIMA_MAX_TOKENS` (default 3 for this
+    /// test, overridable). The paired reduce is a pure re-layout of the SAME
+    /// weight bytes into ONE `Op::Reduce` -- generated token ids and text
+    /// must match exactly, the same oracle ROW-324's own encode-order
+    /// diagnostic used (`generated_text` byte-identical across arms).
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+    fn paired_gate_up_reduce_matches_the_two_matvec_baseline_byte_for_byte() {
+        let path = std::path::Path::new(ServingConfig::default().model_path);
+        if !path.exists() {
+            eprintln!(
+                "skipping: no host-local openchat gguf fixture at {}",
+                ServingConfig::default().model_path
+            );
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local openchat gguf fixture");
+        prefault_if_requested(file_bytes);
+
+        let prompt = decode_loop_prompt();
+        let max_tokens = std::env::var("PROXIMA_MAX_TOKENS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(3);
+
+        let baseline_model = LoadedModel::load(&parsed, file_bytes)
+            .expect("load real openchat checkpoint, two independent matvecs");
+        let baseline = block_on(baseline_model.call((prompt.clone(), max_tokens)))
+            .expect("generate through the public Pipe path, baseline");
+
+        let paired_model =
+            LoadedModel::load_with_paired_gate_up_reduce(&parsed, file_bytes, true)
+                .expect("load real openchat checkpoint, one paired reduce per layer");
+        let paired = block_on(paired_model.call((prompt, max_tokens)))
+            .expect("generate through the public Pipe path, paired");
+
+        std::println!(
+            "paired_gate_up_reduce_parity baseline_text={:?} paired_text={:?}",
+            baseline.1,
+            paired.1
+        );
+        assert_eq!(
+            baseline.0, paired.0,
+            "paired_gate_up_reduce must generate the identical token id sequence"
+        );
+        assert_eq!(
+            baseline.1, paired.1,
+            "paired_gate_up_reduce must generate byte-identical text"
+        );
+        assert_eq!(
+            baseline.2, paired.2,
+            "paired_gate_up_reduce must stop on the same eos/budget signal"
+        );
+    }
+
     /// The multi-token counterpart, through the same public path: one
     /// [`LoadedModel::load`], one [`Pipe::call`] with
     /// `max_tokens: PROXIMA_MAX_TOKENS` (default 24) -- the direct fix for
@@ -3686,7 +3839,7 @@ mod real_openchat_file {
                 .expect("parse host-local openchat gguf fixture");
             let architecture = architecture_from_metadata(&parsed)
                 .expect("derive architecture from real metadata");
-            let weights = bind_all_weights(&parsed, file_bytes, &architecture)
+            let weights = bind_all_weights(&parsed, file_bytes, &architecture, false)
                 .expect("bind real openchat checkpoint weights");
 
             use proxima_tensor::spec::mistral_cached_forward_program;

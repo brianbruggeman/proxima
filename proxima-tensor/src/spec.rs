@@ -2401,6 +2401,22 @@ pub type Qwen35DenseAttentionRoots = (NodeId, NodeId, NodeId, NodeId);
 /// computed them -- this one flag is what lets a single layer builder serve
 /// both architectures rather than forking a parallel copy for the two extra
 /// ops Qwen3 needs.
+///
+/// `paired_gate_up_reduce`, when `true`, requires the caller to have passed
+/// the SAME `NodeId` for both `w_gate` and `w_up` -- a single `[2,
+/// feed_forward, embedding]` leaf (gate rows then up rows, one dispatch
+/// binds it) rather than two separate `[embedding, feed_forward]` leaves.
+/// `gate`/`up` are then read back out of ONE `Op::Reduce`'s `[s, feed_forward]`
+/// output via the parity axis fixed at `0`/`1` (the constant-offset
+/// axis-expression grammar `spec.rs`'s own module doc already carries,
+/// `"s,0*s+K,g->sg"` -- a zero-coefficient term on an unrelated iteration
+/// letter selects a compile-time-fixed operand axis without adding an
+/// `IndexMap` variant). `false` reproduces today's two independent matvecs
+/// byte-for-byte -- every op below this branch is unaffected by which side
+/// ran. Default `false` at every production call site; flipping it removes
+/// one `Op::Reduce` (and its own kernel dispatch) per layer at load-time
+/// cost only when the checkpoint's `ffn_gate`/`ffn_up` tensors are not
+/// byte-adjacent (`proxima-model-interop::bind::bind_matmul_weight_paired`).
 #[allow(clippy::too_many_arguments)]
 fn append_mistral_cached_layer(
     program: &mut Vec<Op>,
@@ -2428,6 +2444,7 @@ fn append_mistral_cached_layer(
     k_odd_cache: NodeId,
     v_cache: NodeId,
     qk_norm: Option<(NodeId, NodeId, NodeId)>,
+    paired_gate_up_reduce: bool,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
@@ -2842,42 +2859,81 @@ fn append_mistral_cached_layer(
 
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
-    let gate_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
-    )?;
-    let gate = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        gate_product,
-        "sdg->sdg",
-        "sg->sdg",
-    )?;
-    let up_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
-    )?;
-    let up = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        up_product,
-        "sdg->sdg",
-        "sg->sdg",
-    )?;
+    // `paired_gate_up_reduce`: one `Op::Reduce` over `w_gate` (== `w_up`,
+    // caller's contract, see this function's own doc) read as `[2,
+    // feed_forward, embedding]` replaces the two independent matvecs below.
+    // `out_map`'s letter order ("spg", not "sgp") is load-bearing, not
+    // stylistic: `proxima_tensor::bind::correct_packed_matmul_layouts`
+    // derives a packed weight's native stride per output axis from
+    // `output_axes`' LISTED order (last-listed axis lands innermost, closest
+    // to the reduced axis) -- "spg" places the broadcast `s` axis outermost
+    // (its stride is discarded either way) and `g` innermost-of-features so
+    // its native stride comes out `embedding` (one row), leaving `p`'s
+    // native stride `feed_forward * embedding` (one whole gate/up half) --
+    // exactly the real concatenated checkpoint's byte layout. `"sgp"` derives
+    // the opposite (interleaved) stride pair and silently mis-reads the
+    // buffer.
+    let (gate, up, gate_map, up_map): (NodeId, NodeId, &str, &str) = if paired_gate_up_reduce {
+        let paired_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed2, "sd->sdgp"), (w_gate, "pgd->sdgp")],
+        )?;
+        let paired_result = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            paired_product,
+            "sdgp->sdgp",
+            "spg->sdgp",
+        )?;
+        (
+            paired_result,
+            paired_result,
+            "s,0*s+0,g->sg",
+            "s,0*s+1,g->sg",
+        )
+    } else {
+        let gate_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
+        )?;
+        let gate = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            gate_product,
+            "sdg->sdg",
+            "sg->sdg",
+        )?;
+        let up_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
+        )?;
+        let up = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            up_product,
+            "sdg->sdg",
+            "sg->sdg",
+        )?;
+        (gate, up, "sg->sg", "sg->sg")
+    };
 
     let neg_gate = elementwise(
         program,
         DType::Float32,
         ScalarOp::Negate,
-        &[(gate, "sg->sg")],
+        &[(gate, gate_map)],
     )?;
     let exp_neg_gate = elementwise(
         program,
@@ -2901,13 +2957,13 @@ fn append_mistral_cached_layer(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")],
+        &[(gate, gate_map), (sigmoid_gate, "sg->sg")],
     )?;
     let ffn_hidden = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(silu_gate, "sg->sg"), (up, "sg->sg")],
+        &[(silu_gate, "sg->sg"), (up, up_map)],
     )?;
 
     let down_product = elementwise(
@@ -6883,6 +6939,7 @@ pub fn mistral_cached_forward_program(
         0,
         0,
         false,
+        false,
     )
 }
 
@@ -6916,6 +6973,7 @@ pub fn qwen3_cached_forward_program(
         0,
         0,
         true,
+        false,
     )
 }
 
@@ -6931,6 +6989,14 @@ pub fn qwen3_cached_forward_program(
 /// `expert_count` experts' weight slabs per token per `append_moe_ffn`'s
 /// doc -- the same routed FFN [`mistral_forward_program`]'s own MoE branch
 /// already runs, reused rather than reconstructed.
+///
+/// `paired_gate_up_reduce` is passed straight through to every dense layer's
+/// `append_mistral_cached_layer` call (see that parameter's own doc) --
+/// `false` at every call site in this crate today; a caller opts in only
+/// once its loader has bound `blk.{layer}.ffn_gate_up.weight`
+/// (`proxima-model-interop::bind::bind_matmul_weight_paired`). No effect on
+/// the `expert_count > 0` branch (MoE's own gate/up weights are a separate
+/// per-expert stack this flag does not touch).
 #[allow(clippy::too_many_arguments)]
 pub fn mistral_cached_forward_program_with_experts(
     vocab: u32,
@@ -6943,6 +7009,7 @@ pub fn mistral_cached_forward_program_with_experts(
     expert_count: u32,
     expert_used_count: u32,
     qk_norm: bool,
+    paired_gate_up_reduce: bool,
 ) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>), TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
@@ -7081,18 +7148,33 @@ pub fn mistral_cached_forward_program_with_experts(
         );
 
         let (x_next, layer_roots) = if expert_count == 0 {
-            let w_gate = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-                &alloc::format!("blk.{layer}.ffn_gate.weight"),
-            );
-            let w_up = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-                &alloc::format!("blk.{layer}.ffn_up.weight"),
-            );
+            let (w_gate, w_up) = if paired_gate_up_reduce {
+                let w_gate_up = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![
+                        Extent::Static(2),
+                        Extent::Static(feed_forward),
+                        Extent::Static(embedding)
+                    ],
+                    &alloc::format!("blk.{layer}.ffn_gate_up.weight"),
+                );
+                (w_gate_up, w_gate_up)
+            } else {
+                let w_gate = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+                    &alloc::format!("blk.{layer}.ffn_gate.weight"),
+                );
+                let w_up = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+                    &alloc::format!("blk.{layer}.ffn_up.weight"),
+                );
+                (w_gate, w_up)
+            };
             let w_down = input_leaf(
                 &mut program,
                 DType::Float32,
@@ -7141,6 +7223,7 @@ pub fn mistral_cached_forward_program_with_experts(
                 k_odd_cache,
                 v_cache,
                 qk_norm_weights,
+                paired_gate_up_reduce,
             )?
         } else {
             let gate_inp = input_leaf(
@@ -13189,6 +13272,114 @@ value = 1.0
         }
     }
 
+    /// `paired_gate_up_reduce`'s own census, in the SAME relation form as
+    /// [`the_rule_census_reconciles_against_the_measured_mistral_forward_split`]
+    /// above -- deltas against the baseline program's own measured counts,
+    /// never a new absolute literal. Building the `[2, feed_forward,
+    /// embedding]`-leaf program and binding it exactly as the baseline is
+    /// bound (`bind_with_fusion(.., false)`, fusion held off) isolates one
+    /// thing: the paired reduce collapses `gate`'s and `up`'s two
+    /// `Op::Reduce`s into one, so `reduce_total` must drop by exactly one
+    /// per layer (32 layers, 32-layer program) relative to the baseline
+    /// this same test computes fresh -- never re-typed from the other
+    /// test's own docstring, which could drift.
+    #[test]
+    fn paired_gate_up_reduce_removes_one_reduce_per_layer_relative_to_the_baseline() {
+        let (baseline_program, baseline_logits, baseline_roots) =
+            mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+                .expect("the baseline cached forward pass lowers to a program");
+        let mut baseline_outputs = alloc::vec![baseline_logits];
+        for (even, odd, value) in &baseline_roots {
+            baseline_outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let baseline_shapes = crate::shape::infer(&baseline_program, &[1, 71])
+            .expect("baseline: one new position against a 71-position cache infers");
+        let baseline_bound = crate::bind::bind_with_fusion(
+            &baseline_program,
+            &baseline_shapes,
+            &baseline_outputs,
+            false,
+        )
+        .expect("the baseline program binds");
+        let baseline_reduce_total = baseline_bound
+            .iter()
+            .filter(|op| matches!(&op.kind, crate::bind::BoundOpKind::Reduce { .. }))
+            .count();
+
+        let (paired_program, paired_logits, paired_roots) =
+            mistral_cached_forward_program_with_experts(
+                32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, true,
+            )
+            .expect("the paired cached forward pass lowers to a program");
+        let mut paired_outputs = alloc::vec![paired_logits];
+        for (even, odd, value) in &paired_roots {
+            paired_outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let paired_shapes = crate::shape::infer(&paired_program, &[1, 71])
+            .expect("paired: one new position against a 71-position cache infers");
+        let paired_bound =
+            crate::bind::bind_with_fusion(&paired_program, &paired_shapes, &paired_outputs, false)
+                .expect("the paired program binds");
+        let paired_reduce_total = paired_bound
+            .iter()
+            .filter(|op| matches!(&op.kind, crate::bind::BoundOpKind::Reduce { .. }))
+            .count();
+
+        std::println!(
+            "paired_gate_up_reduce_census baseline_reduce_total={baseline_reduce_total} paired_reduce_total={paired_reduce_total} baseline_bound_total={} paired_bound_total={}",
+            baseline_bound.len(),
+            paired_bound.len()
+        );
+        assert_eq!(
+            baseline_reduce_total - paired_reduce_total,
+            32,
+            "paired_gate_up_reduce must remove exactly one Op::Reduce per layer (32 layers) \
+             relative to the baseline program's own measured reduce total -- gate's and up's \
+             two independent reduces collapsing into one paired reduce"
+        );
+
+        #[cfg(feature = "reduce-epilogue-fusion")]
+        {
+            let baseline_epilogued = baseline_bound
+                .iter()
+                .filter(|op| {
+                    matches!(
+                        &op.kind,
+                        crate::bind::BoundOpKind::Reduce { epilogue_operands, .. }
+                            if !epilogue_operands.is_empty()
+                    )
+                })
+                .count();
+            let paired_epilogued = paired_bound
+                .iter()
+                .filter(|op| {
+                    matches!(
+                        &op.kind,
+                        crate::bind::BoundOpKind::Reduce { epilogue_operands, .. }
+                            if !epilogue_operands.is_empty()
+                    )
+                })
+                .count();
+            std::println!(
+                "paired_gate_up_reduce_census baseline_epilogued={baseline_epilogued} paired_epilogued={paired_epilogued}"
+            );
+            // `ffn_hidden` (`spec.rs`'s own `append_mistral_cached_layer`)
+            // absorbs the baseline's standalone `up` reduce as its epilogue
+            // today (one of the four per-layer sites the census above
+            // names). The paired reduce's `up` slice is read through a
+            // non-identity axis expression (the parity-selecting
+            // `"s,0*s+1,g->sg"` map), which `bind::reduce_epilogue_candidates`'s
+            // own identity-read condition rejects -- so that fusion site
+            // disappears: one fewer fused site per layer, 32 layers.
+            assert_eq!(
+                baseline_epilogued - paired_epilogued,
+                32,
+                "paired_gate_up_reduce must remove exactly one epilogue-fused site per layer \
+                 (32 layers) relative to the baseline -- ffn_hidden can no longer absorb a \
+                 non-identity parity-sliced read of the paired reduce's own output"
+            );
+        }
+    }
 
     /// Proof the new test can fail: perturbing one tap weight must move the
     /// affected output positions away from the hand-computed reference.
