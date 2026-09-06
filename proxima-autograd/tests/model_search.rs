@@ -174,6 +174,7 @@ fn embedding_gather(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId
                 proxima_tensor::map::AxisIndex {
                     terms: core::iter::once(proxima_tensor::map::AxisTerm::projection(1)).collect(),
                     offset: 0,
+                    len: None,
                 },
             ],
         },

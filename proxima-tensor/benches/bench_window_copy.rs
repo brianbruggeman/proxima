@@ -124,18 +124,22 @@ fn window_copy_program(shape: &WindowShape, extra_step: bool) -> (Vec<Op>, NodeI
             map::AxisIndex {
                 terms: core::iter::once(map::AxisTerm::projection(0)).collect(),
                 offset: 0,
+                len: None,
             },
             map::AxisIndex {
                 terms: core::iter::once(map::AxisTerm::projection(1)).collect(),
                 offset: 0,
+                len: None,
             },
             map::AxisIndex {
                 terms: vec![map::AxisTerm::projection(2), map::AxisTerm::projection(4)].into(),
                 offset: 0,
+                len: None,
             },
             map::AxisIndex {
                 terms: vec![map::AxisTerm::projection(3), map::AxisTerm::projection(5)].into(),
                 offset: 0,
+                len: None,
             },
         ],
     };

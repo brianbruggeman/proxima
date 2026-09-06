@@ -227,7 +227,8 @@ fn embedding_gather(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId
                 AxisIndex::default(),
                 AxisIndex {
                     terms: core::iter::once(AxisTerm::projection(1)).collect(),
-                    offset: 0
+                    offset: 0,
+                    len: None
                 },
             ],
         },

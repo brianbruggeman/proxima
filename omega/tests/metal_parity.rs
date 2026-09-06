@@ -413,6 +413,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Op> {
                 AxisIndex {
                     terms: vec![AxisTerm::projection(1)].into(),
                     offset: 0,
+                    len: None,
                 },
             ],
         },
@@ -470,6 +471,7 @@ fn embedding_matmul_program(vocab: u32, embed_dim: u32, seq: u32, out_dim: u32) 
                 AxisIndex {
                     terms: vec![AxisTerm::projection(2)].into(),
                     offset: 0,
+                    len: None,
                 },
             ],
         },

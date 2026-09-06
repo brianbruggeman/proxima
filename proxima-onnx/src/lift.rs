@@ -1686,14 +1686,17 @@ mod tests {
                 AxisIndex {
                     terms: core::iter::once(proxima_tensor::AxisTerm::projection(0)).collect(),
                     offset: 0,
+                    len: None,
                 },
                 AxisIndex {
                     terms: core::iter::once(proxima_tensor::AxisTerm::projection(1)).collect(),
                     offset: 0,
+                    len: None,
                 },
                 AxisIndex {
                     terms: core::iter::once(proxima_tensor::AxisTerm::projection(2)).collect(),
                     offset: 0,
+                    len: None,
                 },
             ],
         });
@@ -1703,10 +1706,12 @@ mod tests {
                 AxisIndex {
                     terms: core::iter::once(proxima_tensor::AxisTerm::projection(2)).collect(),
                     offset: 0,
+                    len: None,
                 },
                 AxisIndex {
                     terms: core::iter::once(proxima_tensor::AxisTerm::projection(0)).collect(),
                     offset: 0,
+                    len: None,
                 },
             ],
         });
@@ -1790,6 +1795,7 @@ mod tests {
             .into_iter()
             .collect(),
             offset: 0,
+            len: None,
         };
         let pattern = IndexPattern {
             iter_rank: 3,
@@ -1912,6 +1918,7 @@ mod tests {
             axes: vec![AxisIndex {
                 terms: core::iter::once(proxima_tensor::AxisTerm::projection(0)).collect(),
                 offset: 0,
+                len: None,
             }],
         });
         let scanned = append(

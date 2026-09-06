@@ -1752,6 +1752,7 @@ mod tests {
                     map::AxisIndex {
                         terms: vec![AxisTerm::projection(1)].into(),
                         offset: 0,
+                        len: None,
                     },
                 ],
             },

@@ -489,6 +489,7 @@ fn row_c_gather_fused_reduce(c: &mut Criterion) {
                 AxisIndex {
                     terms: core::iter::once(AxisTerm::projection(1)).collect(),
                     offset: 0,
+                    len: None,
                 },
             ],
         },

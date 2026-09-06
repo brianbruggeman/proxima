@@ -731,6 +731,7 @@ fn broadcast_pattern(operand_shape: &[u64], out_shape: &[u64]) -> IndexPattern {
                 AxisIndex {
                     terms: core::iter::once(AxisTerm::projection(iter_axis)).collect(),
                     offset: 0,
+                    len: None,
                 }
             }
         })
@@ -767,6 +768,7 @@ fn operand_pattern(value: &Value, out_shape: &[u64]) -> IndexPattern {
         .map(|real_axis| AxisIndex {
             terms: core::iter::once(AxisTerm::projection(by_real_axis[&real_axis])).collect(),
             offset: 0,
+            len: None,
         })
         .collect();
     IndexPattern {
@@ -1251,6 +1253,7 @@ fn flat_axis_index(extents: &[u64], iter_axes: &[u16]) -> AxisIndex {
         return AxisIndex {
             terms: core::iter::once(AxisTerm::projection(iter_axes[0])).collect(),
             offset: 0,
+            len: None,
         };
     }
     let terms = (0..extents.len())
@@ -1259,7 +1262,11 @@ fn flat_axis_index(extents: &[u64], iter_axes: &[u16]) -> AxisIndex {
             AxisTerm::scaled(iter_axes[index], stride as i32)
         })
         .collect();
-    AxisIndex { terms, offset: 0 }
+    AxisIndex {
+        terms,
+        offset: 0,
+        len: None,
+    }
 }
 
 /// The *owning* side of a [`Value::flatten_source`]-widened `Gemm` operand:
@@ -1273,6 +1280,7 @@ fn owned_axis_indices(iter_axes: &[u16]) -> Vec<AxisIndex> {
         .map(|&axis| AxisIndex {
             terms: core::iter::once(AxisTerm::projection(axis)).collect(),
             offset: 0,
+            len: None,
         })
         .collect()
 }
@@ -1444,6 +1452,7 @@ fn single_term_axis(axis: u16) -> AxisIndex {
     AxisIndex {
         terms: core::iter::once(AxisTerm::projection(axis)).collect(),
         offset: 0,
+        len: None,
     }
 }
 
@@ -1992,12 +2001,14 @@ fn lower_gather(
             base_axes.push(AxisIndex {
                 terms: core::iter::once(AxisTerm::projection(data_axis as u16)).collect(),
                 offset: 0,
+                len: None,
             });
         } else {
             let iter_axis = (data_axis - 1 + indices_rank) as u16;
             base_axes.push(AxisIndex {
                 terms: core::iter::once(AxisTerm::projection(iter_axis)).collect(),
                 offset: 0,
+                len: None,
             });
         }
     }
@@ -2538,11 +2549,13 @@ fn slice_axis0(program: &mut Vec<Op>, value: &Value, index: u64) -> Value {
     axes.push(AxisIndex {
         terms: Default::default(),
         offset: index as i32,
+        len: None,
     });
     for axis in 1..rank {
         axes.push(AxisIndex {
             terms: core::iter::once(AxisTerm::projection((axis - 1) as u16)).collect(),
             offset: 0,
+            len: None,
         });
     }
     let pattern = IndexPattern {
@@ -3901,6 +3914,7 @@ fn concat_base_pattern(iter_rank: u16, rank: usize, skip_axis: usize) -> IndexPa
                 AxisIndex {
                     terms: core::iter::once(AxisTerm::projection(data_axis as u16)).collect(),
                     offset: 0,
+                    len: None,
                 }
             }
         })
@@ -4716,6 +4730,7 @@ fn window_axis(out_axis: u16, kernel_axis: u16, stride: i64, dilation: i64) -> A
         .into_iter()
         .collect(),
         offset: 0,
+        len: None,
     }
 }
 
@@ -4820,11 +4835,13 @@ fn window_materialize(program: &mut Vec<Op>, image: &Value, spec: WindowSpec) ->
         axes: alloc::vec![
             AxisIndex {
                 terms: core::iter::once(AxisTerm::projection(0)).collect(),
-                offset: 0
+                offset: 0,
+                len: None
             },
             AxisIndex {
                 terms: core::iter::once(AxisTerm::projection(1)).collect(),
-                offset: 0
+                offset: 0,
+                len: None
             },
             window_axis(2, 4, spec.stride_h, spec.dilation_h),
             window_axis(3, 5, spec.stride_w, spec.dilation_w),
@@ -4888,11 +4905,13 @@ fn window_materialize1d(
         axes: alloc::vec![
             AxisIndex {
                 terms: core::iter::once(AxisTerm::projection(0)).collect(),
-                offset: 0
+                offset: 0,
+                len: None
             },
             AxisIndex {
                 terms: core::iter::once(AxisTerm::projection(1)).collect(),
-                offset: 0
+                offset: 0,
+                len: None
             },
             window_axis(2, 3, stride_w, dilation_w),
         ],
@@ -4955,11 +4974,13 @@ fn window_materialize3d(
         axes: alloc::vec![
             AxisIndex {
                 terms: core::iter::once(AxisTerm::projection(0)).collect(),
-                offset: 0
+                offset: 0,
+                len: None
             },
             AxisIndex {
                 terms: core::iter::once(AxisTerm::projection(1)).collect(),
-                offset: 0
+                offset: 0,
+                len: None
             },
             window_axis(2, 5, stride_d, dilation_d),
             window_axis(3, 6, stride_h, dilation_h),

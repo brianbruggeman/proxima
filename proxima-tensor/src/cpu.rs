@@ -22104,6 +22104,7 @@ mod tests {
                     map::AxisIndex {
                         terms: core::iter::once(AxisTerm::projection(1)).collect(),
                         offset: 0,
+                        len: None,
                     },
                 ],
             },
@@ -22146,6 +22147,7 @@ mod tests {
                     map::AxisIndex {
                         terms: core::iter::once(AxisTerm::projection(2)).collect(),
                         offset: 0,
+                        len: None,
                     },
                 ],
             },
@@ -24467,6 +24469,7 @@ mod tests {
                     map::AxisIndex {
                         terms: core::iter::once(AxisTerm::projection(1)).collect(),
                         offset: 0,
+                        len: None,
                     },
                 ],
             },
@@ -24551,6 +24554,7 @@ mod tests {
                     map::AxisIndex {
                         terms: core::iter::once(AxisTerm::projection(1)).collect(),
                         offset: 0,
+                        len: None,
                     },
                 ],
             },
@@ -24596,6 +24600,7 @@ mod tests {
         axes[kept_dim as usize] = map::AxisIndex {
             terms: core::iter::once(AxisTerm::projection(1)).collect(),
             offset: 0,
+            len: None,
         };
         let gathered_map = IndexMap::Computed {
             indices: ids,
@@ -24935,6 +24940,7 @@ mod tests {
                     map::AxisIndex {
                         terms: core::iter::once(AxisTerm::projection(1)).collect(),
                         offset: 0,
+                        len: None,
                     },
                 ],
             },
@@ -26629,10 +26635,12 @@ mod tests {
                     map::AxisIndex {
                         terms: core::iter::once(AxisTerm::projection(1)).collect(),
                         offset: 0,
+                        len: None,
                     },
                     map::AxisIndex {
                         terms: core::iter::once(AxisTerm::projection(2)).collect(),
                         offset: 0,
+                        len: None,
                     },
                 ],
             },
