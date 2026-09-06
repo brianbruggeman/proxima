@@ -467,6 +467,7 @@ proxima-telemetry = { workspace = true, features = ["alloc"] }
 # any feature set that drops `metal` but keeps `test-support`.
 proxima-tensor = { path = "../proxima-tensor", features = ["config", "test-support", "cached-attention-streaming"] }
 proxima-test = { path = "../proxima-test", features = ["alloc-count"] }
+rayon.workspace = true
 rustix.workspace = true
 tempfile.workspace = true
 toml.workspace = true

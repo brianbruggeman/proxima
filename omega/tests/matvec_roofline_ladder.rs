@@ -145,6 +145,9 @@ use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use rayon::iter::{IndexedParallelIterator, ParallelIterator};
+use rayon::slice::ParallelSliceMut;
+
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
@@ -2243,6 +2246,224 @@ fn decode_shape_roofline_ladder() {
         parity_failures.is_empty(),
         "parity failed for {} arm(s): {parity_failures:#?}",
         parity_failures.len()
+    );
+}
+
+// ---- ROW 338: per-decode-shape simdgroups/math sweep, production's own
+// dispatch mode -- [`run_shape_arm`] cannot answer this (it goes through
+// `omega::metal::plan`/`execute_plan`, whose dispatch geometry is a
+// compile-time Cargo feature, this file's own module doc). This sweep reuses
+// the L3 shape-sweep's mechanism (`q4k_matvec_l3_shape`, `l3_shape_source`,
+// `compile_pipeline`, `time_batch_l3_shape_threads`) -- the SAME `q4k_pair_dot`
+// body production emits, hand-dispatched so `threads_per_threadgroup` and
+// `MTLMathMode` vary at runtime -- generalized over (rows, k) the way ROW
+// 336's `run_shape_arm` generalized the production path over shape. Dispatch
+// mode is held at `dispatchThreads` throughout (production's own dispatch
+// mode, ROW 335's checked default), so only the two axes the brief asks
+// about move. ----
+
+/// One representative decode shape for this sweep -- `attn_k`/`attn_q` share
+/// this checkpoint's GQA `k`=4096 attention width, `ffn_up`/`ffn_down` are
+/// each other's transpose (`ffn_up` projects 4096->14336, `ffn_down`
+/// 14336->4096), all four real `Q4_K` shapes this checkpoint's decode step
+/// dispatches per [`DECODE_SHAPES`].
+struct ShapeArmSweepSpec {
+    family: &'static str,
+    rows: usize,
+    k: usize,
+    seed: u64,
+}
+
+const SHAPE_ARM_SWEEP_SPECS: &[ShapeArmSweepSpec] = &[
+    ShapeArmSweepSpec { family: "attn_k", rows: 1024, k: 4096, seed: 210_000 },
+    ShapeArmSweepSpec { family: "attn_q", rows: 4096, k: 4096, seed: 220_000 },
+    ShapeArmSweepSpec { family: "ffn_up", rows: 14_336, k: 4096, seed: 230_000 },
+    ShapeArmSweepSpec { family: "ffn_down", rows: 4096, k: 14_336, seed: 240_000 },
+];
+
+/// The two axes this sweep varies: `simdgroups_per_tg` (`threads_per_tg / 32`,
+/// `q4k_matvec_l3_shape`'s own runtime parameter) and `MTLMathMode`.
+/// Production's own default cell is `simdgroups_per_tg=2` (ROW 311),
+/// `MTLMathMode::Relaxed` (ROW 297) -- both present here so the table can mark
+/// it. `Safe` is excluded: the brief's question is what NSG/math buy over
+/// production's own variant, not a third math mode nobody ships.
+const SWEEP_SIMDGROUPS_PER_THREADGROUP: [usize; 3] = [2, 4, 8];
+const SWEEP_MATH_MODE_ARMS: [MathModeArm; 2] = [
+    MathModeArm {
+        name: "relaxed",
+        mode: MTLMathMode::Relaxed,
+    },
+    MathModeArm {
+        name: "fast",
+        mode: MTLMathMode::Fast,
+    },
+];
+
+/// Runs every (`simdgroups_per_tg`, math mode) cell for one shape, printing
+/// one line per cell (`gbps_samples`/`sample_stats`, same discipline every
+/// other arm in this file uses) and checking that cell's own parity against a
+/// single CPU reference computed once per shape (the per-element compute path
+/// is textually identical across cells -- only dispatch geometry and rounding
+/// mode move, so one reference suffices; [`PARITY_MAX_REL_ERROR`]'s own doc
+/// covers why `fast` is allowed to, but not required to, sit further from
+/// that reference than `relaxed`). Weight and activation bytes are copied
+/// into fresh `StorageModeShared` buffers once per shape, before any cell
+/// runs (`shared_buffer_from_bytes` copies at creation and is never touched
+/// again), so every timed repeat of every cell dispatches over buffers
+/// already resident on the GPU -- zero uploads on a timed repeat, the same
+/// invariant [`run_shape_arm`]'s own `nocopy_uploads == nocopy_reuses`
+/// check exists to prove for the production path, satisfied here by
+/// construction instead: nothing this function calls after buffer creation
+/// can trigger a fresh upload.
+/// [`synth_weight_bytes`]'s own body, parallelized across tensors with
+/// `rayon::par_chunks_mut` (workspace performance philosophy: rayon where
+/// applicable). Each tensor's real `q4_k::quantize` call is an independent,
+/// CPU-bound RD search with no shared state -- `synth_weight_bytes`'s own
+/// doc notes each tensor already gets its own `Lcg` seeded from `seed_base +
+/// tensor_index`, so splitting the outer loop across threads changes nothing
+/// about the bytes produced, only the wall time. This sweep needs
+/// `MIN_TIMED_BYTES`'-scale tensor counts per shape (ROW 336's own real
+/// per-family counts, restated here) for four shapes in one test run; the
+/// serial version measured ~40 minutes for a single 848-tensor shape on this
+/// host, which the sweep's own 40-minute budget cannot absorb four times
+/// over. Kept local to this sweep rather than folded into
+/// [`synth_weight_bytes`] itself so every OTHER caller's timing (and its own
+/// single-threaded posture) is unchanged.
+fn synth_weight_bytes_parallel(
+    codec: ShapeCodec,
+    seed_base: u64,
+    tensor_count: usize,
+    k: usize,
+    tensor_bytes: usize,
+) -> Vec<u8> {
+    let row_bytes = codec.row_bytes(k);
+    let mut bytes = vec![0u8; tensor_bytes * tensor_count];
+    bytes.par_chunks_mut(tensor_bytes).enumerate().for_each(|(tensor_index, tensor_slice)| {
+        let mut lcg = Lcg(seed_base + tensor_index as u64);
+        let mut row_f32 = vec![0.0f32; k];
+        for row_blocks in tensor_slice.chunks_exact_mut(row_bytes) {
+            for value in row_f32.iter_mut() {
+                *value = lcg.next_unit() * 4.0 - 2.0;
+            }
+            codec
+                .quantize(&row_f32, row_blocks)
+                .expect("row length is a whole multiple of the codec's own QK_K");
+        }
+    });
+    bytes
+}
+
+fn run_shape_arm_sweep(
+    device: &ProtocolObject<dyn MTLDevice>,
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    spec: &ShapeArmSweepSpec,
+) -> Vec<String> {
+    let row_bytes = ShapeCodec::Q4K.row_bytes(spec.k);
+    let tensor_bytes = (spec.rows * row_bytes) as u64;
+    let tensor_count = MIN_TIMED_BYTES.div_ceil(tensor_bytes) as usize;
+    let total_timed_bytes = tensor_bytes * tensor_count as u64;
+    println!(
+        "=== shape-arm sweep {}: rows={} k={} tensors={tensor_count} total_timed_bytes={total_timed_bytes} \
+         (q4k_matvec_l3_shape, dispatchThreads, production's own read path) ===",
+        spec.family, spec.rows, spec.k
+    );
+
+    let weight_bytes =
+        synth_weight_bytes_parallel(ShapeCodec::Q4K, spec.seed, tensor_count, spec.k, tensor_bytes as usize);
+    let weight_offsets: Vec<usize> = (0..tensor_count).map(|index| index * tensor_bytes as usize).collect();
+    let weight_buffer = shared_buffer_from_bytes(device, &weight_bytes);
+
+    let mut activation_lcg = Lcg(spec.seed + 999);
+    let activation: Vec<f32> = (0..spec.k).map(|_| activation_lcg.next_unit() * 4.0 - 2.0).collect();
+    // SAFETY: `activation` is a live `Vec<f32>` for the duration of this
+    // call; the byte view is read-only and never outlives `activation`.
+    let activation_bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(activation.as_ptr().cast::<u8>(), std::mem::size_of_val(activation.as_slice()))
+    };
+    let activation_buffer = shared_buffer_from_bytes(device, activation_bytes);
+    let blocks_per_row_uniform = uniform_u64(device, (spec.k / Q4K_BLOCK_ELEMENTS) as u64);
+
+    let cpu_reference =
+        codec_cpu_reference_first_rows(ShapeCodec::Q4K, &weight_bytes[..spec.rows * row_bytes], spec.k, &activation);
+
+    let output = device
+        .newBufferWithLength_options(tensor_count * spec.rows * size_of::<f32>(), MTLResourceOptions::StorageModeShared)
+        .expect("device allocates the sweep's output buffer");
+
+    let total_simdgroups = spec.rows / PACKED_ROWS_PER_GROUP;
+    let l3_shape_source_text = l3_shape_source();
+    let mut parity_failures = Vec::new();
+
+    for math_arm in SWEEP_MATH_MODE_ARMS {
+        let pipeline = compile_pipeline(device, &l3_shape_source_text, "q4k_matvec_l3_shape", math_arm.mode);
+        for simdgroups_per_tg in SWEEP_SIMDGROUPS_PER_THREADGROUP {
+            let threadgroup_width = simdgroups_per_tg * 32;
+            let threadgroup_count = total_simdgroups / simdgroups_per_tg;
+            assert_eq!(
+                threadgroup_count * simdgroups_per_tg,
+                total_simdgroups,
+                "{}: rows must divide evenly by simdgroups_per_tg for this sweep",
+                spec.family
+            );
+            let grid_threads = threadgroup_count * threadgroup_width;
+
+            let elapsed_samples = warmed_up_samples(|| {
+                time_batch_l3_shape_threads(
+                    queue,
+                    &pipeline,
+                    &weight_buffer,
+                    &weight_offsets,
+                    &activation_buffer,
+                    &output,
+                    spec.rows * size_of::<f32>(),
+                    &blocks_per_row_uniform,
+                    grid_threads,
+                    threadgroup_width,
+                )
+            });
+            let samples = gbps_samples(&elapsed_samples, total_timed_bytes);
+            let stats = sample_stats(&samples);
+            let is_production_default = simdgroups_per_tg == 2 && math_arm.name == "relaxed";
+            let first_tensor_rows = read_f32_buffer(&output, PARITY_ROWS);
+            let label = format!("{} nsg={simdgroups_per_tg} math={}", spec.family, math_arm.name);
+            let parity_failure = check_parity(&label, &first_tensor_rows, &cpu_reference);
+            println!(
+                "arm=shape_sweep family={} nsg={simdgroups_per_tg} math={:<8} production_default={is_production_default} \
+                 median_gbps={:.2} mean_gbps={:.2} min_gbps={:.2} max_gbps={:.2} cov_pct={:.2} samples={samples:?} \
+                 parity_ok={}",
+                spec.family, math_arm.name, stats.median, stats.mean, stats.min, stats.max, stats.cov_pct,
+                parity_failure.is_none()
+            );
+            parity_failures.extend(parity_failure);
+        }
+    }
+    parity_failures
+}
+
+/// ROW 338: what do simdgroups-per-threadgroup {2, 4, 8} x math mode
+/// {relaxed, fast} buy, per decode shape, on PRODUCTION's own op variant
+/// (`q4k_pair_dot`, `dispatchThreads`)? Follows ROW 335's single-shape (ffn)
+/// L3 sweep and ROW 336's per-shape isolation with the axes ROW 335 already
+/// has, generalized across every representative shape instead of one.
+///
+/// `#[ignore]`d: synthesizes real quantized bytes per shape through the real
+/// encoder (CPU-bound minutes of work) and needs a real Metal device, same
+/// posture as this file's other synthetic-data arms.
+#[test]
+#[ignore = "synthesizes real quantized bytes per shape through the real encoder and needs a real metal device"]
+fn decode_shape_nsg_math_sweep() {
+    let device = MTLCreateSystemDefaultDevice().expect("a Metal device is available on this host");
+    let queue = device.newCommandQueue().expect("device creates a command queue");
+
+    let failures: Vec<String> = SHAPE_ARM_SWEEP_SPECS
+        .iter()
+        .flat_map(|spec| run_shape_arm_sweep(&device, &queue, spec))
+        .collect();
+
+    assert!(
+        failures.is_empty(),
+        "parity failed for {} cell(s): {failures:#?}",
+        failures.len()
     );
 }
 
