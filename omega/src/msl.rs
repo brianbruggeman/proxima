@@ -71,6 +71,10 @@ use proxima_tensor::{
 };
 
 use crate::error::EmitError;
+use crate::identity::{
+    body_token, init_token, keep_token, op_token, operand_codecs, reduce_epilogue_is_identity,
+    signed_name_part,
+};
 #[cfg(all(
     any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port"),
     not(feature = "metal-q4k-split-k")
@@ -1160,21 +1164,6 @@ impl PackedCodec {
 /// before Q6_K support existed.
 pub type PackedOperands = BTreeMap<NodeId, PackedCodec>;
 
-/// One codec slot per operand: which of `resolved`'s operands is a packed
-/// buffer (and which [`PackedCodec`]) rather than a flat element array.
-/// Shared by [`emit`] and the cheap pre-compile helpers below so the three
-/// never re-derive it differently.
-fn operand_codecs(
-    resolved: &BoundOp,
-    packed_operands: &PackedOperands,
-) -> Vec<Option<PackedCodec>> {
-    resolved
-        .operands()
-        .iter()
-        .map(|(node, _, _)| packed_operands.get(node).copied())
-        .collect()
-}
-
 pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kernel, EmitError> {
     validate(resolved)?;
     let entry = entry_name(resolved);
@@ -1202,41 +1191,90 @@ pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kern
     })
 }
 
-/// Cheap structural identity for the kernel [`emit`] would produce from
-/// `resolved` — built without ever rendering the MSL body text, so a caller
-/// can decide whether a pipeline compile is needed before paying for one.
-/// Must distinguish anything [`emit`]'s `source` could differ on:
-/// [`entry_name`] already carries rank / output-rank / operand-count / body /
-/// reduce-op / keep / init / gather shape; this adds four axes `entry_name`
-/// does NOT cover:
-///
-/// - [`type_token`]'s "half" vs "float" split — every dtype `emit` accepts
-///   collapses to one of those two declarations.
-/// - Per operand, which [`PackedCodec`] (if any) it reads through, AND
-///   whether the op takes the row-blocked packed-matmul path
-///   ([`packed_row_block`]) — that gate reads CONCRETE extents/strides, not
-///   just op structure, so two ops agreeing on every field above can still
-///   emit different bodies if only one of them clears it.
-/// - For a `Reduce`, `output_axes`' own EXACT ORDERED sequence, not just its
-///   length: `render_reduce`/`render_scan` bake the literal axis index tied
-///   to each `output_extents`/`operand_strides` uniform slot straight into
-///   the source text (e.g. `coord_q[{dim}] = ... u.output_extents[{index}]`),
-///   so two folds sharing every field above but keeping a DIFFERENT axis SET
-///   (or the same set in a different order) still emit different source.
-///   `reduce_dims` needs no separate entry: it is `(0..rank)` minus
-///   `output_axes` as a SET, always ascending, so `rank` + this exact
-///   sequence already pins it down.
-/// - [`tiled_gemm_threadgroup_width`]'s return for this exact op — the
-///   dispatch-width single source of truth it documents itself as being. For
-///   a cooperative reduce (`metal-wide-cooperative-reduce`'s scaling arm)
-///   this is a function of CONCRETE reduce extents, not just structure
-///   (`cooperative_reduce_width`'s own doc), and that width is baked
-///   LITERALLY into `render_reduce`'s lane-index / stride / tail-fold source
-///   text. Two reduces sharing every field above but picking a different
-///   width therefore emit different source and MUST NOT share a cache entry
-///   — a stale narrower kernel silently drops reduction terms, and a stale
-///   wider one reads uninitialized `threadgroup` memory in the multi-
-///   simdgroup tail fold when too few simdgroups are actually dispatched.
+/// The row-blocked/tiled-GEMM structural shape [`kernel_cache_key`] folds
+/// into [`crate::identity::MetalOnlyExtras::packed_row_block_shape`] — 'G'
+/// (tiled `simdgroup_matrix` GEMM, checked FIRST: [`tiled_gemm_block`] only
+/// ever returns `Some` when [`packed_row_block`] also would, since it is
+/// built ON TOP of that same gate, so the two are mutually exclusive by
+/// construction and this order costs nothing extra to get right), 'M'/'B'
+/// (row-blocked, multiple/single activation row per streamed weight row),
+/// 'S' (fully serial, every non-`Reduce` op and every `Reduce` neither path
+/// claims). Kept here, not in `identity.rs`: every function it calls is
+/// Metal-only private state ([`PackedRowBlock`], [`tiled_gemm_block`]).
+// same gate as `kernel_cache_key`, its sole caller -- see that function's
+// own comment for why `metal-core` alone (not `metal`) is the right feature.
+#[cfg(any(test, feature = "metal-core"))]
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
+)]
+fn packed_row_block_shape_token(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> char {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return 'S';
+    };
+    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
+        'G'
+    } else if let Some(block) = packed_row_block(resolved, quantized) {
+        if packed_row_block_token_total(&block, &resolved.extents) > 1 {
+            'M'
+        } else {
+            'B'
+        }
+    } else {
+        'S'
+    }
+}
+
+/// Whether the packed row-block's non-weight operand reads unit stride on
+/// the reduce axis — `push_packed_row_blocked_body`'s STRIDE-FREE
+/// SPECIALIZATION (see that function's own doc) renders different source
+/// text for the SAME 'B'/'M' structural shape depending on this CONCRETE
+/// resolved stride, not just op structure. `None` when [`packed_row_block`]
+/// has no match at all — [`packed_row_block_shape_token`]'s 'G'/'S' arms
+/// never render that specialization, so a stray extra token there would
+/// only cost an unnecessary cache miss, never a wrong hit; leaving it out
+/// entirely is just as sound and keeps a non-matching op's identity free of
+/// a token it has no reason to carry.
+#[cfg(any(test, feature = "metal-core"))]
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
+)]
+fn packed_row_block_stride_is_one(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+) -> Option<bool> {
+    let BoundOpKind::Reduce { .. } = &resolved.kind else {
+        return None;
+    };
+    let block = packed_row_block(resolved, quantized)?;
+    Some(
+        resolved.operands()[block.other]
+            .1
+            .stride(block.reduce_dim as u16)
+            == 1,
+    )
+}
+
+/// Cheap structural + compile-option identity for the kernel [`emit`] would
+/// produce from `resolved` — built without ever rendering the MSL body
+/// text, so a caller can decide whether a pipeline compile is needed before
+/// paying for one. A thin Metal-specific wrapper around
+/// [`crate::identity::kernel_identity`]: this crate's own [`entry_name`]
+/// stays a byte-identical, narrower fingerprint (embedded literally as the
+/// compiled kernel's own declared name, so its format can never change
+/// without changing emitted MSL source); this key is the fuller identity a
+/// caller uses to decide pipeline-cache reuse, never embedded in source
+/// text, so its format is free to change as the union of axes it must
+/// distinguish grows. See [`crate::identity`]'s module doc for the full
+/// axis census and why one shared function derives every renderer's own
+/// version of this fact instead of three.
 ///
 /// # Errors
 /// Propagates [`type_token`]'s unsupported-dtype rejection — the same gate
@@ -1256,95 +1294,28 @@ pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kern
 pub(crate) fn kernel_cache_key(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
+    math_mode_token: char,
 ) -> Result<String, EmitError> {
+    // Called for its unsupported-dtype rejection alone -- `kernel_identity`
+    // reads `resolved.dtype` directly for the actual half/wide classing (the
+    // same partition every renderer's own `type_token` match already makes),
+    // but `kernel_cache_key` has no `validate` call of its own upstream of
+    // it, so this stays the one place that fails fast on a dtype `emit`
+    // would also reject.
+    type_token(resolved.node, resolved.dtype)?;
     let quantized = operand_codecs(resolved, packed_operands);
-    let mut key = entry_name(resolved);
-    key.push('_');
-    key.push_str(type_token(resolved.node, resolved.dtype)?);
-    for codec in &quantized {
-        key.push(match codec {
-            Some(PackedCodec::Q3K) => '3',
-            Some(PackedCodec::Q4K) => '4',
-            Some(PackedCodec::Q5K) => '5',
-            Some(PackedCodec::Q6K) => '6',
-            Some(PackedCodec::Q8_0) => '8',
-            Some(PackedCodec::Q4_0) => '0',
-            Some(PackedCodec::Float16) => 'h',
-            Some(PackedCodec::BFloat16) => 'b',
-            None => 'f',
-        });
-    }
-    // 'G' (tiled `simdgroup_matrix` GEMM) is checked FIRST: `tiled_gemm_block`
-    // only ever returns `Some` when `packed_row_block` also would (it is
-    // built ON TOP of that same gate), so the two are mutually exclusive by
-    // construction and this order costs nothing extra to get right.
-    key.push(
-        if let BoundOpKind::Reduce {
-            reduce_op,
-            init,
-            output_axes,
-            ..
-        } = &resolved.kind
-        {
-            if tiled_gemm_block(resolved, &quantized, *reduce_op, *init, output_axes).is_some() {
-                'G'
-            } else if let Some(block) = packed_row_block(resolved, &quantized) {
-                if packed_row_block_token_total(&block, &resolved.extents) > 1 {
-                    'M'
-                } else {
-                    'B'
-                }
-            } else {
-                'S'
-            }
-        } else {
-            'S'
-        },
-    );
-    // `push_packed_row_blocked_body`'s STRIDE-FREE SPECIALIZATION (see that
-    // function's own doc) renders different source text for the SAME 'B'
-    // structural shape depending on a CONCRETE resolved stride, not just op
-    // structure — two ops agreeing on every field checked above (including
-    // `packed_row_block` matching at all) can still emit different bodies
-    // if only one of them has a unit-stride activation. Pushed whenever
-    // `packed_row_block` matches at all (so it also fires alongside 'G',
-    // harmlessly — the tiled path does not vary on this axis, but a stray
-    // extra key character never causes a wrong cache hit, only an
-    // unnecessary miss).
-    if let BoundOpKind::Reduce { .. } = &resolved.kind
-        && let Some(block) = packed_row_block(resolved, &quantized)
-    {
-        let other_stride_is_one = resolved.operands()[block.other]
-            .1
-            .stride(block.reduce_dim as u16)
-            == 1;
-        key.push(if other_stride_is_one { '1' } else { 'N' });
-    }
-    if let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind {
-        key.push_str("_ax");
-        for axis in output_axes {
-            key.push('_');
-            key.push_str(&axis.to_string());
-        }
-        // `tiled_gemm_threadgroup_width` is the single source of truth
-        // `render_reduce`/`push_cooperative_reduce_tail` read for the lane
-        // width baked LITERALLY into the source text (`cooperative_reduce_
-        // width`'s own doc) -- two reduces agreeing on every field above can
-        // still pick a different width purely from CONCRETE reduce extents
-        // (`metal-wide-cooperative-reduce` scales it from `reduction_total`),
-        // and a stale cached pipeline compiled for one width silently
-        // mis-dispatches a later call needing another (missing reduction
-        // terms, or reading uninitialized `threadgroup` memory in the
-        // multi-simdgroup tail fold) -- see
-        // `wide_cooperative_reduce_key_collision.rs`'s repro. `None` (the
-        // fully serial one-thread-per-output path) needs no extra token: its
-        // body has no lane math to disagree on.
-        if let Some(width) = tiled_gemm_threadgroup_width(resolved, &quantized) {
-            key.push_str("_w");
-            key.push_str(&width.to_string());
-        }
-    }
-    Ok(key)
+    let extras = crate::identity::MetalOnlyExtras {
+        cooperative_width: tiled_gemm_threadgroup_width(resolved, &quantized),
+        packed_row_block_shape: Some(packed_row_block_shape_token(resolved, &quantized)),
+        packed_row_block_stride_is_one: packed_row_block_stride_is_one(resolved, &quantized),
+        math_mode_token: Some(math_mode_token),
+    };
+    Ok(crate::identity::kernel_identity(
+        crate::identity::KernelLanguage::Metal,
+        resolved,
+        packed_operands,
+        extras,
+    ))
 }
 
 /// The dispatch-time shape of `resolved`'s kernel — buffer bindings and
@@ -2388,45 +2359,6 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Result
     Ok(threads)
 }
 
-fn op_token(op: ScalarOp) -> &'static str {
-    match op {
-        ScalarOp::Identity => "identity",
-        ScalarOp::Add => "add",
-        ScalarOp::Subtract => "subtract",
-        ScalarOp::Multiply => "multiply",
-        ScalarOp::Divide => "divide",
-        ScalarOp::Maximum => "maximum",
-        ScalarOp::Minimum => "minimum",
-        ScalarOp::Negate => "negate",
-        ScalarOp::Reciprocal => "reciprocal",
-        ScalarOp::Exponential => "exponential",
-        ScalarOp::Logarithm => "logarithm",
-        ScalarOp::SquareRoot => "square_root",
-        ScalarOp::Tanh => "tanh",
-        ScalarOp::Erf => "erf",
-        ScalarOp::Greater => "greater",
-        ScalarOp::Equal => "equal",
-        ScalarOp::Select => "select",
-    }
-}
-
-fn init_token(init: ReduceInit) -> &'static str {
-    match init {
-        ReduceInit::Zero => "zero",
-        ReduceInit::One => "one",
-        ReduceInit::NegativeInfinity => "negative_infinity",
-        ReduceInit::PositiveInfinity => "positive_infinity",
-        ReduceInit::FirstElement => "first_element",
-    }
-}
-
-fn keep_token(keep: Keep) -> &'static str {
-    match keep {
-        Keep::Reduce => "reduce",
-        Keep::Scan => "scan",
-    }
-}
-
 /// The MSL scalar type a `BoundOp`'s own dtype declares its buffers,
 /// scratch array, and accumulator as. `Float16` is the one narrower type
 /// this backend emits (`half`, MSL's IEEE-754 binary16) — every other
@@ -2465,47 +2397,6 @@ fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
 /// fetch code) — which operands gather. That last part is a suffix appended
 /// only when at least one operand gathers, so a gather-free `BoundOp`'s name is
 /// unchanged from before this existed.
-/// Whether `body` is the unfused, one-step, sequential-operand shape every
-/// body had before fusion existed — the case [`body_token`] keeps naming
-/// exactly as it always has, so every kernel name this crate emitted before
-/// fusion existed is unchanged.
-fn is_leaf(body: &ComposedBody) -> bool {
-    body.steps.len() == 1
-        && body.steps[0].args.iter().enumerate().all(
-            |(index, arg)| matches!(arg, StepArg::Operand(operand) if *operand as usize == index),
-        )
-}
-
-/// A valid-MSL-identifier fingerprint of every step in a fused body: which
-/// op, over which operand slots or earlier steps, in order — two bodies with
-/// the same structure (independent of concrete extents/strides/buffers)
-/// must fingerprint identically so the kernel they emit is cacheable by
-/// structure, matching this module's own stance on `entry_name` overall.
-fn body_fingerprint(body: &ComposedBody) -> String {
-    body.steps
-        .iter()
-        .map(|step| {
-            let mut token = String::from(op_token(step.op));
-            for arg in &step.args {
-                match arg {
-                    StepArg::Operand(index) => token.push_str(&format!("_o{index}")),
-                    StepArg::Step(index) => token.push_str(&format!("_s{index}")),
-                }
-            }
-            token
-        })
-        .collect::<Vec<_>>()
-        .join("__")
-}
-
-fn body_token(body: &ComposedBody) -> String {
-    if is_leaf(body) {
-        op_token(body.steps[0].op).into()
-    } else {
-        format!("fused_{}", body_fingerprint(body))
-    }
-}
-
 fn entry_name(resolved: &BoundOp) -> String {
     let rank = resolved.extents.len();
     let operand_count = resolved.operands().len();
@@ -2605,14 +2496,6 @@ fn entry_name(resolved: &BoundOp) -> String {
         format!("{base}_g{gather_bits}")
     } else {
         base
-    }
-}
-
-fn signed_name_part(value: i64) -> String {
-    if value < 0 {
-        format!("n{}", value.unsigned_abs())
-    } else {
-        format!("p{value}")
     }
 }
 
@@ -3431,21 +3314,6 @@ fn push_epilogue_body_steps(
             ));
         },
     )
-}
-
-/// The untouched-epilogue convention [`BoundOpKind::Reduce::epilogue_body`]'s
-/// own doc names: a leaf [`ScalarOp::Identity`] reading its own sole implicit
-/// slot, over zero real operands. Mirrors `proxima_tensor::cpu`'s own
-/// private `reduce_epilogue_is_identity`, restated here because this crate
-/// cannot reach that CPU-evaluator-internal helper.
-fn reduce_epilogue_is_identity(
-    body: &ComposedBody,
-    operands: &[(NodeId, Layout, Option<Lookup>)],
-) -> bool {
-    operands.is_empty()
-        && body.steps.len() == 1
-        && body.steps[0].op == ScalarOp::Identity
-        && body.steps[0].args == [StepArg::Operand(0)]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7492,8 +7360,8 @@ mod tests {
         );
 
         let empty = BTreeMap::new();
-        let key_two_axes = kernel_cache_key(&keeps_two_axes, &empty).expect("cache key builds");
-        let key_one_axis = kernel_cache_key(&keeps_one_axis, &empty).expect("cache key builds");
+        let key_two_axes = kernel_cache_key(&keeps_two_axes, &empty, 'R').expect("cache key builds");
+        let key_one_axis = kernel_cache_key(&keeps_one_axis, &empty, 'R').expect("cache key builds");
         assert_ne!(
             key_two_axes, key_one_axis,
             "a coarser key would let a 1-output-axis fold hit the 2-output-axis pipeline"
@@ -7505,6 +7373,136 @@ mod tests {
             source_two_axes, source_one_axis,
             "output_extents/reduction_extents array sizes must differ in the rendered source"
         );
+    }
+
+    /// The test the class defect this module fixes needed: sweep every
+    /// render option one axis at a time from a shared base op, and for each
+    /// assert BOTH the emitted source changes AND `kernel_cache_key`'s
+    /// identity changes with it. ROW 290 (a forgotten cooperative-reduce
+    /// width) and main 7312713 (wgsl/cuda forgetting the reduce epilogue)
+    /// are exactly the shape this would have caught: a renderer whose body
+    /// text moved on some axis while its own identity function stayed
+    /// silent about it.
+    #[test]
+    fn every_axis_that_changes_emitted_source_also_changes_kernel_cache_key() {
+        let empty = BTreeMap::new();
+
+        // reduce op.
+        let add = matmul_op_with_reduce(4, 8, 5, ScalarOp::Add);
+        let max = matmul_op_with_reduce(4, 8, 5, ScalarOp::Maximum);
+        assert_ne!(
+            emit(&add, &empty).expect("emits").source,
+            emit(&max, &empty).expect("emits").source,
+            "reduce op must change the emitted body"
+        );
+        assert_ne!(
+            kernel_cache_key(&add, &empty, 'R').expect("cache key builds"),
+            kernel_cache_key(&max, &empty, 'R').expect("cache key builds"),
+            "reduce op must change the identity"
+        );
+
+        // dtype (half vs wide).
+        let mut program = Vec::new();
+        let f32_source = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Tanh,
+                operands: vec![(f32_source, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let mut f16_program = Vec::new();
+        let f16_source = append(
+            &mut f16_program,
+            Op::Input {
+                dtype: DType::Float16,
+                shape: vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        append(
+            &mut f16_program,
+            Op::Elementwise {
+                dtype: DType::Float16,
+                body: ScalarOp::Tanh,
+                operands: vec![(f16_source, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let f32_shapes = infer(&program, &[]).expect("f32 infers");
+        let f32_bound = bind(&program, &f32_shapes, &[])
+            .expect("f32 lowers")
+            .into_iter()
+            .next()
+            .expect("one bound emitted");
+        let f16_shapes = infer(&f16_program, &[]).expect("f16 infers");
+        let f16_bound = bind(&f16_program, &f16_shapes, &[])
+            .expect("f16 lowers")
+            .into_iter()
+            .next()
+            .expect("one bound emitted");
+        assert_ne!(
+            emit(&f32_bound, &empty).expect("emits").source,
+            emit(&f16_bound, &empty).expect("emits").source,
+            "dtype must change the emitted body (half vs. float declarations)"
+        );
+        assert_ne!(
+            kernel_cache_key(&f32_bound, &empty, 'R').expect("cache key builds"),
+            kernel_cache_key(&f16_bound, &empty, 'R').expect("cache key builds"),
+            "dtype must change the identity"
+        );
+
+        // packed codec (the census's own finding for wgsl/cuda -- confirmed
+        // here it was ALREADY correct for Metal).
+        let bound = matmul_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+        let mut q5k = BTreeMap::new();
+        q5k.insert(weight_node, PackedCodec::Q5K);
+        assert_ne!(
+            emit(&bound, &q4k).expect("emits").source,
+            emit(&bound, &q5k).expect("emits").source,
+            "packed codec must change the emitted body"
+        );
+        assert_ne!(
+            kernel_cache_key(&bound, &q4k, 'R').expect("cache key builds"),
+            kernel_cache_key(&bound, &q5k, 'R').expect("cache key builds"),
+            "packed codec must change the identity"
+        );
+
+        // math mode -- folded into `kernel_cache_key` directly now (never
+        // embedded in `emit`'s own source text, so no source-side assertion
+        // here: `math_mode_cache_key_tests` covers the token pair itself).
+        assert_ne!(
+            kernel_cache_key(&bound, &q4k, 'S').expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, 'R').expect("cache key builds"),
+            "math mode must change the identity, or a Safe- and a Relaxed-compiled \
+             kernel could share one PIPELINE_CACHE entry"
+        );
+
+        // cooperative-reduce width -- ROW 290's own defect, at the same two
+        // reduce lengths that test proved COOPERATIVE_REDUCE_MIN_LEN against.
+        #[cfg(feature = "metal-wide-cooperative-reduce")]
+        {
+            let narrow = single_axis_sum_op(34);
+            let wide = single_axis_sum_op(4096);
+            assert_ne!(
+                kernel_cache_key(&narrow, &empty, 'R').expect("cache key builds"),
+                kernel_cache_key(&wide, &empty, 'R').expect("cache key builds"),
+                "two cooperative reduces at different widths must never share a pipeline \
+                 (ROW 290: a stale narrower kernel silently drops reduction terms)"
+            );
+        }
     }
 
     /// The regression this row's first cut of `kernel_cache_key` actually
@@ -7530,9 +7528,9 @@ mod tests {
             "same total rank"
         );
         let key_first_second =
-            kernel_cache_key(&keeps_first_and_second, &empty).expect("cache key builds");
+            kernel_cache_key(&keeps_first_and_second, &empty, 'R').expect("cache key builds");
         let key_first_third =
-            kernel_cache_key(&keeps_first_and_third, &empty).expect("cache key builds");
+            kernel_cache_key(&keeps_first_and_third, &empty, 'R').expect("cache key builds");
         assert_ne!(
             key_first_second, key_first_third,
             "output_axes.len() alone cannot tell {{0,1}} from {{0,2}}"
@@ -7552,8 +7550,8 @@ mod tests {
         let descending = rank3_identity_sum_op(&[1, 0]);
         let empty = BTreeMap::new();
 
-        let key_ascending = kernel_cache_key(&ascending, &empty).expect("cache key builds");
-        let key_descending = kernel_cache_key(&descending, &empty).expect("cache key builds");
+        let key_ascending = kernel_cache_key(&ascending, &empty, 'R').expect("cache key builds");
+        let key_descending = kernel_cache_key(&descending, &empty, 'R').expect("cache key builds");
         assert_ne!(
             key_ascending, key_descending,
             "the SEQUENCE order of output_axes selects which u.output_extents slot each dim reads"
@@ -7577,8 +7575,8 @@ mod tests {
         let mut q6k = BTreeMap::new();
         q6k.insert(weight_node, PackedCodec::Q6K);
 
-        let key_q4k = kernel_cache_key(&bound, &q4k).expect("cache key builds");
-        let key_q6k = kernel_cache_key(&bound, &q6k).expect("cache key builds");
+        let key_q4k = kernel_cache_key(&bound, &q4k, 'R').expect("cache key builds");
+        let key_q6k = kernel_cache_key(&bound, &q6k, 'R').expect("cache key builds");
         assert_ne!(
             key_q4k, key_q6k,
             "entry_name alone cannot see which codec an operand reads through"
@@ -7645,8 +7643,8 @@ mod tests {
             .expect("one bound emitted");
 
         let empty = BTreeMap::new();
-        let key_f32 = kernel_cache_key(&f32_bound, &empty).expect("cache key builds");
-        let key_f16 = kernel_cache_key(&f16_bound, &empty).expect("cache key builds");
+        let key_f32 = kernel_cache_key(&f32_bound, &empty, 'R').expect("cache key builds");
+        let key_f16 = kernel_cache_key(&f16_bound, &empty, 'R').expect("cache key builds");
         assert_ne!(
             key_f32, key_f16,
             "entry_name does not encode dtype on its own"
@@ -7667,8 +7665,8 @@ mod tests {
         let empty = BTreeMap::new();
 
         assert_eq!(
-            kernel_cache_key(&small, &empty).expect("cache key builds"),
-            kernel_cache_key(&large, &empty).expect("cache key builds"),
+            kernel_cache_key(&small, &empty, 'R').expect("cache key builds"),
+            kernel_cache_key(&large, &empty, 'R').expect("cache key builds"),
             "a cache keyed on structure must still hit across concrete extents"
         );
     }

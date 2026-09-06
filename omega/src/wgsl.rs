@@ -100,10 +100,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, ScalarOp, StepArg,
+    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, ScalarOp,
 };
 
 use crate::error::EmitError;
+use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
 use crate::msl::{Binding, PackedCodec, PackedOperands, gather_count, gather_slots};
 
 /// Threads per workgroup every v1 WGSL kernel dispatches with. See
@@ -177,7 +178,7 @@ pub fn emit_wgsl(
     packed_operands: &PackedOperands,
 ) -> Result<WgslKernel, EmitError> {
     validate(resolved, packed_operands)?;
-    let entry = entry_name(resolved);
+    let entry = entry_name(resolved, packed_operands);
     let element_type = type_token(resolved.node, resolved.dtype, caps)?;
     let quantized = operand_codecs(resolved, packed_operands);
     if quantized.contains(&Some(PackedCodec::Q3K)) {
@@ -363,21 +364,6 @@ fn validate_body(node: NodeId, body: &ComposedBody) -> Result<(), EmitError> {
     Ok(())
 }
 
-/// The untouched-epilogue convention [`proxima_tensor::BoundOpKind::
-/// Reduce::epilogue_body`]'s own doc names: a leaf [`ScalarOp::Identity`]
-/// reading its own sole implicit slot, over zero real operands. Restated per
-/// backend module (`crate::msl` carries its own copy) because
-/// `proxima_tensor::cpu`'s private original is not reachable from here.
-fn reduce_epilogue_is_identity(
-    body: &ComposedBody,
-    operands: &[(NodeId, Layout, Option<Lookup>)],
-) -> bool {
-    operands.is_empty()
-        && body.steps.len() == 1
-        && body.steps[0].op == ScalarOp::Identity
-        && body.steps[0].args == [StepArg::Operand(0)]
-}
-
 fn validate(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<(), EmitError> {
     validate_body(resolved.node, resolved.element_body())?;
     if let BoundOpKind::Reduce {
@@ -441,20 +427,6 @@ fn validate(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<(), 
     Ok(())
 }
 
-/// One codec slot per operand — the WGSL counterpart of
-/// `crate::msl::operand_codecs`, restated here since that helper is private
-/// to `crate::msl`.
-fn operand_codecs(
-    resolved: &BoundOp,
-    packed_operands: &PackedOperands,
-) -> Vec<Option<PackedCodec>> {
-    resolved
-        .operands()
-        .iter()
-        .map(|(node, _, _)| packed_operands.get(node).copied())
-        .collect()
-}
-
 fn bindings(resolved: &BoundOp) -> Vec<Binding> {
     // `all_read_sources`, not `operands` -- a `BoundOpKind::Reduce` with a
     // fused epilogue reads its `epilogue_operands` too, and those need a
@@ -511,152 +483,24 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
     }
 }
 
-fn op_token(op: ScalarOp) -> &'static str {
-    match op {
-        ScalarOp::Identity => "identity",
-        ScalarOp::Add => "add",
-        ScalarOp::Subtract => "subtract",
-        ScalarOp::Multiply => "multiply",
-        ScalarOp::Divide => "divide",
-        ScalarOp::Maximum => "maximum",
-        ScalarOp::Minimum => "minimum",
-        ScalarOp::Negate => "negate",
-        ScalarOp::Reciprocal => "reciprocal",
-        ScalarOp::Exponential => "exponential",
-        ScalarOp::Logarithm => "logarithm",
-        ScalarOp::SquareRoot => "square_root",
-        ScalarOp::Tanh => "tanh",
-        ScalarOp::Erf => "erf",
-        ScalarOp::Greater => "greater",
-        ScalarOp::Equal => "equal",
-        ScalarOp::Select => "select",
-    }
-}
-
-fn keep_token(keep: Keep) -> &'static str {
-    match keep {
-        Keep::Reduce => "reduce",
-        Keep::Scan => "scan",
-    }
-}
-
-fn init_token(init: proxima_tensor::ReduceInit) -> &'static str {
-    use proxima_tensor::ReduceInit;
-    match init {
-        ReduceInit::Zero => "zero",
-        ReduceInit::One => "one",
-        ReduceInit::NegativeInfinity => "negative_infinity",
-        ReduceInit::PositiveInfinity => "positive_infinity",
-        ReduceInit::FirstElement => "first_element",
-    }
-}
-
-fn is_leaf(body: &ComposedBody) -> bool {
-    body.steps.len() == 1
-        && body.steps[0].args.iter().enumerate().all(
-            |(index, arg)| matches!(arg, StepArg::Operand(operand) if *operand as usize == index),
-        )
-}
-
-fn body_fingerprint(body: &ComposedBody) -> String {
-    body.steps
-        .iter()
-        .map(|step| {
-            let mut token = String::from(op_token(step.op));
-            for arg in &step.args {
-                match arg {
-                    StepArg::Operand(index) => token.push_str(&format!("_o{index}")),
-                    StepArg::Step(index) => token.push_str(&format!("_s{index}")),
-                }
-            }
-            token
-        })
-        .collect::<Vec<_>>()
-        .join("__")
-}
-
-fn body_token(body: &ComposedBody) -> String {
-    if is_leaf(body) {
-        op_token(body.steps[0].op).into()
-    } else {
-        format!("fused_{}", body_fingerprint(body))
-    }
-}
-
-/// A structural fingerprint over rank/operand-count/body/(for a reduce)
-/// reduce-op/init/output-AXES — the WGSL counterpart of `crate::msl::entry_name`,
-/// narrower because v1 never fuses a gather bit-pattern suffix into the name
-/// (gather is rejected before this is ever called).
-fn entry_name(resolved: &BoundOp) -> String {
-    let rank = resolved.extents.len();
-    let operand_count = resolved.operands().len();
-    match &resolved.kind {
-        BoundOpKind::Elementwise { .. } => {
-            let body = body_token(resolved.element_body());
-            format!("omega_wgsl_elementwise_r{rank}_n{operand_count}_{body}")
-        }
-        BoundOpKind::Reduce {
-            reduce_op,
-            init,
-            keep,
-            output_axes,
-            epilogue_body,
-            epilogue_operands,
-            ..
-        } => {
-            let body = body_token(resolved.element_body());
-            let kind = keep_token(*keep);
-            let reduce_body = op_token(*reduce_op);
-            let init = init_token(*init);
-            // the axis COUNT alone is not enough: two reduces over the same
-            // total rank and the same number of kept axes can still keep
-            // DIFFERENT axis positions (e.g. `[0, 1, 2]` folding the last
-            // axis vs `[0, 2, 3]` folding axis 1) -- `render_reduce`/
-            // `render_reduce_cooperative` bake `output_axes` directly into
-            // the generated source (`full_coord[{dim}] = output_coord[{index}]`
-            // for each `dim` in `output_axes`), so two such ops emit
-            // DIFFERENT WGSL under an identical name if only the count is
-            // here. `pipeline_for` (`crate::wgpu_driver`) caches by this
-            // string alone and never re-diffs source on a cache hit, so a
-            // collision silently reuses the wrong axis mapping's compiled
-            // pipeline against the second op's uniforms.
-            let axes = output_axes
-                .iter()
-                .map(u16::to_string)
-                .collect::<Vec<_>>()
-                .join("_");
-            // A fused epilogue changes both the `Uniforms` layout (the extra
-            // `epilogue_operand_base`/`_strides` fields) and the body text
-            // (`push_reduce_epilogue_write`'s emitted tail) -- mirrors
-            // `crate::msl::entry_name`'s own `epilogue` suffix, for the same
-            // `pipeline_for` cache-key reason `output_axes` above needs one:
-            // the untouched identity default contributes nothing here, so a
-            // program with no fused epilogue anywhere names exactly what it
-            // always did.
-            let epilogue = if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
-                String::new()
-            } else {
-                format!(
-                    "_epi{}_{}",
-                    epilogue_operands.len(),
-                    body_token(epilogue_body)
-                )
-            };
-            format!(
-                "omega_wgsl_{kind}_r{rank}_ax{axes}_n{operand_count}_{body}_{reduce_body}_{init}{epilogue}"
-            )
-        }
-        BoundOpKind::Iota => format!("omega_wgsl_iota_r{rank}"),
-        BoundOpKind::Constant { value } => {
-            format!("omega_wgsl_constant_r{rank}_v{:08x}", value.to_bits())
-        }
-        // Never actually rendered: `emit_wgsl`'s own kind-match returns
-        // `EmitError::UnsupportedOpKind` for `CachedAttention` before this
-        // name is used for anything. A name is still produced (rather than
-        // panicking here) because this function runs before that later
-        // match, purely to satisfy exhaustiveness with a harmless value.
-        BoundOpKind::CachedAttention { .. } => format!("omega_wgsl_cached_attention_r{rank}"),
-    }
+/// This language's own [`crate::identity::kernel_identity`] — see that
+/// module's doc for the full union of axes folded in and why. Unlike
+/// `crate::msl::entry_name` (frozen: byte-identical to what it always
+/// produced, since it is embedded literally in emitted MSL source and
+/// `crate::msl::kernel_cache_key` is the identity that is free to change),
+/// WGSL conflates "embedded kernel name" and "pipeline cache identity" into
+/// this ONE string (`crate::wgpu_driver::pipeline_for` keys on it directly),
+/// so this function IS both, and gains every axis the shared identity now
+/// covers that it did not before: dtype width class and per-operand packed
+/// codec — this census's own finding, `crate::wgsl`'s `packed_element_fn`
+/// renders a different body per codec but this name never said so.
+fn entry_name(resolved: &BoundOp, packed_operands: &PackedOperands) -> String {
+    crate::identity::kernel_identity(
+        crate::identity::KernelLanguage::Wgsl,
+        resolved,
+        packed_operands,
+        crate::identity::MetalOnlyExtras::default(),
+    )
 }
 
 /// `metal_stdlib` has no `erf`; WGSL's own standard library has none either
@@ -2106,6 +1950,38 @@ mod tests {
         assert!(kernel.source.contains("@workgroup_size(64)"));
         assert_eq!(kernel.workgroup_size, WORKGROUP_SIZE);
         assert_eq!(kernel.threads, 12);
+    }
+
+    /// This census's own finding: `packed_element_fn` (this module's own
+    /// codec-dependent body renderer, `q4k_element`/`q5k_element`/...)
+    /// already emitted a distinct body per codec, but `entry_name` never
+    /// said so before `crate::identity::kernel_identity` folded the codec
+    /// digits in for every language. `crate::wgpu_driver::pipeline_for`
+    /// keys its whole `PIPELINE_CACHE`-equivalent on `entry` alone, so two
+    /// operands differing only in codec would have silently shared one
+    /// compiled pipeline.
+    #[test]
+    fn packed_codec_changes_emitted_source_and_the_entry_name() {
+        let bound = matmul_reduce_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+
+        let mut q4k = PackedOperands::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+        let mut q5k = PackedOperands::new();
+        q5k.insert(weight_node, PackedCodec::Q5K);
+
+        let kernel_q4k = emit_wgsl(&bound, WgslCaps::default(), &q4k).expect("q4k emits");
+        let kernel_q5k = emit_wgsl(&bound, WgslCaps::default(), &q5k).expect("q5k emits");
+
+        assert_ne!(
+            kernel_q4k.source, kernel_q5k.source,
+            "packed_element_fn must render a distinct body per codec"
+        );
+        assert_ne!(
+            kernel_q4k.entry, kernel_q5k.entry,
+            "two operands differing only in packed codec must never share one cached wgpu \
+             pipeline (wgpu_driver::pipeline_for keys on `entry` alone)"
+        );
     }
 
     #[test]
