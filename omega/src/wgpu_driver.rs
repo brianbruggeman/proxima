@@ -160,41 +160,6 @@ fn element_count(shape: &[u64]) -> usize {
     shape.iter().product::<u64>() as usize
 }
 
-/// Element count of one bound block, whatever codec carries it — the wgpu
-/// driver's counterpart of `crate::metal::block_element_count`. A packed
-/// codec's element count is derived from its own block geometry, never from
-/// `bytes.len()` — packed bytes and elements are not the same unit (a
-/// `Q4_K` super-block is 144 bytes carrying 256 elements).
-fn packed_block_element_count(block: &QuantizedBlock<'_>) -> usize {
-    match block {
-        QuantizedBlock::Float32(data) => data.len(),
-        QuantizedBlock::Q3K(bytes) => {
-            (bytes.len() / crate::msl::Q3K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS
-        }
-        QuantizedBlock::Q4K(bytes) => {
-            (bytes.len() / crate::msl::Q4K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS
-        }
-        QuantizedBlock::Q6K(bytes) => {
-            (bytes.len() / crate::msl::Q6K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS
-        }
-        QuantizedBlock::Q5K(bytes) => {
-            (bytes.len() / crate::msl::Q5K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS
-        }
-        QuantizedBlock::Q8_0(bytes) => {
-            (bytes.len() / crate::msl::Q8_0_BLOCK_BYTES) * crate::msl::Q8_0_BLOCK_ELEMENTS
-        }
-        QuantizedBlock::Q4_0(bytes) => {
-            (bytes.len() / crate::msl::Q4_0_BLOCK_BYTES) * crate::msl::Q4_0_BLOCK_ELEMENTS
-        }
-        QuantizedBlock::Float16(bytes) => {
-            (bytes.len() / crate::msl::FLOAT16_BLOCK_BYTES) * crate::msl::FLOAT16_BLOCK_ELEMENTS
-        }
-        QuantizedBlock::BFloat16(bytes) => {
-            (bytes.len() / crate::msl::BFLOAT16_BLOCK_BYTES) * crate::msl::BFLOAT16_BLOCK_ELEMENTS
-        }
-    }
-}
-
 /// The raw packed bytes underneath any non-`Float32` [`QuantizedBlock`]
 /// variant — every one of them wraps a `&[u8]` (see that type's own doc), so
 /// this is a match, not a computation.
@@ -340,7 +305,7 @@ pub fn plan(
     }
     for (node, block) in block_nodes.iter().zip(blocks.iter()) {
         let expected = element_count(shapes.of(*node));
-        let found = packed_block_element_count(block);
+        let found = block.element_count()?;
         if found != expected {
             return Err(TensorError::InputSizeMismatch {
                 node: *node,
