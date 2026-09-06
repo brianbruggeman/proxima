@@ -2673,7 +2673,10 @@ mod real_openchat_file {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use crate::test_support::{dispatch_type_from_env, math_mode_from_env};
 
-    use super::{architecture_from_metadata, bind_all_weights, gguf_tensor_as_f32};
+    use super::{
+        ParsedGguf, architecture_from_metadata, bind_all_weights, find_tensor,
+        gguf_tensor_as_f32,
+    };
 
     /// A read-only `mmap` of the fixture file (rustix, already a workspace
     /// dependency used the same way by `proxima-storage/src/dax/region.rs`
@@ -2750,6 +2753,55 @@ mod real_openchat_file {
         let enabled = std::env::var("PROXIMA_PREFAULT").is_ok_and(|value| value == "1");
         if enabled {
             prefault(file_bytes).expect("prefault the host-local openchat gguf mapping");
+        }
+        enabled
+    }
+
+    /// ROW 325 residency arm C: `PROXIMA_MLOCK=1` pins every page of the
+    /// whole mapping resident for the process's lifetime (`mlock(2)`), the
+    /// stronger sibling of [`prefault_if_requested`] -- prefault forces the
+    /// initial fault-in but does not stop the kernel evicting a page again
+    /// under memory pressure; `mlock` does. Reuses [`rustix::mm`], already a
+    /// workspace dependency (`MappedGguf::open`'s own `rustix::mm::mmap`
+    /// above), rather than adding a new one.
+    fn mlock_if_requested(file_bytes: &[u8]) -> bool {
+        let enabled = std::env::var("PROXIMA_MLOCK").is_ok_and(|value| value == "1");
+        if enabled && !file_bytes.is_empty() {
+            // SAFETY: `file_bytes` is the live `MappedGguf` mapping borrowed
+            // for this call; `mlock` only marks its pages non-evictable, it
+            // never mutates or moves them, so the shared reference stays
+            // valid for as long as the mapping itself does.
+            unsafe {
+                rustix::mm::mlock(
+                    file_bytes.as_ptr().cast::<core::ffi::c_void>().cast_mut(),
+                    file_bytes.len(),
+                )
+            }
+            .expect("mlock the host-local openchat gguf mapping");
+        }
+        enabled
+    }
+
+    /// ROW 325 residency arm D: `PROXIMA_TOUCH_OUTPUT=1` warms ONLY
+    /// `output.weight`'s own byte range via [`prefault`] -- the same
+    /// primitive [`prefault_if_requested`] already applies to the whole
+    /// mapping, reused here at a narrower span to isolate whether that one
+    /// tensor's own pages (not the mapping-wide readahead arm B also
+    /// triggers) are the source of ROW 319's unaccounted cost. Read the
+    /// tensor's byte range through [`find_tensor`]/[`ParsedGguf::tensor_data_range`],
+    /// the same accessors [`gguf_tensor_as_packed_block`] binds through, so
+    /// this touches exactly the bytes the GPU upload later reads -- no
+    /// separate range computation to drift out of sync with bind's own.
+    fn touch_output_weight_if_requested(parsed: &ParsedGguf, file_bytes: &[u8]) -> bool {
+        let enabled = std::env::var("PROXIMA_TOUCH_OUTPUT").is_ok_and(|value| value == "1");
+        if enabled {
+            let tensor = find_tensor(parsed, "output.weight")
+                .expect("openchat checkpoint carries an output.weight tensor");
+            let range = parsed
+                .tensor_data_range(tensor, file_bytes.len() as u64)
+                .expect("output.weight's declared byte range fits the mapping");
+            let bytes = &file_bytes[range.start as usize..range.end as usize];
+            prefault(bytes).expect("touch the output.weight byte range");
         }
         enabled
     }
@@ -3142,6 +3194,8 @@ mod real_openchat_file {
         let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
             .expect("parse host-local openchat gguf fixture");
         prefault_if_requested(file_bytes);
+        mlock_if_requested(file_bytes);
+        touch_output_weight_if_requested(&parsed, file_bytes);
 
         let model = LoadedModel::load(&parsed, file_bytes)
             .expect("load real openchat checkpoint through the public path");
