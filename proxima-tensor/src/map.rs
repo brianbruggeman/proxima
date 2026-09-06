@@ -92,6 +92,31 @@ pub struct AxisIndex {
     pub len: Option<Extent>,
 }
 
+impl AxisIndex {
+    /// Which iteration axis a declared [`Self::len`] describes. A single
+    /// term names it unambiguously regardless of `coeff`/`offset` (`i+1@2`,
+    /// `2*i@4`). A multi-term axis (convolution: `2*i+p`) names it only when
+    /// exactly one term carries `coeff == 1` — the "plain" contribution, as
+    /// opposed to a stride/dilation-scaled one — which is what
+    /// `2*i+p@2` needs to mean "`p`'s true extent is 2" without a second
+    /// syntax. Zero or more than one such term (`i+j@2`, `2*i+3*p@2`) has no
+    /// unambiguous target and returns `None`, which
+    /// [`crate::shape::ShapeTable`] and `spec::parse_axis_expr` both reject
+    /// rather than guess.
+    #[must_use]
+    pub fn len_target_axis(&self) -> Option<u16> {
+        match self.terms.as_slice() {
+            [] => None,
+            [only] => Some(only.axis),
+            multiple => {
+                let mut unit_coefficient = multiple.iter().filter(|term| term.coeff == 1);
+                let target = unit_coefficient.next()?;
+                unit_coefficient.next().is_none().then_some(target.axis)
+            }
+        }
+    }
+}
+
 /// Relates an iteration space of rank `iter_rank` to an operand's index space.
 ///
 /// `axes` holds one [`AxisIndex`] per operand axis, so the operand's rank is

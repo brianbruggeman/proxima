@@ -262,4 +262,11 @@ pub enum TensorError {
     /// from it (the exact prefix-read case `len` exists for).
     #[error("node {node} reduce iteration dim {dim} declares a len override, which reduce folding does not consult")]
     ReduceLenAxisUnsupported { node: NodeId, dim: u16 },
+
+    /// [`crate::map::AxisIndex::len_target_axis`] found zero or more than
+    /// one `coeff == 1` term on an axis that declares `len` -- a multi-term
+    /// address (`i+j@2`, `2*i+3*p@2`) with no single "plain" contribution
+    /// has no iteration axis `len` can unambiguously describe.
+    #[error("node {node} operand axis {dim} declares a len override but its address has no single term len can describe")]
+    AmbiguousLenAxis { node: NodeId, dim: u16 },
 }
