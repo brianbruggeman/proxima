@@ -2277,13 +2277,20 @@ fn packed_row_dispatch(feature_total: u64, token_total: u64, codec: PackedCodec)
 
 fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Result<u64, EmitError> {
     let threads = match &resolved.kind {
-        BoundOpKind::CachedAttention { head_dim, .. } => {
+        BoundOpKind::CachedAttention {
+            head_dim,
+            cached_key_rows,
+            new_key_rows,
+            ..
+        } => {
+            let chunks = context_chunks_for(*cached_key_rows + *new_key_rows);
             resolved
                 .extents
                 .iter()
                 .product::<u64>()
                 .checked_div(*head_dim)
                 .unwrap_or(0)
+                * chunks
                 * SIMD_WIDTH
         }
         BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
@@ -2912,6 +2919,22 @@ fn msl_literal(value: f32) -> String {
     format!("{value:?}")
 }
 
+/// Number of simdgroups `render_cached_attention` splits one
+/// `(query_row, kv_head, group)` triple's key range across -- llama.cpp's
+/// `kernel_flash_attn_ext_vec` (ggml-metal.metal:4016-4017) partitions the
+/// context across `nsg` simdgroups with a stride of `C*nsg`; this ports the
+/// same stride partition to a `C=1` per-key loop. `context_length` is the
+/// bind-time `cached_key_rows + new_key_rows` (the same static fields the
+/// kernel body already bakes as `constexpr`), so this is a build-time-
+/// configurable but bind-time-deterministic function of shape alone --
+/// never a runtime read. See `omega-runtime.toml`'s
+/// `[attention_context_chunks]` for the two knobs.
+pub(crate) fn context_chunks_for(context_length: u64) -> u64 {
+    context_length
+        .div_ceil(crate::sized::ATTENTION_CONTEXT_KEYS_PER_CHUNK)
+        .clamp(1, crate::sized::ATTENTION_CONTEXT_CHUNK_CAP)
+}
+
 /// `BoundOpKind::CachedAttention`'s Metal kernel: online (running max/sum,
 /// register-resident weighted-value accumulator) softmax attention over a
 /// cached range plus a new range, one 32-lane simdgroup per `(query_row,
@@ -3001,16 +3024,53 @@ fn render_cached_attention(resolved: &BoundOp, entry: &str) -> Result<String, Em
     // `query_row` -- see this function's doc. `tid`/`group_width` below are
     // therefore derivable from the existing `group`/`lane` split without a
     // new `[[thread_position_in_threadgroup]]` kernel parameter.
-    source.push_str("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    uint tid = (uint)group * 32u + lane; uint group_width = (uint)query_groups * 32u;\n    threadgroup float shared_k_even[head_dim / 2]; threadgroup float shared_k_odd[head_dim / 2]; threadgroup float shared_v[head_dim];\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }\n");
-    // Every masking decision below (`cached`, `relative`, the two `continue`s)
-    // depends only on `key`/`query_row`/`cached_lower`/`new_upper` -- never on
-    // `kv_head`/`group`/`lane` -- so it is uniform across the WHOLE
-    // threadgroup, and a `continue` taken there is taken by every thread in
-    // the group alike. That is what makes the two `threadgroup_barrier` calls
-    // inside the loop body safe: no thread ever reaches one while a sibling
-    // skipped past it via the masked-out `continue`.
-    source.push_str("    for (long key = 0; key < cached_key_rows + new_key_rows; key++) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        for (long pair = (long)tid; pair < head_dim / 2; pair += (long)group_width) {\n            shared_k_even[pair] = cached ? in2[kbase + pair] : in4[kbase + pair];\n            shared_k_odd[pair] = cached ? in3[kbase + pair] : in5[kbase + pair];\n        }\n        for (long dimension = (long)tid; dimension < head_dim; dimension += (long)group_width) {\n            shared_v[dimension] = cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension];\n        }\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * shared_k_even[pair];\n            partial_score += in1[qbase + pair] * shared_k_odd[pair];\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * shared_v[dimension];\n        }\n        maximum = next_max;\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n    }\n");
-    source.push_str(&format!("    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n}}\n"));
+    let context_chunks = context_chunks_for(*cached_key_rows + *new_key_rows);
+    if context_chunks <= 1 {
+        source.push_str("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    uint tid = (uint)group * 32u + lane; uint group_width = (uint)query_groups * 32u;\n    threadgroup float shared_k_even[head_dim / 2]; threadgroup float shared_k_odd[head_dim / 2]; threadgroup float shared_v[head_dim];\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }\n");
+        // Every masking decision below (`cached`, `relative`, the two `continue`s)
+        // depends only on `key`/`query_row`/`cached_lower`/`new_upper` -- never on
+        // `kv_head`/`group`/`lane` -- so it is uniform across the WHOLE
+        // threadgroup, and a `continue` taken there is taken by every thread in
+        // the group alike. That is what makes the two `threadgroup_barrier` calls
+        // inside the loop body safe: no thread ever reaches one while a sibling
+        // skipped past it via the masked-out `continue`.
+        source.push_str("    for (long key = 0; key < cached_key_rows + new_key_rows; key++) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        for (long pair = (long)tid; pair < head_dim / 2; pair += (long)group_width) {\n            shared_k_even[pair] = cached ? in2[kbase + pair] : in4[kbase + pair];\n            shared_k_odd[pair] = cached ? in3[kbase + pair] : in5[kbase + pair];\n        }\n        for (long dimension = (long)tid; dimension < head_dim; dimension += (long)group_width) {\n            shared_v[dimension] = cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension];\n        }\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * shared_k_even[pair];\n            partial_score += in1[qbase + pair] * shared_k_odd[pair];\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * shared_v[dimension];\n        }\n        maximum = next_max;\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n    }\n");
+        source.push_str(&format!("    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n}}\n"));
+    } else {
+        // `context_chunks` simdgroups per (query_row, kv_head, group) triple
+        // now share one threadgroup -- `local_group_index` (`group *
+        // context_chunks + chunk`) is what `tiled_gemm_threadgroup_width`'s
+        // `CachedAttention` arm sizes the dispatch width against, and its
+        // encoding cycles `chunk` fastest so the SAME `dispatchThreads_
+        // threadsPerThreadgroup` linear-grouping invariant this function's
+        // doc already relies on for `group` still holds. The per-key loop's
+        // trip count and BOTH `threadgroup_barrier` calls stay identical for
+        // every thread in the threadgroup (masking `continue`s are still
+        // uniform across the whole group, exactly as the `chunks<=1` body
+        // above) -- only the per-key SCORE/ACCUMULATE step is gated on
+        // `key % context_chunks == chunk`, which is why the barrier-safety
+        // argument above still applies unchanged: no thread's control flow
+        // around a barrier depends on `chunk`. `context_chunks` extra
+        // threads cooperate on the same K/V load every key (`group_width`
+        // widened to `query_groups * context_chunks * 32`), so splitting the
+        // score work does not add device-memory traffic.
+        source.push_str(&format!(
+            "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long context_chunks = {context_chunks};\n    long query_index = vector_index / context_chunks;\n    long chunk = vector_index % context_chunks;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    long local_group_index = group * context_chunks + chunk;\n    uint tid = (uint)local_group_index * 32u + lane; uint group_width = (uint)(query_groups * context_chunks) * 32u;\n    threadgroup float shared_k_even[head_dim / 2]; threadgroup float shared_k_odd[head_dim / 2]; threadgroup float shared_v[head_dim];\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
+        ));
+        source.push_str("    for (long key = 0; key < cached_key_rows + new_key_rows; key++) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        for (long pair = (long)tid; pair < head_dim / 2; pair += (long)group_width) {\n            shared_k_even[pair] = cached ? in2[kbase + pair] : in4[kbase + pair];\n            shared_k_odd[pair] = cached ? in3[kbase + pair] : in5[kbase + pair];\n        }\n        for (long dimension = (long)tid; dimension < head_dim; dimension += (long)group_width) {\n            shared_v[dimension] = cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension];\n        }\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        if (key % context_chunks == chunk) {\n            float partial_score = 0.0f;\n            for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n                partial_score += in0[qbase + pair] * shared_k_even[pair];\n                partial_score += in1[qbase + pair] * shared_k_odd[pair];\n            }\n            float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n            float next_max = max(maximum, score);\n            float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n            sum = sum * rescale + weight;\n            for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n                long local_dimension = dimension / 32L;\n                weighted[local_dimension] = weighted[local_dimension] * rescale + weight * shared_v[dimension];\n            }\n            maximum = next_max;\n        }\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n    }\n");
+        // Single cross-simdgroup merge: each chunk's own (max, sum,
+        // weighted) is the same online-softmax state the `chunks<=1` body
+        // already computes over its own key subset; combining them is the
+        // one piece of NEW arithmetic (`render_cached_attention`'s own
+        // doc) -- rescale each chunk's partial by `exp(m_i - m_max)`, sum
+        // `l`, sum `o`, exactly llama.cpp's `kernel_flash_attn_ext_vec`
+        // cross-simdgroup reduction (ggml-metal.metal). Only `chunk == 0`
+        // writes the merged result and the final output -- the other
+        // chunks' registers are dead past this point.
+        source.push_str(&format!(
+            "    threadgroup float shared_m[query_groups * context_chunks]; threadgroup float shared_l[query_groups * context_chunks]; threadgroup float shared_o[query_groups * context_chunks * head_dim];\n    if (lane == 0u) {{ shared_m[local_group_index] = maximum; shared_l[local_group_index] = sum; }}\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ shared_o[local_group_index * head_dim + dimension] = weighted[dimension / 32L]; }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    if (chunk == 0L) {{\n        float merged_max = -INFINITY;\n        for (long c = 0; c < context_chunks; c++) {{ merged_max = max(merged_max, shared_m[group * context_chunks + c]); }}\n        float merged_sum = 0.0f;\n        for (long c = 0; c < context_chunks; c++) {{\n            float partial_max = shared_m[group * context_chunks + c];\n            float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n            merged_sum += shared_l[group * context_chunks + c] * rescale;\n        }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            float acc = 0.0f;\n            for (long c = 0; c < context_chunks; c++) {{\n                float partial_max = shared_m[group * context_chunks + c];\n                float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n                acc += shared_o[(group * context_chunks + c) * head_dim + dimension] * rescale;\n            }}\n            weighted[local_dimension] = acc;\n        }}\n        sum = merged_sum;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n    }}\n}}\n"
+        ));
+    }
     let _ = query_rows;
     let _ = new_key_rows;
     Ok(source)
@@ -5437,8 +5497,15 @@ fn tiled_gemm_threadgroup_width(
     // (`render_cached_attention`'s own doc). Correctness-load-bearing, not an
     // occupancy hint: the body's `tid`/`group_width` split assumes exactly
     // this many threads land in the same threadgroup.
-    if let BoundOpKind::CachedAttention { query_groups, .. } = &resolved.kind {
-        return Some(*query_groups * SIMD_WIDTH);
+    if let BoundOpKind::CachedAttention {
+        query_groups,
+        cached_key_rows,
+        new_key_rows,
+        ..
+    } = &resolved.kind
+    {
+        let chunks = context_chunks_for(*cached_key_rows + *new_key_rows);
+        return Some(*query_groups * chunks * SIMD_WIDTH);
     }
     if let BoundOpKind::Reduce {
         keep: Keep::Reduce,
@@ -7792,17 +7859,28 @@ mod tests {
         let bound = cached_attention_op();
         let kernel = emit(&bound, &BTreeMap::new()).expect("cached attention emits");
 
+        let BoundOpKind::CachedAttention {
+            cached_key_rows,
+            new_key_rows,
+            query_groups,
+            ..
+        } = &bound.kind
+        else {
+            panic!("cached_attention_op must build a CachedAttention bound op");
+        };
+        let context_chunks = context_chunks_for(*cached_key_rows + *new_key_rows);
+
         assert!(kernel.source.contains("long relative ="));
         assert!(kernel.source.contains("simd_sum(partial_score)"));
         assert!(kernel.source.contains("vector_index = (long)gid / 32L"));
         assert!(kernel.source.contains("weighted[local_dimension] / sum"));
         assert_eq!(kernel.bindings.len(), 10, "eight inputs, output, uniforms");
-        assert_eq!(kernel.grid.threads, 32);
+        assert_eq!(kernel.grid.threads, 32 * context_chunks);
         assert_eq!(
             kernel.grid.threadgroup_width,
-            Some(32),
-            "query_groups=1 -- one simdgroup per threadgroup, same width the \
-             cooperative K/V load needs every other query_groups value"
+            Some(query_groups * context_chunks * SIMD_WIDTH),
+            "query_groups=1 -- one threadgroup per (query_row, kv_head), width \
+             widened by context_chunks under `[attention_context_chunks]`"
         );
         assert!(kernel.source.contains("threadgroup float shared_k_even"));
         assert!(
@@ -7810,6 +7888,43 @@ mod tests {
                 .source
                 .contains("threadgroup_barrier(mem_flags::mem_threadgroup)")
         );
+        assert_eq!(
+            kernel.source.contains("threadgroup float shared_m["),
+            context_chunks > 1,
+            "the cross-simdgroup merge only exists when context splits across \
+             more than one simdgroup"
+        );
+    }
+
+    /// A one-chunk dispatch must render EXACTLY the pre-context-parallel
+    /// body: no `context_chunks`/`chunk`/merge tokens anywhere in the
+    /// source. This is the byte-identity guarantee `render_cached_attention`'s
+    /// `context_chunks <= 1` branch reuses the original string construction
+    /// for, verified here rather than by a stored fixture (none pre-existed
+    /// to snapshot against). Skipped (not failed) under a sizing override
+    /// aggressive enough that even this tiny fixture's context splits --
+    /// `cached_attention_emits_one_online_softmax_dispatch` already checks
+    /// grid shape agrees with `context_chunks_for` at ANY sizing, this test
+    /// only adds the byte-identity claim for the sizing where chunks==1.
+    #[test]
+    fn cached_attention_at_one_chunk_never_emits_context_chunk_machinery() {
+        let bound = cached_attention_op();
+        let BoundOpKind::CachedAttention {
+            cached_key_rows,
+            new_key_rows,
+            ..
+        } = &bound.kind
+        else {
+            panic!("cached_attention_op must build a CachedAttention bound op");
+        };
+        if context_chunks_for(*cached_key_rows + *new_key_rows) != 1 {
+            return;
+        }
+
+        let kernel = emit(&bound, &BTreeMap::new()).expect("cached attention emits");
+        assert!(!kernel.source.contains("context_chunks"));
+        assert!(!kernel.source.contains("long chunk ="));
+        assert!(!kernel.source.contains("shared_m["));
     }
 
     #[test]

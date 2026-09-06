@@ -3775,19 +3775,27 @@ mod pack_uniforms_byte_len_tests {
 }
 
 fn pack_cached_attention_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) -> Result<(), EmitError> {
-    let BoundOpKind::CachedAttention { head_dim, .. } = &bound.kind else {
+    let BoundOpKind::CachedAttention {
+        head_dim,
+        cached_key_rows,
+        new_key_rows,
+        ..
+    } = &bound.kind
+    else {
         return Err(EmitError::RenderKindMismatch {
             node: bound.node,
             expected: "cached_attention",
             found: bound.kind.name(),
         });
     };
+    let chunks = crate::msl::context_chunks_for(*cached_key_rows + *new_key_rows) as i64;
     let total: i64 = bound
         .extents
         .iter()
         .map(|extent| *extent as i64)
         .product::<i64>()
-        / *head_dim as i64;
+        / *head_dim as i64
+        * chunks;
     push_i64(bytes, total);
     Ok(())
 }
