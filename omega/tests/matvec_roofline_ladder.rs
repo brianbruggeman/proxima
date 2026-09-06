@@ -1835,11 +1835,89 @@ fn run_shape_arm(label: &str, codec: ShapeCodec, rows: usize, k: usize, tensor_c
             ),
         }
     }
+    if let Ok(raw_repeat_count) = std::env::var("PROXIMA_LADDER_REPEAT") {
+        let repeat_count: usize = raw_repeat_count
+            .parse()
+            .expect("PROXIMA_LADDER_REPEAT must be a positive integer");
+        let failures =
+            repeat_dump_divergences(label, &plan, &blocks, 0, sums[0], &cpu_reference, repeat_count);
+        println!(
+            "PROXIMA_LADDER_REPEAT summary: label={label} repeats={repeat_count} failures={failures}"
+        );
+    }
+
     check_parity(
         &format!("{label} ({codec_name}) vs cpu_reference"),
         &first_tensor_output[..PARITY_ROWS],
         &cpu_reference,
     )
+}
+
+/// One repeat's divergent row ([`PROXIMA_LADDER_REPEAT`], `ladder-parity-
+/// flake-read.md` candidate 2) -- which row, and by how much, so the diff of
+/// divergent rows across repeats names the mechanism (a whole-row garbage
+/// read vs a single SIMD lane's partial contribution) instead of leaving it
+/// to [`check_parity`]'s own aggregate `relative_error`.
+struct DivergentRow {
+    row: usize,
+    reference: f32,
+    observed: f32,
+    relative_error: f32,
+}
+
+/// `PROXIMA_LADDER_REPEAT=<n>` re-dispatches the SAME resolved `plan` `n`
+/// extra times beyond the bandwidth timing loop above and checks EVERY
+/// repeat's per-row parity individually against `cpu_reference` (rather than
+/// [`check_parity`]'s single aggregate `relative_error` over the last repeat
+/// only), printing the repeat index, `tensor_index`, and the first 8
+/// divergent rows (row, reference, observed, relative_error) for any repeat
+/// that diverges. No-op when the env var is unset (callers only reach this
+/// when it parsed), so normal bandwidth runs never pay for it.
+fn repeat_dump_divergences(
+    label: &str,
+    plan: &omega::metal::Plan,
+    blocks: &[QuantizedBlock<'_>],
+    tensor_index: usize,
+    sum_node: NodeId,
+    cpu_reference: &[f32],
+    repeat_count: usize,
+) -> usize {
+    let batch_peak = cpu_reference.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+    let mut failing_repeats = 0usize;
+    for repeat in 0..repeat_count {
+        let evaluated = omega::metal::execute_plan(plan, blocks)
+            .expect("execute_plan runs the synthetic matmul over every tensor");
+        let observed = evaluated
+            .get(sum_node)
+            .map(|(data, _)| data.to_vec())
+            .expect("tensor's own reduce node is a requested output");
+        let divergent: Vec<DivergentRow> = cpu_reference
+            .iter()
+            .zip(observed.iter())
+            .enumerate()
+            .filter_map(|(row, (&reference, &observed))| {
+                let relative_error = (observed - reference).abs() / batch_peak.max(f32::EPSILON);
+                (relative_error > PARITY_MAX_REL_ERROR)
+                    .then_some(DivergentRow { row, reference, observed, relative_error })
+            })
+            .collect();
+        if divergent.is_empty() {
+            continue;
+        }
+        failing_repeats += 1;
+        println!(
+            "PROXIMA_LADDER_REPEAT flake: label={label} repeat={repeat} tensor_index={tensor_index} \
+             divergent_rows={} (showing first 8)",
+            divergent.len()
+        );
+        for entry in divergent.iter().take(8) {
+            println!(
+                "  row={} reference={} observed={} relative_error={}",
+                entry.row, entry.reference, entry.observed, entry.relative_error
+            );
+        }
+    }
+    failing_repeats
 }
 
 /// Isolates the output head's `Q6_K` shape (rows=32000, k=4096) from any
