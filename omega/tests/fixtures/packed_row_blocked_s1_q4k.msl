@@ -546,7 +546,7 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     uint lane = gid % 32u;
     long group_first = output_index * 4;
     float sumf[4];
-    for (int q = 0; q < 4; ++q) { sumf[q] = (lane == 0u) ? (0.0f) : (0.0f); }
+    for (int q = 0; q < 4; ++q) { sumf[q] = 0.0f; }
     long weight_base[4];
     long other_base[4];
     long coord_q_cache[4][3];
