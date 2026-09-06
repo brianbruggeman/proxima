@@ -21,46 +21,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use toml::Value;
-
-fn require_nonzero(name: &str, value: u64) -> u64 {
-    assert!(value > 0, "{name} must be non-zero; got {value}");
-    value
-}
-
-fn require_usize(name: &str, value: u64) -> usize {
-    usize::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows usize"))
-}
-
-fn get_int(table: &Value, section: &str, key: &str) -> u64 {
-    let raw = table
-        .get(section)
-        .and_then(|sec| sec.get(key))
-        .and_then(Value::as_integer)
-        .unwrap_or_else(|| {
-            panic!("proxima-primitives.toml: missing or non-integer [{section}].{key}")
-        });
-    u64::try_from(raw).unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-}
-
-/// Read `(section, key)` from the TOML, then apply the optional
-/// `PROXIMA_PIPE_<SECTION>_<KEY>` env-var override. The `PROXIMA_PIPE_`
-/// prefix is kept verbatim (unchanged env-var contract) even though the
-/// crate is now `proxima-primitives`.
-fn resolve(table: &Value, section: &str, key: &str) -> u64 {
-    let env_name = format!(
-        "PROXIMA_PIPE_{}_{}",
-        section.to_ascii_uppercase(),
-        key.to_ascii_uppercase()
-    );
-    println!("cargo:rerun-if-env-changed={env_name}");
-    if let Ok(raw) = env::var(&env_name) {
-        return raw
-            .parse()
-            .unwrap_or_else(|err| panic!("{env_name} = {raw}: {err}"));
-    }
-    get_int(table, section, key)
-}
+use proxima_build::sizing::{require_nonzero, SizingSource};
 
 /// Emits into two separate `OUT_DIR` files rather than one, because the two
 /// consts are read under different cfgs: `RETRY_STATUS_CAP` only by the
@@ -69,25 +30,27 @@ fn resolve(table: &Value, section: &str, key: &str) -> u64 {
 /// is read unconditionally by `FanInVec` (its `mod fan_in_sized` has no cfg).
 /// One shared file would force one shared cfg, making one const dead code
 /// under the other's tier.
+///
+/// The env-var prefix (`PROXIMA_PIPE_`, not `PROXIMA_PRIMITIVES_`) is kept
+/// verbatim as an unchanged contract even though the crate is now
+/// `proxima-primitives` — this crate is the former proxima-pipe.
 #[allow(clippy::expect_used)]
 fn emit_sizing_consts(out_dir: &Path) {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-    let toml_path = PathBuf::from(&manifest_dir).join("proxima-primitives.toml");
-    println!("cargo:rerun-if-changed=proxima-primitives.toml");
+    let source = SizingSource::load(&manifest_dir, "proxima-primitives.toml", "PROXIMA_PIPE")
+        .unwrap_or_else(|err| panic!("{err}"));
 
-    let text = fs::read_to_string(&toml_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", toml_path.display()));
-    let root: Value = text
-        .parse()
-        .unwrap_or_else(|err| panic!("parse {}: {err}", toml_path.display()));
-
-    let retry_status_cap = require_usize(
+    let retry_status_cap = require_nonzero(
         "retry.status_cap",
-        require_nonzero("retry.status_cap", resolve(&root, "retry", "status_cap")),
+        source
+            .resolve_int("retry", "status_cap")
+            .unwrap_or_else(|err| panic!("{err}")),
     );
-    let fan_in_source_cap = require_usize(
+    let fan_in_source_cap = require_nonzero(
         "fan_in.source_cap",
-        require_nonzero("fan_in.source_cap", resolve(&root, "fan_in", "source_cap")),
+        source
+            .resolve_int("fan_in", "source_cap")
+            .unwrap_or_else(|err| panic!("{err}")),
     );
 
     let retry_out = format!(
