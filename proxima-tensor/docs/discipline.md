@@ -24615,3 +24615,47 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `test(omega): sweep one shape by name` + this row | Added `PROXIMA_SWEEP_SHAPE` env filter to `decode_shape_nsg_math_sweep` so one shape can be timed inside a quiet window ROW 337's own 4-shape/25-minute run could not finish; ran it for `ffn_up`, the shape ROW 336 named as the dominant FFN byte cost | `ffn_up`: nsg=4/fast measured 239.80 GB/s vs production default (nsg=2/relaxed) 235.65 GB/s, +1.76% (+0.077 ms/token for `ffn_up` alone; +0.232 ms/token extrapolated to all three FFN matrices, UNMEASURED assumption that gate/down track up) | 1 full run, all 6 `ffn_up` cells complete, parity-clean | quiet gate (`pgrep -l` process-name list) EMPTY confirmed before the measured run; load-1 elevated (14.84-20.49) from a `cargo test --no-run` build's own tail-off, not from a concurrent measurer |
+
+## ROW 339 -- whole decode token as bare serial dispatches, llama's own encoding: is the 9 ms gap program structure or small-shape kernel?
+
+**Card:** `test(omega): whole-token matvec sequence as bare serial dispatches` (off `main` at `0f3102f`). **Worktree/branch:** `proxima-wt-token`, `test/whole-token-bare-dispatches`.
+
+**Question.** llama.cpp does none of our machinery (no epilogue fusion, no hazard tracker, no uniform arena, no plan cache, no concurrent encoder) and decodes the same 4.17 GB in 17.5 ms; our kernels match llama on the big shapes in isolation (ROW 338 `ffn_up` 236 GB/s; ROW 336 `head` 232) but the whole program takes 26.85 ms and its small projections isolate at 95-131 GB/s (ROW 336). Strip production's OWN machinery entirely -- encode the whole token's 225 matvec dispatches (`q`,`k`,`v`,`o`,`gate`,`up`,`down` x 32 layers + `head`) into one plain `computeCommandEncoder()` the way llama does (no `HazardTrackingModeUntracked`/`memoryBarrierWithScope`, no plan cache, no uniform arena) -- and see whether the 9 ms gap disappears (structure) or survives (kernel).
+
+**Test edge, this row.** New `#[ignore]`d test `whole_token_matvec_sequence_bare` in `omega/tests/matvec_roofline_ladder.rs`. Reuses this file's own established machinery rather than inventing a parallel path: `synth_weight_bytes_parallel` (rayon weight synthesis, ROW 337's own helper) for 32 genuinely distinct tensors per family; `shared_buffer_from_bytes` (one upload per family, never touched again); `l3_shape_source`/`compile_pipeline` (the SAME `q4k_pair_dot`-based `q4k_matvec_l3_shape` kernel text this file's L3 shape-sweep already compiles, byte-identical, not restated); and a new `Q6K_L3_SHAPE_KERNEL_BODY`/`q6k_l3_shape_source` -- the same wrapper shape with `q6k_pair_dot` and a 210-byte block stride swapped in for the output head. `time_bare_dispatch_sequence` generalizes `time_batch_l3_shape_threads`'s own encode/commit/wait technique (identical binding order: `weight@0`/`activation@1`/`output@2`/`uniform@3`) from a homogeneous batch of one shape to a heterogeneous per-dispatch sequence (varying pipeline/rows/k/activation/uniform per call), which a same-shape batch helper cannot express -- not a second, parallel raw-dispatch mechanism. Weights are synthesized (not the real checkpoint): `Q4_K` for every one of `q`/`k`/`v`/`o`/`gate`/`up`/`down` (this file's own doc: the real 4-of-32 `Q5_K` layers are a detail this dispatch-count arm does not need to absorb) and `Q6_K` for `head`. Output is never read back -- timing only, no parity claim.
+
+**Quiet gate.** `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'` EMPTY and load-1 6.70 at gate time, confirmed before any build or measurement started.
+
+**Data -- one quiet run, both arms, 7 timed tokens each (1 untimed warm-up token dropped):**
+
+| arm | dispatch geometry | median ms/token | min-max ms | CoV % | median GB/s |
+| --- | --- | --- | --- | --- | --- |
+| A (llama's encoding, production's default kernel) | nsg=1, `MTLMathMode::Safe`, `dispatchThreads` | 23.153 | 23.107-23.235 | 0.19 | 174.20 |
+| B (llama's encoding, ROW 337/338's sweep mechanism) | nsg=4, `MTLMathMode::Fast`, `dispatchThreads` | 16.949 | 16.884-16.975 | 0.17 | 237.98 |
+
+225 dispatches/token (32 layers x 7 + 1 head), 4,033,388,544 bytes/token (4.03 GB decimal, matching this checkpoint's per-token byte figure within the real head's own `32000` vs `32002` row count and the 4-of-32 real `Q5_K` layers this arm does not model).
+
+**The split.** Arm A measures 23.15 ms -- essentially IDENTICAL to the in-program matvec cost ROW 308 measured (22.64 ms), not to llama's 17.5 ms total. Removing every one of production's own mechanisms (hazard tracker, memory barriers, plan cache, uniform arena, concurrent encoder) and replacing them with llama's own plain serial encoder changes the whole-token time by less than 3%. **The 9 ms gap is NOT program structure -- it survives with zero program structure in the way. It is the small-shape kernel**, exactly as ROW 336's isolated small-projection numbers (95-131 GB/s vs `ffn_up`/`head`'s 232-236) already pointed to.
+
+Arm B's delta: switching ONLY the compiled kernel's dispatch geometry (nsg 1->4) and math mode (Safe->Fast) -- no other change to the sequence, buffers, or encoding -- drops the SAME 225-dispatch sequence to 16.949 ms, **27.8% faster than Arm A and already under llama's own 17.5 ms**. This is ROW 337/338's per-shape sweep result generalized to the whole token at once: the lever that closes the gap is kernel/dispatch-geometry choice, not any of production's surrounding machinery.
+
+**Residual, named not hidden.** This arm's weights are synthesized, not the real checkpoint (guiding-principles §9's documented fallback, same posture as `DECODE_SHAPES`'s own `Q5_K` variants) -- a real-checkpoint run would additionally pay 4 real `Q5_K` layers' own shape, unmeasured here. Output is never read back, so this row makes no parity claim for the whole-token sequence (each op's own kernel already carries parity elsewhere: ROW 336/337/338 for the per-shape cells this row's kernels are lifted from verbatim). Arm B's `nsg=4`/`fast` cell is ROW 337/338's own per-shape "best cell," not a from-scratch search across this row's own whole-token sequence -- a finer sweep over the whole token is unmeasured by this row.
+
+**Gates.** `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0. `cargo test -p omega --release --features metal --test matvec_roofline_ladder -- --ignored whole_token_matvec_sequence_bare --nocapture`: EXIT 0, `test result: ok. 1 passed`.
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-row339-repro -b docs/row-339-repro main
+cd ../proxima-wt-row339-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --release --test matvec_roofline_ladder --features metal \
+  -- --ignored --exact whole_token_matvec_sequence_bare --nocapture
+```
+(expected: ~1m30s release build + ~1 minute run on a host comparable to this row's M1 Max -- 225 distinct real-shaped `Q4_K`/`Q6_K` tensors synthesized via the rayon-parallel path, then 2 arms x 8 command buffers (1 warm-up + 7 timed) each.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | `test(omega): whole-token matvec sequence as bare serial dispatches` + this row | New whole-token bare-dispatch test: 225 dispatches/token encoded into ONE plain serial `computeCommandEncoder()` (llama's own encoding), zero of production's own machinery (no hazard tracker, no barrier, no plan cache, no uniform arena) | Arm A (production default kernel) 23.153 ms/token, essentially equal to ROW 308's 22.64 ms in-program matvec cost -- the 9 ms gap to llama's 17.5 ms is NOT structural, it survives with no structure present; Arm B (nsg=4, fast) 16.949 ms/token, 27.8% faster than Arm A and under llama's own total | 1 full run, 7 timed tokens/arm, CoV 0.17-0.19% | quiet gate (`pgrep -l` process-name list) EMPTY, load-1 6.70, confirmed before any build or measurement |
