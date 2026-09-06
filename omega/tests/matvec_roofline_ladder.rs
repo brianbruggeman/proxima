@@ -149,6 +149,7 @@ use objc2_metal::{
 use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::q4_k;
+use proxima_gguf::quant::q6_k;
 use proxima_gguf::types::GgmlType;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
@@ -407,6 +408,63 @@ const _: () = assert!(
     TOTAL_TIMED_BYTES >= MIN_TIMED_BYTES,
     "WEIGHT_TENSOR_COUNT must move at least MIN_TIMED_BYTES per timed command buffer"
 );
+
+// ---- Q6_K shape arms: the output-head shape (rows=32000, k=4096) ROW
+// 319/output-head-read singles out (llama's own Q6_K kernel measures
+// 45 GB/s in-program on `output.weight`, ours 41, both well under the
+// 183-237 GB/s the Q4_K families reach and the 381.24 GB/s device ceiling
+// ROW 296 measured), plus a layer-sized sibling (rows=4096) so shape
+// scaling is visible. `IN_DIM` (4096) is shared with the Q4_K ladder above
+// -- Q6_K's `output.weight` in this checkpoint has the same `k`. ----
+
+/// `Q4_K`/`Q5_K`/`Q6_K` share one super-block element count (`QK_K == 256`,
+/// each codec's own module doc, restated at `metal_parity.rs:2068-2071`).
+const Q6K_BLOCKS_PER_ROW: usize = IN_DIM / q6_k::QK_K;
+const Q6K_ROW_BYTES: usize = Q6K_BLOCKS_PER_ROW * q6_k::BLOCK_BYTES;
+
+/// The output head's own shape: `output.weight` is `[32002, 4096]` in the
+/// real openchat checkpoint (`q6k_real_checkpoint_parity.rs`'s own
+/// `real_tensor_bytes` call); 32000 is the round shape this arm sweeps,
+/// per the read this arm exists to follow up (`output-head-read.md`).
+const Q6K_HEAD_ROWS: usize = 32_000;
+/// A layer-sized `Q6_K` matrix -- `Q4_K`'s own `ffn_up`/`ffn_gate` shape's
+/// row count would be `ROWS` (14336), but no real layer tensor in this
+/// checkpoint is `Q6_K`-encoded (`output.weight` is the LONE one), so 4096
+/// is chosen to keep `Q6K_LAYER_TENSOR_BYTES` an easy comparison point
+/// against `TOTAL_WEIGHT_BYTES / (ROWS / IN_DIM)`-scale reasoning, not
+/// because a real 4096-row `Q6_K` tensor exists in this file.
+const Q6K_LAYER_ROWS: usize = 4_096;
+
+const Q6K_HEAD_TENSOR_BYTES: u64 = (Q6K_HEAD_ROWS * Q6K_ROW_BYTES) as u64;
+const Q6K_LAYER_TENSOR_BYTES: u64 = (Q6K_LAYER_ROWS * Q6K_ROW_BYTES) as u64;
+
+/// One real `output.weight`-shaped `Q6_K` tensor is 107.5 MB
+/// (`32000 * 16 * 210` bytes) -- `WEIGHT_TENSOR_COUNT`'s own 64-tensor
+/// convention would move 6.9 GB per timed buffer for this shape, so this
+/// arm instead uses the smallest tensor count that still clears
+/// [`MIN_TIMED_BYTES`] (2 GB decimal), same amortization-floor reasoning as
+/// this file's module doc: `ceil(2e9 / 107_520_000) = 19`.
+const Q6K_HEAD_TENSOR_COUNT: usize = MIN_TIMED_BYTES.div_ceil(Q6K_HEAD_TENSOR_BYTES) as usize;
+/// Same reasoning at the layer shape: `ceil(2e9 / 13_762_560) = 146`.
+const Q6K_LAYER_TENSOR_COUNT: usize = MIN_TIMED_BYTES.div_ceil(Q6K_LAYER_TENSOR_BYTES) as usize;
+
+const _: () = assert!(
+    Q6K_HEAD_TENSOR_BYTES * Q6K_HEAD_TENSOR_COUNT as u64 >= MIN_TIMED_BYTES,
+    "Q6K_HEAD_TENSOR_COUNT must move at least MIN_TIMED_BYTES per timed command buffer"
+);
+const _: () = assert!(
+    Q6K_LAYER_TENSOR_BYTES * Q6K_LAYER_TENSOR_COUNT as u64 >= MIN_TIMED_BYTES,
+    "Q6K_LAYER_TENSOR_COUNT must move at least MIN_TIMED_BYTES per timed command buffer"
+);
+
+/// llama's own device streaming ceiling on this M1 Max (ROW 296,
+/// `proxima-tensor/docs/discipline.md`), decimal GB/s -- reported alongside
+/// every Q6_K shape arm's own GB/s as a ratio, not re-measured here.
+const DEVICE_CEILING_GBPS: f64 = 381.24;
+/// ROW 319's in-program measurement of llama's ported `Q6_K` kernel on the
+/// real `output.weight` dispatch (2.38 ms for 107.5 MB) -- the number this
+/// arm's isolated measurement is checked against.
+const ROW_319_IN_PROGRAM_GBPS: f64 = 45.0;
 
 const REPEATS: usize = 5;
 const PARITY_ROWS: usize = 64;
@@ -1509,4 +1567,138 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         "L0={l0:.2} L1={l1:.2} L2={l2:.2} L3_shape={l3_shape:.2} L3_baseline={l3_base:.2} GB/s"
     );
     println!("L1/L0={:.3} L2/L1={:.3} L3_shape/L2={:.3}", l1 / l0, l2 / l1, l3_shape / l2);
+}
+
+/// Synthesizes `tensor_count` distinct `Q6_K`-encoded tensors, each
+/// `[rows, k]`, through the SAME encoder production's own real `Q6_K`
+/// tensors are quantized with (`proxima_gguf::quant::q6_k::quantize`) --
+/// guiding-principles §9's fallback for the one case in this file where the
+/// real artifact (`output.weight`) exists only ONCE in the checkpoint, not
+/// in the quantity (19/146) this harness's amortization floor needs. Each
+/// tensor gets its own [`Lcg`] seed (`seed_base + tensor_index`) so no two
+/// tensors are bit-identical and a GPU cache cannot serve one tensor's read
+/// from another's -- the same "distinct tensors" posture the real `Q4_K`
+/// arms above get for free from 32 real, distinct checkpoint tensors. One
+/// row's worth of `f32` (`k` elements) is reused per row rather than
+/// materializing the whole tensor in `f32` first, so peak host memory stays
+/// at the quantized output size, not `4x` that.
+fn synth_q6k_weight_bytes(seed_base: u64, tensor_count: usize, rows: usize, row_bytes: usize, k: usize) -> Vec<u8> {
+    let tensor_bytes = rows * row_bytes;
+    let mut bytes = vec![0u8; tensor_bytes * tensor_count];
+    let mut row_f32 = vec![0.0f32; k];
+    for (tensor_index, tensor_slice) in bytes.chunks_exact_mut(tensor_bytes).enumerate() {
+        let mut lcg = Lcg(seed_base + tensor_index as u64);
+        for row_blocks in tensor_slice.chunks_exact_mut(row_bytes) {
+            for value in row_f32.iter_mut() {
+                *value = lcg.next_unit() * 4.0 - 2.0;
+            }
+            q6_k::quantize(&row_f32, row_blocks).expect("row length is a whole multiple of QK_K");
+        }
+    }
+    bytes
+}
+
+/// CPU oracle for the first [`PARITY_ROWS`] rows of the FIRST synthesized
+/// tensor -- same posture as [`cpu_reference_first_rows`], `Q6_K`'s own
+/// `dequantize`/dot-product instead of `Q4_K`'s.
+fn q6k_cpu_reference_first_rows(first_tensor_bytes: &[u8], row_bytes: usize, k: usize, activation: &[f32]) -> Vec<f32> {
+    let mut reference = Vec::with_capacity(PARITY_ROWS);
+    let mut dequantized_row = vec![0.0f32; k];
+    for row_blocks in first_tensor_bytes[..PARITY_ROWS * row_bytes].chunks_exact(row_bytes) {
+        q6_k::dequantize(row_blocks, &mut dequantized_row).expect("a whole number of q6_k super-blocks per row");
+        let dot: f32 = dequantized_row.iter().zip(activation.iter()).map(|(weight, act)| weight * act).sum();
+        reference.push(dot);
+    }
+    reference
+}
+
+/// Runs one `Q6_K` shape arm: synthesizes `tensor_count` distinct
+/// `[rows, IN_DIM]` tensors, dispatches PRODUCTION's own emitted `Q6_K`
+/// kernel over all of them through `omega::metal::plan`/`execute_plan` --
+/// the SAME public entry point `L3_baseline` uses for `Q4_K` above, so the
+/// MSL text is whatever `omega::msl::emit` renders today (byte-identical to
+/// production by construction) and the dispatch geometry
+/// (`packed_row_dispatch`, `Q6K`'s `rows_per_simdgroup() == 1`,
+/// `omega/src/msl.rs:1148`, `nsg2` default-on) is production's, never
+/// hand-assembled here -- and reports GB/s plus CoV over [`REPEATS`], with
+/// ratios to ROW 319's in-program 45 GB/s and to the 381.24 GB/s device
+/// ceiling (ROW 296), so an in-isolation vs in-program gap reads directly
+/// off this arm's own printed line.
+fn run_q6k_shape_arm(label: &str, rows: usize, tensor_count: usize, seed_base: u64) {
+    let row_bytes = Q6K_ROW_BYTES;
+    let tensor_bytes = (rows * row_bytes) as u64;
+    let total_timed_bytes = tensor_bytes * tensor_count as u64;
+    println!(
+        "=== q6_k shape arm {label}: rows={rows} k={IN_DIM} tensors={tensor_count} \
+         tensor_bytes={tensor_bytes} total_timed_bytes={total_timed_bytes} \
+         (production Q6_K kernel via omega::metal::plan/execute_plan) ==="
+    );
+
+    let weight_bytes = synth_q6k_weight_bytes(seed_base, tensor_count, rows, row_bytes, IN_DIM);
+    let weight_names: Vec<String> = (0..tensor_count).map(|index| format!("q6k_{label}_{index}")).collect();
+
+    let mut activation_lcg = Lcg(seed_base + 999);
+    let activation: Vec<f32> = (0..IN_DIM).map(|_| activation_lcg.next_unit() * 4.0 - 2.0).collect();
+
+    let cpu_reference =
+        q6k_cpu_reference_first_rows(&weight_bytes[..rows * row_bytes], row_bytes, IN_DIM, &activation);
+
+    let (program, sums) =
+        multi_tensor_matmul_program(&weight_names, rows as u32, IN_DIM as u32, DType::UInt8);
+    let weight_slices: Vec<&[u8]> = weight_bytes.chunks_exact(rows * row_bytes).collect();
+    let mut blocks: Vec<QuantizedBlock<'_>> =
+        weight_slices.iter().map(|slice| QuantizedBlock::Q6K(slice)).collect();
+    blocks.push(QuantizedBlock::Float32(&activation));
+
+    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums)
+        .expect("plan resolves the synthetic q6_k matmul over every tensor");
+    let mut resident_names: BTreeSet<&str> = weight_names.iter().map(String::as_str).collect();
+    resident_names.insert("activation");
+    plan.mark_resident(&resident_names);
+
+    let mut first_tensor_output: Vec<f32> = Vec::new();
+    let mut elapsed_samples = Vec::with_capacity(REPEATS);
+    for _ in 0..REPEATS {
+        let started = Instant::now();
+        let evaluated = omega::metal::execute_plan(&plan, &blocks)
+            .expect("execute_plan runs the synthetic q6_k matmul over every tensor");
+        elapsed_samples.push(started.elapsed());
+        first_tensor_output = evaluated
+            .get(sums[0])
+            .map(|(data, _)| data.to_vec())
+            .expect("first tensor's own reduce node is a requested output");
+    }
+    let samples = gbps_samples(&elapsed_samples, total_timed_bytes);
+    let (mean, cov) = mean_and_cov(&samples);
+    println!(
+        "arm=Q6K_{label} rows={rows} tensors={tensor_count} mean_gbps={mean:.2} cov_pct={cov:.2} \
+         samples={samples:?} bytes={total_timed_bytes} ratio_to_row319_in_program={:.3} \
+         ratio_to_device_ceiling={:.3}",
+        mean / ROW_319_IN_PROGRAM_GBPS,
+        mean / DEVICE_CEILING_GBPS,
+    );
+    assert_parity(
+        &format!("Q6K_{label} vs cpu_reference"),
+        &first_tensor_output[..PARITY_ROWS],
+        &cpu_reference,
+    );
+}
+
+/// Isolates the output head's `Q6_K` shape (rows=32000, k=4096) from any
+/// in-program effect -- terminal dispatch position, unamortized
+/// per-dispatch floor at count=1 -- that ROW 310/314's in-buffer ablation
+/// could not separate from the kernel's own bandwidth
+/// (`output-head-read.md`'s candidates 2/3). Also runs the layer-sized
+/// sibling (rows=4096) so shape scaling is visible on the same axis.
+///
+/// `#[ignore]`d: synthesizes ~2 GB of `Q6_K` bytes per arm (19 tensors at
+/// the head shape, 146 at the layer shape) through the real quantize
+/// encoder -- CPU-bound minutes of work per arm -- and depends on a real
+/// Metal device, same posture as this file's GGUF-dependent arms above,
+/// though this one needs no external fixture file.
+#[test]
+#[ignore = "synthesizes ~2 GB of q6_k bytes per arm through the real encoder and needs a real metal device"]
+fn q6k_head_and_layer_shape_roofline_ladder() {
+    run_q6k_shape_arm("head", Q6K_HEAD_ROWS, Q6K_HEAD_TENSOR_COUNT, 4096);
+    run_q6k_shape_arm("layer", Q6K_LAYER_ROWS, Q6K_LAYER_TENSOR_COUNT, 8192);
 }
