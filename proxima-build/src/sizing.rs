@@ -46,6 +46,16 @@ pub enum SizingError {
         section: String,
         key: String,
     },
+    #[error(
+        "{toml}: missing or non-integer [{section}.{subsection}].{key}",
+        toml = .toml.display()
+    )]
+    MissingNestedInt {
+        toml: PathBuf,
+        section: String,
+        subsection: String,
+        key: String,
+    },
     #[error("{toml}: missing or non-float [{section}].{key}", toml = .toml.display())]
     MissingFloat {
         toml: PathBuf,
@@ -123,6 +133,47 @@ impl SizingSource {
             section = section.to_uppercase(),
             key = key.to_uppercase()
         )
+    }
+
+    fn env_name_nested(&self, section: &str, subsection: &str, key: &str) -> String {
+        format!(
+            "{prefix}_{section}_{subsection}_{key}",
+            prefix = self.env_prefix,
+            section = section.to_uppercase(),
+            subsection = subsection.to_uppercase(),
+            key = key.to_uppercase()
+        )
+    }
+
+    /// Like [`Self::resolve_int`], but for a `[section.subsection].key`
+    /// nested table, honoring a
+    /// `<ENV_PREFIX>_<SECTION>_<SUBSECTION>_<KEY>` env override.
+    ///
+    /// # Errors
+    ///
+    /// [`SizingError::EnvInt`] if the override is set but does not parse;
+    /// [`SizingError::MissingNestedInt`] if neither the override nor the
+    /// TOML key is present.
+    pub fn resolve_nested_int(&self, section: &str, subsection: &str, key: &str) -> Result<i64> {
+        let env_name = self.env_name_nested(section, subsection, key);
+        println!("cargo:rerun-if-env-changed={env_name}");
+        match env::var(&env_name) {
+            Ok(raw) => raw
+                .parse::<i64>()
+                .map_err(|source| SizingError::EnvInt { env_name, raw, source }),
+            Err(_) => self
+                .table
+                .get(section)
+                .and_then(|section_value| section_value.get(subsection))
+                .and_then(|subsection_value| subsection_value.get(key))
+                .and_then(Value::as_integer)
+                .ok_or_else(|| SizingError::MissingNestedInt {
+                    toml: self.toml_path.clone(),
+                    section: section.to_owned(),
+                    subsection: subsection.to_owned(),
+                    key: key.to_owned(),
+                }),
+        }
     }
 
     /// Resolves `[section].key` as an integer, honoring an
