@@ -2935,21 +2935,35 @@ fn reduce_epilogue_source_flags(resolved: &[BoundOp]) -> Vec<bool> {
     flags
 }
 
-/// How many times each [`NodeId`] this program can name is read by ANY
-/// resolved op's [`BoundOp::all_read_sources`] — [`reduce_epilogue_fusion`]'s
-/// own liveness gate (condition (b): "no OTHER consumer"), computed over the
-/// ALREADY-FUSED op list so a node absorbed into a `ComposedBody` upstream
-/// (never its own [`BoundOp`]) correctly counts zero rather than needing a
-/// separate raw-`Op` walk.
+/// How many DISTINCT resolved ops read each [`NodeId`] this program can
+/// name, via any of that consumer's own [`BoundOp::all_read_sources`] —
+/// [`reduce_epilogue_fusion`]'s own liveness gate (condition (b): "no OTHER
+/// consumer"), computed over the ALREADY-FUSED op list so a node absorbed
+/// into a `ComposedBody` upstream (never its own [`BoundOp`]) correctly
+/// counts zero rather than needing a separate raw-`Op` walk.
+///
+/// Counts CONSUMING OPERATIONS, not operand occurrences: production SiLU
+/// (`spec.rs`'s `silu` builder) reads its `gate` operand twice within the
+/// SAME consumer — directly, and again inside `exp(-gate)` — and chain
+/// composition preserves both as separate `operands` slots. Naively counting
+/// every slot would see `gate` "referenced" twice and reject condition (b)
+/// even though exactly one consumer reads it. Each `bound`'s own reads are
+/// deduped to their distinct source [`NodeId`]s before folding into the
+/// per-source total, so N reads of the same source by one consumer count as
+/// the one reference that consumer actually is.
 #[cfg(feature = "reduce-epilogue-fusion")]
 fn resolved_reference_counts(resolved: &[BoundOp]) -> BTreeMap<NodeId, u32> {
     let mut counts = BTreeMap::new();
     for bound in resolved {
+        let mut sources_read = BTreeSet::new();
         for (source, _, gather) in bound.all_read_sources() {
-            *counts.entry(*source).or_insert(0u32) += 1;
+            sources_read.insert(*source);
             if let Some(lookup) = gather {
-                *counts.entry(lookup.indices).or_insert(0u32) += 1;
+                sources_read.insert(lookup.indices);
             }
+        }
+        for source in sources_read {
+            *counts.entry(source).or_insert(0u32) += 1;
         }
     }
     counts
@@ -2967,6 +2981,14 @@ fn resolved_reference_counts(resolved: &[BoundOp]) -> BTreeMap<NodeId, u32> {
 /// already ONE [`BoundOp`] by the time this runs, keyed at the final
 /// consumer's own [`NodeId`], not at whichever raw op happened to sit
 /// directly after the reduce).
+///
+/// Multiple `operands` slots naming the SAME reduce are not automatically a
+/// conflict: production SiLU reads its reduce-derived `gate` operand once
+/// directly and once more inside `exp(-gate)`, and chain composition
+/// preserves both as separate slots reading the SAME [`Layout`] (identical
+/// projection) — that is ONE logical read repeated, not two. Two slots
+/// naming the same reduce through DIFFERENT [`Layout`]s is the real
+/// conflict this declines (see below).
 #[cfg(feature = "reduce-epilogue-fusion")]
 fn find_epilogue_source(consumer: &BoundOp, reduce_flags: &[bool]) -> Option<NodeId> {
     let BoundOpKind::Elementwise { operands, .. } = &consumer.kind else {
@@ -2975,27 +2997,32 @@ fn find_epilogue_source(consumer: &BoundOp, reduce_flags: &[bool]) -> Option<Nod
     if operands.iter().any(|(_, _, gather)| gather.is_some()) {
         return None; // no renderer/evaluator supports a gathered epilogue read.
     }
-    let mut found: Option<NodeId> = None;
-    for (node, _, _) in operands {
+    let mut found: Option<(NodeId, &Layout)> = None;
+    for (node, layout, _) in operands {
         if !reduce_flags.get(node.0 as usize).copied().unwrap_or(false) {
             continue;
         }
         match found {
-            None => found = Some(*node),
-            // Two DIFFERENT slots reading the SAME reduce, at (possibly)
-            // two DIFFERENT projections — a parity-selecting split like
-            // "gate = paired[..,0,..]" / "up = paired[..,1,..]" both landing
-            // in one consumer. `compose_reduce_epilogue`'s own "implicit
-            // fold-result slot" model has room for exactly ONE such read;
-            // absorbing the fold here would silently drop whichever
-            // occurrence isn't picked as the sentinel while still trying to
-            // read the fold's now-gone standalone buffer for the other one.
-            // Decline the whole consumer rather than guess which read wins.
-            Some(existing) if existing == *node => return None,
+            None => found = Some((*node, layout)),
+            // The SAME slot (same node, same projection) read again — the
+            // production-SiLU shape (`gate` used both bare and inside
+            // `exp(-gate)`). One logical read; nothing more to record.
+            Some((existing_node, existing_layout))
+                if existing_node == *node && existing_layout == layout => {}
+            // The SAME reduce read through a DIFFERENT projection — a
+            // parity-selecting split like "gate = paired[..,0,..]" /
+            // "up = paired[..,1,..]" both landing in one consumer.
+            // `compose_reduce_epilogue`'s own "implicit fold-result slot"
+            // model has room for exactly ONE such read; absorbing the fold
+            // here would silently drop whichever occurrence isn't picked as
+            // the sentinel while still trying to read the fold's now-gone
+            // standalone buffer for the other one. Decline the whole
+            // consumer rather than guess which read wins.
+            Some((existing_node, _)) if existing_node == *node => return None,
             Some(_) => {}
         }
     }
-    found
+    found.map(|(node, _)| node)
 }
 
 /// One (consumer, reduce) pair a single [`reduce_epilogue_fusion`] pass will
@@ -3286,14 +3313,28 @@ fn compose_reduce_epilogue(
     else {
         return None;
     };
-    let source_index = outer_operands
+    // Every slot naming `source`, not just the first — [`find_epilogue_source`]
+    // already guarantees any repeat is the SAME projection (production SiLU
+    // reads `gate` once bare, once inside `exp(-gate)`, both slots naming the
+    // same source), so every one of them, not only the first, must be
+    // redirected to the fold's own implicit result below. Leaving a later
+    // occurrence pointed at `source` would reference a producer this fusion
+    // is about to remove (`source` is folded into `absorbed`, never emitted
+    // as its own `BoundOp`), silently reading a buffer that no longer exists.
+    let source_indices: Vec<usize> = outer_operands
         .iter()
-        .position(|(node, _, _)| *node == source)?;
+        .enumerate()
+        .filter(|(_, (node, _, _))| *node == source)
+        .map(|(index, _)| index)
+        .collect();
+    if source_indices.is_empty() {
+        return None;
+    }
 
     let mut new_operands = BoundOperands::new();
     let mut outer_remap: Vec<u16> = vec![0; outer_operands.len()];
     for (index, operand) in outer_operands.iter().enumerate() {
-        if index == source_index {
+        if source_indices.contains(&index) {
             continue; // replaced below by the inner fold's own implicit result.
         }
         outer_remap[index] = new_operands.len() as u16;
@@ -3345,7 +3386,7 @@ fn compose_reduce_epilogue(
                 .map(|arg| match arg {
                     StepArg::Operand(index) => {
                         let old = *index as usize;
-                        if old == source_index {
+                        if source_indices.contains(&old) {
                             StepArg::Step(inner_step_count - 1)
                         } else {
                             StepArg::Operand(outer_remap[old])
@@ -5575,19 +5616,21 @@ mod tests {
                 epilogue_count > 0,
                 "the real openchat shape must produce at least one epilogued reduce"
             );
-            // MEASURED (not derived) on this checkout: 619 -> 490, a 129-op
-            // drop. The resolved-op candidate match (this module's own
-            // `reduce_epilogue_candidates`, which sees straight through
-            // `BoundOpBuilder`'s own chain-fusion) widened the prior
-            // raw-`Op`-level one-hop rule's 619 -> 523 (96-op) result: every
-            // RMSNorm's own `mean/eps/sqrt/reciprocal` PLAIN epilogue round
-            // now also chains into a SECOND, broadcast-reduce round
+            // MEASURED (not derived) on this checkout: 619 -> 458, a 161-op
+            // drop. Every RMSNorm's own `mean/eps/sqrt/reciprocal` PLAIN
+            // epilogue round chains into a SECOND, broadcast-reduce round
             // (`x * inv_rms`), and every `SiLU(gate) * up`-shaped tail (two
-            // independent reduces feeding one consumer) now fuses too, where
-            // the raw-`Op`-level rule dropped both to the composed-body
-            // absorption this module's own doc names. A regression here
-            // means one of those two classes stopped firing, not merely
-            // "fewer than before".
+            // independent reduces feeding one consumer) fuses too. The prior
+            // measured value here (490) was taken while `find_epilogue_source`/
+            // `resolved_reference_counts` still counted a consumer's OWN
+            // repeated read of the same source (production SiLU reads `gate`
+            // once bare, once inside `exp(-gate)`) as a second, conflicting
+            // consumer and declined the fold — so the real SiLU*up class
+            // this comment already claimed was fusing was NOT actually
+            // firing on this program; only RMSNorm's broadcast-reduce round
+            // was. Fixing that reference-count/projection bug is what widens
+            // 490 -> 458. A regression here means one of the two classes
+            // stopped firing, not merely "fewer than before".
             assert_eq!(
                 attention_only.len(),
                 619,
@@ -5595,8 +5638,8 @@ mod tests {
             );
             assert_eq!(
                 with_epilogue.len(),
-                490,
-                "reduce-epilogue-fusion's own op count regressed from the measured 490"
+                458,
+                "reduce-epilogue-fusion's own op count regressed from the measured 458"
             );
         }
 
