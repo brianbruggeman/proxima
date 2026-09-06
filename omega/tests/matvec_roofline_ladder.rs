@@ -3383,11 +3383,130 @@ const WHOLE_TOKEN_ARMS: [WholeTokenArm; 4] = [
 /// `#[ignore]`d: CPU-bound minutes synthesizing real quantized bytes for a
 /// full 7B-parameter-shaped program, and needs a real Metal device, same
 /// posture as every other synthetic-data arm in this file.
+/// ROW 361: llama's own `test-backend-ops perf` number per shape is
+/// AMORTIZED -- `n_runs` copies of the SAME op duplicated into one graph
+/// (`tests/test-backend-ops.cpp:675-677`), one `ggml_backend_graph_compute`
+/// call per timed sample (`:704`), `us/run = total_time_us / total_runs`
+/// (`:718`). ROW 360's per-shape ladder (`decode_shape_roofline_ladder`) is
+/// ISOLATED -- one dispatch per timed sample, its own command-buffer
+/// commit/wait -- which is why its per-shape sum overshoots our own
+/// measured whole-token sequence (ROW 354). This function restricts
+/// [`whole_token_matvec_sequence_bare`]'s own 225-dispatch, one-command-
+/// buffer construction to ONE family's dispatches (its 32 per-layer
+/// dispatches, or the head's 1), so the resulting number is AMORTIZED the
+/// same way llama's is -- comparable to ROW 360's llama column, not to ROW
+/// 360's isolated "ours" column. `attn_v`/`ffn_down` are synthesized as
+/// `Q5_K` for every one of their dispatches (this checkpoint's real codec
+/// for those two families, ROW 63's inventory: 4 of 32 layers; this cell
+/// reports a clean single-codec number rather than mixing Q4_K/Q5_K bytes).
+fn run_row361_family_amortized(
+    device: &ProtocolObject<dyn MTLDevice>,
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    family_name: &str,
+) {
+    let (label, codec, packed_codec, rows, k, seed, dispatch_count) = if family_name == "head" {
+        (
+            "head",
+            ShapeCodec::Q6K,
+            omega::PackedCodec::Q6K,
+            WHOLE_TOKEN_HEAD_ROWS,
+            WHOLE_TOKEN_HEAD_K,
+            900_000,
+            1_usize,
+        )
+    } else {
+        let family = WHOLE_TOKEN_LAYER_FAMILIES
+            .iter()
+            .find(|family| family.name == family_name)
+            .unwrap_or_else(|| panic!("ROW361_FAMILY={family_name} is not a known family name"));
+        let uses_q5k = family_name == "v" || family_name == "down";
+        let codec = if uses_q5k { ShapeCodec::Q5K } else { ShapeCodec::Q4K };
+        let packed_codec = if uses_q5k { omega::PackedCodec::Q5K } else { omega::PackedCodec::Q4K };
+        (family.name, codec, packed_codec, family.rows, family.k, family.seed, FFN_LAYERS)
+    };
+
+    let row_bytes = codec.row_bytes(k);
+    let tensor_bytes = rows * row_bytes;
+    let total_timed_bytes = (tensor_bytes * dispatch_count) as u64;
+    println!(
+        "=== ROW 361 amortized family={label} codec={} rows={rows} k={k} dispatches={dispatch_count} \
+         bytes={total_timed_bytes} (one command buffer, production's own emitted kernel) ===",
+        codec.name()
+    );
+
+    let weight_bytes = synth_weight_bytes_parallel(codec, seed, dispatch_count, k, tensor_bytes);
+    let weight_buffer = shared_buffer_from_bytes(device, &weight_bytes);
+    let offsets: Vec<usize> = (0..dispatch_count).map(|index| index * tensor_bytes).collect();
+
+    let mut activation_lcg = Lcg(seed + 999);
+    let activation: Vec<f32> = (0..k).map(|_| activation_lcg.next_unit() * 4.0 - 2.0).collect();
+    // SAFETY: `activation` is a live `Vec<f32>` for the duration of this
+    // call; the byte view is read-only and never outlives `activation`.
+    let activation_bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(activation.as_ptr().cast::<u8>(), std::mem::size_of_val(activation.as_slice()))
+    };
+    let activation_buffer = shared_buffer_from_bytes(device, activation_bytes);
+
+    let kernel = production_reduce_kernel(device, packed_codec, rows as u32, k as u32);
+
+    let output = device
+        .newBufferWithLength_options(rows * size_of::<f32>(), MTLResourceOptions::StorageModeShared)
+        .expect("device allocates ROW 361's own scratch output buffer");
+
+    let ops: Vec<BareDispatchOp<'_>> = offsets
+        .iter()
+        .map(|offset| BareDispatchOp {
+            pipeline: &kernel.pipeline,
+            weight: &weight_buffer,
+            weight_offset: *offset,
+            activation: &activation_buffer,
+            uniform: &kernel.uniform,
+            grid_threads: kernel.grid_threads,
+            threadgroup_width: kernel.threadgroup_width,
+            weight_index: kernel.weight_index,
+            activation_index: kernel.activation_index,
+            output_index: kernel.output_index,
+            uniform_index: kernel.uniform_index,
+        })
+        .collect();
+
+    let elapsed_samples = warmed_up_samples(|| time_bare_dispatch_sequence(queue, &output, &ops));
+    let ms_samples: Vec<f64> = elapsed_samples.iter().map(Duration::as_secs_f64).map(|s| s * 1e3).collect();
+    let ms_stats = sample_stats(&ms_samples);
+    let gbps_samples_vec = gbps_samples(&elapsed_samples, total_timed_bytes);
+    let gbps_stats = sample_stats(&gbps_samples_vec);
+    let us_per_dispatch = ms_stats.median * 1000.0 / dispatch_count as f64;
+    println!(
+        "arm=ROW361_family_{label} codec={} dispatches={dispatch_count} bytes={total_timed_bytes} \
+         median_ms={:.3} min_ms={:.3} max_ms={:.3} cov_pct={:.2} ms_samples={ms_samples:?} \
+         median_gbps={:.2} mean_gbps={:.2} us_per_dispatch={us_per_dispatch:.2}",
+        codec.name(),
+        ms_stats.median,
+        ms_stats.min,
+        ms_stats.max,
+        ms_stats.cov_pct,
+        gbps_stats.median,
+        gbps_stats.mean,
+    );
+}
+
 #[test]
 #[ignore = "synthesizes real quantized bytes for a whole decode token and needs a real metal device"]
 fn whole_token_matvec_sequence_bare() {
     let device = MTLCreateSystemDefaultDevice().expect("a Metal device is available on this host");
     let queue = device.newCommandQueue().expect("device creates a command queue");
+
+    // ROW 361: `ROW361_FAMILY=<name>` (`q`/`k`/`v`/`o`/`gate`/`up`/`down`/
+    // `head`) restricts this whole-token construction to ONE family's
+    // dispatches, amortized the same way llama's own `test-backend-ops
+    // perf` amortizes (n_runs copies in one graph, one dispatch), so the
+    // resulting per-dispatch number is comparable to ROW 360's llama
+    // column rather than its isolated "ours" column. Additive: unset,
+    // this function's behavior is byte-for-byte the same as before.
+    if let Some(family_name) = std::env::var("ROW361_FAMILY").ok().filter(|value| !value.is_empty()) {
+        run_row361_family_amortized(&device, &queue, &family_name);
+        return;
+    }
 
     type FamilyBuffer = (Retained<ProtocolObject<dyn MTLBuffer>>, Vec<usize>);
     let family_buffers: Vec<FamilyBuffer> =
