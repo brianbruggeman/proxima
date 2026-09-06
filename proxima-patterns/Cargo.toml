@@ -142,7 +142,7 @@ xxhash-rust = { workspace = true, features = ["xxh3"], optional = true }
 portable-atomic = { workspace = true, default-features = false, optional = true }
 
 [build-dependencies]
-toml = { workspace = true }
+proxima-build.workspace = true
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support-tokio"] }
