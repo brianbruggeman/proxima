@@ -34,6 +34,20 @@ use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
 
+/// fixed so recording never itself allocates; large enough for any single
+/// warm-step naming session, callers reading beyond it get the most recent
+/// window only.
+const SIZE_RING_CAPACITY: usize = 256;
+
+static SIZE_RING: [AtomicUsize; SIZE_RING_CAPACITY] =
+    [const { AtomicUsize::new(0) }; SIZE_RING_CAPACITY];
+static SIZE_RING_WRITES: AtomicUsize = AtomicUsize::new(0);
+
+fn record_size(size: usize) {
+    let index = SIZE_RING_WRITES.fetch_add(1, Ordering::Relaxed) % SIZE_RING_CAPACITY;
+    SIZE_RING[index].store(size, Ordering::Relaxed);
+}
+
 /// Global allocator that forwards every call to [`System`], counts each
 /// `alloc`/`alloc_zeroed`/`realloc` call ([`allocations`]), and tracks the net
 /// live byte count ([`live_bytes`]) so a caller can prove both "zero
@@ -45,6 +59,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         LIVE_BYTES.fetch_add(layout.size() as i64, Ordering::Relaxed);
+        record_size(layout.size());
         unsafe { System.alloc(layout) }
     }
 
@@ -56,12 +71,14 @@ unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         LIVE_BYTES.fetch_add(layout.size() as i64, Ordering::Relaxed);
+        record_size(layout.size());
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         LIVE_BYTES.fetch_add(new_size as i64 - layout.size() as i64, Ordering::Relaxed);
+        record_size(new_size);
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -87,4 +104,21 @@ pub fn live_bytes() -> i64 {
 pub fn reset() {
     ALLOC_COUNT.store(0, Ordering::Relaxed);
     LIVE_BYTES.store(0, Ordering::Relaxed);
+    SIZE_RING_WRITES.store(0, Ordering::Relaxed);
+}
+
+/// The requested size of every allocation recorded since process start or the
+/// last [`reset`], oldest first, capped to the most recent 256 entries —
+/// enough to name every allocation in a single warm hot-path call without the
+/// naming call itself allocating on the path under proof. Read after the
+/// section under proof, never inside it: the returned `Vec` is
+/// diagnostic-path allocation, not hot-path.
+#[must_use]
+pub fn recorded_sizes() -> Vec<usize> {
+    let total_writes = SIZE_RING_WRITES.load(Ordering::Relaxed);
+    let count = total_writes.min(SIZE_RING_CAPACITY);
+    let start = total_writes.saturating_sub(SIZE_RING_CAPACITY);
+    (start..start + count)
+        .map(|index| SIZE_RING[index % SIZE_RING_CAPACITY].load(Ordering::Relaxed))
+        .collect()
 }
