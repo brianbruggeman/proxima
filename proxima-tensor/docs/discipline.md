@@ -23670,3 +23670,59 @@ CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-r321/target CARGO
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | none landed -- `docs(tensor): row 321 q6_k head shape in isolation` only | first execution of the arm landed at `f030ccc`: head bandwidth reads 38.13 GB/s (CoV 59.32%, ratio 0.847 to ROW 319's 45 GB/s in-program figure), but the arm's own parity assertion fails (`max_abs_error=0.029296875` vs gate `1e-4`) and aborts the test before the layer shape runs -- no layer numbers exist, and the parity gap is unresolved | 1 run, 5 repeats (head only); CoV 59.32% (gpu_exec-equivalent, head arm) | quiet gate (names-only, load-1<10) loud for ~10 of 20 allotted minutes (a determinism experiment's `proxima_model_i` load generator), cleared to load-1 2.73/2.67 with zero matching processes before the build and run |
+
+## ROW 322 -- the "odd-block misaligned `ushort` load" hypothesis is arithmetically false; a fresh quiet-gate run of the same arm reads 4-6x higher than ROW 321's own point estimate
+
+**Card:** `omega/src/msl.rs`, `omega/tests/matvec_roofline_ladder.rs`. **Worktree/branch:** `proxima-wt-q6align`, `perf/q6k-aligned-loads`, off `main` at `96365d8`.
+
+**Task.** ROW 321 left two live hypotheses for the head arm's 38.13 GB/s and its parity failure. A follow-on brief proposed a third: that `Q6_K`'s 210-byte block stride puts every odd-indexed block at an odd byte address, making the `ushort` (`uint16_t`) loads in the pair-dot decode body misaligned, and that llama.cpp avoids this by reading only bytes. This row checks that claim against the source before writing any fix.
+
+**Load census.** Every weight-plane read in the two Q6_K decode bodies (`push_q6k_ggml_port_body`, `omega/src/msl.rs:5063-5146`, the `metal-q4k-ggml-port`-gated verbatim transcription; `q6k_pair_dot`/`q6k_header_for`/`q6k_value`, `omega/src/msl.rs:606-756`, the default in-program path selected by `PackedCodec::supports_pair_dot`):
+
+| function | load | width | address expression | aligned for every `ib`? |
+| --- | --- | --- | --- | --- |
+| `push_q6k_ggml_port_body` | `ql[...]`, `qh[...]`, `sc[...]` | `uchar` (1 byte) | `blk + {0,128,192+is}` | trivially yes (byte load) |
+| `push_q6k_ggml_port_body` | `dh[0]` | `half` (2 bytes) | `blk + 208` | yes -- see below |
+| `q6k_header_for` | `d_bits` | assembled from two `block[208]`/`block[209]` byte reads | `blk + 208/209` | yes (byte loads, no width issue by construction) |
+| `q6k_value` (scalar path) | `ql`,`qh`,`scales` bytes | `uchar` | `blk + {0/64, 128/160, 192}` | trivially yes (byte load) |
+| `q6k_pair_dot` (default pair-dot path) | `ql_a/b/c/d`, `qh_0/1` | `ushort` (2 bytes) | `blk + {0,32,64,96}+l_base`, `l_base = 8*ir ∈ {0,8,16,24}` | **yes, for every `ib`, not just even `ib`** |
+
+`blk` (`omega/src/msl.rs:5090`, `4329`) is `in{weight} + (superblock_index + ib_first) * block_bytes`, `block_bytes = Q6K_BLOCK_BYTES = 210` (`omega/src/msl.rs:656`). **210 is even**, so `210 * n` is a multiple of 2 for *every* integer `n` -- there is no odd-`ib` case where a block starts at an odd byte offset; every block start is 2-byte aligned regardless of parity, and every offset added on top (`0`, `32`, `64`, `96`, `128`, `192`, `208`, plus `l_base ∈ {0,8,16,24}`) is itself even, so every `ushort`/`half` load in both bodies is 2-byte aligned unconditionally. This is not a new derivation: `omega/src/msl.rs:677-708`'s own doc comment on `Q6K_PAIR_DOT_MSL` already states exactly this ("`block` itself always lands on an even byte (210-byte stride, always even)") and gives the reason a `uint`/`ulong` load would NOT be safe (`l_base` and `block` would both need 4-byte alignment, which does not hold for every super-block). **The land-brief's stated premise -- "every ODD block starts at an odd address" -- is arithmetically false for a 210-byte (even) stride; it would only hold for an odd block size.** No misaligned load exists in either body.
+
+**llama.cpp comparison, re-read, not assumed.** `kernel_mul_mv_q6_K_f32_impl` (`ggml-metal.metal:5340-5433`, read this row) does read `ql`/`qh` as `device const uint8_t*` bytes and `sc` as `device const int8_t*` -- but `dh` (`ggml-metal.metal:5392`, `device const half *dh = &x[i].d;`) is a genuine 16-bit `half*` load at the same offset-208 position our `q6k_header_for` reaches via manual byte assembly. llama's own kernel is not byte-loads-only; it takes exactly the same `half`-at-208 load our code takes more conservatively (byte-assembled instead of a native `half*` cast). The brief's "no 16-bit weight-word loads" claim holds only for `ql`/`qh`/`scales`, not for `d`.
+
+**Decision on the code (owner rule: same output, less/aligned work, wall not worse -> land).** No load is misaligned, so there is nothing to align. Converting `q6k_pair_dot`'s already-aligned `ushort` loads to byte-assembled loads (the brief's Step 2 ask) would produce the *same output* through *more* instructions per element (each 2-byte load replaced by two 1-byte loads plus a shift/or to reconstruct) -- a straight regression under the "less work, same output" rule, not a fix. **Not made.** `Q4_K`/`Q5_K` bodies are untouched (never read for this row -- no claim made about them).
+
+**Parity, magnitude added (Step 2's added print, `omega/tests/matvec_roofline_ladder.rs:1671-1685`).** Kept `PARITY_MAX_ABS_ERROR = 1e-4` absolute unchanged and the assert unchanged (it is shared by every `Q4_K` arm above in the same file; loosening it here would silently loosen those too, out of this row's scope). Added one `println!` reporting `batch_peak_abs` and `max_abs_error / batch_peak`:
+
+```
+Q6K_head batch_peak_abs=17379.0879 max_abs_error=0.0293 relative_to_peak=0.000002
+```
+
+The head shape's own CPU-oracle outputs peak near 17379 (a 4096-term dot product over `Q6_K`-quantized weights in `[-2,2]`-scaled synthetic data); `max_abs_error=0.029296875` is 2e-6 relative to that peak -- six-decimal-digit agreement, and smaller than float32's own representable ULP at that magnitude (~17379 * 1.19e-7 ≈ 0.002). The fixed 1e-4 *absolute* gate cannot pass at this output magnitude regardless of kernel correctness; ROW 321's hypothesis (1) -- "a threshold bug, not a kernel bug" -- is the one the numbers support. Not resolved here (changing the shared threshold is out of scope), but now measured rather than argued.
+
+**Fresh quiet-gate measurement (one round, as budgeted).** Quiet gate (names-only `pgrep`, load-1<10) held clean immediately before build and immediately before the run (`uptime` load-1 7.58, then re-checked 9.86 after a transient spike to 14.31 cleared in one 20s poll). Build: `cargo test -p omega --release --features metal --test matvec_roofline_ladder --no-run`, 1m21s, clean. Run: the built binary directly, `q6k_head_and_layer_shape_roofline_ladder --ignored --nocapture`.
+
+| shape | rows | tensors | mean GB/s (5 samples) | mean GB/s (samples 2-5 only) | CoV% (5) / CoV% (2-5) | samples (GB/s) | max_abs_error | ratio to ROW 319 (45) | ratio to device ceiling (381.24) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| head | 32000 | 19 | 185.33 | 230.78 | 49.08 / ~1.6 | [3.55, 224.94, 235.33, 232.23, 230.63] | 0.029296875 (still FAILS 1e-4 gate) | 4.119 | 0.486 (0.605 on samples 2-5) |
+| layer | 4096 | 146 | -- did not run, test still aborts on head's parity panic (unchanged from ROW 321) -- | | | | | | |
+
+**Mechanism.** Sample 1 (3.55 GB/s) is a first-dispatch cold-start outlier (pipeline-state-object compile / first-touch cost), consistent with a >60x jump to sample 2 and then a tight cluster (224.9-235.3, CoV ~1.6%) for samples 2-5 -- the same shape ROW 296's device-ceiling arm named as its own cold-outlier pattern, which ROW 321 explicitly said this arm's own samples (21.48-65.45 GB/s spread, no convergence) did *not* show. This run's samples DO converge, to a steady-state figure (~231 GB/s) close to `Q4_K`'s in-isolation 237 GB/s and 4-6x ROW 321's 38.13 GB/s point estimate. Two runs of the identical, unmodified arm producing 38 GB/s (CoV 59%, no convergence) and ~231 GB/s (CoV 1.6% on the converged tail) is itself the finding ROW 321's own residual predicted ("a repeat count beyond 5, or a warm-up rep excluded from the mean, would be needed to say more") -- this arm's mean-of-5 is not a stable estimator of steady-state bandwidth, and neither prior nor this row's number should be read as "the" Q6_K head bandwidth without more rounds.
+
+**Residual, named not hidden.** (1) No second confirmation round: the ROW 320 determinism experiment's `proxima_model_i` oracle began looping mid-task (first seen quiet, then loud for the remainder of the 30-minute budget) and never returned to a sustained quiet window; only one gated round was taken, as the brief's own budget allows. (2) The mean-of-5-including-cold-start metric this test prints is not fixed by this row (a scope call: this row was measurement + the alignment question, not a rewrite of the arm's statistics) -- a follow-up should drop sample 1 or add warm-up reps, the same fix ROW 321 already named. (3) The parity failure is unfixed; only its magnitude is now visible. (4) Layer-shape numbers still do not exist (same structural gap ROW 321 named, `catch_unwind` per shape not added here).
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-q6align
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-q6align/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  -- --ignored --nocapture q6k_head_and_layer_shape_roofline_ladder
+```
+(expected: `test result: FAILED`, exit 101, head arm's two printed lines before the panic; the added `relative_to_peak` line shows the failure is a magnitude/threshold mismatch, not divergent output.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | `test(omega): print relative-to-peak error for the q6k head parity check` (no kernel-body change -- the alignment hypothesis this row was asked to fix turned out to be false) | the "odd block -> misaligned `ushort` load" hypothesis is false (`210` is even, every block start and every fixed sub-offset used is even, so every `ushort`/`half` load in both Q6_K bodies is 2-byte aligned for every `ib`); no code fix landed because none is needed -- converting to byte loads would be strictly more instructions for identical output. Added a `batch_peak_abs`/`relative_to_peak` print to the head arm showing its `0.029` absolute parity miss is `2e-6` relative to a `17379`-magnitude output, below float32's own ULP at that scale. A fresh quiet-gate run of the unmodified arm read 230.78 GB/s (CoV 1.6%) on its converged tail vs ROW 321's 38.13 GB/s (CoV 59%, no convergence) -- same arm, same code, 4-6x apart, read as evidence the 5-sample mean (including a cold-start dispatch) is not yet a stable estimator | 1 run, 5 repeats (head only); CoV 49.08% overall / ~1.6% excluding sample 1 | quiet gate (names-only, load-1<10) clean at build and at run start (load-1 7.58 -> transient 14.31 -> 9.86, one 20s re-check); a second confirmation round could not be scheduled inside the 30-minute budget once the ROW 320 `proxima_model_i` oracle began looping persistently |
