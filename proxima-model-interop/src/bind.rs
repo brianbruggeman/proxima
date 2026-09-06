@@ -2667,7 +2667,7 @@ mod real_openchat_file {
     #[cfg(feature = "instrument")]
     use proxima_telemetry::recorder::Recorder;
 
-    use crate::generate::LoadedModel;
+    use crate::generate::{LoadedModel, LogitsSink};
     use crate::loader::prefault;
     use crate::serving::ServingConfig;
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -3860,7 +3860,10 @@ mod real_openchat_file {
     /// live suspect.
     ///
     /// Loads the checkpoint ONCE, then drives
-    /// [`crate::generate::LoadedModel::run_decode_loop`]
+    /// [`crate::generate::LoadedModel::run_decode_loop_observed`] (a
+    /// `LogitsSink::SumBarriers` sink so this call's own `barriers` total
+    /// is the sum of every step's per-step `barriers_emitted`, never a
+    /// post-loop read of the already-drained `metal_stage_totals` static)
     /// [`determinism_runs`] times (default 10) with [`determinism_max_tokens`]
     /// tokens (default 32) on the same oracle prompt ([`decode_loop_prompt`]),
     /// hashing each run's `generated_text` with [`fnv1a_hash`] and reporting
@@ -3935,14 +3938,18 @@ mod real_openchat_file {
 
         for run_index in 0..runs {
             let mut runtime = crate::generate::BackendRuntime::new(&serving_config);
+            let mut barriers: u64 = 0;
+            let mut logits_sink = LogitsSink::SumBarriers(&mut barriers);
             let generated = model
-                .run_decode_loop(&prompt, max_tokens, &serving_config, &mut runtime)
+                .run_decode_loop_observed(
+                    &prompt,
+                    max_tokens,
+                    &serving_config,
+                    &mut runtime,
+                    None,
+                    &mut logits_sink,
+                )
                 .expect("generate through the metal backend");
-
-            #[cfg(all(feature = "instrument", target_os = "macos"))]
-            let barriers = omega::metal::metal_stage_totals().barriers_emitted;
-            #[cfg(not(all(feature = "instrument", target_os = "macos")))]
-            let barriers = 0_u64;
 
             let hash = fnv1a_hash(&generated.1);
             let divergence = match &reference_ids {
