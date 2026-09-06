@@ -23,6 +23,7 @@ fn resolve(source: &SizingSource, section: &str, key: &str) -> i64 {
     source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
 }
 
+#[allow(clippy::expect_used)]
 fn main() {
     // SizingSource::load only arms rerun-if-changed for the toml it reads;
     // printing any rerun-if-changed disables cargo's implicit whole-package
