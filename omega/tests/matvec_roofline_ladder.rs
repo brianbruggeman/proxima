@@ -1814,8 +1814,21 @@ fn codec_cpu_reference_first_rows(
 /// end listing all of them ([`check_parity`]'s own doc). Generalizes the
 /// prior `run_q6k_shape_arm` (one codec parameter instead of a second copy
 /// per codec, guiding-principles §1).
+/// `weight_keepalive` (ROW 336) is the caller's own accumulator that this
+/// call's synthesized weight bytes are moved into rather than dropped --
+/// see the `resident_names` comment below for why an arm's weight buffer
+/// must never be freed while the process (and therefore `NOCOPY_BUFFERS`,
+/// `omega::metal`'s own address-keyed cache) is still alive.
 #[must_use]
-fn run_shape_arm(label: &str, codec: ShapeCodec, rows: usize, k: usize, tensor_count: usize, seed_base: u64) -> Option<String> {
+fn run_shape_arm(
+    label: &str,
+    codec: ShapeCodec,
+    rows: usize,
+    k: usize,
+    tensor_count: usize,
+    seed_base: u64,
+    weight_keepalive: &mut Vec<Vec<u8>>,
+) -> Option<String> {
     let row_bytes = codec.row_bytes(k);
     let tensor_bytes = (rows * row_bytes) as u64;
     let total_timed_bytes = tensor_bytes * tensor_count as u64;
@@ -1855,45 +1868,50 @@ fn run_shape_arm(label: &str, codec: ShapeCodec, rows: usize, k: usize, tensor_c
 
     let mut plan = omega::metal::plan(&program, &[], &blocks, &sums)
         .expect("plan resolves the synthetic matmul over every tensor");
-    // ROW 334: weight nodes are deliberately NOT marked resident. Every
-    // per-arm weight tensor here is a fresh `Vec<u8>` (`synth_weight_bytes`)
-    // this function itself allocates and drops -- the OPPOSITE of
-    // `Plan::mark_resident`'s own documented precondition ("the caller's OWN
-    // static data -- model weights bound once at load and never mutated
-    // again"). This shape's own byte size (a multiple of the host page size
-    // for every arm in `DECODE_SHAPES`) sends every weight chunk through the
-    // page-aligned no-copy path either way (`omega::metal::upload_packed_bytes`),
-    // so marking it resident bought no real saving -- only routed it into
-    // `NOCOPY_BUFFERS`, a cache keyed on `(pointer, byte_length)` alone, NEVER
-    // on the name `mark_resident` proved unique. When one arm's `Vec` is
-    // freed and the NEXT arm's same-byte-size `Vec` lands at the identical
-    // address (`malloc`/`mmap` handing back a just-freed large region, which
-    // this ladder's own second-of-a-same-byte-size-pair arms hit every time:
-    // ROW 333's `attn_v`/`attn_output`/`ffn_up`/`ffn_down`), that cache
-    // serves the PRIOR arm's stale weight bytes under the new arm's own
-    // fresh, uniquely-named plan -- proven directly by this row's own
-    // `nocopy_uploads`/`nocopy_reuses` counters (`r334-logs/repro-realscale.log`:
-    // `attn_output`'s `nocopy_reuses` equals its own `nocopy_uploads`, 1060
-    // of 1060 -- every single weight touch this arm made was served from
-    // `attn_q`'s addresses, zero fresh uploads). Leaving weight nodes
-    // unmarked routes them to `upload_block_no_copy_uncached` instead --
-    // still zero-copy for this call, just never remembered past it, which is
-    // exactly right for a buffer this function itself frees a few lines
-    // below. The activation node stays resident (label-unique since ROW
-    // 332): it is small enough in every `DECODE_SHAPES` arm to take the
-    // NAME-keyed `RESIDENT_BUFFERS` copy path instead (this row's own
-    // `resident_uploads`/`resident_reuses` counters show it there, never in
-    // `NOCOPY_BUFFERS`), where the per-label name this file already gives it
-    // is the correct, sufficient guard.
-    let mut resident_names: BTreeSet<&str> = BTreeSet::new();
+    // ROW 334 found that marking these weight nodes resident bought no real
+    // saving and was UNSOUND: this shape's own byte size (a multiple of the
+    // host page size for every arm in `DECODE_SHAPES`) sends every weight
+    // chunk through the page-aligned no-copy path either way
+    // (`omega::metal::upload_packed_bytes`), which keys its cache
+    // (`NOCOPY_BUFFERS`) on `(pointer, byte_length)` alone, NEVER on the name
+    // `mark_resident` proved unique -- so when one arm's `Vec` was freed and
+    // the NEXT arm's same-byte-size `Vec` landed at the identical address,
+    // that cache served the PRIOR arm's stale weight bytes under the new
+    // arm's own fresh, uniquely-named plan. ROW 334's fix left weight nodes
+    // unmarked, which is sound but re-pays `upload_block_no_copy_uncached`'s
+    // own device-buffer-wrapper cost on EVERY timed repeat, not just once --
+    // ROW 335's own defect (every shape arm reading 20-25 GB/s in a quiet
+    // session where the L3 rung reads 186-247 with the identical kernel).
+    //
+    // ROW 336 fix: mark every weight node resident TOO (each already carries
+    // a name unique per arm AND tensor, `{label}_{index}`), and -- the part
+    // that actually restores ROW 334's soundness argument -- never free this
+    // arm's `weight_bytes` while the process is alive: `weight_keepalive`
+    // (this function's own last statement) moves it into an accumulator the
+    // caller holds for the whole test run. `NOCOPY_BUFFERS`'s hazard was
+    // never residency itself, only a FREED address being handed to a LATER,
+    // different allocation; a `Vec` this function never frees can never
+    // donate its address to a later arm, so the exact collision ROW 334
+    // reproduced (`nocopy_reuses` equal to `nocopy_uploads`, every touch
+    // served from a DIFFERENT arm's addresses) is now impossible by
+    // construction, not by avoidance. The activation node stays resident
+    // (label-unique since ROW 332) for the same reason it always was.
+    let mut resident_names: BTreeSet<&str> =
+        weight_names.iter().map(String::as_str).collect();
     resident_names.insert(activation_name.as_str());
     plan.mark_resident(&resident_names);
 
-    // ROW 334 repro instrumentation: reset every stage counter right before
-    // this arm's own timed repeats so the totals read below attribute
-    // cleanly to THIS arm, never a prior one in the same process.
+    // ROW 336: reset every stage counter right before this arm's own timed
+    // repeats, then read `metal_stage_totals()` again inside the closure
+    // itself, once per call (`warmed_up_samples`'s own doc: index 0 is the
+    // untimed warm-up, indices 1.. are the timed repeats) -- a per-repeat
+    // delta, not one aggregate over the whole arm, is the only way to prove
+    // a TIMED repeat never re-uploads: an aggregate could still hide one
+    // stray upload inside seven repeats' worth of otherwise-free reuses.
     #[cfg(feature = "instrument")]
     let _ = omega::metal::metal_stage_totals();
+    #[cfg(feature = "instrument")]
+    let mut per_call_totals: Vec<omega::metal::MetalStageTotals> = Vec::new();
 
     let mut first_tensor_output: Vec<f32> = Vec::new();
     let elapsed_samples = warmed_up_samples(|| {
@@ -1905,25 +1923,61 @@ fn run_shape_arm(label: &str, codec: ShapeCodec, rows: usize, k: usize, tensor_c
             .get(sums[0])
             .map(|(data, _)| data.to_vec())
             .expect("first tensor's own reduce node is a requested output");
+        #[cfg(feature = "instrument")]
+        per_call_totals.push(omega::metal::metal_stage_totals());
         elapsed
     });
-    // ROW 334: `resident_uploads`/`resident_reuses` witness the NAME-keyed
+    // `resident_uploads`/`resident_reuses` witness the NAME-keyed
     // `RESIDENT_BUFFERS` copy path (ROW 332's own fix); `nocopy_uploads`/
-    // `nocopy_reuses` witness the ADDRESS-keyed `NOCOPY_BUFFERS` cache --
-    // the one `mark_resident`'s own name uniqueness cannot touch, since that
-    // cache never reads the name at all (`omega/src/metal.rs`'s own
-    // `upload_block_no_copy`).
+    // `nocopy_reuses` witness the ADDRESS-keyed `NOCOPY_BUFFERS` cache this
+    // ROW 336 fix now routes every weight node through.
+    //
+    // `nocopy_uploads` is NOT "how many fresh buffers were created" -- it
+    // fires once per call routed through the no-copy path REGARDLESS of hit
+    // or miss (`upload_block_as_float`/`upload_packed_bytes`'s own counter
+    // site sits before the hit/miss branch); `nocopy_reuses` is the ONLY
+    // counter that fires exclusively on a cache HIT. So the per-repeat
+    // no-copy invariant is `nocopy_uploads == nocopy_reuses` (every no-copy
+    // touch this repeat was a reuse of the warm-up's own wrapper, zero
+    // fresh creations), never `nocopy_uploads == 0` -- confirmed the hard
+    // way: the naive `== 0` form false-failed on `attn_q`'s very first timed
+    // repeat, which this comment exists so nobody repeats. `resident_uploads`
+    // has the opposite shape (`upload_resident_copy`'s own counter site sits
+    // INSIDE the miss branch only), so `== 0` is exactly right there.
     #[cfg(feature = "instrument")]
     {
-        let totals = omega::metal::metal_stage_totals();
+        for (repeat_index, totals) in per_call_totals.iter().enumerate().skip(1) {
+            assert_eq!(
+                totals.nocopy_uploads, totals.nocopy_reuses,
+                "arm={label} timed repeat {repeat_index}: {} of {} no-copy weight touches were \
+                 a FRESH upload, not a cache reuse of the warm-up's own wrapper",
+                totals.nocopy_uploads - totals.nocopy_reuses,
+                totals.nocopy_uploads
+            );
+            assert_eq!(
+                totals.resident_uploads, 0,
+                "arm={label} timed repeat {repeat_index} re-uploaded {} buffer(s) via the \
+                 resident-copy path instead of reusing the warm-up's own upload",
+                totals.resident_uploads
+            );
+        }
+        let total_nocopy_uploads: u64 = per_call_totals.iter().map(|totals| totals.nocopy_uploads).sum();
+        let total_nocopy_reuses: u64 = per_call_totals.iter().map(|totals| totals.nocopy_reuses).sum();
+        let total_resident_uploads: u64 =
+            per_call_totals.iter().map(|totals| totals.resident_uploads).sum();
+        let total_resident_reuses: u64 =
+            per_call_totals.iter().map(|totals| totals.resident_reuses).sum();
+        let total_copying_uploads: u64 =
+            per_call_totals.iter().map(|totals| totals.copying_uploads).sum();
         println!(
-            "arm={label} stage_totals: nocopy_uploads={} nocopy_reuses={} resident_uploads={} \
-             resident_reuses={} copying_uploads={}",
-            totals.nocopy_uploads,
-            totals.nocopy_reuses,
-            totals.resident_uploads,
-            totals.resident_reuses,
-            totals.copying_uploads
+            "arm={label} stage_totals: nocopy_uploads={total_nocopy_uploads} \
+             nocopy_reuses={total_nocopy_reuses} resident_uploads={total_resident_uploads} \
+             resident_reuses={total_resident_reuses} copying_uploads={total_copying_uploads} \
+             per_call_uploads={:?}",
+            per_call_totals
+                .iter()
+                .map(|totals| (totals.nocopy_uploads, totals.resident_uploads))
+                .collect::<Vec<_>>()
         );
     }
     let samples = gbps_samples(&elapsed_samples, total_timed_bytes);
@@ -1962,6 +2016,11 @@ fn run_shape_arm(label: &str, codec: ShapeCodec, rows: usize, k: usize, tensor_c
             "PROXIMA_LADDER_REPEAT summary: label={label} repeats={repeat_count} failures={failures}"
         );
     }
+
+    // ROW 336: moved, never dropped -- see this function's own doc and the
+    // `resident_names` comment above for why `weight_bytes`' address must
+    // outlive this arm.
+    weight_keepalive.push(weight_bytes);
 
     check_parity(
         &format!("{label} ({codec_name}) vs cpu_reference"),
@@ -2052,9 +2111,26 @@ fn repeat_dump_divergences(
 #[test]
 #[ignore = "synthesizes ~2 GB of q6_k bytes per arm through the real encoder and needs a real metal device"]
 fn q6k_head_and_layer_shape_roofline_ladder() {
+    let mut weight_keepalive: Vec<Vec<u8>> = Vec::new();
     let parity_failures: Vec<String> = [
-        run_shape_arm("head", ShapeCodec::Q6K, Q6K_HEAD_ROWS, IN_DIM, Q6K_HEAD_TENSOR_COUNT, 4096),
-        run_shape_arm("layer", ShapeCodec::Q6K, Q6K_LAYER_ROWS, IN_DIM, Q6K_LAYER_TENSOR_COUNT, 8192),
+        run_shape_arm(
+            "head",
+            ShapeCodec::Q6K,
+            Q6K_HEAD_ROWS,
+            IN_DIM,
+            Q6K_HEAD_TENSOR_COUNT,
+            4096,
+            &mut weight_keepalive,
+        ),
+        run_shape_arm(
+            "layer",
+            ShapeCodec::Q6K,
+            Q6K_LAYER_ROWS,
+            IN_DIM,
+            Q6K_LAYER_TENSOR_COUNT,
+            8192,
+            &mut weight_keepalive,
+        ),
     ]
     .into_iter()
     .flatten()
@@ -2146,11 +2222,20 @@ fn decode_shape_roofline_ladder() {
         DECODE_SHAPES.len()
     );
 
+    let mut weight_keepalive: Vec<Vec<u8>> = Vec::new();
     let parity_failures: Vec<String> = DECODE_SHAPES
         .iter()
         .filter_map(|shape| {
             let tensor_count = tensor_count_for_shape(shape);
-            run_shape_arm(shape.family, shape.codec, shape.rows, shape.k, tensor_count, shape.seed)
+            run_shape_arm(
+                shape.family,
+                shape.codec,
+                shape.rows,
+                shape.k,
+                tensor_count,
+                shape.seed,
+                &mut weight_keepalive,
+            )
         })
         .collect();
 
@@ -2176,11 +2261,20 @@ fn row334_attn_q_then_attn_output_real_scale() {
         .iter()
         .find(|shape| shape.family == "attn_output")
         .expect("attn_output shape exists");
+    let mut weight_keepalive: Vec<Vec<u8>> = Vec::new();
     let failures: Vec<String> = [attn_q, attn_output]
         .into_iter()
         .filter_map(|shape| {
             let tensor_count = tensor_count_for_shape(shape);
-            run_shape_arm(shape.family, shape.codec, shape.rows, shape.k, tensor_count, shape.seed)
+            run_shape_arm(
+                shape.family,
+                shape.codec,
+                shape.rows,
+                shape.k,
+                tensor_count,
+                shape.seed,
+                &mut weight_keepalive,
+            )
         })
         .collect();
     assert!(failures.is_empty(), "parity failed for {} arm(s): {failures:#?}", failures.len());
@@ -2206,11 +2300,20 @@ fn row334_four_failing_arms_real_scale() {
             DECODE_SHAPES.iter().find(|shape| shape.family == *family).expect("family exists in DECODE_SHAPES")
         })
         .collect();
+    let mut weight_keepalive: Vec<Vec<u8>> = Vec::new();
     let failures: Vec<String> = shapes
         .into_iter()
         .filter_map(|shape| {
             let tensor_count = tensor_count_for_shape(shape);
-            run_shape_arm(shape.family, shape.codec, shape.rows, shape.k, tensor_count, shape.seed)
+            run_shape_arm(
+                shape.family,
+                shape.codec,
+                shape.rows,
+                shape.k,
+                tensor_count,
+                shape.seed,
+                &mut weight_keepalive,
+            )
         })
         .collect();
 
