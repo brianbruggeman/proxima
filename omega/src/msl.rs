@@ -1590,6 +1590,37 @@ fn bindings(resolved: &BoundOp) -> Vec<Binding> {
     bindings
 }
 
+/// Every `NodeId` `bindings` reads from a device buffer for — the exact
+/// operand set `crate::metal::bind_buffers` resolves for a
+/// `Binding::Input`/`Binding::Indices` slot, in bind order. This is the one
+/// adapter a hazard tracker (or anything
+/// else that needs "what does this dispatch read") should walk, instead of
+/// re-deriving the read set from `BoundOp::all_read_sources()` independently
+/// — ROW 323's bug was exactly two call sites (`bindings()` here and the
+/// hazard tracker's own operand enumeration) drifting apart when
+/// `bindings()` grew a source `all_read_sources()`'s caller had not been
+/// updated to match. Walking `bindings` itself makes that drift impossible:
+/// there is only one list, and both the encoder bind loop and the hazard
+/// walk read the same one.
+pub(crate) fn hazard_read_nodes(bindings: &[Binding]) -> impl Iterator<Item = NodeId> + '_ {
+    bindings.iter().filter_map(|binding| match binding {
+        Binding::Input(node) | Binding::Indices(node) => Some(*node),
+        Binding::Output(_) | Binding::Uniforms | Binding::Fault => None,
+    })
+}
+
+/// The single `NodeId` `bindings` writes to — every bound op writes exactly
+/// one device buffer (`crate::metal::bind_buffers`'s own doc), so a well-formed
+/// `bindings` list always has exactly one `Binding::Output`. `None` only if
+/// `bindings` is malformed (a validation bug upstream, not a runtime case a
+/// caller should expect to hit).
+pub(crate) fn hazard_write_node(bindings: &[Binding]) -> Option<NodeId> {
+    bindings.iter().find_map(|binding| match binding {
+        Binding::Output(node) => Some(*node),
+        Binding::Input(_) | Binding::Indices(_) | Binding::Uniforms | Binding::Fault => None,
+    })
+}
+
 /// For each operand, `Some(slot)` if it gathers — `slot` is its position
 /// among only the gathered operands, 0-based, matching the order
 /// [`bindings`] appends `Indices` buffers and the order the `Uniforms`
