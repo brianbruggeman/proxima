@@ -259,10 +259,11 @@ static inline float q3k_element(device const uchar *block, uint index) {
 }
 "#;
 
-/// Bytes one `Q3_K` super-block occupies. Mirrors
-/// `proxima_gguf::quant::q3_k::BLOCK_BYTES`; pinned in
-/// `omega/tests/q3k_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
-pub const Q3K_BLOCK_BYTES: usize = 110;
+/// Bytes one `Q3_K` super-block occupies -- read from
+/// `proxima_gguf::quant::q3_k::BLOCK_BYTES`, the one place this number is
+/// defined; pinned in `omega/tests/q3k_unpack.rs`, same posture as
+/// [`Q4K_BLOCK_BYTES`].
+pub const Q3K_BLOCK_BYTES: usize = proxima_gguf::quant::q3_k::BLOCK_BYTES;
 
 /// The paired plain-product body for `Q3_K`, structurally selected by
 /// `PackedCodec::supports_pair_dot` (no new Cargo feature -- `Q3_K` always
@@ -581,16 +582,15 @@ static inline q4k_header q4k_header_for_bf(device const uchar *block, uint index
 "#;
 
 /// Bytes one `Q4_K` super-block occupies, and elements it carries — the two
-/// numbers a caller needs to index a packed weight row. Mirrors
-/// `proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K}`; omega does not depend on
-/// `proxima-gguf` at build time, so they are restated here and pinned by a
-/// test that does.
-pub const Q4K_BLOCK_BYTES: usize = 144;
+/// numbers a caller needs to index a packed weight row. Read from
+/// `proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K}`, the one place this
+/// codec's block geometry is defined.
+pub const Q4K_BLOCK_BYTES: usize = proxima_gguf::quant::q4_k::BLOCK_BYTES;
 /// Elements one `Q4_K` super-block carries. Shared by `Q5_K`/`Q6_K` too —
 /// the whole K-quant super-block family is 256 elements wide
 /// (`proxima-tensor/src/cpu.rs`'s own doc on its `Q6K_BLOCK_BYTES` makes the
 /// same point); only the packed BYTE width differs per codec.
-pub const Q4K_BLOCK_ELEMENTS: usize = 256;
+pub const Q4K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_k::QK_K;
 
 /// MSL source for unpacking one element of a `Q6_K` super-block. Ports
 /// `proxima_gguf::quant::q6_k::dequantize_block`/`unpack_levels` exactly:
@@ -650,10 +650,10 @@ static inline float q6k_element(device const uchar *block, uint index) {
 }
 "#;
 
-/// Bytes one `Q6_K` super-block occupies. Mirrors
+/// Bytes one `Q6_K` super-block occupies -- read from
 /// `proxima_gguf::quant::q6_k::BLOCK_BYTES`; pinned in
 /// `omega/tests/q6k_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
-pub const Q6K_BLOCK_BYTES: usize = 210;
+pub const Q6K_BLOCK_BYTES: usize = proxima_gguf::quant::q6_k::BLOCK_BYTES;
 
 /// `Q6_K`'s counterpart to `q4k_pair_dot`/`q5k_pair_dot`, selected by
 /// `PackedCodec::supports_pair_dot` rather than a cargo feature -- routed
@@ -839,10 +839,10 @@ static inline float q5k_element(device const uchar *block, uint index) {
 }
 "#;
 
-/// Bytes one `Q5_K` super-block occupies. Mirrors
+/// Bytes one `Q5_K` super-block occupies -- read from
 /// `proxima_gguf::quant::q5_k::BLOCK_BYTES`; pinned in
 /// `omega/tests/q5k_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
-pub const Q5K_BLOCK_BYTES: usize = 176;
+pub const Q5K_BLOCK_BYTES: usize = proxima_gguf::quant::q5_k::BLOCK_BYTES;
 
 /// The same paired-nibble, packed-word-load body `q4k_pair_dot` gives
 /// `Q4_K`'s `plain_product` arm, selected by
@@ -935,15 +935,15 @@ static inline float q8_0_element(device const uchar *block, uint index) {
 }
 "#;
 
-/// Bytes one `Q8_0` block occupies. Mirrors
+/// Bytes one `Q8_0` block occupies -- read from
 /// `proxima_gguf::quant::q8_0::BLOCK_BYTES`; pinned in
 /// `omega/tests/q8_0_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
-pub const Q8_0_BLOCK_BYTES: usize = 34;
+pub const Q8_0_BLOCK_BYTES: usize = proxima_gguf::quant::q8_0::BLOCK_BYTES;
 
 /// Elements one `Q8_0` block carries -- 32, NOT [`Q4K_BLOCK_ELEMENTS`]'s 256:
 /// `Q8_0` has no super-block structure, so it does not share the K-quant
-/// family's element count. Mirrors `proxima_gguf::quant::q8_0::QK8_0`.
-pub const Q8_0_BLOCK_ELEMENTS: usize = 32;
+/// family's element count. Read from `proxima_gguf::quant::q8_0::QK8_0`.
+pub const Q8_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q8_0::QK8_0;
 
 /// `Q4_0`: llama.cpp's simplest and most widely distributed 4-bit legacy
 /// format -- a flat 32-element block, one `f16` scale, no sub-block
@@ -971,15 +971,15 @@ static inline float q4_0_element(device const uchar *block, uint index) {
 }
 "#;
 
-/// Bytes one `Q4_0` block occupies. Mirrors
+/// Bytes one `Q4_0` block occupies -- read from
 /// `proxima_gguf::quant::q4_0::BLOCK_BYTES`; pinned in
 /// `omega/tests/q4_0_unpack.rs`, same posture as [`Q8_0_BLOCK_BYTES`].
-pub const Q4_0_BLOCK_BYTES: usize = 18;
+pub const Q4_0_BLOCK_BYTES: usize = proxima_gguf::quant::q4_0::BLOCK_BYTES;
 
 /// Elements one `Q4_0` block carries -- 32, the same flat block width as
-/// [`Q8_0_BLOCK_ELEMENTS`], NOT [`Q4K_BLOCK_ELEMENTS`]'s 256. Mirrors
+/// [`Q8_0_BLOCK_ELEMENTS`], NOT [`Q4K_BLOCK_ELEMENTS`]'s 256. Read from
 /// `proxima_gguf::quant::q4_0::QK4_0`.
-pub const Q4_0_BLOCK_ELEMENTS: usize = 32;
+pub const Q4_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_0::QK4_0;
 
 /// `Float16`: not a quantization at all -- MSL's `half` is IEEE-754 binary16
 /// natively, so a `Float16` weight's bytes ARE a valid `half` buffer with no
@@ -992,11 +992,12 @@ pub const Q4_0_BLOCK_ELEMENTS: usize = 32;
 /// Same non-K-quant, flat, one-element-per-block shape `Q8_0`/`Q4_0`
 /// take: never the row-blocked (`classify_packed_row_block`) or tiled-GEMM
 /// path, always the generic per-element accessor.
-pub const FLOAT16_BLOCK_BYTES: usize = 2;
+pub const FLOAT16_BLOCK_BYTES: usize = proxima_gguf::quant::f16::BLOCK_BYTES;
 
 /// One `Float16` block is one element -- there is no super-block or
-/// sub-block structure to amortize over, unlike every K-quant codec.
-pub const FLOAT16_BLOCK_ELEMENTS: usize = 1;
+/// sub-block structure to amortize over, unlike every K-quant codec. Read
+/// from `proxima_gguf::quant::f16::QK_F16`.
+pub const FLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::f16::QK_F16;
 
 /// `BFloat16`: unlike `Float16`/[`FLOAT16_BLOCK_BYTES`], MSL has no
 /// native `bfloat` storage type on this driver's baseline toolchain, so a
@@ -1005,10 +1006,11 @@ pub const FLOAT16_BLOCK_ELEMENTS: usize = 1;
 /// bits of an `f32` (1 sign + 8 exponent + 7 mantissa, IEEE binary32's
 /// exponent width exactly), so reconstructing the `f32` is `bits << 16`
 /// reinterpreted, no rounding or lookup table involved.
-pub const BFLOAT16_BLOCK_BYTES: usize = 2;
+pub const BFLOAT16_BLOCK_BYTES: usize = proxima_gguf::quant::bf16::BLOCK_BYTES;
 
-/// Same one-element-per-block shape as [`FLOAT16_BLOCK_ELEMENTS`].
-pub const BFLOAT16_BLOCK_ELEMENTS: usize = 1;
+/// Same one-element-per-block shape as [`FLOAT16_BLOCK_ELEMENTS`]. Read
+/// from `proxima_gguf::quant::bf16::QK_BF16`.
+pub const BFLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::bf16::QK_BF16;
 
 /// Widens one `bfloat16` element (2 little-endian bytes, the top half of an
 /// `f32`) to `float` by shifting it into the high 16 bits of a 32-bit word
