@@ -24557,3 +24557,61 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `test(omega): decode-shape arms sweep simdgroups and math mode` + this row | New `run_shape_arm_sweep`/`decode_shape_nsg_math_sweep` generalize ROW 335's single-shape (ffn) simdgroups/math sweep across the real per-family shapes ROW 336 isolated, reusing the L3 shape-sweep's hand-dispatched mechanism (production's dispatch geometry is compile-time, cannot vary at runtime); `synth_weight_bytes_parallel` (new, `rayon` dev-dependency) cuts per-shape synthesis ~9x so the sweep fits inside a session | `attn_k`: nsg=8/relaxed measured 137.10 GB/s vs production default (nsg=2/relaxed) 133.43 GB/s, +2.75% (+0.015 ms/token for this one family); `attn_q`/`ffn_up`/`ffn_down` NOT RUN | 1 partial run (`attn_k`'s own 6 cells complete, parity-clean; `attn_q` killed before its first cell) | quiet gate (`pgrep -l` process-name list) EMPTY and load-1 < 10 confirmed before the measured run |
+
+## ROW 338 -- `ffn_up`'s own simdgroups/math sweep, the shape ROW 336 named as the dominant 3.17 GB/token cost, ROW 337 never reached
+
+**Card:** `test(omega): sweep one shape by name` (off `main` at `68c9fa2`). **Worktree/branch:** `proxima-wt-r338b`, `docs/row-338-ffn-up-cells`.
+
+**Question.** ROW 337 ran ROW 336's `decode_shape_nsg_math_sweep` (simdgroups-per-threadgroup {2, 4, 8} x math mode {relaxed, fast}, production's own `q4k_pair_dot`/`dispatchThreads`) across all four real decode shapes in one pass and only `attn_k` finished before the quiet window closed. This row names the shape directly and times it alone: `ffn_up` (14336x4096, `ffn_up`'s own real `Q4_K` weight, ROW 335's single-shape sweep already having read 181 GB/s production-default vs 247 GB/s fastest on a differently-compiled kernel entry point) -- the shape whose three FFN siblings (`ffn_up`/`ffn_gate`/`ffn_down`) ROW 336 measured as this checkpoint's dominant 3.17 GB/token decode cost.
+
+**Test edge change, this row.** `decode_shape_nsg_math_sweep` (`omega/tests/matvec_roofline_ladder.rs`) had no way to run one shape alone -- it always flat-mapped over the full `SHAPE_ARM_SWEEP_SPECS` (four shapes x six cells = 24 cells, the run ROW 337's own 25-minute quiet window could not finish). Added one env read at the test's own edge, `PROXIMA_SWEEP_SHAPE`, filtering `SHAPE_ARM_SWEEP_SPECS` to the named family before the sweep runs (empty/unset keeps the full four-shape behavior; an unmatched name panics via `assert!`, naming what it did not match). No change to `run_shape_arm_sweep`, `SHAPE_ARM_SWEEP_SPECS`, or any measurement code -- the filter is pure selection, not a new mechanism.
+
+**Quiet gate.** `pgrep -l 'proxima_model_i|llama-bench|oracle-|gpu_load_genera|matvec_roofline|^cargo$|^rustc$|nextest|cargo-nextest'` EMPTY, confirmed immediately before the timed run (a `cargo test --no-run` build had just finished on this host, so load-1 briefly read 14.84-20.49 during/after that build's own tail-off; no measurement or build process was running per the process-name check, which is the binding criterion this brief names).
+
+**Data -- `decode_shape_nsg_math_sweep`, `PROXIMA_SWEEP_SHAPE=ffn_up`, ONE quiet run, all six cells complete:**
+
+| shape | cell (nsg, math) | median GB/s | CoV % | parity (max rel err) | production default |
+| --- | --- | --- | --- | --- | --- |
+| ffn_up | nsg=2, relaxed | 235.65 | 2.16 | 1.6515e-6, OK | YES |
+| ffn_up | nsg=4, relaxed | 232.34 | 2.73 | 1.6515e-6, OK | no |
+| ffn_up | nsg=8, relaxed | 233.77 | 3.75 | 1.6515e-6, OK | no |
+| ffn_up | nsg=2, fast | 238.19 | 2.58 | 1.6515e-6, OK | no |
+| ffn_up | nsg=4, fast | 239.80 | 2.59 | 1.6515e-6, OK | no |
+| ffn_up | nsg=8, fast | 237.70 | 2.52 | 1.6515e-6, OK | no |
+
+Every cell reports the same `relative_error=1.6515455e-6` -- same read as ROW 337's `attn_k` table: this shape's per-element arithmetic never exercises a path `MTLMathMode::Fast` rounds differently from `Relaxed` at a magnitude `PARITY_MAX_REL_ERROR=1e-5` would catch.
+
+**Best cell vs production default.** Best: `nsg=4, fast` at 239.80 GB/s. Production default (`nsg=2, relaxed`): 235.65 GB/s. Gain: +4.15 GB/s, **+1.76%** -- smaller than ROW 337's `attn_k` gain (+2.75%), and non-monotonic in `nsg` under `relaxed` (232.34 at nsg=4 dips below both nsg=2 and nsg=8), so "more simdgroups always help" does not hold even within this one shape.
+
+`ffn_up` moves `14336 * 2304 = 33,030,144` bytes/tensor (`ShapeCodec::Q4K.row_bytes(4096)`, matching this file's own "33 MB `blk.0.ffn_up.weight`" figure), one real tensor per layer across `FFN_LAYERS=32` -- `1,056,964,608` bytes (**1.057 GB decimal**) of `ffn_up` weight per decode token, matching the brief's own figure exactly.
+
+DERIVED (bytes/measured-GB/s, not separately measured) -- `ffn_up` alone:
+- production default: `1.056964608e9 / 235.65e9 * 1000 = 4.485 ms/token`
+- best cell: `1.056964608e9 / 239.80e9 * 1000 = 4.408 ms/token`
+- gain: **0.077 ms/token**, `ffn_up` alone.
+
+DERIVED, extrapolated to all three FFN matrices (`ffn_up`+`ffn_gate`+`ffn_down`, the brief's own 3.17 GB/token figure) -- **ASSUMING `ffn_gate`/`ffn_down` behave like `ffn_up`'s own measured cells, which is UNMEASURED by this row** (ROW 336 read bandwidth as rising with row count, and `ffn_down`'s transposed shape (4096 rows x 14336 k, the opposite geometry from `ffn_up`'s 14336x4096) was flagged unmeasured by ROW 337 for exactly this reason -- carrying that same caveat forward, not resolving it):
+- production default: `3.17e9 / 235.65e9 * 1000 = 13.452 ms/token`
+- best cell: `3.17e9 / 239.80e9 * 1000 = 13.220 ms/token`
+- gain: **0.232 ms/token**, assuming gate/down track up (unmeasured).
+
+**Residual, named not hidden.** `attn_k` (ROW 337), `attn_q`, `ffn_down` remain unmeasured by any row to date under this sweep; `ffn_gate` has never been dispatched under this sweep at all. The three-matrix extrapolation above is DERIVED under an explicit, unverified assumption, not a measurement -- a future row's job is to run `ffn_gate`/`ffn_down` through this same filter, not to treat this row's number as covering them.
+
+**Gates.** `cargo test -p omega --release --test matvec_roofline_ladder --no-run`: EXIT 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0.
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-row338-repro -b docs/row-338-repro main
+cd ../proxima-wt-row338-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  PROXIMA_SWEEP_SHAPE=ffn_up cargo test -p omega --release --test matvec_roofline_ladder --features metal \
+  -- --ignored --exact decode_shape_nsg_math_sweep --nocapture
+```
+(expected: well under a minute for `ffn_up` alone on a host comparable to this row's M1 Max -- `ffn_up`'s own 61-tensor synthesis at `MIN_TIMED_BYTES` is far smaller than `attn_k`'s 848 tensors, ROW 337's own doc.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | `test(omega): sweep one shape by name` + this row | Added `PROXIMA_SWEEP_SHAPE` env filter to `decode_shape_nsg_math_sweep` so one shape can be timed inside a quiet window ROW 337's own 4-shape/25-minute run could not finish; ran it for `ffn_up`, the shape ROW 336 named as the dominant FFN byte cost | `ffn_up`: nsg=4/fast measured 239.80 GB/s vs production default (nsg=2/relaxed) 235.65 GB/s, +1.76% (+0.077 ms/token for `ffn_up` alone; +0.232 ms/token extrapolated to all three FFN matrices, UNMEASURED assumption that gate/down track up) | 1 full run, all 6 `ffn_up` cells complete, parity-clean | quiet gate (`pgrep -l` process-name list) EMPTY confirmed before the measured run; load-1 elevated (14.84-20.49) from a `cargo test --no-run` build's own tail-off, not from a concurrent measurer |
