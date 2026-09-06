@@ -1496,17 +1496,23 @@ impl BackendRuntime {
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<Evaluated, InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
+        let math_mode = self.math_mode;
+        let dispatch_type = self.dispatch_type;
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
             || {
-                let mut plan = plan_named_placed(program, symbols, named, outputs)?;
-                plan.mark_resident(resident_names);
-                plan.set_math_mode(self.math_mode);
-                plan.set_dispatch_type(self.dispatch_type);
-                Ok(plan)
+                Self::build_placed_plan(
+                    program,
+                    symbols,
+                    named,
+                    outputs,
+                    resident_names,
+                    math_mode,
+                    dispatch_type,
+                )
             },
         )?;
         Ok(execute_plan_named_with_placements(
@@ -1515,6 +1521,34 @@ impl BackendRuntime {
             input_placements,
             output_placements,
         )?)
+    }
+
+    /// Every [`Self::placed_plans`] build closure's shared body -- the class
+    /// fix for the defect ROW 329's slice found: `evaluate_op_timed_with_placements`
+    /// and `evaluate_dispatch_timed_with_placements` used to build their own
+    /// `plan_named_placed` + `mark_resident` inline, never calling
+    /// `set_math_mode`/`set_dispatch_type`, so a shape first resolved through
+    /// either diagnostic path entered the cache carrying the DEFAULT math
+    /// mode / dispatch type, and a later hit from [`Self::evaluate_with_placements`]
+    /// (the production path) silently served that wrong mode. Folding all
+    /// three closures through this one function makes every placed-plan
+    /// build path correct by construction -- there is no longer a second
+    /// closure body that can forget the call.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    fn build_placed_plan(
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        math_mode: omega::metal::MathMode,
+        dispatch_type: omega::metal::DispatchType,
+    ) -> Result<omega::metal::Plan, InteropError> {
+        let mut plan = plan_named_placed(program, symbols, named, outputs)?;
+        plan.mark_resident(resident_names);
+        plan.set_math_mode(math_mode);
+        plan.set_dispatch_type(dispatch_type);
+        Ok(plan)
     }
 
     /// [`Self::evaluate_with_placements`]'s diagnostic counterpart, same
@@ -1545,15 +1579,23 @@ impl BackendRuntime {
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
+        let math_mode = self.math_mode;
+        let dispatch_type = self.dispatch_type;
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
             || {
-                let mut plan = plan_named_placed(program, symbols, named, outputs)?;
-                plan.mark_resident(resident_names);
-                Ok(plan)
+                Self::build_placed_plan(
+                    program,
+                    symbols,
+                    named,
+                    outputs,
+                    resident_names,
+                    math_mode,
+                    dispatch_type,
+                )
             },
         )?;
         Ok(execute_plan_named_with_placements_op_timed(
@@ -1604,15 +1646,23 @@ impl BackendRuntime {
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<omega::metal::DispatchTimedOutcome, InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
+        let math_mode = self.math_mode;
+        let dispatch_type = self.dispatch_type;
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
             || {
-                let mut plan = plan_named_placed(program, symbols, named, outputs)?;
-                plan.mark_resident(resident_names);
-                Ok(plan)
+                Self::build_placed_plan(
+                    program,
+                    symbols,
+                    named,
+                    outputs,
+                    resident_names,
+                    math_mode,
+                    dispatch_type,
+                )
             },
         )?;
         // Applied AFTER the cache lookup, not inside the build closure above:
@@ -3357,6 +3407,99 @@ mod tests {
         assert_eq!(
             calls, 1,
             "must stop after exactly one call, not run toward the budget of 10"
+        );
+    }
+}
+
+/// The defect ROW 329's slice found, proved directly: every
+/// [`BackendRuntime::placed_plans`] build closure now routes through
+/// [`BackendRuntime::build_placed_plan`], so a shape first resolved through
+/// a diagnostic path (`evaluate_op_timed_with_placements`/
+/// `evaluate_dispatch_timed_with_placements`) carries the SAME math mode
+/// and dispatch type a later hit from the production path
+/// ([`BackendRuntime::evaluate_with_placements`]) would have applied,
+/// instead of silently keeping [`omega::metal::MathMode::default`]/
+/// [`omega::metal::DispatchType::default`].
+///
+/// Exercises [`BackendRuntime::build_placed_plan`] directly against the
+/// smallest program that plans without touching a Metal device
+/// ([`omega::metal::plan`]/[`omega::metal::plan_named`] only resolve
+/// shapes and codecs -- no `MTLDevice` is opened until an `execute_plan*`
+/// call, per that function's own doc), rather than driving a full decode
+/// step through the driver.
+#[cfg(all(
+    test,
+    feature = "metal-output-placement",
+    feature = "instrument",
+    target_os = "macos"
+))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod placed_plan_mode_tests {
+    use alloc::collections::BTreeSet;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use proxima_tensor::{
+        DType, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, projection,
+    };
+
+    use super::BackendRuntime;
+
+    /// `Input(name = "x") -> Elementwise(Identity)` -- the same minimal
+    /// identity shape `omega`'s own `metal_output_placement.rs` test uses,
+    /// named so [`proxima_tensor::resolve_named_blocks`] (which
+    /// [`omega::plan_named`] calls) can bind it.
+    fn named_identity_program() -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: Some(String::from("x")),
+            },
+        );
+        let identity = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(source, IndexMap::Affine(projection(1, &[0])))],
+                name: None,
+            },
+        );
+        (program, identity)
+    }
+
+    #[test]
+    fn build_placed_plan_applies_the_runtimes_math_mode_and_dispatch_type() {
+        let (program, identity_node) = named_identity_program();
+        let data = [1.0f32, 2.0, 3.0, 4.0];
+        let named: [(&str, QuantizedBlock<'_>); 1] = [("x", QuantizedBlock::Float32(&data))];
+        let resident_names: BTreeSet<&str> = BTreeSet::new();
+
+        let plan = BackendRuntime::build_placed_plan(
+            &program,
+            &[],
+            &named,
+            &[identity_node],
+            &resident_names,
+            omega::metal::MathMode::Safe,
+            omega::metal::DispatchType::Serial,
+        )
+        .expect("plans the identity program under an explicit non-default mode");
+
+        assert_eq!(
+            plan.math_mode(),
+            omega::metal::MathMode::Safe,
+            "a freshly built placed plan must carry the caller's math mode, \
+             not MathMode::default() (Relaxed)"
+        );
+        assert_eq!(
+            plan.dispatch_type(),
+            omega::metal::DispatchType::Serial,
+            "a freshly built placed plan must carry the caller's dispatch type, \
+             not DispatchType::default() (Concurrent)"
         );
     }
 }
