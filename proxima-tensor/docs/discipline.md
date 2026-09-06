@@ -24701,3 +24701,48 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `test(omega): row-340 nsg2 arms for whole-token bare dispatch` + this row | Added Arm C (nsg=2/relaxed, the actual production cell ROW 339 never timed) and Arm D (nsg=2/fast) to `WHOLE_TOKEN_ARMS`, no new dispatch machinery | Arm C 17.283 ms/token (233.38 GB/s), 1.9% off llama.cpp's 17.45 ms and within 1.9% of Arm B's swept cell -- retracts ROW 339's "9 ms is the kernel" for the cell production ships; the 9 ms gap is program structure at nsg>=2, and Arm A's nsg=1 was never production's default | 1 full run, 7 timed tokens/arm, CoV 0.10-0.18% | quiet gate (`pgrep -l` process-name list) EMPTY, load-1 4.75 pre-build / 7.33 pre-run, re-verified after the release build's own transient load spike settled |
+
+## ROW 341 -- U2: our steady state at 64 tokens rises with decode length; the 5-step scoreboard window is not paying a clock ramp, it is the fastest window that exists
+
+**Card:** `docs(tensor): row 341 steady state at 64 tokens` (off `main` at `2f5fbba`). **Worktree/branch:** `proxima-wt-r341`, `docs/row-341-steady-state`.
+
+**Question this row answers.** ROWs before this one report `gpu_exec_ms`/`step_wall_ms` averaged over decode steps 3..7 (the "scoreboard window", chosen to skip the step-0 full-context forward and its cold pipeline-compile cost). Is that 5-step window paying a warm-up/clock-ramp premium that a longer decode run would shed -- i.e. would the number of record fall if measured further into the run?
+
+**Harness, no library change.** Release oracle `proxima-model-interop`'s `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `--features metal,instrument`, `PROXIMA_MAX_TOKENS=64`, `--exact --ignored --nocapture --test-threads=1`. `install_stdout_telemetry`'s 5 ms background pump (`proxima-model-interop/src/bind.rs:3144-3171`) already prevents the 4096-slot ring from dropping records regardless of token count -- all 64 `token_breakdown`/`token_breakdown_metal` step lines printed in every round (verified: 128 lines/round, steps 0..63 each with exactly 2 lines), so no per-step print limit needed raising; the hypothesis in the brief that only steps 1..8 print did not hold at this token count with the existing pump.
+
+**Quiet gate.** `pgrep -l 'llama-bench|proxima_model_i|oracle-|gpu_load_genera|matvec_roofline|nextest|cargo-nextest'` EMPTY immediately before the release build and again immediately before the 3 timed rounds and the two `llama-bench` invocations; load-1 14.25 at the pre-build check (no matching process, tolerated per the brief's cargo/rustc clause since the only processes present were unrelated `cargo`/`rustc` from this row's own build, not measurement binaries), 4.64 immediately before the `llama-bench` pair.
+
+**Data -- 3 rounds, pooled per window (n = rounds x steps in window):**
+
+| window | n | step_wall_ms pooled mean | CoV % | gpu_exec_ms pooled mean | CoV % |
+| --- | --- | --- | --- | --- | --- |
+| 3..7 (scoreboard) | 15 | 26.769 | 0.26 | 25.879 | 0.31 |
+| 8..31 | 72 | 27.451 | 1.19 | 26.567 | 1.25 |
+| 32..63 | 96 | 29.580 | 13.15 | 28.032 | 1.63 |
+
+Per-round `gpu_exec_ms` means agree with the pooled figures within their own CoV (round 1: 25.887/26.586/28.026; round 2: 25.932/26.564/28.039; round 3: 25.818/26.553/28.030 for the same three windows) -- the rise is not a single-round artifact.
+
+**Per-step `gpu_exec_ms` series, round 1, steps 0..63 (step 0 is the 12922 ms full-context forward, excluded from the windows above):**
+
+```
+[12922.46, 25.78, 26.03, 25.82, 25.95, 25.84, 25.88, 25.94, 26.00, 26.03, 26.04, 26.19,
+ 26.27, 26.30, 26.34, 26.37, 26.41, 26.50, 26.56, 26.59, 26.63, 26.66, 26.70, 26.82,
+ 26.84, 26.84, 26.87, 26.96, 26.99, 27.04, 27.06, 27.03, 27.07, 27.14, 27.55, 27.36,
+ 27.41, 27.48, 27.47, 28.00, 27.63, 27.62, 27.71, 27.77, 27.76, 27.87, 27.97, 28.03,
+ 28.03, 28.13, 28.13, 28.21, 28.34, 28.34, 28.37, 28.35, 28.46, 28.62, 28.57, 28.66,
+ 28.64, 28.72, 28.72, 28.73]
+```
+
+**Symmetric check on llama's own harness.** `llama-bench -m openchat-3.5-1210.Q4_K_S.gguf -p 0 -r 5 -b 2048 -ub 512 -t 8 -o md` (ROW 298's own invocation), `-n 32`: 57.60 +/- 0.07 t/s (17.361 ms/token); `-n 8`: 57.71 +/- 0.06 t/s (17.329 ms/token). The two differ by 0.19%, inside both arms' own CoV (0.12%/0.10%) -- llama's short-run number does not rise or fall materially when the window shortens from 32 to 8 tokens.
+
+**The sentence the numbers settle.** Ours rises smoothly and monotonically from 25.88 ms (steps 3..7) to 26.57 ms (8..31) to 28.03 ms (32..63) -- a +8.3% climb from the scoreboard window to the tail, 5-27x its own CoV band, so it is a real effect, not noise. The brief's alternative hypothesis -- that the 5-step scoreboard window is cheap because it is paying a lower cost than steady state, i.e. a clock/GPU-warm-up ramp that a longer window would shed -- does not hold: later windows are *higher*, not lower, so per the brief's own rule ("if later windows are lower beyond CoV, the record moves; if not, the 5-step window stands") **the 5-step window of record stands** and no number changes. But the per-step series is smoothly increasing across the entire run (not an early jump that then plateaus, the signature a clock ramp would leave), which is the mechanism consistent with a cost that scales with cached context length (`cached_len_before` grows by 1 every step, so attention/KV-read cost per token grows with it) rather than thermal throttling -- and llama's own harness shows no equivalent rise at all between `-n 8` and `-n 32`, so if llama pays the same context-length-dependent cost it is small enough at these lengths to sit inside its CoV, while ours does not. The scoreboard window (3..7) is therefore not a ramp-inflated number; if anything it slightly *underestimates* the per-token cost a full 64-token generation actually pays, because it is measured at the shortest context in the run.
+
+**Residual, named not hidden.** (1) Step 34 is a reproducible `step_wall_ms` outlier in every one of the 3 rounds (60.207, 44.434, 44.881 ms vs a ~27-28 ms neighborhood), the sole cause of the 32..63 window's 13.15% `step_wall_ms` CoV (its `gpu_exec_ms` at the same step, 27.55/27.36/27.41, is unremarkable, so the spike is CPU-side, not GPU) -- unexplained by this row, a candidate for its own measurement. (2) This row does not isolate which sub-cost (attention read volume, KV cache append, plan-cache lookup) grows with `cached_len_before`; it only shows the aggregate `gpu_exec_ms` growth correlates with step index. (3) `-n 8`/`-n 32` on llama's harness is a proxy for "does llama's number move with window length", not a like-for-like context-length sweep at llama's own decode granularity.
+
+**Gates.** Docs-only row, no source or test changed this row -- no clippy/nextest run (brief's per-slice gate rule ties gates to touched crates; none touched).
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | docs-only: `docs(tensor): row 341 steady state at 64 tokens` | Measured `gpu_exec_ms` over the full 64-token decode instead of the usual 8-token oracle run: scoreboard window (steps 3..7) 25.879 ms rises to 26.567 ms (8..31) to 28.032 ms (32..63), +8.3% end to end, well beyond CoV -- the rise is real and monotonic (consistent with per-token cost growing with `cached_len_before`), but it is a RISE not a fall, so per the brief's own rule the scoreboard window of record is unchanged; llama's own `-n 8` vs `-n 32` shows no equivalent rise (57.71 vs 57.60 t/s, inside CoV) | 3 rounds, 64 steps/round; pooled CoV 0.26-1.63% per window except step_wall_ms's 32..63 window (13.15%, traced to a single reproducible step-34 CPU-side outlier, residual not resolved) | quiet gate (names-only, no `-f`) EMPTY before build and before every timed run; load-1 14.25 pre-build (no matching process, tolerated), 4.64 pre-llama-bench |
