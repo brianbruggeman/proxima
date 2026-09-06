@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use toml::Value;
+use proxima_build::sizing::{require_nonzero, SizingSource};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -28,12 +28,7 @@ fn main() {
 // `include!`s the generated file — the single source of truth for the ring
 // depths, UMEM geometry, and RX drain batch.
 
-fn xdp_require_nonzero(name: &str, value: u64) -> u64 {
-    assert!(value > 0, "{name} must be non-zero; got {value}");
-    value
-}
-
-fn xdp_require_pow2(name: &str, value: u64) -> u64 {
+fn xdp_require_pow2(name: &str, value: usize) -> usize {
     assert!(
         value.is_power_of_two(),
         "{name} must be a power of two (SPSC ring index masks with size-1); got {value}"
@@ -41,57 +36,18 @@ fn xdp_require_pow2(name: &str, value: u64) -> u64 {
     value
 }
 
-fn xdp_require_u32(name: &str, value: u64) -> u32 {
+fn xdp_require_u32(name: &str, value: usize) -> u32 {
     u32::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows u32"))
 }
 
-fn xdp_require_usize(name: &str, value: u64) -> usize {
-    usize::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows usize"))
-}
-
-fn xdp_read_int(table: &Value, section: &str, key: &str) -> u64 {
-    let raw = table
-        .get(section)
-        .and_then(|sec| sec.get(key))
-        .and_then(Value::as_integer)
-        .unwrap_or_else(|| {
-            panic!("proxima-net-xdp.toml: missing or non-integer [{section}].{key}")
-        });
-    u64::try_from(raw).unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-}
-
-fn xdp_resolve(table: &Value, section: &str, key: &str) -> u64 {
-    let env_name = format!(
-        "PROXIMA_NET_XDP_{section}_{key}",
-        section = section.to_uppercase(),
-        key = key.to_uppercase()
-    );
-    println!("cargo:rerun-if-env-changed={env_name}");
-    if let Ok(raw) = env::var(&env_name) {
-        raw.parse::<u64>()
-            .unwrap_or_else(|err| panic!("{env_name}={raw} must parse as u64: {err}"))
-    } else {
-        xdp_read_int(table, section, key)
-    }
-}
-
 fn build_xdp_sized() {
-    println!("cargo:rerun-if-changed=proxima-net-xdp.toml");
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
+    let source = SizingSource::load(&manifest_dir, "proxima-net-xdp.toml", "PROXIMA_NET_XDP")
+        .unwrap_or_else(|err| panic!("{err}"));
+    let resolve =
+        |section: &str, key: &str| source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"));
 
-    let toml_text = fs::read_to_string("proxima-net-xdp.toml")
-        .unwrap_or_else(|err| panic!("read proxima-net-xdp.toml: {err}"));
-    let table: Value = toml::from_str(&toml_text)
-        .unwrap_or_else(|err| panic!("parse proxima-net-xdp.toml: {err}"));
-
-    let ring = |key: &str| {
-        xdp_require_u32(
-            key,
-            xdp_require_pow2(
-                key,
-                xdp_require_nonzero(key, xdp_resolve(&table, "rings", key)),
-            ),
-        )
-    };
+    let ring = |key: &str| xdp_require_u32(key, xdp_require_pow2(key, require_nonzero(key, resolve("rings", key))));
     let fill = ring("fill");
     let completion = ring("completion");
     let rx = ring("rx");
@@ -99,28 +55,19 @@ fn build_xdp_sized() {
 
     let frame_count = xdp_require_u32(
         "umem.frame_count",
-        xdp_require_nonzero(
-            "umem.frame_count",
-            xdp_resolve(&table, "umem", "frame_count"),
-        ),
+        require_nonzero("umem.frame_count", resolve("umem", "frame_count")),
     );
     let frame_size = xdp_require_u32(
         "umem.frame_size",
-        xdp_require_nonzero("umem.frame_size", xdp_resolve(&table, "umem", "frame_size")),
+        require_nonzero("umem.frame_size", resolve("umem", "frame_size")),
     );
-    let headroom = xdp_require_u32("umem.headroom", xdp_resolve(&table, "umem", "headroom"));
+    let headroom = xdp_require_u32(
+        "umem.headroom",
+        proxima_build::sizing::require_nonneg("umem.headroom", resolve("umem", "headroom")),
+    );
 
-    let rx_drain = xdp_require_usize(
-        "batch.rx_drain",
-        xdp_require_nonzero("batch.rx_drain", xdp_resolve(&table, "batch", "rx_drain")),
-    );
-    let rx_queue_cap = xdp_require_usize(
-        "app.rx_queue_cap",
-        xdp_require_nonzero(
-            "app.rx_queue_cap",
-            xdp_resolve(&table, "app", "rx_queue_cap"),
-        ),
-    );
+    let rx_drain = require_nonzero("batch.rx_drain", resolve("batch", "rx_drain"));
+    let rx_queue_cap = require_nonzero("app.rx_queue_cap", resolve("app", "rx_queue_cap"));
 
     let out_dir =
         PathBuf::from(env::var_os("OUT_DIR").unwrap_or_else(|| panic!("OUT_DIR set by cargo")));

@@ -4577,6 +4577,7 @@ dependencies = [
  "libc",
  "prime",
  "proxima",
+ "proxima-build",
  "proxima-core",
  "proxima-primitives",
  "proxima-protocols",
@@ -4586,7 +4587,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
- "toml 0.8.23",
 ]
 
 [[package]]
