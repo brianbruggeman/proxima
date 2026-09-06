@@ -19,114 +19,50 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use toml::Value;
+use proxima_build::sizing::SizingSource;
 
-fn env_name(section: &str, key: &str) -> String {
-    format!(
-        "PROXIMA_LISTENERS_HTTP_{}_{}",
-        section.to_ascii_uppercase(),
-        key.to_ascii_uppercase()
-    )
-}
-
-fn get_str<'table>(table: &'table Value, section: &str, key: &str) -> &'table str {
-    table
-        .get(section)
-        .and_then(|sec| sec.get(key))
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| {
-            panic!("proxima-listeners-http.toml: missing or non-string [{section}].{key}")
-        })
-}
-
-fn get_int(table: &Value, section: &str, key: &str) -> u64 {
-    let raw = table
-        .get(section)
-        .and_then(|sec| sec.get(key))
-        .and_then(Value::as_integer)
-        .unwrap_or_else(|| {
-            panic!("proxima-listeners-http.toml: missing or non-integer [{section}].{key}")
-        });
-    u64::try_from(raw).unwrap_or_else(|_| panic!("[{section}].{key} = {raw} must be non-negative"))
-}
-
-fn get_bool(table: &Value, section: &str, key: &str) -> bool {
-    table
-        .get(section)
-        .and_then(|sec| sec.get(key))
-        .and_then(Value::as_bool)
-        .unwrap_or_else(|| {
-            panic!("proxima-listeners-http.toml: missing or non-bool [{section}].{key}")
-        })
-}
-
-/// Read a string `(section, key)` from the TOML, then apply the optional
-/// `PROXIMA_LISTENERS_HTTP_<SECTION>_<KEY>` env-var override.
-fn resolve_str(table: &Value, section: &str, key: &str) -> String {
-    let name = env_name(section, key);
-    println!("cargo:rerun-if-env-changed={name}");
-    env::var(&name).unwrap_or_else(|_| get_str(table, section, key).to_string())
-}
-
-/// Read an integer `(section, key)` from the TOML, then apply the optional
-/// `PROXIMA_LISTENERS_HTTP_<SECTION>_<KEY>` env-var override.
-fn resolve_int(table: &Value, section: &str, key: &str) -> u64 {
-    let name = env_name(section, key);
-    println!("cargo:rerun-if-env-changed={name}");
-    if let Ok(raw) = env::var(&name) {
-        return raw
-            .parse()
-            .unwrap_or_else(|err| panic!("{name} = {raw}: {err}"));
-    }
-    get_int(table, section, key)
-}
-
-/// Read a bool `(section, key)` from the TOML, then apply the optional
-/// `PROXIMA_LISTENERS_HTTP_<SECTION>_<KEY>` env-var override.
-fn resolve_bool(table: &Value, section: &str, key: &str) -> bool {
-    let name = env_name(section, key);
-    println!("cargo:rerun-if-env-changed={name}");
-    if let Ok(raw) = env::var(&name) {
-        return raw
-            .parse()
-            .unwrap_or_else(|err| panic!("{name} = {raw}: {err}"));
-    }
-    get_bool(table, section, key)
-}
-
-fn require_u16(name: &str, value: u64) -> u16 {
+fn require_u16(name: &str, value: i64) -> u16 {
     u16::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows u16"))
 }
 
-fn require_nonempty(name: &str, value: &str) -> String {
+fn require_nonempty(name: &str, value: String) -> String {
     assert!(!value.is_empty(), "{name} must be non-empty");
-    value.to_string()
+    value
 }
 
 #[allow(clippy::expect_used)]
 fn emit_sizing_consts(out_dir: &Path) {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-    let toml_path = PathBuf::from(&manifest_dir).join("proxima-listeners-http.toml");
-    println!("cargo:rerun-if-changed=proxima-listeners-http.toml");
+    let root = SizingSource::load(
+        &manifest_dir,
+        "proxima-listeners-http.toml",
+        "PROXIMA_LISTENERS_HTTP",
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
 
-    let text = fs::read_to_string(&toml_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", toml_path.display()));
-    let root: Value = text
-        .parse()
-        .unwrap_or_else(|err| panic!("parse {}: {err}", toml_path.display()));
-
-    let name = require_nonempty("listener.name", &resolve_str(&root, "listener", "name"));
-    let drain_timeout_ms = resolve_int(&root, "listener", "drain_timeout_ms");
+    let name = require_nonempty(
+        "listener.name",
+        root.resolve_str("listener", "name").unwrap_or_else(|err| panic!("{err}")),
+    );
+    let drain_timeout_ms = root
+        .resolve_int("listener", "drain_timeout_ms")
+        .unwrap_or_else(|err| panic!("{err}"));
     let quiesce_status = require_u16(
         "listener.quiesce_status",
-        resolve_int(&root, "listener", "quiesce_status"),
+        root.resolve_int("listener", "quiesce_status")
+            .unwrap_or_else(|err| panic!("{err}")),
     );
     let quiesce_retry_after = require_nonempty(
         "listener.quiesce_retry_after",
-        &resolve_str(&root, "listener", "quiesce_retry_after"),
+        root.resolve_str("listener", "quiesce_retry_after")
+            .unwrap_or_else(|err| panic!("{err}")),
     );
-    let proxy_protocol_enabled = resolve_bool(&root, "listener", "proxy_protocol_enabled");
-    let encode_buffer_headroom = resolve_int(&root, "serve_pipe", "encode_buffer_headroom");
+    let proxy_protocol_enabled = root
+        .resolve_bool("listener", "proxy_protocol_enabled")
+        .unwrap_or_else(|err| panic!("{err}"));
+    let encode_buffer_headroom = root
+        .resolve_int("serve_pipe", "encode_buffer_headroom")
+        .unwrap_or_else(|err| panic!("{err}"));
 
     let out = format!(
         "// AUTO-GENERATED by build.rs from proxima-listeners-http.toml. DO NOT EDIT.\n\
