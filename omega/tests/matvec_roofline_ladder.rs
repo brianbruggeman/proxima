@@ -3460,7 +3460,19 @@ fn whole_token_matvec_sequence_bare() {
     let q4k_shape_source_text = l3_shape_source();
     let q6k_shape_source_text = q6k_l3_shape_source();
 
+    // ROW 354: `ROW354_EMITTED_ONLY=1` skips arms A-D (this ladder's own
+    // hand-written `q4k_pair_dot`/`q6k_pair_dot` body at fixed dispatch
+    // geometries) so an nsg sweep of arm E -- production's OWN emitted body,
+    // whose `nsg` is a compile-time constant (`omega::sized::PACKED_ROW_NSG`,
+    // `OMEGA_PACKED_ROW_NSG_WIDTH` per build) -- times only the one cell this
+    // process was compiled with, keeping each of the sweep's separate
+    // `cargo test` invocations to a single timed cell instead of five.
+    let emitted_only = std::env::var_os("ROW354_EMITTED_ONLY").is_some();
+
     for arm in WHOLE_TOKEN_ARMS {
+        if emitted_only {
+            break;
+        }
         let q4k_pipeline =
             compile_pipeline(&device, &q4k_shape_source_text, "q4k_matvec_l3_shape", arm.math);
         let q6k_pipeline =
@@ -3611,10 +3623,17 @@ fn whole_token_matvec_sequence_bare() {
     let ms_stats = sample_stats(&ms_samples);
     let gbps_samples_vec = gbps_samples(&elapsed_samples, total_timed_bytes);
     let gbps_stats = sample_stats(&gbps_samples_vec);
+    // ROW 354: the emitted body's own compiled `nsg` in the arm name, read
+    // from the SAME `omega::sized::PACKED_ROW_NSG` constant
+    // `production_reduce_kernel`'s emitted pipeline was built against, so
+    // each of the sweep's separate `cargo test` runs self-documents which
+    // cell it timed instead of relying on the caller to remember which
+    // `OMEGA_PACKED_ROW_NSG_WIDTH` it built with.
     println!(
-        "arm=E_production_emitted_body_nsg2_relaxed dispatches={} bytes={total_timed_bytes} \
+        "arm=E_production_emitted_body_nsg{}_relaxed dispatches={} bytes={total_timed_bytes} \
          median_ms={:.3} min_ms={:.3} max_ms={:.3} cov_pct={:.2} ms_samples={ms_samples:?} \
          median_gbps={:.2} mean_gbps={:.2}",
+        omega::sized::PACKED_ROW_NSG,
         production_ops.len(),
         ms_stats.median,
         ms_stats.min,
