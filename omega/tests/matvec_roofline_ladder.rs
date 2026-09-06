@@ -1956,3 +1956,350 @@ fn decode_shape_roofline_ladder() {
         parity_failures.len()
     );
 }
+
+// ---- ROW 327: output-head buffer-kind vs kernel-variant ladder ----
+//
+// ROW 326 found two variables confounded between the in-program head
+// dispatch (45 GB/s) and this file's own head arm (231 GB/s): the compiled
+// kernel VARIANT (production reduces the MIDDLE axis of a `[seq,emb,vocab]`
+// intermediate, activation operand first -- `..._floatf6B1_ax_0_2_w64`; this
+// file's [`multi_tensor_matmul_program`] reduces the LAST axis, weight
+// operand first -- `..._float6fB1_ax_0_1_w64`) and the weight BUFFER kind
+// (production's weight buffer is a no-copy `MTLBuffer` over the mmap'd real
+// gguf; this file's own head arm synthesizes fresh `StorageModeShared`
+// bytes). This 2x2 isolates each axis independently over the SAME real
+// `output.weight` shape (`Q6_K`, rows=32000ish, k=4096).
+
+/// Which axis order/operand order [`production_head_program`] and
+/// [`multi_tensor_matmul_program`] each bake into the reduce -- the KERNEL
+/// VARIANT half of ROW 327's 2x2. `LadderReduceLast` delegates straight to
+/// [`multi_tensor_matmul_program`] (weight operand first, reduces the LAST
+/// axis, `_ax_0_1` in `kernel_cache_key`); `ProductionReduceMiddle` mirrors
+/// `mistral_forward_program`'s own output-head `elementwise`/`reduce` calls
+/// (`proxima-tensor/src/spec.rs:4181-4195`: `(normed_final, "sd->sdv")` then
+/// `(lm_head, "dv->sdv")`, `reduce(.., "sdv->sdv", "sv->sdv")`) exactly --
+/// activation operand first, reduces the MIDDLE axis, `_ax_0_2`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpShape {
+    LadderReduceLast,
+    ProductionReduceMiddle,
+}
+
+impl OpShape {
+    const fn label(self) -> &'static str {
+        match self {
+            OpShape::LadderReduceLast => "ladder_reduce_last",
+            OpShape::ProductionReduceMiddle => "production_reduce_middle",
+        }
+    }
+}
+
+/// Mirrors `mistral_forward_program`'s output head exactly
+/// (`proxima-tensor/src/spec.rs:4181-4195`), generalized over
+/// `weight_names.len()` independent weight nodes sharing ONE `activation`
+/// input so [`omega::metal::plan`]/`execute_plan` batch every dispatch into
+/// one command buffer, same posture as [`multi_tensor_matmul_program`].
+/// Iteration space is rank 3, `(s, d, v)` = (seq=1, embedding=`k`,
+/// vocab=`rows`) -- the SAME letters spec.rs's own notation strings name.
+/// `activation` is operand 0 of the elementwise product (spec.rs's
+/// `(normed_final, "sd->sdv")` comes first); the reduce's `out_map` keeps
+/// axes `[0, 2]` (`s`, `v`), reducing axis 1 (`d`, the MIDDLE axis) -- spec.rs's
+/// `reduce(.., "sdv->sdv", "sv->sdv")` resolves to exactly this.
+fn production_head_program(
+    weight_names: &[String],
+    rows: u32,
+    k: u32,
+    weight_dtype: DType,
+) -> (Vec<Op>, Vec<NodeId>) {
+    // Weight nodes declared BEFORE `activation` -- `packed_operands_of`
+    // (`omega/src/metal.rs:574`) zips `block_nodes` (program declaration
+    // order) against the caller's own `blocks` slice POSITIONALLY, and
+    // [`run_head_arm`] binds every weight's block before `activation`'s
+    // (the SAME convention [`multi_tensor_matmul_program`] declares in).
+    // Declaration order is independent of OPERAND order inside the
+    // elementwise product below -- `activation` still comes first there,
+    // matching spec.rs's own `(normed_final, "sd->sdv")` before
+    // `(lm_head, "dv->sdv")` -- so this stays a faithful mirror of
+    // production's BoundOp while satisfying this driver's own block-binding
+    // contract.
+    let mut program = Vec::new();
+    let weight_nodes: Vec<NodeId> = weight_names
+        .iter()
+        .map(|name| {
+            append(
+                &mut program,
+                Op::Input {
+                    dtype: weight_dtype,
+                    shape: vec![Extent::Static(k), Extent::Static(rows)],
+                    name: Some(name.clone()),
+                },
+            )
+        })
+        .collect();
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(1), Extent::Static(k)],
+            name: Some("activation".into()),
+        },
+    );
+    let mut sums = Vec::with_capacity(weight_names.len());
+    for (index, weight) in weight_nodes.into_iter().enumerate() {
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (activation, IndexMap::Affine(map::projection(3, &[0, 1]))),
+                    (weight, IndexMap::Affine(map::projection(3, &[1, 2]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 2])),
+                keep: Keep::Reduce,
+                name: Some(format!("production_head_{index}")),
+            }),
+        );
+        sums.push(sum);
+    }
+    (program, sums)
+}
+
+/// Builds either op shape over `weight_names`/`rows`/`k` -- the single
+/// dispatch point [`run_head_arm`] calls so its own body never branches on
+/// [`OpShape`] directly.
+fn head_program(
+    op_shape: OpShape,
+    weight_names: &[String],
+    rows: u32,
+    k: u32,
+    weight_dtype: DType,
+) -> (Vec<Op>, Vec<NodeId>) {
+    match op_shape {
+        OpShape::LadderReduceLast => multi_tensor_matmul_program(weight_names, rows, k, weight_dtype),
+        OpShape::ProductionReduceMiddle => production_head_program(weight_names, rows, k, weight_dtype),
+    }
+}
+
+/// Which weight BYTES [`run_head_arm`] binds every named weight input to --
+/// the BUFFER KIND half of ROW 327's 2x2. `Synthesized` generates
+/// `tensor_count` DISTINCT `Q6_K` tensors through the real encoder, exactly
+/// [`run_shape_arm`]'s own posture. `RealNoCopy` binds every one of the
+/// `tensor_count` named weight inputs to the SAME slice, borrowed straight
+/// out of the real gguf's `mmap` -- 19 (or 1) dispatches of the ONE real
+/// `output.weight` tensor this checkpoint has, not 19 distinct ones (ROW
+/// 327's own doc: "19 distinct tensors are not available, one real head").
+/// [`omega::backend::register_checkpoint_mapping`] must be called on the
+/// SAME mapping before [`omega::metal::plan`]/`execute_plan` runs, so
+/// `upload_packed_bytes`'s `checkpoint_mapping_offset` fallback (this
+/// tensor's own byte offset is essentially never page-aligned by itself)
+/// hands the GPU a no-copy `MTLBuffer` over the WHOLE mapping plus this
+/// tensor's byte offset into it -- production's own exact upload path
+/// (`omega/src/metal.rs:4230-4269`), not a hand-rolled Metal call.
+enum HeadBufferKind<'a> {
+    Synthesized,
+    RealNoCopy { tensor_bytes: &'a [u8] },
+}
+
+impl HeadBufferKind<'_> {
+    const fn label(&self) -> &'static str {
+        match self {
+            HeadBufferKind::Synthesized => "synthesized",
+            HeadBufferKind::RealNoCopy { .. } => "real_no_copy",
+        }
+    }
+}
+
+/// One measured (op_shape, buffer_kind) cell of ROW 327's 2x2, at one
+/// `tensor_count` -- called once at `tensor_count=1` (isolates the
+/// first-dispatch cost per command buffer, [`REPEATS`] separate 1-dispatch
+/// buffers) and once at `tensor_count` large enough to clear
+/// [`MIN_TIMED_BYTES`] (steady per-dispatch mean). Runs parity against the
+/// REAL codec's own dequantize-and-dot CPU oracle only when `check_parity`
+/// is `true` -- the two calls per arm bind bit-identical weight bytes for
+/// their first tensor, so checking it twice would be redundant, not a
+/// stronger proof.
+#[allow(clippy::too_many_arguments)]
+fn run_head_arm(
+    label: &str,
+    op_shape: OpShape,
+    buffer_kind: &HeadBufferKind<'_>,
+    rows: u32,
+    k: u32,
+    tensor_count: usize,
+    seed_base: u64,
+    assert_parity: bool,
+) -> (String, f64, f64, Option<String>) {
+    let row_bytes = ShapeCodec::Q6K.row_bytes(k as usize);
+    let tensor_bytes = (rows as usize * row_bytes) as u64;
+    let total_timed_bytes = tensor_bytes * tensor_count as u64;
+    let weight_names: Vec<String> = (0..tensor_count).map(|index| format!("{label}_{index}")).collect();
+
+    let synth_bytes = match buffer_kind {
+        HeadBufferKind::Synthesized => {
+            Some(synth_weight_bytes(ShapeCodec::Q6K, seed_base, tensor_count, rows as usize, k as usize))
+        }
+        HeadBufferKind::RealNoCopy { .. } => None,
+    };
+
+    let mut activation_lcg = Lcg(seed_base + 999);
+    let activation: Vec<f32> = (0..k).map(|_| activation_lcg.next_unit() * 4.0 - 2.0).collect();
+
+    let (program, sums) = head_program(op_shape, &weight_names, rows, k, DType::UInt8);
+    let blocks_weights: Vec<QuantizedBlock<'_>> = match (buffer_kind, &synth_bytes) {
+        (HeadBufferKind::Synthesized, Some(bytes)) => bytes
+            .chunks_exact(rows as usize * row_bytes)
+            .map(|slice| ShapeCodec::Q6K.quantized_block(slice))
+            .collect(),
+        (HeadBufferKind::RealNoCopy { tensor_bytes }, _) => {
+            (0..tensor_count).map(|_| ShapeCodec::Q6K.quantized_block(tensor_bytes)).collect()
+        }
+        _ => unreachable!("synth_bytes is Some exactly when buffer_kind is Synthesized"),
+    };
+    let mut blocks = blocks_weights;
+    blocks.push(QuantizedBlock::Float32(&activation));
+
+    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums)
+        .expect("plan resolves the output-head matmul over every weight input");
+    let mut resident_names: BTreeSet<&str> = weight_names.iter().map(String::as_str).collect();
+    resident_names.insert("activation");
+    plan.mark_resident(&resident_names);
+    let keys = plan.kernel_keys().expect("every resolved position emits a kernel key");
+    let key = keys
+        .last()
+        .cloned()
+        .expect("the reduce position's own key is the plan's last resolved position");
+
+    let mut first_tensor_output: Vec<f32> = Vec::new();
+    let mut elapsed_samples = Vec::with_capacity(REPEATS);
+    for _ in 0..REPEATS {
+        let started = Instant::now();
+        let evaluated = omega::metal::execute_plan(&plan, &blocks)
+            .expect("execute_plan runs the output-head matmul over every weight input");
+        elapsed_samples.push(started.elapsed());
+        first_tensor_output = evaluated
+            .get(sums[0])
+            .map(|(data, _)| data.to_vec())
+            .expect("first weight's own reduce node is a requested output");
+    }
+    let ns_per_dispatch = ns_per_dispatch_samples(&elapsed_samples, tensor_count);
+    let (mean_ns_per_dispatch, _) = mean_and_cov(&ns_per_dispatch);
+    let samples = gbps_samples(&elapsed_samples, total_timed_bytes);
+    let (mean_gbps, cov) = mean_and_cov(&samples);
+
+    let parity_failure = if assert_parity {
+        let first_tensor_bytes: &[u8] = match (buffer_kind, &synth_bytes) {
+            (HeadBufferKind::Synthesized, Some(bytes)) => &bytes[..rows as usize * row_bytes],
+            (HeadBufferKind::RealNoCopy { tensor_bytes }, _) => tensor_bytes,
+            _ => unreachable!("synth_bytes is Some exactly when buffer_kind is Synthesized"),
+        };
+        let cpu_reference =
+            codec_cpu_reference_first_rows(ShapeCodec::Q6K, first_tensor_bytes, k as usize, &activation);
+        check_parity(
+            &format!("{label} vs cpu_reference"),
+            &first_tensor_output[..PARITY_ROWS],
+            &cpu_reference,
+        )
+    } else {
+        None
+    };
+
+    println!(
+        "arm={label} op_shape={} buffer_kind={} key={key} tensor_count={tensor_count} \
+         mean_ns_per_dispatch={mean_ns_per_dispatch:.0} mean_gbps={mean_gbps:.2} cov_pct={cov:.2}",
+        op_shape.label(),
+        buffer_kind.label()
+    );
+
+    (key, mean_ns_per_dispatch, mean_gbps, parity_failure)
+}
+
+/// ROW 327: isolates the two variables ROW 326 found confounded between
+/// production's own in-program output-head dispatch (2.19 ms first dispatch,
+/// 0.41 ms a duplicate; 45 GB/s in-program) and this file's own head arm
+/// (231 GB/s) -- the compiled kernel VARIANT
+/// ([`OpShape::ProductionReduceMiddle`] vs [`OpShape::LadderReduceLast`]) and
+/// the weight BUFFER kind ([`HeadBufferKind::RealNoCopy`] vs
+/// [`HeadBufferKind::Synthesized`]) -- as an honest 2x2 over the SAME real
+/// `output.weight` shape.
+///
+/// `#[ignore]`d: depends on the same host-local openchat GGUF checkout as
+/// this file's other real-checkpoint arms, and needs a real Metal device.
+#[test]
+#[ignore = "depends on a host-local openchat gguf checkout and a real metal device"]
+fn head_buffer_kind_by_kernel_variant() {
+    let checkpoint = checkpoint_path();
+    let path = Path::new(&checkpoint);
+    let (parsed, file_len, _file) =
+        real_gguf_header(path).expect("real openchat gguf checkpoint header parses");
+    let real_tensor = locate_real_tensor(&parsed, file_len, "output.weight", GgmlType::Q6_K)
+        .expect("output.weight is Q6_K in this checkpoint");
+    assert_eq!(real_tensor.in_dim, IN_DIM, "output.weight's own k must match this ladder's IN_DIM");
+
+    let mapped = MappedFile::open(path).expect("mmap the real openchat gguf checkpoint");
+    omega::backend::register_checkpoint_mapping(mapped.as_slice());
+    let real_tensor_bytes = &mapped.as_slice()
+        [real_tensor.byte_offset as usize..(real_tensor.byte_offset + real_tensor.byte_len) as usize];
+
+    let arms: [(OpShape, HeadBufferKind<'_>); 4] = [
+        (OpShape::LadderReduceLast, HeadBufferKind::Synthesized),
+        (OpShape::ProductionReduceMiddle, HeadBufferKind::Synthesized),
+        (OpShape::LadderReduceLast, HeadBufferKind::RealNoCopy { tensor_bytes: real_tensor_bytes }),
+        (OpShape::ProductionReduceMiddle, HeadBufferKind::RealNoCopy { tensor_bytes: real_tensor_bytes }),
+    ];
+
+    let mut parity_failures = Vec::new();
+    println!(
+        "=== ROW 327: output-head buffer-kind x kernel-variant, real output.weight \
+         (rows={} k={IN_DIM}, device ceiling {DEVICE_CEILING_GBPS:.2} GB/s) ===",
+        real_tensor.out_dim
+    );
+    for (op_shape, buffer_kind) in &arms {
+        let label = format!("{}_{}", op_shape.label(), buffer_kind.label());
+        let rows = match buffer_kind {
+            HeadBufferKind::Synthesized => Q6K_HEAD_ROWS as u32,
+            HeadBufferKind::RealNoCopy { .. } => real_tensor.out_dim as u32,
+        };
+
+        let (_, first_dispatch_ns, _, _) =
+            run_head_arm(&label, *op_shape, buffer_kind, rows, IN_DIM as u32, 1, 90_000, false);
+
+        let (key, mean_dispatch_ns, mean_gbps, parity_failure) = run_head_arm(
+            &label,
+            *op_shape,
+            buffer_kind,
+            rows,
+            IN_DIM as u32,
+            Q6K_HEAD_TENSOR_COUNT,
+            91_000,
+            true,
+        );
+        if let Some(failure) = parity_failure {
+            parity_failures.push(failure);
+        }
+
+        println!(
+            "summary arm={label} key={key} first_dispatch_ms={:.4} mean_dispatch_ms={:.4} \
+             mean_gbps={mean_gbps:.2} vs_row_326_in_program_first_ms=2.19 vs_row_326_in_program_dup_ms=0.41",
+            first_dispatch_ns / 1e6,
+            mean_dispatch_ns / 1e6
+        );
+    }
+
+    assert!(
+        parity_failures.is_empty(),
+        "parity failed for {} arm(s): {parity_failures:#?}",
+        parity_failures.len()
+    );
+}

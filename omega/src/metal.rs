@@ -541,6 +541,24 @@ impl Plan {
             None
         }
     }
+
+    /// The plan-cache key [`resolve_steps`] computes for each program
+    /// position (`omega::msl::kernel_cache_key`'s own doc: a pure structural
+    /// fingerprint of that position's resolved `BoundOp`) -- exposed so a
+    /// caller can assert exactly which compiled kernel variant a program
+    /// resolves to (operand order, reduced axis, packed-row shape) without
+    /// re-deriving `kernel_cache_key`'s own logic outside this crate.
+    ///
+    /// # Errors
+    /// Propagates the same rejection `kernel_cache_key` raises for an
+    /// unsupported dtype.
+    pub fn kernel_keys(&self) -> Result<Vec<String>, MetalError> {
+        self.prepared
+            .resolved
+            .iter()
+            .map(|bound| kernel_cache_key(bound, &self.packed_operands).map_err(MetalError::from))
+            .collect()
+    }
 }
 
 /// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has an
