@@ -3930,17 +3930,18 @@ fn nserror_description(error: &NSError) -> String {
     error.localizedDescription().to_string()
 }
 
-/// [`MTLCompileOptions::mathMode`], narrowed to the two values this crate's
-/// kernels are ever compiled with. `Fast` is not a third variant here: ROW
-/// 296 (`proxima-tensor/docs/discipline.md`) measured it identical to
-/// `Relaxed` (240.9-247.3 GB/s vs. 179.2 GB/s for `Safe`, same 0-1.9e-6
-/// parity drift), so exposing it would be a knob nothing ever selects
-/// (guiding-principles §1: no peer for an option with no distinct use).
+/// [`MTLCompileOptions::mathMode`], narrowed to the three values this
+/// crate's kernels compile with. ROW 296 (`proxima-tensor/docs/discipline.md`)
+/// measured `Fast` identical to `Relaxed` on that one kernel
+/// (240.9-247.3 GB/s vs. 179.2 GB/s for `Safe`, same 0-1.9e-6 parity drift)
+/// and dropped it as a knob nothing selected; ROW 338's best cell (nsg=4 +
+/// fast) reopened the question on a different kernel, so `Fast` is back as a
+/// selectable runtime value rather than a recompile.
 ///
 /// A [`Plan`] carries one of these ([`Plan::set_math_mode`]); it feeds
 /// `compile_pipeline` and folds into `pipeline_for`'s cache key so a
 /// `Safe`-compiled kernel is never handed to a caller that asked for
-/// `Relaxed`, or the reverse.
+/// `Relaxed` or `Fast`, or the reverse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MathMode {
     /// IEEE-safe float math -- bit-parity with
@@ -3954,6 +3955,11 @@ pub enum MathMode {
     /// `Safe`'s in both rows.
     #[default]
     Relaxed,
+    /// Metal's fast-math kernels. Measured indistinguishable from
+    /// `Relaxed` on the ROW 296 kernel; ROW 338's best cell (nsg=4 + fast)
+    /// found a different kernel where it was not, so it is exposed here as
+    /// a runtime choice rather than assumed identical everywhere.
+    Fast,
 }
 
 impl MathMode {
@@ -3961,17 +3967,19 @@ impl MathMode {
         match self {
             MathMode::Safe => MTLMathMode::Safe,
             MathMode::Relaxed => MTLMathMode::Relaxed,
+            MathMode::Fast => MTLMathMode::Fast,
         }
     }
 
     /// The character [`pipeline_for`] appends to a structural
-    /// [`kernel_cache_key`] so the two modes never share a compiled
+    /// [`kernel_cache_key`] so the three modes never share a compiled
     /// pipeline -- kept next to [`Self::as_mtl`] so the two mappings this
     /// type owns (device value, cache-key token) cannot drift apart.
     const fn cache_token(self) -> char {
         match self {
             MathMode::Safe => 'S',
             MathMode::Relaxed => 'R',
+            MathMode::Fast => 'F',
         }
     }
 }
@@ -4016,7 +4024,7 @@ impl DispatchType {
 mod math_mode_cache_key_tests {
     //! [`pipeline_for`]'s cache key is `format!("{cache_key}{}",
     //! math_mode.cache_token())` -- this proves the one fact that
-    //! invariant depends on: the two live [`MathMode`] variants never
+    //! invariant depends on: the three live [`MathMode`] variants never
     //! collide on that token, so two `Plan`s agreeing on every structural
     //! field [`kernel_cache_key`] checks still resolve to distinct
     //! [`PIPELINE_CACHE`] entries when they disagree on math mode.
@@ -4024,13 +4032,22 @@ mod math_mode_cache_key_tests {
     use super::MathMode;
 
     #[test]
-    fn safe_and_relaxed_produce_distinct_pipeline_cache_keys() {
+    fn safe_relaxed_and_fast_produce_distinct_pipeline_cache_keys() {
         let structural_key = "elementwise_f32S_ax_0";
         let safe_key = format!("{structural_key}{}", MathMode::Safe.cache_token());
         let relaxed_key = format!("{structural_key}{}", MathMode::Relaxed.cache_token());
+        let fast_key = format!("{structural_key}{}", MathMode::Fast.cache_token());
         assert_ne!(
             safe_key, relaxed_key,
             "Safe and Relaxed must never share a compiled pipeline"
+        );
+        assert_ne!(
+            safe_key, fast_key,
+            "Safe and Fast must never share a compiled pipeline"
+        );
+        assert_ne!(
+            relaxed_key, fast_key,
+            "Relaxed and Fast must never share a compiled pipeline"
         );
     }
 }
