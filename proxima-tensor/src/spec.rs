@@ -590,6 +590,125 @@ fn reduce(
     ))
 }
 
+/// Which pairing a checkpoint's RoPE uses to split one head's channel axis
+/// into rotation pairs -- interleaved (`(2*i, 2*i+1)`, llama's
+/// `kernel_rope_norm`) for a checkpoint with no QK-norm, split-half
+/// (`(i, i+pairs)`, llama's `kernel_rope_neox`,
+/// `ggml-metal.metal:2795-2845`) for one with it -- mirroring the
+/// `qk_norm.is_some()` match a few call sites below this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RopePairing {
+    Interleaved,
+    SplitHalf { pairs: u32 },
+}
+
+impl RopePairing {
+    /// `(same, partner)` axis-expression suffixes reading a pair's two
+    /// source elements off ONE `head_dim`-wide axis, given a pair index `i`
+    /// (extent `pairs`) that is genuinely NARROWER than `source`'s own
+    /// channel axis under [`Self::SplitHalf`] (`source` is `attn_head_dim`
+    /// wide; `i` only ranges over `pairs = rotary_dim/2`). A bare `"i"`
+    /// would parse to a single coefficient-1, offset-0 term, which
+    /// `shape::infer`'s `unify_iteration_space` (`shape.rs:224-227`) reads
+    /// as "this operand's own axis size IS `i`'s extent" -- sizing `i` at
+    /// `source`'s full width instead of `cos_new`/`sin_new`'s `pairs` and
+    /// producing an `ExtentMismatch` the moment `pairs < attn_head_dim`
+    /// (partial rotary). `"i+0*i"` is the same address (`i*1 + i*0 == i`)
+    /// spelled as two terms so that check's `[term]`-slice match declines,
+    /// leaving `cos_new`/`sin_new` as the sole size-definer for `i`, same
+    /// as [`Self::Interleaved`]'s `"2*i"` already is (its coefficient-2
+    /// term never qualifies as a coefficient-1 single term either).
+    fn offsets(self) -> (alloc::string::String, alloc::string::String) {
+        match self {
+            Self::Interleaved => (
+                alloc::string::String::from("2*i"),
+                alloc::string::String::from("2*i+1"),
+            ),
+            Self::SplitHalf { pairs } => (alloc::string::String::from("i+0*i"), alloc::format!("i+{pairs}")),
+        }
+    }
+}
+
+/// Builds RoPE for one tensor (`source`, e.g. `q`/`k`/`k_new`, addressed
+/// whole -- never a pre-sliced half) as two [`Op::Elementwise`] chains
+/// reading `source` directly through [`RopePairing::offsets`] instead of
+/// through a separately-materialized `per_head_channel_range` slice.
+/// Returns `(first, second)`: `(rotated_even, rotated_odd)` under
+/// [`RopePairing::Interleaved`], `(rotated_first, rotated_second)` under
+/// [`RopePairing::SplitHalf`] -- the same two [`NodeId`]s every existing
+/// downstream call site already threads separately into its own group
+/// broadcast / cache dot product, unchanged.
+///
+/// A genuinely single-dispatch form (both halves from one
+/// [`Op::Elementwise`], mirroring llama's `kernel_rope_neox`/
+/// `kernel_rope_norm` writing both destinations from one pair read) was
+/// tried and reverted: packing a parity axis into the source's own
+/// `IndexMap` leaves that axis with no operand anywhere in the node that
+/// gives `shape::infer`'s `unify_iteration_space`
+/// (`shape.rs:208-256`) a pure single-coefficient-term projection to size
+/// it from, since the source's own term is fused with `i` and every
+/// available trig/sign operand is either broadcast-away from it or
+/// entangled the same way -- `UnconstrainedDim` at construction, not a
+/// runtime bug. This form still removes the two-op-per-half
+/// `per_head_channel_range` mask-and-reduce this crate used to build
+/// `q_first`/`q_second`/`k_first`/`k_second` before rotating them.
+fn fused_rope_pair(
+    program: &mut Vec<Op>,
+    source: NodeId,
+    head_letter: char,
+    cos_new: NodeId,
+    sin_new: NodeId,
+    pairing: RopePairing,
+) -> Result<(NodeId, NodeId), TensorError> {
+    let out_axes = alloc::format!("s{head_letter}i");
+    let out_identity = alloc::format!("{out_axes}->{out_axes}");
+    let (same_offset, partner_offset) = pairing.offsets();
+
+    let same_pattern = alloc::format!("s,{head_letter},{same_offset}->{out_axes}");
+    let partner_pattern = alloc::format!("s,{head_letter},{partner_offset}->{out_axes}");
+    let trig_pattern = alloc::format!("s,i->{out_axes}");
+
+    let same_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(source, same_pattern.as_str()), (cos_new, trig_pattern.as_str())],
+    )?;
+    let partner_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(source, partner_pattern.as_str()), (sin_new, trig_pattern.as_str())],
+    )?;
+    let rotated_same = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(same_cos, out_identity.as_str()), (partner_sin, out_identity.as_str())],
+    )?;
+
+    let partner_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(source, partner_pattern.as_str()), (cos_new, trig_pattern.as_str())],
+    )?;
+    let same_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(source, same_pattern.as_str()), (sin_new, trig_pattern.as_str())],
+    )?;
+    let rotated_partner = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(partner_cos, out_identity.as_str()), (same_sin, out_identity.as_str())],
+    )?;
+
+    Ok((rotated_same, rotated_partner))
+}
+
 /// `[?0]`-shaped bound leaf. `eps` is the only caller left: RMSNorm's
 /// epsilon is model metadata (`attention.layer_norm_rms_epsilon` in a GGUF
 /// checkpoint), not a value this function's `u32` parameters determine, so
@@ -2650,41 +2769,18 @@ fn append_mistral_cached_layer(
     let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match qk_norm {
         Some(_) => {
             let pairs = head_dim / 2;
-            let q_first = per_head_channel_range(program, q, "h", head_dim, 0, pairs)?;
-            let q_second = per_head_channel_range(program, q, "h", head_dim, pairs, pairs)?;
-            let k_first = per_head_channel_range(program, k_new, "u", head_dim, 0, pairs)?;
-            let k_second = per_head_channel_range(program, k_new, "u", head_dim, pairs, pairs)?;
-
-            let q_first_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first, "shi->shi"), (cos_new, "si->shi")])?;
-            let q_second_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_second, "shi->shi"), (sin_new, "si->shi")])?;
-            let rotated_q_first = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_first_cos, "shi->shi"), (q_second_sin, "shi->shi")])?;
-            let q_second_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_second, "shi->shi"), (cos_new, "si->shi")])?;
-            let q_first_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first, "shi->shi"), (sin_new, "si->shi")])?;
-            let rotated_q_second = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_second_cos, "shi->shi"), (q_first_sin, "shi->shi")])?;
-
-            let k_first_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_first, "sui->sui"), (cos_new, "si->sui")])?;
-            let k_second_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_second, "sui->sui"), (sin_new, "si->sui")])?;
-            let rotated_k_first = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_first_cos, "sui->sui"), (k_second_sin, "sui->sui")])?;
-            let k_second_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_second, "sui->sui"), (cos_new, "si->sui")])?;
-            let k_first_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_first, "sui->sui"), (sin_new, "si->sui")])?;
-            let rotated_k_second = elementwise(program, DType::Float32, ScalarOp::Add, &[(k_second_cos, "sui->sui"), (k_first_sin, "sui->sui")])?;
+            let (rotated_q_first, rotated_q_second) =
+                fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
+            let (rotated_k_first, rotated_k_second) =
+                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
 
             (rotated_q_first, rotated_q_second, rotated_k_first, rotated_k_second)
         }
         None => {
-            let q_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (cos_new, "si->shi")])?;
-            let q_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (sin_new, "si->shi")])?;
-            let rotated_q_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")])?;
-            let q_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (sin_new, "si->shi")])?;
-            let q_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (cos_new, "si->shi")])?;
-            let rotated_q_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")])?;
-
-            let k_new_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i->sui"), (cos_new, "si->sui")])?;
-            let k_new_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i+1->sui"), (sin_new, "si->sui")])?;
-            let rotated_k_new_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_new_even_cos, "sui->sui"), (k_new_odd_sin, "sui->sui")])?;
-            let k_new_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i->sui"), (sin_new, "si->sui")])?;
-            let k_new_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i+1->sui"), (cos_new, "si->sui")])?;
-            let rotated_k_new_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(k_new_even_sin, "sui->sui"), (k_new_odd_cos, "sui->sui")])?;
+            let (rotated_q_even, rotated_q_odd) =
+                fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::Interleaved)?;
+            let (rotated_k_new_even, rotated_k_new_odd) =
+                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::Interleaved)?;
 
             (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd)
         }
@@ -3275,50 +3371,19 @@ fn append_qwen35_dense_attention_layer(
     let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_attn_head_dim, eps, "h")?;
     let k = rmsnorm_per_head(program, k_raw, k_norm_weight, inv_attn_head_dim, eps, "u")?;
 
-    let q_first = per_head_channel_range(program, q, "h", attn_head_dim, 0, pairs)?;
-    let q_second = per_head_channel_range(program, q, "h", attn_head_dim, pairs, pairs)?;
     let q_pass = per_head_channel_range(program, q, "h", attn_head_dim, rotary_dim, pass_dim)?;
-
-    let k_first = per_head_channel_range(program, k, "u", attn_head_dim, 0, pairs)?;
-    let k_second = per_head_channel_range(program, k, "u", attn_head_dim, pairs, pairs)?;
     let k_pass = per_head_channel_range(program, k, "u", attn_head_dim, rotary_dim, pass_dim)?;
 
     // split-half RoPE (`ggml_compute_forward_rope_flt`'s
     // `GGML_ROPE_TYPE_IMROPE` arm, `rotate_pairs(n_dims, n_dims/2, ...)`):
     // `out[i] = x[i]*cos[i] - x[i+pairs]*sin[i]`,
-    // `out[i+pairs] = x[i+pairs]*cos[i] + x[i]*sin[i]`.
-    let q_first_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first, "shi->shi"), (cos_new, "si->shi")])?;
-    let q_second_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_second, "shi->shi"), (sin_new, "si->shi")])?;
-    let rotated_q_first = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(q_first_cos, "shi->shi"), (q_second_sin, "shi->shi")],
-    )?;
-    let q_second_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_second, "shi->shi"), (cos_new, "si->shi")])?;
-    let q_first_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first, "shi->shi"), (sin_new, "si->shi")])?;
-    let rotated_q_second = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(q_second_cos, "shi->shi"), (q_first_sin, "shi->shi")],
-    )?;
-    let k_first_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_first, "sui->sui"), (cos_new, "si->sui")])?;
-    let k_second_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_second, "sui->sui"), (sin_new, "si->sui")])?;
-    let rotated_k_new_first = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(k_first_cos, "sui->sui"), (k_second_sin, "sui->sui")],
-    )?;
-    let k_second_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_second, "sui->sui"), (cos_new, "si->sui")])?;
-    let k_first_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_first, "sui->sui"), (sin_new, "si->sui")])?;
-    let rotated_k_new_second = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(k_second_cos, "sui->sui"), (k_first_sin, "sui->sui")],
-    )?;
+    // `out[i+pairs] = x[i+pairs]*cos[i] + x[i]*sin[i]`. Read directly off
+    // `q`/`k`'s own `attn_head_dim`-wide axis (not a pre-sliced
+    // `q_first`/`q_second`) -- see [`fused_rope_pair`].
+    let (rotated_q_first, rotated_q_second) =
+        fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
+    let (rotated_k_new_first, rotated_k_new_second) =
+        fused_rope_pair(program, k, 'u', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
 
     let group_map_i = alloc::format!("s,{group}*u+g,i->sugi");
     let q_first_grouped = elementwise(
@@ -3813,79 +3878,10 @@ fn append_mistral_single_range_cached_layer(
         "sud->sudi",
     )?;
 
-    let q_even_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i->shi"), (cos_new, "si->shi")],
-    )?;
-    let q_odd_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i+1->shi"), (sin_new, "si->shi")],
-    )?;
-    let rotated_q_even = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")],
-    )?;
-    let q_even_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i->shi"), (sin_new, "si->shi")],
-    )?;
-    let q_odd_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i+1->shi"), (cos_new, "si->shi")],
-    )?;
-    let rotated_q_odd = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")],
-    )?;
-
-    let k_new_even_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k_new, "s,u,2*i->sui"), (cos_new, "si->sui")],
-    )?;
-    let k_new_odd_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k_new, "s,u,2*i+1->sui"), (sin_new, "si->sui")],
-    )?;
-    let rotated_k_new_even = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(k_new_even_cos, "sui->sui"), (k_new_odd_sin, "sui->sui")],
-    )?;
-    let k_new_even_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k_new, "s,u,2*i->sui"), (sin_new, "si->sui")],
-    )?;
-    let k_new_odd_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k_new, "s,u,2*i+1->sui"), (cos_new, "si->sui")],
-    )?;
-    let rotated_k_new_odd = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(k_new_even_sin, "sui->sui"), (k_new_odd_cos, "sui->sui")],
-    )?;
+    let (rotated_q_even, rotated_q_odd) =
+        fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::Interleaved)?;
+    let (rotated_k_new_even, rotated_k_new_odd) =
+        fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::Interleaved)?;
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
