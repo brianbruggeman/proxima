@@ -4205,6 +4205,25 @@ fn pipeline_for(
         return Ok(pipeline);
     }
     trace!(cache_key = %cache_key, hit = false, "pipeline cache lookup");
+    // fires only on a pipeline-cache MISS, before `compile_pipeline` runs --
+    // evidence of the lowering choice this cache-key string encodes, never
+    // of a later dispatch: a cache hit on the same key emits nothing here.
+    #[cfg(feature = "instrument")]
+    if let BoundOpKind::CachedAttention {
+        cached_key_rows,
+        new_key_rows,
+        ..
+    } = &bound.kind
+    {
+        let context_length = cached_key_rows + new_key_rows;
+        debug!(
+            context_length,
+            context_chunks = crate::msl::context_chunks_for(context_length, numeric_policy),
+            numeric_policy = ?numeric_policy,
+            kernel_identity = %cache_key,
+            "lowering selected attention chunking"
+        );
+    }
     #[cfg(feature = "instrument")]
     let compile_started = read_ticks();
     let kernel = emit(bound, packed_operands, numeric_policy)?;
