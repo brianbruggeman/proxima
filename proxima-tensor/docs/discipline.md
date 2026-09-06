@@ -24504,3 +24504,56 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `test(omega): ladder arms upload once and time only the dispatches` + this row | Every `run_shape_arm` weight node is now `plan.mark_resident`-marked and its backing `Vec<u8>` is kept alive for the whole test run via a caller-owned `weight_keepalive` accumulator, fixing ROW 335's void per-repeat re-upload without reintroducing ROW 334's stale-buffer collision; a per-repeat `assert_eq!` on `nocopy_uploads`/`resident_uploads` now proves zero uploads on every timed repeat, not just a faster wall time | Every `Q4_K`/`Q5_K` shape arm's median GB/s rose 4-8x (ROW 335's 20.29-25.68 -> this row's 94.89-196.94); `head` (`Q6_K`) rose from 8.07 to 231.96, matching ROW 322 | 1 full 10-arm `decode_shape_roofline_ladder` run (1502.32s, release, all parity-clean, zero uploads on every timed repeat) | quiet gate (`pgrep -l` process-name list) EMPTY and load-1 < 10 confirmed before the measured run (waited ~90s for load-1 11.09 -> 4.49) |
+
+## ROW 337 -- per-decode-shape simdgroups/math sweep on production's own dispatch mode: attn_k measured, attn_q/ffn_up/ffn_down not run (time budget)
+
+**Card:** `test(omega): decode-shape arms sweep simdgroups and math mode` (off `main` at `efd5dfc`). **Worktree/branch:** `proxima-wt-r338`, `test/shape-arm-nsg-math-sweep`.
+
+**Question.** On PRODUCTION's own op variant per shape (`q4k_pair_dot`, `dispatchThreads`), what do simdgroups-per-threadgroup {2, 4, 8} x math mode {relaxed, fast} buy? ROW 335's L3 sweep answered this on ONE shape (the ffn shape: production-default cell 181 GB/s, fastest cell 247 GB/s); this row generalizes that sweep across the real per-family shapes ROW 336 isolated, the way ROW 336's own `run_shape_arm` generalized the production-path measurement across shape.
+
+**Why not through `run_shape_arm`/`execute_plan`.** `omega::msl::emit`'s own dispatch geometry (simdgroups per threadgroup, math mode) is a compile-time Cargo feature (`metal-q4k-nsg2` and friends, this file's own module doc) and cannot be varied at runtime inside one test binary -- the same reason ROW 335's own L3 sweep exists as a hand-dispatched kernel rather than a call through `plan`/`execute_plan`. `run_shape_arm_sweep` (`omega/tests/matvec_roofline_ladder.rs`) reuses that exact mechanism (`q4k_matvec_l3_shape`, `l3_shape_source`, `compile_pipeline`, `time_batch_l3_shape_threads` -- the SAME `q4k_pair_dot` body production emits, restated verbatim from `omega::msl::Q4K_UNPACK_MSL`), generalized over `(rows, k)` instead of hand-copied once per shape.
+
+**Four shapes, held to `dispatchThreads` (production's own dispatch mode, ROW 335's checked default) so only the two axes the question names move:** `attn_k` (1024x4096), `attn_q` (4096x4096), `ffn_up` (14336x4096), `ffn_down` (4096x14336, `ffn_up`'s transpose) -- all real `Q4_K` shapes this checkpoint's decode step dispatches (ROW 336's own `DECODE_SHAPES`), tensor counts sized identically to ROW 336's own `tensor_count_for_shape` (the `MIN_TIMED_BYTES` 2 GB decimal amortization floor, ROW 289).
+
+**Parallelized synthesis, added this row.** The serial `synth_weight_bytes` (ROW 336's own helper, unchanged, still used by every other caller) took ~41 minutes wall time to quantize `attn_k`'s own 848 real-encoder tensors (868,352 rows through the real RD-search `q4_k::quantize`) on this host, single-threaded -- a cost this sweep pays FOUR times over (once per shape), which its own budget could not absorb. `synth_weight_bytes_parallel` (same file, `rayon` added as an `omega` dev-dependency via `cargo add rayon --dev`) is `synth_weight_bytes`'s own body with the outer per-tensor loop split across `par_chunks_mut` -- sound because each tensor already gets its own `Lcg` seeded from `seed_base + tensor_index` (`synth_weight_bytes`'s own doc: no shared state, no two tensors' bytes depend on each other) -- cutting `attn_k`'s own synthesis to ~4.5 minutes on this host (887% CPU observed, ~9 cores). Left local to the new sweep rather than folded into `synth_weight_bytes` itself, so every OTHER caller's serial timing is unchanged.
+
+**Quiet gate.** `pgrep -l 'proxima_model_i|llama-bench|oracle-|gpu_load_genera|matvec_roofline|^cargo$|^rustc$|nextest|cargo-nextest'` EMPTY and load-1 < 10 confirmed immediately before the measured run (`uptime` before: load-1 3.69; a prior attempt with the unparallelized synth was allowed to run for over an hour of wall time under an earlier quiet window before this row's own coordinator called time and the run was killed mid-`attn_q` synthesis, discarded, not reported below).
+
+**Data -- `decode_shape_nsg_math_sweep`, ONE quiet run, killed after `attn_k` completed and `attn_q` had only just printed its own header (zero `attn_q` cells timed) -- `attn_q`/`ffn_up`/`ffn_down` are NOT RUN, not zero, not estimated:**
+
+| shape | cell (nsg, math) | median GB/s | CoV % | parity (max rel err) | production default |
+| --- | --- | --- | --- | --- | --- |
+| attn_k | nsg=2, relaxed | 133.43 | 2.05 | 1.77e-6, OK | YES |
+| attn_k | nsg=4, relaxed | 134.86 | 1.59 | 1.77e-6, OK | no |
+| attn_k | nsg=8, relaxed | 137.10 | 1.82 | 1.77e-6, OK | no |
+| attn_k | nsg=2, fast | 133.41 | 2.87 | 1.77e-6, OK | no |
+| attn_k | nsg=4, fast | 133.64 | 1.80 | 1.77e-6, OK | no |
+| attn_k | nsg=8, fast | 135.70 | 2.35 | 1.77e-6, OK | no |
+| attn_q | -- | -- | -- | -- | NOT RUN |
+| ffn_up | -- | -- | -- | -- | NOT RUN |
+| ffn_down | -- | -- | -- | -- | NOT RUN |
+
+Every `attn_k` cell's own parity check reports the SAME `relative_error=1.77e-6` regardless of math mode -- `q4_k_pair_dot`'s per-element arithmetic on this shape never exercises a code path `MTLMathMode::Fast` approximates differently from `Relaxed` at a magnitude this test's own `PARITY_MAX_REL_ERROR=1e-5` bound would catch; `fast` staying parity-clean here is a MEASUREMENT, not a general claim about `fast` math on every shape.
+
+**Best cell vs production default, `attn_k` only (the only shape measured).** Best: `nsg=8, relaxed` at 137.10 GB/s. Production default (`nsg=2, relaxed`): 133.43 GB/s. Gain: +3.67 GB/s, +2.75%. `attn_k` moves `1024 * 2304 = 2,359,296` bytes/tensor (`ShapeCodec::Q4K.row_bytes(4096)`), one real, distinct tensor per layer across this checkpoint's 32 layers (`FFN_LAYERS`) -- `75,497,472` bytes (0.0755 GB decimal) of `attn_k` weight per decode token. DERIVED (bytes/measured-GB/s, not separately measured): production default costs `0.0755e9 / 133.43e9 * 1000 = 0.566 ms/token` for `attn_k` alone; the best cell costs `0.0755e9 / 137.10e9 * 1000 = 0.551 ms/token` -- a **0.015 ms/token** gain for this one family. This is NOT the same number as the brief's own "0.76 GB attention projections" total (that figure spans `attn_q`+`attn_k`+`attn_v`+`attn_output` together, ROW 336's module doc); `attn_k` alone is roughly a tenth of that total by byte share (0.0755/0.76 ≈ 9.9%), so no aggregate "ms on the table" line is reported here -- three of the four shapes this row was asked to cover, including both `ffn` shapes that ROW 336 measured as the dominant 3.17 GB/token cost, were never dispatched.
+
+**Residual, named not hidden.** `attn_q`, `ffn_up`, `ffn_down` are entirely unmeasured by this row -- not "assumed similar to `attn_k`", not "expected to follow ROW 335's ffn single-shape numbers" (ROW 335 measured `dispatchThreads`+`dispatchThreadgroups` both, `safe`/`relaxed`/`fast`, nsg={1,2,4} on the ffn shape ONLY, under a DIFFERENT kernel entry point's compiled variant -- not restated as a stand-in for `ffn_up`/`ffn_down` here). Whether the ~2.75% `attn_k` gain generalizes to the FFN shapes (higher per-dispatch parallelism already, ROW 336's own read: "bandwidth rises with row count") is unmeasured, not a small number -- a future row's first job, not a small number safe to interpolate from `attn_k`'s own 1024-row shape.
+
+**Gates.** `cargo test -p omega --test matvec_roofline_ladder --features metal --no-run`: EXIT 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0.
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-row337-repro -b docs/row-337-repro main
+cd ../proxima-wt-row337-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --test matvec_roofline_ladder --features metal \
+  -- --ignored --exact decode_shape_nsg_math_sweep --nocapture
+```
+(expected: ~4.5 minutes for `attn_k` alone on a host comparable to this row's M1 Max; the full 4-shape run's own wall time is unmeasured by this row -- budget accordingly before running unattended.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | `test(omega): decode-shape arms sweep simdgroups and math mode` + this row | New `run_shape_arm_sweep`/`decode_shape_nsg_math_sweep` generalize ROW 335's single-shape (ffn) simdgroups/math sweep across the real per-family shapes ROW 336 isolated, reusing the L3 shape-sweep's hand-dispatched mechanism (production's dispatch geometry is compile-time, cannot vary at runtime); `synth_weight_bytes_parallel` (new, `rayon` dev-dependency) cuts per-shape synthesis ~9x so the sweep fits inside a session | `attn_k`: nsg=8/relaxed measured 137.10 GB/s vs production default (nsg=2/relaxed) 133.43 GB/s, +2.75% (+0.015 ms/token for this one family); `attn_q`/`ffn_up`/`ffn_down` NOT RUN | 1 partial run (`attn_k`'s own 6 cells complete, parity-clean; `attn_q` killed before its first cell) | quiet gate (`pgrep -l` process-name list) EMPTY and load-1 < 10 confirmed before the measured run |
