@@ -24373,3 +24373,67 @@ CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `fix(omega): stop resident-caching ladder's ephemeral synthesized weights` + this row | Root-causes ROW 333's entire 4-of-10 residual: `NOCOPY_BUFFERS` caches zero-copy weight uploads by `(pointer, byte_length)` alone, never by name, so `mark_resident`'s per-arm-unique weight names (already unique pre-ROW-332) never gated it; a freed same-byte-size arm's `Vec<u8>` landing at the identical address served the next arm 100% stale bytes (`nocopy_reuses` equal to `nocopy_uploads`, proven via direct counter reads, not inferred); fix stops marking ephemeral per-arm synthesized weight buffers resident at all (real, `mmap`'d, process-lifetime weight buffers elsewhere in this file are unaffected and still correctly resident) | 1 pre-fix two-arm real-scale repro (100% stale, relative_error matching ROW 333 to full precision) + 1 post-fix two-arm real-scale verify (clean) + 1 post-fix four-arm real-scale verify, all four previously-failing arms in one pass (clean) | quiet gate (names-only `pgrep -l 'matvec_roofline\|oracle-'`) EMPTY at every launch this row |
+
+## ROW 335 -- isolated kernel bandwidth per decode shape, warm: every ladder arm now runs one untimed warm-up dispatch before 7 timed repeats, reporting median/min/max/CoV alongside the mean
+
+**Card:** `test(omega): ladder arms warm up once and report the median of seven` (off `main` at `6084423`). **Worktree/branch:** `proxima-wt-r335`, `test/ladder-warmup-and-median`.
+
+**Task.** ROW 333/334 left every `decode_shape_roofline_ladder` shape arm's own bandwidth mean carrying CoV 33-50%, because each arm's `REPEATS=5` timed repeats included a cold first dispatch -- ROW 296/302 saw the same signature (repeat 1 at 4-13 GB/s, repeats 2-5 converged) and ROW 331's own Q6_K head sample list (`[3.95, 43.17, 21.48, 65.45, 56.60]`) never converged at all in 5. This row adds one timing discipline to every arm in `omega/tests/matvec_roofline_ladder.rs` -- the L0-L3 rungs, the L3 shape sweep, the `empty` floor arm, every `decode_shape_roofline_ladder`/`q6k_head_and_layer_shape_roofline_ladder` shape arm (`run_shape_arm`), and ROW 327's buffer-kind x kernel-variant 2x2 (`run_head_arm`): one untimed warm-up dispatch of the arm's own command buffer, discarded, then `REPEATS=7` timed repeats, reporting the MEDIAN as the headline number (robust to a single outlier repeat) alongside min, max, CoV, and the mean (kept for continuity with every prior row's own printed number).
+
+**Change.** Two new functions, no new types (guiding-principles §1 -- a struct held only the five numbers every arm already computed field-by-field): `SampleStats` (mean/median/min/max/cov_pct, `sample_stats(samples: &[f64])`) replaces `mean_and_cov`; `warmed_up_samples<F: FnMut() -> Duration>(dispatch_once: F) -> Vec<Duration>` calls `dispatch_once` once (discarded) then `REPEATS` times, collecting. Every one of the 8 timed-repeat call sites in the file (`L0_streaming`, `L1_header_decode`, `L2_dequant`, `L3_baseline`, the `L3_shape` sweep's 18-cell inner loop, the `empty` floor arm, `run_shape_arm`, `run_head_arm`) now calls `warmed_up_samples` instead of hand-rolling its own `for _ in 0..REPEATS` loop, and reports `stats.median`/`stats.mean`/`stats.min`/`stats.max`/`stats.cov_pct` instead of the old `(mean, cov)` pair; `ladder_gbps` (the L0-L3 ratio table) and `run_shape_arm`'s ROW 310 in-program comparison now key on the median. `REPEATS` raised from 5 to 7. The `empty` arm keeps its ns/dispatch floor semantics -- only the discipline (warm-up + 7 + median/min/max/cov/mean) is now shared, not the unit.
+
+**Build.** `cargo test -p omega --test matvec_roofline_ladder --features metal --no-run`: EXIT 0 (debug). The two real-checkpoint-dependent gates below both ran the **release** profile instead: `decode_shape_roofline_ladder`'s own CPU-bound `Q4_K`/`Q5_K`/`Q6_K` quantize-encode synthesis (`synth_weight_bytes`, up to 848 tensors/arm) cost 30+ minutes of wall time for the FIRST of 10 arms alone in a debug binary (confirmed live, then killed) -- release cut the full 10-arm run to 1508s end to end. This changes wall-clock cost only; the GPU dispatch geometry, weight bytes, and every measured GB/s number are identical in either profile (`synth_weight_bytes`/`compile_pipeline` are never `#[cfg(debug_assertions)]`-gated).
+
+**Quiet gate.** `pgrep -l 'proxima_model_i|llama-bench|oracle-|gpu_load_genera|matvec_roofline|^cargo$|^rustc$|nextest|cargo-nextest'` EMPTY and load-1 < 10 confirmed immediately before each of the two measured runs below (waited ~90s once for load-1 to drop from 21.94 to 8.89 before the first).
+
+**Data -- `decode_shape_roofline_ladder`, 1508.37s, `test result: ok. 1 passed`, all 10 arms parity-clean** (`/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6e203711-bd50-48cc-9ade-409668bdafdd/scratchpad/r335-logs/decode_shape_roofline_ladder-release.log`):
+
+| family | rows | k | codec | median GB/s | min-max GB/s | CoV % | ratio to 381.24 | ROW 310 in-program GB/s |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| attn_q | 4096 | 4096 | Q4_K | 23.33 | 17.06-33.46 | 23.53 | 0.061 | noise-negative |
+| attn_k | 1024 | 4096 | Q4_K | 20.73 | 20.14-21.78 | 2.79 | 0.054 | noise-negative |
+| attn_v | 1024 | 4096 | Q4_K | 20.29 | 19.79-21.47 | 2.86 | 0.053 | noise-negative |
+| attn_v_q5k | 1024 | 4096 | Q5_K | 21.16 | 17.56-22.94 | 8.36 | 0.056 | (attn_v family, noise-negative) |
+| attn_output | 4096 | 4096 | Q4_K | 24.59 | 17.71-30.27 | 14.65 | 0.065 | 144.94 |
+| ffn_gate | 14336 | 4096 | Q4_K | 25.46 | 22.98-26.52 | 4.91 | 0.067 | 236.55 |
+| ffn_up | 14336 | 4096 | Q4_K | 24.13 | 19.01-26.67 | 9.66 | 0.063 | 183.48 |
+| ffn_down | 4096 | 14336 | Q4_K | 24.51 | 23.97-26.78 | 4.14 | 0.064 | 200.46 |
+| ffn_down_q5k | 4096 | 14336 | Q5_K | 25.68 | 20.44-27.33 | 8.43 | 0.067 | (ffn_down family, no separate ROW 310 entry) |
+| head | 32000 | 4096 | Q6_K | 8.07 | 6.99-8.22 | 5.14 | 0.021 | 41.63 |
+
+CoV dropped from ROW 333's own 33-50% floor to a 2.79-23.53% range post-warm-up -- 6 of 10 arms now sit under 10%, and the two that do not (`attn_q` 23.53%, `attn_output` 14.65%) are the two `rows=4096, k=4096` shapes whose own `tensor_count` (212) is the smallest of the `Q4_K` family, so 7 repeats still sample a small dispatch-scheduling-noise-dominated population; this is a residual, named not hidden, not re-investigated this row (out of scope: the task was the timing discipline, not a further noise reduction). Every isolated `median_gbps` in this table sits at 5-19% of its own family's ROW 310 in-program number (`attn_output` 0.170, `ffn_gate` 0.108, `ffn_up` 0.132, `ffn_down` 0.122, `head` 0.194) -- an isolated-single-family-dispatch vs concurrent-in-program-overlap gap this row does not explain (ROW 310's own in-program numbers were measured under a DIFFERENT, overlapped dispatch pattern; this row's isolated numbers and ROW 310's in-program numbers are two independent MEASUREMENTs of two different dispatch contexts, per this file's own `ROW_310_IN_PROGRAM_GBPS` doc, never combined into one derived number).
+
+**Data -- `matvec_roofline_ladder_l0_through_l3_and_shape_sweep`, 4.73s, `test result: ok. 1 passed`, real-checkpoint parity clean** (`/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6e203711-bd50-48cc-9ade-409668bdafdd/scratchpad/r335-logs/l0-l3-shape-sweep-release.log`), the L3-one-shape reference this row's shape arms sit beside:
+
+| arm | median GB/s | min-max GB/s | CoV % |
+| --- | --- | --- | --- |
+| L0_streaming | 329.50 | 324.26-335.70 | 1.22 |
+| L1_header_decode | 332.09 | 329.27-333.22 | 0.40 |
+| L2_dequant | 282.12 | 281.74-282.33 | 0.07 |
+| L3_baseline (production `execute_plan`) | 186.37 | 184.50-187.46 | 0.57 |
+| L3_shape_default (safe, sg=1, dispatchThreads) | 181.11 | 180.42-181.27 | 0.18 |
+| L3_shape fastest cell (fast, sg=4, dispatchThreads) | 246.96 | 246.76-247.22 | 0.06 |
+| empty (ns/dispatch) | 4794.3 ns | 4740.9-5203.8 ns | 3.77 |
+
+This is the real, `Q4_K`, 64-real-distinct-tensor `ffn_up`/`ffn_gate` batch the module doc calls the ladder's ground truth -- CoV fell from ROW 289's 35-120% floor to 0.06-1.22% across every rung with the same warm-up-plus-7-repeats discipline, and the "known 247" the task brief points at is this run's own `L3_shape` fastest math-mode/simdgroup cell (`fast`, `simdgroups_per_tg=4`, `dispatchThreads`, median 246.96), not the production-default cell (`safe`, `simdgroups_per_tg=1`, median 181.11) `ladder_gbps["L3_shape_default"]` reports -- the two cells differ only in `MTLMathMode`/simdgroup count, both already measured in the same table above the module doc restates as its own shape sweep.
+
+**Residual, named not hidden.** `attn_q`/`attn_output`'s CoV (23.53%/14.65%) did not clear this row's own de-noising target even with the warm-up -- both are the smallest-`tensor_count` `Q4_K` shapes in `DECODE_SHAPES`; a larger `tensor_count` or more repeats is the direct next-slice candidate, not executed this row (out of this row's own scope: land the timing discipline, not chase every residual CoV to zero). `q6k_head_and_layer_shape_roofline_ladder`, `head_buffer_kind_by_kernel_variant`, `row334_attn_q_then_attn_output_real_scale`, and `row334_four_failing_arms_real_scale` were not re-run this row (all four call the same `run_shape_arm`/`run_head_arm` this row changed, so the same discipline applies to them by construction, but this row's own 40-minute budget covered the two gates the brief named, not every `#[ignore]`d test in the file).
+
+**Gates.** `cargo test -p omega --test matvec_roofline_ladder --features metal --no-run`: EXIT 0. `cargo clippy -p omega --all-targets --features metal -- -D warnings`: EXIT 0 (see commit below).
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-row335-repro -b docs/row-335-repro main
+cd ../proxima-wt-row335-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --release --features metal --test matvec_roofline_ladder \
+  -- --ignored --nocapture decode_shape_roofline_ladder matvec_roofline_ladder_l0_through_l3_and_shape_sweep
+```
+(expected: both `test result: ok`; every arm's printed line carries `median_gbps`/`mean_gbps`/`min_gbps`/`max_gbps`/`cov_pct` -- or `median_ns_per_dispatch`/... for `empty` -- and every `samples=[...]` list has exactly 7 entries, none of them the arm's own cold-first-dispatch outlier.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-06 | `test(omega): ladder arms warm up once and report the median of seven` + this row | Every arm in `matvec_roofline_ladder.rs` (L0-L3 rungs, L3 shape sweep, empty floor, decode-shape arms, ROW 327's 2x2) now runs one untimed warm-up dispatch before `REPEATS=7` (was 5) timed repeats and reports median/min/max/CoV alongside the mean; `decode_shape_roofline_ladder`'s CoV fell from ROW 333's 33-50% to 2.79-23.53% (6/10 arms under 10%), the L0-L3/shape-sweep ladder's CoV fell from ROW 289's 35-120% to 0.06-1.22% across every rung | 1 full 10-arm `decode_shape_roofline_ladder` run (1508s, release, all parity-clean) + 1 full `matvec_roofline_ladder_l0_through_l3_and_shape_sweep` run (4.73s, release, parity-clean) | quiet gate (`pgrep -l` process-name list) EMPTY and load-1 < 10 confirmed before each measured run |
