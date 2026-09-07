@@ -3154,12 +3154,32 @@ pub(crate) fn block_width_for(policy: NumericPolicy) -> u64 {
 /// `render_cached_attention` body, byte for byte -- the single-dispatch path
 /// IS the bit-exact lowering, the same way `context_chunks_for`/
 /// `block_width_for` fall back to `1` under `bit_exact`.
+///
+/// ROW 383: the divisor has a KNEE rather than being one constant. More
+/// splits helps at both ends -- the tiny decode window (normally a single,
+/// occupancy-starved threadgroup) and huge contexts (enough keys per split
+/// to amortize the merge dispatch's fixed cost) -- but HURTS in the middle,
+/// where occupancy is already adequate at a handful of splits and a finer
+/// divisor only adds fixed per-split overhead with nothing to amortize it
+/// against (measured: 512 keys at 8/16/32 splits all land 170-177us, no
+/// better than each other, vs 89.5us at 4 splits). So `context_length`
+/// below `ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE` uses the small divisor
+/// (`ATTENTION_SPLIT_KEYS_PER_SPLIT`, ROW 381's decode-window fix); at or
+/// above it, the ORIGINAL pre-ROW-381 divisor
+/// (`ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE`) applies, unchanged from what
+/// already won at both 512 keys (splits=4) and 4096 keys (splits=32, the
+/// same value the small divisor also reaches once clamped to `max`).
 pub(crate) fn splits_for(context_length: u64, policy: NumericPolicy) -> u64 {
     if admit(policy, NumericRewrite::ContextSplitMerge).is_err() {
         return 1;
     }
+    let keys_per_split = if context_length < crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE {
+        crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT
+    } else {
+        crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE
+    };
     context_length
-        .div_ceil(crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT)
+        .div_ceil(keys_per_split)
         .clamp(1, crate::sized::ATTENTION_SPLIT_MAX)
 }
 
@@ -9361,8 +9381,9 @@ mod tests {
     /// `attn_scratch` and its output binding becomes `Binding::Scratch`,
     /// and `emit_cached_attention_merge` returns the companion kernel that
     /// reads that scratch layout back and writes the real output. 256 keys
-    /// (`omega-runtime.toml`'s `keys_per_split = 128`) is deliberately past
-    /// the split threshold under EITHER policy that admits the rewrite --
+    /// (`omega-runtime.toml`'s `keys_per_split_at_scale = 128`, ROW 383) is
+    /// deliberately past the split threshold under EITHER policy that admits
+    /// the rewrite --
     /// `cached_attention_merge_needed` now takes context length, not just
     /// policy (its own doc), so a fixture at or below `keys_per_split`
     /// would stay single-dispatch even under `llama_relaxed`, proving
@@ -9787,7 +9808,7 @@ mod tests {
         let splits_4096 = splits_for(4096, NumericPolicy::llama_relaxed());
         assert!(
             splits_512 > 1,
-            "512 keys (4x omega-runtime.toml's 128-key keys_per_split) must split; got {splits_512}"
+            "512 keys (4x omega-runtime.toml's 128-key keys_per_split_at_scale) must split; got {splits_512}"
         );
         assert!(
             splits_4096 > 1,
@@ -9797,6 +9818,23 @@ mod tests {
             splits_4096 >= splits_512,
             "a longer context must never split into FEWER threadgroups than a shorter one"
         );
+    }
+
+    /// ROW 383's own knee, pinned at the five lengths its own log row
+    /// tabulates: below `keys_per_split_at_scale` (128) the small divisor
+    /// (16) applies (40 keys -> 3 splits, ROW 381's decode-window win,
+    /// unchanged); at or above it the large divisor (128, the ORIGINAL
+    /// pre-ROW-381 value) applies, which is what measured fastest at 512
+    /// keys (splits=4, 89.5us bare vs 170-177us at 8/16/32) and reaches the
+    /// SAME split count (32) as the small divisor already did once clamped
+    /// to `max` at 4096 keys, so nothing regresses at scale.
+    #[test]
+    fn splits_for_has_a_knee_at_the_scaled_divisor_threshold() {
+        assert_eq!(splits_for(40, NumericPolicy::llama_relaxed()), 3);
+        assert_eq!(splits_for(256, NumericPolicy::llama_relaxed()), 2);
+        assert_eq!(splits_for(512, NumericPolicy::llama_relaxed()), 4);
+        assert_eq!(splits_for(1024, NumericPolicy::llama_relaxed()), 8);
+        assert_eq!(splits_for(4096, NumericPolicy::llama_relaxed()), 32);
     }
 
     /// `ATTENTION_SPLIT_MAX` (`omega-runtime.toml`'s `[attention_splits].max`,

@@ -58,11 +58,12 @@
 //!   block_width_for`'s in-block staging width for cached attention's
 //!   Q·K/softmax/V loop, gated by `NumericRewrite::TreeReduce`; see
 //!   `omega-runtime.toml`'s `[attention_block]`.
-//! - `ATTENTION_SPLIT_KEYS_PER_SPLIT`/`ATTENTION_SPLIT_MAX` (always
-//!   compiled) — `crate::msl::splits_for`'s divisor and ceiling for
-//!   splitting cached-attention's key range across THREADGROUPS (one level
-//!   above `ATTENTION_CONTEXT_KEYS_PER_CHUNK`'s intra-threadgroup split),
-//!   gated by `NumericRewrite::ContextSplitMerge`; see
+//! - `ATTENTION_SPLIT_KEYS_PER_SPLIT`/`ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE`/
+//!   `ATTENTION_SPLIT_MAX` (always compiled) — `crate::msl::splits_for`'s
+//!   two divisors (small below the knee, large at or above it) and ceiling
+//!   for splitting cached-attention's key range across THREADGROUPS (one
+//!   level above `ATTENTION_CONTEXT_KEYS_PER_CHUNK`'s intra-threadgroup
+//!   split), gated by `NumericRewrite::ContextSplitMerge`; see
 //!   `omega-runtime.toml`'s `[attention_splits]`.
 //!
 //! `msl` (this module's own crate) is alloc-tier and target-independent --
