@@ -244,12 +244,13 @@ pub enum TensorError {
     #[error("full_attention_interval must be >= 1, got {full_attention_interval}")]
     InvalidFullAttentionInterval { full_attention_interval: u32 },
 
-    /// [`crate::numeric::admit`] rejected a rewrite: `granted` is below
-    /// `rewrite`'s [`crate::numeric::NumericRewrite::minimum_level`].
-    #[error("{rewrite:?} needs numeric policy >= {minimum:?}, caller granted {granted:?}")]
+    /// [`crate::numeric::admit`] rejected a rewrite: `granted` does not
+    /// grant every permission `rewrite`'s
+    /// [`crate::numeric::NumericRewrite::required_permissions`] names.
+    #[error("{rewrite:?} needs permissions {required:?}, granted {granted:?}")]
     NumericPolicyTooStrict {
         rewrite: NumericRewrite,
-        minimum: NumericPolicy,
+        required: NumericPolicy,
         granted: NumericPolicy,
     },
 

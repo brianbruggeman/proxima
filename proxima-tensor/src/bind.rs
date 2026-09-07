@@ -752,9 +752,9 @@ pub struct BoundOpBuilder {
     constant_value: RefCell<Vec<Option<f32>>>,
     /// The [`NumericPolicy`] every [`Constants`] this builder hands to
     /// [`push_canonical_step`] carries — governs whether the
-    /// `x+0`/`max(x,-inf)`/`min(x,+inf)` identity eliminations (bit-changing
-    /// on NaN/signed-zero, [`NumericRewrite::IdentityEliminationSignedZeroNan`])
-    /// fire, on top of the always-on `x*1` case.
+    /// `x+0` ([`NumericRewrite::IdentityEliminationSignedZero`]) and
+    /// `max(x,-inf)`/`min(x,+inf)` ([`NumericRewrite::IdentityEliminationNanAssumption`])
+    /// identity eliminations fire, on top of the always-on `x*1` case.
     numeric_policy: NumericPolicy,
 }
 
@@ -1750,8 +1750,8 @@ fn eliminate_masked_window_reduce(
 /// The scalar identity element for `op`'s own [`ScalarOp::is_associative`]
 /// class that is bit-exact for EVERY `f32`, including NaN and signed zero —
 /// `x * 1.0 == x` always, per IEEE 754 multiplication-by-one. Always
-/// admitted at [`NumericPolicy::BitExact`]
-/// ([`NumericRewrite::IdentityElimination`]'s own minimum level). `Add`,
+/// admitted regardless of policy
+/// ([`NumericRewrite::IdentityElimination`] needs no permission). `Add`,
 /// `Maximum`, and `Minimum` also have an algebraic identity element but are
 /// NOT bit-exact on every input — see [`identity_element_signed_zero_nan`].
 const fn identity_element_bitexact(op: ScalarOp) -> Option<f32> {
@@ -1766,16 +1766,33 @@ const fn identity_element_bitexact(op: ScalarOp) -> Option<f32> {
 /// for every `f32`: `max(NaN, -inf)` evaluates to `-inf` ([`f32::max`]'s own
 /// "if one argument is NaN, return the other" rule), while eliminating the
 /// op would return the survivor, `NaN`; `(-0.0) + 0.0` evaluates to `+0.0`,
-/// while eliminating the op would return `-0.0`. Classified
-/// [`NumericRewrite::IdentityEliminationSignedZeroNan`], floor
-/// [`NumericPolicy::FusedNoReassociation`] — [`push_canonical_step`] checks
-/// this only after [`identity_element_bitexact`] misses, and only fires it
-/// once [`admit`] clears the caller's [`NumericPolicy`].
+/// while eliminating the op would return `-0.0`. `Add` is classified
+/// [`NumericRewrite::IdentityEliminationSignedZero`] (needs `signed_zero`
+/// alone); `Maximum`/`Minimum` are classified
+/// [`NumericRewrite::IdentityEliminationNanAssumption`] (needs
+/// `nan_assumptions` alone) — [`identity_element_signed_zero_nan_rewrite`]
+/// names which one a given op requires. [`push_canonical_step`] checks this
+/// only after [`identity_element_bitexact`] misses, and only fires it once
+/// [`admit`] clears the caller's [`NumericPolicy`] for that specific rewrite.
 const fn identity_element_signed_zero_nan(op: ScalarOp) -> Option<f32> {
     match op {
         ScalarOp::Add => Some(0.0),
         ScalarOp::Maximum => Some(f32::NEG_INFINITY),
         ScalarOp::Minimum => Some(f32::INFINITY),
+        _ => None,
+    }
+}
+
+/// The specific permission [`identity_element_signed_zero_nan`]'s
+/// elimination needs for `op` — `Add`'s zero-literal case needs
+/// `signed_zero` alone, `Maximum`/`Minimum`'s infinity-literal case needs
+/// `nan_assumptions` alone. The two are independent permissions (a caller
+/// may grant one without the other), so this is never a single shared
+/// rewrite classification.
+const fn identity_element_signed_zero_nan_rewrite(op: ScalarOp) -> Option<NumericRewrite> {
+    match op {
+        ScalarOp::Add => Some(NumericRewrite::IdentityEliminationSignedZero),
+        ScalarOp::Maximum | ScalarOp::Minimum => Some(NumericRewrite::IdentityEliminationNanAssumption),
         _ => None,
     }
 }
@@ -1830,10 +1847,11 @@ fn step_arg_constant(arg: StepArg, state: &ComposeState<'_>, constant_value: &[O
 /// [`identity_element_bitexact`] (`x*1`) always fires. The remaining three
 /// cases (`x+0`, `max(x,-inf)`, `min(x,+inf)`,
 /// [`identity_element_signed_zero_nan`]) change bits on NaN/signed-zero
-/// inputs and only fire once `constants.numeric_policy` clears
-/// [`NumericRewrite::IdentityEliminationSignedZeroNan`] via [`admit`] — under
-/// the library default ([`NumericPolicy::BitExact`]) they never fire, and a
-/// step carrying a `+0`/`max(-inf)`/`min(+inf)` operand survives unreduced.
+/// inputs and only fire once `constants.numeric_policy` clears the specific
+/// rewrite [`identity_element_signed_zero_nan_rewrite`] names via [`admit`]
+/// — under the library default ([`NumericPolicy::bit_exact`]) neither ever
+/// fires, and a step carrying a `+0`/`max(-inf)`/`min(+inf)` operand
+/// survives unreduced.
 fn push_canonical_step(
     state: &mut ComposeState<'_>,
     op: ScalarOp,
@@ -1853,7 +1871,8 @@ fn push_canonical_step(
             }
         }
         if let Some(identity) = identity_element_signed_zero_nan(op)
-            && admit(constants.numeric_policy, NumericRewrite::IdentityEliminationSignedZeroNan).is_ok()
+            && let Some(rewrite) = identity_element_signed_zero_nan_rewrite(op)
+            && admit(constants.numeric_policy, rewrite).is_ok()
         {
             if step_arg_constant(*first, state, constants.values) == Some(identity) {
                 return *second;
@@ -2942,8 +2961,9 @@ pub fn bind(
     program: &[Op],
     shapes: &Shapes,
     outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
-    bind_with_fusion(program, shapes, outputs, true, NumericPolicy::default())
+    bind_with_fusion(program, shapes, outputs, true, numeric_policy)
 }
 
 /// Same as [`bind`], but `fuse_cached_attention` states whether the caller's
@@ -2967,10 +2987,10 @@ pub fn bind(
 /// function fires must clear via [`admit`] before it runs. The three
 /// rewrites shipped today (identity elimination, chain fusion,
 /// reduce-epilogue fusion) are classified [`NumericRewrite`]s whose
-/// [`NumericRewrite::minimum_level`] is [`NumericPolicy::BitExact`], so
-/// [`bind`]'s own call with [`NumericPolicy::default`] always clears —
-/// nothing regresses. A future reassociating rewrite in this crate declares
-/// its own [`NumericRewrite`] variant and is admitted the same way.
+/// [`NumericRewrite::required_permissions`] is [`NumericPolicy::bit_exact()`],
+/// so a call under the default policy always clears — nothing regresses. A
+/// future reassociating rewrite in this crate declares its own
+/// [`NumericRewrite`] variant and is admitted the same way.
 pub fn bind_with_fusion(
     program: &[Op],
     shapes: &Shapes,
@@ -3744,11 +3764,10 @@ mod tests {
     /// "if one argument is NaN, return the other" rule means
     /// `NaN.max(-inf) == -inf`, but eliminating the op (returning the
     /// survivor `x`) would produce `NaN` instead. Under the library default
-    /// ([`NumericPolicy::BitExact`]) the `Maximum` step must survive and
-    /// compute the real `-inf`; only once the caller opts up to
-    /// [`NumericPolicy::ReassociationPermitted`] does
-    /// [`identity_element_signed_zero_nan`] fire and collapse the op to `x`,
-    /// producing the DIFFERENT value `NaN`.
+    /// ([`NumericPolicy::bit_exact()`]) the `Maximum` step must survive and
+    /// compute the real `-inf`; only once the caller grants `nan_assumptions`
+    /// does [`identity_element_signed_zero_nan`] fire and collapse the op to
+    /// `x`, producing the DIFFERENT value `NaN`.
     #[test]
     fn maximum_of_nan_and_negative_infinity_differs_by_numeric_policy() {
         use crate::op::{Extent, append};
@@ -3783,7 +3802,7 @@ mod tests {
         );
         let shapes = shape::infer(&program, &[]).expect("max(x,-inf) program infers");
 
-        let bit_exact = bind_with_fusion(&program, &shapes, &[output], true, NumericPolicy::BitExact)
+        let bit_exact = bind_with_fusion(&program, &shapes, &[output], true, NumericPolicy::bit_exact())
             .expect("bit-exact bind succeeds");
         let bit_exact_buffers =
             run_resolved(program.len(), &bit_exact, alloc::vec![(x, alloc::vec![f32::NAN])]);
@@ -3795,26 +3814,25 @@ mod tests {
             "BitExact must compute the real max(NaN, -inf) == -inf, not eliminate the op"
         );
 
-        let reassociation_permitted = bind_with_fusion(
-            &program,
-            &shapes,
-            &[output],
-            true,
-            NumericPolicy::ReassociationPermitted,
-        )
-        .expect("reassociation-permitted bind succeeds");
-        let reassociation_buffers = run_resolved(
+        let nan_assumption_policy = NumericPolicy {
+            nan_assumptions: true,
+            ..NumericPolicy::bit_exact()
+        };
+        let nan_assumption_bound =
+            bind_with_fusion(&program, &shapes, &[output], true, nan_assumption_policy)
+                .expect("nan-assumption bind succeeds");
+        let nan_assumption_buffers = run_resolved(
             program.len(),
-            &reassociation_permitted,
+            &nan_assumption_bound,
             alloc::vec![(x, alloc::vec![f32::NAN])],
         );
-        let reassociation_result = reassociation_buffers[output.0 as usize]
+        let nan_assumption_result = nan_assumption_buffers[output.0 as usize]
             .as_ref()
-            .expect("reassociation-permitted output present")[0];
+            .expect("nan-assumption output present")[0];
         assert!(
-            reassociation_result.is_nan(),
-            "ReassociationPermitted admits IdentityEliminationSignedZeroNan, collapsing to the \
-             surviving operand x == NaN, got {reassociation_result}"
+            nan_assumption_result.is_nan(),
+            "nan_assumptions admits IdentityEliminationNanAssumption, collapsing to the \
+             surviving operand x == NaN, got {nan_assumption_result}"
         );
     }
 
@@ -3856,7 +3874,7 @@ mod tests {
         );
         let shapes = shape::infer(&program, &[]).expect("x+0 program infers");
 
-        let bit_exact = bind_with_fusion(&program, &shapes, &[output], true, NumericPolicy::BitExact)
+        let bit_exact = bind_with_fusion(&program, &shapes, &[output], true, NumericPolicy::bit_exact())
             .expect("bit-exact bind succeeds");
         let bit_exact_buffers =
             run_resolved(program.len(), &bit_exact, alloc::vec![(x, alloc::vec![-0.0f32])]);
@@ -3869,27 +3887,81 @@ mod tests {
             "BitExact must compute the real (-0.0)+0.0 == +0.0, not eliminate the op and keep -0.0"
         );
 
-        let reassociation_permitted = bind_with_fusion(
-            &program,
-            &shapes,
-            &[output],
-            true,
-            NumericPolicy::ReassociationPermitted,
-        )
-        .expect("reassociation-permitted bind succeeds");
-        let reassociation_buffers = run_resolved(
+        let signed_zero_policy = NumericPolicy {
+            signed_zero: true,
+            ..NumericPolicy::bit_exact()
+        };
+        let signed_zero_bound =
+            bind_with_fusion(&program, &shapes, &[output], true, signed_zero_policy)
+                .expect("signed-zero bind succeeds");
+        let signed_zero_buffers = run_resolved(
             program.len(),
-            &reassociation_permitted,
+            &signed_zero_bound,
             alloc::vec![(x, alloc::vec![-0.0f32])],
         );
-        let reassociation_result = reassociation_buffers[output.0 as usize]
+        let signed_zero_result = signed_zero_buffers[output.0 as usize]
             .as_ref()
-            .expect("reassociation-permitted output present")[0];
+            .expect("signed-zero output present")[0];
         assert_eq!(
-            reassociation_result.to_bits(),
+            signed_zero_result.to_bits(),
             (-0.0f32).to_bits(),
-            "ReassociationPermitted admits IdentityEliminationSignedZeroNan, collapsing to the \
-             surviving operand x == -0.0, got {reassociation_result}"
+            "signed_zero admits IdentityEliminationSignedZero, collapsing to the surviving \
+             operand x == -0.0, got {signed_zero_result}"
+        );
+    }
+
+    /// The split this design makes at the whole-bind level: granting
+    /// `nan_assumptions` alone must NOT also eliminate `x+0` -- proves the
+    /// two permissions stay independent through the full bind pipeline, not
+    /// just at [`admit`] in isolation.
+    #[test]
+    fn nan_assumption_alone_does_not_eliminate_add_zero() {
+        use crate::op::{Extent, append};
+
+        let mut program = Vec::new();
+        let x = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(1)],
+                name: None,
+            },
+        );
+        let zero = append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: Vec::new(),
+                value: 0.0,
+            },
+        );
+        let identity = || IndexMap::Affine(map::projection(1, &[0]));
+        let broadcast_scalar = || IndexMap::Affine(map::projection(1, &[]));
+        let output = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(x, identity()), (zero, broadcast_scalar())],
+                name: None,
+            },
+        );
+        let shapes = shape::infer(&program, &[]).expect("x+0 program infers");
+        let nan_assumption_policy = NumericPolicy {
+            nan_assumptions: true,
+            ..NumericPolicy::bit_exact()
+        };
+        let bound = bind_with_fusion(&program, &shapes, &[output], true, nan_assumption_policy)
+            .expect("nan-assumption bind succeeds");
+        let buffers = run_resolved(program.len(), &bound, alloc::vec![(x, alloc::vec![-0.0f32])]);
+        let result = buffers[output.0 as usize]
+            .as_ref()
+            .expect("output present")[0];
+        assert_eq!(
+            result.to_bits(),
+            0.0f32.to_bits(),
+            "nan_assumptions must not grant signed_zero's x+0 elimination -- the Add step must \
+             survive and compute the real (-0.0)+0.0 == +0.0"
         );
     }
 
@@ -3977,10 +4049,10 @@ mod tests {
             .expect("cached attention fixture builds");
         let shapes = crate::shape::infer(&program, &[1, 1]).expect("cached attention infers");
         let outputs: &[NodeId] = &[];
-        let plain = bind_plain(&program, &shapes, outputs, NumericPolicy::BitExact).expect("plain bind succeeds");
-        let cached_only = bind_cached_attention_fusion(&program, &shapes, outputs, true, NumericPolicy::BitExact)
+        let plain = bind_plain(&program, &shapes, outputs, NumericPolicy::bit_exact()).expect("plain bind succeeds");
+        let cached_only = bind_cached_attention_fusion(&program, &shapes, outputs, true, NumericPolicy::bit_exact())
             .expect("cached-attention-only bind succeeds");
-        let rewritten = bind(&program, &shapes, outputs).expect("rewritten bind succeeds");
+        let rewritten = bind(&program, &shapes, outputs, NumericPolicy::bit_exact()).expect("rewritten bind succeeds");
 
         assert_eq!(plain.len(), 48, "fixture baseline bound operation count");
         assert_eq!(
@@ -4061,7 +4133,7 @@ mod tests {
         for (even, odd, value) in &roots {
             outputs.extend_from_slice(&[*even, *odd, *value]);
         }
-        let bound = bind(&program, &shapes, &outputs)
+        let bound = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
             .expect("the cached decode fixture binds through the real bind() path");
 
         for (index, op) in bound.iter().enumerate() {
@@ -4112,7 +4184,7 @@ mod tests {
         }
         let shapes = crate::shape::infer(&program, &[1, 5])
             .expect("omega cached attention fixture infers");
-        let rewritten = bind(&program, &shapes, &outputs)
+        let rewritten = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
             .expect("omega cached attention fixture binds");
 
         assert_eq!(
@@ -4172,10 +4244,10 @@ mod tests {
         }
         let shapes = crate::shape::infer(&program, &[1, 71])
             .expect("one new position against a 71-position merged range infers");
-        let plain = bind_plain(&program, &shapes, &outputs, NumericPolicy::BitExact).expect("plain bind succeeds");
-        let cached_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true, NumericPolicy::BitExact)
+        let plain = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("plain bind succeeds");
+        let cached_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true, NumericPolicy::bit_exact())
             .expect("cached-attention-only bind succeeds");
-        let rewritten = bind(&program, &shapes, &outputs).expect("fused bind succeeds");
+        let rewritten = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
 
         assert_eq!(
             plain.len(),
@@ -4241,7 +4313,7 @@ mod tests {
             outputs.extend_from_slice(&[*even, *odd, *value]);
         }
         let shapes = crate::shape::infer(&program, &[1, 5]).expect("single-range fixture infers");
-        let resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::BitExact).expect("plain bind succeeds");
+        let resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("plain bind succeeds");
 
         let candidates =
             cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
@@ -4311,7 +4383,7 @@ mod tests {
         }
         let shapes =
             crate::shape::infer(&program, &[1, 5]).expect("single-range fixture infers");
-        let mut resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::BitExact).expect("plain bind succeeds");
+        let mut resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("plain bind succeeds");
 
         let baseline = cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
         assert!(
@@ -4414,7 +4486,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("iota infers");
-        let built = bind(&program, &shapes, &[]).expect("iota builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("iota builds ops");
 
         assert_eq!(built.len(), 1, "the iota leaf materializes on its own");
         assert_eq!(built[0].node, iota);
@@ -4431,7 +4503,7 @@ mod tests {
     fn matmul_resolves_to_one_fused_op_not_two() {
         let (program, product, sum, _lhs) = matmul_program();
         let shapes = shape::infer(&program, &[512]).expect("matmul infers");
-        let built = bind(&program, &shapes, &[]).expect("matmul builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("matmul builds ops");
 
         assert_eq!(
             built.len(),
@@ -4458,7 +4530,7 @@ mod tests {
         let (program, product, sum, _lhs) = matmul_program();
         let shapes = shape::infer(&program, &[512]).expect("matmul infers");
         let built =
-            bind(&program, &shapes, &[product, sum]).expect("matmul builds ops with two outputs");
+            bind(&program, &shapes, &[product, sum], NumericPolicy::bit_exact()).expect("matmul builds ops with two outputs");
 
         assert_eq!(
             built.len(),
@@ -4542,7 +4614,7 @@ mod tests {
     fn a_chain_of_elementwise_ops_fuses_into_one_bound_op_not_three() {
         let (program, _b, _c, d) = elementwise_chain_program();
         let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
-        let built = bind(&program, &shapes, &[]).expect("elementwise chain builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("elementwise chain builds ops");
 
         assert_eq!(
             built.len(),
@@ -4562,7 +4634,7 @@ mod tests {
         let (program, b, _c, d) = elementwise_chain_program();
         let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
         let built =
-            bind(&program, &shapes, &[b, d]).expect("elementwise chain builds ops with 2 outputs");
+            bind(&program, &shapes, &[b, d], NumericPolicy::bit_exact()).expect("elementwise chain builds ops with 2 outputs");
 
         assert_eq!(
             built.len(),
@@ -4627,7 +4699,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("diamond chain infers");
-        let built = bind(&program, &shapes, &[]).expect("diamond chain builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("diamond chain builds ops");
 
         assert_eq!(
             built.len(),
@@ -4711,7 +4783,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("weighted dot infers");
-        let built = bind(&program, &shapes, &[]).expect("weighted dot builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("weighted dot builds ops");
 
         assert_eq!(
             built.len(),
@@ -4760,7 +4832,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("broadcast infers");
-        let built = bind(&program, &shapes, &[]).expect("broadcast builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("broadcast builds ops");
         let op = built.iter().find(|op| op.node == sum).expect("sum emitted");
         assert_eq!(
             op.operands()[1].1.stride(0),
@@ -4817,7 +4889,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("conv window infers");
-        let built = bind(&program, &shapes, &[]).expect("conv window builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("conv window builds ops");
         let op = built
             .iter()
             .find(|op| op.node == touched)
@@ -4854,7 +4926,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("transpose infers");
-        let built = bind(&program, &shapes, &[]).expect("transpose builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("transpose builds ops");
         let op = built
             .iter()
             .find(|op| op.node == transposed)
@@ -4934,7 +5006,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("two-axis output group infers");
-        let mut built = bind(&program, &shapes, &[]).expect("two-axis output group binds");
+        let mut built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("two-axis output group binds");
         let packed: BTreeSet<NodeId> = core::iter::once(weight).collect();
         correct_packed_matmul_layouts(&mut built, &packed);
 
@@ -4991,7 +5063,7 @@ mod tests {
             },
         );
         let shapes = shape::infer(&program, &[]).expect("elementwise infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::bit_exact())
             .expect("elementwise builds ops")
             .into_iter()
             .next()
@@ -5022,7 +5094,7 @@ mod tests {
             }),
         );
         let shapes = shape::infer(&program, &[]).expect("scalar reduction infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::bit_exact())
             .expect("scalar reduction builds ops")
             .into_iter()
             .next()
@@ -5053,7 +5125,7 @@ mod tests {
             }),
         );
         let shapes = shape::infer(&program, &[]).expect("scan infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::bit_exact())
             .expect("scan builds ops")
             .into_iter()
             .next()
@@ -5143,7 +5215,7 @@ mod tests {
     fn split_of_a_fused_matmul_reduction_rebases_operands_but_not_out_layout() {
         let (program, _product, sum, _lhs) = matmul_program();
         let shapes = shape::infer(&program, &[512]).expect("matmul infers");
-        let op = bind(&program, &shapes, &[])
+        let op = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
             .expect("matmul builds ops")
             .into_iter()
             .next()
@@ -5287,7 +5359,7 @@ mod tests {
         // makes `retires.contains(operand_node)` false for every node, so
         // every held predecessor fails the fuse check regardless of its
         // projection — isolating exactly what a single push can materialize.
-        let building = BoundOpBuilder::new(Vec::new(), NumericPolicy::BitExact);
+        let building = BoundOpBuilder::new(Vec::new(), NumericPolicy::bit_exact());
         let mut last_emitted_len = 0;
         for expr in program.iter() {
             let emitted = building.push(expr, &shapes).expect("push succeeds");
@@ -5317,7 +5389,7 @@ mod tests {
         let retires = live::annotate(&program, &outputs);
 
         let shape_table = ShapeTable::new(&[512]);
-        let builder = BoundOpBuilder::new(retires, NumericPolicy::BitExact);
+        let builder = BoundOpBuilder::new(retires, NumericPolicy::bit_exact());
         let chain = shape_table.and_then(builder);
 
         let mut built_via_pipe = Vec::new();
@@ -5329,7 +5401,7 @@ mod tests {
 
         let shapes = shape::infer(&program, &[512]).expect("free-function infer succeeds");
         let built_via_free_function =
-            bind(&program, &shapes, &outputs).expect("free-function op building succeeds");
+            bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("free-function op building succeeds");
 
         assert_eq!(built_via_pipe, built_via_free_function);
         assert_eq!(built_via_pipe.len(), 1, "matmul fuses into one op");
@@ -5421,7 +5493,7 @@ mod tests {
         let shapes = shape::infer(&program, &[]).expect("computed-index program infers");
         let base_data: Vec<f32> = alloc::vec![10.0, 20.0, 30.0, 40.0];
 
-        let built = bind(&program, &shapes, &[output]).expect("binding itself never errors");
+        let built = bind(&program, &shapes, &[output], NumericPolicy::bit_exact()).expect("binding itself never errors");
         let indices_position = built
             .iter()
             .position(|op| {
@@ -5600,7 +5672,7 @@ mod tests {
         let (program, source, reduced) =
             masked_window_reduce_program(1, 0, 5, 3, 3, 1, ScalarOp::Equal);
         let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
-        let built = bind(&program, &shapes, &[]).expect("masked-window program builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("masked-window program builds ops");
 
         let folded = built
             .iter()
@@ -5640,7 +5712,7 @@ mod tests {
         let (program, _source, reduced) =
             masked_window_reduce_program(1, 0, 5, 3, 3, 2, ScalarOp::Equal);
         let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
-        let built = bind(&program, &shapes, &[]).expect("masked-window program builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("masked-window program builds ops");
 
         let folded = built
             .iter()
@@ -5689,7 +5761,7 @@ mod tests {
         let (program, _source, reduced) =
             masked_window_reduce_program(1, 0, 5, 3, 3, 1, ScalarOp::Greater);
         let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
-        let built = bind(&program, &shapes, &[]).expect("masked-window program builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("masked-window program builds ops");
 
         let folded = built
             .iter()
@@ -5819,9 +5891,9 @@ mod tests {
         fn reduce_then_residual_add_fuses_into_one_epilogued_reduce() {
             let (program, reduced, consumer, _x, extra_x_use) = reduce_then_residual_add_program();
             let shapes = shape::infer(&program, &[]).expect("residual-add program infers");
-            let plain = bind_plain(&program, &shapes, &[extra_x_use], NumericPolicy::BitExact)
+            let plain = bind_plain(&program, &shapes, &[extra_x_use], NumericPolicy::bit_exact())
                 .expect("plain bind succeeds");
-            let fused = bind(&program, &shapes, &[extra_x_use]).expect("fused bind succeeds");
+            let fused = bind(&program, &shapes, &[extra_x_use], NumericPolicy::bit_exact()).expect("fused bind succeeds");
 
             assert_eq!(
                 fused.len(),
@@ -5913,7 +5985,7 @@ mod tests {
                     .collect()
             };
 
-            let fused = bind(&program, &shapes, &outputs).expect("fused bind succeeds");
+            let fused = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
             let fused_buffers = run_resolved(program.len(), &fused, inputs());
             let fused_consumer = fused_buffers[consumer.0 as usize]
                 .as_ref()
@@ -5924,7 +5996,7 @@ mod tests {
                 "epilogued reduce must match the hand-derived sum-plus-residual exactly"
             );
 
-            let plain = bind_plain(&program, &shapes, &outputs, NumericPolicy::BitExact).expect("plain bind succeeds");
+            let plain = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("plain bind succeeds");
             let plain_buffers = run_resolved(program.len(), &plain, inputs());
             let plain_consumer = plain_buffers[consumer.0 as usize]
                 .as_ref()
@@ -5950,7 +6022,7 @@ mod tests {
                 },
             );
             let shapes = shape::infer(&program, &[]).expect("two-consumer program infers");
-            let fused = bind(&program, &shapes, &[extra_x_use, second_consumer])
+            let fused = bind(&program, &shapes, &[extra_x_use, second_consumer], NumericPolicy::bit_exact())
                 .expect("two-consumer program still binds");
 
             assert!(
@@ -6007,7 +6079,7 @@ mod tests {
             };
             let consumer = NodeId(consumer_index as u32);
             let shapes = shape::infer(&program, &[]).expect("strided-consumer program infers");
-            let fused = bind(&program, &shapes, &[extra_x_use, consumer])
+            let fused = bind(&program, &shapes, &[extra_x_use, consumer], NumericPolicy::bit_exact())
                 .expect("strided-consumer program still binds");
 
             assert!(
@@ -6034,7 +6106,7 @@ mod tests {
             // `node == consumer` convention exists for for (the epilogue
             // output IS the output, so nothing needs to keep the reduce
             // materialized separately).
-            let fused = bind(&program, &shapes, &[consumer, extra_x_use])
+            let fused = bind(&program, &shapes, &[consumer, extra_x_use], NumericPolicy::bit_exact())
                 .expect("fused bind with the consumer as a required output succeeds");
 
             assert!(
@@ -6080,9 +6152,9 @@ mod tests {
             }
             let shapes = crate::shape::infer(&program, &[1, 71])
                 .expect("one new position against a 71-position merged range infers");
-            let attention_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true, NumericPolicy::BitExact)
+            let attention_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true, NumericPolicy::bit_exact())
                 .expect("cached-attention-only bind succeeds");
-            let with_epilogue = bind(&program, &shapes, &outputs).expect("fused bind succeeds");
+            let with_epilogue = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
 
             let epilogue_count = with_epilogue
                 .iter()
@@ -6317,8 +6389,8 @@ mod tests {
                     .collect()
             };
 
-            let with_epilogue = bind(&program, &shapes, &outputs).expect("fused bind succeeds");
-            let attention_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true, NumericPolicy::BitExact)
+            let with_epilogue = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
+            let attention_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true, NumericPolicy::bit_exact())
                 .expect("cached-attention-only bind succeeds");
             assert!(
                 with_epilogue
@@ -6507,8 +6579,8 @@ mod tests {
                 let (program, x, scaled) = rmsnorm_program(seq, DIM);
                 let shapes = shape::infer(&program, &[]).expect("rmsnorm program infers");
                 let plain =
-                    bind_plain(&program, &shapes, &[scaled], NumericPolicy::BitExact).expect("unfused rmsnorm binds");
-                let fused = bind(&program, &shapes, &[scaled]).expect("fused rmsnorm binds");
+                    bind_plain(&program, &shapes, &[scaled], NumericPolicy::bit_exact()).expect("unfused rmsnorm binds");
+                let fused = bind(&program, &shapes, &[scaled], NumericPolicy::bit_exact()).expect("fused rmsnorm binds");
 
                 let fused_epilogue_count = fused
                     .iter()
@@ -6632,8 +6704,8 @@ mod tests {
             );
 
             let shapes = shape::infer(&program, &[]).expect("silu*up program infers");
-            let plain = bind_plain(&program, &shapes, &[output], NumericPolicy::BitExact).expect("unfused silu*up binds");
-            let fused = bind(&program, &shapes, &[output]).expect("fused silu*up binds");
+            let plain = bind_plain(&program, &shapes, &[output], NumericPolicy::bit_exact()).expect("unfused silu*up binds");
+            let fused = bind(&program, &shapes, &[output], NumericPolicy::bit_exact()).expect("fused silu*up binds");
 
             // One of the two reduces (whichever `find_epilogue_source` picks
             // first) absorbs the WHOLE `silu(gate) * up` tail into its own
@@ -6741,8 +6813,8 @@ mod tests {
             );
 
             let shapes = shape::infer(&program, &[]).expect("x+reduced program infers");
-            let plain = bind_plain(&program, &shapes, &[consumer], NumericPolicy::BitExact).expect("unfused x+reduced binds");
-            let fused = bind(&program, &shapes, &[consumer]).expect("fused x+reduced binds");
+            let plain = bind_plain(&program, &shapes, &[consumer], NumericPolicy::bit_exact()).expect("unfused x+reduced binds");
+            let fused = bind(&program, &shapes, &[consumer], NumericPolicy::bit_exact()).expect("fused x+reduced binds");
             assert_eq!(
                 fused.len(),
                 plain.len() - 1,
@@ -6855,8 +6927,8 @@ mod tests {
 
             let shapes = shape::infer(&program, &[]).expect("different-projection program infers");
             let plain =
-                bind_plain(&program, &shapes, &[output], NumericPolicy::BitExact).expect("unfused different-projection binds");
-            let fused = bind(&program, &shapes, &[output]).expect("bind with fusion enabled still binds");
+                bind_plain(&program, &shapes, &[output], NumericPolicy::bit_exact()).expect("unfused different-projection binds");
+            let fused = bind(&program, &shapes, &[output], NumericPolicy::bit_exact()).expect("bind with fusion enabled still binds");
 
             assert_eq!(
                 fused.len(),

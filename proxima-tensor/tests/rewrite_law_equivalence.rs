@@ -22,7 +22,8 @@ use proxima_tensor::cpu::{
     self, build_static_arena, evaluate, evaluate_named, evaluate_named_with_arena,
 };
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, map, shape,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append,
+    map, shape,
 };
 use std::sync::Mutex;
 
@@ -564,7 +565,8 @@ proptest! {
     ) {
         let (program, root) = weighted_dot_program(length);
         let shapes = shape::infer(&program, &[]).expect("weighted dot infers");
-        let resolved = bind::bind(&program, &shapes, &[]).expect("weighted dot resolves");
+        let resolved =
+            bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("weighted dot resolves");
         prop_assert_eq!(
             resolved.len(),
             1,

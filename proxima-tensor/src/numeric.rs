@@ -1,4 +1,4 @@
-//! Numerical permission ladder for bind-time and plan-time rewrites.
+//! Numerical permission set for bind-time and plan-time rewrites.
 //!
 //! [`op::is_associative`](crate::op::ScalarOp::is_associative) has exactly
 //! one caller today ([`shape::ShapeTable`](crate::shape::ShapeTable)'s
@@ -11,59 +11,121 @@
 
 use crate::error::TensorError;
 
-/// What class of float-bit-changing rewrite a bind (or a GPU plan) may
-/// apply. A total order: `BitExact < FusedNoReassociation <
-/// ReassociationPermitted < FastMath`. The default is the most conservative
-/// rung — every rewrite this crate ships unconditionally today (identity
-/// elimination, chain fusion, reduce-epilogue fusion) is bit-exact by
-/// construction and is admitted at the default, so nothing regresses; only
-/// a rewrite that actually changes bits needs the caller to opt up.
+/// Five independent float-bit-changing permissions a bind (or GPU plan) may
+/// grant, mirroring LLVM's own fast-math flags (`contract`, `reassoc`,
+/// `nnan`, `nsz`, `afn`/`arcp`) rather than a single total order. Default
+/// (all `false`) is bit-exact -- every rewrite this crate ships
+/// unconditionally today (identity elimination of `x*1`, chain fusion,
+/// reduce-epilogue fusion) needs none of these and is admitted regardless.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
-pub enum NumericPolicy {
-    /// Bit-parity with [`crate::cpu::evaluate`] — no reordering, no fused
-    /// rounding.
-    #[default]
-    BitExact,
-    /// Same operand order and count; permits merging a multiply and an add
-    /// into one hardware FMA (one rounding instead of two).
-    FusedNoReassociation,
+pub struct NumericPolicy {
+    /// Permits merging a multiply and an add into one hardware FMA (one
+    /// rounding instead of two). LLVM's `contract`.
+    pub contraction: bool,
     /// Permits reordering an associative fold: tree-reduce, the simdgroup
     /// context-chunk merge, quantization-scale factoring across a block.
-    ReassociationPermitted,
+    /// LLVM's `reassoc`.
+    pub reassociation: bool,
+    /// Permits assuming no operand is NaN, so an op whose *only* deviation
+    /// from its algebraic identity is NaN propagation may be eliminated
+    /// (`max(x, -inf)`, `min(x, +inf)`). LLVM's `nnan`.
+    pub nan_assumptions: bool,
+    /// Permits treating `+0.0`/`-0.0` as interchangeable, so `x + 0.0` may
+    /// be eliminated. LLVM's `nsz`.
+    pub signed_zero: bool,
     /// Permits approximate transcendentals/reciprocals with a bounded
-    /// relative error, on top of everything `ReassociationPermitted` allows.
-    FastMath,
+    /// relative error. LLVM's `afn`/`arcp`.
+    pub approx_functions: bool,
 }
 
-/// One rewrite class this crate or a GPU backend may apply, and the minimum
-/// [`NumericPolicy`] it requires. `#[non_exhaustive]` — every future
-/// bit-changing rewrite adds a variant and a [`NumericRewrite::minimum_level`]
-/// arm before it may fire, never a second, parallel check.
+impl NumericPolicy {
+    /// Bit-parity with [`crate::cpu::evaluate`] -- no permission granted.
+    #[must_use]
+    pub const fn bit_exact() -> Self {
+        Self {
+            contraction: false,
+            reassociation: false,
+            nan_assumptions: false,
+            signed_zero: false,
+            approx_functions: false,
+        }
+    }
+
+    /// Metal `MTLMathMode::Relaxed`'s own documented contract (Apple's
+    /// `MTLMathMode` header, quoted at `omega::metal`'s `MathMode` doc):
+    /// "allows aggressive, unsafe floating-point optimizations but
+    /// preserves infs and nans." Grants contraction and reassociation;
+    /// withholds `nan_assumptions`/`signed_zero`/`approx_functions` because
+    /// Relaxed's own contract explicitly preserves NaN/inf/zero behavior.
+    #[must_use]
+    pub const fn llama_relaxed() -> Self {
+        Self {
+            contraction: true,
+            reassociation: true,
+            nan_assumptions: false,
+            signed_zero: false,
+            approx_functions: false,
+        }
+    }
+
+    /// Metal `MTLMathMode::Fast`'s contract: aggressive optimization with no
+    /// NaN/inf/zero preservation. Every permission granted.
+    #[must_use]
+    pub const fn fast() -> Self {
+        Self {
+            contraction: true,
+            reassociation: true,
+            nan_assumptions: true,
+            signed_zero: true,
+            approx_functions: true,
+        }
+    }
+
+    /// Whether `self` grants every permission `required` names -- a subset
+    /// check, never a total-order comparison.
+    #[must_use]
+    pub const fn grants(self, required: Self) -> bool {
+        (!required.contraction || self.contraction)
+            && (!required.reassociation || self.reassociation)
+            && (!required.nan_assumptions || self.nan_assumptions)
+            && (!required.signed_zero || self.signed_zero)
+            && (!required.approx_functions || self.approx_functions)
+    }
+}
+
+/// One rewrite class this crate or a GPU backend may apply, and the exact
+/// [`NumericPolicy`] permissions it requires. `#[non_exhaustive]` -- every
+/// future bit-changing rewrite adds a variant and a
+/// [`NumericRewrite::required_permissions`] arm before it may fire, never a
+/// second, parallel check.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumericRewrite {
     /// [`crate::bind`]'s identity-elimination fold, restricted to the ONE
     /// sub-case that is bit-exact for every `f32` including NaN and signed
-    /// zero: `x * 1.0`. Always admitted at [`NumericPolicy::BitExact`].
+    /// zero: `x * 1.0`. Needs nothing.
     IdentityElimination,
-    /// [`crate::bind`]'s identity-elimination fold for `x + 0.0`,
-    /// `max(x, -inf)`, and `min(x, +inf)` -- each collapses to `x` for every
-    /// FINITE input, but not for every `f32`: `max(NaN, -inf)` evaluates to
-    /// `-inf` (IEEE 754 `maxNum`/[`f32::max`]'s own "if one argument is NaN,
-    /// return the other" rule), while eliminating the op returns the
-    /// survivor `NaN` instead; `(-0.0) + 0.0` evaluates to `+0.0`, while
-    /// eliminating the op returns `-0.0`. This changes bits without
-    /// reassociating anything (no operand order changes, no operand count
-    /// changes -- an op simply vanishes), so [`NumericPolicy::BitExact`]
-    /// does NOT admit it; its floor is [`NumericPolicy::FusedNoReassociation`],
-    /// the first rung this crate's ladder allows to change bits at all.
-    IdentityEliminationSignedZeroNan,
-    /// [`crate::bind`]'s elementwise/reduce chain fusion.
+    /// [`crate::bind`]'s identity-elimination fold for `x + 0.0` --
+    /// changes bits only on signed zero (`(-0.0) + 0.0` evaluates to
+    /// `+0.0`, while eliminating the op returns the survivor `-0.0`). Needs
+    /// `signed_zero` alone; does NOT need `nan_assumptions` -- `NaN + 0.0`
+    /// stays `NaN` whichever path is taken.
+    IdentityEliminationSignedZero,
+    /// [`crate::bind`]'s identity-elimination fold for `max(x, -inf)` and
+    /// `min(x, +inf)` -- changes bits only on NaN handling (IEEE 754
+    /// `maxNum`/[`f32::max`]'s own "if one argument is NaN, return the
+    /// other" rule: `max(NaN, -inf)` evaluates to `NaN`, while eliminating
+    /// the op returns the survivor `-inf`). Needs `nan_assumptions` alone;
+    /// does NOT need `signed_zero` -- no zero literal is involved.
+    IdentityEliminationNanAssumption,
+    /// [`crate::bind`]'s elementwise/reduce chain fusion. Bit-exact by
+    /// construction. Needs nothing.
     ChainFusion,
-    /// [`crate::bind`]'s reduce-epilogue fusion.
+    /// [`crate::bind`]'s reduce-epilogue fusion. Bit-exact by construction.
+    /// Needs nothing.
     ReduceEpilogueFusion,
     /// Merging a multiply and an add into one hardware FMA.
     FmaContraction,
@@ -78,20 +140,36 @@ pub enum NumericRewrite {
 }
 
 impl NumericRewrite {
-    /// The lowest [`NumericPolicy`] under which this rewrite may fire.
+    /// The exact permission set this rewrite needs -- never a scalar
+    /// minimum rung.
     #[must_use]
-    pub const fn minimum_level(self) -> NumericPolicy {
+    pub const fn required_permissions(self) -> NumericPolicy {
         match self {
             Self::IdentityElimination | Self::ChainFusion | Self::ReduceEpilogueFusion => {
-                NumericPolicy::BitExact
+                NumericPolicy::bit_exact()
             }
-            Self::IdentityEliminationSignedZeroNan | Self::FmaContraction => {
-                NumericPolicy::FusedNoReassociation
-            }
+            Self::IdentityEliminationSignedZero => NumericPolicy {
+                signed_zero: true,
+                ..NumericPolicy::bit_exact()
+            },
+            Self::IdentityEliminationNanAssumption => NumericPolicy {
+                nan_assumptions: true,
+                ..NumericPolicy::bit_exact()
+            },
+            Self::FmaContraction => NumericPolicy {
+                contraction: true,
+                ..NumericPolicy::bit_exact()
+            },
             Self::TreeReduce | Self::ContextChunkMerge | Self::DequantScaleFactoring => {
-                NumericPolicy::ReassociationPermitted
+                NumericPolicy {
+                    reassociation: true,
+                    ..NumericPolicy::bit_exact()
+                }
             }
-            Self::FastMathApprox => NumericPolicy::FastMath,
+            Self::FastMathApprox => NumericPolicy {
+                approx_functions: true,
+                ..NumericPolicy::bit_exact()
+            },
         }
     }
 }
@@ -100,18 +178,19 @@ impl NumericRewrite {
 /// error, never a silent numerics change.
 ///
 /// # Errors
-/// [`TensorError::NumericPolicyTooStrict`] when `policy` is below
-/// `rewrite`'s [`NumericRewrite::minimum_level`].
+/// [`TensorError::NumericPolicyTooStrict`] when `policy` does not grant
+/// every permission `rewrite.required_permissions()` names.
 pub fn admit(policy: NumericPolicy, rewrite: NumericRewrite) -> Result<(), TensorError> {
-    let minimum = rewrite.minimum_level();
-    if policy < minimum {
-        return Err(TensorError::NumericPolicyTooStrict {
+    let required = rewrite.required_permissions();
+    if policy.grants(required) {
+        Ok(())
+    } else {
+        Err(TensorError::NumericPolicyTooStrict {
             rewrite,
-            minimum,
+            required,
             granted: policy,
-        });
+        })
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -120,16 +199,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ladder_orders_bit_exact_below_fast_math() {
-        assert!(NumericPolicy::BitExact < NumericPolicy::FusedNoReassociation);
-        assert!(NumericPolicy::FusedNoReassociation < NumericPolicy::ReassociationPermitted);
-        assert!(NumericPolicy::ReassociationPermitted < NumericPolicy::FastMath);
+    fn presets_grant_exactly_their_documented_permissions() {
+        assert_eq!(NumericPolicy::bit_exact(), NumericPolicy::default());
+        assert!(NumericPolicy::llama_relaxed().contraction);
+        assert!(NumericPolicy::llama_relaxed().reassociation);
+        assert!(!NumericPolicy::llama_relaxed().nan_assumptions);
+        assert!(!NumericPolicy::llama_relaxed().signed_zero);
+        assert!(!NumericPolicy::llama_relaxed().approx_functions);
+        assert!(NumericPolicy::fast().nan_assumptions);
+        assert!(NumericPolicy::fast().signed_zero);
+        assert!(NumericPolicy::fast().approx_functions);
     }
 
     #[test]
     fn bit_exact_rewrites_admitted_at_the_default_policy() {
         let policy = NumericPolicy::default();
-        assert_eq!(policy, NumericPolicy::BitExact);
+        assert_eq!(policy, NumericPolicy::bit_exact());
         assert!(admit(policy, NumericRewrite::IdentityElimination).is_ok());
         assert!(admit(policy, NumericRewrite::ChainFusion).is_ok());
         assert!(admit(policy, NumericRewrite::ReduceEpilogueFusion).is_ok());
@@ -137,60 +222,75 @@ mod tests {
 
     #[test]
     fn reassociating_rewrite_rejected_under_bit_exact_policy() {
-        let error = admit(NumericPolicy::BitExact, NumericRewrite::ContextChunkMerge)
-            .expect_err("context-chunk merge reassociates and needs ReassociationPermitted");
+        let error = admit(NumericPolicy::bit_exact(), NumericRewrite::ContextChunkMerge)
+            .expect_err("context-chunk merge reassociates and needs the reassociation permission");
         assert_eq!(
             error,
             TensorError::NumericPolicyTooStrict {
                 rewrite: NumericRewrite::ContextChunkMerge,
-                minimum: NumericPolicy::ReassociationPermitted,
-                granted: NumericPolicy::BitExact,
+                required: NumericPolicy {
+                    reassociation: true,
+                    ..NumericPolicy::bit_exact()
+                },
+                granted: NumericPolicy::bit_exact(),
             }
         );
     }
 
     #[test]
     fn reassociating_rewrite_admitted_once_the_policy_opts_up() {
-        assert!(admit(NumericPolicy::ReassociationPermitted, NumericRewrite::ContextChunkMerge).is_ok());
-        assert!(admit(NumericPolicy::FastMath, NumericRewrite::ContextChunkMerge).is_ok());
+        assert!(
+            admit(
+                NumericPolicy::llama_relaxed(),
+                NumericRewrite::ContextChunkMerge
+            )
+            .is_ok()
+        );
+        assert!(admit(NumericPolicy::fast(), NumericRewrite::ContextChunkMerge).is_ok());
     }
 
-    /// The NaN/signed-zero-changing identity eliminations (`x+0`,
-    /// `max(x,-inf)`, `min(x,+inf)`) are NOT admitted at the library
-    /// default -- only `x*1` (plain [`NumericRewrite::IdentityElimination`])
-    /// is bit-exact for every float and clears [`NumericPolicy::BitExact`].
+    /// The split this design makes: granting `signed_zero` alone eliminates
+    /// `x+0`, but must NOT also eliminate `max(x,-inf)` -- proves the two
+    /// permissions are actually independent, not just independently named.
     #[test]
-    fn signed_zero_nan_identity_elimination_rejected_under_bit_exact_policy() {
-        let policy = NumericPolicy::default();
-        assert_eq!(policy, NumericPolicy::BitExact);
-        assert!(admit(policy, NumericRewrite::IdentityElimination).is_ok());
-        let error = admit(policy, NumericRewrite::IdentityEliminationSignedZeroNan)
-            .expect_err("x+0/max(x,-inf)/min(x,+inf) change bits on NaN/signed-zero inputs");
+    fn signed_zero_alone_does_not_grant_nan_assumption_elimination() {
+        let policy = NumericPolicy {
+            signed_zero: true,
+            ..NumericPolicy::bit_exact()
+        };
+        let error = admit(policy, NumericRewrite::IdentityEliminationNanAssumption)
+            .expect_err("signed_zero does not grant nan_assumptions");
         assert_eq!(
             error,
             TensorError::NumericPolicyTooStrict {
-                rewrite: NumericRewrite::IdentityEliminationSignedZeroNan,
-                minimum: NumericPolicy::FusedNoReassociation,
-                granted: NumericPolicy::BitExact,
+                rewrite: NumericRewrite::IdentityEliminationNanAssumption,
+                required: NumericPolicy {
+                    nan_assumptions: true,
+                    ..NumericPolicy::bit_exact()
+                },
+                granted: policy,
             }
         );
     }
 
+    /// The converse split: granting `nan_assumptions` alone must NOT also
+    /// eliminate `x+0`.
     #[test]
-    fn signed_zero_nan_identity_elimination_admitted_once_the_policy_opts_up() {
-        assert!(
-            admit(
-                NumericPolicy::FusedNoReassociation,
-                NumericRewrite::IdentityEliminationSignedZeroNan
-            )
-            .is_ok()
-        );
-        assert!(
-            admit(
-                NumericPolicy::ReassociationPermitted,
-                NumericRewrite::IdentityEliminationSignedZeroNan
-            )
-            .is_ok()
-        );
+    fn nan_assumption_alone_does_not_grant_signed_zero_elimination() {
+        let policy = NumericPolicy {
+            nan_assumptions: true,
+            ..NumericPolicy::bit_exact()
+        };
+        assert!(admit(policy, NumericRewrite::IdentityEliminationSignedZero).is_err());
+        assert!(admit(policy, NumericRewrite::IdentityEliminationNanAssumption).is_ok());
+    }
+
+    #[test]
+    fn signed_zero_elimination_admitted_once_the_policy_opts_up() {
+        let policy = NumericPolicy {
+            signed_zero: true,
+            ..NumericPolicy::bit_exact()
+        };
+        assert!(admit(policy, NumericRewrite::IdentityEliminationSignedZero).is_ok());
     }
 }

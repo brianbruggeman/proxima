@@ -190,6 +190,7 @@ use crate::error::TensorError;
 use crate::instrument;
 #[cfg(feature = "instrument")]
 use crate::instrument::{KernelCounters, Path};
+use crate::numeric::NumericPolicy;
 use crate::op::{Keep, NodeId, Op, ReduceInit, ScalarOp};
 use crate::shape;
 use crate::sized::COHORT_SPIN_POLLS;
@@ -396,7 +397,7 @@ fn prepare<'block>(
         buffers[node.0 as usize] = Some(Cow::Borrowed(data));
     }
 
-    let resolved = bind::bind(program, &shapes, &effective_outputs)?;
+    let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
     let retires = node_retirement(&resolved, &effective_outputs);
 
     Ok(Prepared {
@@ -758,7 +759,7 @@ pub fn build_static_arena_with_constants(
         buffers[node.0 as usize] = Some(vec![0.0f32; element_count(shapes.of(*node))]);
     }
 
-    let resolved = bind::bind(program, &shapes, &effective_outputs)?;
+    let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
     for computed in &resolved {
         buffers[computed.node.0 as usize] = Some(vec![0.0f32; node_output_len(computed)]);
     }
@@ -3530,7 +3531,7 @@ pub fn evaluate_quantized_with_scratch(
     }
     reject_non_float32_outputs(program, &quantized_weight_nodes, &effective_outputs)?;
 
-    let resolved = bind::bind(program, &shapes, &effective_outputs)?;
+    let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
     let retires = node_retirement(&resolved, &effective_outputs);
     // ROW 181 profile-gate probe: `evaluate_named` no longer reaches this
     // loop (it routes through `evaluate_named_via_arena` ->
@@ -18488,7 +18489,7 @@ fn run_typed_program<T: Element>(
         buffers[node.0 as usize] = Some(Cow::Borrowed(data));
     }
 
-    let resolved = bind::bind(program, &shapes, &effective_outputs)?;
+    let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
 
     let retires = node_retirement(&resolved, &effective_outputs);
     let mut free_buffers: Vec<Vec<T>> = Vec::new();
@@ -18632,7 +18633,7 @@ where
         }
     }
 
-    let resolved = bind::bind(program, &shapes, &effective_outputs)?;
+    let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
 
     let retires = node_retirement(&resolved, &effective_outputs);
     let mut free_in: Vec<Vec<TIn>> = Vec::new();
@@ -19514,7 +19515,7 @@ mod tests {
             );
 
             let shapes = shape::infer(&program, &[]).expect("shape inference succeeds");
-            let resolved = bind::bind(&program, &shapes, &[]).expect("bind succeeds");
+            let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("bind succeeds");
             let BoundOpKind::Elementwise { body, .. } = &resolved
                 .iter()
                 .find(|op| op.node == root)
@@ -22808,7 +22809,7 @@ mod tests {
             embedding_matmul_program(vocab as u32, embed_dim as u32, seq as u32, out_dim as u32);
 
         let shapes = shape::infer(&program, &[]).expect("embedding matmul infers");
-        let resolved = bind::bind(&program, &shapes, &[]).expect("embedding matmul resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("embedding matmul resolves");
         assert_eq!(
             resolved.len(),
             1,
@@ -22881,7 +22882,7 @@ mod tests {
             .collect();
 
         let shapes = shape::infer(&program, &[]).expect("infers");
-        let resolved = bind::bind(&program, &shapes, &[]).expect("resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("resolves");
         assert_eq!(resolved.len(), 1, "fused into one reduction node");
         assert!(
             element_count(&resolved[0].extents) >= PARALLEL_THRESHOLD,
@@ -23644,7 +23645,7 @@ mod tests {
         let _ = current;
 
         let shapes = shape::infer(&program, &[]).expect("tanh chain infers");
-        let resolved = bind::bind(&program, &shapes, &[]).expect("tanh chain resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("tanh chain resolves");
         assert_eq!(
             resolved.len(),
             1,
@@ -23703,7 +23704,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
-        let resolved = bind::bind(&program, &shapes, &[]).expect("elementwise chain resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("elementwise chain resolves");
         assert_eq!(
             resolved.len(),
             1,
@@ -23776,7 +23777,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("diamond chain infers");
-        let resolved = bind::bind(&program, &shapes, &[]).expect("diamond chain resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("diamond chain resolves");
         assert_eq!(
             resolved.len(),
             2,
@@ -23826,7 +23827,7 @@ mod tests {
 
         let shapes = shape::infer(&program, &[]).expect("requested-output chain infers");
         let resolved =
-            bind::bind(&program, &shapes, &[b, c]).expect("requested-output chain resolves");
+            bind::bind(&program, &shapes, &[b, c], NumericPolicy::bit_exact()).expect("requested-output chain resolves");
         assert_eq!(
             resolved.len(),
             2,
@@ -24094,7 +24095,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("elementwise infers");
-        let resolved = bind::bind(&program, &shapes, &[]).expect("elementwise resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("elementwise resolves");
         let node = &resolved[0];
 
         let data: Vec<f32> = (0..40).map(|value| value as f32 * 0.01).collect();
@@ -24123,7 +24124,7 @@ mod tests {
         let rhs: Vec<f32> = (0..k * n).map(|value| value as f32).collect();
 
         let shapes = shape::infer(&program, &[]).expect("matmul infers");
-        let resolved = bind::bind(&program, &shapes, &[]).expect("matmul resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("matmul resolves");
         assert_eq!(resolved.len(), 1, "fused into one reduction node");
         let node = &resolved[0];
 
@@ -24417,7 +24418,7 @@ mod tests {
         let rhs: Vec<f32> = (0..k * n).map(|value| (value % 5) as f32).collect();
 
         let shapes = shape::infer(&program, &[]).expect("64x64x64 matmul infers");
-        let resolved = bind::bind(&program, &shapes, &[]).expect("64x64x64 matmul resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("64x64x64 matmul resolves");
         assert_eq!(resolved.len(), 1, "fused into one reduction node");
         assert!(
             element_count(&resolved[0].extents) >= PARALLEL_THRESHOLD,
@@ -24589,7 +24590,7 @@ mod tests {
         let outputs: Vec<NodeId> = Vec::new();
         let retires = live::annotate(&program, &outputs);
         let shapes = ShapeTable::new(&[]);
-        let builder = BoundOpBuilder::new(retires, NumericPolicy::BitExact);
+        let builder = BoundOpBuilder::new(retires, NumericPolicy::bit_exact());
 
         // `matmul_program` always appends `lhs` then `rhs` first.
         let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];
