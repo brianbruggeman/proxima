@@ -395,6 +395,43 @@ pub(crate) fn checkpoint_has_qk_norm(parsed: &ParsedGguf) -> bool {
     find_tensor(parsed, "blk.0.attn_q_norm.weight").is_ok()
 }
 
+/// A checkpoint's on-disk tensor bytes, summed by class -- dense (per-layer
+/// attention/FFN weights every architecture has), experts (mixture-of-
+/// experts `blk.{layer}.{proj}_exps.weight` stacks, llama.cpp's own
+/// naming), and tables (`token_embd.weight`/`output.weight`, the two
+/// tensors [`crate::memory_fit`]'s follow-up (per-expert precision as a
+/// budget-constrained allocation, DynaExq's per-layer top-n rule) needs
+/// isolated from the per-layer dense/expert sets it selects over).
+///
+/// `crate::generate::LoadedModel::load_inner` calls this ONCE at load,
+/// before any weight is bound, and stores the three sums on
+/// [`crate::generate::LoadedModel`] for its own load-time memory-fit gate
+/// (`crate::memory_fit`'s own module doc) to read back later, since the
+/// gate itself runs after `parsed`'s own borrow has gone out of scope.
+///
+/// A tensor whose byte size cannot be computed ([`TensorInfo::nbytes`]
+/// returning [`None`] -- pathological dimensions) contributes `0` rather
+/// than failing the whole classification: this is a load-time SAFETY-NET
+/// budget, not an exactness-critical accounting, and the tensor's own
+/// dimensions get a real, typed rejection later at bind time regardless.
+#[must_use]
+pub(crate) fn tensor_bytes_by_class(parsed: &ParsedGguf) -> (u64, u64, u64) {
+    let mut dense_bytes = 0u64;
+    let mut expert_bytes = 0u64;
+    let mut table_bytes = 0u64;
+    for tensor in &parsed.tensors {
+        let bytes = tensor.nbytes().unwrap_or(0);
+        if tensor.name.contains("_exps.") {
+            expert_bytes += bytes;
+        } else if tensor.name == "token_embd.weight" || tensor.name == "output.weight" {
+            table_bytes += bytes;
+        } else {
+            dense_bytes += bytes;
+        }
+    }
+    (dense_bytes, expert_bytes, table_bytes)
+}
+
 pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitecture, InteropError> {
     let architecture = metadata_str(parsed, "general.architecture")?;
     let embedding = metadata_u32(parsed, &alloc::format!("{architecture}.embedding_length"))?;

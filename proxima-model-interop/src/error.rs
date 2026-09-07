@@ -310,4 +310,33 @@ pub enum InteropError {
     #[cfg(feature = "std")]
     #[error("quality prompt fixture line {line_number}: {reason}")]
     MalformedQualityPrompt { line_number: usize, reason: String },
+
+    /// [`crate::memory_fit::fit_context_length`]: even a context length of
+    /// `1` cannot fit this checkpoint's own weights (by class -- dense,
+    /// mixture-of-experts, embedding/output tables, SSM state) plus the
+    /// fixed arena allowance inside `limit_bytes - os_headroom_bytes` --
+    /// `generate_with_serving_config` returns this before
+    /// `BackendRuntime::new` uploads a single weight
+    /// (`ServingConfig::gpu_memory_fit`'s own doc). Every field names one
+    /// class so a later allocation step (per-expert precision as a
+    /// budget-constrained top-n selection, `crate::memory_fit`'s own module
+    /// doc) can read the record without re-deriving the split.
+    #[cfg(feature = "std")]
+    #[error(
+        "load-time memory budget exceeded: dense_weights_bytes={dense_weights_bytes} \
+         expert_weights_bytes={expert_weights_bytes} table_weights_bytes={table_weights_bytes} \
+         kv_cache_bytes={kv_cache_bytes} ssm_state_bytes={ssm_state_bytes} \
+         arena_allowance_bytes={arena_allowance_bytes} exceeds limit_bytes={limit_bytes} \
+         minus os_headroom_bytes={os_headroom_bytes}"
+    )]
+    MemoryBudgetExceeded {
+        dense_weights_bytes: u64,
+        expert_weights_bytes: u64,
+        table_weights_bytes: u64,
+        kv_cache_bytes: u64,
+        ssm_state_bytes: u64,
+        arena_allowance_bytes: u64,
+        limit_bytes: u64,
+        os_headroom_bytes: u64,
+    },
 }

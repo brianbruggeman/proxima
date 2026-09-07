@@ -38,6 +38,8 @@ mod lfm2;
 #[cfg(feature = "std")]
 mod loader;
 #[cfg(feature = "std")]
+mod memory_fit;
+#[cfg(feature = "std")]
 mod qwen35;
 #[cfg(feature = "std")]
 mod quality;
