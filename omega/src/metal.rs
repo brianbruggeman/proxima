@@ -2101,6 +2101,120 @@ pub fn execute_plan_named_with_placements(
     execute_plan_with_placements(plan, &blocks, input_placements, output_placements, &mut Vec::new())
 }
 
+/// [`execute_plan`] with the WHOLE program's own single command buffer's
+/// `GPUStartTime`/`GPUEndTime` read back once, instead of
+/// [`execute_plan_op_timed`]'s one-command-buffer-per-op attribution. ROW
+/// 375 measured a batch of independent same-kind dispatches with the
+/// per-op instrument and got a flat ~705 us reading dominated by that
+/// function's own per-buffer submit/wait floor, 13-20x the in-program
+/// per-dispatch cost `rmsnorm_fused_epilogue_cost.rs`'s ROW 368/372 batched
+/// harness measures through this same one-encoder, one-command-buffer
+/// shape `execute_plan` already uses for production. This function exists
+/// so a caller batching N independent dispatches into one plan (this
+/// crate's own `plan_named`/`execute_plan_named`) can read that batch's
+/// real GPU occupancy without re-deriving `execute_plan`'s encode loop.
+///
+/// # Errors
+/// Same as [`execute_plan`].
+#[cfg(feature = "instrument")]
+pub fn execute_plan_timed(
+    plan: &Plan,
+    blocks: &[QuantizedBlock<'_>],
+) -> Result<(Evaluated, u64), MetalError> {
+    let prepared = &plan.prepared;
+    let packed_operands = &plan.packed_operands;
+
+    let (device, queue) = device_and_queue()?;
+
+    let mut device_buffers: BTreeMap<NodeId, DeviceBuffer> = BTreeMap::new();
+    for ((node, block), dtype) in prepared
+        .block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .zip(plan.block_dtypes.iter())
+    {
+        let resident_name = resident_name(plan, *node);
+        let buffer = match block {
+            QuantizedBlock::Float32(data) => {
+                upload_block(&device, data, *node, *dtype, resident_name)?
+            }
+            QuantizedBlock::Q3K(bytes)
+            | QuantizedBlock::Q4K(bytes)
+            | QuantizedBlock::Q5K(bytes)
+            | QuantizedBlock::Q6K(bytes)
+            | QuantizedBlock::Q8_0(bytes)
+            | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Float16(bytes)
+            | QuantizedBlock::BFloat16(bytes) => {
+                upload_packed_bytes(&device, bytes, resident_name)?
+            }
+        };
+        device_buffers.insert(*node, buffer);
+    }
+
+    let command_buffer = queue
+        .commandBuffer()
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "command queue refused to hand out a command buffer".to_string(),
+        })?;
+    let encoder =
+        command_buffer
+            .computeCommandEncoder()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "command buffer refused to hand out a compute encoder".to_string(),
+            })?;
+
+    let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
+    for (position, bound) in prepared.resolved.iter().enumerate() {
+        let fault = encode_op(
+            &device,
+            &encoder,
+            &mut device_buffers,
+            bound,
+            packed_operands,
+            None,
+            None,
+            None,
+            plan.math_mode,
+            plan.numeric_policy,
+            None,
+        )?;
+        if let Some((fault_buffer, gathers)) = fault {
+            pending_faults.push((bound, fault_buffer, gathers));
+        }
+        for retired in &prepared.retires[position] {
+            device_buffers.remove(retired);
+        }
+    }
+    encoder.endEncoding();
+
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    let gpu_ns =
+        ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
+
+    for (bound, fault_buffer, gathers) in &pending_faults {
+        check_gather_fault(bound, fault_buffer, *gathers)?;
+    }
+
+    let evaluated = finish(plan, &device_buffers, &BTreeSet::new(), None)?;
+    Ok((evaluated, gpu_ns))
+}
+
+/// [`execute_plan_timed`] against a name-keyed block set, mirroring
+/// [`execute_plan_named`]'s own name resolution.
+///
+/// # Errors
+/// Propagates name-resolution and Metal driver failures.
+#[cfg(feature = "instrument")]
+pub fn execute_plan_named_timed(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+) -> Result<(Evaluated, u64), MetalError> {
+    let blocks = resolve_named_blocks(&plan.program, named)?;
+    execute_plan_timed(plan, &blocks)
+}
+
 /// One [`BoundOp`]'s GPU-only execution time and the operand bytes it read,
 /// as gathered by [`execute_plan_op_timed`]. `weight_name` is
 /// [`Op::name`](proxima_tensor::Op::name) off whichever operand is a named
