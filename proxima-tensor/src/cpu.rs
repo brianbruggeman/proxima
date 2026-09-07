@@ -1598,50 +1598,166 @@ enum EpilogueKind {
     LayerNorm,
 }
 
-fn epilogue_step_is(step: &bind::BodyStep, op: ScalarOp, args: &[StepArg]) -> bool {
-    step.op == op && step.args.as_slice() == args
+/// `arg`, resolved one edge: `Some((op, args))` when `arg` is a
+/// [`StepArg::Step`] pointing at a real entry in `body.steps`, `None` for a
+/// [`StepArg::Operand`] (a leaf — nothing upstream to walk) or a dangling
+/// index. The one primitive [`match_epilogue`]'s per-kind matchers below
+/// build on: walking `StepArg::Step` edges rather than reading `steps[i]` by
+/// position is what makes recognition invariant to how many steps upstream
+/// canonicalization folded away (`push_canonical_step`, `bind.rs`) — the
+/// defect `cpu.rs:2570-2626`'s "hidden=1 confluence gap" doc names.
+fn edge(body: &ComposedBody, arg: StepArg) -> Option<(ScalarOp, &[StepArg])> {
+    match arg {
+        StepArg::Step(index) => {
+            let step = body.steps.get(index as usize)?;
+            Some((step.op, step.args.as_slice()))
+        }
+        StepArg::Operand(_) => None,
+    }
 }
 
-fn detect_epilogue_kind(body: &ComposedBody) -> Option<EpilogueKind> {
-    use StepArg::{Operand, Step};
-    let steps = body.steps.as_slice();
-    let is_clip = steps.len() == 2
-        && epilogue_step_is(&steps[0], ScalarOp::Add, &[Operand(0), Operand(1)])
-        && epilogue_step_is(&steps[1], ScalarOp::Maximum, &[Step(0), Operand(2)]);
-    if is_clip {
+/// `edge`, specialized to a binary op — `Clip`/`ClipNorm`/`Norm`/`LayerNorm`
+/// are all built entirely from unary (`SquareRoot`) and binary
+/// (`Add`/`Subtract`/`Multiply`/`Divide`/`Maximum`) scalar steps, never a
+/// three-arg `Select`.
+fn binary_edge(body: &ComposedBody, arg: StepArg) -> Option<(ScalarOp, StepArg, StepArg)> {
+    let (op, args) = edge(body, arg)?;
+    let [left, right] = args else { return None };
+    Some((op, *left, *right))
+}
+
+fn unary_edge(body: &ComposedBody, arg: StepArg) -> Option<(ScalarOp, StepArg)> {
+    let (op, args) = edge(body, arg)?;
+    let [only] = args else { return None };
+    Some((op, *only))
+}
+
+/// `arg` is `expected_op(Operand(left), Operand(right))` — OR, when
+/// `push_canonical_step` eliminated that step because one side was
+/// `expected_op`'s own identity element, `arg` is directly whichever operand
+/// survived the fold. Both are the same algebraic value; a matcher that only
+/// accepted the first shape is exactly the positional brittleness this
+/// module replaces. Used for the `reduce + bias` step every kind but
+/// `LayerNorm` opens with, and reused by `LayerNorm`'s `reduce * (1/N)` step
+/// — the concrete case `docs/discipline.md`'s hidden=1 confluence note
+/// names, generalized here to any identity-eliminable binary step.
+fn matches_binary_or_eliminated(
+    body: &ComposedBody,
+    arg: StepArg,
+    expected_op: ScalarOp,
+    left_operand: u16,
+    right_operand: u16,
+) -> bool {
+    match binary_edge(body, arg) {
+        Some((op, StepArg::Operand(left), StepArg::Operand(right))) => {
+            op == expected_op && left == left_operand && right == right_operand
+        }
+        Some(_) => false,
+        None => {
+            arg == StepArg::Operand(left_operand) || arg == StepArg::Operand(right_operand)
+        }
+    }
+}
+
+/// `Maximum(reduce_plus_bias, Operand(2))` — the `max(reduce + bias, 0)`
+/// shape every `Clip`-carrying kind opens with, structural over which arg
+/// feeds `Maximum` rather than a fixed step index.
+fn matches_clip_head(body: &ComposedBody, arg: StepArg) -> bool {
+    matches!(
+        binary_edge(body, arg),
+        Some((ScalarOp::Maximum, reduce_plus_bias, StepArg::Operand(2)))
+            if matches_binary_or_eliminated(body, reduce_plus_bias, ScalarOp::Add, 0, 1)
+    )
+}
+
+/// `((relu_result - mean) / sqrt(var + eps)) * gamma + beta` — the norm tail
+/// shared by `ClipNorm`/`Norm`, parameterized over the operand slots each
+/// carries the clipped/unclipped reduce at, since that is the only place the
+/// two kinds' operand numbering diverges.
+fn matches_norm_tail(
+    body: &ComposedBody,
+    result: StepArg,
+    mean_operand: u16,
+    var_operand: u16,
+    eps_operand: u16,
+    gamma_operand: u16,
+    beta_operand: u16,
+) -> Option<StepArg> {
+    let (ScalarOp::Add, scaled, StepArg::Operand(beta)) = binary_edge(body, result)? else {
+        return None;
+    };
+    if beta != beta_operand {
+        return None;
+    }
+    let (ScalarOp::Multiply, normalized, StepArg::Operand(gamma)) = binary_edge(body, scaled)?
+    else {
+        return None;
+    };
+    if gamma != gamma_operand {
+        return None;
+    }
+    let (ScalarOp::Divide, centered, std) = binary_edge(body, normalized)? else {
+        return None;
+    };
+    let (ScalarOp::SquareRoot, var_eps) = unary_edge(body, std)? else {
+        return None;
+    };
+    if !matches_binary_or_eliminated(body, var_eps, ScalarOp::Add, var_operand, eps_operand) {
+        return None;
+    }
+    let (ScalarOp::Subtract, reduce_head, StepArg::Operand(mean)) = binary_edge(body, centered)?
+    else {
+        return None;
+    };
+    if mean != mean_operand {
+        return None;
+    }
+    Some(reduce_head)
+}
+
+/// Structural epilogue recognizer: walks backward from `body.steps.last()`
+/// through [`StepArg::Step`] edges, matching each of the four kinds by which
+/// step feeds which and what op it applies — never `steps.len() == N` or
+/// `steps[i]`. Invariant to how many steps upstream canonicalization folded
+/// (`push_canonical_step`, `bind.rs`) in the same bind call; same signature
+/// as the `detect_epilogue_kind` this replaces, so `epilogue_fuse_plan`'s
+/// call sites are unchanged.
+fn match_epilogue(body: &ComposedBody) -> Option<EpilogueKind> {
+    let last_index = u16::try_from(body.steps.len().checked_sub(1)?).ok()?;
+    let result = StepArg::Step(last_index);
+
+    if matches_clip_head(body, result) {
         return Some(EpilogueKind::Clip);
     }
-    let is_clip_norm = steps.len() == 8
-        && epilogue_step_is(&steps[0], ScalarOp::Add, &[Operand(0), Operand(1)])
-        && epilogue_step_is(&steps[1], ScalarOp::Maximum, &[Step(0), Operand(2)])
-        && epilogue_step_is(&steps[2], ScalarOp::Subtract, &[Step(1), Operand(3)])
-        && epilogue_step_is(&steps[3], ScalarOp::Add, &[Operand(4), Operand(5)])
-        && epilogue_step_is(&steps[4], ScalarOp::SquareRoot, &[Step(3)])
-        && epilogue_step_is(&steps[5], ScalarOp::Divide, &[Step(2), Step(4)])
-        && epilogue_step_is(&steps[6], ScalarOp::Multiply, &[Step(5), Operand(6)])
-        && epilogue_step_is(&steps[7], ScalarOp::Add, &[Step(6), Operand(7)]);
-    if is_clip_norm {
+
+    if let Some(reduce_head) = matches_norm_tail(body, result, 3, 4, 5, 6, 7)
+        && matches_clip_head(body, reduce_head)
+    {
         return Some(EpilogueKind::ClipNorm);
     }
-    let is_norm = steps.len() == 7
-        && epilogue_step_is(&steps[0], ScalarOp::Add, &[Operand(0), Operand(1)])
-        && epilogue_step_is(&steps[1], ScalarOp::Subtract, &[Step(0), Operand(2)])
-        && epilogue_step_is(&steps[2], ScalarOp::Add, &[Operand(3), Operand(4)])
-        && epilogue_step_is(&steps[3], ScalarOp::SquareRoot, &[Step(2)])
-        && epilogue_step_is(&steps[4], ScalarOp::Divide, &[Step(1), Step(3)])
-        && epilogue_step_is(&steps[5], ScalarOp::Multiply, &[Step(4), Operand(5)])
-        && epilogue_step_is(&steps[6], ScalarOp::Add, &[Step(5), Operand(6)]);
-    if is_norm {
+
+    if let Some(reduce_head) = matches_norm_tail(body, result, 2, 3, 4, 5, 6)
+        && matches_binary_or_eliminated(body, reduce_head, ScalarOp::Add, 0, 1)
+    {
         return Some(EpilogueKind::Norm);
     }
-    let is_layer_norm = steps.len() == 6
-        && epilogue_step_is(&steps[0], ScalarOp::Multiply, &[Operand(1), Operand(2)])
-        && epilogue_step_is(&steps[1], ScalarOp::Add, &[Step(0), Operand(3)])
-        && epilogue_step_is(&steps[2], ScalarOp::SquareRoot, &[Step(1)])
-        && epilogue_step_is(&steps[3], ScalarOp::Divide, &[Operand(0), Step(2)])
-        && epilogue_step_is(&steps[4], ScalarOp::Multiply, &[Step(3), Operand(4)])
-        && epilogue_step_is(&steps[5], ScalarOp::Add, &[Step(4), Operand(5)]);
-    if is_layer_norm {
+
+    let (ScalarOp::Add, scaled, StepArg::Operand(5)) = binary_edge(body, result)? else {
+        return None;
+    };
+    let (ScalarOp::Multiply, normalized, StepArg::Operand(4)) = binary_edge(body, scaled)? else {
+        return None;
+    };
+    let (ScalarOp::Divide, StepArg::Operand(0), std) = binary_edge(body, normalized)? else {
+        return None;
+    };
+    let (ScalarOp::SquareRoot, var_eps) = unary_edge(body, std)? else {
+        return None;
+    };
+    let (ScalarOp::Add, var_arg, StepArg::Operand(3)) = binary_edge(body, var_eps)? else {
+        return None;
+    };
+    if matches_binary_or_eliminated(body, var_arg, ScalarOp::Multiply, 1, 2) {
         return Some(EpilogueKind::LayerNorm);
     }
     None
@@ -1788,7 +1904,7 @@ fn epilogue_fuse_plan(
         } else {
             continue;
         };
-        let Some(kind) = detect_epilogue_kind(body) else {
+        let Some(kind) = match_epilogue(body) else {
             continue;
         };
         // the monomorphized kernels below encode a FIXED operand wiring per
@@ -19100,6 +19216,368 @@ mod tests {
         assert!(evaluated.get(requested).is_none());
         assert!(!evaluated.is_placed(never_requested));
         assert!(evaluated.get(never_requested).is_none());
+    }
+
+    /// `max(reduce + bias, 0)` — [`EpilogueKind::Clip`]'s own shape, walking
+    /// [`match_epilogue`] the authored (never eliminated) way, per P17: a
+    /// worked example over a hand-built [`ComposedBody`], not a fixture that
+    /// happens to hit the pattern.
+    #[test]
+    fn match_epilogue_recognizes_clip_authored() {
+        let body = ComposedBody {
+            steps: vec![
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Operand(0), StepArg::Operand(1)],
+                },
+                BodyStep {
+                    op: ScalarOp::Maximum,
+                    args: vec![StepArg::Step(0), StepArg::Operand(2)],
+                },
+            ],
+        };
+        assert_eq!(match_epilogue(&body), Some(EpilogueKind::Clip));
+    }
+
+    /// The same `Clip` value with the `+ bias` step already eliminated
+    /// because `bias == 0` (`push_canonical_step`'s own identity fold) —
+    /// `Maximum` reads `Operand(0)` (the reduce) directly instead of a
+    /// `Step`. `detect_epilogue_kind` (main) would reject this: it always
+    /// expected exactly 2 steps with `steps[0]` a literal `Add`. This one
+    /// step is exactly what `push_canonical_step` mints when bias folds
+    /// away, so recognizing it here is the confluence guarantee, not a
+    /// synthetic shape.
+    #[test]
+    fn match_epilogue_recognizes_clip_after_bias_identity_elimination() {
+        let body = ComposedBody {
+            steps: vec![BodyStep {
+                op: ScalarOp::Maximum,
+                args: vec![StepArg::Operand(0), StepArg::Operand(2)],
+            }],
+        };
+        assert_eq!(match_epilogue(&body), Some(EpilogueKind::Clip));
+    }
+
+    fn clip_norm_body() -> ComposedBody {
+        ComposedBody {
+            steps: vec![
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Operand(0), StepArg::Operand(1)],
+                },
+                BodyStep {
+                    op: ScalarOp::Maximum,
+                    args: vec![StepArg::Step(0), StepArg::Operand(2)],
+                },
+                BodyStep {
+                    op: ScalarOp::Subtract,
+                    args: vec![StepArg::Step(1), StepArg::Operand(3)],
+                },
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Operand(4), StepArg::Operand(5)],
+                },
+                BodyStep {
+                    op: ScalarOp::SquareRoot,
+                    args: vec![StepArg::Step(3)],
+                },
+                BodyStep {
+                    op: ScalarOp::Divide,
+                    args: vec![StepArg::Step(2), StepArg::Step(4)],
+                },
+                BodyStep {
+                    op: ScalarOp::Multiply,
+                    args: vec![StepArg::Step(5), StepArg::Operand(6)],
+                },
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Step(6), StepArg::Operand(7)],
+                },
+            ],
+        }
+    }
+
+    /// `((max(reduce + bias, 0) - mean) / sqrt(var + eps)) * gamma + beta`
+    /// authored in full, per P17's worked-example requirement.
+    #[test]
+    fn match_epilogue_recognizes_clip_norm_authored() {
+        assert_eq!(match_epilogue(&clip_norm_body()), Some(EpilogueKind::ClipNorm));
+    }
+
+    fn norm_body() -> ComposedBody {
+        ComposedBody {
+            steps: vec![
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Operand(0), StepArg::Operand(1)],
+                },
+                BodyStep {
+                    op: ScalarOp::Subtract,
+                    args: vec![StepArg::Step(0), StepArg::Operand(2)],
+                },
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Operand(3), StepArg::Operand(4)],
+                },
+                BodyStep {
+                    op: ScalarOp::SquareRoot,
+                    args: vec![StepArg::Step(2)],
+                },
+                BodyStep {
+                    op: ScalarOp::Divide,
+                    args: vec![StepArg::Step(1), StepArg::Step(3)],
+                },
+                BodyStep {
+                    op: ScalarOp::Multiply,
+                    args: vec![StepArg::Step(4), StepArg::Operand(5)],
+                },
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Step(5), StepArg::Operand(6)],
+                },
+            ],
+        }
+    }
+
+    /// `((reduce + bias - mean) / sqrt(var + eps)) * gamma + beta`, no relu
+    /// — authored in full.
+    #[test]
+    fn match_epilogue_recognizes_norm_authored() {
+        assert_eq!(match_epilogue(&norm_body()), Some(EpilogueKind::Norm));
+    }
+
+    /// `Norm` with the leading `reduce + bias` step already eliminated
+    /// (`bias == 0`) — `Subtract` reads `Operand(0)` (the raw reduce)
+    /// directly instead of a `Step`, one step shorter than `norm_body`'s own
+    /// 7. `detect_epilogue_kind` (main) hard-coded `steps.len() == 7`; a
+    /// still-valid `Norm` one step shorter than that never matched.
+    #[test]
+    fn match_epilogue_recognizes_norm_after_bias_identity_elimination() {
+        let body = ComposedBody {
+            steps: vec![
+                BodyStep {
+                    op: ScalarOp::Subtract,
+                    args: vec![StepArg::Operand(0), StepArg::Operand(2)],
+                },
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Operand(3), StepArg::Operand(4)],
+                },
+                BodyStep {
+                    op: ScalarOp::SquareRoot,
+                    args: vec![StepArg::Step(1)],
+                },
+                BodyStep {
+                    op: ScalarOp::Divide,
+                    args: vec![StepArg::Step(0), StepArg::Step(2)],
+                },
+                BodyStep {
+                    op: ScalarOp::Multiply,
+                    args: vec![StepArg::Step(3), StepArg::Operand(5)],
+                },
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Step(4), StepArg::Operand(6)],
+                },
+            ],
+        };
+        assert_eq!(match_epilogue(&body), Some(EpilogueKind::Norm));
+    }
+
+    fn layer_norm_body() -> ComposedBody {
+        ComposedBody {
+            steps: vec![
+                BodyStep {
+                    op: ScalarOp::Multiply,
+                    args: vec![StepArg::Operand(1), StepArg::Operand(2)],
+                },
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Step(0), StepArg::Operand(3)],
+                },
+                BodyStep {
+                    op: ScalarOp::SquareRoot,
+                    args: vec![StepArg::Step(1)],
+                },
+                BodyStep {
+                    op: ScalarOp::Divide,
+                    args: vec![StepArg::Operand(0), StepArg::Step(2)],
+                },
+                BodyStep {
+                    op: ScalarOp::Multiply,
+                    args: vec![StepArg::Step(3), StepArg::Operand(4)],
+                },
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Step(4), StepArg::Operand(5)],
+                },
+            ],
+        }
+    }
+
+    /// `(centered / sqrt(reduce * (1/N) + eps)) * gamma + beta` authored in
+    /// full — BERT-style `LayerNormalization`'s own unrolled tail.
+    #[test]
+    fn match_epilogue_recognizes_layer_norm_authored() {
+        assert_eq!(match_epilogue(&layer_norm_body()), Some(EpilogueKind::LayerNorm));
+    }
+
+    /// The `docs/discipline.md`/`cpu.rs:2570-2626` "hidden=1 confluence
+    /// gap" reproduced directly: `hidden == 1` makes `1/N == 1.0`, so
+    /// `push_canonical_step` folds `reduce * (1/N)` to the bare reduce
+    /// operand, one step shorter than `layer_norm_body`'s own 6 —
+    /// `var_eps` reads `Operand(1)` directly instead of `Step(0)`.
+    /// `detect_epilogue_kind` (main) hard-coded `steps.len() == 6` and
+    /// `steps[0] == Multiply(Operand(1), Operand(2))`; this body fails
+    /// that check on main and passes here, which is the point: a real
+    /// LayerNorm program at `hidden=1` must not silently fall off the
+    /// fused path depending on which upstream fold fired first.
+    #[test]
+    fn match_epilogue_recognizes_layer_norm_after_hidden_one_confluence() {
+        let body = ComposedBody {
+            steps: vec![
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Operand(1), StepArg::Operand(3)],
+                },
+                BodyStep {
+                    op: ScalarOp::SquareRoot,
+                    args: vec![StepArg::Step(0)],
+                },
+                BodyStep {
+                    op: ScalarOp::Divide,
+                    args: vec![StepArg::Operand(0), StepArg::Step(1)],
+                },
+                BodyStep {
+                    op: ScalarOp::Multiply,
+                    args: vec![StepArg::Step(2), StepArg::Operand(4)],
+                },
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Step(3), StepArg::Operand(5)],
+                },
+            ],
+        };
+        assert_eq!(match_epilogue(&body), Some(EpilogueKind::LayerNorm));
+    }
+
+    /// A shape none of the four kinds is (`Subtract` at the top, not
+    /// `Add`/`Maximum`) is rejected outright — `match_epilogue` is a
+    /// recognizer, not a permissive fallback.
+    #[test]
+    fn match_epilogue_rejects_unrelated_shape() {
+        let body = ComposedBody {
+            steps: vec![BodyStep {
+                op: ScalarOp::Subtract,
+                args: vec![StepArg::Operand(0), StepArg::Operand(1)],
+            }],
+        };
+        assert_eq!(match_epilogue(&body), None);
+    }
+
+    /// `push_canonical_step` canonicalizes a commutative op's operand order
+    /// before minting a step — `a*b+c` and `c+a*b` compose to the identical
+    /// [`bind::BodyStep`] sequence, never two different `BoundOpKind`s for
+    /// the same algebraic value. Built through `bind`'s own program/bind
+    /// path (not a hand-built body) so this is a real authored-order test,
+    /// per the brief's "bind to the identical `BoundOpKind`" requirement.
+    #[test]
+    fn commutative_operand_order_is_canonical_regardless_of_authored_order() {
+        let build = |c_plus_a_times_b: bool| -> ComposedBody {
+            let mut program = Vec::new();
+            let a = f32_block(&mut program, &[Extent::Static(4)]);
+            let b = f32_block(&mut program, &[Extent::Static(4)]);
+            let c = f32_block(&mut program, &[Extent::Static(4)]);
+            let identity = || IndexMap::Affine(map::projection(1, &[0]));
+            let a_times_b = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![(a, identity()), (b, identity())],
+                    name: None,
+                },
+            );
+            let operands = if c_plus_a_times_b {
+                alloc::vec![(c, identity()), (a_times_b, identity())]
+            } else {
+                alloc::vec![(a_times_b, identity()), (c, identity())]
+            };
+            let root = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    operands,
+                    name: None,
+                },
+            );
+
+            let shapes = shape::infer(&program, &[]).expect("shape inference succeeds");
+            let resolved = bind::bind(&program, &shapes, &[]).expect("bind succeeds");
+            let BoundOpKind::Elementwise { body, .. } = &resolved
+                .iter()
+                .find(|op| op.node == root)
+                .expect("root node bound")
+                .kind
+            else {
+                panic!("root node did not bind to an Elementwise kind");
+            };
+            body.clone()
+        };
+
+        assert_eq!(build(true), build(false), "c+a*b and a*b+c must mint the identical BodyStep sequence");
+    }
+
+    /// Bit-identity, per the brief's requirement that canonicalizing operand
+    /// order never changes a computed value: a real-shaped elementwise chain
+    /// (`a*b+c`, four-element vectors) authored two ways evaluates to
+    /// bit-identical `f32` output, not merely an equal `ComposedBody`.
+    #[test]
+    fn commutative_operand_order_preserves_bit_exact_output() {
+        let build_and_evaluate = |c_plus_a_times_b: bool| -> Vec<f32> {
+            let mut program = Vec::new();
+            let a = f32_block(&mut program, &[Extent::Static(4)]);
+            let b = f32_block(&mut program, &[Extent::Static(4)]);
+            let c = f32_block(&mut program, &[Extent::Static(4)]);
+            let identity = || IndexMap::Affine(map::projection(1, &[0]));
+            let a_times_b = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![(a, identity()), (b, identity())],
+                    name: None,
+                },
+            );
+            let operands = if c_plus_a_times_b {
+                alloc::vec![(c, identity()), (a_times_b, identity())]
+            } else {
+                alloc::vec![(a_times_b, identity()), (c, identity())]
+            };
+            append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    operands,
+                    name: None,
+                },
+            );
+
+            let a_data = [1.0, 2.0, 3.0, 4.0f32];
+            let b_data = [2.0, 0.5, -1.0, 3.0f32];
+            let c_data = [1.0, 1.0, 1.0, 1.0f32];
+            let evaluated = evaluate(&program, &[], &[&a_data, &b_data, &c_data], &[])
+                .expect("elementwise chain evaluates");
+            evaluated.root().to_vec()
+        };
+
+        assert_eq!(
+            build_and_evaluate(true).as_slice(),
+            build_and_evaluate(false).as_slice(),
+            "reordering a*b+c's commutative Add operand must not change one bit of the result"
+        );
     }
 
     fn packed_block<'a>(codec: &str, bytes: &'a [u8]) -> QuantizedBlock<'a> {
