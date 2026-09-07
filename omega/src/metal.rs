@@ -1734,6 +1734,22 @@ pub fn execute_plan_with_placements(
             continue;
         }
         block_identity[index] = Some(current_identity);
+        let resident_name = resident_name(plan, *node);
+        // a brand-new `Plan` (a KV-bucket-boundary reshape, say) starts with
+        // an empty `device_buffers`/`block_identity` of its OWN, so the
+        // fast-skip above always misses on plan 1 of a node's life even
+        // though the GLOBAL, name-keyed caches
+        // (`NOCOPY_BUFFERS`/`RESIDENT_BUFFERS`/the checkpoint mapping)
+        // already hold this exact host range from the PRIOR plan. Consult
+        // them here, before counting this node as "offered", so a reshape
+        // does not re-walk every resident weight block through the upload
+        // path just to have it resolve to the same cache hit it already was.
+        if let Some((buffer, offset)) =
+            cross_plan_resident_reuse(resident_name, current_identity.0 as *const c_void, current_identity.1)?
+        {
+            device_buffers.insert(*node, (buffer, offset));
+            continue;
+        }
         // an input-placed node above never reaches here, so `BLOCK_OFFERED_BYTES`
         // fires only for a block that genuinely takes the host round trip
         // below -- the same "offered for upload" meaning `execute_plan`'s own
@@ -1746,7 +1762,6 @@ pub fn execute_plan_with_placements(
             counter!(BLOCK_UPLOAD_CALLS, 1);
             counter!(BLOCK_OFFERED_BYTES, block_byte_len(block) as u64);
         }
-        let resident_name = resident_name(plan, *node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => {
                 upload_block(&device, data, *node, *dtype, resident_name)?
@@ -4512,8 +4527,10 @@ pub struct MetalStageTotals {
     /// Every block's own declared byte length, summed regardless of which
     /// terminal upload path served it -- see [`BLOCK_OFFERED_BYTES`]'s own
     /// doc. `block_copied_bytes + block_nocopy_bound_bytes +
-    /// block_offset_bound_bytes == block_offered_bytes` on every step is the
-    /// partition identity this card exists to prove.
+    /// block_offset_bound_bytes == block_offered_bytes` on every step EXCEPT
+    /// one where a resident-copy cache hit served bytes for free -- see
+    /// [`BLOCK_COPIED_BYTES`]'s own doc for why that hit contributes to
+    /// neither term.
     pub block_offered_bytes: u64,
     /// Bytes bound through a real host->device copy this step -- see
     /// [`BLOCK_COPIED_BYTES`]'s own doc.
@@ -4630,14 +4647,16 @@ pub static NOCOPY_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_blo
 pub static COPYING_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_block.copy");
 
 /// Bytes bound through a real host->device copy this call
-/// (`upload_block_copy` or `upload_resident_copy`) — the terminal-path
-/// byte split of [`BLOCK_OFFERED_BYTES`], fired at the same granularity (once
-/// per block, every call, cache hit or miss) so the three counters below sum
-/// to `BLOCK_OFFERED_BYTES` on every step. See the module doc's "Host buffer
-/// upload" section for why most weight bytes never reach this counter --
-/// only a misaligned, non-resident block (the KV cache, which is deliberately
-/// never cached: see `upload_block_copy`'s own doc) pays a real copy every
-/// token.
+/// (`upload_block_copy`, or `upload_resident_copy` on a cache MISS only) --
+/// fired at the point the bytes actually move, never before the lookup that
+/// can avoid moving them. [`upload_resident_copy`]'s own cache HIT does not
+/// increment this counter (no bytes moved, the same buffer is reused), so
+/// `BLOCK_COPIED_BYTES + BLOCK_NOCOPY_BOUND_BYTES + BLOCK_OFFSET_BOUND_BYTES`
+/// sums to `BLOCK_OFFERED_BYTES` minus whatever a resident-copy cache hit
+/// served for free that step. See the module doc's "Host buffer upload"
+/// section for why most weight bytes never reach this counter -- only a
+/// misaligned, non-resident block (the KV cache, which is deliberately never
+/// cached: see `upload_block_copy`'s own doc) pays a real copy every token.
 pub static BLOCK_COPIED_BYTES: Counter = Counter::new("omega.metal.block_copied_bytes");
 /// Bytes bound zero-copy, either `upload_block_no_copy` (cached, resident)
 /// or `upload_block_no_copy_uncached` (uncached) — the other terminal-path
@@ -4751,10 +4770,10 @@ fn upload_block_as_float(
     if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
         return result;
     }
-    counter!(BLOCK_COPIED_BYTES, byte_length as u64);
     if let Some(name) = resident_name {
         return upload_resident_copy(device, name, pointer, byte_length).map(|buffer| (buffer, 0));
     }
+    counter!(BLOCK_COPIED_BYTES, byte_length as u64);
     counter!(COPYING_BUFFER_UPLOADS, 1);
     upload_block_copy(device, pointer, byte_length).map(|buffer| (buffer, 0))
 }
@@ -4790,10 +4809,10 @@ fn upload_packed_bytes(
     if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
         return result;
     }
-    counter!(BLOCK_COPIED_BYTES, byte_length as u64);
     if let Some(name) = resident_name {
         return upload_resident_copy(device, name, pointer, byte_length).map(|buffer| (buffer, 0));
     }
+    counter!(BLOCK_COPIED_BYTES, byte_length as u64);
     counter!(COPYING_BUFFER_UPLOADS, 1);
     upload_block_copy(device, pointer, byte_length).map(|buffer| (buffer, 0))
 }
@@ -4963,6 +4982,70 @@ fn resident_name_lookup(
         cached_len: cached_length,
         offered_len: byte_length,
     })
+}
+
+/// Counts a fresh [`Plan`]'s per-node fast path resolving a resident block
+/// straight from the process-global caches ([`NOCOPY_BUFFERS`],
+/// [`RESIDENT_BUFFERS`], the checkpoint mapping) instead of taking the
+/// upload path -- the direct witness that a KV-bucket-boundary reshape does
+/// not re-walk the checkpoint's weight blocks through
+/// `upload_block`/`upload_packed_bytes` just to re-derive a buffer those
+/// caches already hold.
+pub static PLAN_HANDOFF_REUSES: Counter = Counter::new("omega.metal.plan_handoff_reuses");
+
+/// Resolves `(pointer, byte_length)` against the GLOBAL, name-keyed residency
+/// caches without recording it as a fresh "offer" -- the fast path a brand
+/// new [`Plan`] takes so its own empty `device_buffers`/`block_identity`
+/// (see [`plan`]'s doc) never forces a resident weight block through the
+/// host round trip a PRIOR plan already paid once. `Ok(None)` means none of
+/// the three caches have this host range yet, so the caller falls through to
+/// `upload_block`/`upload_packed_bytes`'s normal offer path unchanged.
+///
+/// Never creates a buffer and never mutates a cache -- a rebind (the offered
+/// `(pointer, byte_length)` disagreeing with what a name already holds) is
+/// [`MetalError::ResidentNameRebound`] via [`resident_name_lookup`], the same
+/// contract [`upload_block_no_copy`]/[`upload_resident_copy`] enforce, never
+/// a silent reuse of a different allocation under the same name.
+fn cross_plan_resident_reuse(
+    resident_name: Option<&str>,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
+    if let Some(name) = resident_name {
+        if let Some(buffer) =
+            NOCOPY_BUFFERS.with(|cache| resident_name_lookup(cache, name, pointer, byte_length))?
+        {
+            counter!(PLAN_HANDOFF_REUSES, 1);
+            return Ok(Some((buffer, 0)));
+        }
+        if let Some(buffer) =
+            RESIDENT_BUFFERS.with(|cache| resident_name_lookup(cache, name, pointer, byte_length))?
+        {
+            counter!(PLAN_HANDOFF_REUSES, 1);
+            return Ok(Some((buffer, 0)));
+        }
+    }
+    let Some((base, mapping_length)) = CHECKPOINT_MAPPING.with(|mapping| *mapping.borrow()) else {
+        return Ok(None);
+    };
+    let address = pointer as usize;
+    if address < base || address + byte_length > base + mapping_length {
+        return Ok(None);
+    }
+    let rounded_length = mapping_length.div_ceil(page_size()) * page_size();
+    let Some(buffer) = NOCOPY_BUFFERS.with(|cache| {
+        resident_name_lookup(
+            cache,
+            CHECKPOINT_MAPPING_NOCOPY_NAME,
+            base as *const c_void,
+            rounded_length,
+        )
+    })?
+    else {
+        return Ok(None);
+    };
+    counter!(PLAN_HANDOFF_REUSES, 1);
+    Ok(Some((buffer, address - base)))
 }
 
 /// Counts entries `NOCOPY_BUFFERS` actually holds right now — the direct
@@ -5167,6 +5250,7 @@ fn upload_resident_copy(
     }
     counter!(COPYING_BUFFER_UPLOADS, 1);
     counter!(RESIDENT_BUFFER_UPLOADS, 1);
+    counter!(BLOCK_COPIED_BYTES, byte_length as u64);
     let buffer = upload_block_copy(device, pointer, byte_length)?;
     RESIDENT_BUFFERS.with(|cache| {
         cache
@@ -5344,6 +5428,40 @@ mod resident_buffer_cache_tests {
         assert_eq!(super::RESIDENT_BUFFER_REUSES.get(), reuses_before);
         assert_eq!(resident_cache_len(), 1);
     }
+
+    /// A cache HIT never moves bytes -- `BLOCK_COPIED_BYTES` must reflect
+    /// that (ROW 369): the counter used to fire at the call site, before the
+    /// lookup that can avoid the copy, so a resident-cache hit was double
+    /// counted as if it had re-copied the whole block every time.
+    #[test]
+    fn a_resident_cache_hit_adds_no_bytes_to_the_copied_counter() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_resident_cache_for_test();
+
+        let host_buffer = vec![7.0_f32; 4096];
+        let pointer = host_buffer.as_ptr().cast();
+        let byte_length = size_of_val(host_buffer.as_slice());
+
+        let copied_before_miss = super::BLOCK_COPIED_BYTES.get();
+        upload_resident_copy(&device, "resident_weight_copied_counter", pointer, byte_length)
+            .expect("first upload is a real copy (a cache miss)");
+        assert_eq!(
+            super::BLOCK_COPIED_BYTES.get(),
+            copied_before_miss + byte_length as u64,
+            "a genuine copy must add its own byte length"
+        );
+
+        let copied_before_hit = super::BLOCK_COPIED_BYTES.get();
+        upload_resident_copy(&device, "resident_weight_copied_counter", pointer, byte_length)
+            .expect("second upload of the same name hits the cache");
+        assert_eq!(
+            super::BLOCK_COPIED_BYTES.get(),
+            copied_before_hit,
+            "a cache hit moves zero bytes, so it must add zero"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5475,6 +5593,102 @@ mod nocopy_buffer_cache_tests {
             0,
             "an unnamed (uncached) upload must never populate NOCOPY_BUFFERS"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod cross_plan_resident_reuse_tests {
+    //! ROW 369: a KV-bucket-boundary reshape builds a brand-new [`Plan`]
+    //! whose own `device_buffers`/`block_identity` start empty. These prove
+    //! [`cross_plan_resident_reuse`] -- the fast path that new `Plan` takes
+    //! against the process-global caches -- resolves a still-resident block
+    //! WITHOUT re-registering it as an "offer", and still refuses a genuine
+    //! rebind. `execute_plan_with_placements`'s own per-node loop is the
+    //! caller; these test the decision it delegates, GPU-free of any real
+    //! `Plan`/program construction.
+
+    use core::mem::size_of_val;
+
+    use super::{
+        PLAN_HANDOFF_REUSES, cross_plan_resident_reuse, device_and_queue,
+        register_checkpoint_mapping, reset_nocopy_cache_for_test, upload_packed_bytes,
+    };
+
+    #[test]
+    fn a_checkpoint_mapped_block_is_resolved_from_the_global_cache_without_an_offer() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_nocopy_cache_for_test();
+
+        let checkpoint = vec![0_u8; super::page_size() * 4];
+        register_checkpoint_mapping(&checkpoint);
+        // one real upload registers `CHECKPOINT_MAPPING_NOCOPY_NAME` in
+        // `NOCOPY_BUFFERS` -- the state a PRIOR `Plan`'s own weight walk
+        // would have already left behind by the time a reshape builds a new
+        // one.
+        let tensor_bytes = &checkpoint[64..128];
+        upload_packed_bytes(&device, tensor_bytes, None).expect("first checkpoint-backed upload");
+
+        let handoffs_before = PLAN_HANDOFF_REUSES.get();
+        let pointer = tensor_bytes.as_ptr().cast();
+        let byte_length = tensor_bytes.len();
+        let resolved = cross_plan_resident_reuse(None, pointer, byte_length)
+            .expect("a resident block already in the checkpoint mapping must resolve")
+            .expect("the checkpoint mapping is registered, so this must be Some");
+
+        assert_eq!(resolved.1, 64, "the offset into the shared mapping buffer");
+        assert_eq!(
+            PLAN_HANDOFF_REUSES.get(),
+            handoffs_before + 1,
+            "a global-cache hit must be counted as a handoff, not an offer"
+        );
+    }
+
+    #[test]
+    fn a_host_range_the_global_caches_have_never_seen_is_not_resolved() {
+        reset_nocopy_cache_for_test();
+        let never_registered = vec![1.0_f32; 16];
+        let byte_length = size_of_val(never_registered.as_slice());
+        let resolved =
+            cross_plan_resident_reuse(None, never_registered.as_ptr().cast(), byte_length)
+                .expect("a miss is Ok(None), never an error");
+        assert!(
+            resolved.is_none(),
+            "the caller must fall through to the normal offer path on a miss"
+        );
+    }
+
+    #[test]
+    fn a_resident_name_rebound_to_different_bytes_is_rejected_not_silently_reused() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        super::reset_resident_cache_for_test();
+
+        let first_host_buffer = vec![8.0_f32; 4096];
+        let byte_length = size_of_val(first_host_buffer.as_slice());
+        super::upload_resident_copy(
+            &device,
+            "resident_weight_cross_plan_rebound",
+            first_host_buffer.as_ptr().cast(),
+            byte_length,
+        )
+        .expect("first upload establishes the cached entry a later plan could try to reuse");
+
+        // a later `Plan` offering the SAME resident name against a
+        // DIFFERENT host allocation -- the exact contract violation
+        // `cross_plan_resident_reuse` must never paper over with a silent
+        // reuse of the wrong buffer.
+        let second_host_buffer = vec![9.0_f32; 4096];
+        let error = cross_plan_resident_reuse(
+            Some("resident_weight_cross_plan_rebound"),
+            second_host_buffer.as_ptr().cast(),
+            byte_length,
+        )
+        .expect_err("a rebind under the same name must never resolve, even from this fast path");
+        assert!(matches!(error, super::MetalError::ResidentNameRebound { .. }));
     }
 }
 
