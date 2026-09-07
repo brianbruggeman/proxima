@@ -2267,6 +2267,17 @@ pub enum Control {
 /// that one-shot decode gives the whole sequence, just deferred: an
 /// incomplete tail waits here for the token that completes it instead of
 /// resolving to U+FFFD before decoding is known to be finished.
+///
+/// Never returns [`proxima_tokenizer::TokenizerError::InvalidUtf8`] over a
+/// pending tail that turns out unresolvable -- a decode step producing a
+/// token id that does not validly continue an earlier incomplete lead byte
+/// is a normal outcome of autoregressive sampling, not corruption
+/// (guiding-principles principle 15: an error type is not the "correct
+/// treatment" for a case the caller cannot act on). [`core::str::Utf8Error::error_len`]
+/// returning `Some(_)` here means the STALE pending bytes can never become
+/// valid no matter what follows; those bytes resolve to one U+FFFD and
+/// decoding resumes on whatever bytes remain after the bad run, so one
+/// unresolvable byte never fails the whole call.
 fn decode_streamed_piece(
     vocab: &Vocab,
     token_id: u32,
@@ -2274,27 +2285,53 @@ fn decode_streamed_piece(
 ) -> Result<String, InteropError> {
     let bytes = proxima_tokenizer::bpe::decode_ids(&[token_id], vocab)?;
     pending.extend_from_slice(&bytes);
-    let piece = match core::str::from_utf8(pending.as_slice()) {
-        Ok(text) => {
-            let piece = String::from(text);
-            pending.clear();
-            piece
+    let mut piece = String::new();
+    loop {
+        match core::str::from_utf8(pending.as_slice()) {
+            Ok(text) => {
+                piece.push_str(text);
+                pending.clear();
+                break;
+            }
+            Err(error) if error.error_len().is_none() => {
+                push_valid_prefix(pending, error.valid_up_to(), &mut piece)?;
+                pending.drain(..error.valid_up_to());
+                break;
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                let bad_len = error.error_len().unwrap_or(1).max(1);
+                push_valid_prefix(pending, valid_up_to, &mut piece)?;
+                piece.push('\u{FFFD}');
+                pending.drain(..valid_up_to + bad_len);
+            }
         }
-        Err(error) if error.error_len().is_none() => {
-            let valid_up_to = error.valid_up_to();
-            let piece = core::str::from_utf8(&pending[..valid_up_to])
-                .map(String::from)
-                .map_err(|_| proxima_tokenizer::TokenizerError::InvalidUtf8)?;
-            pending.drain(..valid_up_to);
-            piece
-        }
-        Err(_) => return Err(proxima_tokenizer::TokenizerError::InvalidUtf8.into()),
-    };
+    }
     Ok(if vocab.is_unigram() {
         proxima_tokenizer::unigram::replace_space_markers(&piece)
     } else {
         piece
     })
+}
+
+/// Appends `pending`'s first `valid_up_to` bytes to `piece` -- both of
+/// [`decode_streamed_piece`]'s error arms already know this prefix is
+/// proven valid UTF-8 ([`core::str::Utf8Error::valid_up_to`]'s own
+/// contract), so the `map_err` here is unreachable in practice and exists
+/// only so this function stays `Result`-returning rather than reaching for
+/// `unwrap`/`expect` in production code.
+fn push_valid_prefix(
+    pending: &[u8],
+    valid_up_to: usize,
+    piece: &mut String,
+) -> Result<(), InteropError> {
+    if valid_up_to == 0 {
+        return Ok(());
+    }
+    let prefix = core::str::from_utf8(&pending[..valid_up_to])
+        .map_err(|_| proxima_tokenizer::TokenizerError::InvalidUtf8)?;
+    piece.push_str(prefix);
+    Ok(())
 }
 
 /// The decode loop's termination policy, isolated from the forward pass
@@ -4253,6 +4290,92 @@ mod tests {
         assert!(
             !stopped_by_eos,
             "a caller-requested Stop must report finished=false, same as budget exhaustion"
+        );
+    }
+
+    /// The regression this module exists to fix, at proxima 818f5e46: a
+    /// long prompt with a small `max_tokens` budget can legitimately end
+    /// mid multibyte character (a real Qwen3 checkpoint stopping mid
+    /// emoji/CJK glyph is the exact production report). Byte `0xE4` is
+    /// `vocab_with_eos`'s own `<0xE4>` byte-fallback token -- the first of
+    /// three bytes ([`crate::generate`]'s own `hex_fallback_token` fixture
+    /// doc) a real 3-byte UTF-8 codepoint like `中` starts with -- and this
+    /// vocab never supplies the other two, so the budget runs out with an
+    /// incomplete lead byte still pending. Neither
+    /// [`decode_until_stop_or_budget`] nor [`proxima_tokenizer::decode`] on
+    /// its returned ids may fail over that: the caller-visible outcome is
+    /// the valid prefix plus one U+FFFD, matching `proxima_tokenizer::decode`'s
+    /// own "flag, don't drop" contract for a one-shot decode of the same
+    /// truncated ids.
+    #[test]
+    fn budget_ending_mid_multibyte_character_flags_instead_of_erroring() {
+        let vocab = vocab_with_eos(32_000);
+        let scripted_tokens = [b'H' as u32, b'i' as u32, 0xE4u32];
+
+        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
+            &vocab,
+            scripted_tokens.len(),
+            0,
+            |step| Ok(scripted_tokens[step]),
+            &mut |_event| Control::Continue,
+        )
+        .expect("an incomplete trailing multibyte sequence must never error");
+
+        assert_eq!(
+            generated_ids,
+            alloc::vec![72, 105, 0xE4],
+            "the incomplete lead byte's own id is still a real generated id"
+        );
+        assert!(
+            !stopped_by_eos,
+            "the budget ran out; the model never emitted its own eos"
+        );
+
+        let text = proxima_tokenizer::decode(&generated_ids, &vocab)
+            .expect("a one-shot decode of the same truncated ids must never error either");
+        assert_eq!(
+            text, "Hi\u{FFFD}",
+            "the complete prefix stays intact and the unfinished tail becomes one U+FFFD"
+        );
+    }
+
+    /// The other way an incomplete lead byte can resolve: not by the
+    /// budget ending, but by the very next token NOT being a valid
+    /// continuation byte (autoregressive sampling gives no guarantee that
+    /// consecutive token ids retrace one contiguous encoder segmentation).
+    /// [`decode_streamed_piece`]'s own doc: a stale pending tail that turns
+    /// out unresolvable resolves to one U+FFFD and decoding resumes on
+    /// whatever bytes follow, so decoding one bad run never fails the
+    /// whole call.
+    #[test]
+    fn incomplete_lead_byte_followed_by_a_non_continuation_byte_flags_and_resumes() {
+        let vocab = vocab_with_eos(32_000);
+        // 0xE4 starts a 3-byte sequence; 'H'/'i' are plain ASCII and can
+        // never be valid UTF-8 continuation bytes (those are 0x80-0xBF).
+        let scripted_tokens = [0xE4u32, b'H' as u32, b'i' as u32];
+
+        let mut events: Vec<String> = Vec::new();
+        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
+            &vocab,
+            scripted_tokens.len(),
+            0,
+            |step| Ok(scripted_tokens[step]),
+            &mut |event: TokenEvent<'_>| {
+                if matches!(event.phase, Phase::Token) {
+                    events.push(String::from(event.text_piece));
+                }
+                Control::Continue
+            },
+        )
+        .expect("a non-continuing follow-on token must never error");
+
+        assert_eq!(generated_ids, alloc::vec![0xE4, 72, 105]);
+        assert!(!stopped_by_eos);
+        assert_eq!(
+            events.join(""),
+            "\u{FFFD}Hi",
+            "the unresolvable lead byte flags as one U+FFFD, then decoding \
+             resumes normally on the bytes that follow it"
         );
     }
 }

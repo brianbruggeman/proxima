@@ -1266,4 +1266,53 @@ mod real_qwen3_file {
              the split-half rope path"
         );
     }
+
+    /// The exact production report this crate's ROW 395/396 regressed: a
+    /// caller's long prompt with a small `max_tokens` budget returned
+    /// `Error: Internal("provider error: generate: decoded bytes are not
+    /// valid utf-8")` instead of text -- stopping mid multibyte character
+    /// (a Qwen3 CJK/emoji glyph) is a normal outcome of a token budget,
+    /// never an error ([`crate::generate::decode_streamed_piece`]'s own
+    /// doc). A real ~1100-token prompt exercises the checkpoint's actual
+    /// tokenizer and forward pass, not a synthetic vocab -- only a real
+    /// run proves the fix against the exact failure this regression
+    /// report named.
+    #[test]
+    #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
+    fn qwen3_long_prompt_small_budget_never_errors_on_a_partial_multibyte_tail() {
+        let model_path = crate::test_support::qwen3_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3_GGUF"));
+        let path = std::path::Path::new(&model_path);
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local qwen3 gguf fixture");
+        let model = open_model(&mapped);
+
+        // One paragraph, repeated to reach roughly 1100 tokens -- the exact
+        // prompt length the production report named, not a hand-picked
+        // short string a tokenizer would never actually see in the wild.
+        let paragraph = "The quick brown fox jumps over the lazy dog near the \
+            riverbank while the sun sets slowly behind the distant mountains, \
+            painting the sky in brilliant shades of orange and violet. ";
+        let prompt = paragraph.repeat(60);
+        let max_tokens = 32;
+
+        let config = crate::generate::supported_serving_config(
+            GPU_LAYERS_ALL,
+            #[cfg(target_os = "macos")]
+            crate::test_support::math_mode_from_env(),
+        );
+        let (generated_ids, text, _stopped_by_eos) = model
+            .generate_with_serving_config(&prompt, max_tokens, config)
+            .expect(
+                "a token budget ending mid multibyte character must decode to text, never \
+                 InvalidUtf8",
+            );
+
+        std::println!(
+            "qwen3_long_prompt_small_budget ids_len={} text={text:?}",
+            generated_ids.len()
+        );
+
+        assert!(!generated_ids.is_empty(), "the model must produce at least one token");
+    }
 }
