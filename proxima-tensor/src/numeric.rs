@@ -170,6 +170,12 @@ pub enum NumericRewrite {
     TreeReduce,
     /// The GPU cross-simdgroup context-chunk merge in an attention kernel.
     ContextChunkMerge,
+    /// The GPU cross-threadgroup key-split merge in an attention kernel --
+    /// the same online-softmax combine as [`Self::ContextChunkMerge`], one
+    /// hardware level up: partials cross a kernel-dispatch boundary (read
+    /// from a scratch buffer another dispatch wrote) rather than a
+    /// `threadgroup_barrier` inside one dispatch.
+    ContextSplitMerge,
     /// Factoring a dequantization scale across a block instead of per element.
     DequantScaleFactoring,
     /// An approximate transcendental/reciprocal with bounded relative error.
@@ -197,12 +203,13 @@ impl NumericRewrite {
                 contraction: true,
                 ..NumericPolicy::bit_exact()
             },
-            Self::TreeReduce | Self::ContextChunkMerge | Self::DequantScaleFactoring => {
-                NumericPolicy {
-                    reassociation: true,
-                    ..NumericPolicy::bit_exact()
-                }
-            }
+            Self::TreeReduce
+            | Self::ContextChunkMerge
+            | Self::ContextSplitMerge
+            | Self::DequantScaleFactoring => NumericPolicy {
+                reassociation: true,
+                ..NumericPolicy::bit_exact()
+            },
             Self::FastMathApprox => NumericPolicy {
                 approx_functions: true,
                 ..NumericPolicy::bit_exact()
@@ -284,6 +291,39 @@ mod tests {
             .is_ok()
         );
         assert!(admit(NumericPolicy::fast(), NumericRewrite::ContextChunkMerge).is_ok());
+    }
+
+    /// [`NumericRewrite::ContextSplitMerge`] -- the cross-THREADGROUP
+    /// sibling of `ContextChunkMerge` (cross-simdgroup) -- joins the same
+    /// `reassociation` permission arm, so it is rejected under `bit_exact`
+    /// with the identical shape.
+    #[test]
+    fn context_split_merge_rejected_under_bit_exact_policy() {
+        let error = admit(NumericPolicy::bit_exact(), NumericRewrite::ContextSplitMerge)
+            .expect_err("a cross-threadgroup online-softmax merge reassociates the fold");
+        assert_eq!(
+            error,
+            TensorError::NumericPolicyTooStrict {
+                rewrite: NumericRewrite::ContextSplitMerge,
+                required: NumericPolicy {
+                    reassociation: true,
+                    ..NumericPolicy::bit_exact()
+                },
+                granted: NumericPolicy::bit_exact(),
+            }
+        );
+    }
+
+    #[test]
+    fn context_split_merge_admitted_once_the_policy_opts_up() {
+        assert!(
+            admit(
+                NumericPolicy::llama_relaxed(),
+                NumericRewrite::ContextSplitMerge
+            )
+            .is_ok()
+        );
+        assert!(admit(NumericPolicy::fast(), NumericRewrite::ContextSplitMerge).is_ok());
     }
 
     /// The split this design makes: granting `signed_zero` alone eliminates
