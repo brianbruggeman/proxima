@@ -304,6 +304,21 @@ fn emit_sizing_consts() {
         "pub const ATTENTION_BLOCK_WIDTH: u64 = {attention_block_width};\n"
     ));
 
+    let attention_splits_keys_per_split = require_nonzero(
+        "attention_splits.keys_per_split",
+        resolve_int(&root, "attention_splits", "keys_per_split"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_SPLIT_KEYS_PER_SPLIT: u64 = {attention_splits_keys_per_split};\n"
+    ));
+    let attention_splits_max = require_nonzero(
+        "attention_splits.max",
+        resolve_int(&root, "attention_splits", "max"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_SPLIT_MAX: u64 = {attention_splits_max};\n"
+    ));
+
     let workgroup_size = require_nonzero(
         "wgsl.workgroup_size",
         resolve_int(&root, "wgsl", "workgroup_size"),
