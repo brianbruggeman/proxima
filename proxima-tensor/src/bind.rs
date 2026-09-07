@@ -903,7 +903,10 @@ impl BoundOpBuilder {
                             reduce.dtype,
                             ScalarOp::Identity,
                             &identity_operand,
-                            &self.ones.borrow(),
+                            Constants {
+                                ones: &self.ones.borrow(),
+                                values: &self.constant_value.borrow(),
+                            },
                         ),
                     )?;
                     return Ok(emitted);
@@ -946,7 +949,10 @@ impl BoundOpBuilder {
                         &self.held,
                         reduce.operand,
                         &reduce.in_map,
-                        &self.ones.borrow(),
+                        Constants {
+                            ones: &self.ones.borrow(),
+                            values: &self.constant_value.borrow(),
+                        },
                     )
                 } else {
                     self.materialize_if_held(reduce.operand, shapes, &mut emitted)?;
@@ -1003,7 +1009,10 @@ impl BoundOpBuilder {
                     held.dtype,
                     held.body,
                     &held.operands,
-                    &self.ones.borrow(),
+                    Constants {
+                        ones: &self.ones.borrow(),
+                        values: &self.constant_value.borrow(),
+                    },
                 ));
             }
         }
@@ -1050,7 +1059,10 @@ impl BoundOpBuilder {
                 held.dtype,
                 held.body,
                 &held.operands,
-                &self.ones.borrow(),
+                Constants {
+                    ones: &self.ones.borrow(),
+                    values: &self.constant_value.borrow(),
+                },
             );
             push_ready(emitted, node, materialized)?;
         }
@@ -1146,10 +1158,10 @@ fn build_elementwise_op(
     dtype: DType,
     body: ScalarOp,
     operands: &[(NodeId, IndexMap)],
-    ones: &[bool],
+    constants: Constants<'_>,
 ) -> BoundOp {
     let extents = shapes.of(node).to_vec();
-    let (composed_body, built_operands) = compose(shapes, held, body, operands, ones);
+    let (composed_body, built_operands) = compose(shapes, held, body, operands, constants);
     BoundOp {
         node,
         dtype,
@@ -1318,6 +1330,18 @@ struct ComposeState<'a> {
     absorbed: &'a mut Vec<NodeId>,
 }
 
+/// [`BoundOpBuilder`]'s own `ones`/`constant_value` per-node tables, bundled
+/// for the same reason [`ComposeState`] bundles its own three fields: every
+/// `compose_*` call threads both together (never one without the other), so
+/// a bare pair of `&[bool]`/`&[Option<f32>]` parameters is exactly the
+/// positional soup `clippy::too_many_arguments` flags at
+/// [`build_elementwise_op`]'s own call depth.
+#[derive(Clone, Copy)]
+struct Constants<'a> {
+    ones: &'a [bool],
+    values: &'a [Option<f32>],
+}
+
 /// Composes the single still-held node `node` — reached from its consumer
 /// through `map` — into a [`ComposedBody`] plus the flat, fully-addressed
 /// operand list an executor reads from: the reduce-fusion entry point.
@@ -1342,7 +1366,7 @@ fn compose_fused_operands(
     held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
     node: NodeId,
     map: &IndexMap,
-    ones: &[bool],
+    constants: Constants<'_>,
 ) -> (ComposedBody, BoundOperands) {
     let mut steps = Vec::new();
     let mut operands = Vec::new();
@@ -1352,7 +1376,7 @@ fn compose_fused_operands(
         operands: &mut operands,
         absorbed: &mut absorbed,
     };
-    let arg = compose_operand(shapes, held, &mut state, node, map, ones);
+    let arg = compose_operand(shapes, held, &mut state, node, map, constants);
     if steps.is_empty() {
         steps.push(BodyStep {
             op: ScalarOp::Identity,
@@ -1385,7 +1409,7 @@ fn compose(
     held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
     body: ScalarOp,
     operands: &[(NodeId, IndexMap)],
-    ones: &[bool],
+    constants: Constants<'_>,
 ) -> (ComposedBody, BoundOperands) {
     let mut steps = Vec::new();
     let mut resolved_operands = Vec::new();
@@ -1395,11 +1419,11 @@ fn compose(
         operands: &mut resolved_operands,
         absorbed: &mut absorbed,
     };
-    let arg = match eliminate_identity_multiply(body, operands, ones) {
+    let arg = match eliminate_identity_multiply(body, operands, constants.ones) {
         Some((survivor_node, survivor_map)) => {
-            compose_operand(shapes, held, &mut state, survivor_node, survivor_map, ones)
+            compose_operand(shapes, held, &mut state, survivor_node, survivor_map, constants)
         }
-        None => StepArg::Step(compose_body(shapes, held, &mut state, body, operands, ones)),
+        None => compose_body(shapes, held, &mut state, body, operands, constants),
     };
     if steps.is_empty() {
         steps.push(BodyStep {
@@ -1715,24 +1739,125 @@ fn eliminate_masked_window_reduce(
     ))
 }
 
-/// Appends one [`BodyStep`] for `body` applied over `body_operands`
-/// (expressed in the caller's own iteration space), recursively composing
-/// each operand through [`compose_operand`] first. Returns the new step's
-/// index — the value a caller reads back via `StepArg::Step`.
+/// The scalar identity element for `op`'s own [`ScalarOp::is_associative`]
+/// class — `x op identity == x` for every finite/inf/nan `f32` — or `None`
+/// for a `ScalarOp` with no such element. Generalizes
+/// [`eliminate_identity_multiply`]'s single hard-coded `(Multiply, 1.0)` case
+/// to the whole class `op.rs`'s own `is_associative` already names (`Add`,
+/// `Multiply`, `Maximum`, `Minimum`; `op.rs:112-117`), so `x + 0`, `max(x,
+/// -inf)`, and `min(x, +inf)` are recognized here the same way `x * 1` always
+/// was.
+const fn identity_element(op: ScalarOp) -> Option<f32> {
+    match op {
+        ScalarOp::Add => Some(0.0),
+        ScalarOp::Multiply => Some(1.0),
+        ScalarOp::Maximum => Some(f32::NEG_INFINITY),
+        ScalarOp::Minimum => Some(f32::INFINITY),
+        _ => None,
+    }
+}
+
+/// The operand-order sort key [`push_canonical_step`] applies to a
+/// commutative op's two args: a fused predecessor ([`StepArg::Step`]) always
+/// sorts before a raw operand ([`StepArg::Operand`]), then by index —
+/// `false < true` puts every `Step` ahead of every `Operand`. This is what
+/// makes `a*b+c` and `c+a*b` mint the identical [`BodyStep`]: whichever
+/// operand order the source authored, [`compose_operand`] has already turned
+/// each into a `StepArg`, and this key sees only that shape, never the
+/// original authoring order.
+fn step_arg_sort_key(arg: &StepArg) -> (bool, u16) {
+    match *arg {
+        StepArg::Step(index) => (false, index),
+        StepArg::Operand(index) => (true, index),
+    }
+}
+
+/// The literal value `arg` resolves to, if it is a [`StepArg::Operand`]
+/// built from an [`crate::op::Op::Constant`] leaf — `state.operands[index].0`
+/// is that operand's source [`NodeId`] ([`build_operand`]'s own first
+/// field), and `constant_value[node.0]` is `Some` exactly when
+/// [`BoundOpBuilder::push`] saw that node as a constant. A [`StepArg::Step`]
+/// is a computed value, never a known literal at this point in composition,
+/// so it always returns `None` here (no recursive constant-folding of a
+/// step's own body in this slice).
+fn step_arg_constant(arg: StepArg, state: &ComposeState<'_>, constant_value: &[Option<f32>]) -> Option<f32> {
+    match arg {
+        StepArg::Operand(index) => {
+            let (node, _, _) = state.operands.get(index as usize)?;
+            constant_value.get(node.0 as usize).copied().flatten()
+        }
+        StepArg::Step(_) => None,
+    }
+}
+
+/// The one place a [`BodyStep`] enters a [`ComposedBody`] — replaces the raw
+/// `state.steps.push(BodyStep { .. })` call this module used to make
+/// directly. Canonicalizes a commutative binary op's operand order
+/// ([`step_arg_sort_key`]) and eliminates an operand equal to `op`'s own
+/// [`identity_element`] before ever minting a step, so two authored orderings
+/// of the same algebraic expression — `a*b+c` and `c+a*b`, or a chain with an
+/// identity multiply/add folded away by an earlier rewrite — produce the
+/// identical [`StepArg`], never a step whose recognizability depends on
+/// which rewrite fired first in the same bind call
+/// (`proxima-tensor/src/cpu.rs:2570-2626`'s own "hidden=1 confluence gap"
+/// doc). Mints no new `ScalarOp`/`Op` variant: every value this returns is
+/// either an existing `StepArg` unchanged or a freshly pushed `BodyStep`
+/// using `op` exactly as given.
+fn push_canonical_step(
+    state: &mut ComposeState<'_>,
+    op: ScalarOp,
+    mut args: Vec<StepArg>,
+    constant_value: &[Option<f32>],
+) -> StepArg {
+    if op.is_associative() && args.len() == 2 {
+        args.sort_by_key(step_arg_sort_key);
+    }
+    if let (Some(identity), [first, second]) = (identity_element(op), args.as_slice()) {
+        if step_arg_constant(*first, state, constant_value) == Some(identity) {
+            return *second;
+        }
+        if step_arg_constant(*second, state, constant_value) == Some(identity) {
+            return *first;
+        }
+    }
+    state.steps.push(BodyStep { op, args });
+    StepArg::Step((state.steps.len() - 1) as u16)
+}
+
+/// Composes `body` applied over `body_operands` (expressed in the caller's
+/// own iteration space), recursively composing each operand through
+/// [`compose_operand`] first, then minting the step through
+/// [`push_canonical_step`] — so a step this call mints is already in
+/// canonical form, never a second pass over `state.steps`.
+///
+/// For a commutative binary `body`, `body_operands` is sorted by source
+/// [`NodeId`] BEFORE recursing, not only after: `state.operands`'s indices
+/// are assigned in visitation order, so `c + a*b` and `a*b + c` would
+/// otherwise still number `c`/`a`/`b` differently depending on which
+/// authored position each was in, even though `push_canonical_step`'s own
+/// post-hoc `StepArg` sort puts the resulting args back in the same
+/// `Step`-before-`Operand` shape. Sorting the source pairs first is what
+/// makes the two authorings mint byte-identical operand slots, not merely
+/// an equivalent argument order — the same "reordering a commutative binary
+/// op's operands is exact" guarantee [`push_canonical_step`] documents,
+/// applied one level earlier, before any operand slot exists to reorder.
 fn compose_body(
     shapes: &Shapes,
     held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
     state: &mut ComposeState<'_>,
     body: ScalarOp,
     body_operands: &[(NodeId, IndexMap)],
-    ones: &[bool],
-) -> u16 {
-    let args = body_operands
+    constants: Constants<'_>,
+) -> StepArg {
+    let mut ordered: Vec<&(NodeId, IndexMap)> = body_operands.iter().collect();
+    if body.is_associative() && ordered.len() == 2 {
+        ordered.sort_by_key(|(node, _)| node.0);
+    }
+    let args = ordered
         .iter()
-        .map(|(node, map)| compose_operand(shapes, held, state, *node, map, ones))
+        .map(|(node, map)| compose_operand(shapes, held, state, *node, map, constants))
         .collect();
-    state.steps.push(BodyStep { op: body, args });
-    (state.steps.len() - 1) as u16
+    push_canonical_step(state, body, args, constants.values)
 }
 
 /// Composes one operand reference `(node, map)` into `steps`/`operands`:
@@ -1751,7 +1876,7 @@ fn compose_operand(
     state: &mut ComposeState<'_>,
     node: NodeId,
     map: &IndexMap,
-    ones: &[bool],
+    constants: Constants<'_>,
 ) -> StepArg {
     let entry = held
         .borrow()
@@ -1766,12 +1891,13 @@ fn compose_operand(
     state.absorbed.push(node);
     let remapped = remap_sub_operands(&sub_operands, map);
 
-    if let Some((survivor_node, survivor_map)) = eliminate_identity_multiply(body, &remapped, ones)
+    if let Some((survivor_node, survivor_map)) =
+        eliminate_identity_multiply(body, &remapped, constants.ones)
     {
-        return compose_operand(shapes, held, state, survivor_node, survivor_map, ones);
+        return compose_operand(shapes, held, state, survivor_node, survivor_map, constants);
     }
 
-    StepArg::Step(compose_body(shapes, held, state, body, &remapped, ones))
+    compose_body(shapes, held, state, body, &remapped, constants)
 }
 
 /// The outer iteration axis each of `map`'s own axes corresponds to — sound
