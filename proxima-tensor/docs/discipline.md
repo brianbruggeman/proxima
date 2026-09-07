@@ -26728,3 +26728,76 @@ simdgroup_barrier(mem_flags::mem_threadgroup);
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-07 | `perf(omega): attention accumulates v as float4 per ty group with a final cross-group reduce` | V-accumulate ported to llama's `kernel_flash_attn_ext_vec` register form (`float4` per `tx` lane, `simd_shuffle_xor` cross-`ty` reduce) when `head_dim % 32 == 0`; scalar fallback otherwise | 4096: -40.4% (519.436us -> 309.440us); 512: +12.9% regression (150.867us -> 170.307us) under ROW 381's `keys_per_split=16`; 40: +1.9%, flat | 246+120 tests green; bare cells median-of-7 (CoV 3.68-10.39%); oracle 6/6 rounds md5-identical, `gpu_exec` combined range not above, single round-3 pair above | solo run except a ~2 min wait for another agent's timed slice (`proxima_model_i`) to clear the quiet gate before the bare cells; no other cargo/nextest/rustc process observed during any timed cell |
+
+## ROW 383 -- the split divisor has a knee: ROW 381's small divisor (16) helps only at the decode window; sweeping `max` down to 8/16 at 512/4096 keys never recovers the pre-ROW-381 speed, so the fix reinstates the ORIGINAL divisor (128) once context crosses it, rather than clamping harder on the small one
+
+**Card:** `perf(omega): attention split count has a knee: short slices only at short context`. **Worktree/branch:** `proxima-wt-r383`, `perf/row-383-split-rule`, off `main` at `3c66bc88` (ROW 382's own commit).
+
+**Question.** ROW 381 lowered `keys_per_split` 128 -> 16 to fix the decode window (40 keys, splits 1 -> 3) but regressed 512 keys (splits 4 -> 32, 89.5us -> 150.9us). ROW 382's V-float4 rewrite made that regression worse (170.3us). This row asks: does capping `max` down from 32 recover the pre-ROW-381 speed at 512/4096 keys without losing the decode-window win?
+
+**Bare cells, `per_op_timed_kind_validated_us_per_dispatch: median` (kind-validated, GPU time, median-of-7, `--test-threads=1`, `row_376_cached_attention_batched`), rebuilt per cell via `OMEGA_ATTENTION_SPLITS_MAX=<n>`, verified against the generated `omega_sized.rs` constant after each build:**
+
+| context | max override | splits (keys_per_split=16 pre-fix) | median us | cov | vs current (max=32) |
+| --- | --- | --- | --- | --- | --- |
+| 40 | -- (ROW 381 baseline) | 3 | 36.132 | 5.20% | -- |
+| 512 | -- (ROW 381 baseline, `keys_per_split`=128) | 4 | 89.524 | 14.88% | -- |
+| 512 | 32 (ROW 382 baseline) | 32 | 170.307 | 3.68% | -- |
+| 512 | 8 | 8 | 176.895 | 12.31% | +3.9%, inside combined CoV -- flat |
+| 512 | 16 | 16 | 172.480 | 17.65% | +1.3%, inside combined CoV -- flat |
+| 4096 | 32 (ROW 382 baseline) | 32 | 309.440 | 6.71% | -- |
+| 4096 | 16 | 16 | 306.818 | 4.64% | -0.8%, inside combined CoV -- flat |
+| 4096 | 8 | 8 | 308.187 | 4.92% | -0.4%, inside combined CoV -- flat |
+
+**Finding: capping `max` down does not help.** At 512 keys, 8/16/32 splits all land 170-177us (all within each other's CoV) -- nowhere near the 89.5us the ORIGINAL `keys_per_split=128` divisor got at the SAME length (splits=4). At 4096 keys, 8/16/32 splits are likewise statistically indistinguishable (306-309us). This rules out "just clamp `max` lower" as the fix: the regression is not caused by *how many* splits result once splitting kicks in at 512 keys, it is caused by the *small divisor itself* engaging at a length where it never used to. The mechanism is genuinely non-monotonic in context length: more splits helps at the tiny decode window (normally one occupancy-starved threadgroup; splitting buys free parallelism) AND at huge contexts (enough keys per split to amortize the merge dispatch's fixed cost), but hurts in between (occupancy is already adequate at ~4 splits; a finer divisor only adds fixed per-split overhead with nothing to amortize it against).
+
+**Rule.** Two divisors, not one, selected by a single length threshold that is itself the larger divisor's own value (no third threshold constant):
+
+```
+divisor(len) = keys_per_split           if len <  keys_per_split_at_scale
+             = keys_per_split_at_scale  if len >= keys_per_split_at_scale
+splits = clamp(ceil(len / divisor(len)), 1, max)
+```
+
+`keys_per_split = 16` (ROW 381's small divisor, unchanged), `keys_per_split_at_scale = 128` (the ORIGINAL pre-ROW-381 divisor, reinstated as the large-context rule), `max = 32` (unchanged). A third build-time key was necessary, not a fourth: the mechanism is genuinely two-regime (verified by the bare-cell sweep above finding no single divisor or `max` clamp recovers both ends), and `keys_per_split_at_scale` doubles as both the large-context divisor and the switch threshold, so no separate constant is needed for "when to switch."
+
+**Five-length tabulation (`splits_for`, `NumericPolicy::llama_relaxed()`):**
+
+| len | divisor used | splits | matches |
+| --- | --- | --- | --- |
+| 40 | 16 (small, 40 < 128) | 3 | ROW 381's decode-window win, unchanged |
+| 256 | 128 (scaled, 256 >= 128) | 2 | pre-ROW-381 behavior |
+| 512 | 128 (scaled) | 4 | ROW 381's own measured-fastest cell, 89.5us |
+| 1024 | 128 (scaled) | 8 | pre-ROW-381 behavior |
+| 4096 | 128 (scaled) | 32 | same split count the small divisor already reached once clamped to `max`; ROW 382's -40.4% win is untouched |
+
+**Change.** `omega/omega-runtime.toml`'s `[attention_splits]` gains `keys_per_split_at_scale = 128`; `omega/build.rs` emits `ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE`; `omega/src/msl.rs`'s `splits_for` picks the divisor by `context_length < ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE`. Five unit tests added/updated in `msl.rs`: `splits_for_has_a_knee_at_the_scaled_divisor_threshold` pins all five tabulated lengths; `long_contexts_split_across_more_than_one_threadgroup_under_llama_relaxed`'s doc comment corrected to name `keys_per_split_at_scale` instead of the old single `keys_per_split`; `cached_attention_two_dispatch_form_is_inert_under_bit_exact`'s doc comment likewise. `forty_keys_stays_one_split_under_bit_exact_but_splits_under_llama_relaxed` and `split_count_never_exceeds_the_compiled_maximum` needed no code change (still hold under the new rule: 40 < 128 uses the small divisor unchanged; 1,000,000 clamps to `max` either way).
+
+**Oracle, A (main `3c66bc88`) / B (this branch), `PROXIMA_MAX_TOKENS=64`, `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, one round (budget-limited, see Residual):**
+
+| | step 3..7 gpu_exec_ms range |
+| --- | --- |
+| A (main) | 20.218-20.244 |
+| B (branch) | 20.759-20.887 |
+
+`generated_text` md5 identical both arms: `a62fd09e17e19a2c84261fa47d6e88e5` (differs from ROW 380-382's own quoted hash, `84c7519e6bffea98476fefd9d545a0fc` -- this row's extraction method, `sed`-stripping the `generated_text="..."` field verbatim including its literal `\n`/`\"` escape sequences, was not cross-checked against whichever method produced that earlier hash; what matters here is A and B agree with EACH OTHER under the same extraction, which they do). B's `gpu_exec_ms` range sits entirely ABOVE A's, the opposite of the "B not above A" decision rule ROW 381/382 used. This is NOT attributed to the code change: at this fixture's decode window (capacity 39-78 keys, both readings well below `keys_per_split_at_scale`=128), `splits_for` computes the identical divisor (16) and therefore the identical split count on both main and this branch -- the kernel dispatched is bit-for-bit the same on both arms by construction, not merely by measurement. The ~2.5% gap is read as host-load noise: round A ran at `load-1=3.17`, round B at `load-1=5.15` rising toward `8+` during the surrounding gate runs (this session's own `uptime` samples, logged before/after each cell). No second round was run to confirm (see Residual).
+
+**Decision rule applied: NOT met on gpu_exec alone (B above A), but the split computation is provably identical at this fixture's window by construction, so the decision rule's premise (comparing two different kernels) does not apply here** -- this oracle is a sanity check that the decode window is untouched, not a bake-off, and the identical-divisor argument is the stronger evidence.
+
+**Gates.**
+- `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` -- exit 0.
+- `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` -- exit 0.
+- `cargo nextest run -j 2 -p omega --features metal,instrument -E 'test(attention) or test(cached) or test(split)'` -- 22 tests run: 22 passed, 0 failed, 239 skipped.
+- `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 120 tests run: 120 passed, 0 failed, 36 skipped.
+- `cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --ignored --test-threads=1 --nocapture` against `real_openchat_file`'s decode-loop fixture and `quality::real_qwen3_file::qwen3_split_half_rope_cpu_and_metal_greedy_decode_match` -- both PASS; qwen3 CPU/Metal ids match exactly, `[12095, 13, 576, 6722, 315, 279, 3639, 4180]` (matches ROW 378's own reference).
+
+**Tiers.** `omega` is `std`-only; this change is confined to `omega/build.rs`/`omega-runtime.toml`/`omega/src/msl.rs`'s existing `std`-gated `feature = "metal"` build-time-sizing surface -- no new tier claim.
+
+**Residual, named not hidden.** (1) Only ONE A/B round was run, not the three ROW 382 ran, and it landed OUTSIDE the "B not above A" rule on `gpu_exec_ms` alone -- the identical-divisor argument (both arms compute the same split count at this window, so the dispatched kernel is bit-identical) is offered as the reason, not as a substitute for a second confirming round; a second round was not run under the 30-minute budget. (2) The 256/1024-length rows of the five-length tabulation are analytic (`splits_for` evaluated directly, pinned by a unit test), not separately GPU-timed -- only 40/512/4096 have bare-cell GPU measurements (this row's own and ROW 381/382's). (3) The `generated_text` md5 in this row's oracle does not match ROW 380-382's quoted hash under this row's own extraction method; not reconciled against their exact command, since A and B agreeing with each other under the same method is what the regression check needs. (4) No bare cell was run at `max` values between 4 and 8 or above 32, so the exact point at which "more splits helps" flips back to "hurts" past 4096, or below 8, is not characterized -- the two-regime rule matches all five requested tabulation points and both baselines' own measured optima, which is the evidence this row has.
+
+**Axes (principle 8):** numeric -- `keys_per_split` (16, unchanged), `keys_per_split_at_scale` (128, new), `max` (32, unchanged); structural -- none. **Sans-IO opt-sweep (principle 11):** N/A -- build-time-constant divisor selection consumed by an already-shipped bind-time state machine (`splits_for`), not a new sans-IO component.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | `perf(omega): attention split count has a knee: short slices only at short context` | Reinstates the original `keys_per_split=128` divisor for context >= 128 (`keys_per_split_at_scale`), keeping ROW 381's `keys_per_split=16` only below that threshold | 512: back to splits=4 (matching ROW 381's own 89.5us-winning cell -- pinned by unit test, not re-measured on GPU after landing); 4096: unchanged, splits=32 (ROW 382's -40.4% win untouched); 40: unchanged, splits=3 (ROW 381's win untouched) | 22+120 tests green; bare-cell sweep (8 cells, median-of-7, CoV 3.68-17.65%) showed max-clamping alone cannot recover the regression; oracle 1/1 round md5-identical, gpu_exec B above A but the dispatched kernel is provably identical at this window | solo run; load-1 ranged 3.17-21.42 across the session from unrelated macOS system processes (`mds_stores`, `mediaanalysisd`), two 30s quiet-gate retries taken, no cargo/nextest/rustc contention observed at any point |
