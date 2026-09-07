@@ -234,6 +234,22 @@ cap = 4
 # Overridable per-build via `OMEGA_ATTENTION_BLOCK_WIDTH`.
 width = 32
 
+[attention_splits]
+# `render_cached_attention`'s key range, split across this many THREADGROUPS
+# per `(query_row, kv_head)` pair -- llama.cpp's own `nwg` (fixed 32,
+# `ggml-metal-ops.cpp:3457-3466`), ported here as a live-length-derived
+# count rather than a fixed one, because our threadgroup is heavier
+# (cooperative `query_groups`-way K/V sharing across simdgroups) than
+# llama's per-Q-head one. `splits = clamp(ceil(live_len / keys_per_split), 1,
+# max)` -- `msl::splits_for`. Raising `keys_per_split` delays the crossover
+# into a second dispatch (fewer, larger splits); raising `max` allows more
+# GPU cores to share one attention op on long contexts at the cost of one
+# more `device`-scratch write/read pass per extra split and a second,
+# merge-kernel dispatch whenever `splits > 1`. Overridable per-build via
+# `OMEGA_ATTENTION_SPLITS_KEYS_PER_SPLIT` / `OMEGA_ATTENTION_SPLITS_MAX`.
+keys_per_split = 128
+max = 32
+
 [packed_row_nsg]
 # `tiled_gemm_threadgroup_width`'s nsg multiplier for the packed
 # row-blocked path, shared by `metal-packed-row-nsg2` and

@@ -3806,9 +3806,10 @@ fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
     match &bound.kind {
         BoundOpKind::CachedAttention { .. } => {
             // Mirrors `pack_cached_attention_uniforms`: the single-range
-            // fused form (nine operands) appends `cached_key_rows` and
-            // `new_key_rows` as runtime uniform fields.
-            if operand_count == 9 { 3 * WORD } else { WORD }
+            // fused form (nine operands) appends `cached_key_rows`,
+            // `new_key_rows`, `context_chunks`, and `splits` as runtime
+            // uniform fields (`total_elements` plus these four = 5 words).
+            if operand_count == 9 { 5 * WORD } else { WORD }
         }
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => WORD,
         BoundOpKind::Elementwise { .. } => {
@@ -4295,6 +4296,16 @@ fn pack_cached_attention_uniforms(
         push_i64(bytes, *cached_key_rows as i64);
         push_i64(bytes, *new_key_rows as i64);
         push_i64(bytes, chunks);
+        // Redesign §4c: the cross-THREADGROUP sibling of `chunks` above,
+        // one hardware level up -- see `crate::msl::splits_for`'s own doc.
+        // Packed from the SAME compiled-capacity input `chunks` already
+        // used, so it rides the same "one compiled kernel serves every
+        // `kv-capacity-bucket`" property. Not yet read by
+        // `render_cached_attention`'s kernel body -- see that struct
+        // field's own doc for what still needs to consume it.
+        let splits =
+            crate::msl::splits_for(*cached_key_rows + *new_key_rows, numeric_policy) as i64;
+        push_i64(bytes, splits);
     }
     Ok(())
 }

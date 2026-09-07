@@ -3041,6 +3041,43 @@ pub(crate) fn block_width_for(policy: NumericPolicy) -> u64 {
     }
 }
 
+/// Number of THREADGROUPS `render_cached_attention`'s single-range dynamic
+/// path splits one `(query_row, kv_head)` pair's key range across --
+/// [`context_chunks_for`] one level down (simdgroups sharing ONE
+/// threadgroup); this is the same partition one hardware level up
+/// (threadgroups sharing one dispatch), llama.cpp's `nwg`
+/// (`ggml-metal-ops.cpp:3457-3466`) ported as a compiled-capacity-derived
+/// count rather than llama's fixed 32, because this backend's threadgroup is
+/// heavier (cooperative `query_groups`-way K/V sharing across its `cap`
+/// simdgroups) than llama's per-Q-head one.
+///
+/// `context_length` is the SAME compiled-capacity input
+/// [`context_chunks_for`] already takes (`cached_key_rows + new_key_rows`),
+/// not a per-call live value -- so, exactly like `chunks`/`cap`, one
+/// compiled kernel serves every `kv-capacity-bucket` crossing: the dispatch
+/// always issues the compiled MAXIMUM ([`crate::sized::ATTENTION_SPLIT_MAX`])
+/// worth of threadgroups, and the live `splits` value this function returns
+/// travels as a runtime `Uniforms` field so an idle split (`split >= splits`)
+/// contributes the merge's own identity partial rather than being sized out
+/// of the dispatch -- the same "idle unit, identity partial" shape `chunks`/
+/// `cap` already uses.
+///
+/// Splitting the key range across dispatch boundaries reassociates the
+/// online-softmax combine one hardware level above [`ContextChunkMerge`] --
+/// [`NumericRewrite::ContextSplitMerge`]. Under `bit_exact` (`admit` rejects
+/// the rewrite), this returns `1`, rendering exactly today's single-dispatch
+/// `render_cached_attention` body, byte for byte -- the single-dispatch path
+/// IS the bit-exact lowering, the same way `context_chunks_for`/
+/// `block_width_for` fall back to `1` under `bit_exact`.
+pub(crate) fn splits_for(context_length: u64, policy: NumericPolicy) -> u64 {
+    if admit(policy, NumericRewrite::ContextSplitMerge).is_err() {
+        return 1;
+    }
+    context_length
+        .div_ceil(crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT)
+        .clamp(1, crate::sized::ATTENTION_SPLIT_MAX)
+}
+
 /// `BoundOpKind::CachedAttention`'s Metal kernel: online (running max/sum,
 /// register-resident weighted-value accumulator) softmax attention over a
 /// cached range plus a new range, one 32-lane simdgroup per
@@ -3118,8 +3155,21 @@ fn render_cached_attention(
     // longer depends on the compiled `kv-capacity-bucket` extent at all, and
     // one pipeline serves every bucket, matching llama's own `ne11`-as-
     // runtime-field property (`ggml-metal.m:4790-4813`).
+    // `splits` (redesign §4c, [`NumericRewrite::ContextSplitMerge`]) rides
+    // the SAME "runtime `Uniforms` field, never a `constexpr`" precedent
+    // `context_chunks` just set two lines below -- packed by
+    // `crate::metal::pack_cached_attention_uniforms` from the SAME
+    // compiled-capacity input `context_chunks_for` already takes, via
+    // `splits_for`. Declared here so the packed byte layout the driver
+    // writes (`pack_cached_attention_uniforms`) and the struct this text
+    // declares never drift out of sync. Not yet read anywhere in this
+    // kernel body -- `render_cached_attention_merge`, the split/scratch
+    // write, and the encoder's second dispatch are the follow-up that
+    // consumes it (see this crate's `attention-kernel-design.md` §4c, risk
+    // 1: the scratch-buffer plumbing this needs is unverified against
+    // `metal.rs`'s current allocation call sites and is out of scope here).
     let uniforms_struct = if dynamic_cached_len {
-        "struct Uniforms { long total_elements; long cached_key_rows; long new_key_rows; long context_chunks; };\n\n"
+        "struct Uniforms { long total_elements; long cached_key_rows; long new_key_rows; long context_chunks; long splits; };\n\n"
     } else {
         "struct Uniforms { long total_elements; };\n\n"
     };
@@ -9120,6 +9170,67 @@ mod tests {
             !source.contains("simd_broadcast_first(simd_sum(partial_score)) * scale"),
             "the block-staged body must not keep the old per-key reduce expression"
         );
+    }
+
+    /// ROW 376's own scoreboard-window shape (40 keys) must stay
+    /// single-split even under a policy that grants
+    /// [`NumericRewrite::ContextSplitMerge`] -- `omega-runtime.toml`'s
+    /// `[attention_splits]` default (`keys_per_split = 128`) clamps a
+    /// 40-key context to exactly `ceil(40/128) = 1`, so the scoreboard
+    /// window's numerics never move: no scratch write, no merge dispatch,
+    /// byte-identical to today at that shape regardless of policy.
+    #[test]
+    fn forty_keys_stays_one_split_under_either_policy() {
+        assert_eq!(splits_for(40, NumericPolicy::bit_exact()), 1);
+        assert_eq!(splits_for(40, NumericPolicy::llama_relaxed()), 1);
+    }
+
+    /// `bit_exact()` withholds `ContextSplitMerge` regardless of context
+    /// length -- the split kernel-plus-merge machinery must never engage
+    /// under a policy that demands bit-identical output, the same
+    /// `admit`-rejects-so-fall-back-to-`1` shape [`context_chunks_for`]/
+    /// [`block_width_for`] already use.
+    #[test]
+    fn long_contexts_stay_one_split_under_bit_exact() {
+        assert_eq!(splits_for(512, NumericPolicy::bit_exact()), 1);
+        assert_eq!(splits_for(4096, NumericPolicy::bit_exact()), 1);
+    }
+
+    /// `llama_relaxed()` grants reassociation, clearing
+    /// `ContextSplitMerge`, so ROW 376's longer decode shapes (512/4096
+    /// keys) must split across more than one threadgroup -- the whole
+    /// point of the port: more of the GPU's 32 cores get a share of one
+    /// attention op on the contexts where today's 8-threadgroup dispatch
+    /// (`query_rows * kv_heads` for openchat's shape) leaves most of the
+    /// GPU idle.
+    #[test]
+    fn long_contexts_split_across_more_than_one_threadgroup_under_llama_relaxed() {
+        let splits_512 = splits_for(512, NumericPolicy::llama_relaxed());
+        let splits_4096 = splits_for(4096, NumericPolicy::llama_relaxed());
+        assert!(
+            splits_512 > 1,
+            "512 keys (4x omega-runtime.toml's 128-key keys_per_split) must split; got {splits_512}"
+        );
+        assert!(
+            splits_4096 > 1,
+            "4096 keys must split; got {splits_4096}"
+        );
+        assert!(
+            splits_4096 >= splits_512,
+            "a longer context must never split into FEWER threadgroups than a shorter one"
+        );
+    }
+
+    /// `ATTENTION_SPLIT_MAX` (`omega-runtime.toml`'s `[attention_splits].max`,
+    /// default 32) is a hard ceiling regardless of how long the context
+    /// grows -- the compiled dispatch always issues exactly this many
+    /// threadgroups per `(query_row, kv_head)` pair on the dynamic path
+    /// (`grid_threads`'s own doc), so the live count this function returns
+    /// can never exceed it without under-provisioning the grid.
+    #[test]
+    fn split_count_never_exceeds_the_compiled_maximum() {
+        let splits = splits_for(1_000_000, NumericPolicy::llama_relaxed());
+        assert_eq!(splits, crate::sized::ATTENTION_SPLIT_MAX);
     }
 
     /// [`EmitError::AttentionBlockMisaligned`]'s own reachable gate: a
