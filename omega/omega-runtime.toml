@@ -240,20 +240,34 @@ width = 32
 # `ggml-metal-ops.cpp:3457-3466`), ported here as a live-length-derived
 # count rather than a fixed one, because our threadgroup is heavier
 # (cooperative `query_groups`-way K/V sharing across simdgroups) than
-# llama's per-Q-head one. `splits = clamp(ceil(live_len / keys_per_split), 1,
-# max)` -- `msl::splits_for`. Raising `keys_per_split` delays the crossover
-# into a second dispatch (fewer, larger splits); raising `max` allows more
-# GPU cores to share one attention op on long contexts at the cost of one
-# more `device`-scratch write/read pass per extra split and a second,
-# merge-kernel dispatch whenever `splits > 1`. Overridable per-build via
-# `OMEGA_ATTENTION_SPLITS_KEYS_PER_SPLIT` / `OMEGA_ATTENTION_SPLITS_MAX`.
-# ROW 381: at the decode scoreboard window (capacity 39-78 keys) 128 clamps
-# to a single un-split kernel; 16 measured 36.1us median vs 128's 43.6us
-# bare (beyond 2x CoV) by giving that window 3 threadgroups instead of 1.
-# The tradeoff: at 512 keys 16 forces splits=32 (vs 128's 4) and the extra
-# merge-dispatch overhead makes it SLOWER than 128 (150.9us vs 89.5us) --
-# accepted because the decode window is the hot path this crosses most.
+# llama's per-Q-head one.
+#
+# ROW 383: the divisor has a KNEE, because the mechanism is genuinely
+# non-monotonic -- more splits helps at the tiny decode window (occupancy
+# starved: normally only 1 threadgroup, so splitting buys free parallelism)
+# AND at huge contexts (throughput-bound: enough work per split to amortize
+# the merge-dispatch overhead), but HURTS in between (occupancy is already
+# adequate at 4 splits, so a finer divisor only adds fixed per-split
+# overhead -- 512 keys measured 170-177us at 8/16/32 splits, all within
+# noise of each other, vs 89.5us at the old 4-split rule; ROW 383's own
+# `omega/tests/row_376_cached_attention_batched.rs` cells).
+# `keys_per_split = clamp(ceil(live_len / divisor), 1, max)` where
+# `divisor = keys_per_split` (this key, small) below `keys_per_split_at_scale`
+# and `divisor = keys_per_split_at_scale` (large) at or above it --
+# `msl::splits_for`. Overridable per-build via
+# `OMEGA_ATTENTION_SPLITS_KEYS_PER_SPLIT` /
+# `OMEGA_ATTENTION_SPLITS_KEYS_PER_SPLIT_AT_SCALE` / `OMEGA_ATTENTION_SPLITS_MAX`.
+# ROW 381: at the decode scoreboard window (capacity 39-78 keys) 16 measured
+# 36.1us median vs the (then-only) divisor 128's 43.6us bare (beyond 2x CoV)
+# by giving that window 3 threadgroups instead of 1.
+# ROW 383: reinstates 128 as `keys_per_split_at_scale`, the ORIGINAL
+# pre-ROW-381 divisor, for any context at or above it -- this is exactly the
+# value ROW 381 measured winning at 512 keys (splits=4, 89.5us) and it
+# already clamps to `max` at 4096 keys (splits=32) the same as the small
+# divisor did, so nothing regresses at scale while the decode window keeps
+# ROW 381's win.
 keys_per_split = 16
+keys_per_split_at_scale = 128
 max = 32
 
 [packed_row_nsg]
