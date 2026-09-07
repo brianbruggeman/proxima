@@ -3059,15 +3059,42 @@ fn render_cached_attention(
     };
     let (out_buffer_index, uniforms_buffer_index) =
         if dynamic_cached_len { (9, 10) } else { (8, 9) };
+    // `cached_key_rows`/`new_key_rows` become runtime `Uniforms` fields
+    // (rather than `constexpr` body literals) ONLY on the single-range
+    // fused path (`dynamic_cached_len`, the ninth-operand form) -- the same
+    // scope §5 of the redesign names for this step. The plan-cache
+    // `entry_name` still carries `_c{cached_key_rows}_n{new_key_rows}`
+    // (unchanged below): dropping those tokens would let two different
+    // capacities reuse the same compiled `context_chunks` array-sizing
+    // decision baked a few lines down, which is the exact hazard this
+    // change stops short of chasing without ALSO making `context_chunks`
+    // itself a runtime, threadgroup-memory-length-sized quantity (redesign
+    // §5 option 2, not done in this slice -- see the commit/report). What
+    // this DOES buy: the kernel body's own key-band arithmetic reads the
+    // live row counts off the uniform buffer instead of a value fixed at
+    // compile time, matching `new_upper`'s existing `in8[0]` pattern.
+    let uniforms_struct = if dynamic_cached_len {
+        "struct Uniforms { long total_elements; long cached_key_rows; long new_key_rows; };\n\n"
+    } else {
+        "struct Uniforms { long total_elements; };\n\n"
+    };
+    let row_count_decl = if dynamic_cached_len {
+        "long cached_key_rows = u.cached_key_rows; long new_key_rows = u.new_key_rows;"
+    } else {
+        "constexpr long cached_key_rows = {cached_key_rows}; constexpr long new_key_rows = {new_key_rows};"
+    };
+    let row_count_decl = row_count_decl
+        .replace("{cached_key_rows}", &cached_key_rows.to_string())
+        .replace("{new_key_rows}", &new_key_rows.to_string());
     let mut source = String::new();
     preamble(&mut source);
-    source.push_str("struct Uniforms { long total_elements; };\n\n");
+    source.push_str(uniforms_struct);
     source.push_str(&format!(
         "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {element_type}* in2 [[buffer(2)]], device const {element_type}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {element_type}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]]{cached_len_param}, device {element_type}* out [[buffer({out_buffer_index})]], constant Uniforms& u [[buffer({uniforms_buffer_index})]], uint gid [[thread_position_in_grid]]) {{\n"
     ));
     source.push_str("    if ((long)gid >= u.total_elements * 32L) { return; }\n");
     source.push_str(&format!(
-        "    constexpr long cached_key_rows = {cached_key_rows}; constexpr long new_key_rows = {new_key_rows}; constexpr long kv_heads = {kv_heads}; constexpr long query_groups = {query_groups}; constexpr long head_dim = {head_dim}; constexpr float scale = {}; constexpr long cached_lower = {cached_lower}; {new_upper_decl}\n",
+        "    {row_count_decl} constexpr long kv_heads = {kv_heads}; constexpr long query_groups = {query_groups}; constexpr long head_dim = {head_dim}; constexpr float scale = {}; constexpr long cached_lower = {cached_lower}; {new_upper_decl}\n",
         msl_literal(*scale),
     ));
     // One threadgroup per (query_row, kv_head) pair -- `tiled_gemm_
@@ -3155,7 +3182,6 @@ fn render_cached_attention(
         ));
     }
     let _ = query_rows;
-    let _ = new_key_rows;
     Ok(source)
 }
 
