@@ -185,6 +185,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::ffi::c_void;
 use core::mem::{size_of, size_of_val};
+use core::ops::Deref;
 use core::ptr::NonNull;
 #[cfg(feature = "metal-buffer-pool")]
 use std::collections::HashMap;
@@ -237,6 +238,73 @@ type MetalBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 /// lets [`bind_buffers`] bind the right slice with `setBuffer:offset:atIndex:`
 /// instead of every binding assuming offset 0.
 type DeviceBuffer = (MetalBuffer, usize);
+
+/// Owns a compute encoder's `endEncoding()` call so an early `?` return from
+/// inside an op-encoding loop cannot leave it un-ended. Every `execute*`
+/// entry point in this file used to open one encoder and call
+/// `endEncoding()` exactly once, textually after its per-op loop (see the
+/// module doc's "Execution model") — correct on the happy path, but any
+/// error propagated with `?` from inside that loop skipped the call, and the
+/// `Retained` handle's `dealloc` at autorelease-pool drain hit Metal's own
+/// `-[_MTLCommandEncoder dealloc]: failed assertion 'Command encoder
+/// released without endEncoding'`, a hard `SIGTRAP` that also swallowed the
+/// real Rust `Err` that triggered it.
+///
+/// `Deref`s to the encoder so every existing call site (`&encoder`,
+/// `encoder.memoryBarrierWithScope(..)`, passing it into [`encode_op`])
+/// compiles unchanged. Call [`EncoderGuard::finish`] on the explicit success
+/// path; anywhere else (including every `?`), [`Drop::drop`] ends it exactly
+/// once instead.
+struct EncoderGuard {
+    encoder: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    finished: bool,
+}
+
+impl EncoderGuard {
+    fn new(encoder: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) -> Self {
+        Self {
+            encoder,
+            finished: false,
+        }
+    }
+
+    /// The success-path close: ends encoding now rather than at `Drop`, so
+    /// intent at the call site reads the same as the un-guarded code it
+    /// replaces (`encoder.endEncoding()` becomes `encoder.finish()`).
+    fn finish(mut self) {
+        self.encoder.endEncoding();
+        self.finished = true;
+    }
+
+    /// A cheap `Retained` clone of the underlying encoder for callers that
+    /// need to alias it (e.g. hand it to [`encode_op`] by value) without
+    /// taking over its `endEncoding()` obligation — only this guard's own
+    /// `finish`/`Drop` ever closes the encoder. Only
+    /// [`execute_plan_with_placements_dispatch_timed`]'s shared/stage-encoder
+    /// reuse needs an alias rather than sole ownership, so this is gated
+    /// identically to that function rather than left dead under every other
+    /// feature combination.
+    #[cfg(all(feature = "metal-output-placement", feature = "instrument"))]
+    fn clone_inner(&self) -> Retained<ProtocolObject<dyn MTLComputeCommandEncoder>> {
+        self.encoder.clone()
+    }
+}
+
+impl Deref for EncoderGuard {
+    type Target = ProtocolObject<dyn MTLComputeCommandEncoder>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.encoder
+    }
+}
+
+impl Drop for EncoderGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.encoder.endEncoding();
+        }
+    }
+}
 
 /// One gathering op's deferred fault check: the op it came from, its fault
 /// buffer, and how many gather slots that buffer holds. [`encode_op`]
@@ -1059,12 +1127,11 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
     // model"), so this is the SAME correctness argument that section makes
     // for this one encoder's dispatches: they were always ordered and
     // hazard-tracked relative to each other, encoder boundaries or not.
-    let encoder =
-        command_buffer
-            .computeCommandEncoder()
-            .ok_or_else(|| MetalError::CompileFailed {
-                log: "command buffer refused to hand out a compute encoder".to_string(),
-            })?;
+    let encoder = EncoderGuard::new(command_buffer.computeCommandEncoder().ok_or_else(|| {
+        MetalError::CompileFailed {
+            log: "command buffer refused to hand out a compute encoder".to_string(),
+        }
+    })?);
 
     // `metal-buffer-pool` reclaim bookkeeping: which node ids are op OUTPUTS
     // (never block inputs) and their `(bucket, dtype)` pool key -- built once,
@@ -1132,7 +1199,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             }
         }
     }
-    encoder.endEncoding();
+    encoder.finish();
 
     #[cfg(feature = "instrument")]
     let gpu_exec_started = read_ticks();
@@ -1876,11 +1943,13 @@ pub fn execute_plan_with_placements(
     // below to insert the barriers `Serial` gives for free by never
     // overlapping any two dispatches in the first place.
     let dispatch_type = plan.dispatch_type;
-    let encoder = command_buffer
-        .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
-        .ok_or_else(|| MetalError::CompileFailed {
-            log: "command buffer refused to hand out a compute encoder".to_string(),
-        })?;
+    let encoder = EncoderGuard::new(
+        command_buffer
+            .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "command buffer refused to hand out a compute encoder".to_string(),
+            })?,
+    );
     // plan-owned, reused across every call against this `Plan` (`HazardState`'s
     // own doc) -- `reset` clears both the tracker's sets and the input scratch
     // without releasing their capacity, so a warm call after the first never
@@ -2092,7 +2161,7 @@ pub fn execute_plan_with_placements(
             }
         }
     }
-    encoder.endEncoding();
+    encoder.finish();
 
     #[cfg(feature = "instrument")]
     let gpu_exec_started = read_ticks();
@@ -2222,12 +2291,11 @@ pub fn execute_plan_timed(
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
-    let encoder =
-        command_buffer
-            .computeCommandEncoder()
-            .ok_or_else(|| MetalError::CompileFailed {
-                log: "command buffer refused to hand out a compute encoder".to_string(),
-            })?;
+    let encoder = EncoderGuard::new(command_buffer.computeCommandEncoder().ok_or_else(|| {
+        MetalError::CompileFailed {
+            log: "command buffer refused to hand out a compute encoder".to_string(),
+        }
+    })?);
 
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
     for (position, bound) in prepared.resolved.iter().enumerate() {
@@ -2253,7 +2321,7 @@ pub fn execute_plan_timed(
             device_buffers.remove(retired);
         }
     }
-    encoder.endEncoding();
+    encoder.finish();
 
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
@@ -2411,12 +2479,11 @@ fn execute_op_timed(
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
-    let encoder =
-        command_buffer
-            .computeCommandEncoder()
-            .ok_or_else(|| MetalError::CompileFailed {
-                log: "command buffer refused to hand out a compute encoder".to_string(),
-            })?;
+    let encoder = EncoderGuard::new(command_buffer.computeCommandEncoder().ok_or_else(|| {
+        MetalError::CompileFailed {
+            log: "command buffer refused to hand out a compute encoder".to_string(),
+        }
+    })?);
     let fault = encode_op(
         device,
         &encoder,
@@ -2432,7 +2499,7 @@ fn execute_op_timed(
         None,
         None,
     )?;
-    encoder.endEncoding();
+    encoder.finish();
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
     let gpu_ns =
@@ -2913,13 +2980,11 @@ pub fn execute_plan_with_placements_dispatch_timed(
         })?;
 
     let shared_encoder = if dispatch_boundary {
-        Some(
-            command_buffer
-                .computeCommandEncoder()
-                .ok_or_else(|| MetalError::CompileFailed {
-                    log: "command buffer refused to hand out a compute encoder".to_string(),
-                })?,
-        )
+        Some(EncoderGuard::new(command_buffer.computeCommandEncoder().ok_or_else(
+            || MetalError::CompileFailed {
+                log: "command buffer refused to hand out a compute encoder".to_string(),
+            },
+        )?))
     } else {
         None
     };
@@ -2928,7 +2993,11 @@ pub fn execute_plan_with_placements_dispatch_timed(
     // position inside it -- `None` until the loop's first iteration
     // creates one. Unused (stays `None` the whole call) when
     // `dispatch_boundary` is true, since `shared_encoder` covers that case.
-    let mut stage_encoder: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>> = None;
+    // `EncoderGuard`-owned (not a plain `Retained`) so a `?` from inside the
+    // loop below -- `arena_placement`, `plan_uniform_buffer`, `encode_op`'s
+    // own error sites -- ends whichever encoder is currently open at `Drop`
+    // instead of leaking it into the assertion this guard exists to avoid.
+    let mut stage_encoder: Option<EncoderGuard> = None;
 
     // one tuple per position: `(node, kind, operand_bytes, bound_buffer_bytes,
     // weight_name, operand_count, packed_codec, packed_kernel_variant)` --
@@ -2999,7 +3068,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
         ));
 
         let encoder = match &shared_encoder {
-            Some(encoder) => encoder.clone(),
+            Some(guard) => guard.clone_inner(),
             None => {
                 // ROW 329: without a split, every position opens (and, below,
                 // immediately closes) its own encoder -- ROW 309's original
@@ -3017,11 +3086,13 @@ pub fn execute_plan_with_placements_dispatch_timed(
                 // one instead of panicking, which cannot happen given
                 // `needs_new_encoder`'s own boundary check above but costs
                 // nothing to make self-healing rather than load-bearing.
-                if let Some(existing) = (!needs_new_encoder).then(|| stage_encoder.clone()).flatten() {
+                if let Some(existing) =
+                    (!needs_new_encoder).then(|| stage_encoder.as_ref().map(EncoderGuard::clone_inner)).flatten()
+                {
                     existing
                 } else {
                     if let Some(previous) = stage_encoder.take() {
-                        previous.endEncoding();
+                        previous.finish();
                     }
                     let descriptor = objc2_metal::MTLComputePassDescriptor::computePassDescriptor();
                     let attachment =
@@ -3042,7 +3113,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
                             log: "command buffer refused to hand out a stage-sampled compute encoder"
                                 .to_string(),
                         })?;
-                    stage_encoder = Some(opened.clone());
+                    stage_encoder = Some(EncoderGuard::new(opened.clone()));
                     opened
                 }
             }
@@ -3094,7 +3165,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             && split_at.is_none()
             && let Some(open) = stage_encoder.take()
         {
-            open.endEncoding();
+            open.finish();
         }
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
@@ -3106,14 +3177,14 @@ pub fn execute_plan_with_placements_dispatch_timed(
             device_buffers.remove(retired);
         }
     }
-    if let Some(encoder) = &shared_encoder {
-        encoder.endEncoding();
+    if let Some(encoder) = shared_encoder {
+        encoder.finish();
     }
     // ROW 329: the last group's stage-boundary encoder (split mode's
     // encoder-2, or a non-split call that somehow left one open) never hit
     // the per-iteration close above.
     if let Some(open) = stage_encoder.take() {
-        open.endEncoding();
+        open.finish();
     }
 
     // Same CPU-wall-clock-around-commit-and-wait shape
