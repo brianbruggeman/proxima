@@ -768,13 +768,13 @@ fn build_single_range_program(
         Ok("first") => DuplicateHeadPosition::Before,
         _ => DuplicateHeadPosition::None,
     };
-    // the builder itself is the authority on what it can express: a
-    // qk-norm checkpoint (which also implies split-half RoPE pairing this
-    // builder does not implement) is turned away here by its own typed
-    // rejection (`TensorError::UnsupportedInBuilder`), not by a flag list
-    // this call site would otherwise have to keep in sync with the
-    // builder's real capability -- see
-    // `append_mistral_single_range_cached_layer` and ROW 372.
+    // ROW 373: `qk_norm` now builds correctly through this path -- the
+    // builder derives its per-head norm and RoPE pairing from `qk_norm`
+    // itself (`append_mistral_single_range_cached_layer`'s own doc), so a
+    // qk-norm checkpoint takes the placed-KV fast path rather than falling
+    // back to `Ok(None)`. `Err(TensorError::UnsupportedInBuilder)` still
+    // maps to `Ok(None)` below for whatever this builder genuinely cannot
+    // express (still dense-only -- MoE is turned away above).
     let (program, logits_root, cache_roots, duplicate_head_scratch) =
         match mistral_single_range_cached_forward_program(
             architecture.vocab,
@@ -852,6 +852,19 @@ struct Qwen35SsmShape {
 }
 
 impl<'file> LoadedModel<'file> {
+    /// `true` when [`Self::load`] built a device-resident, single-range
+    /// program for this checkpoint ([`Self::single_range`]'s own doc) --
+    /// the ROW 373 evidence hook: a qk-norm (Qwen3) checkpoint returned
+    /// `false` here before that row (rejected by
+    /// `append_mistral_single_range_cached_layer`, `build_single_range_program`
+    /// falling back to `Ok(None)`) and returns `true` after it, WITHOUT this
+    /// crate's own decode output changing (`Self::run_decode_loop`'s own
+    /// `Some(single_range)` branch is what a Metal decode step then takes).
+    #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
+    pub(crate) fn takes_placed_kv_path(&self) -> bool {
+        self.single_range.is_some()
+    }
+
     /// Binds every weight the cached forward program needs out of
     /// `parsed`/`file_bytes` (`crate::bind::bind_all_weights`), derives
     /// [`ModelArchitecture`] from `parsed`'s own metadata
@@ -1033,27 +1046,20 @@ impl<'file> LoadedModel<'file> {
         // extract-op rewrite `append_mistral_cached_layer` just got, and is
         // out of this change's scope).
         //
-        // `qk_norm` no longer joins this call-site flag list (ROW 372):
-        // `append_mistral_single_range_cached_layer` (`proxima-tensor/src/spec.rs`)
-        // gained a `qk_norm` parameter it rejects with a typed
-        // `TensorError::UnsupportedInBuilder` rather than silently building
-        // a program missing BOTH Qwen3's per-head `attn_q_norm.weight`/
-        // `attn_k_norm.weight` RMSNorm AND the split-half RoPE pairing that
-        // same checkpoint property implies (that builder hard-codes
-        // interleaved pairing unconditionally) -- `build_single_range_program`
-        // below turns that rejection into `Ok(None)` itself, so this call
-        // site cannot drift out of sync with what the builder actually
-        // supports the way the previous flag list did. Before this row, a
-        // qk-norm dense checkpoint (Qwen3) on the Metal backend silently ran
-        // attention on raw, un-normed Q/K, with the wrong RoPE pairing on
-        // top, through the placed-KV fast path -- no error, just a
-        // structurally different (wrong) computation, which is why CPU
-        // decode (always the two-range path) produced correct text while
-        // Metal decode collapsed to one repeated token from step 0. The
-        // crate's own `forward_node_values_on_backend` diagnostic never
-        // caught this during triage because it evaluates `self.program`
-        // (the two-range graph `LoadedModel::load` always binds), never
-        // `self.single_range` -- the one path this bug lived on.
+        // `qk_norm` (ROW 373): `append_mistral_single_range_cached_layer`
+        // (`proxima-tensor/src/spec.rs`) now takes the SAME
+        // `Option<(NodeId, NodeId, NodeId)>` shape its two-range sibling
+        // does and derives its RoPE pairing from `qk_norm.is_some()` the
+        // same way -- a qk-norm checkpoint (Qwen3) now takes this
+        // placed-KV fast path on Metal instead of falling back to the
+        // two-range program (`build_single_range_program` no longer turns
+        // a qk-norm request into `Ok(None)`; ROW 372's typed rejection is
+        // gone from this builder). Before ROW 372, the same checkpoint
+        // class silently ran attention on raw, un-normed Q/K with the wrong
+        // RoPE pairing through this exact path -- no error, just a
+        // structurally different (wrong) computation. ROW 372 made the
+        // wrong path loud (reject); this row makes the right path fast
+        // (build it correctly instead).
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let single_range = if paired_gate_up_reduce || fused_qkv_reduce {
             None

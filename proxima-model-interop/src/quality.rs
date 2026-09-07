@@ -1201,6 +1201,16 @@ mod real_qwen3_file {
         let prompt = "The capital of France is";
         let max_tokens = 8;
 
+        // ROW 373: this qk-norm checkpoint must now take the placed-KV
+        // single-range program, not the two-range fallback -- the same
+        // condition `append_mistral_single_range_cached_layer` used to
+        // reject (`LoadedModel::takes_placed_kv_path`'s own doc).
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        assert!(
+            model.takes_placed_kv_path(),
+            "a qk-norm checkpoint must build the placed-KV single-range program after ROW 373"
+        );
+
         let cpu_config = crate::generate::supported_serving_config(
             0,
             #[cfg(target_os = "macos")]
