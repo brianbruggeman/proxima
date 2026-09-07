@@ -125,3 +125,15 @@ pub const SIMD_WIDTH: u64 = 32;
 // at any of N in {1,2,4,8} on 0.6B (30.6-31.6 ms/token, all within ~2%
 // noise), and a directional REGRESSION on 4B at N=2 (75.1 vs 63.98 ms/token,
 // n=8 steady steps). Left at the TOML default of 1.
+
+// `LOAD_TIME_FIT_OS_HEADROOM_BYTES`/`LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES`
+// come in through the `include!` above -- `proxima-model-interop`'s
+// load-time memory-fit gate's own two byte-budget constants (see
+// `omega-runtime.toml`'s `[load_time_fit]` doc for what each measures and
+// where the default came from). Read from this crate rather than declared
+// in `proxima-model-interop` itself: `omega` is the crate every GPU-backed
+// serving build already links for device facts
+// (`crate::metal::system_memory_facts`), so its own sizing toml is the one
+// source of truth for a byte constant the fit gate compares against those
+// facts -- not a parallel default the interop crate would otherwise have to
+// keep in sync by hand.

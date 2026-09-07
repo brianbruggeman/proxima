@@ -347,6 +347,22 @@ fn emit_sizing_consts() {
         out.push_str(&format!("pub const PACKED_ROW_NSG: usize = {width};\n"));
     }
 
+    let os_headroom_bytes = require_nonzero(
+        "load_time_fit.os_headroom_bytes",
+        resolve_int(&root, "load_time_fit", "os_headroom_bytes"),
+    );
+    out.push_str(&format!(
+        "pub const LOAD_TIME_FIT_OS_HEADROOM_BYTES: u64 = {os_headroom_bytes};\n"
+    ));
+
+    let arena_allowance_bytes = require_nonzero(
+        "load_time_fit.arena_allowance_bytes",
+        resolve_int(&root, "load_time_fit", "arena_allowance_bytes"),
+    );
+    out.push_str(&format!(
+        "pub const LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES: u64 = {arena_allowance_bytes};\n"
+    ));
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
     let out_path = out_dir.join("omega_sized.rs");
     fs::write(&out_path, out).unwrap_or_else(|err| panic!("write {}: {err}", out_path.display()));

@@ -205,6 +205,7 @@ use objc2_metal::{
 };
 use proxima_telemetry::counter;
 use proxima_telemetry::debug;
+use proxima_telemetry::info;
 use proxima_telemetry::metric::Counter;
 use proxima_telemetry::trace;
 
@@ -439,6 +440,90 @@ thread_local! {
 pub fn current_allocated_size() -> Option<u64> {
     let (device, _queue) = device_and_queue().ok()?;
     Some(device.currentAllocatedSize() as u64)
+}
+
+/// A plain record of the facts a load-time budget decision needs about this
+/// host and its Metal device -- no policy, no threshold, just what the
+/// device and the OS report right now (guiding-principles principle 1:
+/// this is payload, not a new abstraction; the fit decision itself lives in
+/// `proxima-model-interop`, which reads these fields). Every field is a
+/// direct pass-through of one `MTLDevice` accessor or one `sysctlbyname`
+/// call -- see [`system_memory_facts`]'s own doc for which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemMemoryFacts {
+    /// `MTLDevice::recommendedMaxWorkingSetSize` -- the device's own advice
+    /// for how many bytes of GPU-visible memory a well-behaved app should
+    /// keep resident at once, in bytes.
+    pub recommended_max_working_set_size: u64,
+    /// `MTLDevice::maxBufferLength` -- the largest single `MTLBuffer` this
+    /// device will create, in bytes.
+    pub max_buffer_length: u64,
+    /// `MTLDevice::hasUnifiedMemory` -- `true` on every Apple silicon Mac
+    /// (the device and the host share one physical memory pool), `false` on
+    /// a discrete GPU with its own VRAM.
+    pub has_unified_memory: bool,
+    /// `MTLDevice::currentAllocatedSize` at probe time -- bytes this device
+    /// has already allocated for buffers/textures/heaps, before this load
+    /// adds anything.
+    pub current_allocated_size: u64,
+    /// `sysctlbyname("hw.memsize")` -- the host's total physical memory, in
+    /// bytes, independent of anything Metal reports.
+    pub physical_memory_bytes: u64,
+}
+
+/// Reads [`SystemMemoryFacts`] off this thread's Metal device
+/// ([`device_and_queue`], the same lazily-created device/queue pair every
+/// other driver call in this module shares) and the host's `sysctlbyname`,
+/// and emits them as one structured `system_facts` telemetry event. Callers
+/// building a load-time fit budget (`proxima-model-interop`'s own gate) call
+/// this once, before any weight upload, and derive their own limit from the
+/// fields it returns -- this function makes no fit decision itself.
+///
+/// # Errors
+///
+/// [`MetalError::NoDevice`] if this host has no Metal device.
+pub fn system_memory_facts() -> Result<SystemMemoryFacts, MetalError> {
+    let (device, _queue) = device_and_queue()?;
+    let facts = SystemMemoryFacts {
+        recommended_max_working_set_size: device.recommendedMaxWorkingSetSize(),
+        max_buffer_length: device.maxBufferLength() as u64,
+        has_unified_memory: device.hasUnifiedMemory(),
+        current_allocated_size: device.currentAllocatedSize() as u64,
+        physical_memory_bytes: physical_memory_bytes(),
+    };
+    info!(
+        recommended_max_working_set_size = facts.recommended_max_working_set_size,
+        max_buffer_length = facts.max_buffer_length,
+        has_unified_memory = facts.has_unified_memory,
+        current_allocated_size = facts.current_allocated_size,
+        physical_memory_bytes = facts.physical_memory_bytes,
+        "system_facts: host and device memory facts probed at load time"
+    );
+    Ok(facts)
+}
+
+/// The host's total physical memory, in bytes -- `sysctlbyname("hw.memsize")`
+/// rather than `sysconf` (unlike [`page_size`]'s `_SC_PAGESIZE`, POSIX has no
+/// portable name for "total RAM"; `hw.memsize` is the macOS-specific MIB
+/// name, read the same way `page_size` already reads a host fact through
+/// `libc`).
+fn physical_memory_bytes() -> u64 {
+    let mut value: u64 = 0;
+    let mut size = core::mem::size_of::<u64>();
+    // SAFETY: `name` is a NUL-terminated C string naming a real MIB entry;
+    // `value`/`size` point at a live `u64` and its own length, exactly what
+    // `sysctlbyname` requires for an output buffer; the two trailing
+    // pointers are `None`/`0` since this call has nothing to write.
+    unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&raw mut value).cast::<c_void>(),
+            &raw mut size,
+            core::ptr::null_mut(),
+            0,
+        );
+    }
+    value
 }
 
 /// This thread's Metal device and command queue, created on first use.
