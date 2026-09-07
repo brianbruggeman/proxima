@@ -217,6 +217,23 @@ workgroup_size = 64
 keys_per_chunk = 16
 cap = 4
 
+[attention_block]
+# `render_cached_attention`'s in-block staging width -- llama.cpp's own
+# `kernel_flash_attn_ext_vec` keys-per-block constant `C` (ggml-metal.metal
+# `:4016-4017`, `ic0 += C*nsg`), ported onto our per-simdgroup key walk. A
+# block of `width` keys is staged into `threadgroup` memory (`ss[]`) and
+# online-softmax-reduced ONCE per block (one `simd_max`/`simd_sum` pair),
+# rather than once per key -- see `omega/src/msl.rs`'s `block_width_for` and
+# ROW notes on `NumericRewrite::TreeReduce`. `width = 1` renders today's
+# strictly-sequential per-key body, byte-for-byte -- the two are the same
+# generated MSL text at `width = 1`, never a separate code path. `width` MUST
+# be a multiple of 32 (SIMD_WIDTH): the online-softmax combine fires once
+# per 32-lane sub-block (`simd_max`/`simd_sum` operate over the current 32
+# lanes), and within each 32-lane sub-block the Q*K stage covers `NE = 4`
+# concurrent keys per `cc` iteration (`ty = lane / 8` picks which of the 4).
+# Overridable per-build via `OMEGA_ATTENTION_BLOCK_WIDTH`.
+width = 32
+
 [packed_row_nsg]
 # `tiled_gemm_threadgroup_width`'s nsg multiplier for the packed
 # row-blocked path, shared by `metal-packed-row-nsg2` and
