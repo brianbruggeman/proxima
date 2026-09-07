@@ -454,6 +454,24 @@ pub struct Plan {
     /// reason -- see [`PlanUniforms`]'s own doc.
     #[cfg(feature = "metal-plan-stable-buffers")]
     uniforms: core::cell::OnceCell<PlanUniforms>,
+    /// One scratch buffer per plan position, `None` for every position
+    /// other than a `CachedAttention` op -- redesign §4c
+    /// ([`NumericRewrite::ContextSplitMerge`]): the split kernel's own
+    /// write set, the merge kernel's own read set (`crate::msl::Binding::
+    /// Scratch`'s own doc). Sized once, for the compiled MAXIMUM split
+    /// count (`crate::sized::ATTENTION_SPLIT_MAX`) regardless of which
+    /// `NumericPolicy` this call happens to run under -- the same "always
+    /// allocate room for the compiled ceiling" stance [`BufferArena`]'s own
+    /// output slots take, so a later call narrowing/widening the active
+    /// policy never needs a resize. Deliberately plan-owned rather than
+    /// folded into [`BufferArena`]'s own whole-buffer reuse: that arena's
+    /// slot-sharing invariant ("whole-buffer sharing only", that struct's
+    /// own doc) is unverified against a SECOND buffer per position in this
+    /// pass -- see `attention-kernel-design.md` §4c risk 1. A future slice
+    /// folding this into the arena's own reuse is free to do so without
+    /// changing this field's read side ([`attention_scratch_buffer`]).
+    #[cfg(feature = "metal-plan-stable-buffers")]
+    attention_scratch: core::cell::OnceCell<Vec<Option<MetalBuffer>>>,
     /// Per-position `(pipeline, bindings, grid)` resolved once, lazily, on
     /// this plan's first [`execute_plan_with_placements`] call -- see
     /// [`resolve_steps`]'s own doc for why a hit no longer builds
@@ -517,6 +535,25 @@ struct ResolvedSteps {
 /// (a `String`) and [`kernel_dispatch_shape`] (a `Vec<Binding>`) just to
 /// look the same pipeline up again.
 struct ResolvedStep {
+    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    bindings: Vec<Binding>,
+    grid: GridSpec,
+    /// Redesign §4c: `Some` exactly when [`crate::msl::
+    /// cached_attention_merge_needed`] admits `ContextSplitMerge` for this
+    /// position's `CachedAttention` op -- its own compiled pipeline (a
+    /// SEPARATE `MTLLibrary`/pipeline-cache entry, keyed on the `_merge`
+    /// entry name [`crate::msl::emit_cached_attention_merge`] builds), read
+    /// back out of the scratch buffer `bindings`' own trailing
+    /// `Binding::Scratch` slot wrote.
+    merge: Option<ResolvedMergeStep>,
+}
+
+/// [`ResolvedStep::merge`]'s payload -- the SAME triple `ResolvedStep`
+/// itself carries, so [`encode_op`]'s second dispatch binds and dispatches
+/// it identically to the first, just against a different pipeline/bindings/
+/// grid and a scratch-buffer placement instead of the position's real
+/// output.
+struct ResolvedMergeStep {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     bindings: Vec<Binding>,
     grid: GridSpec,
@@ -907,6 +944,8 @@ pub fn plan(
         arena: core::cell::OnceCell::new(),
         #[cfg(feature = "metal-plan-stable-buffers")]
         uniforms: core::cell::OnceCell::new(),
+        #[cfg(feature = "metal-plan-stable-buffers")]
+        attention_scratch: core::cell::OnceCell::new(),
         resolved_steps: RefCell::new(None),
         hazard_state: RefCell::new(HazardState::new()),
         #[cfg(feature = "metal-plan-stable-buffers")]
@@ -1066,6 +1105,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             None,
             plan.math_mode,
             plan.numeric_policy,
+            None,
             None,
         )?;
         if let Some((fault_buffer, gathers)) = fault {
@@ -1953,15 +1993,26 @@ pub fn execute_plan_with_placements(
                     None => (allocate_buffer(&device, bound_output_len(bound), bound.dtype)?, 0),
                 };
                 // the write side of the same "derived from bindings" guarantee:
-                // `bindings_for_hazard`'s one `Binding::Output` must name this
-                // op's own node -- if it ever didn't, the buffer the hazard
-                // tracker records as written and the buffer `bind_buffers`
-                // actually binds as this op's output would be two different
-                // things, which is a worse bug than the one this refactor closes.
-                debug_assert_eq!(
+                // whenever `bindings_for_hazard` names an explicit
+                // `Binding::Output`, it must name THIS op's own node -- if it
+                // ever didn't, the buffer the hazard tracker records as
+                // written and the buffer `bind_buffers` actually binds as
+                // this op's output would be two different things, which is a
+                // worse bug than the one this refactor closes. Redesign §4c:
+                // a `CachedAttention` split kernel under `ContextSplitMerge`
+                // has NO `Binding::Output` at all (`Binding::Scratch`
+                // replaces it -- that kernel writes scratch, never
+                // `bound.node`'s own buffer) -- `hazard_write_node` returning
+                // `None` there is the honest, by-design case, not a drift:
+                // `resolved` below is still `bound.node`'s own real output
+                // buffer (from `placement`, independent of `bindings`), and
+                // the merge dispatch this position's `encode_op` call also
+                // issues is what actually writes it, in the same encoder,
+                // immediately after the split.
+                debug_assert!(matches!(
                     crate::msl::hazard_write_node(bindings_for_hazard),
-                    Some(bound.node)
-                );
+                    Some(node) if node == bound.node
+                ) || crate::msl::hazard_write_node(bindings_for_hazard).is_none());
                 let hazard_output = Retained::as_ptr(&resolved.0);
                 if hazard_step(&mut hazard_state.tracker, &hazard_state.inputs, hazard_output) {
                     encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
@@ -1980,6 +2031,11 @@ pub fn execute_plan_with_placements(
             let uniform_scratch = Some(&plan.uniform_scratch);
             #[cfg(not(feature = "metal-plan-stable-buffers"))]
             let uniform_scratch = None;
+            // Redesign §4c: the ONE call site that resolves a scratch
+            // buffer for `encode_op`'s two-dispatch `CachedAttention` form
+            // -- every other `encode_op` caller passes `None` and rejects a
+            // `Binding::Scratch` kernel instead (that function's own doc).
+            let attention_scratch = attention_scratch_buffer(plan, position)?.map(|buffer| (buffer, 0usize));
             let fault = encode_op(
                 &device,
                 &encoder,
@@ -1992,6 +2048,7 @@ pub fn execute_plan_with_placements(
                 plan.math_mode,
                 plan.numeric_policy,
                 resolved_step,
+                attention_scratch,
             )?;
             if let Some((fault_buffer, gathers)) = fault {
                 pending_faults.push((bound, fault_buffer, gathers));
@@ -2178,6 +2235,7 @@ pub fn execute_plan_timed(
             plan.math_mode,
             plan.numeric_policy,
             None,
+            None,
         )?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
@@ -2361,6 +2419,7 @@ fn execute_op_timed(
         None,
         math_mode,
         numeric_policy,
+        None,
         None,
     )?;
     encoder.endEncoding();
@@ -2999,6 +3058,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             None,
             plan.math_mode,
             plan.numeric_policy,
+            None,
             None,
         )?;
         if dispatch_boundary {
@@ -4310,6 +4370,34 @@ fn pack_cached_attention_uniforms(
     Ok(())
 }
 
+/// Mirrors `crate::msl::render_cached_attention_merge`'s own `Uniforms`
+/// struct: just `total_elements`, the SAME `query_rows * heads` count
+/// [`pack_cached_attention_uniforms`]'s own `total` computes before its
+/// `dispatch_chunks` multiply -- the merge kernel dispatches one simdgroup
+/// per output row, not per `(row, chunk)` pair. Uploaded fresh every call
+/// (`upload_uniforms`, not a `Plan`-owned buffer like the split kernel's
+/// own `plan_uniform`) -- this slice's own scope boundary, named in
+/// `encode_op`'s call site; folding it into `PlanUniforms` is follow-up
+/// work, not a correctness gap.
+fn pack_cached_attention_merge_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
+    let BoundOpKind::CachedAttention { head_dim, .. } = &bound.kind else {
+        return Err(EmitError::RenderKindMismatch {
+            node: bound.node,
+            expected: "cached_attention_merge",
+            found: bound.kind.name(),
+        });
+    };
+    let total: i64 = bound
+        .extents
+        .iter()
+        .map(|extent| *extent as i64)
+        .product::<i64>()
+        / *head_dim as i64;
+    let mut bytes = Vec::with_capacity(8);
+    push_i64(&mut bytes, total);
+    Ok(bytes)
+}
+
 /// Mirrors the `Uniforms` struct `crate::msl::render_iota` and
 /// `crate::msl::render_constant` both declare: just `total_elements` —
 /// neither leaf has operands, a per-axis extents array, or a gather, so
@@ -4746,6 +4834,29 @@ fn pipeline_for(
         counter!(PIPELINE_MISSES, 1);
         counter!(PIPELINE_COMPILE_TICKS, elapsed_ticks(compile_started));
     }
+    PIPELINE_CACHE.with(|cache| {
+        cache.borrow_mut().insert(cache_key.to_string(), pipeline.clone());
+    });
+    Ok(pipeline)
+}
+
+/// [`pipeline_for`]'s counterpart for a [`Kernel`] already in hand (the
+/// `CachedAttention` merge dispatch's own `emit_cached_attention_merge`
+/// output) instead of one this function must `emit` itself from a `bound` --
+/// its own pipeline-cache entry, keyed on `cache_key` (the split kernel's
+/// own key plus a `_merge` suffix at the call site), so a merge kernel never
+/// shares a compiled `MTLComputePipelineState` with its split sibling even
+/// though both come from the SAME `BoundOp` position.
+fn pipeline_for_kernel(
+    device: &ProtocolObject<dyn MTLDevice>,
+    kernel: &Kernel,
+    cache_key: &str,
+    math_mode: MathMode,
+) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
+    if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(cache_key).cloned()) {
+        return Ok(pipeline);
+    }
+    let pipeline = compile_pipeline(device, kernel, math_mode)?;
     PIPELINE_CACHE.with(|cache| {
         cache.borrow_mut().insert(cache_key.to_string(), pipeline.clone());
     });
@@ -6363,6 +6474,16 @@ fn bind_buffers(
     bindings: &[Binding],
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
     output: (&Retained<ProtocolObject<dyn MTLBuffer>>, usize),
+    // `Some` only for a `CachedAttention` position under `ContextSplitMerge`
+    // -- redesign §4c: the split kernel's `Binding::Scratch` slot binds
+    // THIS buffer (never `output`, unlike `Binding::Output`), and the merge
+    // kernel's own `Binding::Scratch` slot reads it back. `None` for every
+    // other op, and for any call site that never resolved
+    // `crate::metal::attention_scratch_buffer` -- `Binding::Scratch`
+    // appearing with `scratch == None` is exactly the "caller lacks the
+    // merge dispatch this binding shape requires" gap `encode_op`'s own doc
+    // names, and is rejected there before this function is ever reached.
+    scratch: Option<(&Retained<ProtocolObject<dyn MTLBuffer>>, usize)>,
     uniforms: &Retained<ProtocolObject<dyn MTLBuffer>>,
     fault: Option<&Retained<ProtocolObject<dyn MTLBuffer>>>,
 ) -> Result<(), MetalError> {
@@ -6371,6 +6492,12 @@ fn bind_buffers(
         let (buffer, offset) = match binding {
             Binding::Input(node) | Binding::Indices(node) => buffer_for(device_buffers, *node)?,
             Binding::Output(_) => (output_buffer.clone(), output_offset),
+            Binding::Scratch => {
+                let (buffer, offset) = scratch.ok_or_else(|| MetalError::CompileFailed {
+                    log: "kernel binds a scratch buffer but none was resolved".to_string(),
+                })?;
+                (buffer.clone(), offset)
+            }
             Binding::Uniforms => (uniforms.clone(), 0),
             Binding::Fault => (
                 fault.cloned().ok_or_else(|| MetalError::CompileFailed {
@@ -6707,6 +6834,55 @@ fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Result<Option<&MetalBu
     Ok(None)
 }
 
+/// Element count (f32) [`Plan::attention_scratch`] reserves for one
+/// `CachedAttention` position -- `query_rows * heads * max_splits *
+/// (2 + head_dim)`, redesign §4c's own formula: `2` for the running
+/// `(max, sum)` pair, `head_dim` for the un-normalized weighted-value
+/// accumulator, one such record per compiled MAXIMUM split
+/// (`crate::sized::ATTENTION_SPLIT_MAX`) so the buffer never needs
+/// resizing when the live policy narrows or widens. `query_rows * heads`
+/// is `resolved.extents.product() / head_dim` -- the SAME `total_elements`
+/// [`crate::msl::grid_threads`]'s `CachedAttention` arm already derives.
+/// `None` for every other op kind. Used both by [`Plan::attention_scratch`]'s
+/// lazy builder and by [`encode_op`]'s own cold-path fallback allocation
+/// (no `Plan` to own a buffer, so a fresh one is sized with this exact
+/// formula every call -- the same "no placement, fresh `allocate_buffer`"
+/// shape `output` itself already falls back to).
+fn cached_attention_scratch_len(bound: &BoundOp) -> Option<u64> {
+    let BoundOpKind::CachedAttention { head_dim, .. } = &bound.kind else {
+        return None;
+    };
+    let total_elements = bound.extents.iter().product::<u64>().checked_div(*head_dim)?;
+    Some(total_elements * crate::sized::ATTENTION_SPLIT_MAX * (2 + head_dim))
+}
+
+/// [`Plan::attention_scratch`]'s lazy builder, built alongside [`PlanUniforms`]
+/// on the same schedule -- see [`plan_uniform_buffer`]'s own doc for why a
+/// free function rather than an inline `#[cfg]`.
+#[cfg(feature = "metal-plan-stable-buffers")]
+fn attention_scratch_buffer(plan: &Plan, position: usize) -> Result<Option<&MetalBuffer>, MetalError> {
+    if plan.attention_scratch.get().is_none() {
+        let (device, _queue) = device_and_queue()?;
+        let mut buffers = Vec::with_capacity(plan.prepared.resolved.len());
+        for bound in &plan.prepared.resolved {
+            let buffer = match cached_attention_scratch_len(bound) {
+                Some(elements) => Some(allocate_buffer(&device, elements as usize, DType::Float32)?),
+                None => None,
+            };
+            buffers.push(buffer);
+        }
+        let _ = plan.attention_scratch.set(buffers);
+    }
+    Ok(plan
+        .attention_scratch
+        .get()
+        .and_then(|buffers| buffers[position].as_ref()))
+}
+#[cfg(not(feature = "metal-plan-stable-buffers"))]
+fn attention_scratch_buffer(_plan: &Plan, _position: usize) -> Result<Option<&MetalBuffer>, MetalError> {
+    Ok(None)
+}
+
 /// Builds `plan.resolved_steps` on its first call, or when
 /// [`Plan::set_math_mode`] moved the compiled mode since the last build --
 /// every later call for the SAME mode is a no-op. `numeric_policy` cannot
@@ -6740,10 +6916,33 @@ fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<
             plan.math_mode,
             plan.numeric_policy,
         )?;
+        // Redesign §4c: a `CachedAttention` position under a policy that
+        // admits `ContextSplitMerge` resolves a SECOND pipeline for the
+        // merge dispatch, keyed on the split's own cache key plus `_merge`
+        // so the two never collide in `PIPELINE_CACHE` even though they
+        // share every other structural token.
+        let merge = match crate::msl::emit_cached_attention_merge(bound, plan.numeric_policy)? {
+            Some(merge_kernel) => {
+                let merge_cache_key = format!("{cache_key}_merge");
+                let merge_pipeline = pipeline_for_kernel(
+                    device,
+                    &merge_kernel,
+                    &merge_cache_key,
+                    plan.math_mode,
+                )?;
+                Some(ResolvedMergeStep {
+                    pipeline: merge_pipeline,
+                    bindings: merge_kernel.bindings,
+                    grid: merge_kernel.grid,
+                })
+            }
+            None => None,
+        };
         steps.push(ResolvedStep {
             pipeline,
             bindings,
             grid,
+            merge,
         });
     }
     *plan.resolved_steps.borrow_mut() = Some(ResolvedSteps {
@@ -6797,6 +6996,15 @@ fn encode_op(
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
     resolved: Option<&ResolvedStep>,
+    // Redesign §4c: `Some` when `crate::metal::attention_scratch_buffer`
+    // already resolved a PLAN-OWNED scratch buffer for this position
+    // (`execute_plan_with_placements`, the one call site with a `Plan` to
+    // own it). `None` on every other call site (`execute_plan`, the
+    // `*_op_timed` diagnostics) -- when `bindings` still needs one (a
+    // `Binding::Scratch` slot), this function allocates a throwaway one
+    // below, the same "no placement, fresh `allocate_buffer`" fallback
+    // `output` itself already has.
+    scratch: Option<(&MetalBuffer, usize)>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     // read only inside the `metal-plan-stable-buffers` arm below -- named
     // here so a build without that feature does not warn on an unused param.
@@ -6812,8 +7020,14 @@ fn encode_op(
     #[cfg(feature = "instrument")]
     let emit_started = read_ticks();
     let owned_bindings: Vec<Binding>;
-    let (pipeline, bindings, grid) = if let Some(step) = resolved {
-        (step.pipeline.clone(), step.bindings.as_slice(), step.grid)
+    let owned_merge: Option<ResolvedMergeStep>;
+    let (pipeline, bindings, grid, merge) = if let Some(step) = resolved {
+        (
+            step.pipeline.clone(),
+            step.bindings.as_slice(),
+            step.grid,
+            step.merge.as_ref(),
+        )
     } else {
         // `kernel_cache_key`/`kernel_dispatch_shape` are the cheap halves of
         // `emit`'s work -- structural fingerprint, bindings, grid -- with no
@@ -6838,8 +7052,29 @@ fn encode_op(
             counter!(PIPELINE_LOOKUP_CALLS, 1);
             counter!(PIPELINE_LOOKUP_TICKS, elapsed_ticks(pipeline_started));
         }
+        // This cold path (`resolved: None`: `execute_plan`, the
+        // `*_op_timed` diagnostics) has no `Plan` to own a scratch buffer
+        // or a resolved merge pipeline -- it resolves both itself, here,
+        // exactly like `pipeline_for`/`kernel_dispatch_shape` just above,
+        // rather than caching them plan-side. `None` (every non-
+        // `CachedAttention` op, or a `CachedAttention` op under a policy
+        // that withholds `ContextSplitMerge`) costs nothing extra: `emit_
+        // cached_attention_merge` returns `None` before rendering anything.
+        owned_merge = match crate::msl::emit_cached_attention_merge(bound, numeric_policy)? {
+            Some(merge_kernel) => {
+                let merge_cache_key = format!("{cache_key}_merge");
+                let merge_pipeline =
+                    pipeline_for_kernel(device, &merge_kernel, &merge_cache_key, math_mode)?;
+                Some(ResolvedMergeStep {
+                    pipeline: merge_pipeline,
+                    bindings: merge_kernel.bindings,
+                    grid: merge_kernel.grid,
+                })
+            }
+            None => None,
+        };
         owned_bindings = bindings;
-        (pipeline, owned_bindings.as_slice(), grid)
+        (pipeline, owned_bindings.as_slice(), grid, owned_merge.as_ref())
     };
     #[cfg(feature = "instrument")]
     let op_setup_started = read_ticks();
@@ -6849,6 +7084,26 @@ fn encode_op(
             allocate_buffer(device, bound_output_len(bound), bound.dtype)?,
             0,
         ),
+    };
+    // `Some` only from `execute_plan_with_placements` (a `Plan`-owned,
+    // call-to-call-reused buffer via `attention_scratch_buffer`). Every
+    // other caller with a merge dispatch to satisfy falls back to a fresh,
+    // throwaway one, sized by the SAME formula the plan-owned path uses
+    // (`cached_attention_scratch_len`) -- correctness first, plan-owned
+    // reuse is that call site's own optimization, not a requirement this
+    // function imposes on every caller.
+    let owned_scratch: Option<MetalBuffer> = if scratch.is_none() && merge.is_some() {
+        Some(allocate_buffer(
+            device,
+            cached_attention_scratch_len(bound).unwrap_or(0) as usize,
+            DType::Float32,
+        )?)
+    } else {
+        None
+    };
+    let scratch: Option<(&MetalBuffer, usize)> = match &owned_scratch {
+        Some(buffer) => Some((buffer, 0)),
+        None => scratch,
     };
     let uniforms = match plan_uniform {
         Some(buffer) => {
@@ -6902,10 +7157,38 @@ fn encode_op(
         bindings,
         device_buffers,
         (&output, output_offset),
+        scratch,
         &uniforms,
         fault.as_ref(),
     )?;
     dispatch(encoder, &pipeline, grid);
+    // Redesign §4c: the split kernel above wrote its partial into `scratch`
+    // (its own `Binding::Scratch` slot, never `output`); this second
+    // dispatch reads it back and writes the position's REAL output --
+    // `ggml_metal_op_flash_attn_ext`'s own one-op-two-dispatches shape,
+    // `attention-kernel-design.md` §4c. Both land in the SAME encoder, in
+    // program order: under `DispatchType::Serial` (this plan's default)
+    // that ordering alone is Metal's own dependency guarantee, the same
+    // reason this module's `HazardTracker` is never instantiated on that
+    // path at all (`HazardTracker`'s own doc). `DispatchType::Concurrent`
+    // is a NAMED GAP this slice does not close: the hazard tracker above
+    // (when present) records only this op's SINGLE output identity, not
+    // the scratch buffer's -- see `execute_plan_with_placements`'s own
+    // hazard block for where that would need to grow a second identity.
+    if let Some(merge) = merge {
+        let merge_uniforms = upload_uniforms(device, &pack_cached_attention_merge_uniforms(bound)?)?;
+        encoder.setComputePipelineState(&merge.pipeline);
+        bind_buffers(
+            encoder,
+            &merge.bindings,
+            device_buffers,
+            (&output, output_offset),
+            scratch,
+            &merge_uniforms,
+            None,
+        )?;
+        dispatch(encoder, &merge.pipeline, merge.grid);
+    }
     #[cfg(feature = "instrument")]
     {
         counter!(ENCODE_DISPATCH_CALLS, 1);

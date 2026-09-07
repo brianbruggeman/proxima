@@ -113,6 +113,17 @@ pub enum Binding {
     /// `TensorError::GatherIndexOutOfRange` `cpu::evaluate` would report —
     /// see `push_gather_fetch`'s doc for how the check is emitted.
     Fault,
+    /// `CachedAttention`'s cross-threadgroup key-split scratch — present
+    /// only when [`cached_attention_merge_needed`] admits
+    /// [`NumericRewrite::ContextSplitMerge`]. The split kernel WRITES it
+    /// (this binding replaces `Binding::Output` in that kernel's own
+    /// [`bindings`] list, since the split no longer writes the op's real
+    /// output directly); the merge kernel READS it. Not `NodeId`-keyed —
+    /// unlike every other binding, this buffer has no program node of its
+    /// own, so the identity a hazard tracker needs comes from
+    /// `crate::metal`'s own scratch-buffer pointer, resolved outside
+    /// `device_buffers` (see that crate's `BufferArena` scratch slot).
+    Scratch,
 }
 
 /// How many threads a driver must dispatch for this op — one per
@@ -1186,10 +1197,26 @@ pub fn emit(
         BoundOpKind::Iota => render_iota(resolved, &entry),
         BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
     }?;
+    // Coupled to `render_cached_attention`'s own final-store branch by
+    // construction: whenever the rendered SOURCE writes the scratch layout
+    // instead of the real output (`cached_attention_merge_needed`), the
+    // BINDINGS this call returns must say so too (`Binding::Scratch`
+    // replacing `Binding::Output`) -- source and bindings are two views of
+    // the SAME `emit` call, keyed on the SAME `numeric_policy`, so they can
+    // never disagree with each other. What they CAN disagree with is a
+    // caller that lacks the merge dispatch this binding shape requires --
+    // `crate::metal::encode_op`'s own doc names that gap and the guard it
+    // takes on its `resolved: None` (no plan-resolved merge sibling) path.
+    let is_split_cached_attention = matches!(resolved.kind, BoundOpKind::CachedAttention { .. })
+        && cached_attention_merge_needed(numeric_policy);
     Ok(Kernel {
         source,
         entry,
-        bindings: bindings(resolved),
+        bindings: if is_split_cached_attention {
+            split_bindings_with_scratch(resolved)
+        } else {
+            bindings(resolved)
+        },
         grid: GridSpec {
             threads: grid_threads(resolved, &quantized, numeric_policy)?,
             threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
@@ -1374,8 +1401,14 @@ pub(crate) fn kernel_dispatch_shape(
 ) -> Result<(Vec<Binding>, GridSpec), EmitError> {
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
+    let is_split_cached_attention = matches!(resolved.kind, BoundOpKind::CachedAttention { .. })
+        && cached_attention_merge_needed(numeric_policy);
     Ok((
-        bindings(resolved),
+        if is_split_cached_attention {
+            split_bindings_with_scratch(resolved)
+        } else {
+            bindings(resolved)
+        },
         GridSpec {
             threads: grid_threads(resolved, &quantized, numeric_policy)?,
             threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
@@ -1595,6 +1628,32 @@ fn bindings(resolved: &BoundOp) -> Vec<Binding> {
     bindings
 }
 
+/// [`bindings`]'s split-kernel counterpart for `BoundOpKind::CachedAttention`
+/// once [`cached_attention_merge_needed`] admits `ContextSplitMerge`: the
+/// same read set, but the LAST slot -- the op's own output -- becomes
+/// [`Binding::Scratch`] instead of [`Binding::Output`], because the split
+/// kernel no longer writes `resolved.node`'s real buffer; the merge kernel
+/// does. See [`render_cached_attention_merge`]'s own doc for the kernel that
+/// reads this scratch buffer back out.
+fn split_bindings_with_scratch(resolved: &BoundOp) -> Vec<Binding> {
+    let mut list = bindings(resolved);
+    for binding in &mut list {
+        if let Binding::Output(_) = binding {
+            *binding = Binding::Scratch;
+        }
+    }
+    list
+}
+
+/// [`render_cached_attention_merge`]'s own binding list: reads the scratch
+/// buffer [`split_bindings_with_scratch`] wrote, writes the op's real
+/// output, and needs its own (smaller) `Uniforms` blob -- no operand inputs,
+/// no gather, no fault buffer, since the merge is pure scratch-to-output
+/// rescale-and-copy.
+fn merge_bindings(resolved: &BoundOp) -> Vec<Binding> {
+    alloc::vec![Binding::Scratch, Binding::Output(resolved.node), Binding::Uniforms]
+}
+
 /// Every `NodeId` `bindings` reads from a device buffer for — the exact
 /// operand set `crate::metal::bind_buffers` resolves for a
 /// `Binding::Input`/`Binding::Indices` slot, in bind order. This is the one
@@ -1611,7 +1670,7 @@ fn bindings(resolved: &BoundOp) -> Vec<Binding> {
 pub(crate) fn hazard_read_nodes(bindings: &[Binding]) -> impl Iterator<Item = NodeId> + '_ {
     bindings.iter().filter_map(|binding| match binding {
         Binding::Input(node) | Binding::Indices(node) => Some(*node),
-        Binding::Output(_) | Binding::Uniforms | Binding::Fault => None,
+        Binding::Output(_) | Binding::Uniforms | Binding::Fault | Binding::Scratch => None,
     })
 }
 
@@ -1624,7 +1683,11 @@ pub(crate) fn hazard_read_nodes(bindings: &[Binding]) -> impl Iterator<Item = No
 pub(crate) fn hazard_write_node(bindings: &[Binding]) -> Option<NodeId> {
     bindings.iter().find_map(|binding| match binding {
         Binding::Output(node) => Some(*node),
-        Binding::Input(_) | Binding::Indices(_) | Binding::Uniforms | Binding::Fault => None,
+        // `Binding::Scratch`'s write target has no `NodeId` -- see
+        // `Binding::Scratch`'s own doc. A caller tracking hazards across the
+        // split dispatch's scratch write needs the scratch buffer's own
+        // pointer identity directly, not through this `NodeId` path.
+        Binding::Input(_) | Binding::Indices(_) | Binding::Uniforms | Binding::Fault | Binding::Scratch => None,
     })
 }
 
@@ -3078,6 +3141,22 @@ pub(crate) fn splits_for(context_length: u64, policy: NumericPolicy) -> u64 {
         .clamp(1, crate::sized::ATTENTION_SPLIT_MAX)
 }
 
+/// Whether `render_cached_attention`'s single-range dynamic path renders as
+/// TWO Metal dispatches (this function's `true`) or the single, unchanged
+/// dispatch (`false`) -- the SAME `admit` predicate [`splits_for`] itself
+/// gates on, factored out so [`render_cached_attention`]'s own final-store
+/// branch, [`split_bindings_with_scratch`]'s caller, and
+/// [`emit_cached_attention_merge`] all key off one boolean rather than three
+/// independent `admit` calls that could drift. This slice forces the live
+/// split count the KERNEL BODY walks to `1` regardless of what
+/// [`splits_for`] would return under the SAME policy (see
+/// `render_cached_attention`'s final-store doc) -- only the STRUCTURE (two
+/// dispatches, a scratch hop) is proved here; growing the live count past 1
+/// is the follow-up slice.
+pub(crate) fn cached_attention_merge_needed(policy: NumericPolicy) -> bool {
+    admit(policy, NumericRewrite::ContextSplitMerge).is_ok()
+}
+
 /// `BoundOpKind::CachedAttention`'s Metal kernel: online (running max/sum,
 /// register-resident weighted-value accumulator) softmax attention over a
 /// cached range plus a new range, one 32-lane simdgroup per
@@ -3299,8 +3378,35 @@ fn render_cached_attention(
                 "    constexpr long block_width = {block_width};\n    short ty = (short)(lane / 8u); short tx = (short)(lane % 8u);\n    threadgroup float ss[query_groups * cap * block_width];\n    if (chunk < chunks) {{\n    long num_local_keys = (chunk <= last_key) ? ((last_key - chunk) / chunks) + 1L : 0L;\n    for (long block_start = 0L; block_start < num_local_keys; block_start += block_width) {{\n        for (long cc = 0L; cc < block_width / 4L; cc++) {{\n            long local_index = block_start + 4L * cc + (long)ty;\n            bool valid = local_index < num_local_keys;\n            long key = chunk + local_index * chunks;\n            bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n            if (valid) {{\n                long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n                if (cached && relative < cached_lower) {{ valid = false; }}\n                if (!cached && relative > new_upper) {{ valid = false; }}\n            }}\n            long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n            float partial_score = 0.0f;\n            if (valid) {{\n                device const {element_type}4* qr4 = (device const {element_type}4*)(in0 + qbase);\n                device const {element_type}4* qi4 = (device const {element_type}4*)(in1 + qbase);\n                device const {element_type}4* kr4 = (device const {element_type}4*)((cached ? in2 : in4) + kbase);\n                device const {element_type}4* ki4 = (device const {element_type}4*)((cached ? in3 : in5) + kbase);\n                for (short index = tx; index < (short)((head_dim / 2) / 4L); index += 8) {{\n                    partial_score += dot(kr4[index], qr4[index]);\n                    partial_score += dot(ki4[index], qi4[index]);\n                }}\n            }}\n            partial_score += simd_shuffle_down(partial_score, 4);\n            partial_score += simd_shuffle_down(partial_score, 2);\n            partial_score += simd_shuffle_down(partial_score, 1);\n            if (tx == 0) {{ ss[local_group_index * block_width + 4L * cc + (long)ty] = valid ? partial_score * scale : -INFINITY; }}\n        }}\n        simdgroup_barrier(mem_flags::mem_threadgroup);\n        for (long sub = 0L; sub < block_width; sub += 32L) {{\n            long lane_index = sub + (long)lane;\n            float raw_score = ss[local_group_index * block_width + lane_index];\n            float next_max = simd_max(max(maximum, raw_score));\n            float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n            float weight = exp(raw_score - next_max);\n            sum = sum * rescale + simd_sum(weight);\n            ss[local_group_index * block_width + lane_index] = weight;\n            for (long dimension = 0L; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] *= rescale; }}\n            maximum = next_max;\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n            for (long local_index = block_start + sub; local_index < min(block_start + sub + 32L, num_local_keys); local_index++) {{\n                long key = chunk + local_index * chunks;\n                bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n                long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n                float key_weight = ss[local_group_index * block_width + (local_index - block_start)];\n                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n                    long local_dimension = dimension / 32L;\n                    weighted[local_dimension] += key_weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n                }}\n            }}\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n        }}\n    }}\n    }}\n"
             ));
         }
+        // Redesign §4c ([`NumericRewrite::ContextSplitMerge`]): once the
+        // active policy admits it, this simdgroup-level combine's own
+        // result (`merged_max`/`merged_sum`/`weighted`, exactly what the
+        // `bit_exact` arm below normalizes straight into `out`) is instead
+        // the SPLIT kernel's own partial for split 0 -- written raw
+        // (un-normalized) into the scratch buffer this position's
+        // `Binding::Scratch` slot backs, at `max_splits` stride so a later
+        // slice's real `split = threadgroup_index % splits` can address its
+        // own slot with the identical layout. `render_cached_attention_merge`
+        // reads exactly this layout back and performs the divide -- the
+        // final `weighted[..] / sum` normalize this arm always did is
+        // deferred to that kernel, generalizing this exact combine one
+        // hardware level up (`ContextSplitMerge`'s own doc). Splits is
+        // forced to 1 here (this slice's own scope): `split` is always `0L`,
+        // never `u.splits`-derived, so the arithmetic this simdgroup already
+        // computed is completely unchanged -- only WHERE the result lands
+        // differs.
+        let final_store = if cached_attention_merge_needed(numeric_policy) {
+            format!(
+                "        constexpr long max_splits = {};\n        constexpr long split = 0L;\n        device float* attn_scratch = (device float*)out;\n        long scratch_index = (query_index * max_splits + split) * (2L + head_dim);\n        if (lane == 0u) {{ attn_scratch[scratch_index] = merged_max; attn_scratch[scratch_index + 1] = merged_sum; }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; attn_scratch[scratch_index + 2L + dimension] = weighted[local_dimension]; }}\n",
+                crate::sized::ATTENTION_SPLIT_MAX,
+            )
+        } else {
+            format!(
+                "        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n"
+            )
+        };
         source.push_str(&format!(
-            "    threadgroup float shared_m[query_groups * cap]; threadgroup float shared_l[query_groups * cap]; threadgroup float shared_o[query_groups * cap * head_dim];\n    if (lane == 0u) {{ shared_m[local_group_index] = maximum; shared_l[local_group_index] = sum; }}\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ shared_o[local_group_index * head_dim + dimension] = weighted[dimension / 32L]; }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    if (chunk == 0L) {{\n        float merged_max = -INFINITY;\n        for (long c = 0; c < cap; c++) {{ merged_max = max(merged_max, shared_m[group * cap + c]); }}\n        float merged_sum = 0.0f;\n        for (long c = 0; c < cap; c++) {{\n            float partial_max = shared_m[group * cap + c];\n            float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n            merged_sum += shared_l[group * cap + c] * rescale;\n        }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            float acc = 0.0f;\n            for (long c = 0; c < cap; c++) {{\n                float partial_max = shared_m[group * cap + c];\n                float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n                acc += shared_o[(group * cap + c) * head_dim + dimension] * rescale;\n            }}\n            weighted[local_dimension] = acc;\n        }}\n        sum = merged_sum;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n    }}\n}}\n"
+            "    threadgroup float shared_m[query_groups * cap]; threadgroup float shared_l[query_groups * cap]; threadgroup float shared_o[query_groups * cap * head_dim];\n    if (lane == 0u) {{ shared_m[local_group_index] = maximum; shared_l[local_group_index] = sum; }}\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ shared_o[local_group_index * head_dim + dimension] = weighted[dimension / 32L]; }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    if (chunk == 0L) {{\n        float merged_max = -INFINITY;\n        for (long c = 0; c < cap; c++) {{ merged_max = max(merged_max, shared_m[group * cap + c]); }}\n        float merged_sum = 0.0f;\n        for (long c = 0; c < cap; c++) {{\n            float partial_max = shared_m[group * cap + c];\n            float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n            merged_sum += shared_l[group * cap + c] * rescale;\n        }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            float acc = 0.0f;\n            for (long c = 0; c < cap; c++) {{\n                float partial_max = shared_m[group * cap + c];\n                float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n                acc += shared_o[(group * cap + c) * head_dim + dimension] * rescale;\n            }}\n            weighted[local_dimension] = acc;\n        }}\n        sum = merged_sum;\n{final_store}    }}\n}}\n"
         ));
     } else if context_chunks <= 1 {
         source.push_str("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }\n");
@@ -3349,6 +3455,89 @@ fn render_cached_attention(
     }
     let _ = query_rows;
     Ok(source)
+}
+
+/// `BoundOpKind::CachedAttention`'s MERGE kernel -- [`render_cached_attention`]'s
+/// own doc, redesign §4c: reads back the `(max, sum, weighted[head_dim])`
+/// partial [`render_cached_attention`]'s final-store branch wrote into the
+/// scratch buffer (one simdgroup per output row, exactly the layout that
+/// arm used, at `split = 0`) and performs the SAME normalize
+/// (`weighted / sum`) that arm always did before this redesign, now
+/// deferred here. With the live split count forced to `1` this slice (see
+/// [`cached_attention_merge_needed`]'s own doc), "merge" is the degenerate
+/// N=1 case of `ContextSplitMerge`'s combine -- a copy-and-normalize, not a
+/// rescale-across-partials -- exactly matching llama.cpp's own
+/// `kernel_flash_attn_ext_vec_reduce` shape at the SAME granularity
+/// (`attention-kernel-design.md` §4c). Growing past one live partial (a real
+/// `simd_max`/`simd_sum` combine over `u.splits` partials) is the next
+/// slice's work, not this one's.
+fn render_cached_attention_merge(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
+    let BoundOpKind::CachedAttention { head_dim, .. } = &resolved.kind else {
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "cached_attention_merge",
+            found: resolved.kind.name(),
+        });
+    };
+    let element_type = type_token(resolved.node, resolved.dtype)?;
+    let mut source = String::new();
+    preamble(&mut source);
+    source.push_str("struct Uniforms { long total_elements; };\n\n");
+    source.push_str(&format!(
+        "kernel void {entry}(device const float* in0 [[buffer(0)]], device {element_type}* out [[buffer(1)]], constant Uniforms& u [[buffer(2)]], uint gid [[thread_position_in_grid]]) {{\n"
+    ));
+    source.push_str(
+        "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n",
+    );
+    source.push_str(&format!(
+        "    constexpr long head_dim = {head_dim}; constexpr long max_splits = {};\n    long query_index = vector_index;\n    constexpr long split = 0L;\n    long scratch_index = (query_index * max_splits + split) * (2L + head_dim);\n    float merged_sum = in0[scratch_index + 1];\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n        float value = in0[scratch_index + 2L + dimension];\n        out[query_index * head_dim + dimension] = ({element_type})(merged_sum == 0.0f ? 0.0f : value / merged_sum);\n    }}\n}}\n",
+        crate::sized::ATTENTION_SPLIT_MAX,
+    ));
+    Ok(source)
+}
+
+/// Whether `resolved` needs a companion merge dispatch under `numeric_policy`
+/// and, if so, that dispatch's [`Kernel`] -- `None` for every op kind other
+/// than `CachedAttention` and for `CachedAttention` itself when
+/// [`cached_attention_merge_needed`] withholds `ContextSplitMerge` (the
+/// `bit_exact` lowering: single dispatch, byte-identical to before this
+/// redesign). This is [`emit`]'s own companion rather than a change to
+/// `emit`'s signature: every OTHER caller of `emit` (`cuda.rs`, `wgsl.rs`,
+/// the module doc's own example) keeps binding one `BoundOp` to one
+/// `Kernel`, and `CachedAttention`'s own two-dispatch shape is additive —
+/// `crate::metal`'s plan-resolution path calls this alongside `emit` for
+/// every position, exactly as it already calls `kernel_dispatch_shape`
+/// alongside `emit`.
+pub(crate) fn emit_cached_attention_merge(
+    resolved: &BoundOp,
+    numeric_policy: NumericPolicy,
+) -> Result<Option<Kernel>, EmitError> {
+    if !matches!(resolved.kind, BoundOpKind::CachedAttention { .. })
+        || !cached_attention_merge_needed(numeric_policy)
+    {
+        return Ok(None);
+    }
+    validate(resolved)?;
+    let entry = alloc::format!("{}_merge", entry_name(resolved));
+    let source = render_cached_attention_merge(resolved, &entry)?;
+    let total_elements = resolved
+        .extents
+        .iter()
+        .product::<u64>()
+        .checked_div(match &resolved.kind {
+            BoundOpKind::CachedAttention { head_dim, .. } => *head_dim,
+            _ => 1,
+        })
+        .unwrap_or(0);
+    Ok(Some(Kernel {
+        source,
+        entry,
+        bindings: merge_bindings(resolved),
+        grid: GridSpec {
+            threads: total_elements * SIMD_WIDTH,
+            threadgroup_width: None,
+        },
+    }))
 }
 
 fn render_elementwise(
@@ -9053,6 +9242,86 @@ mod tests {
         assert!(
             admitted.contains("merged_max"),
             "llama_relaxed() is expected to emit the cross-simdgroup merge block"
+        );
+    }
+
+    /// Redesign §4c's own inert proof: `bit_exact()` renders the split
+    /// kernel's SOURCE and BINDINGS exactly as `render_cached_attention`
+    /// already did before `ContextSplitMerge` existed (no `attn_scratch`,
+    /// no `Binding::Scratch`, still a single `Binding::Output`), and emits
+    /// no companion merge kernel at all. `llama_relaxed()` is the ONLY
+    /// policy that changes either: the split kernel's final store moves to
+    /// `attn_scratch` and its output binding becomes `Binding::Scratch`,
+    /// and `emit_cached_attention_merge` returns the companion kernel that
+    /// reads that scratch layout back and writes the real output.
+    #[test]
+    fn cached_attention_two_dispatch_form_is_inert_under_bit_exact() {
+        let mut bound = cached_attention_op_dynamic(48, 16);
+        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+            unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
+        };
+        // multiple of 8, `render_cached_attention`'s own alignment
+        // requirement once `block_width_for` admits `TreeReduce`
+        // (`llama_relaxed()` below) -- `AttentionBlockMisaligned`'s own doc.
+        *head_dim = 8;
+        let packed_operands = PackedOperands::new();
+
+        let bit_exact_kernel = emit(&bound, &packed_operands, NumericPolicy::bit_exact())
+            .expect("bit_exact() still renders the single-dispatch kernel");
+        assert!(
+            !bit_exact_kernel.source.contains("attn_scratch"),
+            "bit_exact() must render the byte-identical, pre-redesign kernel body"
+        );
+        assert!(
+            bit_exact_kernel
+                .bindings
+                .iter()
+                .any(|binding| matches!(binding, Binding::Output(node) if *node == bound.node)),
+            "bit_exact() must still bind its own node as a real Binding::Output"
+        );
+        assert!(
+            !bit_exact_kernel
+                .bindings
+                .iter()
+                .any(|binding| matches!(binding, Binding::Scratch)),
+            "bit_exact() must never bind a scratch slot"
+        );
+        assert!(
+            emit_cached_attention_merge(&bound, NumericPolicy::bit_exact())
+                .expect("emit_cached_attention_merge never errors on a well-formed op")
+                .is_none(),
+            "bit_exact() must not need a merge dispatch at all"
+        );
+
+        let relaxed_kernel = emit(&bound, &packed_operands, NumericPolicy::llama_relaxed())
+            .expect("llama_relaxed() renders the split kernel");
+        assert!(
+            relaxed_kernel.source.contains("attn_scratch"),
+            "llama_relaxed() must write its final partial into scratch, not `out`"
+        );
+        assert!(
+            relaxed_kernel
+                .bindings
+                .iter()
+                .any(|binding| matches!(binding, Binding::Scratch)),
+            "llama_relaxed()'s split kernel binds a scratch slot instead of Binding::Output"
+        );
+        assert!(
+            !relaxed_kernel
+                .bindings
+                .iter()
+                .any(|binding| matches!(binding, Binding::Output(_))),
+            "llama_relaxed()'s split kernel must not ALSO claim to write the real output"
+        );
+
+        let merge_kernel = emit_cached_attention_merge(&bound, NumericPolicy::llama_relaxed())
+            .expect("emit_cached_attention_merge never errors on a well-formed op")
+            .expect("llama_relaxed() needs a companion merge dispatch");
+        assert!(merge_kernel.entry.ends_with("_merge"));
+        assert_eq!(
+            merge_kernel.bindings,
+            alloc::vec![Binding::Scratch, Binding::Output(bound.node), Binding::Uniforms],
+            "the merge kernel reads the split's scratch and writes the real output"
         );
     }
 
