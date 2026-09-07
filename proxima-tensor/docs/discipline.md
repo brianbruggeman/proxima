@@ -27275,3 +27275,53 @@ All three PASS at steady state with NEGATIVE residual (the derived sum slightly 
 | --- | --- | --- | --- | --- |
 | 2026-09-07 | `feat(omega): plan load logs device memory by class` + `docs(tensor): row 391 device memory by class per model` | New `emit_device_memory_by_class` (`proxima-model-interop/src/generate.rs`), one line per decode call at step 0, composing existing `MetalStageTotals`/`current_allocated_size`/`phys_footprint_bytes` counters; no new tracking machinery | 1.7B/4B/8B measured in isolated single-model processes (1 run each, not a bake-off -- this is a memory-shape row, not a timing row); golden derived-vs-observed gate PASS at steady state for all three, residual -1.03%/-0.17%/-0.09% | clippy x2 clean; nextest 22/22 (omega) + 120/120 (interop) | solo run; GPU-quiet gate (`pgrep -l 'proxima_model_i\|matvec_roofline\|row_376\|rmsnorm_fused'`) empty before every GPU-touching command; one background 27B invocation launched before the owner's no-force instruction arrived -- CORRECTED in ROW 392: it ran to completion (six decode steps), not killed within seconds as originally logged here |
 
+## ROW 392 -- Qwen3.8-27B (qwen35 hybrid) per-step memory: the host-growing two-range path re-uploads, reads back and appends ~155 MB per token and rebuilds the plan every step; dense 8B on placed KV shows zero
+
+**Card:** ROW 391 wrongly logged the 27B invocation as killed within seconds; this row reads the actual captured log from that run (`qwen38_27b_run.log`, the same `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` harness, `PROXIMA_QWEN38_GGUF` pointed at the Aug-14 blob, `PROXIMA_MAX_TOKENS=8`, release+`metal,instrument`) and reports what it measured, per step, against the dense qwen3 8B run (`qwen3_8b_run.log`, same harness, same flags) as the contrast case. Docs-only row: no gates run, no cargo invoked, host loadout is a single log read.
+
+**Per-step table, Qwen3.8-27B (six steps ran, `qwen38_27b_run.log` lines 3-27).** All numbers copied verbatim from each step's `token_breakdown`/`token_breakdown_metal` line.
+
+| step | step_wall_ms | gpu_exec_ms | kv_cache_upload_bytes | layer_cache_append_bytes | readback_bytes | output_buffer_allocations | plan_misses | plan_hits | phys_footprint_bytes | device_allocated_bytes |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 2543.166166 | 1257.754458 | 156,893,184 | 211,812,352 | 240,617,472 | 3,885 | 1 | 0 | 9,416,055,744 | 18,975,850,496 |
+| 1 | 845.065083 | 642.485666 | 160,694,272 | 153,092,096 | 154,085,376 | 3,773 | 2 | 0 | 13,074,667,264 | 26,106,757,120 |
+| 2 | 724.306791 | 628.778541 | 160,825,344 | 153,092,096 | 154,085,376 | 3,773 | 3 | 0 | 13,430,233,472 | 23,877,992,448 |
+| 3 | 714.259666 | 624.745750 | 160,956,416 | 153,092,096 | 154,085,376 | 3,773 | 4 | 0 | 12,949,281,024 | 23,450,304,512 |
+| 4 | 722.661333 | 620.863041 | 161,087,488 | 153,092,096 | 154,085,376 | 3,773 | 5 | 0 | 12,616,751,872 | 21,647,982,592 |
+| 5 | 710.657458 | 609.615208 | 161,218,560 | 153,092,096 | 154,085,376 | 3,773 | 6 | 0 | 12,465,462,080 | 23,450,566,656 |
+
+`device_memory_by_class` (step 0, only emitted once, `qwen38_27b_run.log:7`): `weights_nocopy_bytes=150994944 weights_copied_bytes=5905896 weights_offset_bytes=18962876416 kv_cache_device_bytes=0 kv_cache_device_bytes_known=false device_allocated_bytes=18975850496 phys_footprint_bytes=9415334848`. `kv_cache_device_bytes_known=false` marks this checkpoint as taking the two-range (non-placed-KV) fallback ROW 391's class table already named -- confirmed by `kv_cache_upload_bytes`/`layer_cache_append_bytes` being nonzero every step below, where the placed-KV path (the 8B contrast) shows zero for both, every step. `generated_text` is not present in this excerpt -- the captured log ends after step 5's `token_breakdown_metal` line, before any `metal_decode_summary` line was emitted.
+
+**Per-step table, dense qwen3 8B, contrast (`qwen3_8b_run.log` lines 6-28, eight steps ran, placed-KV path).**
+
+| step | step_wall_ms | gpu_exec_ms | kv_cache_upload_bytes | layer_cache_append_bytes | readback_bytes | output_buffer_allocations | plan_misses | plan_hits | phys_footprint_bytes | device_allocated_bytes |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 14750.380708 | 14501.896791 | 0 | 0 | 17,624,576 | 161 | 1 | 0 | 246,664,000 | 5,826,265,088 |
+| 1 | 60.835875 | 26.158166 | 0 | 0 | 607,744 | 161 | 2 | 0 | 224,758,528 | 5,258,461,184 |
+| 2 | 27.192416 | 25.657416 | 0 | 0 | 607,744 | 0 | 2 | 1 | 226,216,704 | 5,258,461,184 |
+| 3 | 26.981625 | 25.635541 | 0 | 0 | 607,744 | 0 | 2 | 2 | 224,512,768 | 5,258,461,184 |
+| 4 | 51.390166 | 26.052208 | 0 | 0 | 607,744 | 161 | 3 | 2 | 226,888,448 | 5,258,461,184 |
+| 5 | 27.460083 | 25.987541 | 0 | 0 | 607,744 | 0 | 3 | 3 | 226,888,448 | 5,258,461,184 |
+| 6 | 27.052000 | 25.633500 | 0 | 0 | 607,744 | 0 | 3 | 4 | 226,036,480 | 5,258,461,184 |
+| 7 | 26.910750 | 25.554291 | 0 | 0 | 607,744 | 0 | 3 | 5 | 226,036,480 | 5,258,461,184 |
+
+`device_memory_by_class` (step 0, `qwen3_8b_run.log:8`): `weights_nocopy_bytes=0 weights_copied_bytes=15084 weights_offset_bytes=350060544 kv_cache_device_bytes=10911744 kv_cache_device_bytes_known=true device_allocated_bytes=5826265088 phys_footprint_bytes=246664000`. `kv_cache_device_bytes_known=true` and `kv_cache_upload_bytes`/`layer_cache_append_bytes` both zero at every one of the eight steps -- the placed-KV path (ROW 391's "KV cache (placed, device-resident)" row) allocates once at call start and never re-uploads or appends per token. `generated_text="Okay, I need to write a Python"` (`qwen3_8b_run.log:30`, `metal_decode_summary tokens_generated=8 stopped_by_eos=false total_wall_clock_ms=15085.738 plan_hits=5 plan_misses=3`).
+
+**DERIVED -- host-growth extrapolation, conditional on accumulate-vs-replace (a source question this row does not answer).** `layer_cache_append_bytes` is flat at 153,092,096 bytes per token across steps 1-5 (`qwen38_27b_run.log` lines 8/12/16/20/24). IF that append accumulates onto the host `Vec<f32>` ROW 391 named for the two-range/`LayerCache` path (rather than being overwritten/bounded), host growth would reach this box's 64 GB physical memory at token count N = (64,000,000,000 - 13,074,667,264) / 153,092,096 ≈ **333 tokens** (using step 1's own `phys_footprint_bytes`, 13,074,667,264 = ~13.07 GB, as the baseline already-resident figure). This is DERIVED, not measured: whether the appended bytes actually accumulate without bound, get truncated to a KV window, or are the SAME buffer re-measured every step is unknown from these counters alone -- the mechanism (`file:line` for what `layer_cache_append_bytes` is measuring against) is assigned to the next row.
+
+**What the counters show, mechanism-limited to the counters themselves.** `device_allocated_bytes` rose from 18,975,850,496 (18.98 GB) at step 0 to 26,106,757,120 (26.11 GB) at step 1 -- a 7.13 GB jump in one token, while `phys_footprint_bytes` also rose (9.42 GB to 13.07 GB). At the same step, 3,773 `output_buffer_allocations` were allocated (down from 3,885 at step 0's prefill) and `plan_misses` incremented by exactly 1 every single step (1, 2, 3, 4, 5, 6) with `plan_hits` staying 0 throughout -- no plan reuse on this path, in contrast to the 8B placed-KV run where `plan_hits` climbs (0, 0, 1, 2, 2, 3, 4, 5) while `plan_misses` stays mostly flat (1, 2, 2, 2, 3, 3, 3, 3). `kv_cache_upload_bytes` and `layer_cache_append_bytes` are the two counters ROW 391's class table already names as the two-range host-growing path's own counters (the "KV cache (two-range/`LayerCache`, host-growing)" row of that table, which states this path "folds into the weight counters above, not separately sized" and is "commingled with weight uploads, not separable from this row's counters" -- ROW 391 itself never isolated these two counters per step because no checkpoint measured there took this path). The specific source line that increments `layer_cache_append_bytes`/`kv_cache_upload_bytes` per step, and whether the underlying host buffer is replaced or grown, is not read this row -- assigned to the next row.
+
+**Throughput, derived from the counters.** `gpu_exec_ms` for steps 1-5 ranges 609.615208-642.485666 ms/step, i.e. 1000/642.485666 = 1.5567 to 1000/609.615208 = 1.6404 tokens/s measured against the GPU-execution clock alone (excludes host-side upload/readback/append time already broken out in `step_wall_ms`, which is 710-845 ms/step over the same range -- 1.18-1.41 tokens/s on the full wall-clock).
+
+**Machine state.** This run, 8 tokens against `PROXIMA_MAX_TOKENS=8`, did NOT freeze the box -- it produced the six-step log analyzed above and returned. The owner separately reports that a longer run against this same checkpoint froze the machine previously; that longer-run freeze is not reproduced or explained by this row's 6-8 token sample, and remains unmeasured (ROW 391 named the same gap).
+
+**Residual, named not hidden.** (1) The file:line mechanism for `kv_cache_upload_bytes`/`layer_cache_append_bytes` -- which function increments them, and whether the host `Vec<f32>` behind them accumulates or is replaced per step -- is not read this row; assigned to the next row. (2) The 333-token extrapolation is DERIVED from a flat per-step delta over only 5 data points (steps 1-5) and assumes that delta stays constant as context grows; it does not account for the qwen35 hybrid's SSM recurrent-state class ROW 391 already flagged as uncovered by its dense-model formula. (3) `generated_text` for the 27B run is not in this excerpt; the sample text and end-of-run summary line for that run are unmeasured here.
+
+**Axes (principle 8):** numeric -- none new (reads existing counters from a captured log; no new tunable constant). structural -- none. **Sans-IO opt-sweep (principle 11):** N/A -- docs-only row, no new sans-IO component.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | `docs(tensor): row 392 qwen3.8 27b per-step memory counters` | Corrects ROW 391's false "killed within seconds" claim; reports the captured log's six completed decode steps per-step, contrasted against dense 8B's eight steps on the placed-KV path | 1 log read each, no re-run, no gates | N/A (docs-only) | solo, single log read; no cargo invoked |
+
