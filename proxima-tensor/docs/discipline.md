@@ -27325,3 +27325,40 @@ All three PASS at steady state with NEGATIVE residual (the derived sum slightly 
 | --- | --- | --- | --- | --- |
 | 2026-09-07 | `docs(tensor): row 392 qwen3.8 27b per-step memory counters` | Corrects ROW 391's false "killed within seconds" claim; reports the captured log's six completed decode steps per-step, contrasted against dense 8B's eight steps on the placed-KV path | 1 log read each, no re-run, no gates | N/A (docs-only) | solo, single log read; no cargo invoked |
 
+## ROW 393 -- prefill Q4_K multi-row body decodes each weight block's header/nibble words once per activation group instead of once per token: 10.97s -> 4.26s step 0 on this box
+
+**Card:** ROW 389's 13-second step-0 prefill (`gpu_exec_ms=13064` at M=31, `push_packed_row_multi_row_body`'s generic per-element `operand_read` loop, `~2.5 ns/byte` effective rate against the packed weight bytes).
+
+**Branch:** `perf/prefill-packed-row-decode` (`92280f26`/lean follow-up), landed via `land/prefill`, rebased clean onto main at `374e358c` (zero file overlap with main's own ROW 390-392 landings -- `omega/src/metal.rs`, `omega/src/msl.rs`, `omega/tests/fixtures/packed_row_blocked_s1_q4k.msl` vs main's `omega/tests/matvec_roofline_ladder.rs`, `omega/tests/rmsnorm_fused_epilogue_cost.rs`, `omega/tests/support/mod.rs`, `proxima-model-interop/src/generate.rs`, this file).
+
+**Mechanism.** `push_packed_row_multi_row_q4k_body` (`omega/src/msl.rs:4835`), dispatched from `push_packed_row_multi_row_body`'s `fast_q4k` gate (`omega/src/msl.rs:4743-4749`) when the block is `Q4_K`, unquantized `other`, and a plain product-reduce, replaces the generic per-element `operand_read` loop with `q4k_pair_dot_mr` (`omega/src/msl.rs:480`) -- the M=1 decode path's `q4k_pair_dot` (`omega/src/msl.rs:424`) generalized across a `cap = PACKED_ROW_ACTIVATION_GROUP` (8, `omega/omega-runtime.toml:158`) activation group. Each weight block's `word_low`/`word_high` words and `h0..h3` headers are read/derived ONCE per `(ib, q)` inside `q4k_pair_dot_mr`, then folded against all `cap` activation rows, instead of ROW 389's generic loop paying that decode once per token.
+
+**Two cuts, per-body private-state table.** The first cut of `q4k_pair_dot_mr` took pre-gathered `yl_group[cap][16]`/`yh_group[cap][16]` thread arrays; the landed (lean) cut stages one token's `yl[16]`/`yh[16]` at a time inside the `s` loop (`omega/src/msl.rs:493-517`), so live private state no longer scales with `cap`:
+
+| body | live private floats | note |
+| --- | --- | --- |
+| M=1 decode path (`q4k_pair_dot`) | ~36 | `yl[16]`+`yh[16]`+`result`+scratch, no group dimension |
+| generic multi-row (`operand_read` loop, ROW 389) | ~32 | one `scratch[]` per operand, reused serially across `s` |
+| fat M=8 cut (`yl_group[8][16]`/`yh_group[8][16]`) | ~296 | full `cap`-wide arrays live for the whole per-block iteration |
+| lean M=8 cut (landed) | ~80 | `yl[16]`+`yh[16]`+`result_s`+`result[cap]`, one token's floats live at a time |
+
+Arrays sized by `cap` force Metal to reserve that much thread/private storage for the whole per-block-iteration accumulate regardless of how many of the `cap` slots are actually live at once, collapsing occupancy (`omega/src/msl.rs:465-479`, the fat cut's own CORRECTION comment) -- the lean cut trades that for re-issuing `other_ptr`'s device loads once per output row (`rows_per_simdgroup`, 4 for Q4_K) instead of once shared across all four, each repeat hitting the SAME address (same lane, same token, same sub-block offset) as a cache hit, not additional HBM traffic.
+
+**Measurements, first six interleaved cells (fat cut vs base, before the lean rewrite).** base 22137 / 79497 / 24169 ms vs fat branch 11425 / 11131 / 7822 ms, load < 7.1 throughout, base CoV 57% -> ORDERING ONLY is admissible from this set, the magnitude is not (base's own 22-79s spread contradicts ROW 389's measured 10.9s baseline on the same harness, indicting the *base* arm's stability, not the branch).
+
+**Measurements, six lean cells (lean cut vs base, decision-grade).** base 10971.6 / 10978.4 / 10970.3 ms vs lean 4261.3 / 4261.1 / 4254.1 ms, stdev 3.9 ms on each arm, `pipeline_misses=16` on both arms (no new pipeline objects introduced), `pipeline_compile_ms=1363` on the first lean cell (one-time compile) then 8.6 on the remaining cells. Step 0: **10.97s -> 4.26s on this box.**
+
+**Bucket split on the lean arm.** `reduce-packed-row-blocked` 216 ops vs `reduce-cooperative` 74 ops (contrast ROW 389's 0 ops / 290 ops split) -- the fast path now catches the Q4_K weight matmuls; Q5_K/Q6_K multi-row bodies remain on the generic per-element loop (`push_packed_row_multi_row_body`'s `fast_q4k` gate is `Q4_K`-only), named as the next slice.
+
+**Fingerprint, this landing's own re-run** (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, release+`metal,instrument`, `PROXIMA_MAX_TOKENS=64`, real openchat checkpoint): step 0 `gpu_exec_ms=6991.230125` / `step_wall_ms=7299.278833`; median `gpu_exec_ms` of steps 3..7 = 20.153125 ms; `grep -h -o 'generated_text="[^"]*"' <log> | md5` = `84c7519e6bffea98476fefd9d545a0fc`, matching the known-good value, text `"Here is a simple Python function that returns the nth Fibonacci`... -- output text unchanged by this landing.
+
+**Residual, named not hidden.** (1) 4.26s is still ~two orders of magnitude above llama.cpp's prefill for 31 tokens (ROW 389's own framing of the gap; the tiled-GEMM path that would close it remains compiled out under `metal-tiled-gemm`, unmeasured here). (2) The base arm's 22-79s instability in the first (pre-lean) measurement regime is unexplained -- `XprotectService`/`syspolicyd` observed at 100-200% CPU for days on this box is a suspect, not proven; the decision-grade lean cells (stdev 3.9ms) did not reproduce that instability. (3) No Q5_K/Q6_K coverage: those codecs still pay the generic per-element decode at M>1, and the bucket split above quantifies exactly what remains on that slower path.
+
+**Axes (principle 8):** numeric -- `PACKED_ROW_ACTIVATION_GROUP` (8, `omega/omega-runtime.toml:158`) already tunable, unchanged by this row. structural -- none new; `fast_q4k` is a codec-keyed conditional inside the existing multi-row body, not a new feature flag. **Sans-IO opt-sweep (principle 11):** N/A -- GPU kernel body, not a sans-IO component.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | `perf(omega): prefill packed rows decode each weight block once per activation group` + `perf(omega): stage one token at a time in the multi-row q4k body` | step 0 10.97s -> 4.26s on this box (Q4_K weight matmuls only); fat pre-gather cut measured slower (11.1-11.4s) than the eventual lean cut before being replaced | 3 samples/arm, stdev 3.9ms both arms (lean cells); fat-cut cells CoV 57% on base, ordering-only | solo, load < 7.1 during fat-cut cells, quiet during lean cells |
+
