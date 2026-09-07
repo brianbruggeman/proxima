@@ -27065,3 +27065,52 @@ GGUF=/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/open
 | --- | --- | --- | --- | --- |
 | 2026-09-07 | docs-only: `docs(tensor): row 387 measured pieces after the 2026-09-06/07 landings` | Scoreboard of four already-instrumented cells (Q4-only-synthetic bare whole-token sequence 16.291ms/247.58GB/s; bare attention 30.101us/dispatch x32; in-program `gpu_exec`/`step_wall` at steps 3..7 and 32..63 excl.34; step-3 per-kind dispatch counts; llama-bench 57.31 t/s = 17.449ms/token) reported side by side with an explicit non-additivity/non-attribution statement; ratios ours/llama `gpu_exec` 1.168x, `step_wall` 1.209x (steady-state mean) | cell 1 CoV 1.09% (7 samples); cell 3, 4 one run each; llama-bench CoV 1.01% (5 repeats) | THREE-check gate PASSED at all 6 timed invocations; load-1 alone failed twice (10.24->7.46, 10.51->8.42), each cleared after one 30s retry, both self-inflicted by this brief's own builds |
 
+## ROW 388 -- the rows-per-simdgroup sizing question is already closed: Q4_K/Q6_K match llama's constants today, Q5_K's mismatch was already ported out in ROW 386, and ROW 275 already measured this exact occupancy lever end to end and found it moves nothing
+
+**Card:** none (measurement/verification-only, docs-only row; no source touched, no cells run). **Worktree/branch:** `proxima-wt-r388`, `perf/row-388-rows-per-simdgroup`, off `main` at `1ed8e5bf` (ROW 387's own commit; `origin/main` at the same sha before this row's push).
+
+**Question, as posed.** ROW 384 found the small per-layer shapes (attn_k/attn_q/ffn_gate) latency-bound at 60-88 GB/s versus llama's 187-320 GB/s. ROW 317 made `rows_per_simdgroup()` per-codec and set `Q6_K` to `1`; the brief's premise was that `Q4_K` "stayed at 4" against a lower llama value, and asked for a bare sweep (rows 4 vs rows 2) on arm E and the `attn_k` family cell to test whether shrinking it raises occupancy on the small shapes.
+
+**Llama's actual values (read first, per the brief's own gate step), `ggml-metal-impl.h:32-39`:**
+
+```
+#define N_R0_Q4_K 4
+#define N_SG_Q4_K 2
+#define N_R0_Q5_K 2
+#define N_SG_Q5_K 2
+#define N_R0_Q6_K 1
+#define N_SG_Q6_K 2
+```
+
+`N_R0_Q4_K` is **4**, not 2 -- the premise that llama uses a smaller `Q4_K` row count than this crate does not hold. Grid sizing (`ggml-metal.m:3217-3230,3612-3625`) sets `nr0`/`nsg` from these constants and computes threadgroup count as `ceil(rows / (nr0 * nsg))`.
+
+**Ours, `omega/src/msl.rs:1163-1168` (`rows_per_simdgroup`) and the default feature set (`omega/Cargo.toml:142-143`, `metal-packed-row-nsg2` + `metal-q4k-ggml-port` both default-on):**
+
+- `Q6_K` -> `1` (matches `N_R0_Q6_K=1`, landed ROW 317).
+- `Q4_K`/all else -> `PACKED_ROWS_PER_GROUP = 4` (`omega/src/msl.rs:1731`) -- matches `N_R0_Q4_K=4` exactly. `metal-packed-row-nsg2` widens the packed row-blocked threadgroup to 2 simdgroups by default (`packed_row_nsg_factor`, `omega/src/msl.rs:6694-6708`), matching `N_SG_Q4_K=2` exactly.
+- `Q5_K` -- `rows_per_simdgroup()` itself still returns `4` (the generic arm), which would mismatch `N_R0_Q5_K=2` **if the generic row-blocked path were what ran**. It is not: ROW 386 (landed this session, one row before this one) added `push_q5k_ggml_port_body`, a verbatim transcription of llama's `kernel_mul_mv_q5_K_f32_impl<nr0=2, nsg=2, nw=32>` (`ggml-metal.metal:5209-5324`), and extended `use_ggml_port`'s codec match from `Q4K | Q6K` to `Q4K | Q5K | Q6K` (`omega/src/msl.rs:5019-5027`). With `metal-q4k-ggml-port` default-on, `Q5_K` dispatches through this dedicated body, which hardcodes `nr0=2` in its own lane arithmetic exactly as `push_q4k_single_fetch_body`/`push_q4k_ggml_port_body` already hardcode `4` for `Q4_K` -- the doc comment on `rows_per_simdgroup()` itself names this ("NOT `push_q4k_single_fetch_body`/`push_q4k_ggml_port_body`, which ... keep 4 baked into their own lane arithmetic regardless of this value", `omega/src/msl.rs:1149-1152`). So the one codec whose generic-path constant does not match llama already bypasses that generic path in the default build. `rows_per_simdgroup()`'s `4` for `Q5_K` is dead in the default feature set, live only for `metal-q4k-ggml-port`-off builds (`q5k_pair_dot`, unchanged since before ROW 386).
+
+**Threadgroup-count table, `rows_per_threadgroup = nr0 * nsg`, real decode shapes (ROW 359's checkpoint), ours vs llama -- IDENTICAL on every shape because the constants are identical:**
+
+| shape | rows | codec | nr0 | nsg | rows/threadgroup | threadgroups (ours) | threadgroups (llama) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| attn_k | 1,024 | Q4_K/Q5_K mix | 4 (Q4_K arm) / 2 (Q5_K arm) | 2 | 8 / 4 | 128 (Q4_K rows) | 128 (Q4_K rows) |
+| attn_q | 4,096 | Q4_K | 4 | 2 | 8 | 512 | 512 |
+| ffn_gate | 14,336 | Q4_K | 4 | 2 | 8 | 1,792 | 1,792 |
+
+No shape has fewer threadgroups on our side than llama's. The occupancy-gap hypothesis this brief was built to test does not hold at the static-constant level.
+
+**It was also already tested empirically and found negative -- ROW 275** ("packed-row nsg2 geometry measured for the first time on this tree", `proxima-tensor/docs/discipline.md:20438`): widening the threadgroup from 1 to 2 simdgroups (exactly `N_SG_Q4_K`) "changes NOTHING outside single-run measurement noise (largest magnitude move is attn_k at -3.2%, on an op that takes 1.0ms out of a ~26ms total packed-matvec budget) -- this box's occupancy is not threadgroup-count-bound at the shapes this checkpoint's decode graph produces, so halving threadgroup count buys nothing to recover" (`discipline.md:20489`). That is the identical lever (threadgroup count via `nr0`/`nsg`) this brief asked to re-sweep, already measured end to end on this box, on these shapes, negative.
+
+**Decision: no sizing change lands, no timed cells run.** The brief's own sweep was conditioned on "if ours has fewer threadgroups on the small shapes than llama" -- the threadgroup-count table above shows that condition false on every named shape, so the conditional sweep does not trigger; running "rows 2" for `Q4_K` anyway would not be "following llama's `N_R0`" (llama's `N_R0_Q4_K` is 4) but an arbitrary deviation from it, and ROW 275 already shows the underlying occupancy lever moves nothing on this box at these shapes. Per guiding-principles §6 (never work from inference, read the code) and §18 (a quantitative claim needs a measurement in the same breath), the correct action on finding the premise false via source-plus-log is to report the finding, not to spend the timed-cell budget manufacturing a number for a hypothesis the repo has already falsified once (ROW 275) and already fixed once for the one codec that did mismatch (ROW 386, `Q5_K`).
+
+**Residual, named not hidden.** (1) ROW 384's small-shape gap (60-88 GB/s vs llama's 187-320 GB/s) remains unexplained by this row -- this row only closes the "is it rows-per-simdgroup/threadgroup-count sizing" branch of that question, not the whole gap; the per-family latency-bound framing ROW 384 used points elsewhere (dispatch/launch overhead, not occupancy), not investigated further here. (2) The `Q5_K` `rows_per_simdgroup()=4` dead value for the `metal-q4k-ggml-port`-off, port-disabled build was not corrected to `2` in this row (it is genuinely dead in the default build and correcting it would only matter for a build no default landing runs); if a future row disables `metal-q4k-ggml-port` and measures on that path, this dead-value note is the pointer. (3) `attn_k`'s real per-row codec split between `Q4_K` and `Q5_K` (`discipline.md:8125`, "Q4_K/Q5_K mix") was not re-derived exactly this row -- the threadgroup table above reports it as two parallel arms (Q4_K rows at nr0=4, Q5_K rows at nr0=2) rather than a single blended row count, since the two codecs never share one dispatch.
+
+**Gates.** Docs-only row; no functional source change (verification against already-landed code and an already-landed prior measurement row). No omega source touched, so the OMEGA GATE RULE does not trigger; no cells run, so no THERMAL/QUIET-GATE invocation was needed. `git status --porcelain` in this worktree, before this commit, shows only this file's edit.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | docs-only: `docs(tensor): row 388 rows-per-simdgroup sizing already at parity with llama` | Verified `Q4_K`/`Q6_K` `rows_per_simdgroup()`+nsg already equal llama's `N_R0`/`N_SG` (`ggml-metal-impl.h:32-39`); found `Q5_K`'s generic-path mismatch already bypassed by ROW 386's `push_q5k_ggml_port_body` in the default build; threadgroup-count table shows zero occupancy gap on attn_k/attn_q/ffn_gate; ROW 275 already measured this exact lever end to end, negative -- decision: no sizing change, zero timed cells run | none (analysis only) | not applicable (no timed cells; no cargo invocation beyond reading source) |
+
