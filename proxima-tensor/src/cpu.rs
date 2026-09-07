@@ -848,7 +848,7 @@ pub fn build_static_arena_with_constants(
             node: computed.node,
             reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
         })?;
-        run_node_into(computed, &buffers, None, None, &mut output)?;
+        run_node_into(computed, &buffers, None, None, false, &mut output)?;
         buffers[node_index] = Some(output);
     }
 
@@ -1063,7 +1063,7 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
             // `packed_width_panels` is always empty there.
             match arena.packed_width_panels.get(&node) {
                 Some(packed) => run_reduce(computed, &arena.buffers, &mut output, Some(packed))?,
-                None => run_node_into(computed, &arena.buffers, None, None, &mut output)?,
+                None => run_node_into(computed, &arena.buffers, None, None, false, &mut output)?,
             }
             #[cfg(feature = "epilogue-profile-probe")]
             epilogue_profile_record(
@@ -3072,7 +3072,7 @@ pub fn evaluate_named_with_arena_masked(
             node: computed.node,
             reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
         })?;
-        run_node_into(computed, &arena.buffers, None, None, &mut output)?;
+        run_node_into(computed, &arena.buffers, None, None, false, &mut output)?;
         arena.buffers[node_index] = Some(output);
     }
 
@@ -3416,6 +3416,32 @@ pub fn evaluate_quantized(
     )
 }
 
+/// [`evaluate_quantized`] with the CPU's `Q4_K`/`Q5_K`/`Q6_K` dots run
+/// through their exact dequantize-then-fold kernels
+/// ([`matmul_q4k_f32`]/`matmul_q5k_f32`/`matmul_q6k_f32`) rather than the
+/// `q{4,5,6}k-int8-dot` activation-quantized fast path those features
+/// default on. Exists so a cross-backend parity harness (Metal's kernels
+/// are exact against an f64 dequant reference) can compare against a CPU
+/// reference that is ALSO exact, instead of misattributing the int8 path's
+/// own ~1e-3 relative error to the other backend.
+pub fn evaluate_quantized_exact(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock],
+    outputs: &[NodeId],
+) -> Result<Evaluated, TensorError> {
+    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+    let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
+    evaluate_quantized_exact_with_scratch(
+        program,
+        symbols,
+        blocks,
+        outputs,
+        &mut free_buffers,
+        &mut validated_weight_nodes,
+    )
+}
+
 /// Same contract as [`evaluate_quantized`], plus two capabilities a caller
 /// cannot get from that function, both aimed at the same shape of caller: a
 /// decode loop that evaluates the *same* `program` once per generated
@@ -3459,6 +3485,47 @@ pub fn evaluate_quantized_with_scratch(
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
+) -> Result<Evaluated, TensorError> {
+    evaluate_quantized_with_scratch_impl(
+        program,
+        symbols,
+        blocks,
+        outputs,
+        free_buffers,
+        validated_weight_nodes,
+        false,
+    )
+}
+
+/// [`evaluate_quantized_with_scratch`]'s exact-activation counterpart --
+/// see [`evaluate_quantized_exact`] for why this path exists.
+pub fn evaluate_quantized_exact_with_scratch(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+    validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
+) -> Result<Evaluated, TensorError> {
+    evaluate_quantized_with_scratch_impl(
+        program,
+        symbols,
+        blocks,
+        outputs,
+        free_buffers,
+        validated_weight_nodes,
+        true,
+    )
+}
+
+fn evaluate_quantized_with_scratch_impl(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+    validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
+    exact_activations: bool,
 ) -> Result<Evaluated, TensorError> {
     // brackets the portion of evaluate_quantized that is neither the
     // per-node loop below nor run_node_into itself -- shape::infer,
@@ -3693,7 +3760,9 @@ pub fn evaluate_quantized_with_scratch(
     let mut position = 0usize;
     while position < resolved.len() {
         #[cfg(feature = "cohort-staged-graph")]
-        if let Some(session_ref) = session.as_ref() {
+        if !exact_activations
+            && let Some(session_ref) = session.as_ref()
+        {
             let run_end = staged_batch_run_end(&resolved, position, &quantized_weights);
             if run_end - position >= STAGED_BATCH_MIN_LEN {
                 #[cfg(feature = "instrument")]
@@ -3743,6 +3812,7 @@ pub fn evaluate_quantized_with_scratch(
                 &buffers,
                 Some(&quantized_weights),
                 session.as_ref(),
+                exact_activations,
                 &mut output,
             )?;
             #[cfg(feature = "epilogue-profile-probe")]
@@ -4014,6 +4084,31 @@ pub fn evaluate_quantized_named_with_scratch<'block>(
     )
 }
 
+/// [`evaluate_quantized_named_with_scratch`]'s exact-activation counterpart
+/// -- see [`evaluate_quantized_exact`] for why this path exists. The
+/// caller-facing seam a serving-config-level `exact_activations` toggle
+/// (`proxima-model-interop`'s cross-backend quality harness) reaches
+/// through, since a real forward step binds its weights by name, never by
+/// position.
+pub fn evaluate_quantized_named_exact_with_scratch<'block>(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'block>)],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+    validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
+) -> Result<Evaluated, TensorError> {
+    let blocks = resolve_named_blocks(program, named)?;
+    evaluate_quantized_exact_with_scratch(
+        program,
+        symbols,
+        &blocks,
+        outputs,
+        free_buffers,
+        validated_weight_nodes,
+    )
+}
+
 /// Shared body for [`evaluate`] and [`evaluate_with_scratch`] — the only
 /// difference between the two public entry points is whether `free_buffers`
 /// arrives pre-seeded and is read back by the caller afterward, so that
@@ -4065,7 +4160,7 @@ fn evaluate_pooled(
         let mut output = take_or_allocate(free_buffers, node_output_len(computed));
         #[cfg(feature = "instrument")]
         drop(alloc_site_guard);
-        run_node_into(computed, &buffers, None, None, &mut output)?;
+        run_node_into(computed, &buffers, None, None, false, &mut output)?;
         #[cfg(feature = "instrument")]
         record_bound_op_operand_access(computed, &buffers);
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
@@ -4381,7 +4476,7 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
             }
             #[cfg(feature = "instrument")]
             let sequential_start = instrument::read_ticks();
-            run_node_into(resolved, buffers, None, None, &mut output)?;
+            run_node_into(resolved, buffers, None, None, false, &mut output)?;
             #[cfg(feature = "instrument")]
             counter!(
                 instrument::SERIAL_SEQUENTIAL_COMPUTE_TICKS,
@@ -4464,7 +4559,7 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
 
     if chunks.len() < 2 {
         return match (chunks.first(), slices.into_iter().next()) {
-            (Some(chunk), Some(slice)) => run_node_into(chunk, buffers, None, None, slice),
+            (Some(chunk), Some(slice)) => run_node_into(chunk, buffers, None, None, false, slice),
             _ => Ok(()),
         };
     }
@@ -4646,7 +4741,7 @@ fn claim_and_run<B: Deref<Target = [f32]> + Sync>(
         let chunk_start = instrument::read_ticks();
         #[cfg(feature = "instrument")]
         let cpu_start = instrument::thread_cpu_nanos();
-        let outcome = run_node_into(chunk, chunk_buffers, None, None, chunk_output);
+        let outcome = run_node_into(chunk, chunk_buffers, None, None, false, chunk_output);
         #[cfg(feature = "instrument")]
         {
             let chunk_ticks = instrument::elapsed_ticks(chunk_start);
@@ -4985,7 +5080,7 @@ fn initial_value(init: ReduceInit) -> Option<f32> {
 #[cfg(test)]
 fn run_node(resolved: &BoundOp, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, TensorError> {
     let mut output = vec![0.0f32; node_output_len(resolved)];
-    run_node_into(resolved, buffers, None, None, &mut output)?;
+    run_node_into(resolved, buffers, None, None, false, &mut output)?;
     Ok(output)
 }
 
@@ -4999,6 +5094,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     buffers: &[Option<B>],
     quantized_weights: Option<&BTreeMap<NodeId, QuantizedBlock>>,
     session: Option<&MatmulSession<'_>>,
+    exact_activations: bool,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     let result = match &resolved.kind {
@@ -5045,6 +5141,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
                     buffers,
                     quantized_weights,
                     session,
+                    exact_activations,
                     output,
                 ),
                 None => run_reduce(resolved, buffers, output, None),
@@ -5519,7 +5616,7 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
             let mut output = vec![0.0f32; node_output_len(resolved)];
             {
                 let buffers = self.buffers.borrow();
-                run_node_into(resolved, *buffers, None, None, &mut output)?;
+                run_node_into(resolved, *buffers, None, None, false, &mut output)?;
                 #[cfg(feature = "instrument")]
                 record_bound_op_operand_access(resolved, *buffers);
             }
@@ -7368,7 +7465,10 @@ fn run_staged_batch(
                     // is `None`, so this stage is exactly one chunk).
                     let output =
                         unsafe { core::slice::from_raw_parts_mut(address as *mut f32, length) };
-                    run_node_into(computed, buffers_ref, Some(quantized_weights), None, output)
+                    // `run_staged_batch` is only ever entered from the
+                    // `!exact_activations` staged-batch arm above, so this
+                    // sub-call always wants the int8 path.
+                    run_node_into(computed, buffers_ref, Some(quantized_weights), None, false, output)
                 }
             }
         },
@@ -7553,6 +7653,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     weight_block: QuantizedBlock,
     weight_node: NodeId,
     session: Option<&MatmulSession<'_>>,
+    exact_activations: bool,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     // proxima-debugger diagnostic: whole-function timer, once per matmul
@@ -7762,7 +7863,8 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // slab swap) routes a gathered node into the per-position loop below,
     // which resolves the gather itself.
     #[cfg(feature = "q4k-int8-dot")]
-    if weight_gather.is_none()
+    if !exact_activations
+        && weight_gather.is_none()
         && let QuantizedBlock::Q4K(_) = weight_block
     {
         #[cfg(feature = "instrument")]
@@ -7811,7 +7913,8 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // codec-specific. Gated the same way the `Q4_K` arm above is -- a
     // gathered weight cannot use this single-flat-matrix wide fold.
     #[cfg(feature = "q5k-int8-dot")]
-    if weight_gather.is_none()
+    if !exact_activations
+        && weight_gather.is_none()
         && let QuantizedBlock::Q5K(_) = weight_block
     {
         #[cfg(feature = "instrument")]
@@ -7837,7 +7940,8 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // `matmul_q6k_q8k_f32_impl` in place of `matmul_q4k_q8k_f32_impl`. Gated
     // the same way the `Q4_K` arm above is.
     #[cfg(feature = "q6k-int8-dot")]
-    if weight_gather.is_none()
+    if !exact_activations
+        && weight_gather.is_none()
         && let QuantizedBlock::Q6K(_) = weight_block
     {
         #[cfg(feature = "instrument")]
@@ -7921,13 +8025,18 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         let result = match weight_block {
             QuantizedBlock::Float32(_) => return Err(shape_error()),
             QuantizedBlock::Q4K(_) => {
-                // unreachable when `q4k-int8-dot` is on: the wide fold above
-                // already handled and returned for every `Q4K` weight.
-                // Kept compiling (not `unreachable!()`) only because this
-                // match still names all three `QuantizedBlock` variants.
+                // reachable when `exact_activations` is set (the wide fold
+                // above declines whenever it is) or a gathered/MoE weight
+                // routes here directly; otherwise unreachable when
+                // `q4k-int8-dot` is on, since the wide fold above already
+                // handled and returned for every non-gathered `Q4K` weight.
                 #[cfg(feature = "q4k-int8-dot")]
                 {
-                    matmul_q4k_q8k_f32_impl(weights, rows, activation_row, 1, session)?
+                    if exact_activations {
+                        matmul_q4k_f32(weights, rows, activation_row)?
+                    } else {
+                        matmul_q4k_q8k_f32_impl(weights, rows, activation_row, 1, session)?
+                    }
                 }
                 #[cfg(not(feature = "q4k-int8-dot"))]
                 {
@@ -7935,13 +8044,14 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 }
             }
             QuantizedBlock::Q5K(_) => {
-                // unreachable when `q5k-int8-dot` is on: the wide fold above
-                // already handled and returned for every `Q5K` weight. Kept
-                // compiling (not `unreachable!()`) only because this match
-                // still names all three `QuantizedBlock` variants.
+                // same shape as the `Q4K` arm above.
                 #[cfg(feature = "q5k-int8-dot")]
                 {
-                    matmul_q5k_q8k_f32_impl(weights, rows, activation_row, 1, session)?
+                    if exact_activations {
+                        matmul_q5k_f32(weights, rows, activation_row)?
+                    } else {
+                        matmul_q5k_q8k_f32_impl(weights, rows, activation_row, 1, session)?
+                    }
                 }
                 #[cfg(not(feature = "q5k-int8-dot"))]
                 {
@@ -7949,13 +8059,14 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 }
             }
             QuantizedBlock::Q6K(_) => {
-                // unreachable when `q6k-int8-dot` is on: the wide fold above
-                // already handled and returned for every `Q6K` weight. Kept
-                // compiling (not `unreachable!()`) only because this match
-                // still names all three `QuantizedBlock` variants.
+                // same shape as the `Q4K` arm above.
                 #[cfg(feature = "q6k-int8-dot")]
                 {
-                    matmul_q6k_q8k_f32_impl(weights, rows, activation_row, 1, session)?
+                    if exact_activations {
+                        matmul_q6k_f32(weights, rows, activation_row)?
+                    } else {
+                        matmul_q6k_q8k_f32_impl(weights, rows, activation_row, 1, session)?
+                    }
                 }
                 #[cfg(not(feature = "q6k-int8-dot"))]
                 {
@@ -8031,6 +8142,7 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
     buffers: &[Option<B>],
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
     session: Option<&MatmulSession<'_>>,
+    exact_activations: bool,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     if let Some(weight_node) = quantized_operand(resolved, quantized_weights) {
@@ -8048,6 +8160,7 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
             weight_block,
             weight_node,
             session,
+            exact_activations,
             output,
         );
     }
@@ -20198,7 +20311,7 @@ mod tests {
             },
         };
         let mut output = vec![0.0; 2];
-        run_node_into(&resolved, &buffers, None, None, &mut output)
+        run_node_into(&resolved, &buffers, None, None, false, &mut output)
             .expect("cached attention bound step runs");
         let cached_weight = 1.0f32.exp() / (1.0f32.exp() + 1.0);
         assert!((output[0] - (2.0 * cached_weight + 4.0 * (1.0 - cached_weight))).abs() < 1e-6);
@@ -24109,7 +24222,7 @@ mod tests {
         let mut remaining = split_output.as_mut_slice();
         for chunk in &chunks {
             let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-            run_node_into(chunk, &buffers, None, None, this_chunk).expect("chunk runs");
+            run_node_into(chunk, &buffers, None, None, false, this_chunk).expect("chunk runs");
             remaining = rest;
         }
 
@@ -24139,7 +24252,7 @@ mod tests {
         let mut remaining = split_output.as_mut_slice();
         for chunk in &chunks {
             let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-            run_node_into(chunk, &buffers, None, None, this_chunk).expect("chunk runs");
+            run_node_into(chunk, &buffers, None, None, false, this_chunk).expect("chunk runs");
             remaining = rest;
         }
 
@@ -26364,6 +26477,81 @@ mod tests {
         );
     }
 
+    /// Three-way parity check on a real `Q4_K` row (openchat-3.5-1210,
+    /// `blk.0.ffn_gate.weight`): an f64 dequant-then-fold reference against
+    /// (1) [`matmul_q4k_f32`] -- the exact dequantize-then-fold kernel
+    /// `exact_activations` routes to -- and (2) [`matmul_q4k_q8k_f32`], the
+    /// Q8_K activation-quantized fast path `q4k-int8-dot` defaults on. This
+    /// is the CPU-side half of the finding behind `exact_activations`
+    /// (`evaluate_quantized_exact`): (1) matches the f64 reference to fp32
+    /// rounding, while (2) carries Q8_K's own real quantization error on
+    /// top -- the error every pre-existing cross-backend harness was
+    /// attributing to Metal instead.
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn matmul_q4k_f32_matches_an_f64_dequant_reference_tighter_than_the_int8_path_on_a_real_row() {
+        let path = std::path::Path::new(REAL_OPENCHAT_GGUF_PATH);
+        let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
+            eprintln!("real gguf file not found at {REAL_OPENCHAT_GGUF_PATH}; test skipped");
+            return;
+        };
+        let Some((weight_bytes, in_dim, out_dim)) = real_tensor_bytes(
+            &mut file,
+            &parsed,
+            file_len,
+            "blk.0.ffn_gate.weight",
+            proxima_gguf::types::GgmlType::Q4_K,
+        ) else {
+            eprintln!("blk.0.ffn_gate.weight is not Q4_K in this file; test skipped, not faked");
+            return;
+        };
+        let row_bytes = weight_bytes.len() / out_dim;
+        let first_row = &weight_bytes[..row_bytes];
+
+        let activation: Vec<f32> = random_vec(701, in_dim)
+            .into_iter()
+            .map(|value| value * 6.0 - 3.0)
+            .collect();
+
+        let mut scratch = [0.0f32; Q4K_BLOCK_ELEMENTS];
+        let mut f64_reference = 0.0f64;
+        for (block, activation_chunk) in first_row
+            .as_chunks::<Q4K_BLOCK_BYTES>()
+            .0
+            .iter()
+            .zip(activation.as_chunks::<Q4K_BLOCK_ELEMENTS>().0)
+        {
+            proxima_gguf::quant::q4_k::dequantize_block(block, &mut scratch);
+            for (&weight, &input) in scratch.iter().zip(activation_chunk) {
+                f64_reference += f64::from(weight) * f64::from(input);
+            }
+        }
+
+        let exact = dot_q4k_f32(first_row, &activation).expect("well-formed exact q4_k dot");
+        let int8 = matmul_q4k_q8k_f32(first_row, 1, &activation)
+            .expect("well-formed packed int8 matmul")[0];
+
+        let magnitude = f64_reference.abs().max(1.0);
+        let exact_relative_error = ((f64::from(exact) - f64_reference) / magnitude).abs();
+        let int8_relative_error = ((f64::from(int8) - f64_reference) / magnitude).abs();
+        eprintln!(
+            "ffn_gate row0 (real Q4_K bytes) vs f64 dequant reference: f64_reference={f64_reference} \
+             exact={exact} exact_relative_error={exact_relative_error} \
+             int8={int8} int8_relative_error={int8_relative_error}"
+        );
+        assert!(
+            exact_relative_error < 1e-5,
+            "exact q4_k dot diverged from its own f64 dequant reference beyond fp32 rounding: \
+             exact={exact} f64_reference={f64_reference} relative_error={exact_relative_error}"
+        );
+        assert!(
+            exact_relative_error < int8_relative_error,
+            "exact_activations must not carry MORE error against the f64 reference than the \
+             int8 path it replaces: exact_relative_error={exact_relative_error} \
+             int8_relative_error={int8_relative_error}"
+        );
+    }
+
     /// Shape-coverage regression: the test above only ever exercised `rows =
     /// 5`, so nothing in this crate's test suite verified
     /// [`dot_q4k_q8k`]/[`matmul_q4k_q8k_f32`] at the `out_dim` (row count)
@@ -27185,6 +27373,91 @@ mod tests {
             relative_max_diff < 0.01,
             "relative_max_diff={relative_max_diff} (max_diff={max_diff} over magnitude {max_magnitude}) \
              exceeds loose sanity bound"
+        );
+    }
+
+    /// [`evaluate_quantized_exact`] run end to end on the same program as
+    /// [`evaluate_quantized_matmul_matches_dequantize_then_f32_evaluate`]
+    /// above, held to a tighter absolute float-noise-floor bound instead of
+    /// that test's relative-error sanity bound -- `exact_activations` skips
+    /// the wide-fold `matmul_q4k_q8k_f32_impl` arm entirely (`cfg(feature =
+    /// "q4k-int8-dot")`'s wide-fold gate in `run_reduce_quantized` now reads
+    /// `!exact_activations && ...`) and always dots through `matmul_q4k_f32`,
+    /// so this run shares the SAME dequantized bytes and the SAME `f32`
+    /// accumulation order as the dequantize-then-evaluate reference, exactly
+    /// the shape `matmul_q4k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance`
+    /// already holds to a near-zero absolute bound.
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn evaluate_quantized_exact_matches_dequantize_then_f32_evaluate_near_exactly() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+        let rows: u32 = 5;
+        let blocks_per_row = 3;
+        let k = QK_K as u32 * blocks_per_row as u32;
+
+        let activation: Vec<f32> = random_vec(19, k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let weight_f32: Vec<f32> = random_vec(23, rows as usize * k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+
+        let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+        for (row_f32, row_blocks) in weight_f32
+            .chunks_exact(k as usize)
+            .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        {
+            quantize(row_f32, row_blocks)
+                .expect("row length is a whole multiple of QK_K by construction");
+        }
+
+        let (quantized_program, quantized_sum) = quantized_matmul_program(rows, k);
+        let quantized_blocks = [
+            QuantizedBlock::Q4K(&weight_blocks),
+            QuantizedBlock::Float32(&activation),
+        ];
+        let exact_result =
+            evaluate_quantized_exact(&quantized_program, &[], &quantized_blocks, &[quantized_sum])
+                .expect("exact-activation quantized matmul evaluates end to end");
+
+        let mut dequantized_weight = vec![0.0f32; rows as usize * k as usize];
+        for (row_blocks, row_f32) in weight_blocks
+            .chunks_exact(blocks_per_row * BLOCK_BYTES)
+            .zip(dequantized_weight.chunks_exact_mut(k as usize))
+        {
+            dequantize(row_blocks, row_f32)
+                .expect("row_blocks is a whole number of q4_k super-blocks");
+        }
+
+        let (f32_program, f32_sum) = matmul_program(rows, k, 1, false);
+        let f32_blocks: [&[f32]; 2] = [&dequantized_weight, &activation];
+        let f32_result = evaluate(&f32_program, &[], &f32_blocks, &[f32_sum])
+            .expect("dequantized f32 matmul evaluates");
+
+        let actual = exact_result.root();
+        let expected = f32_result.root();
+        assert_eq!(actual.len(), rows as usize);
+        assert_eq!(actual.len(), expected.len());
+
+        let max_diff = actual
+            .iter()
+            .zip(expected.iter())
+            .map(|(&got, &want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("evaluate_quantized_exact vs dequantize-then-evaluate: max_diff={max_diff}");
+        // Same loose sanity bound (accumulation-order float noise floor, not
+        // tuned to the measured number) as
+        // `matmul_q4k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance`'s
+        // own `max_error < 0.05` -- this test runs the identical kernel
+        // through the full `evaluate_quantized_exact` program dispatch
+        // instead of calling it directly.
+        assert!(
+            max_diff < 0.05,
+            "evaluate_quantized_exact diverged from the dequantize-then-evaluate reference \
+             beyond float noise: max_diff={max_diff}"
         );
     }
 
