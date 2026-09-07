@@ -4334,17 +4334,28 @@ fn pack_cached_attention_uniforms(
         });
     };
     let dynamic_cached_len = bound.operands().len() == 9;
-    let chunks =
-        crate::msl::context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy) as i64;
+    let context_length = *cached_key_rows + *new_key_rows;
+    let chunks = crate::msl::context_chunks_for(context_length, numeric_policy) as i64;
+    let splits = crate::msl::splits_for(context_length, numeric_policy) as i64;
     // Redesign §5 option 2: the single-range fused path always dispatches
     // the compiled MAXIMUM chunk count (`cap`) -- `grid_threads`'s own
     // `CachedAttention` arm (`omega/src/msl.rs`) -- so `total_elements` here
     // must agree with that grid width, never the live `chunks` value, which
-    // travels separately as its own `Uniforms` field below.
+    // travels separately as its own `Uniforms` field below. Redesign §4c:
+    // the dispatch is ALSO widened by the compiled `ATTENTION_SPLIT_MAX`,
+    // but only when `cached_attention_merge_needed` holds for this op's own
+    // context length -- `grid_threads`'s own doc explains why a split, unlike
+    // a chunk, cannot be widened unconditionally without racing the real
+    // dispatch's output write; this must stay in lock-step with that gate.
     let dispatch_chunks = if dynamic_cached_len {
         i64::try_from(crate::sized::ATTENTION_CONTEXT_CHUNK_CAP).unwrap_or(chunks)
     } else {
         chunks
+    };
+    let dispatch_splits = if dynamic_cached_len && crate::msl::cached_attention_merge_needed(context_length, numeric_policy) {
+        i64::try_from(crate::sized::ATTENTION_SPLIT_MAX).unwrap_or(splits)
+    } else {
+        1
     };
     let total: i64 = bound
         .extents
@@ -4352,7 +4363,8 @@ fn pack_cached_attention_uniforms(
         .map(|extent| *extent as i64)
         .product::<i64>()
         / *head_dim as i64
-        * dispatch_chunks;
+        * dispatch_chunks
+        * dispatch_splits;
     push_i64(bytes, total);
     // Mirrors `render_cached_attention`'s `struct Uniforms` (`omega/src/msl.rs`):
     // the single-range fused form (nine operands) declares three extra
@@ -4367,31 +4379,40 @@ fn pack_cached_attention_uniforms(
         push_i64(bytes, *cached_key_rows as i64);
         push_i64(bytes, *new_key_rows as i64);
         push_i64(bytes, chunks);
-        // Redesign §4c: the cross-THREADGROUP sibling of `chunks` above,
-        // one hardware level up -- see `crate::msl::splits_for`'s own doc.
-        // Packed from the SAME compiled-capacity input `chunks` already
-        // used, so it rides the same "one compiled kernel serves every
-        // `kv-capacity-bucket`" property. Not yet read by
-        // `render_cached_attention`'s kernel body -- see that struct
-        // field's own doc for what still needs to consume it.
-        let splits =
-            crate::msl::splits_for(*cached_key_rows + *new_key_rows, numeric_policy) as i64;
+        // Redesign §4c: the cross-THREADGROUP sibling of `chunks` above, one
+        // hardware level up -- see `crate::msl::splits_for`'s own doc. The
+        // LIVE value (never the compiled maximum `dispatch_splits` widens
+        // the grid by above), since this is what the kernel body's own
+        // `slice_len`/`lo`/`hi` computation and split extraction read.
         push_i64(bytes, splits);
     }
     Ok(())
 }
 
 /// Mirrors `crate::msl::render_cached_attention_merge`'s own `Uniforms`
-/// struct: just `total_elements`, the SAME `query_rows * heads` count
+/// struct: `total_elements` (the SAME `query_rows * heads` count
 /// [`pack_cached_attention_uniforms`]'s own `total` computes before its
 /// `dispatch_chunks` multiply -- the merge kernel dispatches one simdgroup
-/// per output row, not per `(row, chunk)` pair. Uploaded fresh every call
-/// (`upload_uniforms`, not a `Plan`-owned buffer like the split kernel's
-/// own `plan_uniform`) -- this slice's own scope boundary, named in
-/// `encode_op`'s call site; folding it into `PlanUniforms` is follow-up
-/// work, not a correctness gap.
-fn pack_cached_attention_merge_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
-    let BoundOpKind::CachedAttention { head_dim, .. } = &bound.kind else {
+/// per output row, not per `(row, chunk)` pair) plus `splits`, the live
+/// count the merge's own online-softmax combine reduces over -- the SAME
+/// `crate::msl::splits_for` call [`pack_cached_attention_uniforms`] already
+/// makes for the split kernel's own `Uniforms.splits`, so the two dispatches
+/// can never disagree on how many partials the split kernel wrote and the
+/// merge kernel reads back. Uploaded fresh every call (`upload_uniforms`,
+/// not a `Plan`-owned buffer like the split kernel's own `plan_uniform`) --
+/// this slice's own scope boundary, named in `encode_op`'s call site;
+/// folding it into `PlanUniforms` is follow-up work, not a correctness gap.
+fn pack_cached_attention_merge_uniforms(
+    bound: &BoundOp,
+    numeric_policy: NumericPolicy,
+) -> Result<Vec<u8>, EmitError> {
+    let BoundOpKind::CachedAttention {
+        head_dim,
+        cached_key_rows,
+        new_key_rows,
+        ..
+    } = &bound.kind
+    else {
         return Err(EmitError::RenderKindMismatch {
             node: bound.node,
             expected: "cached_attention_merge",
@@ -4404,8 +4425,10 @@ fn pack_cached_attention_merge_uniforms(bound: &BoundOp) -> Result<Vec<u8>, Emit
         .map(|extent| *extent as i64)
         .product::<i64>()
         / *head_dim as i64;
-    let mut bytes = Vec::with_capacity(8);
+    let splits = crate::msl::splits_for(*cached_key_rows + *new_key_rows, numeric_policy) as i64;
+    let mut bytes = Vec::with_capacity(16);
     push_i64(&mut bytes, total);
+    push_i64(&mut bytes, splits);
     Ok(bytes)
 }
 
@@ -7218,7 +7241,8 @@ fn encode_op(
                 tracker.record(&[], Some(output_pointer));
             }
         }
-        let merge_uniforms = upload_uniforms(device, &pack_cached_attention_merge_uniforms(bound)?)?;
+        let merge_uniforms =
+            upload_uniforms(device, &pack_cached_attention_merge_uniforms(bound, numeric_policy)?)?;
         encoder.setComputePipelineState(&merge.pipeline);
         bind_buffers(
             encoder,

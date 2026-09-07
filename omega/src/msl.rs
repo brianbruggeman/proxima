@@ -1207,8 +1207,8 @@ pub fn emit(
     // caller that lacks the merge dispatch this binding shape requires --
     // `crate::metal::encode_op`'s own doc names that gap and the guard it
     // takes on its `resolved: None` (no plan-resolved merge sibling) path.
-    let is_split_cached_attention = matches!(resolved.kind, BoundOpKind::CachedAttention { .. })
-        && cached_attention_merge_needed(numeric_policy);
+    let is_split_cached_attention = cached_attention_context_length(&resolved.kind)
+        .is_some_and(|context_length| cached_attention_merge_needed(context_length, numeric_policy));
     Ok(Kernel {
         source,
         entry,
@@ -1401,8 +1401,8 @@ pub(crate) fn kernel_dispatch_shape(
 ) -> Result<(Vec<Binding>, GridSpec), EmitError> {
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
-    let is_split_cached_attention = matches!(resolved.kind, BoundOpKind::CachedAttention { .. })
-        && cached_attention_merge_needed(numeric_policy);
+    let is_split_cached_attention = cached_attention_context_length(&resolved.kind)
+        .is_some_and(|context_length| cached_attention_merge_needed(context_length, numeric_policy));
     Ok((
         if is_split_cached_attention {
             split_bindings_with_scratch(resolved)
@@ -2387,11 +2387,32 @@ fn grid_threads(
             // 2, `render_cached_attention`'s own doc -- so idle simdgroups
             // above the live `context_chunks_for(...)` result are always
             // present in the grid and contribute the merge's identity
-            // partial rather than being sized out of the dispatch.
-            let chunks = if resolved.operands().len() == 9 {
-                crate::sized::ATTENTION_CONTEXT_CHUNK_CAP
+            // partial rather than being sized out of the dispatch. Redesign
+            // §4c: `splits` multiplies the THREADGROUP count (this product
+            // divided by `threadgroup_width`, `tiled_gemm_threadgroup_
+            // width`'s own `CachedAttention` arm) by the compiled maximum
+            // `ATTENTION_SPLIT_MAX` ONLY when [`cached_attention_merge_needed`]
+            // holds for THIS op's own context length -- unlike `chunks`
+            // (whose idle simdgroups stay inside one threadgroup and merge
+            // there, so widening them costs nothing under `bit_exact`), an
+            // idle SPLIT is a whole extra threadgroup that would otherwise
+            // race the real one to write `out` directly (the single-dispatch
+            // `final_store` branch has no scratch hop to arbitrate that
+            // race). Gating this exactly like `render_cached_attention`'s own
+            // `final_store` branch keeps grid width and kernel body in
+            // lock-step: both flip together, at the same context length.
+            let context_length = *cached_key_rows + *new_key_rows;
+            let (chunks, splits) = if resolved.operands().len() == 9 {
+                (
+                    crate::sized::ATTENTION_CONTEXT_CHUNK_CAP,
+                    if cached_attention_merge_needed(context_length, numeric_policy) {
+                        crate::sized::ATTENTION_SPLIT_MAX
+                    } else {
+                        1
+                    },
+                )
             } else {
-                context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy)
+                (context_chunks_for(context_length, numeric_policy), 1)
             };
             resolved
                 .extents
@@ -2400,6 +2421,7 @@ fn grid_threads(
                 .checked_div(*head_dim)
                 .unwrap_or(0)
                 * chunks
+                * splits
                 * SIMD_WIDTH
         }
         BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
@@ -3143,18 +3165,35 @@ pub(crate) fn splits_for(context_length: u64, policy: NumericPolicy) -> u64 {
 
 /// Whether `render_cached_attention`'s single-range dynamic path renders as
 /// TWO Metal dispatches (this function's `true`) or the single, unchanged
-/// dispatch (`false`) -- the SAME `admit` predicate [`splits_for`] itself
-/// gates on, factored out so [`render_cached_attention`]'s own final-store
-/// branch, [`split_bindings_with_scratch`]'s caller, and
+/// dispatch (`false`) -- delegates to [`splits_for`]'s own `context_length`
+/// AND policy gate, factored out so [`render_cached_attention`]'s own
+/// final-store branch, [`split_bindings_with_scratch`]'s caller, and
 /// [`emit_cached_attention_merge`] all key off one boolean rather than three
-/// independent `admit` calls that could drift. This slice forces the live
-/// split count the KERNEL BODY walks to `1` regardless of what
-/// [`splits_for`] would return under the SAME policy (see
-/// `render_cached_attention`'s final-store doc) -- only the STRUCTURE (two
-/// dispatches, a scratch hop) is proved here; growing the live count past 1
-/// is the follow-up slice.
-pub(crate) fn cached_attention_merge_needed(policy: NumericPolicy) -> bool {
-    admit(policy, NumericRewrite::ContextSplitMerge).is_ok()
+/// independent `splits_for` calls that could drift. Taking `context_length`
+/// (not policy alone) matters: a policy that admits `ContextSplitMerge` but
+/// whose live capacity clamps `splits_for` to `1` (ROW 376's own 40-key
+/// scoreboard window, well under `omega-runtime.toml`'s `keys_per_split`)
+/// must still render the byte-identical single dispatch -- admitting the
+/// rewrite is necessary but not sufficient for a SECOND dispatch to be
+/// worth its own fixed overhead (design risk 2).
+pub(crate) fn cached_attention_merge_needed(context_length: u64, policy: NumericPolicy) -> bool {
+    splits_for(context_length, policy) > 1
+}
+
+/// `cached_key_rows + new_key_rows` for a `CachedAttention` kind, `None` for
+/// every other kind -- the single compiled-capacity input [`splits_for`]
+/// (via [`cached_attention_merge_needed`]) needs, extracted once so `emit`,
+/// `kernel_dispatch_shape`, and `emit_cached_attention_merge` derive it from
+/// the SAME match rather than three copies that could drift.
+fn cached_attention_context_length(kind: &BoundOpKind) -> Option<u64> {
+    match kind {
+        BoundOpKind::CachedAttention {
+            cached_key_rows,
+            new_key_rows,
+            ..
+        } => Some(cached_key_rows + new_key_rows),
+        _ => None,
+    }
 }
 
 /// `BoundOpKind::CachedAttention`'s Metal kernel: online (running max/sum,
@@ -3224,6 +3263,20 @@ fn render_cached_attention(
             format!("constexpr long new_upper = {new_upper_inclusive}L;"),
         )
     };
+    // The split kernel-plus-merge shape (redesign §4c) reads WHICH
+    // threadgroup a simdgroup belongs to directly from Metal's own
+    // per-dispatch coordinate rather than re-deriving it from `gid` --
+    // `gid / threadgroup_width` would give the same value today, but that
+    // equality holds only because `threadgroup_width` never itself depends
+    // on `splits` (see `grid_threads`'s own doc); a hardware-native readback
+    // does not carry that assumption. Only the single-range dynamic path
+    // dispatches more than one threadgroup per `(query_row, kv_head)` pair,
+    // so only that path declares the parameter.
+    let tgid_param = if dynamic_cached_len {
+        ", uint tgid [[threadgroup_position_in_grid]]"
+    } else {
+        ""
+    };
     let (out_buffer_index, uniforms_buffer_index) =
         if dynamic_cached_len { (9, 10) } else { (8, 9) };
     // `cached_key_rows`/`new_key_rows` are runtime `Uniforms` fields on the
@@ -3264,7 +3317,7 @@ fn render_cached_attention(
     preamble(&mut source);
     source.push_str(uniforms_struct);
     source.push_str(&format!(
-        "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {element_type}* in2 [[buffer(2)]], device const {element_type}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {element_type}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]]{cached_len_param}, device {element_type}* out [[buffer({out_buffer_index})]], constant Uniforms& u [[buffer({uniforms_buffer_index})]], uint gid [[thread_position_in_grid]]) {{\n"
+        "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {element_type}* in2 [[buffer(2)]], device const {element_type}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {element_type}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]]{cached_len_param}, device {element_type}* out [[buffer({out_buffer_index})]], constant Uniforms& u [[buffer({uniforms_buffer_index})]], uint gid [[thread_position_in_grid]]{tgid_param}) {{\n"
     ));
     source.push_str("    if ((long)gid >= u.total_elements * 32L) { return; }\n");
     source.push_str(&format!(
@@ -3345,9 +3398,19 @@ fn render_cached_attention(
         // is 1 or `cap` -- the compiled `kv-capacity-bucket` extent no
         // longer appears anywhere in the text `entry_name` keys on.
         source.push_str(&format!(
-            "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long cap = {cap};\n    long chunks = u.context_chunks;\n    long query_index = vector_index / cap;\n    long chunk = vector_index % cap;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    long local_group_index = group * cap + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
+            "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long cap = {cap};\n    long chunks = u.context_chunks;\n    long splits = u.splits;\n    long chunk = vector_index % cap;\n    long group = (vector_index / cap) % query_groups;\n    long kv_head = (long)tgid % kv_heads;\n    long query_row_and_split = (long)tgid / kv_heads;\n    long split = query_row_and_split % splits;\n    long query_row = query_row_and_split / splits;\n    long query_index = query_row * (kv_heads * query_groups) + kv_head * query_groups + group;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    long local_group_index = group * cap + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
         ));
         source.push_str(&format!("    {last_key_decl}"));
+        // Redesign §4c: this threadgroup's slice of the LIVE key range
+        // (`last_key + 1`, ROW 366's live upper) -- `ceil_div(live, splits)`
+        // sized so every split but the last is exactly `slice_len` keys and
+        // the last absorbs the remainder; `lo >= hi` (a `split` past the end
+        // of a short live range) leaves the per-key loop below empty, which
+        // is already this kernel's identity partial (`maximum = -INFINITY`,
+        // `sum = 0.0`, `weighted` zeroed above) -- no separate branch needed.
+        source.push_str(
+            "    long live = last_key + 1L;\n    long slice_len = (live + splits - 1L) / splits;\n    long lo = split * slice_len;\n    long hi = min(lo + slice_len, live);\n",
+        );
         // Idle simdgroups (`chunk >= chunks`, live count below the compiled
         // maximum) skip the walk entirely and keep the identity partial
         // (`maximum = -INFINITY`, `sum = 0.0`, `weighted` zeroed above) --
@@ -3372,10 +3435,10 @@ fn render_cached_attention(
         // `shared_l`/`shared_o` below it, so concurrent simdgroups in the
         // same threadgroup never alias each other's staged scores.
         if block_width <= 1 {
-            source.push_str("    if (chunk < chunks) {\n    for (long key = chunk; key <= last_key; key += chunks) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n    }\n");
+            source.push_str("    if (chunk < chunks) {\n    for (long key = lo + chunk; key < hi; key += chunks) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n    }\n");
         } else {
             source.push_str(&format!(
-                "    constexpr long block_width = {block_width};\n    short ty = (short)(lane / 8u); short tx = (short)(lane % 8u);\n    threadgroup float ss[query_groups * cap * block_width];\n    if (chunk < chunks) {{\n    long num_local_keys = (chunk <= last_key) ? ((last_key - chunk) / chunks) + 1L : 0L;\n    for (long block_start = 0L; block_start < num_local_keys; block_start += block_width) {{\n        for (long cc = 0L; cc < block_width / 4L; cc++) {{\n            long local_index = block_start + 4L * cc + (long)ty;\n            bool valid = local_index < num_local_keys;\n            long key = chunk + local_index * chunks;\n            bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n            if (valid) {{\n                long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n                if (cached && relative < cached_lower) {{ valid = false; }}\n                if (!cached && relative > new_upper) {{ valid = false; }}\n            }}\n            long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n            float partial_score = 0.0f;\n            if (valid) {{\n                device const {element_type}4* qr4 = (device const {element_type}4*)(in0 + qbase);\n                device const {element_type}4* qi4 = (device const {element_type}4*)(in1 + qbase);\n                device const {element_type}4* kr4 = (device const {element_type}4*)((cached ? in2 : in4) + kbase);\n                device const {element_type}4* ki4 = (device const {element_type}4*)((cached ? in3 : in5) + kbase);\n                for (short index = tx; index < (short)((head_dim / 2) / 4L); index += 8) {{\n                    partial_score += dot(kr4[index], qr4[index]);\n                    partial_score += dot(ki4[index], qi4[index]);\n                }}\n            }}\n            partial_score += simd_shuffle_down(partial_score, 4);\n            partial_score += simd_shuffle_down(partial_score, 2);\n            partial_score += simd_shuffle_down(partial_score, 1);\n            if (tx == 0) {{ ss[local_group_index * block_width + 4L * cc + (long)ty] = valid ? partial_score * scale : -INFINITY; }}\n        }}\n        simdgroup_barrier(mem_flags::mem_threadgroup);\n        for (long sub = 0L; sub < block_width; sub += 32L) {{\n            long lane_index = sub + (long)lane;\n            float raw_score = ss[local_group_index * block_width + lane_index];\n            float next_max = simd_max(max(maximum, raw_score));\n            float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n            float weight = exp(raw_score - next_max);\n            sum = sum * rescale + simd_sum(weight);\n            ss[local_group_index * block_width + lane_index] = weight;\n            for (long dimension = 0L; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] *= rescale; }}\n            maximum = next_max;\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n            for (long local_index = block_start + sub; local_index < min(block_start + sub + 32L, num_local_keys); local_index++) {{\n                long key = chunk + local_index * chunks;\n                bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n                long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n                float key_weight = ss[local_group_index * block_width + (local_index - block_start)];\n                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n                    long local_dimension = dimension / 32L;\n                    weighted[local_dimension] += key_weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n                }}\n            }}\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n        }}\n    }}\n    }}\n"
+                "    constexpr long block_width = {block_width};\n    short ty = (short)(lane / 8u); short tx = (short)(lane % 8u);\n    threadgroup float ss[query_groups * cap * block_width];\n    if (chunk < chunks) {{\n    long slice_start = lo + chunk;\n    long num_local_keys = (slice_start < hi) ? ((hi - 1L - slice_start) / chunks) + 1L : 0L;\n    for (long block_start = 0L; block_start < num_local_keys; block_start += block_width) {{\n        for (long cc = 0L; cc < block_width / 4L; cc++) {{\n            long local_index = block_start + 4L * cc + (long)ty;\n            bool valid = local_index < num_local_keys;\n            long key = slice_start + local_index * chunks;\n            bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n            if (valid) {{\n                long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n                if (cached && relative < cached_lower) {{ valid = false; }}\n                if (!cached && relative > new_upper) {{ valid = false; }}\n            }}\n            long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n            float partial_score = 0.0f;\n            if (valid) {{\n                device const {element_type}4* qr4 = (device const {element_type}4*)(in0 + qbase);\n                device const {element_type}4* qi4 = (device const {element_type}4*)(in1 + qbase);\n                device const {element_type}4* kr4 = (device const {element_type}4*)((cached ? in2 : in4) + kbase);\n                device const {element_type}4* ki4 = (device const {element_type}4*)((cached ? in3 : in5) + kbase);\n                for (short index = tx; index < (short)((head_dim / 2) / 4L); index += 8) {{\n                    partial_score += dot(kr4[index], qr4[index]);\n                    partial_score += dot(ki4[index], qi4[index]);\n                }}\n            }}\n            partial_score += simd_shuffle_down(partial_score, 4);\n            partial_score += simd_shuffle_down(partial_score, 2);\n            partial_score += simd_shuffle_down(partial_score, 1);\n            if (tx == 0) {{ ss[local_group_index * block_width + 4L * cc + (long)ty] = valid ? partial_score * scale : -INFINITY; }}\n        }}\n        simdgroup_barrier(mem_flags::mem_threadgroup);\n        for (long sub = 0L; sub < block_width; sub += 32L) {{\n            long lane_index = sub + (long)lane;\n            float raw_score = ss[local_group_index * block_width + lane_index];\n            float next_max = simd_max(max(maximum, raw_score));\n            float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n            float weight = exp(raw_score - next_max);\n            sum = sum * rescale + simd_sum(weight);\n            ss[local_group_index * block_width + lane_index] = weight;\n            for (long dimension = 0L; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] *= rescale; }}\n            maximum = next_max;\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n            for (long local_index = block_start + sub; local_index < min(block_start + sub + 32L, num_local_keys); local_index++) {{\n                long key = slice_start + local_index * chunks;\n                bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n                long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n                float key_weight = ss[local_group_index * block_width + (local_index - block_start)];\n                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n                    long local_dimension = dimension / 32L;\n                    weighted[local_dimension] += key_weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n                }}\n            }}\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n        }}\n    }}\n    }}\n"
             ));
         }
         // Redesign §4c ([`NumericRewrite::ContextSplitMerge`]): once the
@@ -3387,17 +3450,17 @@ fn render_cached_attention(
         // `Binding::Scratch` slot backs, at `max_splits` stride so a later
         // slice's real `split = threadgroup_index % splits` can address its
         // own slot with the identical layout. `render_cached_attention_merge`
-        // reads exactly this layout back and performs the divide -- the
-        // final `weighted[..] / sum` normalize this arm always did is
-        // deferred to that kernel, generalizing this exact combine one
-        // hardware level up (`ContextSplitMerge`'s own doc). Splits is
-        // forced to 1 here (this slice's own scope): `split` is always `0L`,
-        // never `u.splits`-derived, so the arithmetic this simdgroup already
-        // computed is completely unchanged -- only WHERE the result lands
-        // differs.
-        let final_store = if cached_attention_merge_needed(numeric_policy) {
+        // reads exactly this layout back and performs the online-softmax
+        // combine over every live split -- the final `weighted[..] / sum`
+        // normalize this arm always did is deferred to that kernel,
+        // generalizing this exact combine one hardware level up
+        // (`ContextSplitMerge`'s own doc). `split` is the real per-
+        // threadgroup value this function's own index-unpack derived from
+        // `tgid` above -- at `u.splits == 1` it is always `0`, so this
+        // reduces to exactly the prior forced-`0L` behaviour byte for byte.
+        let final_store = if cached_attention_merge_needed(*cached_key_rows + *new_key_rows, numeric_policy) {
             format!(
-                "        constexpr long max_splits = {};\n        constexpr long split = 0L;\n        device float* attn_scratch = (device float*)out;\n        long scratch_index = (query_index * max_splits + split) * (2L + head_dim);\n        if (lane == 0u) {{ attn_scratch[scratch_index] = merged_max; attn_scratch[scratch_index + 1] = merged_sum; }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; attn_scratch[scratch_index + 2L + dimension] = weighted[local_dimension]; }}\n",
+                "        constexpr long max_splits = {};\n        device float* attn_scratch = (device float*)out;\n        long scratch_index = (query_index * max_splits + split) * (2L + head_dim);\n        if (lane == 0u) {{ attn_scratch[scratch_index] = merged_max; attn_scratch[scratch_index + 1] = merged_sum; }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; attn_scratch[scratch_index + 2L + dimension] = weighted[local_dimension]; }}\n",
                 crate::sized::ATTENTION_SPLIT_MAX,
             )
         } else {
@@ -3459,18 +3522,22 @@ fn render_cached_attention(
 
 /// `BoundOpKind::CachedAttention`'s MERGE kernel -- [`render_cached_attention`]'s
 /// own doc, redesign §4c: reads back the `(max, sum, weighted[head_dim])`
-/// partial [`render_cached_attention`]'s final-store branch wrote into the
-/// scratch buffer (one simdgroup per output row, exactly the layout that
-/// arm used, at `split = 0`) and performs the SAME normalize
-/// (`weighted / sum`) that arm always did before this redesign, now
-/// deferred here. With the live split count forced to `1` this slice (see
-/// [`cached_attention_merge_needed`]'s own doc), "merge" is the degenerate
-/// N=1 case of `ContextSplitMerge`'s combine -- a copy-and-normalize, not a
-/// rescale-across-partials -- exactly matching llama.cpp's own
-/// `kernel_flash_attn_ext_vec_reduce` shape at the SAME granularity
-/// (`attention-kernel-design.md` §4c). Growing past one live partial (a real
-/// `simd_max`/`simd_sum` combine over `u.splits` partials) is the next
-/// slice's work, not this one's.
+/// partial each of `u.splits` split-kernel threadgroups wrote into the
+/// scratch buffer (one simdgroup per output row) and combines them with the
+/// SAME online-softmax rescale llama.cpp's own
+/// `kernel_flash_attn_ext_vec_reduce` uses (`ggml-metal-ops.cpp:2063-2097`
+/// on `origin/master`, this crate's `attention-kernel-design.md` §4c cites
+/// it verbatim): lane `i` (`i < splits`) loads that split's own `(M_i,
+/// S_i)`; `simd_max`/`simd_sum` combine the up-to-32 lanes (one lane per
+/// split, `ATTENTION_SPLIT_MAX <= 32` so every live split fits in one
+/// simdgroup's shuffle network, the same reason llama's own reduce needs no
+/// tree); each lane then walks its own lane-strided subset of `head_dim`
+/// dimensions, re-deriving every split's rescale weight straight from
+/// device memory (cheap here -- this kernel is `O(splits * head_dim)`, not
+/// the hot per-key loop) rather than shuffling `M`/`S` across lanes. At
+/// `u.splits == 1` this reduces to exactly the prior forced-`split = 0`
+/// copy-and-normalize, since the single live lane's rescale weight is
+/// always `1.0` (or `0.0` under the all-`-INFINITY`/empty-context corner).
 fn render_cached_attention_merge(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention { head_dim, .. } = &resolved.kind else {
         return Err(EmitError::RenderKindMismatch {
@@ -3482,7 +3549,7 @@ fn render_cached_attention_merge(resolved: &BoundOp, entry: &str) -> Result<Stri
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let mut source = String::new();
     preamble(&mut source);
-    source.push_str("struct Uniforms { long total_elements; };\n\n");
+    source.push_str("struct Uniforms { long total_elements; long splits; };\n\n");
     source.push_str(&format!(
         "kernel void {entry}(device const float* in0 [[buffer(0)]], device {element_type}* out [[buffer(1)]], constant Uniforms& u [[buffer(2)]], uint gid [[thread_position_in_grid]]) {{\n"
     ));
@@ -3490,7 +3557,7 @@ fn render_cached_attention_merge(resolved: &BoundOp, entry: &str) -> Result<Stri
         "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n",
     );
     source.push_str(&format!(
-        "    constexpr long head_dim = {head_dim}; constexpr long max_splits = {};\n    long query_index = vector_index;\n    constexpr long split = 0L;\n    long scratch_index = (query_index * max_splits + split) * (2L + head_dim);\n    float merged_sum = in0[scratch_index + 1];\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n        float value = in0[scratch_index + 2L + dimension];\n        out[query_index * head_dim + dimension] = ({element_type})(merged_sum == 0.0f ? 0.0f : value / merged_sum);\n    }}\n}}\n",
+        "    constexpr long head_dim = {head_dim}; constexpr long max_splits = {};\n    long query_index = vector_index;\n    long splits = u.splits;\n    long iwg = (long)lane;\n    long own_scratch = (query_index * max_splits + iwg) * (2L + head_dim);\n    float own_max = (iwg < splits) ? in0[own_scratch] : -INFINITY;\n    float own_sum = (iwg < splits) ? in0[own_scratch + 1] : 0.0f;\n    float global_max = simd_max(own_max);\n    float own_weight = (own_max == -INFINITY) ? 0.0f : exp(own_max - global_max);\n    float total_sum = simd_sum(own_weight * own_sum);\n    float inv_sum = (total_sum == 0.0f) ? 0.0f : 1.0f / total_sum;\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n        float accumulated = 0.0f;\n        for (long split = 0; split < splits; split++) {{\n            long scratch_index = (query_index * max_splits + split) * (2L + head_dim);\n            float split_max = in0[scratch_index];\n            float split_weight = (split_max == -INFINITY) ? 0.0f : exp(split_max - global_max);\n            accumulated += split_weight * in0[scratch_index + 2L + dimension];\n        }}\n        out[query_index * head_dim + dimension] = ({element_type})(accumulated * inv_sum);\n    }}\n}}\n",
         crate::sized::ATTENTION_SPLIT_MAX,
     ));
     Ok(source)
@@ -3512,9 +3579,10 @@ pub(crate) fn emit_cached_attention_merge(
     resolved: &BoundOp,
     numeric_policy: NumericPolicy,
 ) -> Result<Option<Kernel>, EmitError> {
-    if !matches!(resolved.kind, BoundOpKind::CachedAttention { .. })
-        || !cached_attention_merge_needed(numeric_policy)
-    {
+    let Some(context_length) = cached_attention_context_length(&resolved.kind) else {
+        return Ok(None);
+    };
+    if !cached_attention_merge_needed(context_length, numeric_policy) {
         return Ok(None);
     }
     validate(resolved)?;
@@ -9253,10 +9321,16 @@ mod tests {
     /// policy that changes either: the split kernel's final store moves to
     /// `attn_scratch` and its output binding becomes `Binding::Scratch`,
     /// and `emit_cached_attention_merge` returns the companion kernel that
-    /// reads that scratch layout back and writes the real output.
+    /// reads that scratch layout back and writes the real output. 256 keys
+    /// (`omega-runtime.toml`'s `keys_per_split = 128`) is deliberately past
+    /// the split threshold under EITHER policy that admits the rewrite --
+    /// `cached_attention_merge_needed` now takes context length, not just
+    /// policy (its own doc), so a fixture at or below `keys_per_split`
+    /// would stay single-dispatch even under `llama_relaxed`, proving
+    /// nothing about the two-dispatch form this test exists to check.
     #[test]
     fn cached_attention_two_dispatch_form_is_inert_under_bit_exact() {
-        let mut bound = cached_attention_op_dynamic(48, 16);
+        let mut bound = cached_attention_op_dynamic(200, 56);
         let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
             unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
         };
@@ -9322,6 +9396,102 @@ mod tests {
             merge_kernel.bindings,
             alloc::vec![Binding::Scratch, Binding::Output(bound.node), Binding::Uniforms],
             "the merge kernel reads the split's scratch and writes the real output"
+        );
+    }
+
+    /// Redesign §4c, item 3: a ROW 376-scoreboard-shaped context (40 keys,
+    /// well under `omega-runtime.toml`'s `keys_per_split = 128`) must render
+    /// the single, byte-identical kernel under EITHER policy --
+    /// `cached_attention_merge_needed` gained the capacity input precisely
+    /// so `llama_relaxed()` at this shape does not pay for a scratch hop and
+    /// a merge dispatch it cannot use (design risk 2).
+    #[test]
+    fn forty_key_plan_renders_one_kernel_under_either_policy() {
+        let mut bound = cached_attention_op_dynamic(32, 8);
+        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+            unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
+        };
+        *head_dim = 8;
+        let packed_operands = PackedOperands::new();
+
+        for policy in [NumericPolicy::bit_exact(), NumericPolicy::llama_relaxed()] {
+            let kernel = emit(&bound, &packed_operands, policy)
+                .expect("a 40-key context always renders");
+            assert!(
+                !kernel.source.contains("attn_scratch"),
+                "policy={policy:?}: a 40-key context must never engage the scratch hop"
+            );
+            assert!(
+                emit_cached_attention_merge(&bound, policy)
+                    .expect("emit_cached_attention_merge never errors on a well-formed op")
+                    .is_none(),
+                "policy={policy:?}: a 40-key context must never need a companion merge dispatch"
+            );
+        }
+    }
+
+    /// Redesign §4c, item 1: the split kernel's own slice formula and
+    /// scratch index expression, read straight out of the emitted MSL text
+    /// -- an off-by-one in either is a device OOB write (design risk 3), so
+    /// this pins the exact rendered arithmetic rather than trusting the
+    /// hand-derivation.
+    #[test]
+    fn split_kernel_emits_the_slice_formula_and_scratch_index() {
+        let mut bound = cached_attention_op_dynamic(200, 56);
+        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+            unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
+        };
+        *head_dim = 8;
+
+        let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+            .expect("llama_relaxed renders the split kernel for a 256-key context");
+
+        assert!(
+            source.contains("uint tgid [[threadgroup_position_in_grid]]"),
+            "the split kernel must read its threadgroup index off Metal's own coordinate"
+        );
+        assert!(
+            source.contains(
+                "long slice_len = (live + splits - 1L) / splits;\n    long lo = split * slice_len;\n    long hi = min(lo + slice_len, live);"
+            ),
+            "the slice formula must be exactly ceil_div(live, splits), [lo, hi)"
+        );
+        assert!(
+            source.contains("long scratch_index = (query_index * max_splits + split) * (2L + head_dim);"),
+            "the scratch write must index by (query_index * max_splits + split), not query_index alone"
+        );
+        assert!(
+            source.contains("long slice_start = lo + chunk;"),
+            "the block-staged walk (llama_relaxed grants TreeReduce too) must start from this \
+             threadgroup's own [lo, hi) slice, not the whole live range"
+        );
+
+        let sequential_source =
+            render_cached_attention(&bound, "entry", NumericPolicy::default())
+                .expect("bit_exact still renders (splits collapse to 1, but the shape is shared)");
+        assert!(
+            sequential_source.contains("for (long key = lo + chunk; key < hi; key += chunks)"),
+            "the strictly-sequential per-key walk must be bounded to this threadgroup's own \
+             [lo, hi) slice"
+        );
+    }
+
+    /// Redesign §4c: the merge kernel's own combine, read straight out of
+    /// the emitted MSL text -- `simd_max`/`simd_sum` over the up-to-32
+    /// per-split partials, exactly llama.cpp's `kernel_flash_attn_ext_vec_
+    /// reduce` shape (`ggml-metal-ops.cpp:2063-2097` on `origin/master`).
+    #[test]
+    fn merge_kernel_emits_the_online_softmax_combine() {
+        let bound = cached_attention_op_dynamic(200, 56);
+        let source =
+            render_cached_attention_merge(&bound, "entry").expect("the merge kernel always renders");
+
+        assert!(source.contains("long splits = u.splits;"));
+        assert!(source.contains("float global_max = simd_max(own_max);"));
+        assert!(source.contains("float total_sum = simd_sum(own_weight * own_sum);"));
+        assert!(
+            source.contains("for (long split = 0; split < splits; split++)"),
+            "each lane's own dimensions must accumulate over every live split"
         );
     }
 
