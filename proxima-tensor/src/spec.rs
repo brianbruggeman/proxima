@@ -3837,6 +3837,15 @@ fn append_qwen35_dense_attention_layer(
 /// sibling pair, see `omega/src/metal.rs`'s `HazardTracker`) rather than
 /// per-kernel -- see this module's own
 /// `swapping_gate_and_up_order_keeps_dataflow_identical` test.
+///
+/// `qk_norm` (ROW 373) is the SAME `Option<(NodeId, NodeId, NodeId)>` shape
+/// as [`append_mistral_cached_layer`]'s own parameter of that name --
+/// q-norm weight, k-norm weight, `inv_head_dim` -- applied through the same
+/// [`rmsnorm_per_head`] calls before RoPE, and selects the same
+/// interleaved-vs-split-half pairing that function's doc already derives
+/// from `qk_norm.is_some()`. This builder no longer rejects a qk-norm
+/// checkpoint; it now builds it, node-for-node the same attention block the
+/// two-range sibling would.
 #[allow(clippy::too_many_arguments)]
 fn append_mistral_single_range_cached_layer(
     program: &mut Vec<Op>,
@@ -3850,6 +3859,7 @@ fn append_mistral_single_range_cached_layer(
     group_ones: NodeId,
     is_future: NodeId,
     group: u32,
+    head_dim: u32,
     attn_norm_weight: NodeId,
     ffn_norm_weight: NodeId,
     wq: NodeId,
@@ -3862,32 +3872,17 @@ fn append_mistral_single_range_cached_layer(
     k_even_cache: NodeId,
     k_odd_cache: NodeId,
     v_cache: NodeId,
-    qk_norm: bool,
+    qk_norm: Option<(NodeId, NodeId, NodeId)>,
     gate_before_up: bool,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
-    // `qk_norm` names TWO omissions this function has relative to its
-    // two-range sibling `append_mistral_cached_layer`, not one: (1) no
-    // `attn_q_norm.weight`/`attn_k_norm.weight` inputs and no
-    // `rmsnorm_per_head` call, and (2) below, `rotated_q_even`/`rotated_k_new_even`
-    // hard-code `RopePairing::Interleaved` unconditionally, where the
-    // two-range sibling switches to `RopePairing::SplitHalf` exactly when
-    // `qk_norm.is_some()` (`append_mistral_cached_layer`'s own comment: every
-    // checkpoint this crate binds with `attn_q_norm.weight` present is the
-    // NEOX/split-half family, so the same presence check that gates QK-norm
-    // also selects the matching RoPE pairing). A qk-norm checkpoint routed
-    // through this builder would get neither its per-head norm nor its
-    // correct RoPE pairing -- rejecting the whole checkpoint class here is
-    // the fix for the class defect (a builder silently omitting an
-    // architecture feature) rather than the caller
-    // (`build_single_range_program`) working around it with a flag list;
-    // see ROW 372.
-    if qk_norm {
-        return Err(TensorError::UnsupportedInBuilder {
-            builder: "append_mistral_single_range_cached_layer",
-            feature: "qk_norm (also implies split-half rope pairing, which this builder hard-codes as interleaved)",
-        });
-    }
-
+    // Same architecture inputs as `append_mistral_cached_layer`'s own
+    // `qk_norm: Option<(NodeId, NodeId, NodeId)>` (q-norm weight, k-norm
+    // weight, `inv_head_dim`) -- ROW 373's typed rejection here was a class
+    // defect, not a correct omission: this builder's own attention block is
+    // otherwise node-for-node the two-range sibling's, so it can carry the
+    // same per-head RMSNorm and the same pairing selection
+    // (`qk_norm.is_some()`) that sibling already uses, see that function's
+    // own `qk_norm` doc.
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
     let q_product = elementwise(
@@ -3896,7 +3891,7 @@ fn append_mistral_single_range_cached_layer(
         ScalarOp::Multiply,
         &[(normed, "si->shdi"), (wq, "ihd->shdi")],
     )?;
-    let q = reduce(
+    let q_raw = reduce(
         program,
         DType::Float32,
         ScalarOp::Add,
@@ -3912,7 +3907,7 @@ fn append_mistral_single_range_cached_layer(
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wk, "iud->sudi")],
     )?;
-    let k_new = reduce(
+    let k_new_raw = reduce(
         program,
         DType::Float32,
         ScalarOp::Add,
@@ -3938,13 +3933,36 @@ fn append_mistral_single_range_cached_layer(
         "sud->sudi",
     )?;
 
-    // hard-coded `Interleaved`, never `SplitHalf` -- correct only because the
-    // `qk_norm` guard above already turned away every checkpoint that would
-    // need `SplitHalf` (see that guard's own comment, ROW 372).
-    let (rotated_q_even, rotated_q_odd) =
-        fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::Interleaved)?;
-    let (rotated_k_new_even, rotated_k_new_odd) =
-        fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::Interleaved)?;
+    let (q, k_new) = match qk_norm {
+        Some((q_norm_weight, k_norm_weight, inv_head_dim)) => {
+            let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
+            let k_new = rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+            (q, k_new)
+        }
+        None => (q_raw, k_new_raw),
+    };
+
+    // Pairing selection mirrors `append_mistral_cached_layer`'s own
+    // `qk_norm.is_some()` rule (that function's doc walks the NEOX-vs-
+    // interleaved reasoning): a checkpoint carrying `attn_q_norm.weight` is
+    // the split-half family, everything else stays interleaved.
+    let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match qk_norm {
+        Some(_) => {
+            let pairs = head_dim / 2;
+            let (rotated_q_first, rotated_q_second) =
+                fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
+            let (rotated_k_first, rotated_k_second) =
+                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
+            (rotated_q_first, rotated_q_second, rotated_k_first, rotated_k_second)
+        }
+        None => {
+            let (rotated_q_even, rotated_q_odd) =
+                fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::Interleaved)?;
+            let (rotated_k_new_even, rotated_k_new_odd) =
+                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::Interleaved)?;
+            (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd)
+        }
+    };
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
@@ -4233,16 +4251,15 @@ fn append_mistral_single_range_cached_layer(
 /// supports is orthogonal to the attention-merge this function exists to
 /// prove, and duplicating that branch here would test nothing new.
 ///
-/// `qk_norm` names ROW 372's rejection, not a feature this function
-/// implements: `append_mistral_single_range_cached_layer` has no per-head
-/// QK-norm of its own (unlike [`append_mistral_cached_layer`]'s
-/// `qk_norm: Option<(NodeId, NodeId, NodeId)>`) AND hard-codes
-/// `RopePairing::Interleaved` where the two-range sibling switches to
-/// `RopePairing::SplitHalf` exactly when `qk_norm.is_some()` -- so passing
-/// `true` here returns [`TensorError::UnsupportedInBuilder`] instead of
-/// silently building a program missing both the norm and the correct RoPE
-/// pairing. Pass `false` for every checkpoint that does not carry
-/// `attn_q_norm.weight`/`attn_k_norm.weight`.
+/// `qk_norm` (ROW 373) selects the same per-head QK-norm + split-half RoPE
+/// pairing [`qwen3_cached_forward_program`] carries on the two-range path --
+/// `true` declares `blk.{layer}.attn_q_norm.weight`/`attn_k_norm.weight`
+/// inputs per layer and threads them through
+/// [`append_mistral_single_range_cached_layer`]'s own
+/// `Option<(NodeId, NodeId, NodeId)>` parameter, mirroring
+/// [`mistral_cached_forward_program_with_experts`]'s own `inv_head_dim`/
+/// `qk_norm_weights` construction below. `false` reproduces today's
+/// interleaved, no-norm program node-for-node.
 // ROW 326/328 diagnostic: `duplicate_head` mirrors `gate_before_up`'s own
 // mechanism (a plain, always-compiled parameter a caller sets, production
 // call sites pass a fixed literal) rather than a `#[cfg(test)]` item,
@@ -4321,6 +4338,10 @@ pub fn mistral_single_range_cached_forward_program(
     let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
+    // only materialized when a layer actually consumes it (`qk_norm`), same
+    // guard `mistral_cached_forward_program_with_experts` uses so a dense
+    // checkpoint's own node count is unaffected by this feature existing.
+    let inv_head_dim = qk_norm.then(|| scalar_constant(&mut program, 1.0 / head_dim as f32));
     let cos_new = input_leaf(
         &mut program,
         DType::Float32,
@@ -4448,6 +4469,21 @@ pub fn mistral_single_range_cached_forward_program(
             alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.ffn_down.weight"),
         );
+        let qk_norm_weights = inv_head_dim.map(|inv_head_dim| {
+            let q_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(head_dim)],
+                &alloc::format!("blk.{layer}.attn_q_norm.weight"),
+            );
+            let k_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(head_dim)],
+                &alloc::format!("blk.{layer}.attn_k_norm.weight"),
+            );
+            (q_norm_weight, k_norm_weight, inv_head_dim)
+        });
 
         let (x_next, layer_roots) = append_mistral_single_range_cached_layer(
             &mut program,
@@ -4461,6 +4497,7 @@ pub fn mistral_single_range_cached_forward_program(
             group_ones,
             is_future,
             group,
+            head_dim,
             attn_norm_weight,
             ffn_norm_weight,
             wq,
@@ -4473,7 +4510,7 @@ pub fn mistral_single_range_cached_forward_program(
             k_even_cache,
             k_odd_cache,
             v_cache,
-            qk_norm,
+            qk_norm_weights,
             true,
         )?;
         x = x_next;
@@ -11663,6 +11700,314 @@ value = 1.0
         }
     }
 
+    /// ROW 373's own parity check: [`a_single_range_decode_step_matches_the_two_range_decode_step`]'s
+    /// exact harness, `qk_norm` flipped on for both arms
+    /// ([`qwen3_cached_forward_program`] as the two-range oracle,
+    /// [`mistral_single_range_cached_forward_program`]'s `qk_norm: true` as
+    /// the candidate) and `attn_q_norm.weight`/`attn_k_norm.weight` (random,
+    /// non-degenerate, so a wrong gamma or a missing normalization is
+    /// visible) added per layer. Split-half RoPE is exercised by
+    /// construction -- `qk_norm.is_some()` selects it in both builders, see
+    /// `append_mistral_cached_layer`'s and
+    /// `append_mistral_single_range_cached_layer`'s own doc on that rule.
+    /// Same normalized-error tolerance as the plain arm: the online-softmax
+    /// combine's own op ordering (two partial reduces, elementwise-summed)
+    /// vs the single-range one-shot reduce is not required to be 0-ULP, only
+    /// numerically equivalent -- `a_single_range_decode_step_matches_the_two_range_decode_step`'s
+    /// own doc already established `< 1e-4` as this codebase's bar for that
+    /// distinction.
+    #[test]
+    fn a_single_range_decode_step_with_qk_norm_matches_the_two_range_decode_step() {
+        const VOCAB: usize = 5;
+        const EMBEDDING: usize = 4;
+        const FEED_FORWARD: usize = 4;
+        const QUERY_HEADS: usize = 2;
+        const KV_HEADS: usize = 1;
+        const HEAD_DIM: usize = 2;
+        const PAIRS: usize = HEAD_DIM / 2;
+        const GROUP: usize = QUERY_HEADS / KV_HEADS;
+        const BLOCK_COUNT: u32 = 2;
+
+        struct LayerWeights {
+            attn_norm: Vec<f32>,
+            ffn_norm: Vec<f32>,
+            wq: Vec<f32>,
+            wk: Vec<f32>,
+            wv: Vec<f32>,
+            wo: Vec<f32>,
+            w_gate: Vec<f32>,
+            w_up: Vec<f32>,
+            w_down: Vec<f32>,
+            q_norm: Vec<f32>,
+            k_norm: Vec<f32>,
+        }
+
+        fn max_error_at(cached_len: usize, new_count: usize) -> (f32, f32) {
+            let sequence = cached_len + new_count;
+            let ids: Vec<u32> = (0..sequence as u32).map(|id| 1 + id % 3).collect();
+            let ids_f32: Vec<f32> = ids.iter().map(|&id| id as f32).collect();
+
+            let table = random_vec(10, VOCAB * EMBEDDING);
+            let eps_cached = alloc::vec![1e-5f32; cached_len.max(1)];
+            let eps_new = alloc::vec![1e-5f32; new_count];
+            let (cos_cached, sin_cached) = rope_angles(0, cached_len.max(1), PAIRS, HEAD_DIM);
+            let (cos_new, sin_new) = rope_angles(cached_len, new_count, PAIRS, HEAD_DIM);
+
+            let mut layers = Vec::new();
+            let mut seed = 300u64;
+            for _ in 0..BLOCK_COUNT {
+                layers.push(LayerWeights {
+                    attn_norm: alloc::vec![1.0f32; EMBEDDING],
+                    ffn_norm: alloc::vec![1.0f32; EMBEDDING],
+                    wq: random_vec(seed, EMBEDDING * QUERY_HEADS * HEAD_DIM),
+                    wk: random_vec(seed + 1, EMBEDDING * KV_HEADS * HEAD_DIM),
+                    wv: random_vec(seed + 2, EMBEDDING * KV_HEADS * HEAD_DIM),
+                    wo: random_vec(seed + 3, KV_HEADS * GROUP * HEAD_DIM * EMBEDDING),
+                    w_gate: random_vec(seed + 4, EMBEDDING * FEED_FORWARD),
+                    w_up: random_vec(seed + 5, EMBEDDING * FEED_FORWARD),
+                    w_down: random_vec(seed + 6, FEED_FORWARD * EMBEDDING),
+                    q_norm: random_vec(seed + 7, HEAD_DIM),
+                    k_norm: random_vec(seed + 8, HEAD_DIM),
+                });
+                seed += 9;
+            }
+            let output_norm = alloc::vec![1.0f32; EMBEDDING];
+            let lm_head = random_vec(seed, EMBEDDING * VOCAB);
+
+            let layer_names: Vec<[alloc::string::String; 11]> = (0..BLOCK_COUNT as usize)
+                .map(|layer| {
+                    [
+                        alloc::format!("blk.{layer}.attn_norm.weight"),
+                        alloc::format!("blk.{layer}.ffn_norm.weight"),
+                        alloc::format!("blk.{layer}.attn_q.weight"),
+                        alloc::format!("blk.{layer}.attn_k.weight"),
+                        alloc::format!("blk.{layer}.attn_v.weight"),
+                        alloc::format!("blk.{layer}.attn_output.weight"),
+                        alloc::format!("blk.{layer}.ffn_gate.weight"),
+                        alloc::format!("blk.{layer}.ffn_up.weight"),
+                        alloc::format!("blk.{layer}.ffn_down.weight"),
+                        alloc::format!("blk.{layer}.attn_q_norm.weight"),
+                        alloc::format!("blk.{layer}.attn_k_norm.weight"),
+                    ]
+                })
+                .collect();
+            let kv_cache_names: Vec<[alloc::string::String; 3]> = (0..BLOCK_COUNT as usize)
+                .map(|layer| {
+                    [
+                        alloc::format!("kv_cache.{layer}.k_even"),
+                        alloc::format!("kv_cache.{layer}.k_odd"),
+                        alloc::format!("kv_cache.{layer}.v"),
+                    ]
+                })
+                .collect();
+
+            let mut common_named: Vec<(&str, &[f32])> =
+                alloc::vec![("token_embd.weight", table.as_slice())];
+            for (layer_index, weights) in layers.iter().enumerate() {
+                let names = &layer_names[layer_index];
+                common_named.push((names[0].as_str(), weights.attn_norm.as_slice()));
+                common_named.push((names[1].as_str(), weights.ffn_norm.as_slice()));
+                common_named.push((names[2].as_str(), weights.wq.as_slice()));
+                common_named.push((names[3].as_str(), weights.wk.as_slice()));
+                common_named.push((names[4].as_str(), weights.wv.as_slice()));
+                common_named.push((names[5].as_str(), weights.wo.as_slice()));
+                common_named.push((names[6].as_str(), weights.w_gate.as_slice()));
+                common_named.push((names[7].as_str(), weights.w_up.as_slice()));
+                common_named.push((names[8].as_str(), weights.w_down.as_slice()));
+                common_named.push((names[9].as_str(), weights.q_norm.as_slice()));
+                common_named.push((names[10].as_str(), weights.k_norm.as_slice()));
+            }
+            common_named.push(("output_norm.weight", output_norm.as_slice()));
+            common_named.push(("output.weight", lm_head.as_slice()));
+
+            // -- fold the cache up to `cached_len` via the two-range qk-norm
+            // program's own prefill path, same mechanism the plain-layer
+            // parity test trusts.
+            let (cached_program, _, cache_roots) = qwen3_cached_forward_program(
+                VOCAB as u32,
+                EMBEDDING as u32,
+                FEED_FORWARD as u32,
+                QUERY_HEADS as u32,
+                KV_HEADS as u32,
+                HEAD_DIM as u32,
+                BLOCK_COUNT,
+            )
+            .expect("qk-norm cached forward pass lowers");
+
+            let (k_even_cache, k_odd_cache, v_cache): PerLayerCacheColumns = if cached_len == 0 {
+                (
+                    alloc::vec![Vec::new(); BLOCK_COUNT as usize],
+                    alloc::vec![Vec::new(); BLOCK_COUNT as usize],
+                    alloc::vec![Vec::new(); BLOCK_COUNT as usize],
+                )
+            } else {
+                let mut prefill_named = common_named.clone();
+                prefill_named.push(("ids", &ids_f32[..cached_len]));
+                prefill_named.push(("eps", eps_cached.as_slice()));
+                prefill_named.push(("rope_cos", cos_cached.as_slice()));
+                prefill_named.push(("rope_sin", sin_cached.as_slice()));
+                let empty = Vec::<f32>::new();
+                for names in &kv_cache_names {
+                    prefill_named.push((names[0].as_str(), empty.as_slice()));
+                    prefill_named.push((names[1].as_str(), empty.as_slice()));
+                    prefill_named.push((names[2].as_str(), empty.as_slice()));
+                }
+                let mut prefill_roots = Vec::new();
+                for (even, odd, value) in &cache_roots {
+                    prefill_roots.push(*even);
+                    prefill_roots.push(*odd);
+                    prefill_roots.push(*value);
+                }
+                let prefill_symbols = [cached_len as u64, 0u64];
+                let prefill_evaluated = crate::cpu::evaluate_named(
+                    &cached_program,
+                    &prefill_symbols,
+                    &prefill_named,
+                    &prefill_roots,
+                )
+                .expect("prefill call evaluates");
+                let mut even_out = Vec::with_capacity(BLOCK_COUNT as usize);
+                let mut odd_out = Vec::with_capacity(BLOCK_COUNT as usize);
+                let mut value_out = Vec::with_capacity(BLOCK_COUNT as usize);
+                for (even, odd, value) in &cache_roots {
+                    even_out.push(prefill_evaluated.get(*even).expect("k_even").0.to_vec());
+                    odd_out.push(prefill_evaluated.get(*odd).expect("k_odd").0.to_vec());
+                    value_out.push(prefill_evaluated.get(*value).expect("v").0.to_vec());
+                }
+                (even_out, odd_out, value_out)
+            };
+
+            // -- two-range decode step: the trusted incumbent.
+            let mut two_range_named = common_named.clone();
+            two_range_named.push(("ids", &ids_f32[cached_len..]));
+            two_range_named.push(("eps", eps_new.as_slice()));
+            two_range_named.push(("rope_cos", cos_new.as_slice()));
+            two_range_named.push(("rope_sin", sin_new.as_slice()));
+            for (layer_index, names) in kv_cache_names.iter().enumerate() {
+                two_range_named.push((names[0].as_str(), k_even_cache[layer_index].as_slice()));
+                two_range_named.push((names[1].as_str(), k_odd_cache[layer_index].as_slice()));
+                two_range_named.push((names[2].as_str(), v_cache[layer_index].as_slice()));
+            }
+            let two_range_root = NodeId(cached_program.len() as u32 - 1);
+            let two_range_symbols = [new_count as u64, cached_len as u64];
+            let mut two_range_roots: Vec<NodeId> = Vec::with_capacity(cache_roots.len() * 3 + 1);
+            for (even, odd, value) in &cache_roots {
+                two_range_roots.push(*even);
+                two_range_roots.push(*odd);
+                two_range_roots.push(*value);
+            }
+            two_range_roots.push(two_range_root);
+            let two_range_evaluated = crate::cpu::evaluate_named(
+                &cached_program,
+                &two_range_symbols,
+                &two_range_named,
+                &two_range_roots,
+            )
+            .expect("two-range decode call evaluates");
+            let (two_range_logits, two_range_shape) = two_range_evaluated
+                .get(two_range_root)
+                .expect("two-range logits present");
+            assert_eq!(two_range_shape, [new_count as u64, VOCAB as u64]);
+
+            // -- this decode call's own rotated K/V, per layer: exactly
+            // what write-placement would leave resident at the cache's
+            // tail for the NEXT call. Concatenated onto the prior cache
+            // below to build the single-range arm's merged input.
+            let mut merged_k_even_cache = k_even_cache.clone();
+            let mut merged_k_odd_cache = k_odd_cache.clone();
+            let mut merged_v_cache = v_cache.clone();
+            for (layer_index, (even, odd, value)) in cache_roots.iter().enumerate() {
+                let new_even = two_range_evaluated.get(*even).expect("k_new_even").0;
+                let new_odd = two_range_evaluated.get(*odd).expect("k_new_odd").0;
+                let new_value = two_range_evaluated.get(*value).expect("v_new").0;
+                merged_k_even_cache[layer_index].extend_from_slice(new_even);
+                merged_k_odd_cache[layer_index].extend_from_slice(new_odd);
+                merged_v_cache[layer_index].extend_from_slice(new_value);
+            }
+
+            // -- single-range decode step: the graph under test, `qk_norm:
+            // true`, fed the MERGED cache.
+            let (single_range_program, single_range_root, _, _) =
+                mistral_single_range_cached_forward_program(
+                    VOCAB as u32,
+                    EMBEDDING as u32,
+                    FEED_FORWARD as u32,
+                    QUERY_HEADS as u32,
+                    KV_HEADS as u32,
+                    HEAD_DIM as u32,
+                    BLOCK_COUNT,
+                    true,
+                    DuplicateHeadPosition::None,
+                )
+                .expect("single-range qk-norm cached forward pass lowers");
+            let cached_len_scalar = alloc::vec![cached_len as f32];
+            let mut single_range_named = common_named.clone();
+            single_range_named.push(("ids", &ids_f32[cached_len..]));
+            single_range_named.push(("eps", eps_new.as_slice()));
+            single_range_named.push(("rope_cos", cos_new.as_slice()));
+            single_range_named.push(("rope_sin", sin_new.as_slice()));
+            single_range_named.push(("cached_len", cached_len_scalar.as_slice()));
+            for (layer_index, names) in kv_cache_names.iter().enumerate() {
+                single_range_named.push((
+                    names[0].as_str(),
+                    merged_k_even_cache[layer_index].as_slice(),
+                ));
+                single_range_named.push((
+                    names[1].as_str(),
+                    merged_k_odd_cache[layer_index].as_slice(),
+                ));
+                single_range_named.push((names[2].as_str(), merged_v_cache[layer_index].as_slice()));
+            }
+            let single_range_symbols = [new_count as u64, sequence as u64];
+            let single_range_evaluated = crate::cpu::evaluate_named(
+                &single_range_program,
+                &single_range_symbols,
+                &single_range_named,
+                &[single_range_root],
+            )
+            .expect("single-range decode call evaluates");
+            let (single_range_logits, single_range_shape) = single_range_evaluated
+                .get(single_range_root)
+                .expect("single-range logits present");
+            assert_eq!(single_range_shape, [new_count as u64, VOCAB as u64]);
+
+            let batch_peak = two_range_logits
+                .iter()
+                .fold(0.0f32, |peak, value| peak.max(value.abs()));
+            let max_error = two_range_logits
+                .iter()
+                .zip(single_range_logits.iter())
+                .map(|(oracle, candidate)| (oracle - candidate).abs())
+                .fold(0.0f32, f32::max);
+            let normalized_error = if batch_peak > 0.0 {
+                max_error / batch_peak
+            } else {
+                max_error
+            };
+            std::println!(
+                "single_range_vs_two_range_decode_qk_norm cached_len={cached_len} new_count={new_count} batch_peak={batch_peak} max_error={max_error} normalized_error={normalized_error} two_range={two_range_logits:?} single_range={single_range_logits:?}"
+            );
+            (max_error, normalized_error)
+        }
+
+        let cases = [(0usize, 1usize), (1usize, 1usize), (6usize, 2usize)];
+        let results: Vec<((usize, usize), (f32, f32))> = cases
+            .iter()
+            .map(|&(cached_len, new_count)| ((cached_len, new_count), max_error_at(cached_len, new_count)))
+            .collect();
+        for (cached_len, new_count) in cases {
+            let (max_error, normalized_error) = results
+                .iter()
+                .find(|(case, _)| *case == (cached_len, new_count))
+                .expect("case present")
+                .1;
+            assert!(
+                normalized_error < 1e-4,
+                "single-range qk-norm decode diverged from the two-range qk-norm decode at cached_len={cached_len} new_count={new_count}: max_error={max_error} normalized_error={normalized_error}"
+            );
+        }
+    }
+
     /// Direct A/B on the SAME single-range program under the SAME data:
     /// `crate::bind::bind_with_fusion(.., true)` (fires
     /// [`cached_attention_single_range_candidates`], one
@@ -15355,6 +15700,22 @@ value = 1.0
             alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
             "ffn_down.weight",
         );
+        let qk_norm_weights = qk_norm.then(|| {
+            let inv_head_dim = scalar_constant(&mut program, 1.0 / head_dim as f32);
+            let q_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(head_dim)],
+                "attn_q_norm.weight",
+            );
+            let k_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(head_dim)],
+                "attn_k_norm.weight",
+            );
+            (q_norm_weight, k_norm_weight, inv_head_dim)
+        });
 
         append_mistral_single_range_cached_layer(
             &mut program,
@@ -15368,6 +15729,7 @@ value = 1.0
             group_ones,
             is_future,
             group,
+            head_dim,
             attn_norm_weight,
             ffn_norm_weight,
             wq,
@@ -15380,48 +15742,43 @@ value = 1.0
             k_even_cache,
             k_odd_cache,
             v_cache,
-            qk_norm,
+            qk_norm_weights,
             gate_before_up,
         )?;
 
         Ok((program, w_gate, w_up))
     }
 
-    /// ROW 372: a program builder cannot omit an architecture feature
-    /// silently -- and here there are TWO features bundled behind one
-    /// checkpoint property, not one. `append_mistral_single_range_cached_layer`
-    /// has no `attn_q_norm.weight`/`attn_k_norm.weight` inputs and no
-    /// `rmsnorm_per_head` call (unlike its two-range sibling
-    /// `append_mistral_cached_layer`, which takes
-    /// `qk_norm: Option<(NodeId, NodeId, NodeId)>` and applies it), AND it
-    /// hard-codes `RopePairing::Interleaved` where the two-range sibling
-    /// switches to `RopePairing::SplitHalf` exactly when `qk_norm.is_some()`
-    /// (`append_mistral_cached_layer`'s own comment: every checkpoint this
-    /// crate binds with `attn_q_norm.weight` present is the NEOX/split-half
-    /// family). Before this row the single-range builder silently ignored a
-    /// `qk_norm` request instead of rejecting it -- a qk-norm/split-half
-    /// checkpoint got NEITHER its per-head norm NOR its correct RoPE pairing
-    /// -- and `proxima-model-interop::generate::build_single_range_program`
-    /// had to know that out-of-band via a flag list at its own call site.
-    /// This test is the drift catch: if the builder is ever called for a
-    /// qk-norm architecture, it must fail loudly, not build a structurally
-    /// wrong program.
+    /// ROW 373: the single-range builder no longer rejects a qk-norm
+    /// checkpoint -- it binds the same shape [`append_mistral_cached_layer`]
+    /// would. This is the acceptance replacement for ROW 372's rejection
+    /// test: a qk-norm layer must produce the two extra `rmsnorm_per_head`
+    /// reduces (one per q/k) that a plain interleaved layer does not, and
+    /// nothing else about its op-kind census should move (same op COUNT per
+    /// kind elsewhere -- the two-range sibling's own `qk_norm` doc already
+    /// establishes those two reduces are the ENTIRE cost of this feature).
     #[test]
-    fn single_range_layer_rejects_qk_norm_and_the_split_half_rope_pairing_it_implies() {
-        let rejection = single_range_layer_with_order(true, true).expect_err(
-            "a qk-norm request must not silently build a program with neither qk-norm nor \
-             split-half rope pairing",
-        );
+    fn single_range_layer_binds_qk_norm_with_two_extra_per_head_norm_reduces() {
+        let (plain, _, _) = single_range_layer_with_order(true, false)
+            .expect("a plain interleaved layer still builds");
+        let (normed, _, _) =
+            single_range_layer_with_order(true, true).expect("a qk-norm layer now builds");
+
+        let reduce_count = |program: &[Op]| program.iter().filter(|op| matches!(op, Op::Reduce { .. })).count();
+        let elementwise_count =
+            |program: &[Op]| program.iter().filter(|op| matches!(op, Op::Elementwise { .. })).count();
 
         assert_eq!(
-            rejection,
-            TensorError::UnsupportedInBuilder {
-                builder: "append_mistral_single_range_cached_layer",
-                feature: "qk_norm (also implies split-half rope pairing, which this builder \
-                          hard-codes as interleaved)",
-            },
-            "the single-range builder must name itself and the missing features, not fail for \
-             an unrelated reason"
+            reduce_count(&normed),
+            reduce_count(&plain) + 2,
+            "qk-norm adds exactly the two rmsnorm_per_head reduces (q, k) over the plain layer"
+        );
+        assert_eq!(
+            elementwise_count(&normed),
+            elementwise_count(&plain) + 14,
+            "rmsnorm_per_head is 7 elementwise ops per call (squared, mean_square, \
+             mean_square_eps, rms, inv_rms, normed, gamma-scale), twice (q and k) -- 14 more \
+             elementwise ops, nothing else moves"
         );
     }
 
