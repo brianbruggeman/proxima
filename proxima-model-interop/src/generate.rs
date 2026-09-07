@@ -555,6 +555,53 @@ fn emit_token_breakdown_metal(
     );
 }
 
+/// ROW 391's single load-time answer to "how much device memory does this
+/// checkpoint actually use": one line, emitted once (`step == 0`) from each
+/// decode arm right after that step's own [`metal_stage_totals`] snapshot,
+/// naming every device-allocation class this crate can attribute directly
+/// from an existing counter rather than a new one (principle 1, reuse
+/// first) -- `weights_nocopy_bytes`/`weights_copied_bytes`/
+/// `weights_offset_bytes` are [`omega::metal::MetalStageTotals`]'s own
+/// `block_nocopy_bound_bytes`/`block_copied_bytes`/`block_offset_bound_bytes`,
+/// which on step 0 hold this call's ONE-TIME resident weight upload (every
+/// later step's own snapshot falls to ~0 once a name is cached -- see
+/// [`emit_token_breakdown_metal`]'s own `block_upload_calls` doc).
+/// `kv_cache_device_bytes` is [`None`] on the two-range (`LayerCache`) arm,
+/// whose `kv_cache.{layer}.*` blocks are just more named blocks folded into
+/// the SAME weight counters above, not a separately sized allocation --
+/// only [`Self::run_decode_loop_placed_kv`]'s fixed-capacity
+/// `k_even`/`k_odd`/`v` buffers are a distinct, independently sized class.
+/// `device_allocated_bytes`/`phys_footprint_bytes` are the same
+/// process-wide totals [`emit_token_breakdown_metal`] already reports, so a
+/// reader can subtract the named classes from `device_allocated_bytes` and
+/// see the unattributed remainder (attention scratch, the `BufferArena`'s
+/// per-op output buffers, uniform buffers, fault buffers -- proxima-tensor
+/// discipline.md ROW 391) directly, without this crate re-deriving each of
+/// those privately-sized classes here.
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+fn emit_device_memory_by_class(
+    step: usize,
+    weights_nocopy_bytes: u64,
+    weights_copied_bytes: u64,
+    weights_offset_bytes: u64,
+    kv_cache_device_bytes: Option<u64>,
+    device_allocated_bytes: u64,
+    phys_footprint_bytes: u64,
+) {
+    info!(
+        step = step as u64,
+        weights_nocopy_bytes,
+        weights_copied_bytes,
+        weights_offset_bytes,
+        kv_cache_device_bytes = kv_cache_device_bytes.unwrap_or(0),
+        kv_cache_device_bytes_known = kv_cache_device_bytes.is_some(),
+        device_allocated_bytes,
+        phys_footprint_bytes,
+        "device_memory_by_class: load-time device allocation broken out by class"
+    );
+}
+
 /// `PROXIMA_METAL_KIND_FILTER` -- `omega::metal::execute_plan_with_placements`'s
 /// own in-buffer ablation knob (that function's own `KindFilter` doc has the
 /// full contract). Read here, at [`emit_token_breakdown_metal`]'s own emit
@@ -2775,6 +2822,23 @@ impl<'file> LoadedModel<'file> {
                         runtime.plan_hits,
                         runtime.plan_misses,
                     );
+                    // This arm's `kv_cache.{layer}.*` blocks are ordinary
+                    // named blocks folded into `metal_stage`'s weight
+                    // counters above (`emit_device_memory_by_class`'s own
+                    // doc), never a separately sized device allocation --
+                    // `None` here is honest, not a placeholder.
+                    #[cfg(all(feature = "metal", target_os = "macos"))]
+                    if _step == 0 {
+                        emit_device_memory_by_class(
+                            _step,
+                            metal_stage.block_nocopy_bound_bytes,
+                            metal_stage.block_copied_bytes,
+                            metal_stage.block_offset_bound_bytes,
+                            None,
+                            omega::metal::current_allocated_size().unwrap_or(0),
+                            phys_footprint_bytes(),
+                        );
+                    }
                 }
 
                 Ok(token_id)
@@ -3252,6 +3316,21 @@ impl<'file> LoadedModel<'file> {
                         runtime.plan_hits,
                         runtime.plan_misses,
                     );
+                    #[cfg(all(feature = "metal", target_os = "macos"))]
+                    if _step == 0 {
+                        let kv_cache_device_bytes = (block_count
+                            * (2 * capacity_even_odd + capacity_v))
+                            as u64;
+                        emit_device_memory_by_class(
+                            _step,
+                            metal_stage.block_nocopy_bound_bytes,
+                            metal_stage.block_copied_bytes,
+                            metal_stage.block_offset_bound_bytes,
+                            Some(kv_cache_device_bytes),
+                            omega::metal::current_allocated_size().unwrap_or(0),
+                            phys_footprint_bytes(),
+                        );
+                    }
                 }
 
                 Ok(token_id)
