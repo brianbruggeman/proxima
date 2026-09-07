@@ -24,7 +24,22 @@ use proxima_tensor::spec::{
     DuplicateHeadPosition, mistral_cached_forward_program, mistral_single_range_cached_forward_program,
 };
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{NodeId, Op, QuantizedBlock, block_node_ids, infer};
+use proxima_tensor::{NodeId, NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};
+
+/// The numeric policy production actually runs under --
+/// `proxima-model-interop/src/serving.rs:255`'s `ServingConfig::default()`
+/// sets `numeric_policy: NumericPolicy::llama_relaxed()`, which resolves to
+/// `MTLMathMode::Relaxed` (`omega::metal`'s `numeric_policy_as_metal_math_mode`).
+/// Every bare timing/cost harness in `omega/tests` that reports a number
+/// meant to be comparable to production (or to another arm that already
+/// runs under production's policy) must bind/plan/emit under THIS value,
+/// never `NumericPolicy::default()` (bit-exact `Safe`) -- ROW 374 added the
+/// `NumericPolicy` parameter and every bare arm silently kept `default()`,
+/// so every post-374 per-shape number was measured at the wrong math mode.
+#[must_use]
+pub fn production_numeric_policy() -> NumericPolicy {
+    NumericPolicy::llama_relaxed()
+}
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);

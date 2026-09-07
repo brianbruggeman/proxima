@@ -167,6 +167,9 @@ use proxima_tensor::{
     Reduce, ReduceInit, ScalarOp, append, bind, correct_packed_matmul_layouts, infer, map,
 };
 
+mod support;
+use support::production_numeric_policy;
+
 /// Real GGUF checkpoint path, overridable via `PROXIMA_BENCH_GGUF_PATH` --
 /// same env var and same default host path `q4k_real_checkpoint_parity.rs`
 /// reads, since this file is closest kin to that one (a `Q4_K` matvec over
@@ -1573,7 +1576,7 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         weight_slices.iter().map(|slice| QuantizedBlock::Q4K(slice)).collect();
     blocks.push(QuantizedBlock::Float32(&activation));
 
-    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums, NumericPolicy::default())
+    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums, production_numeric_policy())
         .expect("plan resolves the real production q4_k matmul over every ffn tensor");
     let mut resident_names: BTreeSet<&str> = weight_names.iter().map(String::as_str).collect();
     resident_names.insert("activation");
@@ -1943,7 +1946,7 @@ fn run_shape_arm(
         weight_slices.iter().map(|slice| codec.quantized_block(slice)).collect();
     blocks.push(QuantizedBlock::Float32(&activation));
 
-    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums, NumericPolicy::default())
+    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums, production_numeric_policy())
         .expect("plan resolves the synthetic matmul over every tensor");
     // ROW 334 found that marking these weight nodes resident bought no real
     // saving and was UNSOUND: this shape's own byte size (a multiple of the
@@ -2844,7 +2847,7 @@ fn run_head_arm(
     let mut blocks = blocks_weights;
     blocks.push(QuantizedBlock::Float32(&activation));
 
-    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums, NumericPolicy::default())
+    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums, production_numeric_policy())
         .expect("plan resolves the output-head matmul over every weight input");
     // ROW 334: weight nodes are resident-eligible ONLY for `RealNoCopy` --
     // that branch aliases the SAME real, mmap'd, process-lifetime tensor
@@ -3231,8 +3234,9 @@ fn production_reduce_kernel(
     let weight_node = NodeId(0);
     let activation_node = NodeId(1);
 
+    let production_policy = production_numeric_policy();
     let shapes = infer(&program, &[]).expect("production reduce program's shapes infer");
-    let mut bound_ops = bind(&program, &shapes, &sums, NumericPolicy::default()).expect("production reduce program binds");
+    let mut bound_ops = bind(&program, &shapes, &sums, production_policy).expect("production reduce program binds");
     // `bind()` alone lays out the weight operand row-major over its DECLARED
     // axis order (`correct_packed_matmul_layouts`'s own doc) -- wrong for a
     // packed `Q4_K`/`Q6_K` weight's real on-disk bytes. `omega::metal::prepare`
@@ -3250,7 +3254,7 @@ fn production_reduce_kernel(
 
     let packed_operands: omega::PackedOperands = BTreeMap::from([(weight_node, codec)]);
     let kernel =
-        omega::emit(&bound, &packed_operands, proxima_tensor::NumericPolicy::default()).expect("production reduce fold emits an MSL kernel");
+        omega::emit(&bound, &packed_operands, production_policy).expect("production reduce fold emits an MSL kernel");
 
     let weight_index = kernel
         .bindings
@@ -3284,7 +3288,17 @@ fn production_reduce_kernel(
     } else {
         kernel.source.clone()
     };
-    let pipeline = compile_pipeline(device, &source, &kernel.entry, MTLMathMode::Relaxed);
+    // derived from `production_policy`, never a hardcoded `MathMode` literal --
+    // a hardcoded mode next to a `default()` bind/emit is exactly ROW 374's
+    // defect (kernel emitted under one policy, compiled under another).
+    let math_mode = if production_policy.grants(NumericPolicy::fast()) {
+        MTLMathMode::Fast
+    } else if production_policy.grants(NumericPolicy::llama_relaxed()) {
+        MTLMathMode::Relaxed
+    } else {
+        MTLMathMode::Safe
+    };
+    let pipeline = compile_pipeline(device, &source, &kernel.entry, math_mode);
     let threadgroup_width = kernel.grid.threadgroup_width.unwrap_or(64) as usize;
 
     ProductionKernel {

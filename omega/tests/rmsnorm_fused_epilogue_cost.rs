@@ -56,7 +56,7 @@ use proxima_tensor::{
 };
 
 mod support;
-use support::as_named_blocks;
+use support::{as_named_blocks, production_numeric_policy};
 
 const REPEATS: usize = 7;
 const INSTANCES: usize = 32;
@@ -297,7 +297,8 @@ fn run_cell(label: &str, seq: u32, dim: u32, fused: bool) {
     let named_blocks = as_named_blocks(&named);
 
     let shapes = infer(&program, &symbols).expect("rmsnorm batch program infers");
-    let resolved = bind(&program, &shapes, &roots, NumericPolicy::default()).expect("rmsnorm batch program binds");
+    let resolved =
+        bind(&program, &shapes, &roots, production_numeric_policy()).expect("rmsnorm batch program binds");
     let fused_count = epilogued_reduce_count(&resolved);
     println!(
         "=== ROW 368 {label} seq={seq} dim={dim} fused_requested={fused} \
@@ -330,7 +331,7 @@ fn run_cell(label: &str, seq: u32, dim: u32, fused: bool) {
         &symbols,
         &named_blocks,
         &roots,
-        NumericPolicy::default(),
+        production_numeric_policy(),
     )
     .expect("metal plans the rmsnorm batch");
 
