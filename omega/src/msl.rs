@@ -4975,6 +4975,56 @@ fn push_packed_row_group_bases(
     source.push_str("    }\n");
 }
 
+/// Every source marker a packed-row-blocked body arm below can emit, owned
+/// here next to the bodies that emit them so a new arm's marker is added in
+/// ONE place. [`crate::metal::classify_kind`] (the profiler's own
+/// classifier, source-greps this same emitted text over in `metal.rs`)
+/// consults this list instead of restating its own copy -- the restated copy
+/// is exactly what went stale: it carried `q4k_pair_dot(blk`/`q4k_run8(blk`/
+/// `q5k_pair_dot(blk`/`q5k_value(blk`/`q6k_value(blk`/`acc1_0` but missed
+/// `q3k_pair_dot(blk` (this file, the `Q3K if plain_product` arm above),
+/// `q3k_element(blk` (the `Q3K` per-element fallback), and `q6k_pair_dot(blk`
+/// (the `Q6K if plain_product` arm) -- every Q3_K row-blocked dispatch and
+/// every plain-product Q6_K dispatch (the shape the openchat output head
+/// actually takes) undercounted into `"reduce-cooperative"`. A fourth gap
+/// found by the lowering census test this same landing adds: `metal`'s own
+/// feature list turns `metal-q4k-ggml-port` ON by default (`Cargo.toml`'s
+/// `metal = [.., "metal-q4k-ggml-port"]`), and [`push_q6k_ggml_port_body`]
+/// -- unlike its `Q4_K`/`Q5_K` siblings, which share `acc1_0` -- calls none
+/// of the named helpers and has no `acc1_0` accumulator either, so it fell
+/// through this same list even after the first three additions. `"sums0"`
+/// closes it (unique to that function's own per-thread partial sums).
+// sole caller is `crate::metal::classify_kind`, gated on `metal` (macOS-only
+// driver) AND `instrument` (diagnostic-only) -- this crate's `msl` module
+// itself only needs `alloc`, so a build with neither compiles this table
+// with nothing left to call it.
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos", feature = "instrument")),
+    allow(dead_code, reason = "sole caller is the macOS-only, instrument-gated profiler")
+)]
+pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
+    "q3k_pair_dot(blk",
+    "q3k_element(blk",
+    "q4k_pair_dot(blk",
+    // `push_packed_row_multi_row_body`'s own Q4_K-specific staged decode
+    // (landed on main while this fix was in flight, found again at rebase
+    // time by this same list) -- same gap, same fix, one more marker.
+    "q4k_pair_dot_mr(blk",
+    "q4k_run8(blk",
+    "q5k_pair_dot(blk",
+    "q5k_value(blk",
+    "q6k_pair_dot(blk",
+    "q6k_value(blk",
+    // unique to `push_q4k_ggml_port_body`/`push_q5k_ggml_port_body`'s
+    // per-thread accumulator naming -- those bodies call none of the
+    // helpers above by name, that is the whole point of the ggml port.
+    "acc1_0",
+    // unique to `push_q6k_ggml_port_body`'s own per-thread partial sums --
+    // that body shares neither `acc1_0` nor any named helper call with its
+    // Q4_K/Q5_K ggml-port siblings.
+    "sums0",
+];
+
 #[allow(clippy::too_many_arguments)]
 fn push_packed_row_blocked_body(
     source: &mut String,
