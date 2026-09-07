@@ -7067,12 +7067,10 @@ fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Result<Option<&MetalBu
 }
 
 /// Element count (f32) [`Plan::attention_scratch`] reserves for one
-/// `CachedAttention` position -- `query_rows * heads * max_splits *
+/// `CachedAttention` position -- `query_rows * heads * splits *
 /// (2 + head_dim)`, redesign §4c's own formula: `2` for the running
 /// `(max, sum)` pair, `head_dim` for the un-normalized weighted-value
-/// accumulator, one such record per compiled MAXIMUM split
-/// (`crate::sized::ATTENTION_SPLIT_MAX`) so the buffer never needs
-/// resizing when the live policy narrows or widens. `query_rows * heads`
+/// accumulator, one such record per split. `query_rows * heads`
 /// is `resolved.extents.product() / head_dim` -- the SAME `total_elements`
 /// [`crate::msl::grid_threads`]'s `CachedAttention` arm already derives.
 /// `None` for every other op kind. Used both by [`Plan::attention_scratch`]'s
@@ -7080,12 +7078,43 @@ fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Result<Option<&MetalBu
 /// (no `Plan` to own a buffer, so a fresh one is sized with this exact
 /// formula every call -- the same "no placement, fresh `allocate_buffer`"
 /// shape `output` itself already falls back to).
-fn cached_attention_scratch_len(bound: &BoundOp) -> Option<u64> {
-    let BoundOpKind::CachedAttention { head_dim, .. } = &bound.kind else {
+///
+/// `splits` is the compiled MAXIMUM (`crate::sized::ATTENTION_SPLIT_MAX`)
+/// only at `query_rows == 1` (decode: one query row per dispatch) -- there,
+/// reserving the max up front is what lets a `Plan` grow its own live
+/// context length token by token, all the way to `ATTENTION_SPLIT_MAX`
+/// splits, without this buffer ever needing to resize mid-stream. At
+/// `query_rows > 1` (prefill: every row in the batch sharing ONE dispatch)
+/// that same per-row headroom multiplies `query_rows` times the FULL
+/// compiled max, not the [`crate::msl::splits_for`] value this call's own
+/// (fixed, already-known) `context_length` will ever actually dispatch --
+/// production crash: a 900-row prefill at `head_dim=128`/`heads=32`
+/// requested `900 * 32 * 32 * 130 * 4` bytes (~479 MB) PER LAYER against
+/// that always-max headroom (~17 GB across a 36-layer forward), which no
+/// device honors -- `allocate_buffer`'s `newBufferWithLength_options`
+/// returned `None`, surfaced as `MetalError::CompileFailed` once
+/// [`EncoderGuard`] stopped that `Err` from crashing the process outright.
+/// Prefill's context length cannot grow after this call the way decode's
+/// does, so there is nothing to protect against by over-reserving: sizing
+/// against the real split count is exact, not merely smaller.
+fn cached_attention_scratch_len(bound: &BoundOp, numeric_policy: NumericPolicy) -> Option<u64> {
+    let BoundOpKind::CachedAttention {
+        head_dim,
+        query_rows,
+        cached_key_rows,
+        new_key_rows,
+        ..
+    } = &bound.kind
+    else {
         return None;
     };
     let total_elements = bound.extents.iter().product::<u64>().checked_div(*head_dim)?;
-    Some(total_elements * crate::sized::ATTENTION_SPLIT_MAX * (2 + head_dim))
+    let splits = if *query_rows > 1 {
+        crate::msl::splits_for(cached_key_rows + new_key_rows, numeric_policy)
+    } else {
+        crate::sized::ATTENTION_SPLIT_MAX
+    };
+    Some(total_elements * splits * (2 + head_dim))
 }
 
 /// [`Plan::attention_scratch`]'s lazy builder, built alongside [`PlanUniforms`]
@@ -7097,7 +7126,7 @@ fn attention_scratch_buffer(plan: &Plan, position: usize) -> Result<Option<&Meta
         let (device, _queue) = device_and_queue()?;
         let mut buffers = Vec::with_capacity(plan.prepared.resolved.len());
         for bound in &plan.prepared.resolved {
-            let buffer = match cached_attention_scratch_len(bound) {
+            let buffer = match cached_attention_scratch_len(bound, plan.numeric_policy) {
                 Some(elements) => Some(allocate_buffer(&device, elements as usize, DType::Float32)?),
                 None => None,
             };
@@ -7334,7 +7363,7 @@ fn encode_op(
     let owned_scratch: Option<MetalBuffer> = if scratch.is_none() && merge.is_some() {
         Some(allocate_buffer(
             device,
-            cached_attention_scratch_len(bound).unwrap_or(0) as usize,
+            cached_attention_scratch_len(bound, numeric_policy).unwrap_or(0) as usize,
             DType::Float32,
         )?)
     } else {
@@ -9016,6 +9045,128 @@ mod hazard_tracker_tests {
             barrier1,
             "a RAW hazard against a buffer just written must barrier even when the read arrived \
              through a binding slot no separate operand table names"
+        );
+    }
+}
+
+/// Production crash (2026-09-07): `-[_MTLCommandEncoder dealloc]: failed
+/// assertion 'Command encoder released without endEncoding'`, caught here at
+/// its true root instead of the assertion it manifested as. A pure-CPU
+/// module -- [`cached_attention_scratch_len`] never touches a device -- so
+/// these run on any host, without `metal-plan-stable-buffers` or a GPU.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod attention_scratch_len_tests {
+    use alloc::vec;
+
+    use proxima_tensor::{BoundOpKind, DType, Layout, NodeId, NumericPolicy};
+
+    use super::{BoundOp, cached_attention_scratch_len};
+
+    /// The real openchat decode shape's own dims (`omega/tests/
+    /// row_376_cached_attention_batched.rs`'s `QUERY_HEADS`/`KV_HEADS`/
+    /// `HEAD_DIM`), at `query_rows` and `cached_key_rows + new_key_rows` set
+    /// by the caller -- one dispatch's worth of `CachedAttention`.
+    fn openchat_shaped_bound(query_rows: u64, cached_key_rows: u64, new_key_rows: u64) -> BoundOp {
+        const KV_HEADS: u64 = 8;
+        const QUERY_GROUPS: u64 = 4;
+        const HEAD_DIM: u64 = 128;
+        let operands = (0..8)
+            .map(|index| {
+                (
+                    NodeId(index),
+                    Layout {
+                        base: 0,
+                        strides: vec![1].into(),
+                    },
+                    None,
+                )
+            })
+            .collect();
+        BoundOp {
+            node: NodeId(8),
+            dtype: DType::Float32,
+            extents: vec![query_rows, KV_HEADS, QUERY_GROUPS, HEAD_DIM],
+            kind: BoundOpKind::CachedAttention {
+                operands,
+                query_rows,
+                cached_key_rows,
+                new_key_rows,
+                kv_heads: KV_HEADS,
+                query_groups: QUERY_GROUPS,
+                head_dim: HEAD_DIM,
+                scale: 0.5,
+                cached_lower_inclusive: i64::MIN,
+                new_upper_inclusive: 0,
+            },
+        }
+    }
+
+    /// ROW: a decode dispatch (`query_rows == 1`) still reserves the
+    /// COMPILED MAXIMUM split count, unchanged from before this fix -- a
+    /// live decode's own context length grows one key per token, all the
+    /// way to `ATTENTION_SPLIT_MAX` splits, and this buffer must never need
+    /// to resize mid-stream to keep up with it.
+    #[test]
+    fn decode_dispatch_still_reserves_the_compiled_split_maximum() {
+        let bound = openchat_shaped_bound(1, 0, 4096);
+        let elements = cached_attention_scratch_len(&bound, NumericPolicy::llama_relaxed())
+            .expect("a CachedAttention bound always yields a scratch length");
+        let expected_heads = 8 * 4;
+        let expected = expected_heads * crate::sized::ATTENTION_SPLIT_MAX * (2 + 128);
+        assert_eq!(
+            elements, expected,
+            "decode (query_rows == 1) must keep reserving ATTENTION_SPLIT_MAX splits"
+        );
+    }
+
+    /// ROW: the production crash. Before this fix, a 900-row prefill at
+    /// this exact shape requested `900 * 32 * 32 * 130 * 4` bytes (~479 MB)
+    /// of scratch for ONE `CachedAttention` op -- ~17 GB across a 36-layer
+    /// forward, which no device honors. This test uses 1024 rows (the
+    /// owner's own re-prove shape) and asserts the byte length actually
+    /// requested now, plus the exact 4x reduction the real split count
+    /// (`splits_for(1024, ..) == 8`, vs. the compiled max `32`) predicts --
+    /// tying the byte count to the mechanism, not just a smaller number.
+    #[test]
+    fn prefill_dispatch_sizes_scratch_by_the_real_split_count_not_the_compiled_max() {
+        let context_length = 1024;
+        let bound = openchat_shaped_bound(1024, 0, context_length);
+        let policy = NumericPolicy::llama_relaxed();
+
+        let after_elements = cached_attention_scratch_len(&bound, policy)
+            .expect("a CachedAttention bound always yields a scratch length");
+        let after_bytes = after_elements * 4;
+
+        let real_splits = crate::msl::splits_for(context_length, policy);
+        let total_elements = 1024 * 8 * 4;
+        let expected_after = total_elements * real_splits * (2 + 128);
+        let before_elements = total_elements * crate::sized::ATTENTION_SPLIT_MAX * (2 + 128);
+        let before_bytes = before_elements * 4;
+
+        std::println!(
+            "cached_attention_scratch_len: context_length={context_length} \
+             real_splits={real_splits} compiled_max={} \
+             before_bytes={before_bytes} after_bytes={after_bytes} \
+             reduction={:.1}x",
+            crate::sized::ATTENTION_SPLIT_MAX,
+            before_bytes as f64 / after_bytes as f64,
+        );
+
+        assert_eq!(
+            after_elements, expected_after,
+            "prefill (query_rows > 1) must size scratch off the REAL split count"
+        );
+        assert!(
+            real_splits < crate::sized::ATTENTION_SPLIT_MAX,
+            "this shape is only a meaningful regression check if the real split count is \
+             actually smaller than the compiled max -- otherwise the fix and the pre-fix \
+             formula agree by coincidence, not by the mechanism this test asserts"
+        );
+        assert!(
+            after_bytes < before_bytes,
+            "the fix must always request fewer bytes than the pre-fix always-max formula: \
+             before={before_bytes} after={after_bytes}"
         );
     }
 }
