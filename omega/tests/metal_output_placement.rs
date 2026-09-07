@@ -14,7 +14,9 @@
 #![cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::{DType, Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
+use proxima_tensor::{
+    DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
+};
 
 /// `Input(extent) -> Elementwise(Identity)` — the smallest program whose
 /// output is byte-exact-equal to its input, so parity between what was
@@ -50,8 +52,14 @@ fn a_placed_buffer_holds_both_runs_data_at_their_own_offsets() {
     const SECOND_RUN_OFFSET: usize = RUN_BYTES;
 
     let (program, identity_node) = identity_program(EXTENT);
-    let plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&[0.0; EXTENT as usize])], &[])
-        .expect("plans the identity program once, reused by both runs below");
+    let plan = omega::plan(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&[0.0; EXTENT as usize])],
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("plans the identity program once, reused by both runs below");
 
     let buffer = omega::allocate_placed_buffer(RUN_BYTES * 2)
         .expect("allocates one caller-owned buffer sized for both runs' outputs");
@@ -124,6 +132,7 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
         &[],
         &[QuantizedBlock::Float32(&[0.0; PREFIX_LEN as usize])],
         &[],
+        NumericPolicy::default(),
     )
     .expect("plans the prefix-seeding program");
     let prefix = [100.0f32, 200.0, 300.0, 400.0];
@@ -196,6 +205,7 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
             QuantizedBlock::Float32(&[0.0; TOTAL_LEN as usize]),
         ],
         &[row_out, cache_out],
+        NumericPolicy::default(),
     )
     .expect("plans the read-after-placed-write program");
 

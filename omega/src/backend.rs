@@ -362,6 +362,7 @@ pub fn plan_named(
     _symbols: &[u64],
     _named: &[(&str, QuantizedBlock<'_>)],
     _outputs: &[NodeId],
+    _numeric_policy: NumericPolicy,
 ) -> Result<Plan, BackendError> {
     match engine {
         Engine::Cpu => {
@@ -385,7 +386,7 @@ pub fn plan_named(
                 GpuDriver::Metal => {
                     #[cfg(all(feature = "metal", target_os = "macos"))]
                     {
-                        plan_named_metal(_program, _symbols, _named, _outputs)
+                        plan_named_metal(_program, _symbols, _named, _outputs, _numeric_policy)
                     }
                     #[cfg(not(all(feature = "metal", target_os = "macos")))]
                     {
@@ -489,21 +490,28 @@ pub fn mark_resident(plan: &mut Plan, resident_names: &std::collections::BTreeSe
     }
 }
 
-/// Sets [`metal::MathMode`] on [`Plan::Metal`] -- see that type's own doc
+/// Narrows [`metal::MathMode`] on [`Plan::Metal`] -- see that type's own doc
 /// for the measured rationale (`proxima-tensor/docs/discipline.md` ROW
-/// 296/297). A no-op on every other arm: `Plan::Cpu`'s interpreter has no
-/// `MTLCompileOptions` to set, and v1's `wgpu_driver::WgpuPlan` has no
-/// analogous knob. Gated on `metal`+macos (unlike [`mark_resident`]) because
-/// its own parameter, [`metal::MathMode`], only exists in that build.
+/// 296/297) and [`metal::Plan::set_math_mode`]'s own doc for why this can
+/// now fail (a `math_mode` needing a permission the plan's bound
+/// [`NumericPolicy`] does not grant). A no-op `Ok(())` on every other arm:
+/// `Plan::Cpu`'s interpreter has no `MTLCompileOptions` to set, and v1's
+/// `wgpu_driver::WgpuPlan` has no analogous knob. Gated on `metal`+macos
+/// (unlike [`mark_resident`]) because its own parameter,
+/// [`metal::MathMode`], only exists in that build.
+///
+/// # Errors
+/// [`metal::MetalError::NumericPolicyMismatch`] when `math_mode` needs a
+/// permission the plan's bound policy does not grant.
 #[cfg(all(feature = "metal", target_os = "macos"))]
-pub fn set_math_mode(plan: &mut Plan, math_mode: metal::MathMode) {
+pub fn set_math_mode(plan: &mut Plan, math_mode: metal::MathMode) -> Result<(), metal::MetalError> {
     match plan {
         #[cfg(feature = "cpu")]
-        Plan::Cpu(_) => {}
+        Plan::Cpu(_) => Ok(()),
         #[cfg(all(feature = "metal", target_os = "macos"))]
         Plan::Metal(metal_plan) => metal_plan.set_math_mode(math_mode),
         #[cfg(feature = "wgpu-backend")]
-        Plan::Wgpu(_) => {}
+        Plan::Wgpu(_) => Ok(()),
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
@@ -526,33 +534,6 @@ pub fn set_dispatch_type(plan: &mut Plan, dispatch_type: metal::DispatchType) {
         Plan::Cpu(_) => {}
         #[cfg(all(feature = "metal", target_os = "macos"))]
         Plan::Metal(metal_plan) => metal_plan.set_dispatch_type(dispatch_type),
-        #[cfg(feature = "wgpu-backend")]
-        Plan::Wgpu(_) => {}
-        #[cfg(not(any(
-            feature = "cpu",
-            all(feature = "metal", target_os = "macos"),
-            feature = "wgpu-backend"
-        )))]
-        _ => match *plan {},
-    }
-}
-
-/// Sets [`NumericPolicy`] on [`Plan::Metal`] -- see
-/// [`metal::Plan::set_numeric_policy`]'s own doc for the ladder this
-/// governs and why it is the richer, orthogonal axis next to
-/// [`metal::MathMode`]. A no-op on every other arm, same reasoning as
-/// [`set_math_mode`]: `Plan::Cpu`'s interpreter and v1's `WgpuPlan` have no
-/// analogous knob. Gated on `metal`+macos to match `set_math_mode`/
-/// `set_dispatch_type`'s own gate, even though [`NumericPolicy`] itself is
-/// unconditionally available -- every call site threading it in today only
-/// exists inside that same gate.
-#[cfg(all(feature = "metal", target_os = "macos"))]
-pub fn set_numeric_policy(plan: &mut Plan, numeric_policy: NumericPolicy) {
-    match plan {
-        #[cfg(feature = "cpu")]
-        Plan::Cpu(_) => {}
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        Plan::Metal(metal_plan) => metal_plan.set_numeric_policy(numeric_policy),
         #[cfg(feature = "wgpu-backend")]
         Plan::Wgpu(_) => {}
         #[cfg(not(any(
@@ -621,8 +602,9 @@ fn plan_named_metal(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'_>)],
     outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
 ) -> Result<Plan, BackendError> {
-    let plan = metal::plan_named(program, symbols, named, outputs)?;
+    let plan = metal::plan_named(program, symbols, named, outputs, numeric_policy)?;
     // `.into()` covers both `MetalPlanHandle` shapes: identity when it is
     // `metal::Plan` itself, `Box::from` (`impl<T> From<T> for Box<T>`) when
     // `metal-plan-stable-buffers` makes it `Box<metal::Plan>`.

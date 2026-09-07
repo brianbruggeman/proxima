@@ -139,7 +139,7 @@ pub struct CudaGridSpec {
 /// );
 ///
 /// let shapes = proxima_tensor::infer(&program, &[])?;
-/// let bound_ops = proxima_tensor::bind(&program, &shapes, &[])?;
+/// let bound_ops = proxima_tensor::bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default())?;
 /// let packed_operands = omega::PackedOperands::new();
 /// let kernel = omega::emit_cuda(&bound_ops[0], &packed_operands)?;
 /// assert!(kernel.source.contains("extern \"C\" __global__"));

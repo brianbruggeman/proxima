@@ -22,7 +22,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
-use proxima_tensor::{BoundOpKind, bind};
+use proxima_tensor::{BoundOpKind, NumericPolicy, bind};
 
 mod support;
 use support::{as_named_blocks, real_single_range_forward_fixture_with_padding};
@@ -42,8 +42,8 @@ fn assert_parity_at_padding(padding: u64) {
 
     let shapes = proxima_tensor::infer(&program, &symbols)
         .expect("single-range padded fixture infers");
-    let resolved =
-        bind(&program, &shapes, &output_roots).expect("single-range padded fixture binds");
+    let resolved = bind(&program, &shapes, &output_roots, NumericPolicy::default())
+        .expect("single-range padded fixture binds");
     let fused = resolved
         .iter()
         .find(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
@@ -67,8 +67,14 @@ fn assert_parity_at_padding(padding: u64) {
     )
     .expect("cpu runs the padded single-range program");
 
-    let plan = omega::plan_named(&program, &symbols, &named, &output_roots)
-        .expect("metal plans the padded single-range program");
+    let plan = omega::plan_named(
+        &program,
+        &symbols,
+        &named,
+        &output_roots,
+        NumericPolicy::default(),
+    )
+    .expect("metal plans the padded single-range program");
     let metal = omega::execute_plan_named(&plan, &named)
         .expect("metal runs the padded single-range program on a real device");
 

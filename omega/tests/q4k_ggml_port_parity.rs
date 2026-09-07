@@ -26,8 +26,8 @@ use proxima_gguf::quant::q4_k::{self, BLOCK_BYTES, QK_K, quantize};
 use proxima_gguf::types::GgmlType;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, evaluate, map,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, evaluate, map,
 };
 
 fn real_gguf_path() -> String {
@@ -218,6 +218,7 @@ fn assert_matches_dequantized_oracle(
             QuantizedBlock::Float32(activation),
         ],
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .unwrap_or_else(|error| panic!("{label}: metal executes the ggml-port q4_k matvec: {error}"));
 

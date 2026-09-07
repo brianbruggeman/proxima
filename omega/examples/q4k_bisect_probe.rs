@@ -114,7 +114,14 @@ fn run() {
             QuantizedBlock::Float32(&activation),
         ];
         let cpu = evaluate_quantized(&program, &[], &blocks, &[sum]).expect("cpu runs");
-        let plan = omega::plan(&program, &[], &blocks, &[sum]).expect("metal plans");
+        let plan = omega::plan(
+            &program,
+            &[],
+            &blocks,
+            &[sum],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("metal plans");
         let metal = omega::execute_plan(&plan, &blocks).expect("metal runs");
 
         let cpu_root = cpu.root();

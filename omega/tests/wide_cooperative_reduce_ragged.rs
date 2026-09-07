@@ -14,8 +14,8 @@
 
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append,
-    evaluate, infer, projection,
+    DType, Extent, IndexMap, Keep, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, evaluate, infer, projection,
 };
 
 /// Peak-magnitude-normalized relative error, never per-row -- a per-row
@@ -124,8 +124,14 @@ fn assert_wide_reduce_parity(case: &str, cols: u32, body: ScalarOp, init: Reduce
     infer(&program, &[]).unwrap_or_else(|error| panic!("{case} cols={cols}: infers: {error}"));
     let cpu = evaluate(&program, &[], &[input], &[])
         .unwrap_or_else(|error| panic!("{case} cols={cols}: cpu evaluates: {error}"));
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(input)], &[])
-        .unwrap_or_else(|error| panic!("{case} cols={cols}: metal executes on a real device: {error}"));
+    let metal = omega::execute(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(input)],
+        &[],
+        NumericPolicy::default(),
+    )
+    .unwrap_or_else(|error| panic!("{case} cols={cols}: metal executes on a real device: {error}"));
 
     assert_eq!(
         cpu.root().len(),

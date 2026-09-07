@@ -12,6 +12,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
+use proxima_tensor::NumericPolicy;
 
 mod support;
 use support::{as_named_blocks, real_forward_fixture};
@@ -23,7 +24,7 @@ fn the_wrapper_agrees_with_itself_across_cpu_and_metal() {
     let (program, symbols, roots, owned) = real_forward_fixture();
     let named = as_named_blocks(&owned);
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &symbols, &named, &roots)
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &symbols, &named, &roots, NumericPolicy::default())
         .expect("omega::backend plans the real forward on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
         .expect("omega::backend runs the real forward on cpu");
@@ -35,6 +36,7 @@ fn the_wrapper_agrees_with_itself_across_cpu_and_metal() {
         &symbols,
         &named,
         &roots,
+        NumericPolicy::default(),
     )
     .expect("omega::backend plans the real forward on metal");
     let metal = execute_plan_named(&mut metal_plan, &named)
@@ -80,7 +82,7 @@ fn the_same_process_runs_one_plan_on_cpu_and_the_next_on_metal() {
     let named = as_named_blocks(&owned);
 
     let mut cpu_plan =
-        plan_named(Engine::Cpu, None, &program, &symbols, &named, &roots).expect("cpu plans first");
+        plan_named(Engine::Cpu, None, &program, &symbols, &named, &roots, NumericPolicy::default()).expect("cpu plans first");
     let _cpu = execute_plan_named(&mut cpu_plan, &named).expect("cpu executes first");
 
     let mut metal_plan = plan_named(
@@ -90,6 +92,7 @@ fn the_same_process_runs_one_plan_on_cpu_and_the_next_on_metal() {
         &symbols,
         &named,
         &roots,
+        NumericPolicy::default(),
     )
     .expect("metal plans immediately after, same process");
     let _metal =

@@ -24,7 +24,7 @@
 use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
 use proxima_onnx::lower::lower_graph;
 use proxima_onnx::pipe::parse_complete;
-use proxima_tensor::QuantizedBlock;
+use proxima_tensor::{NumericPolicy, QuantizedBlock};
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     values
@@ -284,8 +284,16 @@ fn an_onnx_lowered_mlp_runs_on_metal_at_cpu_parity_through_the_backend_wrapper()
         .1;
     let roots = [output_node];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &lowered.program, &[], &named, &roots)
-        .expect("omega::backend plans the onnx-lowered mlp on cpu");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &lowered.program,
+        &[],
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the onnx-lowered mlp on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
         .expect("omega::backend runs the onnx-lowered mlp on cpu");
 
@@ -296,6 +304,7 @@ fn an_onnx_lowered_mlp_runs_on_metal_at_cpu_parity_through_the_backend_wrapper()
         &[],
         &named,
         &roots,
+        NumericPolicy::default(),
     )
     .expect("omega::backend plans the onnx-lowered mlp on metal");
     let metal = execute_plan_named(&mut metal_plan, &named)

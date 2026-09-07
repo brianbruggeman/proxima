@@ -23,7 +23,9 @@
 use std::collections::BTreeSet;
 
 use proxima_tensor::spec::mistral_cached_forward_program;
-use proxima_tensor::{BoundOpKind, Keep, NodeId, bind, correct_packed_matmul_layouts, infer};
+use proxima_tensor::{
+    BoundOpKind, Keep, NodeId, NumericPolicy, bind, correct_packed_matmul_layouts, infer,
+};
 
 /// One row of step 1's rejection table: how many ops in this (tensor family,
 /// gate) bucket share this shape, and the shape itself -- printed rather than
@@ -120,7 +122,8 @@ fn main() {
     // real driver ALWAYS runs this post-pass before `emit`. Calling plain
     // `bind` without it here would diagnose a stride nothing in production
     // ever emits.
-    let mut bound = bind(&program, &shapes, &roots).expect("the real forward binds");
+    let mut bound =
+        bind(&program, &shapes, &roots, NumericPolicy::default()).expect("the real forward binds");
     correct_packed_matmul_layouts(&mut bound, &q4k_operands);
 
     let mut reduce_with_packed_operand = 0usize;

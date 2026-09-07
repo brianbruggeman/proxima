@@ -27,8 +27,8 @@ use std::io::{Read, Seek, SeekFrom};
 
 use proxima_safetensors::{Manifest, SafetensorsParser};
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, evaluate, map,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, evaluate, map,
 };
 
 const REAL_QWEN3_SAFETENSORS_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/lmstudio-community/Qwen3-30B-A3B-MLX-4bit/model-00001-of-00004.safetensors";
@@ -180,6 +180,7 @@ fn metal_matmul_on_real_mlp_gate_biases_bf16_bytes_matches_the_dequantized_f32_c
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .expect("metal executes a bf16 matmul on real mlp.gate.biases bytes");
 

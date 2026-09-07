@@ -43,7 +43,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, projection,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append,
+    projection,
 };
 
 const QK_K: usize = 256;
@@ -144,8 +145,8 @@ fn single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_bod
     let shapes = proxima_tensor::infer(&program, &[]).expect("the synthetic program infers");
     let packed_operands: omega::PackedOperands =
         [(NodeId(0), omega::PackedCodec::Q4K)].into_iter().collect();
-    let mut bound =
-        proxima_tensor::bind(&program, &shapes, &[sum]).expect("the synthetic program binds");
+    let mut bound = proxima_tensor::bind(&program, &shapes, &[sum], NumericPolicy::default())
+        .expect("the synthetic program binds");
     proxima_tensor::correct_packed_matmul_layouts(&mut bound, &[NodeId(0)].into_iter().collect());
     let resolved = bound
         .iter()

@@ -23,8 +23,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, projection,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, projection,
 };
 
 /// `PROXIMA_METAL_KIND_FILTER` is process-global; this file's own three
@@ -127,7 +127,14 @@ fn ran_flags(
         .collect();
     let output_nodes: Vec<NodeId> = outputs.iter().map(|(node, _)| *node).collect();
     let plan =
-        omega::plan(&program, &[], &quantized, &output_nodes).expect("plans the named family program");
+        omega::plan(
+            &program,
+            &[],
+            &quantized,
+            &output_nodes,
+            NumericPolicy::default(),
+        )
+        .expect("plans the named family program");
 
     // `ENV_SERIAL` covers the whole set/run/clear span: `PROXIMA_METAL_KIND_FILTER`
     // is process-global, and this file's tests race it under a

@@ -132,7 +132,7 @@ fn run_cpu_arm() {
 #[cfg(all(feature = "metal", feature = "cpu", target_os = "macos"))]
 fn run_metal_arm() {
     use proxima_tensor::{
-        DType, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, map,
+        DType, Extent, IndexMap, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, map,
     };
 
     // pipe question: `Op::Elementwise` with a unary `Negate` body and an
@@ -179,7 +179,8 @@ fn run_metal_arm() {
             .collect();
         let (program, copy) = streaming_copy_program(elements);
         let blocks = [QuantizedBlock::Float32(&data)];
-        let resolved = omega::plan(&program, &[], &blocks, &[copy]).expect("membw probe plans");
+        let resolved = omega::plan(&program, &[], &blocks, &[copy], NumericPolicy::default())
+            .expect("membw probe plans");
         omega::execute_plan(&resolved, &blocks).expect("membw probe warms up");
         let mut samples = Vec::with_capacity(runs);
         for _ in 0..runs {

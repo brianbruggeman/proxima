@@ -24,8 +24,8 @@ use proxima_gguf::quant::q5_k;
 use proxima_gguf::types::GgmlType;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, evaluate, map,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, evaluate, map,
 };
 
 const REAL_OPENCHAT_GGUF_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
@@ -232,6 +232,7 @@ fn run_real_ffn_down_parity(relative_tolerance: f32) {
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .expect("metal executes a packed q5_k matmul on real blk.0.ffn_down.weight bytes");
 

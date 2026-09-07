@@ -109,36 +109,43 @@ pub(crate) struct MetalOnlyExtras {
     pub packed_row_block_direct_axis: Option<u16>,
     /// [`numeric_policy_cache_token`] for the `Plan` compiling this op —
     /// folded in here instead of `MathMode::cache_token()` (what this field
-    /// held before): `NumericPolicy` is a 4-rung ladder,
-    /// `metal::numeric_policy_as_metal_math_mode` collapses two adjacent
-    /// rungs onto the same `MathMode` (`BitExact` and
-    /// `FusedNoReassociation` both compile `Safe`), so the `MathMode` token
-    /// alone could not tell a `BitExact`-compiled kernel apart from a
-    /// `FusedNoReassociation`-compiled one. The policy token is strictly
-    /// finer than the math-mode token it replaces and subsumes it
-    /// completely — every op below folds `numeric_policy` into its cache
-    /// key ONLY through this field, never a separate math-mode token.
-    pub numeric_policy_token: Option<char>,
+    /// held before): `NumericPolicy` is a 5-bit independent permission set,
+    /// not a total order, so no single `MathMode` value can stand in for
+    /// it (`metal::numeric_policy_as_metal_math_mode` maps many distinct
+    /// permission sets onto the same 3-rung `MathMode`). The policy token
+    /// is strictly finer than the math-mode token it replaces and subsumes
+    /// it completely — every op below folds `numeric_policy` into its
+    /// cache key ONLY through this field, never a separate math-mode token.
+    pub numeric_policy_token: Option<[u8; 2]>,
 }
 
-/// `numeric_policy`'s single-character identity token — one letter per
-/// rung on the `BitExact < FusedNoReassociation < ReassociationPermitted <
-/// FastMath` ladder (`proxima_tensor::NumericPolicy`'s own doc), so two
-/// `Plan`s agreeing on every structural field but compiled under different
-/// policies never share a `PIPELINE_CACHE` entry ([`MetalOnlyExtras::
-/// numeric_policy_token`]'s own doc explains why this replaced the coarser
-/// `MathMode` token). `NumericPolicy` is `#[non_exhaustive]`, so the
-/// wildcard arm folds any future rung above `FastMath` onto `'F'` — the
-/// same "future rung compiles under the topmost mode" posture
-/// `metal::numeric_policy_as_metal_math_mode` already takes.
+/// `numeric_policy`'s two-hex-digit identity token — one bit per
+/// permission (`proxima_tensor::NumericPolicy`'s own five `pub bool`
+/// fields), rendered via a const lookup table (no `alloc`, no `format!`) so
+/// two `Plan`s agreeing on every structural field but compiled under
+/// different permission sets never share a `PIPELINE_CACHE` entry
+/// ([`MetalOnlyExtras::numeric_policy_token`]'s own doc explains why this
+/// replaced the coarser `MathMode` token).
 #[must_use]
-pub(crate) const fn numeric_policy_cache_token(policy: NumericPolicy) -> char {
-    match policy {
-        NumericPolicy::BitExact => 'B',
-        NumericPolicy::FusedNoReassociation => 'N',
-        NumericPolicy::ReassociationPermitted => 'R',
-        _ => 'F',
+pub(crate) const fn numeric_policy_cache_token(policy: NumericPolicy) -> [u8; 2] {
+    const HEX: [u8; 16] = *b"0123456789abcdef";
+    let mut bits: u8 = 0;
+    if policy.contraction {
+        bits |= 0b0000_0001;
     }
+    if policy.reassociation {
+        bits |= 0b0000_0010;
+    }
+    if policy.nan_assumptions {
+        bits |= 0b0000_0100;
+    }
+    if policy.signed_zero {
+        bits |= 0b0000_1000;
+    }
+    if policy.approx_functions {
+        bits |= 0b0001_0000;
+    }
+    [HEX[(bits >> 4) as usize], HEX[(bits & 0x0f) as usize]]
 }
 
 fn is_leaf(body: &ComposedBody) -> bool {
@@ -434,7 +441,8 @@ pub(crate) fn kernel_identity(
         identity.push_str(&width.to_string());
     }
     if let Some(token) = metal.numeric_policy_token {
-        identity.push(token);
+        identity.push(token[0] as char);
+        identity.push(token[1] as char);
     }
 
     identity
@@ -444,36 +452,47 @@ pub(crate) fn kernel_identity(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod numeric_policy_cache_token_tests {
     //! [`super::MetalOnlyExtras::numeric_policy_token`]'s cache-key fold
-    //! depends on exactly one fact: the 4 [`NumericPolicy`] rungs never
-    //! collide on their token, so two `Plan`s agreeing on every structural
-    //! field [`super::kernel_identity`] checks still resolve to distinct
-    //! `PIPELINE_CACHE` entries when they disagree on numeric policy --
-    //! this replaces `metal::math_mode_cache_key_tests`, which proved the
-    //! same fact for the coarser, now-removed `MathMode` token.
+    //! depends on exactly one fact: distinct [`NumericPolicy`] permission
+    //! sets never collide on their token, so two `Plan`s agreeing on every
+    //! structural field [`super::kernel_identity`] checks still resolve to
+    //! distinct `PIPELINE_CACHE` entries when they disagree on numeric
+    //! policy -- this replaces `metal::math_mode_cache_key_tests`, which
+    //! proved the same fact for the coarser, now-removed `MathMode` token.
 
     use proxima_tensor::NumericPolicy;
 
     use super::numeric_policy_cache_token;
 
     #[test]
-    fn all_four_rungs_produce_distinct_tokens() {
+    fn the_three_presets_produce_distinct_tokens() {
         let tokens = [
-            numeric_policy_cache_token(NumericPolicy::BitExact),
-            numeric_policy_cache_token(NumericPolicy::FusedNoReassociation),
-            numeric_policy_cache_token(NumericPolicy::ReassociationPermitted),
-            numeric_policy_cache_token(NumericPolicy::FastMath),
+            numeric_policy_cache_token(NumericPolicy::bit_exact()),
+            numeric_policy_cache_token(NumericPolicy::llama_relaxed()),
+            numeric_policy_cache_token(NumericPolicy::fast()),
         ];
         for (left_index, left_token) in tokens.iter().enumerate() {
             for (right_index, right_token) in tokens.iter().enumerate() {
                 if left_index != right_index {
                     assert_ne!(
                         left_token, right_token,
-                        "NumericPolicy rungs {left_index} and {right_index} must never \
+                        "NumericPolicy presets {left_index} and {right_index} must never \
                          share a cache token, or two Plans compiled under different \
                          policies could share one PIPELINE_CACHE entry"
                     );
                 }
             }
         }
+    }
+
+    /// A single permission (`contraction` alone) must produce a token
+    /// distinct from `bit_exact()` -- proves the token is keyed on the
+    /// actual bit pattern, not just the three named presets.
+    #[test]
+    fn a_single_permission_differs_from_bit_exact() {
+        let contraction_only = NumericPolicy::bit_exact().with_contraction(true);
+        assert_ne!(
+            numeric_policy_cache_token(contraction_only),
+            numeric_policy_cache_token(NumericPolicy::bit_exact())
+        );
     }
 }

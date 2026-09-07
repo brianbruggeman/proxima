@@ -17,8 +17,8 @@
 use proxima_tensor::cpu::evaluate_quantized;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, projection,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, projection,
 };
 
 #[derive(Clone, Copy)]
@@ -202,7 +202,7 @@ fn run_case(codec: Codec, tokens: usize) {
     let packed_operands: omega::PackedOperands =
         [(NodeId(0), codec.packed())].into_iter().collect();
     let mut bound =
-        proxima_tensor::bind(&program, &shapes, &[sum]).expect("the synthetic program binds");
+        proxima_tensor::bind(&program, &shapes, &[sum], NumericPolicy::default()).expect("the synthetic program binds");
     proxima_tensor::correct_packed_matmul_layouts(&mut bound, &[NodeId(0)].into_iter().collect());
     let resolved = bound
         .iter()
@@ -227,7 +227,7 @@ fn run_case(codec: Codec, tokens: usize) {
     }
 
     let cpu = evaluate_quantized(&program, &[], &blocks, &[sum]).expect("cpu runs the matmul");
-    let plan = omega::plan(&program, &[], &blocks, &[sum]).expect("metal plans the matmul");
+    let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default()).expect("metal plans the matmul");
     let metal =
         omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
 
@@ -306,7 +306,7 @@ fn q4k_eight_activation_rows_is_byte_identical_across_twenty_runs() {
         QuantizedBlock::Q4K(&packed),
         QuantizedBlock::Float32(&activation),
     ];
-    let plan = omega::plan(&program, &[], &blocks, &[sum]).expect("metal plans the matmul");
+    let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default()).expect("metal plans the matmul");
 
     let first =
         omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");

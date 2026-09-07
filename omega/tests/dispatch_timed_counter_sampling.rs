@@ -11,7 +11,9 @@
 #![cfg(all(feature = "metal-output-placement", feature = "instrument", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::{DType, Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
+use proxima_tensor::{
+    DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
+};
 
 /// `Input(extent) -> body_0(x) -> body_1(...) -> ... -> body_n(...)`, the
 /// same shape [`decode_step_telemetry_budget`]'s `chained_unary_program`
@@ -52,7 +54,7 @@ fn every_dispatch_gets_a_timing_and_a_named_sampling_mode() {
     const EXTENT: u32 = 8;
     let bodies = [ScalarOp::Identity, ScalarOp::Negate];
     let (program, output) = chained_unary_program(EXTENT, &bodies);
-    let plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&[0.0; EXTENT as usize])], &[output])
+    let plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&[0.0; EXTENT as usize])], &[output], NumericPolicy::default())
         .expect("plans the two-dispatch program");
 
     let input = vec![1.0f32; EXTENT as usize];
@@ -108,7 +110,7 @@ fn encoder_split_reports_two_nonzero_encoder_spans_and_zeroes_per_op_gpu_ns() {
     const EXTENT: u32 = 8;
     let bodies = [ScalarOp::Identity, ScalarOp::Negate, ScalarOp::Identity, ScalarOp::Negate];
     let (program, output) = chained_unary_program(EXTENT, &bodies);
-    let mut plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&[0.0; EXTENT as usize])], &[output])
+    let mut plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&[0.0; EXTENT as usize])], &[output], NumericPolicy::default())
         .expect("plans the four-dispatch program");
 
     let input = vec![1.0f32; EXTENT as usize];

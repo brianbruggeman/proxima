@@ -11,8 +11,8 @@
 use std::process::Command;
 
 use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer,
-    map,
+    AxisTerm, DType, Extent, IndexMap, Keep, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp,
+    append, bind, infer, map,
 };
 #[cfg(feature = "cached-attention-streaming")]
 use proxima_tensor::{BoundOp, BoundOpKind, Layout, NodeId};
@@ -37,7 +37,7 @@ fn elementwise_tanh_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("elementwise infers");
-    let nests = bind(&program, &shapes, &[]).expect("elementwise lowers");
+    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("elementwise lowers");
     omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("elementwise emits")
 }
 
@@ -65,7 +65,7 @@ fn elementwise_erf_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("erf infers");
-    let nests = bind(&program, &shapes, &[]).expect("erf lowers");
+    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("erf lowers");
     omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("erf emits")
 }
 
@@ -113,7 +113,7 @@ fn fused_matmul_kernel() -> omega::Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("matmul infers");
-    let nests = bind(&program, &shapes, &[]).expect("matmul lowers");
+    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("matmul lowers");
     omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("matmul emits")
 }
 
@@ -170,7 +170,7 @@ fn tiled_gemm_q4k_kernel() -> omega::Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("tiled gemm infers");
-    let nests = bind(&program, &shapes, &[]).expect("tiled gemm lowers");
+    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("tiled gemm lowers");
     let weight_node = nests[0].operands()[0].0;
     let mut q4k = std::collections::BTreeMap::new();
     q4k.insert(weight_node, omega::PackedCodec::Q4K);
@@ -207,7 +207,7 @@ fn cumsum_kernel() -> omega::Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("cumsum infers");
-    let nests = bind(&program, &shapes, &[]).expect("cumsum lowers");
+    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("cumsum lowers");
     omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("cumsum emits")
 }
 
@@ -256,7 +256,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("embedding lookup infers");
-    let nests = bind(&program, &shapes, &[]).expect("embedding lookup lowers");
+    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("embedding lookup lowers");
     omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("embedding lookup emits")
 }
 
@@ -327,7 +327,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("embedding matmul infers");
-    let nests = bind(&program, &shapes, &[]).expect("embedding matmul lowers");
+    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("embedding matmul lowers");
     omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("embedding matmul emits")
 }
 
@@ -345,7 +345,7 @@ fn iota_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("iota infers");
-    let nests = bind(&program, &shapes, &[]).expect("iota lowers");
+    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("iota lowers");
     omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("iota emits")
 }
 

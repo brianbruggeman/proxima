@@ -163,8 +163,8 @@ use proxima_gguf::quant::{QuantError, q4_k, q5_k, q6_k};
 use proxima_gguf::types::GgmlType;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce,
-    ReduceInit, ScalarOp, append, bind, correct_packed_matmul_layouts, infer, map,
+    BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock,
+    Reduce, ReduceInit, ScalarOp, append, bind, correct_packed_matmul_layouts, infer, map,
 };
 
 /// Real GGUF checkpoint path, overridable via `PROXIMA_BENCH_GGUF_PATH` --
@@ -1573,7 +1573,7 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         weight_slices.iter().map(|slice| QuantizedBlock::Q4K(slice)).collect();
     blocks.push(QuantizedBlock::Float32(&activation));
 
-    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums)
+    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums, NumericPolicy::default())
         .expect("plan resolves the real production q4_k matmul over every ffn tensor");
     let mut resident_names: BTreeSet<&str> = weight_names.iter().map(String::as_str).collect();
     resident_names.insert("activation");
@@ -1943,7 +1943,7 @@ fn run_shape_arm(
         weight_slices.iter().map(|slice| codec.quantized_block(slice)).collect();
     blocks.push(QuantizedBlock::Float32(&activation));
 
-    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums)
+    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums, NumericPolicy::default())
         .expect("plan resolves the synthetic matmul over every tensor");
     // ROW 334 found that marking these weight nodes resident bought no real
     // saving and was UNSOUND: this shape's own byte size (a multiple of the
@@ -2844,7 +2844,7 @@ fn run_head_arm(
     let mut blocks = blocks_weights;
     blocks.push(QuantizedBlock::Float32(&activation));
 
-    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums)
+    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums, NumericPolicy::default())
         .expect("plan resolves the output-head matmul over every weight input");
     // ROW 334: weight nodes are resident-eligible ONLY for `RealNoCopy` --
     // that branch aliases the SAME real, mmap'd, process-lifetime tensor
@@ -3232,7 +3232,7 @@ fn production_reduce_kernel(
     let activation_node = NodeId(1);
 
     let shapes = infer(&program, &[]).expect("production reduce program's shapes infer");
-    let mut bound_ops = bind(&program, &shapes, &sums).expect("production reduce program binds");
+    let mut bound_ops = bind(&program, &shapes, &sums, NumericPolicy::default()).expect("production reduce program binds");
     // `bind()` alone lays out the weight operand row-major over its DECLARED
     // axis order (`correct_packed_matmul_layouts`'s own doc) -- wrong for a
     // packed `Q4_K`/`Q6_K` weight's real on-disk bytes. `omega::metal::prepare`

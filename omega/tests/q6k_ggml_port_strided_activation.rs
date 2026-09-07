@@ -14,8 +14,8 @@
 use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, affine, append, projection,
+    AxisTerm, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
+    ReduceInit, ScalarOp, affine, append, projection,
 };
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
@@ -143,7 +143,8 @@ fn assert_ggml_port_matches_reference_at_stride(label: &str, stride: i32) {
         QuantizedBlock::Float32(&physical_activation),
     ];
 
-    let plan = omega::plan(&program, &[], &blocks, &[sum]).expect("metal plans the matmul");
+    let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
+        .expect("metal plans the matmul");
     let metal = omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
 
     let metal_root = metal.root();
