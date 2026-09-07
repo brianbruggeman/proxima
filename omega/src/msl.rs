@@ -2319,7 +2319,17 @@ fn grid_threads(
             new_key_rows,
             ..
         } => {
-            let chunks = context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy);
+            // The single-range fused path (nine operands) always dispatches
+            // the compiled MAXIMUM chunk count (`cap`) -- redesign §5 option
+            // 2, `render_cached_attention`'s own doc -- so idle simdgroups
+            // above the live `context_chunks_for(...)` result are always
+            // present in the grid and contribute the merge's identity
+            // partial rather than being sized out of the dispatch.
+            let chunks = if resolved.operands().len() == 9 {
+                crate::sized::ATTENTION_CONTEXT_CHUNK_CAP
+            } else {
+                context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy)
+            };
             resolved
                 .extents
                 .iter()
@@ -2461,17 +2471,32 @@ fn entry_name(resolved: &BoundOp) -> String {
             // CachedAttention`'s own doc) -- the static field here is unused
             // filler in that case, so the plan-cache key names the STRUCTURE
             // ("dyn") rather than that filler value, which must never appear
-            // to vary the key across calls whose real bound differs.
+            // to vary the key across calls whose real bound differs. On this
+            // SAME path, `cached_key_rows`/`new_key_rows` are also runtime
+            // `Uniforms` fields now (redesign §5 option 2's
+            // `render_cached_attention`), so the row-count tokens drop from
+            // the name entirely -- two different `kv-capacity-bucket`
+            // extents share one compiled kernel, keyed only by the compiled
+            // MAXIMUM chunk count (`_x{cap}`), never by the live capacity.
             let upper_token = if operand_count == 9 {
                 "dyn".to_string()
             } else {
                 signed_name_part(*new_upper_inclusive)
             };
-            format!(
-                "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}",
-                scale.to_bits(),
-                signed_name_part(*cached_lower_inclusive),
-            )
+            if operand_count == 9 {
+                format!(
+                    "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}",
+                    scale.to_bits(),
+                    signed_name_part(*cached_lower_inclusive),
+                    crate::sized::ATTENTION_CONTEXT_CHUNK_CAP,
+                )
+            } else {
+                format!(
+                    "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}",
+                    scale.to_bits(),
+                    signed_name_part(*cached_lower_inclusive),
+                )
+            }
         }
         BoundOpKind::Elementwise { .. } => {
             let body = body_token(resolved.element_body());
@@ -3059,22 +3084,16 @@ fn render_cached_attention(
     };
     let (out_buffer_index, uniforms_buffer_index) =
         if dynamic_cached_len { (9, 10) } else { (8, 9) };
-    // `cached_key_rows`/`new_key_rows` become runtime `Uniforms` fields
-    // (rather than `constexpr` body literals) ONLY on the single-range
-    // fused path (`dynamic_cached_len`, the ninth-operand form) -- the same
-    // scope §5 of the redesign names for this step. The plan-cache
-    // `entry_name` still carries `_c{cached_key_rows}_n{new_key_rows}`
-    // (unchanged below): dropping those tokens would let two different
-    // capacities reuse the same compiled `context_chunks` array-sizing
-    // decision baked a few lines down, which is the exact hazard this
-    // change stops short of chasing without ALSO making `context_chunks`
-    // itself a runtime, threadgroup-memory-length-sized quantity (redesign
-    // §5 option 2, not done in this slice -- see the commit/report). What
-    // this DOES buy: the kernel body's own key-band arithmetic reads the
-    // live row counts off the uniform buffer instead of a value fixed at
-    // compile time, matching `new_upper`'s existing `in8[0]` pattern.
+    // `cached_key_rows`/`new_key_rows` are runtime `Uniforms` fields on the
+    // single-range fused path (`dynamic_cached_len`, the ninth-operand
+    // form). Redesign §5 option 2: `context_chunks` joins them as a fourth
+    // runtime field on that SAME path, so `entry_name` (below) can drop the
+    // `_c{}`/`_n{}` row-count tokens entirely -- the compiled kernel text no
+    // longer depends on the compiled `kv-capacity-bucket` extent at all, and
+    // one pipeline serves every bucket, matching llama's own `ne11`-as-
+    // runtime-field property (`ggml-metal.m:4790-4813`).
     let uniforms_struct = if dynamic_cached_len {
-        "struct Uniforms { long total_elements; long cached_key_rows; long new_key_rows; };\n\n"
+        "struct Uniforms { long total_elements; long cached_key_rows; long new_key_rows; long context_chunks; };\n\n"
     } else {
         "struct Uniforms { long total_elements; };\n\n"
     };
@@ -3118,6 +3137,18 @@ fn render_cached_attention(
     // which can change the chunk count -- a repartitioning, not merely a
     // loop-bound change.
     let context_chunks = context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy);
+    // Redesign §5 option 2: on the single-range fused path, the compiled
+    // MAXIMUM simdgroup count (`cap`) sizes both the dispatch grid and the
+    // threadgroup-memory merge arrays -- never the bind's own compiled
+    // `context_chunks_for(...)` result, which varies with the compiled
+    // `kv-capacity-bucket` extent and is exactly the quantity `entry_name`
+    // must stop depending on. A live `chunks <= cap` still travels as a
+    // runtime `Uniforms` field (packed by `pack_cached_attention_uniforms`),
+    // and simdgroups `chunk >= chunks` contribute the merge's own identity
+    // (`maximum = -INFINITY`, `sum = 0.0`) rather than looping -- the same
+    // "idle simdgroup, identity partial" shape llama's own dispatch-time
+    // `nsg` uses against a compiled maximum (`ggml-metal.m:4887-4913`).
+    let cap = crate::sized::ATTENTION_CONTEXT_CHUNK_CAP;
     // The stride loop's live upper bound: every key past this point would
     // hit the `relative > new_upper` / `relative < cached_lower` `continue`
     // on every remaining iteration within THIS simdgroup's own assigned
@@ -3136,7 +3167,28 @@ fn render_cached_attention(
     } else {
         "long last_key = cached_key_rows + new_key_rows - 1L;\n"
     };
-    if context_chunks <= 1 {
+    if dynamic_cached_len {
+        // ONE body for every chunk count: the cross-simdgroup merge below is
+        // always present, guarded at runtime by `u.context_chunks` rather
+        // than selected by a compile-time `context_chunks <= 1` branch, so
+        // this generated MSL text is identical whether the live chunk count
+        // is 1 or `cap` -- the compiled `kv-capacity-bucket` extent no
+        // longer appears anywhere in the text `entry_name` keys on.
+        source.push_str(&format!(
+            "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long cap = {cap};\n    long chunks = u.context_chunks;\n    long query_index = vector_index / cap;\n    long chunk = vector_index % cap;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    long local_group_index = group * cap + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
+        ));
+        source.push_str(&format!("    {last_key_decl}"));
+        // Idle simdgroups (`chunk >= chunks`, live count below the compiled
+        // maximum) skip the walk entirely and keep the identity partial
+        // (`maximum = -INFINITY`, `sum = 0.0`, `weighted` zeroed above) --
+        // the merge below already treats a `-INFINITY` partial as
+        // zero-weight (`rescale = 0.0f`), so an idle simdgroup contributes
+        // nothing to the merged result, bit-for-bit.
+        source.push_str("    if (chunk < chunks) {\n    for (long key = chunk; key <= last_key; key += chunks) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n    }\n");
+        source.push_str(&format!(
+            "    threadgroup float shared_m[query_groups * cap]; threadgroup float shared_l[query_groups * cap]; threadgroup float shared_o[query_groups * cap * head_dim];\n    if (lane == 0u) {{ shared_m[local_group_index] = maximum; shared_l[local_group_index] = sum; }}\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ shared_o[local_group_index * head_dim + dimension] = weighted[dimension / 32L]; }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    if (chunk == 0L) {{\n        float merged_max = -INFINITY;\n        for (long c = 0; c < cap; c++) {{ merged_max = max(merged_max, shared_m[group * cap + c]); }}\n        float merged_sum = 0.0f;\n        for (long c = 0; c < cap; c++) {{\n            float partial_max = shared_m[group * cap + c];\n            float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n            merged_sum += shared_l[group * cap + c] * rescale;\n        }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            float acc = 0.0f;\n            for (long c = 0; c < cap; c++) {{\n                float partial_max = shared_m[group * cap + c];\n                float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n                acc += shared_o[(group * cap + c) * head_dim + dimension] * rescale;\n            }}\n            weighted[local_dimension] = acc;\n        }}\n        sum = merged_sum;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n    }}\n}}\n"
+        ));
+    } else if context_chunks <= 1 {
         source.push_str("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }\n");
         source.push_str(&format!("    {last_key_decl}"));
         // Each lane reads its own K/V elements straight from device memory
@@ -5778,7 +5830,18 @@ fn tiled_gemm_threadgroup_width(
         ..
     } = &resolved.kind
     {
-        let chunks = context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy);
+        // Must agree with `grid_threads`'s own `CachedAttention` arm: the
+        // single-range fused (dynamic) path always dispatches the compiled
+        // MAXIMUM chunk count (`cap`), so the threadgroup width has to widen
+        // to match -- a mismatch here puts fewer threads in the threadgroup
+        // than `local_group_index`'s own `cap`-sized addressing assumes,
+        // which is an out-of-bounds `threadgroup` memory write, not merely a
+        // wrong answer.
+        let chunks = if resolved.operands().len() == 9 {
+            crate::sized::ATTENTION_CONTEXT_CHUNK_CAP
+        } else {
+            context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy)
+        };
         return Some(*query_groups * chunks * SIMD_WIDTH);
     }
     if let BoundOpKind::Reduce {
@@ -6896,6 +6959,45 @@ mod tests {
                 query_rows: 1,
                 cached_key_rows: 1,
                 new_key_rows: 1,
+                kv_heads: 1,
+                query_groups: 1,
+                head_dim: 4,
+                scale: 0.5,
+                cached_lower_inclusive: i64::MIN,
+                new_upper_inclusive: 0,
+            },
+        }
+    }
+
+    /// The single-range fused (nine-operand, `dynamic_cached_len`) sibling
+    /// of [`cached_attention_op`] -- the ninth operand carries the live
+    /// `cached_len` at run time (`BoundOpKind::CachedAttention`'s own doc),
+    /// so `cached_key_rows`/`new_key_rows` here are the COMPILED
+    /// `kv-capacity-bucket` extent a test can vary freely to prove
+    /// `entry_name`/the rendered body do not key on it (redesign §5 option
+    /// 2).
+    fn cached_attention_op_dynamic(cached_key_rows: u64, new_key_rows: u64) -> BoundOp {
+        let operands = (0..9)
+            .map(|index| {
+                (
+                    NodeId(index),
+                    Layout {
+                        base: 0,
+                        strides: vec![1].into(),
+                    },
+                    None,
+                )
+            })
+            .collect();
+        BoundOp {
+            node: NodeId(9),
+            dtype: DType::Float32,
+            extents: vec![1, 1, 1, 4],
+            kind: BoundOpKind::CachedAttention {
+                operands,
+                query_rows: 1,
+                cached_key_rows,
+                new_key_rows,
                 kv_heads: 1,
                 query_groups: 1,
                 head_dim: 4,
@@ -8837,6 +8939,67 @@ mod tests {
         assert!(
             admitted.contains("merged_max"),
             "llama_relaxed() is expected to emit the cross-simdgroup merge block"
+        );
+    }
+
+    /// Redesign §5 option 2, the ROW 369 residual this closes: crossing a
+    /// `kv-capacity-bucket` boundary (39 rows of compiled capacity vs. 71)
+    /// on the single-range fused (dynamic) path must neither change
+    /// `entry_name` (the plan-cache key) nor the rendered MSL text -- both
+    /// values now depend only on the compiled MAXIMUM chunk count (`cap`),
+    /// never the live capacity, so one compiled `MTLComputePipelineState`
+    /// serves both buckets and `pipeline_compile_ms` never fires again at a
+    /// crossing (ROW 369's own residual, item 3).
+    #[test]
+    fn dynamic_cached_attention_kernel_identity_is_stable_across_kv_capacity_buckets() {
+        let smaller_bucket = cached_attention_op_dynamic(32, 7); // capacity 39
+        let larger_bucket = cached_attention_op_dynamic(64, 7); // capacity 71
+        assert_ne!(
+            match &smaller_bucket.kind {
+                BoundOpKind::CachedAttention { cached_key_rows, .. } => *cached_key_rows,
+                _ => unreachable!(),
+            },
+            match &larger_bucket.kind {
+                BoundOpKind::CachedAttention { cached_key_rows, .. } => *cached_key_rows,
+                _ => unreachable!(),
+            },
+            "the fixture must actually cross a different compiled capacity"
+        );
+
+        let smaller_name = entry_name(&smaller_bucket);
+        let larger_name = entry_name(&larger_bucket);
+        assert_eq!(
+            smaller_name, larger_name,
+            "kernel identity must be capacity-free on the dynamic path: got {smaller_name:?} \
+             vs {larger_name:?}"
+        );
+        assert!(
+            !smaller_name.contains("_c32") && !smaller_name.contains("_n7"),
+            "row-count tokens must not appear in the dynamic path's entry name: {smaller_name:?}"
+        );
+
+        let smaller_source =
+            render_cached_attention(&smaller_bucket, "entry", NumericPolicy::default())
+                .expect("smaller bucket renders");
+        let larger_source =
+            render_cached_attention(&larger_bucket, "entry", NumericPolicy::default())
+                .expect("larger bucket renders");
+        assert_eq!(
+            smaller_source, larger_source,
+            "the generated MSL text itself must be capacity-free on the dynamic path"
+        );
+        assert!(
+            smaller_source.contains("shared_m["),
+            "the merge block is always present in the unified dynamic body"
+        );
+        assert!(
+            smaller_source.contains("if (chunk < chunks)"),
+            "chunk activity is a runtime guard, not a compile-time branch"
+        );
+        assert!(
+            !smaller_source.contains("constexpr long context_chunks"),
+            "context_chunks must be a runtime uniform, never baked as constexpr, \
+             on the dynamic path"
         );
     }
 }

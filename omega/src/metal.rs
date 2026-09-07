@@ -4261,23 +4261,40 @@ fn pack_cached_attention_uniforms(
             found: bound.kind.name(),
         });
     };
+    let dynamic_cached_len = bound.operands().len() == 9;
     let chunks =
         crate::msl::context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy) as i64;
+    // Redesign §5 option 2: the single-range fused path always dispatches
+    // the compiled MAXIMUM chunk count (`cap`) -- `grid_threads`'s own
+    // `CachedAttention` arm (`omega/src/msl.rs`) -- so `total_elements` here
+    // must agree with that grid width, never the live `chunks` value, which
+    // travels separately as its own `Uniforms` field below.
+    let dispatch_chunks = if dynamic_cached_len {
+        i64::try_from(crate::sized::ATTENTION_CONTEXT_CHUNK_CAP).unwrap_or(chunks)
+    } else {
+        chunks
+    };
     let total: i64 = bound
         .extents
         .iter()
         .map(|extent| *extent as i64)
         .product::<i64>()
         / *head_dim as i64
-        * chunks;
+        * dispatch_chunks;
     push_i64(bytes, total);
     // Mirrors `render_cached_attention`'s `struct Uniforms` (`omega/src/msl.rs`):
-    // the single-range fused form (nine operands) declares two extra `long`
-    // fields so the kernel body reads the live row counts off the uniform
-    // buffer instead of a value baked as `constexpr` at render time.
-    if bound.operands().len() == 9 {
+    // the single-range fused form (nine operands) declares three extra
+    // `long` fields so the kernel body reads the live row counts AND the
+    // live chunk count off the uniform buffer instead of baking either as
+    // `constexpr` at render time -- the row counts per ROW 369, the chunk
+    // count per redesign §5 option 2, both keyed off the SAME `bound.kind`
+    // this function already reads per dispatch, so a `kv-capacity-bucket`
+    // crossing (a new `BoundOp` with new `cached_key_rows`/`new_key_rows`)
+    // repacks fresh uniform values without recompiling the kernel.
+    if dynamic_cached_len {
         push_i64(bytes, *cached_key_rows as i64);
         push_i64(bytes, *new_key_rows as i64);
+        push_i64(bytes, chunks);
     }
     Ok(())
 }
