@@ -300,7 +300,8 @@ fn run_cell(label: &str, seq: u32, dim: u32, fused: bool) {
     let fused_count = epilogued_reduce_count(&resolved);
     println!(
         "=== ROW 368 {label} seq={seq} dim={dim} fused_requested={fused} \
-         fused_reduce_count={fused_count}/{INSTANCES} ==="
+         fused_reduce_count={fused_count}/{INSTANCES} resolved_ops={} ==="
+        , resolved.len()
     );
     if fused {
         assert_eq!(
@@ -337,6 +338,30 @@ fn run_cell(label: &str, seq: u32, dim: u32, fused: bool) {
     println!(
         "ROW 368 {label} seq={seq} wall_ms: mean={:.4} median={:.4} min={:.4} max={:.4} cov={:.2}%",
         stat.mean_ms, stat.median_ms, stat.min_ms, stat.max_ms, stat.cov_pct
+    );
+
+    // ROW 372: GPU-only time, per instance. `metal::execute_plan_named_op_timed`
+    // (`instrument`-gated) reads each dispatch's own command buffer
+    // `GPUEndTime()-GPUStartTime()` -- see its own doc: one command buffer
+    // per `BoundOp`, so summing every op's `gpu_ns` over one warmed-up run
+    // gives the batch's total device-side execution time, independent of the
+    // host-side encode/commit/wait overhead the wall bracket above also
+    // carries. Dividing by `INSTANCES` reports GPU time per rmsnorm chain,
+    // the unit the bare-cell table below is keyed on.
+    let (_evaluated, warm_timings) =
+        omega::metal::execute_plan_named_op_timed(&plan, &named_blocks).expect("warm-up gpu-timed run");
+    drop(warm_timings);
+    let mut gpu_samples_us = Vec::with_capacity(REPEATS);
+    for _ in 0..REPEATS {
+        let (_evaluated, timings) =
+            omega::metal::execute_plan_named_op_timed(&plan, &named_blocks).expect("gpu-timed run");
+        let total_gpu_ns: u64 = timings.iter().map(|timing| timing.gpu_ns).sum();
+        gpu_samples_us.push(total_gpu_ns as f64 / INSTANCES as f64 / 1e3);
+    }
+    let gpu_stat = stats(&gpu_samples_us);
+    println!(
+        "ROW 372 {label} seq={seq} gpu_us_per_instance: mean={:.3} median={:.3} min={:.3} max={:.3} cov={:.2}%",
+        gpu_stat.mean_ms, gpu_stat.median_ms, gpu_stat.min_ms, gpu_stat.max_ms, gpu_stat.cov_pct
     );
 }
 
