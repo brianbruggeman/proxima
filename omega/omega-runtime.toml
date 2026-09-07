@@ -279,3 +279,30 @@ max = 32
 # two and `<= 32` for the same reason `packed_row_block.simdgroups` is.
 # Overridable per-build via `OMEGA_PACKED_ROW_NSG_WIDTH`.
 width = 2
+
+[load_time_fit]
+# `proxima-model-interop`'s own load-time memory-fit gate reads these two
+# constants (via `omega::sized::LOAD_TIME_FIT_OS_HEADROOM_BYTES` /
+# `..._ARENA_ALLOWANCE_BYTES`) rather than hard-coding either — this crate
+# has no OS-facing runtime knowledge of its own, `omega` is the one crate
+# every GPU-backed build already links for device facts
+# (`metal::system_memory_facts`), so its own sizing toml is where a
+# byte-budget constant belongs (principle 12: no magic numbers in source).
+
+# Bytes of slack reserved for the OS and every other process on this host,
+# subtracted from `min(recommendedMaxWorkingSetSize, hw.memsize)` before a
+# checkpoint's own budget (file bytes + placed-KV + arena allowance) is
+# compared against the limit. 8 GiB is a conservative default for a
+# desktop/workstation host running a browser and IDE alongside a serving
+# process -- override lower on a headless box via
+# `OMEGA_LOAD_TIME_FIT_OS_HEADROOM_BYTES`.
+os_headroom_bytes = 8_589_934_592
+
+# The largest measured `BufferArena` peak across every step in
+# `proxima-tensor/docs/discipline.md` ROW 391's own per-step device-memory
+# table (~27 MB, the arena's transient per-op output/uniform/fault-buffer
+# allocation that `emit_device_memory_by_class`'s own doc says is never
+# separately sized) -- a fixed allowance rather than a live measurement
+# because the arena's real peak is only known AFTER a forward runs, and this
+# budget must be computed BEFORE the first weight upload.
+arena_allowance_bytes = 28_311_552
