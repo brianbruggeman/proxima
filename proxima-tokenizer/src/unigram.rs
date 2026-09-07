@@ -53,19 +53,33 @@ pub fn escape(text: &str) -> String {
     escaped
 }
 
-/// Reverses [`escape`]: every `SPACE_MARKER` (crate-private) back to a
-/// literal space, then strips exactly the one leading space [`escape`]
-/// added (matching `remove_space`, `llama-vocab.cpp:2684-2685`).
+/// Every `SPACE_MARKER` (crate-private) back to a literal space, with no
+/// leading-space trim -- the half of [`unescape`] that is safe to apply to
+/// one streamed piece at a time. Trimming the one leading space [`escape`]
+/// added is only correct once, against the whole decoded string ([`unescape`]
+/// does exactly that): a mid-generation piece that happens to start with
+/// `SPACE_MARKER` (any new word boundary, in SentencePiece's own scheme) is
+/// a real space, not the artifact [`escape`] prepended, and must not be
+/// stripped.
+#[must_use]
+pub fn replace_space_markers(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character == SPACE_MARKER {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+/// Reverses [`escape`]: [`replace_space_markers`], then strips exactly the
+/// one leading space [`escape`] added (matching `remove_space`,
+/// `llama-vocab.cpp:2684-2685`).
 #[must_use]
 pub fn unescape(text: &str) -> String {
-    let mut unescaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        unescaped.push(if character == SPACE_MARKER {
-            ' '
-        } else {
-            character
-        });
-    }
+    let mut unescaped = replace_space_markers(text);
     if unescaped.starts_with(' ') {
         unescaped.remove(0);
     }

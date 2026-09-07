@@ -461,6 +461,18 @@ pub(crate) fn metadata_str<'parsed>(
         .ok_or_else(|| InteropError::MissingMetadataKey { key: key.into() })
 }
 
+/// [`metadata_str`] without the required-key error -- [`LoadedModel::model_name`]'s
+/// own source: `general.name` is display-only (a live "what's running"
+/// indicator's label), never a bind precondition the way `metadata_str`'s
+/// other callers' keys are, so a checkpoint that omits it loads exactly the
+/// same as one that carries it.
+pub(crate) fn metadata_str_opt<'parsed>(
+    parsed: &'parsed ParsedGguf,
+    key: &str,
+) -> Option<&'parsed str> {
+    parsed.metadata_value(key).and_then(MetadataValue::as_str)
+}
+
 pub(crate) fn metadata_u32(parsed: &ParsedGguf, key: &str) -> Result<u32, InteropError> {
     parsed
         .metadata_value(key)
@@ -4422,6 +4434,7 @@ mod real_openchat_file {
                     &mut runtime,
                     None,
                     &mut logits_sink,
+                    &mut |_event| crate::generate::Control::Continue,
                 )
                 .expect("generate through the metal backend");
 

@@ -52,7 +52,7 @@ pub use bind::{ModelArchitecture, architecture_from_metadata, gguf_tensor_as_f32
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
 #[cfg(feature = "std")]
-pub use generate::LoadedModel;
+pub use generate::{Control, LoadedModel, Phase, TokenEvent};
 pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};
 #[cfg(feature = "std")]
 pub use lfm2::{

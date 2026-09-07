@@ -719,6 +719,14 @@ pub struct LoadedModel<'file> {
     vocab: Vocab,
     program: Vec<Op>,
     logits_root: NodeId,
+    /// `general.name` off the checkpoint's own metadata ([`Self::load`]/
+    /// [`Self::load_with_paired_gate_up_reduce`]/[`Self::load_with_fused_qkv_reduce`]),
+    /// `None` for [`Self::load_from_safetensors`] (HF's `config.json` has no
+    /// equivalent key this crate reads) or a GGUF checkpoint that omits the
+    /// key outright. Display-only -- see [`Self::model_name`].
+    model_name: Option<String>,
+    /// `file_bytes.len()` at load time -- see [`Self::checkpoint_bytes`].
+    checkpoint_bytes: usize,
     /// One entry per forward-program layer, in layer order --
     /// [`Qwen35LayerRoots::Attention`] for every layer on the dense path
     /// (`Self::load`/`Self::load_from_safetensors` wrap
@@ -914,6 +922,33 @@ impl<'file> LoadedModel<'file> {
         self.single_range.is_some()
     }
 
+    /// `general.name` off the checkpoint this call loaded, when the
+    /// checkpoint declared one -- a live "what's running" indicator's own
+    /// label ([`Self::model_name`]'s field doc). `None` on a safetensors
+    /// checkpoint, or a GGUF checkpoint that omits the key.
+    #[must_use]
+    pub fn model_name(&self) -> Option<&str> {
+        self.model_name.as_deref()
+    }
+
+    /// This checkpoint's own transformer block count
+    /// (`{architecture}.block_count`, [`ModelArchitecture::block_count`]).
+    #[must_use]
+    pub fn layer_count(&self) -> u32 {
+        self.architecture.block_count
+    }
+
+    /// The checkpoint file's own byte length at load time (`file_bytes.len()`
+    /// passed to [`Self::load`]/[`Self::load_from_safetensors`]) -- the
+    /// on-disk size a live indicator reports, not this call's resident
+    /// memory footprint (weights may be memory-mapped rather than copied;
+    /// see `crate::bind::bind_all_weights`'s own doc for which tensors are
+    /// borrowed versus owned).
+    #[must_use]
+    pub fn checkpoint_bytes(&self) -> usize {
+        self.checkpoint_bytes
+    }
+
     /// Binds every weight the cached forward program needs out of
     /// `parsed`/`file_bytes` (`crate::bind::bind_all_weights`), derives
     /// [`ModelArchitecture`] from `parsed`'s own metadata
@@ -1036,6 +1071,8 @@ impl<'file> LoadedModel<'file> {
                 program,
                 logits_root,
                 layer_roots,
+                model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
+                checkpoint_bytes: file_bytes.len(),
                 qwen35_ssm_shape: Some(ssm_shape),
                 // The single-range program is dense-Mistral-only
                 // (`SingleRangeProgram`'s own field doc); qwen35's hybrid
@@ -1125,6 +1162,8 @@ impl<'file> LoadedModel<'file> {
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
                 .collect(),
+            model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
+            checkpoint_bytes: file_bytes.len(),
             qwen35_ssm_shape: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
@@ -1195,6 +1234,10 @@ impl<'file> LoadedModel<'file> {
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
                 .collect(),
+            // safetensors carries no `general.name`-equivalent key this
+            // crate reads (`Self::model_name`'s own doc).
+            model_name: None,
+            checkpoint_bytes: file_bytes.len(),
             qwen35_ssm_shape: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
@@ -2151,13 +2194,125 @@ impl<'file> Pipe for LoadedModel<'file> {
     }
 }
 
+/// One decode step surfaced to a caller AS it happens, instead of only
+/// after [`LoadedModel::generate_streaming`] returns -- the payload
+/// [`decode_until_stop_or_budget`] hands to its `on_token` callback every
+/// step, teaching a caller (a CLI's "loading / thinking / answering"
+/// indicator) exactly what that loop already knows at that point and
+/// nothing it has to re-derive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenEvent<'piece> {
+    pub token_id: u32,
+    /// This token's own decoded text, continuing on from whatever
+    /// [`decode_until_stop_or_budget`] has already handed back for earlier
+    /// tokens -- concatenating every `text_piece` across a whole decode
+    /// reproduces [`proxima_tokenizer::decode`]'s own output on the same
+    /// ids exactly (`decode_streamed_piece`'s own doc: incomplete
+    /// multi-byte tails carry forward instead of resolving to U+FFFD mid
+    /// stream).
+    pub text_piece: &'piece str,
+    pub phase: Phase,
+    /// `0`-indexed decode step this event belongs to.
+    pub step: usize,
+    /// Milliseconds since this call's decode loop started (`step` `0`'s own
+    /// first [`std::time::Instant::now`] reading), not this step's own
+    /// duration -- a caller computes both a running tok/s and a single
+    /// step's latency from two consecutive events' `elapsed_ms` without
+    /// this loop tracking either itself. Plain [`std::time::Instant`]
+    /// rather than `proxima_tensor::instrument`'s tick counters: those only
+    /// exist behind this crate's diagnostic-only `instrument` feature
+    /// (`proxima-tensor/src/lib.rs`'s own `#[cfg(feature = "instrument")]`
+    /// on that module), and a live "what's running" indicator must work on
+    /// every build that reaches [`LoadedModel::generate_streaming`] at all,
+    /// not only one compiled for op-level profiling.
+    pub elapsed_ms: u64,
+}
+
+/// [`TokenEvent::phase`]: which part of the decode loop produced this
+/// event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Emitted exactly once, at decode step `0` -- the one step whose
+    /// forward pass evaluates the whole encoded prompt rather than a single
+    /// new token (`LoadedModel::run_decode_loop_observed`'s own doc on
+    /// `new_positions == prompt_length` on the first step).
+    Prefill {
+        /// The encoded prompt's own token count (`ids.len()` before
+        /// decoding starts), so a caller can show "127 prompt tokens"
+        /// without re-encoding the prompt itself.
+        prompt_tokens: usize,
+    },
+    /// Every decode step, prefill included -- carries the token that step
+    /// produced.
+    Token,
+}
+
+/// A caller's per-token decision, read back by [`decode_until_stop_or_budget`]
+/// after every [`TokenEvent`]. `Stop` is the same early exit this loop
+/// already gives the model's own end-of-sequence id, just requested by the
+/// caller instead -- a chat template's own `<|im_end|>`, or a think-block
+/// boundary a caller wants to cut before ever reaching `max_tokens`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    Continue,
+    Stop,
+}
+
+/// One [`TokenEvent::text_piece`] worth of text for `token_id`, carrying
+/// forward any UTF-8 tail [`proxima_tokenizer::bpe::decode_ids`] left
+/// incomplete in `pending` from a previous call -- byte-level BPE has no
+/// obligation to keep a multibyte character inside one token
+/// ([`proxima_tokenizer::pipe::decode`]'s own doc), so a caller watching
+/// tokens arrive one at a time needs the same "flag, don't drop" contract
+/// that one-shot decode gives the whole sequence, just deferred: an
+/// incomplete tail waits here for the token that completes it instead of
+/// resolving to U+FFFD before decoding is known to be finished.
+fn decode_streamed_piece(
+    vocab: &Vocab,
+    token_id: u32,
+    pending: &mut Vec<u8>,
+) -> Result<String, InteropError> {
+    let bytes = proxima_tokenizer::bpe::decode_ids(&[token_id], vocab)?;
+    pending.extend_from_slice(&bytes);
+    let piece = match core::str::from_utf8(pending.as_slice()) {
+        Ok(text) => {
+            let piece = String::from(text);
+            pending.clear();
+            piece
+        }
+        Err(error) if error.error_len().is_none() => {
+            let valid_up_to = error.valid_up_to();
+            let piece = core::str::from_utf8(&pending[..valid_up_to])
+                .map(String::from)
+                .map_err(|_| proxima_tokenizer::TokenizerError::InvalidUtf8)?;
+            pending.drain(..valid_up_to);
+            piece
+        }
+        Err(_) => return Err(proxima_tokenizer::TokenizerError::InvalidUtf8.into()),
+    };
+    Ok(if vocab.is_unigram() {
+        proxima_tokenizer::unigram::replace_space_markers(&piece)
+    } else {
+        piece
+    })
+}
+
 /// The decode loop's termination policy, isolated from the forward pass
 /// that produces each token: pulls up to `max_tokens` ids out of
 /// `produce_next_token` (one call per step, `0`-indexed), appending each
 /// to the result unless it is `vocab`'s end-of-sequence id, in which case
 /// decoding stops immediately without appending that id. Returns the
 /// accumulated ids plus whether the stop was the model's own signal
-/// (`true`) rather than the budget running out (`false`).
+/// (`true`) rather than the budget running out (`false`) -- a caller
+/// [`Control::Stop`] collapses into the same `false` as budget exhaustion,
+/// since neither is the model's own eos.
+///
+/// Every step, after producing that step's token, calls `on_token` once (an
+/// extra [`Phase::Prefill`] call at step `0`, ahead of that step's own
+/// [`Phase::Token`] call) -- [`LoadedModel::generate_with_serving_config`]'s
+/// own `&mut |_| Control::Continue` never observes a difference from this
+/// function's pre-streaming behavior; [`LoadedModel::generate_streaming`]
+/// is the same loop with a real callback.
 ///
 /// Factored out so this policy -- the exact defect this module's
 /// [`LoadedModel::generate`] fixed (a loop with no termination condition
@@ -2166,17 +2321,64 @@ impl<'file> Pipe for LoadedModel<'file> {
 fn decode_until_stop_or_budget(
     vocab: &Vocab,
     max_tokens: usize,
+    prompt_token_count: usize,
     mut produce_next_token: impl FnMut(usize) -> Result<u32, InteropError>,
+    on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
 ) -> Result<(Vec<u32>, bool), InteropError> {
     let mut generated_ids = Vec::with_capacity(max_tokens);
     let mut stopped_by_eos = false;
+    let mut pending_bytes: Vec<u8> = Vec::new();
+    let mut unigram_leading_space_trimmed = false;
+    let loop_started = std::time::Instant::now();
     for step in 0..max_tokens {
         let token_id = produce_next_token(step)?;
-        if vocab.eos_token_id() == Some(token_id) {
+        let elapsed_ms = u64::try_from(loop_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let is_eos = vocab.eos_token_id() == Some(token_id);
+        let mut text_piece = if is_eos {
+            String::new()
+        } else {
+            decode_streamed_piece(vocab, token_id, &mut pending_bytes)?
+        };
+        // Mirrors `proxima_tokenizer::pipe::decode`'s own one-time leading-
+        // space trim (SentencePiece's `escape` always prepends one), applied
+        // to the FIRST non-empty piece this whole call ever emits rather
+        // than every piece -- a later piece starting with the space marker
+        // is a real inter-word space, not that artifact.
+        if !unigram_leading_space_trimmed && vocab.is_unigram() && !text_piece.is_empty() {
+            unigram_leading_space_trimmed = true;
+            if text_piece.starts_with(' ') {
+                text_piece.remove(0);
+            }
+        }
+        if step == 0 {
+            let control = on_token(TokenEvent {
+                token_id,
+                text_piece: &text_piece,
+                phase: Phase::Prefill {
+                    prompt_tokens: prompt_token_count,
+                },
+                step,
+                elapsed_ms,
+            });
+            if control == Control::Stop {
+                break;
+            }
+        }
+        if is_eos {
             stopped_by_eos = true;
             break;
         }
         generated_ids.push(token_id);
+        let control = on_token(TokenEvent {
+            token_id,
+            text_piece: &text_piece,
+            phase: Phase::Token,
+            step,
+            elapsed_ms,
+        });
+        if control == Control::Stop {
+            break;
+        }
     }
     Ok((generated_ids, stopped_by_eos))
 }
@@ -2268,6 +2470,47 @@ impl<'file> LoadedModel<'file> {
             runtime,
             None,
             &mut LogitsSink::Discard,
+            &mut |_event| Control::Continue,
+        )
+    }
+
+    /// [`Self::generate_with_serving_config`], plus a `TokenEvent` for
+    /// every step [`decode_until_stop_or_budget`] already produces --
+    /// [`Self::run_decode_loop_observed`]'s own loop, unchanged, given a
+    /// real `on_token` instead of `run_decode_loop`'s `&mut |_| Continue`.
+    /// There is one decode loop in this crate; this and
+    /// [`Self::generate_with_serving_config`] are the same call with
+    /// different callbacks, never two implementations of the loop itself.
+    ///
+    /// `on_token` sees exactly what [`TokenEvent`]'s own field docs promise:
+    /// one [`Phase::Prefill`] event at step `0` (prompt token count, that
+    /// step's own forward-pass latency), then one [`Phase::Token`] event
+    /// per generated token, `text_piece`s concatenating to this call's
+    /// returned `String` on the same ids as its returned `Vec<u32>`.
+    /// Returning [`Control::Stop`] from any call ends decoding after that
+    /// token, same as [`Control::Stop`]'s own doc: this call then returns
+    /// `finished = false`, exactly like running out of `max_tokens`, never
+    /// mistaken for the model's own eos.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::generate_with_serving_config`].
+    pub fn generate_streaming(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        serving_config: ServingConfig,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        let mut runtime = BackendRuntime::new(&serving_config);
+        self.run_decode_loop_observed(
+            prompt,
+            max_tokens,
+            &serving_config,
+            &mut runtime,
+            None,
+            &mut LogitsSink::Discard,
+            on_token,
         )
     }
 
@@ -2283,6 +2526,10 @@ impl<'file> LoadedModel<'file> {
     /// already slices out of `evaluated` to sample from), so a caller can
     /// read off per-step logits without a parallel, uncached forward pass.
     /// Both are no-ops for [`Self::run_decode_loop`]'s own callers.
+    /// `on_token` is [`decode_until_stop_or_budget`]'s own per-step callback,
+    /// threaded straight through -- `&mut |_| Control::Continue` for every
+    /// caller that does not need it, [`Self::generate_streaming`]'s real one
+    /// for the one that does.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_decode_loop_observed(
         &self,
@@ -2292,6 +2539,7 @@ impl<'file> LoadedModel<'file> {
         runtime: &mut BackendRuntime,
         token_override: Option<&[u32]>,
         logits_sink: &mut LogitsSink,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let ids = proxima_tokenizer::encode_with_bos_eos(
             prompt,
@@ -2345,6 +2593,7 @@ impl<'file> LoadedModel<'file> {
                 runtime,
                 token_override,
                 logits_sink,
+                on_token,
             );
         }
 
@@ -2411,6 +2660,7 @@ impl<'file> LoadedModel<'file> {
             )
             .collect();
 
+        let prompt_token_count = ids.len();
         let mut cached_len = 0usize;
         let mut next_ids = ids;
         let vocab_size = self.architecture.vocab as usize;
@@ -2418,6 +2668,7 @@ impl<'file> LoadedModel<'file> {
         let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
             &self.vocab,
             max_tokens,
+            prompt_token_count,
             |_step| {
                 // ROW 130's own fix, built: every counter this step's
                 // `evaluate_ms` decomposition reads is zeroed HERE, at step
@@ -2843,6 +3094,7 @@ impl<'file> LoadedModel<'file> {
 
                 Ok(token_id)
             },
+            on_token,
         )?;
 
         let text = proxima_tokenizer::decode(&generated_ids, &self.vocab)?;
@@ -2887,7 +3139,9 @@ impl<'file> LoadedModel<'file> {
         runtime: &mut BackendRuntime,
         token_override: Option<&[u32]>,
         logits_sink: &mut LogitsSink,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        let prompt_token_count = ids.len();
         let block_count = self.architecture.block_count as usize;
         let kv_heads = self.architecture.kv_heads as usize;
         let head_dim = self.architecture.head_dim as usize;
@@ -2977,8 +3231,11 @@ impl<'file> LoadedModel<'file> {
         let mut next_ids = ids;
         let vocab_size = self.architecture.vocab as usize;
 
-        let (generated_ids, stopped_by_eos) =
-            decode_until_stop_or_budget(&self.vocab, max_tokens, |_step| {
+        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
+            &self.vocab,
+            max_tokens,
+            prompt_token_count,
+            |_step| {
                 #[cfg(feature = "instrument")]
                 proxima_tensor::instrument::reset_step();
                 #[cfg(feature = "instrument")]
@@ -3334,7 +3591,9 @@ impl<'file> LoadedModel<'file> {
                 }
 
                 Ok(token_id)
-            })?;
+            },
+            on_token,
+        )?;
 
         let text = proxima_tokenizer::decode(&generated_ids, &self.vocab)?;
         Ok((generated_ids, text, stopped_by_eos))
@@ -3565,7 +3824,7 @@ mod tests {
     use proxima_gguf::{GgmlType as WireType, GgufModel, TensorPayload, write_complete};
     use proxima_tokenizer::Vocab;
 
-    use super::{build_position_inputs, decode_until_stop_or_budget};
+    use super::{Control, Phase, TokenEvent, build_position_inputs, decode_until_stop_or_budget};
     use crate::bind::architecture_from_metadata;
 
     fn dims(values: &[u64]) -> arrayvec::ArrayVec<u64, { proxima_gguf::tensor::MAX_DIMS }> {
@@ -3781,10 +4040,16 @@ mod tests {
         let scripted_tokens = [10u32, 20, 32_000, 999];
         let mut calls = 0usize;
 
-        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(&vocab, 4, |step| {
-            calls += 1;
-            Ok(scripted_tokens[step])
-        })
+        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
+            &vocab,
+            4,
+            0,
+            |step| {
+                calls += 1;
+                Ok(scripted_tokens[step])
+            },
+            &mut |_event| Control::Continue,
+        )
         .expect("scripted token source never errors");
 
         assert_eq!(
@@ -3811,11 +4076,14 @@ mod tests {
         let vocab = vocab_with_eos(32_000);
         let scripted_tokens = [10u32, 20, 30, 40];
 
-        let (generated_ids, stopped_by_eos) =
-            decode_until_stop_or_budget(&vocab, scripted_tokens.len(), |step| {
-                Ok(scripted_tokens[step])
-            })
-            .expect("scripted token source never errors");
+        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
+            &vocab,
+            scripted_tokens.len(),
+            0,
+            |step| Ok(scripted_tokens[step]),
+            &mut |_event| Control::Continue,
+        )
+        .expect("scripted token source never errors");
 
         assert_eq!(
             generated_ids,
@@ -3843,10 +4111,16 @@ mod tests {
         let vocab = vocab_with_eos(32_000);
         let mut calls = 0usize;
 
-        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(&vocab, 10, |_step| {
-            calls += 1;
-            Ok(32_000)
-        })
+        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
+            &vocab,
+            10,
+            0,
+            |_step| {
+                calls += 1;
+                Ok(32_000)
+            },
+            &mut |_event| Control::Continue,
+        )
         .expect("scripted token source never errors");
 
         assert!(
@@ -3857,6 +4131,128 @@ mod tests {
         assert_eq!(
             calls, 1,
             "must stop after exactly one call, not run toward the budget of 10"
+        );
+    }
+
+    /// [`TokenEvent`]'s own contract, proved end to end against a scripted
+    /// source: exactly one [`Phase::Prefill`] event (carrying the prompt
+    /// token count this call was given, at step `0`), then one
+    /// [`Phase::Token`] event per generated token, in order -- concatenating
+    /// every [`Phase::Token`] event's `text_piece` reproduces
+    /// [`proxima_tokenizer::decode`]'s own output on the same ids, and
+    /// every [`Phase::Token`] event's `token_id` is the matching entry of
+    /// the returned `Vec<u32>`.
+    #[test]
+    fn streams_one_prefill_event_then_one_token_event_per_generated_token() {
+        let vocab = vocab_with_eos(32_000);
+        // 'H', 'i', '!' -- three tokens spelling one word this vocab's own
+        // base-byte alphabet can decode without any multibyte splitting.
+        let scripted_tokens = [b'H' as u32, b'i' as u32, b'!' as u32];
+        let prompt_token_count = 5;
+
+        let mut events: Vec<(Phase, u32, String, usize)> = Vec::new();
+        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
+            &vocab,
+            scripted_tokens.len(),
+            prompt_token_count,
+            |step| Ok(scripted_tokens[step]),
+            &mut |event: TokenEvent<'_>| {
+                events.push((
+                    event.phase,
+                    event.token_id,
+                    String::from(event.text_piece),
+                    event.step,
+                ));
+                Control::Continue
+            },
+        )
+        .expect("scripted token source never errors");
+
+        assert!(!stopped_by_eos, "the scripted source never emits eos");
+        assert_eq!(generated_ids, alloc::vec![72, 105, 33]);
+
+        let prefill_events: Vec<_> = events
+            .iter()
+            .filter(|(phase, ..)| matches!(phase, Phase::Prefill { .. }))
+            .collect();
+        assert_eq!(
+            prefill_events.len(),
+            1,
+            "exactly one prefill event, regardless of how many tokens follow"
+        );
+        let (prefill_phase, _, _, prefill_step) = prefill_events[0];
+        assert_eq!(
+            *prefill_phase,
+            Phase::Prefill {
+                prompt_tokens: prompt_token_count
+            },
+            "prefill must carry this call's own prompt token count"
+        );
+        assert_eq!(*prefill_step, 0, "prefill only ever happens at step 0");
+
+        let token_events: Vec<_> = events
+            .iter()
+            .filter(|(phase, ..)| matches!(phase, Phase::Token))
+            .collect();
+        assert_eq!(
+            token_events.len(),
+            scripted_tokens.len(),
+            "one Token event per generated token, none skipped or doubled"
+        );
+        let token_ids: Vec<u32> = token_events.iter().map(|(_, id, ..)| *id).collect();
+        assert_eq!(
+            token_ids, generated_ids,
+            "Token event ids must equal the returned ids, in order"
+        );
+
+        let streamed_text: String = token_events
+            .iter()
+            .map(|(_, _, piece, _)| piece.as_str())
+            .collect();
+        let expected_text = proxima_tokenizer::decode(&generated_ids, &vocab)
+            .expect("scripted ids all resolve to real vocab bytes");
+        assert_eq!(
+            streamed_text, expected_text,
+            "concatenated Token event text must equal a one-shot decode of the same ids"
+        );
+    }
+
+    /// [`Control::Stop`]'s own contract: returning it from `on_token` ends
+    /// decoding after that token, short of `max_tokens`, and is reported
+    /// the same way running out of budget is -- never mistaken for the
+    /// model's own eos.
+    #[test]
+    fn control_stop_ends_decoding_early_and_is_not_reported_as_eos() {
+        let vocab = vocab_with_eos(32_000);
+        let scripted_tokens = [b'H' as u32, b'i' as u32, b'!' as u32, b'?' as u32];
+        let mut token_events_seen = 0usize;
+
+        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
+            &vocab,
+            scripted_tokens.len(),
+            0,
+            |step| Ok(scripted_tokens[step]),
+            &mut |event: TokenEvent<'_>| {
+                if matches!(event.phase, Phase::Token) {
+                    token_events_seen += 1;
+                    if token_events_seen == 3 {
+                        return Control::Stop;
+                    }
+                }
+                Control::Continue
+            },
+        )
+        .expect("scripted token source never errors");
+
+        assert_eq!(
+            generated_ids,
+            alloc::vec![72, 105, 33],
+            "must stop right after the 3rd token, never pulling the 4th"
+        );
+        assert_eq!(token_events_seen, 3);
+        assert!(
+            !stopped_by_eos,
+            "a caller-requested Stop must report finished=false, same as budget exhaustion"
         );
     }
 }
