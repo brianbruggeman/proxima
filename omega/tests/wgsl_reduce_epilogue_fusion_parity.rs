@@ -16,7 +16,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
-use proxima_tensor::{BoundOpKind, bind};
+use proxima_tensor::{BoundOpKind, NumericPolicy, bind};
 
 mod support;
 use support::{as_named_blocks, real_single_range_forward_fixture_with_padding};
@@ -56,8 +56,8 @@ fn the_fused_epilogue_holds_parity_on_wgpu_against_cpu() {
     let named = as_named_blocks(&owned);
 
     let shapes = proxima_tensor::infer(&program, &symbols).expect("single-range fixture infers");
-    let resolved =
-        bind(&program, &shapes, &output_roots).expect("single-range fixture binds");
+    let resolved = bind(&program, &shapes, &output_roots, NumericPolicy::default())
+        .expect("single-range fixture binds");
     assert!(
         epilogued_reduce_count(&resolved) > 0,
         "reduce-epilogue-fusion is compiled in but fused nothing on the real \
@@ -65,8 +65,16 @@ fn the_fused_epilogue_holds_parity_on_wgpu_against_cpu() {
          reduce+elementwise pair or the fusion pass regressed"
     );
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &symbols, &named, &output_roots)
-        .expect("cpu plans the single-range program");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &symbols,
+        &named,
+        &output_roots,
+        NumericPolicy::default(),
+    )
+    .expect("cpu plans the single-range program");
     let cpu = execute_plan_named(&mut cpu_plan, &named).expect("cpu runs the single-range program");
 
     let mut wgpu_plan = plan_named(
@@ -76,6 +84,7 @@ fn the_fused_epilogue_holds_parity_on_wgpu_against_cpu() {
         &symbols,
         &named,
         &output_roots,
+        NumericPolicy::default(),
     )
     .expect("wgpu plans the single-range program");
     let wgpu = execute_plan_named(&mut wgpu_plan, &named)

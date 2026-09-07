@@ -548,6 +548,7 @@ fn a_graph_past_the_adapter_storage_buffer_limit_is_a_named_error_on_wgpu() {
         &[],
         &named_blocks,
         &[sum],
+        NumericPolicy::default(),
     )
     .expect("this program plans (limit is checked at dispatch, not plan)");
     let error = execute_plan_named(&mut plan, &named_blocks).expect_err(
