@@ -26613,3 +26613,43 @@ Consolidated: A's `3..7` range across all three rounds is `20.541-20.872`; B's i
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-07 | `fix(omega): attention split decode uses the grid's multiplier, idle threadgroups write nothing` | `tgid` decode in the split kernel now divides by the compiled `ATTENTION_SPLIT_MAX` (matching the grid `grid_threads` actually dispatched), not the live `u.splits`; an idle split (`split >= splits`) returns before touching Q/K/V or scratch instead of computing a wrapped `query_row` and corrupting device memory past the scratch buffer | Fixes `GatherIndexOutOfRange` panic at context 512 (`splits_for=4 < ATTENTION_SPLIT_MAX=32`); context 40/4096 (`splits_for` = 1 or 32) were never affected. 21/21 clean post-fix at context 512, 0/7 crashes pre-fix (this session) | 244+120 tests green; A/B oracle 6/6 rounds byte-identical text, `gpu_exec_ms` +0.15% at 3..7 (inside combined CoV) | solo run, quiet gate held at load-1 4.87, no other cargo/nextest/rustc processes at any point |
+
+## ROW 381 -- `keys_per_split` 128 -> 16 wins the decode scoreboard window (36.1us vs 43.6us bare, beyond 2x CoV) at the cost of a 68% regression at 512 keys; the fixture's own greedy text and gpu_exec hold across the trade
+
+**Card:** `perf(omega): attention splits fire at the decode window`. **Worktree/branch:** `proxima-wt-r381`, `perf/row-381-split-sizing`, off `main` at `433ae2fb` (ROW 380's own commit).
+
+**Question.** ROW 380 fixed the split kernel's correctness; this row asks whether a smaller `[attention_splits] keys_per_split` moves ROW 376's own scoreboard window (39-78 live keys), where the shipped default (128) clamps `splits_for` to 1 -- one dispatch, no scratch, no merge -- for the whole window.
+
+**Ladder, bare `per_op_timed_kind_validated_us_per_dispatch: median`, kind-validated, median-of-7, `--test-threads=1`** (`row_376_cached_attention_batched`, `omega/tests/row_376_cached_attention_batched.rs`), rebuilt per cell via `OMEGA_ATTENTION_SPLITS_KEYS_PER_SPLIT=<n>` (the brief's own `OMEGA_ATTENTION_SPLIT_KEYS_PER_SPLIT` has no trailing `S` on `SPLITS` and does not match `proxima-build/src/sizing.rs`'s `<PREFIX>_<SECTION>_<KEY>` naming for `[attention_splits]` -- using it silently falls through to the TOML default and would have produced three cells all still running at 128; caught by reading `omega_sized.rs`'s generated constant after each build, not assumed):
+
+| keys_per_split | context | splits | median us | cov | vs 128 baseline |
+| --- | --- | --- | --- | --- | --- |
+| 128 (ROW 380 baseline) | 40 | 1 | 43.637 | 8.28% | -- |
+| 128 (ROW 380 baseline) | 512 | 4 | 89.524 | 14.88% | -- |
+| 16 | 40 | 3 | 36.132 | 5.20% | -17.1%, delta 7.47us > 2x CoV (3.76us) -- **clears** |
+| 16 | 512 | 32 | 150.867 | 10.07% | +68.5%, regression |
+| 8 | 40 | 5 | 41.812 | 12.63% | -4.1%, delta 1.79us < 2x CoV (10.55us) -- does not clear |
+
+`keys_per_split=16` is the only candidate that beats 128 at the scoreboard window beyond 2x CoV; `8` is statistically indistinguishable from 128 at this window (more splits, more per-threadgroup fixed overhead, no net win). `16` at 512 keys forces `splits=32` (vs 128's `4`) -- 8x the split count and 8x the merge-dispatch/scratch-write traffic, which loses badly at that shape. Per the brief's own rule (beat 128 at 40 keys beyond 2x CoV -> land it), `keys_per_split=16` is kept; the 512-key regression is accepted because the decode window (repeat single-token generation) is the hot path this crosses far more often than a 512-key prompt-processing shape.
+
+**Change.** `omega/omega-runtime.toml`'s `[attention_splits] keys_per_split` 128 -> 16, doc comment updated with the measured trade. Two unit tests in `omega/src/msl.rs` asserted the OLD invariant ("a 40-key context never splits under llama_relaxed") as a byte-identical-output guarantee -- both rewritten to assert the policy-split correctly: `bit_exact()` still never splits at any `keys_per_split` (it withholds `ContextSplitMerge` outright); `llama_relaxed()` now splits a 40-key context into 3 (`forty_keys_stays_one_split_under_bit_exact_but_splits_under_llama_relaxed`, `forty_key_plan_stays_one_kernel_under_bit_exact_but_splits_under_llama_relaxed`).
+
+**Oracle, A (main `433ae2fb`) / B (this branch), `PROXIMA_MAX_TOKENS=64`, `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, one round (budget-limited, see Residual):**
+
+| | step 3..7 gpu_exec_ms range | step 2 barriers | step 34 barriers |
+| --- | --- | --- | --- |
+| A (main) | 20.880-21.406 | 290 | 290 |
+| B (branch) | 20.175-20.219 | 322 | 322 |
+
+`generated_text` md5 identical both arms: `84c7519e6bffea98476fefd9d545a0fc` (matches ROW 380's own baseline hash). B's `barriers` count is +32 at every step sampled -- the merge dispatch's hazard-tracking edges, consistent with `cached_attention_merge_needed` now holding at this fixture's live capacity (`cached_len_before=33` at step 3, `context_length=34`, `splits_for(34, 16)=3 > 1`) where it did not at `keys_per_split=128` (`splits_for(34,128)=1`). Despite the added merge dispatch, B's `gpu_exec_ms` range at 3..7 sits entirely BELOW A's, not above -- decision rule (md5 identical AND B not above A's range) is met.
+
+**Flip decision: FLIPPED.** `keys_per_split=16` lands.
+
+**Gates.**
+- `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` -- exit 0.
+- `cargo nextest run -j 2 -p omega --features metal,instrument -E 'test(attention) or test(cached) or test(split)'` -- 21 tests run: 21 passed, 0 failed (includes both rewritten split-assertion tests and the `row_376` parity fixtures at context 40/512/4096).
+- `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 120 tests run: 120 passed, 36 skipped.
+
+**Residual, named not hidden.** (1) Only ONE A/B round was run, not the three the brief asked for -- the 30-minute hard budget was already consumed by: waiting out a concurrent GPU measurement from `proxima-wt-vacc` (~4 min), the two ladder rebuilds, and diagnosing the correct env-var name and test module path (`bind::real_openchat_file::...`, not `bind::tests::real_openchat_file::...`). One round's md5-identical text plus a `gpu_exec` range that does not overlap A's (entirely below, not just "not above") is the evidence available; two more rounds were not run. (2) The two `#[ignore]`d real-checkpoint fixture tests the brief also asked for (`real_smollm2_checkpoint`, `real_lfm2_checkpoint`) were started and killed after >300s on a single LFM2 test case -- unrelated to attention-split sizing (a full CPU decode of a different architecture's checkpoint) and would have consumed the remaining budget alone; not run. The standard `proxima-model-interop` nextest gate (120 passed) and the openchat oracle round above are the interop-level regression evidence in their place. (3) The brief's literal env var name, `OMEGA_ATTENTION_SPLIT_KEYS_PER_SPLIT`, does not match the actual override name; corrected to `OMEGA_ATTENTION_SPLITS_KEYS_PER_SPLIT` and verified against the generated `omega_sized.rs` constant after each build, not assumed from the brief's text.
+
+**Axes (principle 8):** numeric -- `keys_per_split` (16, was 128), `max` (32, unchanged); structural -- none. **Sans-IO opt-sweep (principle 11):** N/A -- build-time-constant divisor consumed by an already-shipped bind-time state machine (`splits_for`), not a new sans-IO component.
