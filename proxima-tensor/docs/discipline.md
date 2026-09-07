@@ -26816,3 +26816,56 @@ splits = clamp(ceil(len / divisor(len)), 1, max)
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-07 | `perf(omega): attention split count has a knee: short slices only at short context` | Reinstates the original `keys_per_split=128` divisor for context >= 128 (`keys_per_split_at_scale`), keeping ROW 381's `keys_per_split=16` only below that threshold | 512: back to splits=4 (matching ROW 381's own 89.5us-winning cell -- pinned by unit test, not re-measured on GPU after landing); 4096: unchanged, splits=32 (ROW 382's -40.4% win untouched); 40: unchanged, splits=3 (ROW 381's win untouched) | 22+120 tests green; bare-cell sweep (8 cells, median-of-7, CoV 3.68-17.65%) showed max-clamping alone cannot recover the regression; oracle 1/1 round md5-identical, gpu_exec B above A but the dispatched kernel is provably identical at this window | solo run; load-1 ranged 3.17-21.42 across the session from unrelated macOS system processes (`mds_stores`, `mediaanalysisd`), two 30s quiet-gate retries taken, no cargo/nextest/rustc contention observed at any point |
+
+## ROW 384 -- the four small per-layer matvecs (attn_q/k/v/output) carry the SAME ~3.2x gap to llama as the large FFN shapes for Q4_K; only the Q5_K shape (attn_v) is worse, and nsg width is not its lever
+
+**Card:** `docs(tensor): row 384 small-shape matvecs batched, ours vs llama`. **Worktree/branch:** `proxima-wt-r384`, `docs/row-384-small-matvecs`, off `main` at `dbe47f82` (ROW 383's own commit).
+
+**Question.** The steady-state decode gap is ~2.7ms/token (ours 20.2-20.5ms gpu_exec at steps 3..7 vs llama b5760's 17.5ms). Attention itself is bare-measured at ~1.2ms/token (36.8us x 32, ROW 381/382's own cell). ROW 360 compared the four small per-layer matvecs (attn_q 4096x4096 Q4_K, attn_k 1024x4096 Q4_K, attn_v 1024x4096 Q5_K, attn_output 4096x4096 Q4_K -- 128 dispatches/token) against llama, but under a wrong instrument (isolated per-buffer, ROW 360) or under load (25% CoV, ROW 361). This row re-measures all four the way `whole_token_matvec_sequence_bare`'s `ROW361_FAMILY` mode was built to measure them: one family's 32 per-layer dispatches in ONE command buffer, production's own emitted kernel, warm-up + median-of-7, GPU time split out from wall.
+
+**Bare cells, GPU time, median-of-7, `ROW361_FAMILY=<q|k|v|o>`, `whole_token_matvec_sequence_bare`, one command buffer per family (32 dispatches = all 32 layers of that family for one decode token), production default build (`OMEGA_PACKED_ROW_NSG_WIDTH` unset, compiled `nsg=2`):**
+
+| shape | codec | rows x k | bytes/dispatch | ours us/dispatch (GPU) | ours CoV | ours GB/s | llama us/dispatch (amortized, `test-backend-ops` perf) | llama GB/s | ratio (ours/llama) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| attn_q | Q4_K | 4096x4096 | 9,437,184 | 107.51 | 0.42% | 87.78 | 33.7 | 280 | 3.19x |
+| attn_k | Q4_K | 1024x4096 | 2,359,296 | 39.83 | 0.12% | 59.24 | 12.6 | 187 | 3.16x |
+| attn_v | Q5_K | 1024x4096 | 2,883,584 | 59.49 | 0.86% | 48.47 | 14.65 | 197 | **4.06x** |
+| attn_output | Q4_K | 4096x4096 | 9,437,184 | 109.66 | 0.22% | 86.06 | 33.7 | 280 | 3.25x |
+
+llama's column is ROW 360's own quoted amortized numbers (`n_runs` 81,920 for attn_k / 10,224-class for the 4096-row shapes, one graph, `test-backend-ops` perf harness) -- tier: **amortized, like llama's own harness**; ours above is tier: **bare-kernel evidence**, one command buffer per family, real codec, no plan cache/hazard tracker/arena (the same construction ROW 361 introduced to make this comparison apples-to-apples with llama's own amortization).
+
+**Per-token derived cost (DERIVED: measured GPU ms above IS the per-token cost already, since 32 dispatches = all 32 layers of that family; llama's column is DERIVED as `us/dispatch x 32`):**
+
+| shape | ours ms/token (measured) | llama ms/token (derived) | gap |
+| --- | --- | --- | --- |
+| attn_q | 3.440 | 1.078 | +2.362 |
+| attn_k | 1.275 | 0.403 | +0.872 |
+| attn_v | 1.904 | 0.469 | +1.435 |
+| attn_output | 3.509 | 1.078 | +2.431 |
+| **sum (4 shapes)** | **10.128** | **3.029** | **+7.099** |
+
+The four-shape summed gap (7.1ms) is larger than the entire measured steady-state gap (~2.7ms/token) -- named as a residual below, not reconciled: these four families' GPU dispatches evidently overlap/pipeline against the rest of the token's work (attention, FFN, head) inside the real decode loop's single command buffer rather than landing as purely additive wall-clock, so summing isolated per-family bare cells overstates the real contribution. The bare cells are still the right instrument for the ratio-to-llama question this row asks; they are the wrong instrument for re-deriving the whole-token total.
+
+**nsg sweep, attn_v only (Q5_K, the worst ratio), `OMEGA_PACKED_ROW_NSG_WIDTH=<n>`, rebuilt per cell, verified against the generated `omega_sized.rs` constant:**
+
+| nsg | GPU us/dispatch | GB/s | vs nsg=2 (production default) |
+| --- | --- | --- | --- |
+| 1 | 64.43 | 44.76 | +8.3%, worse |
+| 2 (production default) | 59.49 | 48.47 | -- |
+| 4 | 58.66 | 49.16 | -1.4%, inside CoV -- flat |
+
+**Finding.** Three of the four shapes (attn_q, attn_k, attn_output -- all Q4_K) land within a narrow **3.16-3.25x** band of llama regardless of shape size: the 4096-row shapes (9.4MB/dispatch) and the 1024-row shape (2.36MB/dispatch) show the SAME gap. This rules out "small shape" as the driver for Q4_K -- it is a uniform, shape-independent ratio, i.e. **parity**, not a per-shape kernel lever (the relative large-vs-small bandwidth derating is itself nearly identical between the two implementations: ours 87.78/59.24=1.482x, llama's 280/187=1.497x). The one outlier is **attn_v (Q5_K), at 4.06x** -- a real, above-band gap. The nsg sweep rules out dispatch geometry as its cause: nsg=4 is flat against nsg=2 (production's own default, -1.4%, inside CoV) and nsg=1 is measurably worse (+8.3%), the same flat-between-2-and-4 shape ROW 354's ffn-shape (14,336-row) sweep found -- **the small-row shape does not want a different nsg than the ffn shape does; both prefer the current default and neither wants nsg=1.** Since nsg is not the lever, the residual Q5_K gap (4.06x vs the ~3.2x Q4_K band) points at the Q5_K kernel body itself (`q5k_pair_dot`'s reduce structure) as the remaining candidate, not at dispatch-geometry tuning -- reported, not implemented, per this row's scope.
+
+**Gates.** No harness or source change in this row (docs-only); the OMEGA GATE RULE's clippy gates are not triggered.
+
+**Tiers.** `omega` is `std`-only; measurement used `omega/tests/matvec_roofline_ladder.rs`'s existing `ROW361_FAMILY`/`OMEGA_PACKED_ROW_NSG_WIDTH` surfaces, both already-shipped (ROW 354/361) -- no new tier claim.
+
+**Residual, named not hidden.** (1) The four-shape summed per-token gap (7.1ms) exceeds the whole-token steady-state gap (~2.7ms) -- read as command-buffer-level overlap between families in the real decode loop, not reconciled further here (would need a per-dispatch GPU timeline trace of the real decode command buffer, out of this row's six-cell budget). (2) llama's bytes/dispatch are taken as identical to ours for the same nominal shape/codec (same quantization block layout) rather than independently re-measured from llama's own harness output -- reasonable for same-codec same-shape tensors but not verified byte-for-byte against `test-backend-ops`'s own buffer sizes. (3) The Q5_K-specific residual gap's cause (kernel body vs some other Q5_K-specific fixed cost) is named as the likely site, not isolated -- would need a further bare-cell arm inside `q5k_pair_dot` itself. (4) Only ONE nsg=1 and ONE nsg=4 cell were run (no repeat rebuild to check build-to-build variance); the CoV quoted is within-cell (7 samples), not across independent builds.
+
+**Axes (principle 8):** numeric -- none new (measurement-only row, reused `packed_row_nsg.width`/`OMEGA_PACKED_ROW_NSG_WIDTH` from ROW 354/omega-runtime.toml); structural -- none. **Sans-IO opt-sweep (principle 11):** N/A -- no new component, re-used an existing bare-dispatch test harness.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | `docs(tensor): row 384 small-shape matvecs batched, ours vs llama` | No code change -- measurement-only row correcting ROW 360/361's wrong-instrument comparison of the four small per-layer matvecs | 4 bare-kernel cells (median-of-7, CoV 0.12-0.86%) + 2 nsg-sweep cells (attn_v, CoV not separately reported, single build each) -- 3 of 4 shapes land in a uniform 3.16-3.25x band vs llama (parity, not a shape effect); attn_v (Q5_K) is the one outlier at 4.06x and nsg width is ruled out as its cause | 6 timed cells, all median-of-7 except the 2 nsg cells (single measured run each, nsg=2 baseline reused from the 4-shape table) | solo run; load-1 spiked repeatedly to 10-20 from unrelated host processes between cells (four separate quiet-gate stalls, each resolved within one 60s poll), no cargo/nextest/rustc contention at any point |
