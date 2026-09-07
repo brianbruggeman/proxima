@@ -3129,12 +3129,15 @@ impl<'file> LoadedModel<'file> {
                         named_blocks_kv_ticks,
                         // No host-side KV cache exists on this arm (the cache
                         // lives entirely in `k_even_buffers`/`k_odd_buffers`/
-                        // `v_buffers`, device-resident for the whole call) --
-                        // `block_offered_bytes` is the real device-side upload
-                        // counter, not a stand-in host element count.
-                        #[cfg(all(feature = "metal", target_os = "macos"))]
-                        kv_cache_upload_bytes: metal_stage.block_offered_bytes,
-                        #[cfg(not(all(feature = "metal", target_os = "macos")))]
+                        // `v_buffers`, device-resident for the whole call), so
+                        // there is no real host-upload byte count to report
+                        // here. `metal_stage.block_offered_bytes` used to fill
+                        // this field instead (ROW 369) -- that is the whole
+                        // bound program's residency census, weights included,
+                        // not a KV-cache-specific count, and it is already
+                        // reported honestly under its own name by
+                        // `emit_token_breakdown_metal`'s `block_offered_bytes`
+                        // field below.
                         kv_cache_upload_bytes: 0,
                         evaluate_ticks,
                         // No separate host layer-cache append step on this
