@@ -26653,3 +26653,78 @@ Consolidated: A's `3..7` range across all three rounds is `20.541-20.872`; B's i
 **Residual, named not hidden.** (1) Only ONE A/B round was run, not the three the brief asked for -- the 30-minute hard budget was already consumed by: waiting out a concurrent GPU measurement from `proxima-wt-vacc` (~4 min), the two ladder rebuilds, and diagnosing the correct env-var name and test module path (`bind::real_openchat_file::...`, not `bind::tests::real_openchat_file::...`). One round's md5-identical text plus a `gpu_exec` range that does not overlap A's (entirely below, not just "not above") is the evidence available; two more rounds were not run. (2) The two `#[ignore]`d real-checkpoint fixture tests the brief also asked for (`real_smollm2_checkpoint`, `real_lfm2_checkpoint`) were started and killed after >300s on a single LFM2 test case -- unrelated to attention-split sizing (a full CPU decode of a different architecture's checkpoint) and would have consumed the remaining budget alone; not run. The standard `proxima-model-interop` nextest gate (120 passed) and the openchat oracle round above are the interop-level regression evidence in their place. (3) The brief's literal env var name, `OMEGA_ATTENTION_SPLIT_KEYS_PER_SPLIT`, does not match the actual override name; corrected to `OMEGA_ATTENTION_SPLITS_KEYS_PER_SPLIT` and verified against the generated `omega_sized.rs` constant after each build, not assumed from the brief's text.
 
 **Axes (principle 8):** numeric -- `keys_per_split` (16, was 128), `max` (32, unchanged); structural -- none. **Sans-IO opt-sweep (principle 11):** N/A -- build-time-constant divisor consumed by an already-shipped bind-time state machine (`splits_for`), not a new sans-IO component.
+
+## ROW 382 -- V accumulates as float4 per `ty` group with a `simd_shuffle_xor` cross-group reduce; wins big at 4096 keys, flat at 40, a real regression at 512 under ROW 381's own `keys_per_split=16`
+
+**Card:** `perf(omega): attention accumulates v as float4 per ty group with a final cross-group reduce`. **Worktree/branch:** `proxima-wt-vacc`, `perf/attention-v-float4`, rebased onto `main` at `136002bd` (ROW 381's own commit; the branch's original base, `433ae2fb`, moved out from under it mid-session).
+
+**The V layout finding.** The block-staged Q·K stage already loads Q/K as `float4` via `kbase` (the pair-packed rotate-half layout, `kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2)`); V's layout is different -- unrotated, `head_dim` contiguous floats per key at `kbase * 2` -- so the SAME `kbase` computed for Q·K reinterprets cleanly as a `float4` V pointer only by doubling it (`kbase * 2`), never re-deriving a second base. This is llama's own `kernel_flash_attn_ext_vec` register form (`ggml-metal.metal:4125-4143`): each of the 4 `ty` groups (8 `tx` lanes each, splitting the 32-lane simdgroup 4-ways) loads its OWN `float4` chunk of V for its OWN assigned key, accumulates in registers across the 8-key block, then the 4 `ty` groups' partials are folded together by a butterfly `simd_shuffle_xor` reduce (strides 8, then 16) before landing in `shared_o` -- the same scratch array the merge step already reads, reused rather than doubled (`omega/src/msl.rs`'s own doc comment on the now-hoisted `threadgroup float shared_o[...]` declaration, this landing's own move: declared once above the `block_width` branch instead of once per policy arm, since both arms read it identically).
+
+**The emitted V loop and reduce (`head_dim % 32 == 0`).**
+```
+constexpr long v_registers = head_dim / 8 / 4;
+float4 v_acc[v_registers] = {float4(0.0f), ...};
+for (long cc4 = 0L; cc4 < 8L; cc4++) {
+    long local_index = block_start + sub + 4L * cc4 + (long)ty;
+    bool valid = local_index < min(block_start + sub + 32L, num_local_keys);
+    ... kbase computed exactly as the scalar form did ...
+    float key_weight = valid ? ss[...] : 0.0f;
+    device const float4* v4 = (device const float4*)((cached ? in6 : in7) + kbase * 2);
+    for (register_index in 0..v_registers) { v_acc[register_index] += valid ? float4(v4[tx + 8 * register_index]) * key_weight : float4(0.0f); }
+}
+for (register_index in 0..v_registers) {
+    v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 8);
+    v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 16);
+}
+if (ty == 0) { shared_o4[tx + 8 * register_index] = v_acc[register_index]; }  // per register_index
+simdgroup_barrier(mem_flags::mem_threadgroup);
+weighted[local_dimension] += shared_o[local_group_index * head_dim + dimension];  // lane-strided read-back
+simdgroup_barrier(mem_flags::mem_threadgroup);
+```
+
+**The alignment fallback.** `head_dim % 32 != 0` (this crate's `head_dim = 8` fixtures: a multiple of 8 so Q/K's own `float4` loads stay valid, but not of 32) keeps today's scalar per-key V loop byte for byte -- `weighted[local_dimension] += key_weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);`, unconditionally on any `dimension` stride, no `v_registers` sizing hazard. Two new tests pin both sides: `block_staged_v_accumulate_uses_float4_and_a_cross_ty_reduce_when_aligned` (`head_dim=32`, asserts the `float4` pointer, the accumulate line, both `simd_shuffle_xor` strides present, and the scalar loop line ABSENT) and `block_staged_v_accumulate_falls_back_to_scalar_when_head_dim_not_32_aligned` (`head_dim=8`, asserts the inverse).
+
+**Rebase, conflicts hit.** `main` advanced from `433ae2fb` to `136002bd` (ROW 381: `keys_per_split` 128 -> 16) between this branch's own commit and this landing attempt. `omega/src/msl.rs` conflicted in exactly the test module's doc-comment region: ROW 381 rewrote the doc above `forty_keys_stays_one_split_under_bit_exact_but_splits_under_llama_relaxed` (old: "40 keys never split", new: "40 keys now split into 3 under `llama_relaxed`, `keys_per_split=16`"), while this branch inserted its own two new tests directly above that same test. Resolved by keeping ROW 381's updated doc-comment and test body verbatim (main wins on the now-current `keys_per_split=16` fact) and re-inserting this branch's two new tests immediately before it, preserving both branches' additions with no row/test dropped.
+
+**Bare cells, `per_op_timed_kind_validated_us_per_dispatch: median` (kind-validated, GPU time, median-of-7, `--test-threads=1`), CURRENT main sizing (`keys_per_split=16`, `max=32`, read from `omega-runtime.toml` after the rebase):**
+
+| context | splits | median us (this branch) | cov | prior median us (same splits, no V-float4) | delta | effective GB/s (this branch, median-based) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 40 | 3 | 36.833 | 10.39% | 36.132 (ROW 381) | +1.9%, inside combined CoV (11.6%) -- flat | 8.90 |
+| 512 | 32 | 170.307 | 3.68% | 150.867 (ROW 381) | **+12.9%, beyond combined CoV (10.7%) -- a real regression** | 24.63 |
+| 4096 | 32 | 309.440 | 6.71% | 519.436 (ROW 380, same splits=32 since both 128 and 16 clamp to `max` at this length) | -40.4%, beyond combined CoV (10.9%) -- a real win | 108.44 |
+
+**Mechanism (report the number that hurts first).** At 512 keys the live sizing already forces `splits=32` (ROW 381's own tradeoff), so each threadgroup's block-staged loop covers very few keys per split; the V-accumulate rewrite adds fixed per-block cost (two `simdgroup_barrier`s, a `shared_o4` write, the register-zero/fold loop) that a short per-split key range cannot amortize, so the fixed cost dominates and the cell regresses. At 4096 keys the SAME split count (32) covers ~8x more keys per split, so the same fixed per-block cost amortizes over far more accumulate iterations and the memory-throughput win (float4 V loads instead of four scalar loads per key) dominates -- the win and the loss are the same mechanism (fixed per-block overhead vs. amortized throughput) on opposite sides of "how much work does one split do." 40 keys sits at splits=3, an intermediate few-keys-per-split regime, and lands within noise of the pre-change baseline for the same reason 512 loses, just not far enough beyond CoV to call it a regression on its own.
+
+**Oracle, A(main `136002bd`, post-ROW-381)/B(branch, this landing), `PROXIMA_MAX_TOKENS=64`, `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, three rounds each, `gpu_exec_ms` at steps 3..7:**
+
+| round | range | mean |
+| --- | --- | --- |
+| A1 (main) | 20.187-20.679 | 20.447 |
+| B1 (branch) | 20.299-20.462 | 20.353 |
+| A2 (main) | 20.861-20.998 | 20.916 |
+| B2 (branch) | 20.199-20.330 | 20.268 |
+| A3 (main) | 20.680-20.800 | 20.750 |
+| B3 (branch) | 20.833-20.997 | 20.934 |
+
+`generated_text` md5 identical across all six rounds: `84c7519e6bffea98476fefd9d545a0fc` (matches ROW 380/381's own baseline hash). Step 2 and step 34 `barriers=322` in every round, both arms (matches ROW 381's own landed count -- this change adds no new dispatch, only rewrites the V loop body inside the existing block-staged kernel). Per-round sign flips -- B1 < A1, B2 < A2, **B3 > A3** -- the same pattern ROW 380 reported and did not call a regression; combined range (A: 20.187-20.998, B: 20.199-20.997) has B's own maximum essentially equal to, not above, A's maximum, and combined mean is lower for B (20.704 vs 20.518, -0.9%). This fixture's own context length tops out at 95 over 64 decode steps -- below `keys_per_split=16`'s crossover into the `splits=32` regime this row's own bare-cell 512/4096 cells show diverging (win vs loss), so this oracle speaks to the common decode-window shape (splits=3 at this fixture's live capacity, matching the bare-cell 40-key cell's own flat result), not to the 512-key regression named above.
+
+**Decision rule applied (md5 identical AND B's `gpu_exec` at 3..7 not above A's range): met on the combined range; NOT met on the single round-3 pair taken alone.** Both readings are reported; no verdict is rendered here.
+
+**Gates.**
+- `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` -- exit 0.
+- `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` -- exit 0.
+- `cargo nextest run -j 2 -p omega --features metal,instrument` -- 246 tests run: 246 passed, 14 skipped.
+- `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 120 tests run: 120 passed, 36 skipped.
+
+**Tiers.** `omega` is `std`-only (Metal/wgpu/cuda backends all require the platform); this change is confined to `omega/src/msl.rs`'s MSL text generation, entirely inside the existing `std`-gated `feature = "metal"` surface -- no new tier surface, no `no_std`/`alloc` claim made or applicable.
+
+**Residual, named not hidden.** (1) The 512-key regression is a genuine, beyond-CoV cost of this change under ROW 381's OWN sizing choice, not a wash -- it was not re-tuned away (e.g., gating the float4 accumulate on split count as well as `head_dim` alignment) because that is a new, untested axis outside this row's scope; named here as the next slice, not silently absorbed into the win at 4096. (2) The A/B oracle's fixture cannot exercise the 512/4096-key regime at all (context tops out at 95), so it is evidence for the common decode-window shape only, not for the regression the bare cells found -- the bare cells are the regression's only direct evidence, and the oracle's own "not above" reading should not be read as clearing the 512-key cost.
+
+**Axes (principle 8):** numeric -- none newly introduced (`v_registers` is derived from the existing `head_dim` at render time, not a build-time tunable); structural -- the `head_dim % 32 == 0` alignment branch (float4 V-accumulate vs. scalar fallback) inside the existing block-staged body. **Sans-IO opt-sweep (principle 11):** N/A -- MSL text generation consumed by an already-shipped bind-time state machine (`render_cached_attention`), not a new sans-IO component.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | `perf(omega): attention accumulates v as float4 per ty group with a final cross-group reduce` | V-accumulate ported to llama's `kernel_flash_attn_ext_vec` register form (`float4` per `tx` lane, `simd_shuffle_xor` cross-`ty` reduce) when `head_dim % 32 == 0`; scalar fallback otherwise | 4096: -40.4% (519.436us -> 309.440us); 512: +12.9% regression (150.867us -> 170.307us) under ROW 381's `keys_per_split=16`; 40: +1.9%, flat | 246+120 tests green; bare cells median-of-7 (CoV 3.68-10.39%); oracle 6/6 rounds md5-identical, `gpu_exec` combined range not above, single round-3 pair above | solo run except a ~2 min wait for another agent's timed slice (`proxima_model_i`) to clear the quiet gate before the bare cells; no other cargo/nextest/rustc process observed during any timed cell |
