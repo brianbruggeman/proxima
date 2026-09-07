@@ -74,7 +74,10 @@ use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::backend::execute_plan_named_metal_op_timed;
 #[cfg(feature = "metal")]
-use omega::backend::{Engine, Plan, execute_plan_named, mark_resident, plan_named, plan_named_exact};
+use omega::backend::{
+    Engine, Plan, execute_plan_named, mark_resident, plan_named, plan_named_exact,
+    release_resident_names, unregister_checkpoint_mapping,
+};
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same
 // `metal`+macos gate that type itself lives behind.
@@ -765,6 +768,46 @@ pub struct LoadedModel<'file> {
     /// the runtime backend selection together allow.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     single_range: Option<SingleRangeProgram>,
+    /// The same `file_bytes` slice [`Self::load`]/[`Self::load_inner`]
+    /// registered with `omega::backend::register_checkpoint_mapping` (GGUF
+    /// checkpoints only -- [`Self::load_from_safetensors`] never registers
+    /// one, so this is just the raw byte view there). Kept so `Drop` can
+    /// hand the identical `(pointer, length)` identity back to
+    /// `omega::backend::unregister_checkpoint_mapping`, which is the only
+    /// thing that lets it tell "this is still my mapping" apart from "a
+    /// second model already superseded it" -- see that function's own doc.
+    /// Named distinctly from [`Self::checkpoint_bytes`] (the `usize` byte
+    /// COUNT the memory-fit gate reports) since this is the byte VIEW
+    /// itself, not a count -- the two coexist on this struct for different
+    /// readers.
+    // only `Drop` (below) reads this, and `Drop` is itself `metal`-gated --
+    // a `std`-only, non-`metal` build has no device buffer to release, so
+    // the field is genuinely dead weight there rather than a leftover
+    // `_` this cfg_attr is hiding a real bug behind.
+    #[cfg_attr(
+        not(feature = "metal"),
+        allow(dead_code, reason = "only `Drop`, itself `metal`-gated, reads this")
+    )]
+    checkpoint_mapping: &'file [u8],
+}
+
+/// Releases every device buffer this checkpoint's own load caused: the
+/// no-copy/resident-copy buffers keyed under [`Self::resident_names`], and
+/// (GGUF checkpoints only -- see [`Self::checkpoint_mapping`]'s own doc) the
+/// whole-mapping no-copy buffer `omega::backend::register_checkpoint_mapping`
+/// registered. Both releases are BY NAME/IDENTITY, never a blanket cache
+/// clear, so a second `LoadedModel` loaded on this same thread keeps its
+/// own weights resident regardless of drop order -- see
+/// `omega::metal::release_resident_names`'s and
+/// `omega::metal::unregister_checkpoint_mapping`'s own docs for the
+/// mechanism. A no-op unless this build was compiled with the `metal`
+/// feature: the CPU evaluator has no device buffer to release.
+#[cfg(feature = "metal")]
+impl Drop for LoadedModel<'_> {
+    fn drop(&mut self) {
+        release_resident_names(self.resident_names().iter().copied());
+        unregister_checkpoint_mapping(self.checkpoint_mapping);
+    }
 }
 
 /// [`mistral_single_range_cached_forward_program`]'s compiled output, plus
@@ -1108,6 +1151,7 @@ impl<'file> LoadedModel<'file> {
                 // attention+state-space layers are never that shape.
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 single_range: None,
+                checkpoint_mapping: file_bytes,
             });
         }
 
@@ -1208,6 +1252,7 @@ impl<'file> LoadedModel<'file> {
             qwen35_ssm_shape: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
+            checkpoint_mapping: file_bytes,
         })
     }
 
@@ -1295,6 +1340,7 @@ impl<'file> LoadedModel<'file> {
             qwen35_ssm_shape: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
+            checkpoint_mapping: file_bytes,
         })
     }
 }
@@ -2489,6 +2535,29 @@ impl<'file> LoadedModel<'file> {
         )
     }
 
+    /// This checkpoint's own static weight names -- `mark_resident`'s own
+    /// caller-supplied classification (`BackendRuntime::evaluate`'s doc),
+    /// bound once at [`Self::load`] time and never mutated again. Shared by
+    /// every decode-loop variant that calls `mark_resident` and by `Drop`,
+    /// which hands this SAME name set to
+    /// `omega::backend::release_resident_names` so a dropped model evicts
+    /// exactly the device buffers it caused and nothing another model's
+    /// own names might collide with.
+    fn resident_names(&self) -> BTreeSet<&str> {
+        self.weights
+            .owned
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(self.weights.packed.iter().map(|(name, _)| name.as_str()))
+            .chain(
+                self.weights
+                    .packed_owned
+                    .iter()
+                    .map(|(name, _, _)| name.as_str()),
+            )
+            .collect()
+    }
+
     /// The greedy decode loop itself: `max_tokens` steps, each one call
     /// into `BackendRuntime::evaluate` against `new_positions == 1` after
     /// the first step (`new_positions == prompt_length` on the first),
@@ -2823,19 +2892,7 @@ impl<'file> LoadedModel<'file> {
         // "same name, same bytes" apart from "same name, new bytes" without
         // ever keying on name itself (`omega::metal::Plan::mark_resident`'s
         // own doc). Computed once, not per token: these names never change.
-        let resident_names: BTreeSet<&str> = self
-            .weights
-            .owned
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .chain(self.weights.packed.iter().map(|(name, _)| name.as_str()))
-            .chain(
-                self.weights
-                    .packed_owned
-                    .iter()
-                    .map(|(name, _, _)| name.as_str()),
-            )
-            .collect();
+        let resident_names: BTreeSet<&str> = self.resident_names();
 
         let prompt_token_count = ids.len();
         let mut cached_len = 0usize;
@@ -3390,19 +3447,7 @@ impl<'file> LoadedModel<'file> {
         let mut cache_length_scratch_even_odd: Vec<f32> = Vec::new();
         let mut cache_length_scratch_v: Vec<f32> = Vec::new();
 
-        let resident_names: BTreeSet<&str> = self
-            .weights
-            .owned
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .chain(self.weights.packed.iter().map(|(name, _)| name.as_str()))
-            .chain(
-                self.weights
-                    .packed_owned
-                    .iter()
-                    .map(|(name, _, _)| name.as_str()),
-            )
-            .collect();
+        let resident_names: BTreeSet<&str> = self.resident_names();
 
         let mut cached_len = 0usize;
         let mut next_ids = ids;
@@ -3894,19 +3939,7 @@ impl<'file> LoadedModel<'file> {
             named_blocks.extend(empty_cache.named_blocks(k_even_name, k_odd_name, v_name));
         }
 
-        let resident_names: BTreeSet<&str> = self
-            .weights
-            .owned
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .chain(self.weights.packed.iter().map(|(name, _)| name.as_str()))
-            .chain(
-                self.weights
-                    .packed_owned
-                    .iter()
-                    .map(|(name, _, _)| name.as_str()),
-            )
-            .collect();
+        let resident_names: BTreeSet<&str> = self.resident_names();
 
         let symbols = [ids.len() as u64, 0u64];
         let evaluated = runtime.evaluate(
@@ -4518,6 +4551,138 @@ mod tests {
              resumes normally on the bytes that follow it"
         );
     }
+
+    /// The one real check for `LoadedModel`'s `Drop` impl: loads a real
+    /// checkpoint on Metal, runs a handful of decode steps (so the resident
+    /// weight buffers and the checkpoint-mapping no-copy buffer are both
+    /// actually populated, not just registered), drops it, and prints
+    /// `MTLDevice::currentAllocatedSize` alongside the process's own
+    /// `phys_footprint` before load / after generate / after drop -- the
+    /// artifact this row's own INVARIANT ("dropping a `LoadedModel` releases
+    /// every device allocation it caused") is checked against. `#[ignore]`d
+    /// like every other host-local fixture in this crate
+    /// ([`real_openchat_file`]'s own doc): this prints evidence for a human
+    /// to read, it does not assert a byte-exact threshold, because the OS's
+    /// own `phys_footprint` also reflects unrelated process state (allocator
+    /// arenas, thread stacks) this test does not control.
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    mod release_on_drop_real_model {
+        use core::ffi::c_void;
+        use std::os::fd::AsFd;
+
+        use super::super::LoadedModel;
+        use crate::serving::GPU_LAYERS_ALL;
+
+        struct MappedGguf {
+            base: *mut u8,
+            len: usize,
+            _file: std::fs::File,
+        }
+
+        impl MappedGguf {
+            fn open(path: &std::path::Path) -> std::io::Result<Self> {
+                let file = std::fs::File::open(path)?;
+                let len = usize::try_from(file.metadata()?.len())
+                    .expect("fixture file length fits in usize");
+                // SAFETY: `len` matches the just-opened file's own length;
+                // `file` is kept alive in `_file` for as long as `base` is
+                // used, and the mapping is read-only/private so no writer
+                // can observe or race it.
+                let base = unsafe {
+                    rustix::mm::mmap(
+                        core::ptr::null_mut(),
+                        len,
+                        rustix::mm::ProtFlags::READ,
+                        rustix::mm::MapFlags::PRIVATE,
+                        file.as_fd(),
+                        0,
+                    )
+                }
+                .expect("mmap host-local release-gate gguf fixture")
+                .cast::<u8>();
+                Ok(Self {
+                    base,
+                    len,
+                    _file: file,
+                })
+            }
+
+            fn as_slice(&self) -> &[u8] {
+                // SAFETY: `base` points at `len` bytes mapped for `self`'s
+                // whole lifetime; this borrows `self` immutably, so nothing
+                // can unmap the region while the returned slice is alive.
+                unsafe { core::slice::from_raw_parts(self.base, self.len) }
+            }
+
+            /// Explicit rather than left to `Drop` -- this test reads the
+            /// device/process footprint immediately after unmapping, and
+            /// that ordering (drop the model, THEN unmap, THEN measure) is
+            /// the whole point: `register_checkpoint_mapping`'s own no-copy
+            /// buffer aliases this mapping directly, so a real fix must
+            /// release Metal's reference to it before the mapping itself
+            /// goes away, not merely before the test happens to check.
+            fn unmap(self) {
+                // SAFETY: `base`/`len` are exactly what `open`'s `mmap`
+                // call returned; nothing else unmaps this region.
+                let _ = unsafe { rustix::mm::munmap(self.base.cast::<c_void>(), self.len) };
+                core::mem::forget(self);
+            }
+        }
+
+        impl Drop for MappedGguf {
+            fn drop(&mut self) {
+                // SAFETY: only reachable if `unmap` was never called --
+                // `unmap` itself `mem::forget`s `self` after unmapping.
+                let _ = unsafe { rustix::mm::munmap(self.base.cast::<c_void>(), self.len) };
+            }
+        }
+
+        const FIXTURE_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3e4cb14174460404e7a233e531675303b2fbf7749c02f91864fe311ab6344e4f";
+
+        #[test]
+        #[ignore = "depends on a host-local ollama gguf blob outside this repo"]
+        fn dropping_a_loaded_model_releases_its_device_buffers() {
+            crate::test_support::require_fixture(FIXTURE_PATH, None);
+            let path = std::path::Path::new(FIXTURE_PATH);
+
+            let before_load = omega::metal::current_allocated_size();
+            let before_load_footprint = super::super::phys_footprint_bytes();
+            std::println!(
+                "before_load current_allocated_size={before_load:?} phys_footprint_bytes={before_load_footprint}"
+            );
+
+            let mapped = MappedGguf::open(path).expect("mmap host-local release-gate fixture");
+            let file_bytes = mapped.as_slice();
+            let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+                .expect("parse host-local release-gate fixture");
+            let model = LoadedModel::load(&parsed, file_bytes)
+                .expect("load real checkpoint through the public path");
+
+            let serving_config = super::super::supported_serving_config(
+                GPU_LAYERS_ALL,
+                omega::MathMode::default(),
+            );
+            let (generated_ids, _text, _stopped_by_eos) = model
+                .generate_with_serving_config("The quick brown fox", 4, serving_config)
+                .expect("decode 4 tokens on Metal");
+            assert_eq!(generated_ids.len(), 4, "must actually run 4 decode steps");
+
+            let after_generate = omega::metal::current_allocated_size();
+            let after_generate_footprint = super::super::phys_footprint_bytes();
+            std::println!(
+                "after_generate current_allocated_size={after_generate:?} phys_footprint_bytes={after_generate_footprint}"
+            );
+
+            drop(model);
+            mapped.unmap();
+
+            let after_drop = omega::metal::current_allocated_size();
+            let after_drop_footprint = super::super::phys_footprint_bytes();
+            std::println!(
+                "after_drop current_allocated_size={after_drop:?} phys_footprint_bytes={after_drop_footprint}"
+            );
+        }
+    }
 }
 
 /// The defect ROW 329's slice found, proved directly: every
@@ -4763,6 +4928,7 @@ mod memory_fit_gate_tests {
             },
             model_name: None,
             checkpoint_bytes: dense_weight_bytes as usize,
+            checkpoint_mapping: &[],
             vocab: tiny_vocab(),
             program: Vec::new(),
             logits_root: proxima_tensor::op::NodeId(0),
