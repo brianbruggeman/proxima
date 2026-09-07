@@ -170,19 +170,20 @@ pub struct ServingConfig<'model> {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub math_mode: MathMode,
     /// Not an upstream llama-server flag -- `proxima_tensor::NumericPolicy`,
-    /// the richer axis [`MathMode`] only narrows (`omega::metal::Plan::
-    /// set_math_mode`'s own doc table). `generate.rs`'s `BackendRuntime`
-    /// reads this once per call and applies it to every freshly-built
-    /// `Plan` via `set_numeric_policy`, AFTER `set_math_mode` -- so this
-    /// field, not the narrower `math_mode` above, is the one that actually
-    /// reaches the plan when both are set. `ReassociationPermitted` (this
-    /// field's default) is today's measured, already-shipping behavior:
-    /// `omega::plan`'s own constructor (`metal.rs`) starts every `Plan` at
-    /// this policy, and `proxima-tensor/docs/discipline.md` ROW 362
-    /// measured the context-chunk merge it admits (keys_per_chunk 16,
-    /// generated text identical, -4.9% gpu_exec) under exactly this value
-    /// -- this field exists so that behavior is visible and overridable at
-    /// the app edge, not only as an internal default nothing names. Present
+    /// the richer permission set [`MathMode`] only narrows
+    /// (`omega::metal::numeric_policy_as_metal_math_mode`'s own doc).
+    /// `generate.rs`'s `BackendRuntime` reads this once per call and passes
+    /// it INTO `plan`/`plan_named` at construction -- the policy is fixed
+    /// for a plan's whole life (`omega::metal::Plan::numeric_policy`'s own
+    /// doc: there is no post-hoc setter), so this field, not the narrower
+    /// `math_mode` above, is the one that actually governs which bind-time
+    /// rewrites fire. [`NumericPolicy::llama_relaxed`] (this field's
+    /// default) is today's measured, already-shipping behavior:
+    /// `proxima-tensor/docs/discipline.md` ROW 362 measured the
+    /// context-chunk merge it admits (keys_per_chunk 16, generated text
+    /// identical, -4.9% gpu_exec) under exactly this value -- this field
+    /// exists so that behavior is visible and overridable at the app edge,
+    /// not only as an internal default nothing names. Present
     /// unconditionally (unlike `math_mode`/`dispatch_type` below): unlike
     /// [`MathMode`], [`NumericPolicy`] is not Metal-specific -- it is
     /// [`crate::bind`]'s own bit-changing-rewrite gate too, and a
@@ -240,7 +241,7 @@ impl Default for ServingConfig<'static> {
             kv_bucket_tokens: 32,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
-            numeric_policy: NumericPolicy::ReassociationPermitted,
+            numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
         }
@@ -509,7 +510,7 @@ mod tests {
             kv_bucket_tokens: 32,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
-            numeric_policy: NumericPolicy::ReassociationPermitted,
+            numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
         };
@@ -645,7 +646,7 @@ mod tests {
             kv_bucket_tokens: 64,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
-            numeric_policy: NumericPolicy::ReassociationPermitted,
+            numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
         };
@@ -658,17 +659,17 @@ mod tests {
         assert_eq!(ServingConfig::default().kv_bucket_tokens, 32);
     }
 
-    /// The declared default is `ReassociationPermitted` -- today's own
-    /// already-shipping behavior (`omega::plan`'s constructor, `metal.rs`)
-    /// made visible and overridable at this app edge, per this field's own
-    /// doc. A silent default change here would be exactly the regression
-    /// this branch's own defect report named: the serving path narrowing
-    /// back to a stricter policy nobody asked for.
+    /// The declared default is [`NumericPolicy::llama_relaxed`] -- today's
+    /// own already-shipping behavior made visible and overridable at this
+    /// app edge, per this field's own doc. A silent default change here
+    /// would be exactly the regression this branch's own defect report
+    /// named: the serving path narrowing back to a stricter policy nobody
+    /// asked for.
     #[test]
-    fn default_numeric_policy_is_reassociation_permitted() {
+    fn default_numeric_policy_is_llama_relaxed() {
         assert_eq!(
             ServingConfig::default().numeric_policy,
-            NumericPolicy::ReassociationPermitted
+            NumericPolicy::llama_relaxed()
         );
     }
 
@@ -680,7 +681,7 @@ mod tests {
     #[test]
     fn numeric_policy_agrees_across_literal_and_default_override() {
         let via_default_override = ServingConfig {
-            numeric_policy: NumericPolicy::BitExact,
+            numeric_policy: NumericPolicy::bit_exact(),
             ..ServingConfig::default()
         };
         let via_full_literal = ServingConfig {
@@ -709,12 +710,12 @@ mod tests {
             kv_bucket_tokens: 32,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
-            numeric_policy: NumericPolicy::BitExact,
+            numeric_policy: NumericPolicy::bit_exact(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
         };
         assert_eq!(via_default_override, via_full_literal);
-        assert_eq!(via_default_override.numeric_policy, NumericPolicy::BitExact);
+        assert_eq!(via_default_override.numeric_policy, NumericPolicy::bit_exact());
     }
 
     #[test]
