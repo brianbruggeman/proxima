@@ -26,6 +26,7 @@ mod support;
 use support::{as_named_blocks, real_forward_fixture};
 
 use omega::backend::{BackendError, Engine, GpuDriver, execute_plan_named, plan_named};
+use proxima_tensor::NumericPolicy;
 
 /// `reduce-epilogue-fusion`'s bind-time pass fuses ANY sole elementwise
 /// consumer of a reduce, program-wide. `render_reduce`/
@@ -173,7 +174,7 @@ fn the_two_layer_mlp_runs_on_wgpu_at_cpu_parity() {
         ("w2", QuantizedBlock::Float32(&w2)),
     ];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[])
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
         .expect("omega::backend plans the mlp on cpu");
     let cpu =
         execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the mlp on cpu");
@@ -185,6 +186,7 @@ fn the_two_layer_mlp_runs_on_wgpu_at_cpu_parity() {
         &[],
         &named,
         &[],
+        NumericPolicy::default(),
     )
     .expect("omega::backend plans the mlp on wgpu");
     let wgpu = match execute_plan_named(&mut wgpu_plan, &named) {
@@ -288,7 +290,7 @@ fn embedding_lookup_runs_on_wgpu_at_cpu_parity_for_integer_valued_inputs() {
         ("ids", QuantizedBlock::Float32(&ids_data)),
     ];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[])
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
         .expect("omega::backend plans the gather on cpu");
     let cpu =
         execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the gather on cpu");
@@ -300,6 +302,7 @@ fn embedding_lookup_runs_on_wgpu_at_cpu_parity_for_integer_valued_inputs() {
         &[],
         &named,
         &[],
+        NumericPolicy::default(),
     )
     .expect("omega::backend plans the gather on wgpu");
     let wgpu = execute_plan_named(&mut wgpu_plan, &named)
@@ -338,6 +341,7 @@ fn an_out_of_range_gather_index_faults_on_wgpu_the_same_way_it_faults_on_cpu() {
         &[],
         &named,
         &[],
+        NumericPolicy::default(),
     )
     .expect("omega::backend plans the gather on wgpu");
     let error = execute_plan_named(&mut wgpu_plan, &named)
@@ -448,7 +452,7 @@ fn f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_reje
         ("rhs", QuantizedBlock::Float32(&rhs)),
     ];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &f32_program, &[], &named, &[])
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &f32_program, &[], &named, &[], NumericPolicy::default())
         .expect("omega::backend plans the f32 oracle on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
         .expect("omega::backend runs the f32 oracle on cpu");
@@ -460,6 +464,7 @@ fn f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_reje
         &[],
         &named,
         &[],
+        NumericPolicy::default(),
     )
     .expect("omega::backend plans the f16 matmul on wgpu");
     match execute_plan_named(&mut wgpu_plan, &named) {
@@ -622,6 +627,7 @@ fn assert_packed_codec_parity(
         &[],
         &named,
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .expect("omega::backend plans the packed matmul on wgpu");
     let wgpu = execute_plan_named(&mut wgpu_plan, &named)
@@ -632,8 +638,16 @@ fn assert_packed_codec_parity(
         ("weight", QuantizedBlock::Float32(&dequantized)),
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &f32_program, &[], &f32_named, &[f32_sum])
-        .expect("omega::backend plans the dequantized oracle on cpu");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &f32_program,
+        &[],
+        &f32_named,
+        &[f32_sum],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the dequantized oracle on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &f32_named)
         .expect("omega::backend runs the dequantized oracle on cpu");
 
@@ -778,8 +792,8 @@ fn matmul_runs_on_wgpu_at_cpu_parity_whichever_reduce_path_the_adapter_takes() {
         ("rhs", QuantizedBlock::Float32(&rhs)),
     ];
 
-    let mut cpu_plan =
-        plan_named(Engine::Cpu, None, &program, &[], &named, &[]).expect("cpu plans the matmul");
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
+        .expect("cpu plans the matmul");
     let cpu = execute_plan_named(&mut cpu_plan, &named).expect("cpu runs the matmul");
 
     let mut wgpu_plan = omega::wgpu_driver::plan_named(&program, &[], &named, &[])
@@ -854,8 +868,16 @@ fn the_full_mistral_cached_forward_runs_on_wgpu_at_cpu_parity() {
     let (program, symbols, roots, owned) = real_forward_fixture();
     let named = as_named_blocks(&owned);
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &symbols, &named, &roots)
-        .expect("omega::backend plans the real forward on cpu");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the real forward on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
         .expect("omega::backend runs the real forward on cpu");
 
@@ -866,6 +888,7 @@ fn the_full_mistral_cached_forward_runs_on_wgpu_at_cpu_parity() {
         &symbols,
         &named,
         &roots,
+        NumericPolicy::default(),
     )
     .expect("omega::backend plans the real forward on wgpu");
     let omega::backend::Plan::Wgpu(inner) = &wgpu_plan else {

@@ -988,7 +988,8 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default())
+            .expect("bind succeeds");
         bound.into_iter().next().expect("one bound op")
     }
 

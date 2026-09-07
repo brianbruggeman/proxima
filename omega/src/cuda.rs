@@ -1634,7 +1634,7 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
         bound.into_iter().next().expect("one bound op")
     }
 
@@ -1681,7 +1681,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
         bound.into_iter().next().expect("one bound op")
     }
 
@@ -1726,7 +1726,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
         bound.into_iter().next().expect("one bound op")
     }
 
@@ -1784,7 +1784,7 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("embedding lookup infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default())
             .expect("embedding lookup lowers")
             .into_iter()
             .next()
@@ -1838,7 +1838,7 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
         let mut packed = BTreeMap::new();
         packed.insert(bound.operands()[0].0, codec);
@@ -1931,7 +1931,7 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
         let kernel = emit_cuda(&bound, &no_packed()).expect("emit succeeds");
         assert!(kernel.source.contains("#include <cuda_fp16.h>"));
@@ -1959,7 +1959,7 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
         let error = emit_cuda(&bound, &no_packed()).expect_err("f64 is rejected");
         assert!(matches!(error, EmitError::UnsupportedDType { .. }));
@@ -2087,7 +2087,8 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[consumer]).expect("bind succeeds");
+        let bound = bind(&program, &shapes, &[consumer], proxima_tensor::NumericPolicy::default())
+            .expect("bind succeeds");
         bound.into_iter().next().expect("fusion collapses to one bound op")
     }
 
