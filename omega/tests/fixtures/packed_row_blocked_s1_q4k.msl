@@ -196,6 +196,51 @@ static inline float q4k_pair_dot(device const uchar *block, uint iq, uint ir, th
     return result;
 }
 
+// `q4k_pair_dot` generalized across an activation GROUP: `push_packed_row_
+// multi_row_body`'s own per-element `operand_read` loop (`docs/discipline.md`
+// ROW 389) decoded this row's header/nibble words once PER TOKEN instead of
+// once per weight-block iteration, because it never shared this function's
+// `word_low`/`word_high`/`h0..h3` decode across the group. `q4k_pair_dot_mr`
+// pulls that decode out of the per-token loop: `word_low`/`word_high` and
+// `h0..h3` are read/derived exactly once, then the eight-fma accumulate
+// below runs once per token against the SAME decoded values, `yl_group`/
+// `yh_group` holding `cap` tokens' worth of gathered activation flattened at
+// stride 16. `cap` (`omega-runtime.toml`'s `PACKED_ROW_ACTIVATION_GROUP`) is
+// a runtime loop bound here, not a fixed array size, so this function has no
+// build-time-value dependency of its own -- the caller sizes `yl_group`/
+// `yh_group`/`result`.
+static inline void q4k_pair_dot_mr(device const uchar *block, uint iq, uint ir, thread const float *yl_group, thread const float *yh_group, uint cap, thread float *result) {
+    device const uchar *qs = block + 16;
+    uint byte_base = 32u * iq + 8u * ir;
+    device const ushort *word_low = (device const ushort *)(qs + byte_base);
+    device const ushort *word_high = (device const ushort *)(qs + byte_base + 64u);
+    uint low_index = 64u * iq + 8u * ir;
+    q4k_header h0 = q4k_header_for(block, low_index);
+    q4k_header h1 = q4k_header_for(block, low_index + 32u);
+    q4k_header h2 = q4k_header_for(block, low_index + 128u);
+    q4k_header h3 = q4k_header_for(block, low_index + 160u);
+    ushort w1[4]; ushort w2[4];
+    for (uint i = 0u; i < 4u; ++i) { w1[i] = word_low[i]; w2[i] = word_high[i]; }
+    for (uint s = 0u; s < cap; ++s) {
+        thread const float *yl = yl_group + s * 16u;
+        thread const float *yh = yh_group + s * 16u;
+        float result_s = 0.0f;
+        for (uint i = 0u; i < 4u; ++i) {
+            uint word1 = (uint)w1[i];
+            uint word2 = (uint)w2[i];
+            result_s += (h0.scale * (float)(word1 & 0x0Fu) - h0.minimum) * yl[2u * i + 0u];
+            result_s += (h0.scale * (float)((word1 >> 8) & 0x0Fu) - h0.minimum) * yl[2u * i + 1u];
+            result_s += (h1.scale * (float)((word1 >> 4) & 0x0Fu) - h1.minimum) * yl[2u * i + 8u];
+            result_s += (h1.scale * (float)((word1 >> 12) & 0x0Fu) - h1.minimum) * yl[2u * i + 9u];
+            result_s += (h2.scale * (float)(word2 & 0x0Fu) - h2.minimum) * yh[2u * i + 0u];
+            result_s += (h2.scale * (float)((word2 >> 8) & 0x0Fu) - h2.minimum) * yh[2u * i + 1u];
+            result_s += (h3.scale * (float)((word2 >> 4) & 0x0Fu) - h3.minimum) * yh[2u * i + 8u];
+            result_s += (h3.scale * (float)((word2 >> 12) & 0x0Fu) - h3.minimum) * yh[2u * i + 9u];
+        }
+        result[s] = result_s;
+    }
+}
+
 // Eight consecutive levels from TWO 32-bit loads instead of eight byte
 // loads. A lane's run is `slot .. slot+7` and never crosses a 32-element
 // sub-block boundary, so all eight share a group and a nibble half, and

@@ -451,6 +451,51 @@ static inline float q4k_pair_dot(device const uchar *block, uint iq, uint ir, th
     return result;
 }
 
+// `q4k_pair_dot` generalized across an activation GROUP: `push_packed_row_
+// multi_row_body`'s own per-element `operand_read` loop (`docs/discipline.md`
+// ROW 389) decoded this row's header/nibble words once PER TOKEN instead of
+// once per weight-block iteration, because it never shared this function's
+// `word_low`/`word_high`/`h0..h3` decode across the group. `q4k_pair_dot_mr`
+// pulls that decode out of the per-token loop: `word_low`/`word_high` and
+// `h0..h3` are read/derived exactly once, then the eight-fma accumulate
+// below runs once per token against the SAME decoded values, `yl_group`/
+// `yh_group` holding `cap` tokens' worth of gathered activation flattened at
+// stride 16. `cap` (`omega-runtime.toml`'s `PACKED_ROW_ACTIVATION_GROUP`) is
+// a runtime loop bound here, not a fixed array size, so this function has no
+// build-time-value dependency of its own -- the caller sizes `yl_group`/
+// `yh_group`/`result`.
+static inline void q4k_pair_dot_mr(device const uchar *block, uint iq, uint ir, thread const float *yl_group, thread const float *yh_group, uint cap, thread float *result) {
+    device const uchar *qs = block + 16;
+    uint byte_base = 32u * iq + 8u * ir;
+    device const ushort *word_low = (device const ushort *)(qs + byte_base);
+    device const ushort *word_high = (device const ushort *)(qs + byte_base + 64u);
+    uint low_index = 64u * iq + 8u * ir;
+    q4k_header h0 = q4k_header_for(block, low_index);
+    q4k_header h1 = q4k_header_for(block, low_index + 32u);
+    q4k_header h2 = q4k_header_for(block, low_index + 128u);
+    q4k_header h3 = q4k_header_for(block, low_index + 160u);
+    ushort w1[4]; ushort w2[4];
+    for (uint i = 0u; i < 4u; ++i) { w1[i] = word_low[i]; w2[i] = word_high[i]; }
+    for (uint s = 0u; s < cap; ++s) {
+        thread const float *yl = yl_group + s * 16u;
+        thread const float *yh = yh_group + s * 16u;
+        float result_s = 0.0f;
+        for (uint i = 0u; i < 4u; ++i) {
+            uint word1 = (uint)w1[i];
+            uint word2 = (uint)w2[i];
+            result_s += (h0.scale * (float)(word1 & 0x0Fu) - h0.minimum) * yl[2u * i + 0u];
+            result_s += (h0.scale * (float)((word1 >> 8) & 0x0Fu) - h0.minimum) * yl[2u * i + 1u];
+            result_s += (h1.scale * (float)((word1 >> 4) & 0x0Fu) - h1.minimum) * yl[2u * i + 8u];
+            result_s += (h1.scale * (float)((word1 >> 12) & 0x0Fu) - h1.minimum) * yl[2u * i + 9u];
+            result_s += (h2.scale * (float)(word2 & 0x0Fu) - h2.minimum) * yh[2u * i + 0u];
+            result_s += (h2.scale * (float)((word2 >> 8) & 0x0Fu) - h2.minimum) * yh[2u * i + 1u];
+            result_s += (h3.scale * (float)((word2 >> 4) & 0x0Fu) - h3.minimum) * yh[2u * i + 8u];
+            result_s += (h3.scale * (float)((word2 >> 12) & 0x0Fu) - h3.minimum) * yh[2u * i + 9u];
+        }
+        result[s] = result_s;
+    }
+}
+
 // Eight consecutive levels from TWO 32-bit loads instead of eight byte
 // loads. A lane's run is `slot .. slot+7` and never crosses a 32-element
 // sub-block boundary, so all eight share a group and a nibble half, and
@@ -4666,30 +4711,47 @@ fn push_packed_row_multi_row_body(
     source.push_str(&format!(
         "    long other_stride = u.operand_strides[{other}][{reduce_dim}];\n"
     ));
-    source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
-    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
-    source.push_str(&format!(
-        "            {element_type} scratch[{}];\n",
-        operand_count.max(1)
-    ));
-    source.push_str(&format!(
-        "            scratch[{weight}] = {};\n",
-        operand_read(weight, "(weight_base[q] + k)", quantized[weight])
-    ));
-    source.push_str(&format!("            for (int s = 0; s < {cap}; ++s) {{\n"));
-    source.push_str(&format!(
-        "                scratch[{other}] = {};\n",
-        operand_read(other, "(other_base[s] + k * other_stride)", quantized[other])
-    ));
-    let value_expr = push_body_steps(source, resolved.element_body(), "                ", element_type);
-    source.push_str(&format!(
-        "                {element_type} value = {value_expr};\n"
-    ));
-    let combine_expr = scalar_op_expr(reduce_op, &["sumf[s][q]", "value"]);
-    source.push_str(&format!("                sumf[s][q] = {combine_expr};\n"));
-    source.push_str("            }\n");
-    source.push_str("        }\n");
-    source.push_str("    }\n");
+    // Q4_K FAST PATH (`docs/discipline.md` ROW 389): the weight block's
+    // header/nibble decode is shared across the whole `cap`-token activation
+    // group via `q4k_pair_dot_mr` (this file's own multi-row generalization
+    // of the M=1 decode path's `q4k_pair_dot`), instead of the per-element
+    // `operand_read` below paying that decode once per token. Every other
+    // codec (`Q3_K`/`Q5_K`/`Q6_K`) keeps the generic loop -- they have no
+    // multi-row port yet, this landing only proves the pattern on `Q4_K`,
+    // the codec `ROW 389`'s own trace named as the dominant contributor.
+    let fast_q4k = block.codec == PackedCodec::Q4K
+        && element_type == "float"
+        && quantized[weight] == Some(PackedCodec::Q4K)
+        && quantized[other].is_none()
+        && is_plain_product_reduce(resolved, reduce_op, weight, other);
+    if fast_q4k {
+        push_packed_row_multi_row_q4k_body(source, weight, other, rows, cap, block.codec.block_bytes());
+    } else {
+        source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
+        source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+        source.push_str(&format!(
+            "            {element_type} scratch[{}];\n",
+            operand_count.max(1)
+        ));
+        source.push_str(&format!(
+            "            scratch[{weight}] = {};\n",
+            operand_read(weight, "(weight_base[q] + k)", quantized[weight])
+        ));
+        source.push_str(&format!("            for (int s = 0; s < {cap}; ++s) {{\n"));
+        source.push_str(&format!(
+            "                scratch[{other}] = {};\n",
+            operand_read(other, "(other_base[s] + k * other_stride)", quantized[other])
+        ));
+        let value_expr = push_body_steps(source, resolved.element_body(), "                ", element_type);
+        source.push_str(&format!(
+            "                {element_type} value = {value_expr};\n"
+        ));
+        let combine_expr = scalar_op_expr(reduce_op, &["sumf[s][q]", "value"]);
+        source.push_str(&format!("                sumf[s][q] = {combine_expr};\n"));
+        source.push_str("            }\n");
+        source.push_str("        }\n");
+        source.push_str("    }\n");
+    }
 
     source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
     source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
@@ -4734,6 +4796,75 @@ fn push_packed_row_multi_row_body(
     source.push_str("        }\n");
     source.push_str("    }\n");
     Ok(())
+}
+
+/// Renders [`push_packed_row_multi_row_body`]'s `Q4_K` fast-path reduction
+/// loop: the SAME lane split (`ix`/`it`/`iq`/`ir`, `lanes_per_block = 8`) and
+/// row-pointer hoist `push_q4k_ggml_port_body`/the M=1 `plain_product` arm
+/// already use, generalized to a `cap`-token activation group. Each weight
+/// block's header/nibble words are read ONCE per `(ib, q)` inside
+/// `q4k_pair_dot_mr` and folded against every one of the `cap` gathered
+/// activation rows, instead of once per `(ib, q, s)` the way a naive
+/// per-token call to `q4k_pair_dot` would still pay.
+fn push_packed_row_multi_row_q4k_body(
+    source: &mut String,
+    weight: usize,
+    other: usize,
+    rows: usize,
+    cap: usize,
+    block_bytes: usize,
+) {
+    source.push_str("    uint ix = (uint)lane / 8u;\n");
+    source.push_str("    uint it = (uint)lane % 8u;\n");
+    source.push_str("    uint iq = it / 4u;\n    uint ir = it % 4u;\n");
+    source.push_str(&format!(
+        "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
+    ));
+    source.push_str("    int ib_first = (int)ix;\n    int ib_step = 4;\n");
+    source.push_str(&format!(
+        "    long blk_step = (long)ib_step * {block_bytes};\n"
+    ));
+    source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
+    source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ib_first) * {block_bytes};\n"
+    ));
+    source.push_str("    }\n");
+    source.push_str(&format!(
+        "    long y4_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
+    ));
+    source.push_str(&format!("    device const float *y4_ptr[{cap}];\n"));
+    source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
+    source.push_str(&format!("        y4_ptr[s] = in{other} + other_base[s] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"));
+    source.push_str("    }\n");
+    source.push_str(&format!("    float yl_group[{cap}][16];\n"));
+    source.push_str(&format!("    float yh_group[{cap}][16];\n"));
+    source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
+    source.push_str(&format!("        for (int s = 0; s < {cap}; ++s) {{\n"));
+    source.push_str("            device const float *y4 = y4_ptr[s];\n");
+    source.push_str("            for (uint i = 0u; i < 8u; ++i) {\n");
+    source.push_str("                yl_group[s][i] = y4[(long)i * other_stride];\n");
+    source.push_str("                yl_group[s][i + 8u] = y4[(long)(i + 32u) * other_stride];\n");
+    source.push_str("                yh_group[s][i] = y4[(long)(i + 128u) * other_stride];\n");
+    source.push_str("                yh_group[s][i + 8u] = y4[(long)(i + 160u) * other_stride];\n");
+    source.push_str("            }\n");
+    source.push_str("        }\n");
+    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!("            float result[{cap}];\n"));
+    source.push_str(&format!(
+        "            q4k_pair_dot_mr(blk_ptr[q], iq, ir, &yl_group[0][0], &yh_group[0][0], {cap}u, result);\n"
+    ));
+    source.push_str(&format!(
+        "            for (int s = 0; s < {cap}; ++s) {{ sumf[s][q] = sumf[s][q] + result[s]; }}\n"
+    ));
+    source.push_str("        }\n");
+    source.push_str(&format!(
+        "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
+    ));
+    source.push_str(&format!(
+        "        for (int s = 0; s < {cap}; ++s) {{ y4_ptr[s] += y4_step; }}\n"
+    ));
+    source.push_str("    }\n");
 }
 
 /// The sole output axis whose bound extent is `> 1`, when every OTHER
