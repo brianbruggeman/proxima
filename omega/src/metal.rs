@@ -330,11 +330,27 @@ pub enum MetalError {
     #[error("hazard tracking: operand {node} has no resolved device buffer")]
     UnresolvedHazardOperand { node: NodeId },
     /// `build_buffer_arena`'s own reuse pass still needed more transient
-    /// bytes live at once than `ARENA_TRANSIENT_CAP` budgets -- MG-3's
-    /// kill condition, now a typed error a caller can act on rather than a
-    /// stderr line beside a silently returned `Ok`.
-    #[error("arena peak_bytes={peak_bytes} exceeds arena_transient_cap={cap}")]
-    ArenaOverCap { peak_bytes: usize, cap: usize },
+    /// bytes live at once than `cap_bytes` budgets -- MG-3's kill condition,
+    /// now a typed error a caller can act on rather than a stderr line
+    /// beside a silently returned `Ok`. `cap_bytes` is
+    /// `ARENA_TRANSIENT_CAP * max(query_rows, 1)` (see
+    /// [`plan_query_rows`]'s own doc for why the cap scales this way, not a
+    /// fixed decode-shaped constant): a prefill's transient outputs grow
+    /// linearly with its own row count, so a per-call budget that ignores
+    /// row count rejects a prefill that fits the device just as readily as
+    /// one that would not. `device_limit` (`MTLDevice::
+    /// recommendedMaxWorkingSetSize`) is carried for diagnosis only -- it is
+    /// not part of the accept/reject decision here.
+    #[error(
+        "arena peak_bytes={peak_bytes} exceeds arena_transient_cap={cap_bytes} \
+         at query_rows={query_rows} (device_limit={device_limit})"
+    )]
+    ArenaOverCap {
+        peak_bytes: usize,
+        cap_bytes: usize,
+        query_rows: u64,
+        device_limit: u64,
+    },
     /// `PROXIMA_METAL_KIND_FILTER`'s `kind:` term named a string
     /// `classify_kind` never returns -- ROW 308 found a stale or
     /// misspelled substring silently dropped the WHOLE plan instead of
@@ -6852,8 +6868,32 @@ impl BufferArena {
 /// through only for the `debug_assert!` below -- `node_retirement` itself is
 /// what actually keeps an output out of `retires`.
 ///
-/// Prints the naive (no-reuse) transient sum against [`ARENA_TRANSIENT_CAP`]
-/// before allocating anything, per this card's memory gate.
+/// This plan's own row count -- the largest `CachedAttention` `query_rows`
+/// among `resolved`, or `1` when the plan has no attention op at all (every
+/// non-attention op's own transient extents already scale with the same row
+/// count, so the maximum over attention ops is the plan-wide M). Decode
+/// dispatches one query row at a time (`query_rows == 1` everywhere), so this
+/// returns `1` there and [`build_buffer_arena`]'s cap collapses to the
+/// unscaled `ARENA_TRANSIENT_CAP` -- the constant's own decode-sized default
+/// is preserved exactly. A prefill sharing ONE dispatch across `M` rows
+/// (ROW 391's 1100-row interactive-chat prompt) reports `query_rows == M`,
+/// so the cap scales up with it instead of being sized once for decode and
+/// applied unchanged to every M.
+#[cfg(feature = "metal-plan-stable-buffers")]
+fn plan_query_rows(resolved: &[BoundOp]) -> u64 {
+    resolved
+        .iter()
+        .filter_map(|bound| match &bound.kind {
+            BoundOpKind::CachedAttention { query_rows, .. } => Some(*query_rows),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(1)
+}
+
+/// Prints the naive (no-reuse) transient sum against this plan's own
+/// [`plan_query_rows`]-scaled cap before allocating anything, per this
+/// card's memory gate.
 #[cfg(feature = "metal-plan-stable-buffers")]
 fn build_buffer_arena(
     device: &ProtocolObject<dyn MTLDevice>,
@@ -6867,11 +6907,17 @@ fn build_buffer_arena(
         .map(|bound| bound_output_len(bound).max(1) * bound.dtype.size_bytes())
         .sum();
     let uniform_bytes: usize = resolved.iter().map(pack_uniforms_byte_len).sum();
+    let query_rows = plan_query_rows(resolved);
+    let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(query_rows.max(1) as usize);
+    let device_limit = device.recommendedMaxWorkingSetSize();
     debug!(
         naive_transient_bytes = naive_transient_bytes as u64,
         uniform_bytes = uniform_bytes as u64,
         op_count = resolved.len() as u64,
+        query_rows,
         arena_transient_cap = ARENA_TRANSIENT_CAP as u64,
+        cap_bytes = cap_bytes as u64,
+        device_limit,
         "buffer arena sized against the naive (no-reuse) transient sum"
     );
 
@@ -6928,15 +6974,19 @@ fn build_buffer_arena(
         peak_bytes = peak_bytes as u64,
         reuse_factor, "buffer arena reached its steady-state peak"
     );
-    if peak_bytes > ARENA_TRANSIENT_CAP {
+    if peak_bytes > cap_bytes {
         proxima_telemetry::error!(
             peak_bytes,
-            cap = ARENA_TRANSIENT_CAP,
+            cap_bytes,
+            query_rows,
+            device_limit,
             "arena peak_bytes exceeds arena_transient_cap -- MG-3 kill condition"
         );
         return Err(MetalError::ArenaOverCap {
             peak_bytes,
-            cap: ARENA_TRANSIENT_CAP,
+            cap_bytes,
+            query_rows,
+            device_limit,
         });
     }
 
@@ -9167,6 +9217,130 @@ mod attention_scratch_len_tests {
             after_bytes < before_bytes,
             "the fix must always request fewer bytes than the pre-fix always-max formula: \
              before={before_bytes} after={after_bytes}"
+        );
+    }
+}
+
+/// Production crash (2026-09-07): `provider error: generate: arena
+/// peak_bytes=984110552 exceeds arena_transient_cap=172812125` -- a
+/// ~1100-row interactive-chat prefill rejected by a cap sized once for
+/// decode (`query_rows == 1`) and never scaled for a prefill's own row
+/// count. Pure CPU -- [`plan_query_rows`] never touches a device -- so
+/// these run on any host, without a GPU.
+#[cfg(all(test, feature = "metal-plan-stable-buffers"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod plan_query_rows_tests {
+    use alloc::vec;
+
+    use proxima_tensor::{BoundOpKind, DType, Layout, NodeId};
+
+    use super::{ARENA_TRANSIENT_CAP, BoundOp, plan_query_rows};
+
+    /// Same real openchat decode/prefill shape `attention_scratch_len_tests`'
+    /// own `openchat_shaped_bound` builds -- one `CachedAttention` dispatch
+    /// at the caller's own `query_rows`.
+    fn cached_attention_bound(query_rows: u64) -> BoundOp {
+        const KV_HEADS: u64 = 8;
+        const QUERY_GROUPS: u64 = 4;
+        const HEAD_DIM: u64 = 128;
+        let operands = (0..8)
+            .map(|index| {
+                (
+                    NodeId(index),
+                    Layout {
+                        base: 0,
+                        strides: vec![1].into(),
+                    },
+                    None,
+                )
+            })
+            .collect();
+        BoundOp {
+            node: NodeId(8),
+            dtype: DType::Float32,
+            extents: vec![query_rows, KV_HEADS, QUERY_GROUPS, HEAD_DIM],
+            kind: BoundOpKind::CachedAttention {
+                operands,
+                query_rows,
+                cached_key_rows: 0,
+                new_key_rows: query_rows,
+                kv_heads: KV_HEADS,
+                query_groups: QUERY_GROUPS,
+                head_dim: HEAD_DIM,
+                scale: 0.5,
+                cached_lower_inclusive: i64::MIN,
+                new_upper_inclusive: 0,
+            },
+        }
+    }
+
+    /// A plan with no `CachedAttention` op at all (a pure elementwise/matmul
+    /// program) has no row count to read off an op, so [`plan_query_rows`]
+    /// falls back to `1` -- the cap this plan sees is the unscaled
+    /// `ARENA_TRANSIENT_CAP`, exactly today's behavior.
+    #[test]
+    fn no_attention_op_defaults_to_one_row() {
+        let elementwise = BoundOp {
+            node: NodeId(0),
+            dtype: DType::Float32,
+            extents: vec![4096],
+            kind: BoundOpKind::Elementwise {
+                body: proxima_tensor::ComposedBody::leaf(proxima_tensor::ScalarOp::Identity),
+                operands: vec![(
+                    NodeId(1),
+                    Layout {
+                        base: 0,
+                        strides: vec![1].into(),
+                    },
+                    None,
+                )],
+            },
+        };
+        assert_eq!(plan_query_rows(&[elementwise]), 1);
+    }
+
+    /// `query_rows` in {1 (decode), 31 (a short prefix), 1100 (ROW's own
+    /// interactive-chat reproduction)} -- [`plan_query_rows`] reads the ONE
+    /// `CachedAttention` op's own field back unchanged, and the derived cap
+    /// scales linearly with it (decode's `query_rows == 1` reproduces the
+    /// pre-fix constant exactly).
+    #[test]
+    fn cap_scales_linearly_with_the_plans_own_query_rows() {
+        for query_rows in [1_u64, 31, 1100] {
+            let resolved = [cached_attention_bound(query_rows)];
+            let observed = plan_query_rows(&resolved);
+            assert_eq!(
+                observed, query_rows,
+                "plan_query_rows must read the plan's own CachedAttention row count back exactly"
+            );
+
+            let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(observed.max(1) as usize);
+            let expected = ARENA_TRANSIENT_CAP * query_rows as usize;
+            assert_eq!(
+                cap_bytes, expected,
+                "cap_bytes must be exactly ARENA_TRANSIENT_CAP * query_rows at query_rows={query_rows}"
+            );
+        }
+    }
+
+    /// ROW: the production shape itself -- at `query_rows=1100` the naive
+    /// 984 MB peak from the incident report is now well inside the
+    /// per-row-scaled cap, where the old fixed `ARENA_TRANSIENT_CAP`
+    /// (172_812_125 bytes) rejected it outright.
+    #[test]
+    fn thousand_row_prefill_shape_fits_the_scaled_cap() {
+        let query_rows = 1100_u64;
+        let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(query_rows as usize);
+        let production_peak_bytes = 984_110_552_usize;
+        assert!(
+            production_peak_bytes < cap_bytes,
+            "the ROW 391 incident's own peak_bytes must fit under the scaled cap: \
+             peak_bytes={production_peak_bytes} cap_bytes={cap_bytes}"
+        );
+        assert!(
+            production_peak_bytes > ARENA_TRANSIENT_CAP,
+            "this reproduction is only meaningful if the unscaled constant alone \
+             would have rejected it, matching the original incident"
         );
     }
 }
