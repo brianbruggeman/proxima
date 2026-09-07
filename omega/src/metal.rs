@@ -4386,8 +4386,17 @@ fn pack_cached_attention_uniforms(
         // `slice_len`/`lo`/`hi` computation reads. `tgid`'s own decode into
         // `query_row`/`split` divides out `dispatch_splits`, NOT this field --
         // that grid-widening constant, not the live count, is what an idle
-        // threadgroup beyond it was actually enumerated against.
-        push_i64(bytes, splits);
+        // threadgroup beyond it was actually enumerated against. ROW 385:
+        // when no merge dispatch exists, this MUST be `1`, never `splits_for`'s
+        // own raw result -- the kernel body's `slice_len = ceil(live/splits)`
+        // would otherwise slice off keys with no second dispatch left to
+        // merge the slices back, an out-of-bounds-shaped undercount.
+        let live_splits = if crate::msl::cached_attention_merge_needed(context_length, numeric_policy) {
+            splits
+        } else {
+            1
+        };
+        push_i64(bytes, live_splits);
     }
     Ok(())
 }

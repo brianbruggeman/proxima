@@ -2573,13 +2573,24 @@ fn entry_name(resolved: &BoundOp) -> String {
                 // (`block_width_for`) -- a build-time constant, so a build
                 // whose `OMEGA_ATTENTION_BLOCK_WIDTH` override changed emits
                 // a distinct name rather than reusing a cached kernel
-                // compiled for a different in-block staging width.
+                // compiled for a different in-block staging width. `_qh{0|1}`
+                // names `cached_attention_per_query_head_grid`'s own decision
+                // -- unlike the row counts this token intentionally reduces
+                // the bucket extent to a boolean, never the extent itself, so
+                // every bucket ON ONE SIDE of the knee still shares a single
+                // compiled kernel, but the two regimes render genuinely
+                // different MSL text (a different `tgid` decode -- see
+                // `render_cached_attention`'s own doc) and so cannot be
+                // allowed to collide on the same cache key.
+                let per_query_head_grid =
+                    cached_attention_per_query_head_grid(true, *cached_key_rows + *new_key_rows);
                 format!(
-                    "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_b{}",
+                    "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_b{}_qh{}",
                     scale.to_bits(),
                     signed_name_part(*cached_lower_inclusive),
                     crate::sized::ATTENTION_CONTEXT_CHUNK_CAP,
                     crate::sized::ATTENTION_BLOCK_WIDTH,
+                    u8::from(per_query_head_grid),
                 )
             } else {
                 format!(
@@ -3195,9 +3206,40 @@ pub(crate) fn splits_for(context_length: u64, policy: NumericPolicy) -> u64 {
 /// scoreboard window, well under `omega-runtime.toml`'s `keys_per_split`)
 /// must still render the byte-identical single dispatch -- admitting the
 /// rewrite is necessary but not sufficient for a SECOND dispatch to be
-/// worth its own fixed overhead (design risk 2).
+/// worth its own fixed overhead (design risk 2). ROW 385: a merge additionally
+/// requires `context_length >= ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE` --
+/// below that knee [`cached_attention_per_query_head_grid`] takes over the
+/// short-context case with one threadgroup per query head instead, and
+/// `splits_for`'s own small-divisor branch would otherwise still report
+/// `> 1` there, which [`crate::metal::pack_cached_attention_uniforms`] would
+/// then slice the live key range by with no second dispatch to merge the
+/// slices back -- an out-of-bounds-shaped undercount, not merely a missed
+/// optimization.
 pub(crate) fn cached_attention_merge_needed(context_length: u64, policy: NumericPolicy) -> bool {
     splits_for(context_length, policy) > 1
+        && context_length >= crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE
+}
+
+/// Whether `render_cached_attention`'s single-range dynamic path dispatches
+/// one threadgroup per `(query_row, kv_head, group)` triple -- narrowing
+/// [`tiled_gemm_threadgroup_width`]'s `CachedAttention` width from
+/// `query_groups * chunks * SIMD_WIDTH` to `chunks * SIMD_WIDTH` and turning
+/// `query_groups` into an extra THREADGROUP-count factor instead -- rather
+/// than today's one threadgroup per `(query_row, kv_head)` pair shared by
+/// every query head in the group. Below
+/// [`crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE`] keys the
+/// occupancy problem is too few threadgroups, not too little per-threadgroup
+/// parallelism (ROW 383's own knee), so spending `query_groups` as more,
+/// narrower threadgroups instead of more warps inside one threadgroup gives
+/// the GPU more independent units of work to schedule at a window where it
+/// is otherwise starved. `dynamic_cached_len` gates this to the single-range
+/// fused (nine-operand) path alone -- the compiled fixed-shape path already
+/// sizes its own dispatch from a KNOWN `context_length`, so it never carries
+/// this trade. Not policy-gated: unlike [`cached_attention_merge_needed`],
+/// this reshapes an EXISTING dispatch rather than reassociating the online-
+/// softmax fold, so `bit_exact` renders it exactly like every other policy.
+pub(crate) fn cached_attention_per_query_head_grid(dynamic_cached_len: bool, context_length: u64) -> bool {
+    dynamic_cached_len && context_length < crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE
 }
 
 /// `cached_key_rows + new_key_rows` for a `CachedAttention` kind, `None` for
@@ -3419,20 +3461,28 @@ fn render_cached_attention(
     // Computed once here so the decode and `final_store`'s scratch-vs-direct
     // branch below can never disagree on which case this compiled kernel is.
     let merge_needed = cached_attention_merge_needed(*cached_key_rows + *new_key_rows, numeric_policy);
+    // ROW 385: below the split-at-scale knee, `query_groups` moves out of
+    // this threadgroup's own width (`tiled_gemm_threadgroup_width`'s own
+    // `CachedAttention` arm) and into a threadgroup-COUNT factor instead, so
+    // `group` decodes off `tgid` here rather than off `vector_index`.
+    // `entry_name` names this decision (`_qh{0|1}`) precisely because it
+    // changes the text below -- the compiled `kv-capacity-bucket` extent
+    // still never appears in the text ITSELF, only this boolean does.
+    let per_query_head_grid =
+        cached_attention_per_query_head_grid(dynamic_cached_len, *cached_key_rows + *new_key_rows);
     if dynamic_cached_len {
         let grid_splits = if merge_needed {
             crate::sized::ATTENTION_SPLIT_MAX
         } else {
             1
         };
-        // ONE body for every chunk count: the cross-simdgroup merge below is
-        // always present, guarded at runtime by `u.context_chunks` rather
-        // than selected by a compile-time `context_chunks <= 1` branch, so
-        // this generated MSL text is identical whether the live chunk count
-        // is 1 or `cap` -- the compiled `kv-capacity-bucket` extent no
-        // longer appears anywhere in the text `entry_name` keys on.
+        let tgid_decode = if per_query_head_grid {
+            "long kv_head_and_group = (long)tgid % (kv_heads * query_groups);\n    long query_row_and_split = (long)tgid / (kv_heads * query_groups);\n    long kv_head = kv_head_and_group / query_groups;\n    long group = kv_head_and_group % query_groups;\n    long chunk = vector_index % cap;\n"
+        } else {
+            "long chunk = vector_index % cap;\n    long group = (vector_index / cap) % query_groups;\n    long kv_head = (long)tgid % kv_heads;\n    long query_row_and_split = (long)tgid / kv_heads;\n"
+        };
         source.push_str(&format!(
-            "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long cap = {cap};\n    long chunks = u.context_chunks;\n    long splits = u.splits;\n    long chunk = vector_index % cap;\n    long group = (vector_index / cap) % query_groups;\n    long kv_head = (long)tgid % kv_heads;\n    long query_row_and_split = (long)tgid / kv_heads;\n    constexpr long grid_splits = {grid_splits};\n    long split = query_row_and_split % grid_splits;\n    long query_row = query_row_and_split / grid_splits;\n    if (split >= splits) {{ return; }}\n    long query_index = query_row * (kv_heads * query_groups) + kv_head * query_groups + group;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    long local_group_index = group * cap + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
+            "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long cap = {cap};\n    long chunks = u.context_chunks;\n    long splits = u.splits;\n    {tgid_decode}    constexpr long grid_splits = {grid_splits};\n    long split = query_row_and_split % grid_splits;\n    long query_row = query_row_and_split / grid_splits;\n    if (split >= splits) {{ return; }}\n    long query_index = query_row * (kv_heads * query_groups) + kv_head * query_groups + group;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    long local_group_index = group * cap + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
         ));
         source.push_str(&format!("    {last_key_decl}"));
         // Declared once here (not per `block_width` arm) because the
@@ -6252,7 +6302,11 @@ fn tiled_gemm_threadgroup_width(
     // each of the `query_groups` simdgroups re-reading it from device memory
     // (`render_cached_attention`'s own doc). Correctness-load-bearing, not an
     // occupancy hint: the body's `tid`/`group_width` split assumes exactly
-    // this many threads land in the same threadgroup.
+    // this many threads land in the same threadgroup. Below
+    // `cached_attention_per_query_head_grid`'s own knee, `query_groups` moves
+    // out of this width entirely -- one query head per threadgroup, decoded
+    // from `tgid` instead of shared threadgroup memory -- so the width there
+    // is `chunks * SIMD_WIDTH` alone.
     if let BoundOpKind::CachedAttention {
         query_groups,
         cached_key_rows,
@@ -6267,12 +6321,24 @@ fn tiled_gemm_threadgroup_width(
         // than `local_group_index`'s own `cap`-sized addressing assumes,
         // which is an out-of-bounds `threadgroup` memory write, not merely a
         // wrong answer.
-        let chunks = if resolved.operands().len() == 9 {
+        let dynamic_cached_len = resolved.operands().len() == 9;
+        let context_length = *cached_key_rows + *new_key_rows;
+        let chunks = if dynamic_cached_len {
             crate::sized::ATTENTION_CONTEXT_CHUNK_CAP
         } else {
-            context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy)
+            context_chunks_for(context_length, numeric_policy)
         };
-        return Some(*query_groups * chunks * SIMD_WIDTH);
+        // Below the split-at-scale knee, `cached_attention_per_query_head_grid`
+        // moves `query_groups` out of this width and into a threadgroup-count
+        // factor instead (`grid_threads`' own total stays unchanged -- see
+        // that function's doc) -- one query head per threadgroup rather than
+        // `query_groups` of them sharing one.
+        let width = if cached_attention_per_query_head_grid(dynamic_cached_len, context_length) {
+            chunks * SIMD_WIDTH
+        } else {
+            *query_groups * chunks * SIMD_WIDTH
+        };
+        return Some(width);
     }
     if let BoundOpKind::Reduce {
         keep: Keep::Reduce,
@@ -9459,17 +9525,20 @@ mod tests {
         );
     }
 
-    /// Redesign §4c, item 3, corrected by ROW 381: a ROW 376-scoreboard-shaped
-    /// context (40 keys) still renders the single, byte-identical kernel
-    /// under `bit_exact()` (that policy withholds `ContextSplitMerge`
-    /// regardless of `keys_per_split`). ROW 381 lowered
-    /// `omega-runtime.toml`'s `[attention_splits] keys_per_split` from 128 to
-    /// 16 because the split form measured faster at this window (36.1us vs
-    /// 43.6us bare, beyond 2x CoV) -- so under `llama_relaxed()` this shape
-    /// NOW engages the scratch hop and its companion merge dispatch
-    /// (`ceil(40/16) = 3` splits), the opposite of the pre-ROW-381 invariant.
+    /// Redesign §4c, item 3, corrected by ROW 385: a ROW 376-scoreboard-shaped
+    /// context (40 keys) renders the single, byte-identical-in-STRUCTURE
+    /// kernel under EITHER policy now -- [`cached_attention_merge_needed`]
+    /// additionally requires `context_length >= ATTENTION_SPLIT_KEYS_PER_
+    /// SPLIT_AT_SCALE` (128), so a 40-key context never engages the scratch
+    /// hop regardless of what `splits_for`'s own small-divisor branch would
+    /// report in isolation. ROW 381's split form measured faster at this
+    /// window than the byte-identical sequential body (36.1us vs 43.6us
+    /// bare), but ROW 385 supersedes it: the per-query-head grid
+    /// ([`cached_attention_per_query_head_grid`]) is the mechanism that wins
+    /// this window now, by giving the GPU more, narrower threadgroups to
+    /// schedule instead of a second dispatch to pay for.
     #[test]
-    fn forty_key_plan_stays_one_kernel_under_bit_exact_but_splits_under_llama_relaxed() {
+    fn forty_key_plan_uses_the_per_query_head_grid_with_no_merge_under_either_policy() {
         let mut bound = cached_attention_op_dynamic(32, 8);
         let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
             unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
@@ -9477,30 +9546,80 @@ mod tests {
         *head_dim = 8;
         let packed_operands = PackedOperands::new();
 
-        let bit_exact_kernel = emit(&bound, &packed_operands, NumericPolicy::bit_exact())
-            .expect("a 40-key context always renders");
-        assert!(
-            !bit_exact_kernel.source.contains("attn_scratch"),
-            "bit_exact: a 40-key context must never engage the scratch hop"
-        );
-        assert!(
-            emit_cached_attention_merge(&bound, NumericPolicy::bit_exact())
-                .expect("emit_cached_attention_merge never errors on a well-formed op")
-                .is_none(),
-            "bit_exact: a 40-key context must never need a companion merge dispatch"
+        for policy in [NumericPolicy::bit_exact(), NumericPolicy::llama_relaxed()] {
+            let kernel = emit(&bound, &packed_operands, policy).expect("a 40-key context always renders");
+            assert!(
+                !kernel.source.contains("attn_scratch"),
+                "a 40-key context must never engage the scratch hop under {policy:?}"
+            );
+            assert!(
+                kernel.source.contains("long kv_head_and_group = (long)tgid % (kv_heads * query_groups);"),
+                "a 40-key context must decode `group` off `tgid`, not shared threadgroup memory, \
+                 under {policy:?}"
+            );
+            assert!(
+                emit_cached_attention_merge(&bound, policy)
+                    .expect("emit_cached_attention_merge never errors on a well-formed op")
+                    .is_none(),
+                "a 40-key context must never need a companion merge dispatch under {policy:?}"
+            );
+        }
+    }
+
+    /// ROW 385: below the split-at-scale knee the per-query-head grid must
+    /// widen the THREADGROUP COUNT by `query_groups`, never the total thread
+    /// count -- [`grid_threads`] is untouched by this feature by
+    /// construction ([`cached_attention_per_query_head_grid`]'s own doc), so
+    /// this is the one source of truth that the reshaping is real: the same
+    /// total threads land in more, narrower threadgroups instead of fewer,
+    /// wider ones.
+    #[test]
+    fn per_query_head_grid_narrows_threadgroup_width_without_changing_total_threads() {
+        let mut narrow = cached_attention_op_dynamic(32, 8);
+        let BoundOpKind::CachedAttention {
+            head_dim,
+            query_groups,
+            ..
+        } = &mut narrow.kind
+        else {
+            unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
+        };
+        *head_dim = 8;
+        *query_groups = 4;
+
+        let mut wide = narrow.clone();
+        let BoundOpKind::CachedAttention {
+            cached_key_rows,
+            new_key_rows,
+            ..
+        } = &mut wide.kind
+        else {
+            unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
+        };
+        *cached_key_rows = 200;
+        *new_key_rows = 56;
+
+        let quantized: Vec<Option<PackedCodec>> = Vec::new();
+        let narrow_width = tiled_gemm_threadgroup_width(&narrow, &quantized, NumericPolicy::bit_exact())
+            .expect("a CachedAttention op always has a threadgroup width");
+        let wide_width = tiled_gemm_threadgroup_width(&wide, &quantized, NumericPolicy::bit_exact())
+            .expect("a CachedAttention op always has a threadgroup width");
+        assert_eq!(
+            wide_width,
+            4 * narrow_width,
+            "past the knee (256 keys) the width must still carry the full query_groups factor \
+             (4x the below-the-knee width): narrow={narrow_width} wide={wide_width}"
         );
 
-        let relaxed_kernel = emit(&bound, &packed_operands, NumericPolicy::llama_relaxed())
-            .expect("a 40-key context always renders");
-        assert!(
-            relaxed_kernel.source.contains("attn_scratch"),
-            "llama_relaxed: ROW 381's keys_per_split=16 must split a 40-key context"
-        );
-        assert!(
-            emit_cached_attention_merge(&bound, NumericPolicy::llama_relaxed())
-                .expect("emit_cached_attention_merge never errors on a well-formed op")
-                .is_some(),
-            "llama_relaxed: a split 40-key context must need a companion merge dispatch"
+        let narrow_threads = grid_threads(&narrow, &quantized, NumericPolicy::bit_exact())
+            .expect("a CachedAttention op always has a thread count");
+        let wide_threads = grid_threads(&wide, &quantized, NumericPolicy::bit_exact())
+            .expect("a CachedAttention op always has a thread count");
+        assert_eq!(
+            narrow_threads, wide_threads,
+            "total dispatched threads must be identical across the knee -- only the \
+             threadgroup width narrows, never grid_threads' own total: narrow={narrow_threads} \
+             wide={wide_threads}"
         );
     }
 
