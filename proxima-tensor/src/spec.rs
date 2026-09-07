@@ -10894,7 +10894,7 @@ shape = ["seq"]
         let root = NodeId(program.len() as u32 - 1);
 
         let bound =
-            crate::bind::bind(&program, &shapes, &[root, ffn_out]).expect("the real layer binds");
+            crate::bind::bind(&program, &shapes, &[root, ffn_out], crate::numeric::NumericPolicy::bit_exact()).expect("the real layer binds");
         let ffn_out_body_steps = bound
             .iter()
             .find(|op| op.node == ffn_out)
@@ -11205,7 +11205,7 @@ value = 1.0
         }
         let cached_shapes = crate::shape::infer(&cached_program, &[1, 71])
             .expect("one new position against a 71-position cache infers");
-        let bound = crate::bind::bind(&cached_program, &cached_shapes, &cached_outputs)
+        let bound = crate::bind::bind(&cached_program, &cached_shapes, &cached_outputs, crate::numeric::NumericPolicy::bit_exact())
             .expect("the cached program binds")
             .len();
 
@@ -12151,11 +12151,11 @@ value = 1.0
         let shapes_a = crate::shape::infer(&program, &[NEW_COUNT, CACHED_LEN_A])
             .expect("cached_len=50 infers");
         let resolved_a =
-            crate::bind::bind(&program, &shapes_a, &outputs).expect("cached_len=50 binds");
+            crate::bind::bind(&program, &shapes_a, &outputs, crate::numeric::NumericPolicy::bit_exact()).expect("cached_len=50 binds");
         let shapes_b = crate::shape::infer(&program, &[NEW_COUNT, CACHED_LEN_B])
             .expect("cached_len=51 infers");
         let resolved_b =
-            crate::bind::bind(&program, &shapes_b, &outputs).expect("cached_len=51 binds");
+            crate::bind::bind(&program, &shapes_b, &outputs, crate::numeric::NumericPolicy::bit_exact()).expect("cached_len=51 binds");
 
         assert_eq!(
             resolved_a.len(),

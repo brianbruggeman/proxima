@@ -16,8 +16,8 @@ use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use proxima_tensor::{
-    Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, bind, evaluate, evaluate_parallel,
-    infer, map,
+    Extent, IndexMap, NodeId, NumericPolicy, Op, ReduceInit, ScalarOp, append, bind, evaluate,
+    evaluate_parallel, infer, map,
 };
 
 /// Same GEMM, RHS stored transposed (`[n, k]`, ggml's own `mul_mat`
@@ -199,7 +199,7 @@ fn report_chunk_distribution(m: u32, k: u32, n: u32) {
         Ok(value) => value,
         Err(error) => panic!("infer failed: {error:?}"),
     };
-    let bound = match bind(&program, &shapes, &[sum]) {
+    let bound = match bind(&program, &shapes, &[sum], NumericPolicy::bit_exact()) {
         Ok(value) => value,
         Err(error) => panic!("bind failed: {error:?}"),
     };
