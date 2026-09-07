@@ -142,7 +142,17 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
             // wgpu entry" rejection `emit_wgsl`'s own
             // `EmitError::UnsupportedPackedCodec` raises for a caller who
             // reaches it directly.
-            QuantizedBlock::Q3K(_) | QuantizedBlock::Float32(_) => None,
+            //
+            // `Q5_1`/`Iq4Nl`/`Iq2Xs`/`Iq3Xxs` are decode-only so far (CPU-only,
+            // see `proxima_tensor::cpu`) -- no `PackedCodec` entry exists for
+            // any of them on either GPU driver yet, so they take the same
+            // `None` route as `Q3K` above.
+            QuantizedBlock::Q3K(_)
+            | QuantizedBlock::Q5_1(_)
+            | QuantizedBlock::Iq4Nl(_)
+            | QuantizedBlock::Iq2Xs(_)
+            | QuantizedBlock::Iq3Xxs(_)
+            | QuantizedBlock::Float32(_) => None,
         })
         .collect()
 }
@@ -179,6 +189,10 @@ fn packed_block_bytes_slice<'a>(
         | QuantizedBlock::Q6K(bytes)
         | QuantizedBlock::Q8_0(bytes)
         | QuantizedBlock::Q4_0(bytes)
+        | QuantizedBlock::Q5_1(bytes)
+        | QuantizedBlock::Iq4Nl(bytes)
+        | QuantizedBlock::Iq2Xs(bytes)
+        | QuantizedBlock::Iq3Xxs(bytes)
         | QuantizedBlock::Float16(bytes)
         | QuantizedBlock::BFloat16(bytes) => Ok(bytes),
         QuantizedBlock::Float32(_) => Err(EmitError::RenderKindMismatch {
@@ -208,6 +222,10 @@ fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {
         QuantizedBlock::Q6K(_) => "q6_k",
         QuantizedBlock::Q8_0(_) => "q8_0",
         QuantizedBlock::Q4_0(_) => "q4_0",
+        QuantizedBlock::Q5_1(_) => "q5_1",
+        QuantizedBlock::Iq4Nl(_) => "iq4_nl",
+        QuantizedBlock::Iq2Xs(_) => "iq2_xs",
+        QuantizedBlock::Iq3Xxs(_) => "iq3_xxs",
         QuantizedBlock::Float16(_) => "float16",
         QuantizedBlock::BFloat16(_) => "bfloat16",
     }

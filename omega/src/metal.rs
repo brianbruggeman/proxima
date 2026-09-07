@@ -790,6 +790,10 @@ fn block_identity_key(block: &QuantizedBlock<'_>) -> (usize, usize) {
         | QuantizedBlock::Q6K(bytes)
         | QuantizedBlock::Q8_0(bytes)
         | QuantizedBlock::Q4_0(bytes)
+        | QuantizedBlock::Q5_1(bytes)
+        | QuantizedBlock::Iq4Nl(bytes)
+        | QuantizedBlock::Iq2Xs(bytes)
+        | QuantizedBlock::Iq3Xxs(bytes)
         | QuantizedBlock::Float16(bytes)
         | QuantizedBlock::BFloat16(bytes) => (bytes.as_ptr().cast::<()>() as usize, bytes.len()),
     }
@@ -1060,7 +1064,16 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
             QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
             QuantizedBlock::Float16(_) => Some((*node, PackedCodec::Float16)),
             QuantizedBlock::BFloat16(_) => Some((*node, PackedCodec::BFloat16)),
-            QuantizedBlock::Float32(_) => None,
+            // decode-only codecs so far (CPU-only, see `proxima_tensor::cpu`)
+            // -- no `PackedCodec`/unpack-kernel entry exists yet, so these
+            // fall out of `packed_operands` exactly like `Float32` and hit
+            // `reject_unsupported_gpu_dtype`'s ordinary rejection rather
+            // than a silent, wrong-shape upload.
+            QuantizedBlock::Q5_1(_)
+            | QuantizedBlock::Iq4Nl(_)
+            | QuantizedBlock::Iq2Xs(_)
+            | QuantizedBlock::Iq3Xxs(_)
+            | QuantizedBlock::Float32(_) => None,
         })
         .collect()
 }
@@ -1197,6 +1210,10 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             | QuantizedBlock::Q6K(bytes)
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Q5_1(bytes)
+            | QuantizedBlock::Iq4Nl(bytes)
+            | QuantizedBlock::Iq2Xs(bytes)
+            | QuantizedBlock::Iq3Xxs(bytes)
             | QuantizedBlock::Float16(bytes)
             | QuantizedBlock::BFloat16(bytes) => {
                 upload_packed_bytes(&device, bytes, resident_name)?
@@ -2018,6 +2035,10 @@ pub fn execute_plan_with_placements(
             | QuantizedBlock::Q6K(bytes)
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Q5_1(bytes)
+            | QuantizedBlock::Iq4Nl(bytes)
+            | QuantizedBlock::Iq2Xs(bytes)
+            | QuantizedBlock::Iq3Xxs(bytes)
             | QuantizedBlock::Float16(bytes)
             | QuantizedBlock::BFloat16(bytes) => {
                 upload_packed_bytes(&device, bytes, resident_name)?
@@ -2379,6 +2400,10 @@ pub fn execute_plan_timed(
             | QuantizedBlock::Q6K(bytes)
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Q5_1(bytes)
+            | QuantizedBlock::Iq4Nl(bytes)
+            | QuantizedBlock::Iq2Xs(bytes)
+            | QuantizedBlock::Iq3Xxs(bytes)
             | QuantizedBlock::Float16(bytes)
             | QuantizedBlock::BFloat16(bytes) => {
                 upload_packed_bytes(&device, bytes, resident_name)?
@@ -2685,6 +2710,10 @@ pub fn execute_plan_op_timed(
             | QuantizedBlock::Q6K(bytes)
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Q5_1(bytes)
+            | QuantizedBlock::Iq4Nl(bytes)
+            | QuantizedBlock::Iq2Xs(bytes)
+            | QuantizedBlock::Iq3Xxs(bytes)
             | QuantizedBlock::Float16(bytes)
             | QuantizedBlock::BFloat16(bytes) => {
                 upload_packed_bytes(&device, bytes, resident_name)?
@@ -2811,6 +2840,10 @@ pub fn execute_plan_with_placements_op_timed(
             | QuantizedBlock::Q6K(bytes)
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Q5_1(bytes)
+            | QuantizedBlock::Iq4Nl(bytes)
+            | QuantizedBlock::Iq2Xs(bytes)
+            | QuantizedBlock::Iq3Xxs(bytes)
             | QuantizedBlock::Float16(bytes)
             | QuantizedBlock::BFloat16(bytes) => {
                 upload_packed_bytes(&device, bytes, resident_name)?
@@ -3011,6 +3044,10 @@ pub fn execute_plan_with_placements_dispatch_timed(
             | QuantizedBlock::Q6K(bytes)
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Q5_1(bytes)
+            | QuantizedBlock::Iq4Nl(bytes)
+            | QuantizedBlock::Iq2Xs(bytes)
+            | QuantizedBlock::Iq3Xxs(bytes)
             | QuantizedBlock::Float16(bytes)
             | QuantizedBlock::BFloat16(bytes) => {
                 upload_packed_bytes(&device, bytes, resident_name)?
@@ -3721,6 +3758,10 @@ fn block_byte_len(block: &QuantizedBlock<'_>) -> usize {
         | QuantizedBlock::Q6K(bytes)
         | QuantizedBlock::Q8_0(bytes)
         | QuantizedBlock::Q4_0(bytes)
+        | QuantizedBlock::Q5_1(bytes)
+        | QuantizedBlock::Iq4Nl(bytes)
+        | QuantizedBlock::Iq2Xs(bytes)
+        | QuantizedBlock::Iq3Xxs(bytes)
         | QuantizedBlock::Float16(bytes)
         | QuantizedBlock::BFloat16(bytes) => bytes.len(),
     }
