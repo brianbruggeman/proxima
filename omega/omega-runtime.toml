@@ -247,7 +247,13 @@ width = 32
 # more `device`-scratch write/read pass per extra split and a second,
 # merge-kernel dispatch whenever `splits > 1`. Overridable per-build via
 # `OMEGA_ATTENTION_SPLITS_KEYS_PER_SPLIT` / `OMEGA_ATTENTION_SPLITS_MAX`.
-keys_per_split = 128
+# ROW 381: at the decode scoreboard window (capacity 39-78 keys) 128 clamps
+# to a single un-split kernel; 16 measured 36.1us median vs 128's 43.6us
+# bare (beyond 2x CoV) by giving that window 3 threadgroups instead of 1.
+# The tradeoff: at 512 keys 16 forces splits=32 (vs 128's 4) and the extra
+# merge-dispatch overhead makes it SLOWER than 128 (150.9us vs 89.5us) --
+# accepted because the decode window is the hot path this crosses most.
+keys_per_split = 16
 max = 32
 
 [packed_row_nsg]
