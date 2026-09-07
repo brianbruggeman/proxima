@@ -203,13 +203,26 @@ static inline float q4k_pair_dot(device const uchar *block, uint iq, uint ir, th
 // `word_low`/`word_high`/`h0..h3` decode across the group. `q4k_pair_dot_mr`
 // pulls that decode out of the per-token loop: `word_low`/`word_high` and
 // `h0..h3` are read/derived exactly once, then the eight-fma accumulate
-// below runs once per token against the SAME decoded values, `yl_group`/
-// `yh_group` holding `cap` tokens' worth of gathered activation flattened at
-// stride 16. `cap` (`omega-runtime.toml`'s `PACKED_ROW_ACTIVATION_GROUP`) is
-// a runtime loop bound here, not a fixed array size, so this function has no
-// build-time-value dependency of its own -- the caller sizes `yl_group`/
-// `yh_group`/`result`.
-static inline void q4k_pair_dot_mr(device const uchar *block, uint iq, uint ir, thread const float *yl_group, thread const float *yh_group, uint cap, thread float *result) {
+// below runs once per token, gathering that ONE token's 16+16 `yl`/`yh`
+// floats from `other_ptr` (via `other_base[s]`/`other_stride`/
+// `other_ib_offset`) immediately before folding them.
+//
+// CORRECTION (perf/prefill-packed-row-decode): a first version of this
+// function took pre-gathered `yl_group[cap][16]`/`yh_group[cap][16]` thread
+// arrays instead -- 256 live private floats at `cap = 8` -- and measured
+// SLOWER on a 31-token prefill than the generic per-element body it
+// replaced (step-0 GPU 13.0s on main vs 15.1-21.8s on that version). Arrays
+// sized by `cap` force Metal to reserve that much thread/private storage
+// for the whole per-block-iteration accumulate regardless of how many of
+// those `cap` slots are actually live at once, collapsing occupancy. This
+// version stages one token's `yl`/`yh` at a time inside the `s` loop below,
+// so live private state is ~40 floats (`yl`, `yh`, `result_s`, `result[]`)
+// no matter how large `cap` gets -- at the cost of re-issuing `other_ptr`'s
+// device loads once per output row (`rows_per_simdgroup`, 4 for `Q4_K`)
+// instead of once shared across all four; each repeat reads the SAME
+// address as the other three (same lane, same token, same sub-block
+// offset), so it costs a cache hit, not additional HBM traffic.
+static inline void q4k_pair_dot_mr(device const uchar *block, uint iq, uint ir, device const float *other_ptr, thread const long *other_base, long other_stride, long other_ib_offset, uint cap, thread float *result) {
     device const uchar *qs = block + 16;
     uint byte_base = 32u * iq + 8u * ir;
     device const ushort *word_low = (device const ushort *)(qs + byte_base);
@@ -221,9 +234,17 @@ static inline void q4k_pair_dot_mr(device const uchar *block, uint iq, uint ir, 
     q4k_header h3 = q4k_header_for(block, low_index + 160u);
     ushort w1[4]; ushort w2[4];
     for (uint i = 0u; i < 4u; ++i) { w1[i] = word_low[i]; w2[i] = word_high[i]; }
+    long lane_offset = (long)(64u * iq + 8u * ir) * other_stride;
     for (uint s = 0u; s < cap; ++s) {
-        thread const float *yl = yl_group + s * 16u;
-        thread const float *yh = yh_group + s * 16u;
+        device const float *y4 = other_ptr + other_base[s] + other_ib_offset + lane_offset;
+        float yl[16];
+        float yh[16];
+        for (uint i = 0u; i < 8u; ++i) {
+            yl[i] = y4[(long)i * other_stride];
+            yl[i + 8u] = y4[(long)(i + 32u) * other_stride];
+            yh[i] = y4[(long)(i + 128u) * other_stride];
+            yh[i + 8u] = y4[(long)(i + 160u) * other_stride];
+        }
         float result_s = 0.0f;
         for (uint i = 0u; i < 4u; ++i) {
             uint word1 = (uint)w1[i];
