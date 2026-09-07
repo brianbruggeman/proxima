@@ -2273,11 +2273,14 @@ pub enum Control {
 /// token id that does not validly continue an earlier incomplete lead byte
 /// is a normal outcome of autoregressive sampling, not corruption
 /// (guiding-principles principle 15: an error type is not the "correct
-/// treatment" for a case the caller cannot act on). [`core::str::Utf8Error::error_len`]
-/// returning `Some(_)` here means the STALE pending bytes can never become
-/// valid no matter what follows; those bytes resolve to one U+FFFD and
-/// decoding resumes on whatever bytes remain after the bad run, so one
-/// unresolvable byte never fails the whole call.
+/// treatment" for a case the caller cannot act on). Draining is
+/// [`proxima_tokenizer::drain_lossy_utf8`] itself -- the same routine
+/// [`proxima_tokenizer::pipe::decode`] uses for the one-shot whole-sequence
+/// case -- so a genuinely invalid run resolves to one U+FFFD and draining
+/// resumes on whatever bytes remain after it here exactly as it does there;
+/// the only difference is this call site leaves an incomplete trailing
+/// sequence in `pending` for a future token to complete, instead of
+/// flushing it immediately.
 fn decode_streamed_piece(
     vocab: &Vocab,
     token_id: u32,
@@ -2286,52 +2289,12 @@ fn decode_streamed_piece(
     let bytes = proxima_tokenizer::bpe::decode_ids(&[token_id], vocab)?;
     pending.extend_from_slice(&bytes);
     let mut piece = String::new();
-    loop {
-        match core::str::from_utf8(pending.as_slice()) {
-            Ok(text) => {
-                piece.push_str(text);
-                pending.clear();
-                break;
-            }
-            Err(error) if error.error_len().is_none() => {
-                push_valid_prefix(pending, error.valid_up_to(), &mut piece)?;
-                pending.drain(..error.valid_up_to());
-                break;
-            }
-            Err(error) => {
-                let valid_up_to = error.valid_up_to();
-                let bad_len = error.error_len().unwrap_or(1).max(1);
-                push_valid_prefix(pending, valid_up_to, &mut piece)?;
-                piece.push('\u{FFFD}');
-                pending.drain(..valid_up_to + bad_len);
-            }
-        }
-    }
+    proxima_tokenizer::drain_lossy_utf8(pending, &mut piece);
     Ok(if vocab.is_unigram() {
         proxima_tokenizer::unigram::replace_space_markers(&piece)
     } else {
         piece
     })
-}
-
-/// Appends `pending`'s first `valid_up_to` bytes to `piece` -- both of
-/// [`decode_streamed_piece`]'s error arms already know this prefix is
-/// proven valid UTF-8 ([`core::str::Utf8Error::valid_up_to`]'s own
-/// contract), so the `map_err` here is unreachable in practice and exists
-/// only so this function stays `Result`-returning rather than reaching for
-/// `unwrap`/`expect` in production code.
-fn push_valid_prefix(
-    pending: &[u8],
-    valid_up_to: usize,
-    piece: &mut String,
-) -> Result<(), InteropError> {
-    if valid_up_to == 0 {
-        return Ok(());
-    }
-    let prefix = core::str::from_utf8(&pending[..valid_up_to])
-        .map_err(|_| proxima_tokenizer::TokenizerError::InvalidUtf8)?;
-    piece.push_str(prefix);
-    Ok(())
 }
 
 /// The decode loop's termination policy, isolated from the forward pass

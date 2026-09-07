@@ -113,41 +113,75 @@ pub fn encode_with_bos_eos(
     Ok(ids)
 }
 
-/// Concatenates every token id's raw bytes ([`decode_ids`]) and interprets
-/// the result as UTF-8.
+/// Drains as much valid UTF-8 out of `pending` as possible, appending it to
+/// `output` in place. Shared by [`decode`] (one-shot, whole sequence) and
+/// [`crate::pipe`]'s streaming counterpart in `proxima-model-interop`'s
+/// `decode_streamed_piece` (per-token, called once per generated id) -- both
+/// need the exact same "flag, don't drop" behavior over byte-level BPE
+/// output, which has no obligation to keep a multibyte character inside one
+/// token: a merge can land the split anywhere.
 ///
-/// Byte-level BPE has no obligation to keep a multibyte character inside
-/// one token -- a merge can land the split anywhere, and a greedy decode
-/// loop that stops at its own token budget can legitimately end mid
-/// character, one or two continuation bytes short of complete. That is
-/// not corruption: [`core::str::Utf8Error::error_len`] returning `None`
-/// means every byte up to `valid_up_to` is proven valid and the tail is
-/// merely unfinished, versus `Some(_)` meaning a byte in the buffer is
-/// never legal at that position. Only the latter is a real decode
-/// failure; the former keeps the valid prefix and marks the unfinished
-/// tail with U+FFFD, the same "flag, don't drop" contract this module's
-/// error type promises everywhere else.
+/// [`core::str::Utf8Error::error_len`] returning `None` means every byte up
+/// to `valid_up_to` is proven valid and the tail is merely unfinished (a
+/// greedy decode stopping mid character); that tail is left untouched in
+/// `pending` for a caller to either complete with a later call or, if no
+/// more bytes are coming, flush as one trailing U+FFFD itself. `Some(_)`
+/// means a byte at that position is never legal there -- a genuinely
+/// invalid run, which can never become valid no matter what bytes follow.
+/// That run resolves to exactly one U+FFFD and draining resumes on whatever
+/// bytes remain after it, so one bad run never drops the rest of `pending`.
+pub fn drain_lossy_utf8(pending: &mut Vec<u8>, output: &mut String) {
+    loop {
+        match core::str::from_utf8(pending.as_slice()) {
+            Ok(text) => {
+                output.push_str(text);
+                pending.clear();
+                return;
+            }
+            Err(error) if error.error_len().is_none() => {
+                let valid_up_to = error.valid_up_to();
+                if let Ok(text) = core::str::from_utf8(&pending[..valid_up_to]) {
+                    output.push_str(text);
+                }
+                pending.drain(..valid_up_to);
+                return;
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                let bad_len = error.error_len().unwrap_or(1).max(1);
+                if let Ok(text) = core::str::from_utf8(&pending[..valid_up_to]) {
+                    output.push_str(text);
+                }
+                output.push('\u{FFFD}');
+                pending.drain(..valid_up_to + bad_len);
+            }
+        }
+    }
+}
+
+/// Concatenates every token id's raw bytes ([`decode_ids`]) and interprets
+/// the result as UTF-8, via [`drain_lossy_utf8`].
+///
+/// A genuinely invalid byte run (a byte that is never legal at its
+/// position) resolves to one U+FFFD and decoding resumes on whatever bytes
+/// remain after it -- never a decode failure, since `ids` legitimately
+/// hitting this case (a caller feeding ids not produced by this crate's own
+/// [`encode`]) has nothing more informative to do than flag the bad run and
+/// keep going, the same "flag, don't drop" contract this module's error
+/// type promises everywhere else. An incomplete trailing sequence (a greedy
+/// caller's own token budget ending mid character) keeps the valid prefix
+/// and marks the unfinished tail with one U+FFFD, exactly as before.
 ///
 /// # Errors
 ///
-/// [`TokenizerError::TokenIdOutOfRange`] for an id absent from `vocab`;
-/// [`TokenizerError::InvalidUtf8`] if the concatenated bytes contain a
-/// byte that is invalid UTF-8 at its position (not merely an incomplete
-/// trailing sequence) -- possible when `ids` did not come from this
-/// crate's own [`encode`].
+/// [`TokenizerError::TokenIdOutOfRange`] for an id absent from `vocab`.
 pub fn decode(ids: &[u32], vocab: &Vocab) -> Result<String, TokenizerError> {
-    let bytes = decode_ids(ids, vocab)?;
-    let text = match core::str::from_utf8(&bytes) {
-        Ok(text) => String::from(text),
-        Err(error) if error.error_len().is_none() => {
-            let valid_prefix = core::str::from_utf8(&bytes[..error.valid_up_to()])
-                .map_err(|_| TokenizerError::InvalidUtf8)?;
-            let mut text = String::from(valid_prefix);
-            text.push('\u{FFFD}');
-            text
-        }
-        Err(_) => return Err(TokenizerError::InvalidUtf8),
-    };
+    let mut pending = decode_ids(ids, vocab)?;
+    let mut text = String::new();
+    drain_lossy_utf8(&mut pending, &mut text);
+    if !pending.is_empty() {
+        text.push('\u{FFFD}');
+    }
     if vocab.is_unigram() {
         return Ok(unigram::unescape(&text));
     }

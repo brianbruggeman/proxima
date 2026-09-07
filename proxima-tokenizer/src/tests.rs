@@ -221,13 +221,16 @@ fn angle_brackets_and_pipes_outside_a_registered_marker_are_ordinary_text() {
 }
 
 #[test]
-fn decoding_bytes_that_are_not_valid_utf8_is_a_typed_error_not_a_panic() {
+fn decoding_an_invalid_byte_run_mid_buffer_flushes_one_replacement_char_and_resumes() {
     let vocab = synthetic_vocab();
-    // byte 0x80 alone is a bare UTF-8 continuation byte -- never valid on
-    // its own. Its base token id is index 0x80 in the first 256 tokens.
-    let lone_continuation_byte_id = 0x80u32;
-    let error = decode(&[lone_continuation_byte_id], &vocab).expect_err("invalid utf-8");
-    assert_eq!(error, TokenizerError::InvalidUtf8);
+    // 0xE4 alone (an illegal continuation byte in this position) sits
+    // between two otherwise-valid ascii bytes -- a genuinely invalid run,
+    // not merely an incomplete trailing sequence, so it must not fail the
+    // whole decode: it resolves to one U+FFFD and decoding resumes on the
+    // bytes after it.
+    let ids = [b'H' as u32, 0xE4u32, b'i' as u32, b'!' as u32];
+    let decoded = decode(&ids, &vocab).expect("an invalid run must decode, not error");
+    assert_eq!(decoded, "H\u{FFFD}i!");
 }
 
 #[test]
