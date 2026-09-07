@@ -1107,6 +1107,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             plan.numeric_policy,
             None,
             None,
+            None,
         )?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
@@ -2036,6 +2037,12 @@ pub fn execute_plan_with_placements(
             // -- every other `encode_op` caller passes `None` and rejects a
             // `Binding::Scratch` kernel instead (that function's own doc).
             let attention_scratch = attention_scratch_buffer(plan, position)?.map(|buffer| (buffer, 0usize));
+            // Only `Concurrent` needs the intra-op scratch write -> read edge
+            // routed through the tracker (see `encode_op`'s own doc for
+            // `hazard`) -- `Serial` orders the split before the merge for
+            // free, the same reason `resolved_output` above is `None` there.
+            let hazard =
+                (dispatch_type == DispatchType::Concurrent).then_some(&mut hazard_state.tracker);
             let fault = encode_op(
                 &device,
                 &encoder,
@@ -2049,6 +2056,7 @@ pub fn execute_plan_with_placements(
                 plan.numeric_policy,
                 resolved_step,
                 attention_scratch,
+                hazard,
             )?;
             if let Some((fault_buffer, gathers)) = fault {
                 pending_faults.push((bound, fault_buffer, gathers));
@@ -2236,6 +2244,7 @@ pub fn execute_plan_timed(
             plan.numeric_policy,
             None,
             None,
+            None,
         )?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
@@ -2419,6 +2428,7 @@ fn execute_op_timed(
         None,
         math_mode,
         numeric_policy,
+        None,
         None,
         None,
     )?;
@@ -3058,6 +3068,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             None,
             plan.math_mode,
             plan.numeric_policy,
+            None,
             None,
             None,
         )?;
@@ -7005,6 +7016,13 @@ fn encode_op(
     // below, the same "no placement, fresh `allocate_buffer`" fallback
     // `output` itself already has.
     scratch: Option<(&MetalBuffer, usize)>,
+    // `Some` only from `execute_plan_with_placements` under
+    // `DispatchType::Concurrent` -- the plan's own per-call `HazardState`,
+    // reborrowed. `None` everywhere else (`execute_plan`, `execute_op_timed`,
+    // every `DispatchType::Serial` call), since program order alone already
+    // orders a split's write before its merge's read there (see the
+    // `dispatch(encoder, &pipeline, grid)` call site's own doc below).
+    hazard: Option<&mut HazardTracker<*const ProtocolObject<dyn MTLBuffer>>>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     // read only inside the `metal-plan-stable-buffers` arm below -- named
     // here so a build without that feature does not warn on an unused param.
@@ -7170,12 +7188,36 @@ fn encode_op(
     // program order: under `DispatchType::Serial` (this plan's default)
     // that ordering alone is Metal's own dependency guarantee, the same
     // reason this module's `HazardTracker` is never instantiated on that
-    // path at all (`HazardTracker`'s own doc). `DispatchType::Concurrent`
-    // is a NAMED GAP this slice does not close: the hazard tracker above
-    // (when present) records only this op's SINGLE output identity, not
-    // the scratch buffer's -- see `execute_plan_with_placements`'s own
-    // hazard block for where that would need to grow a second identity.
+    // path at all (`HazardTracker`'s own doc). Under `DispatchType::Concurrent`
+    // program order is NOT a guarantee, so the split's write and the merge's
+    // read of `scratch` are routed through `hazard` below -- the SAME
+    // `HazardTracker` mechanism every other buffer's hazard uses, since
+    // `Binding::Scratch` maps to its own buffer identity exactly like
+    // `Binding::Output`/`Binding::Input` do (see that variant's own doc).
     if let Some(merge) = merge {
+        if let (Some(tracker), Some((scratch_buffer, _))) = (hazard, scratch) {
+            let scratch_pointer = Retained::as_ptr(scratch_buffer);
+            let output_pointer = Retained::as_ptr(&output);
+            // the split dispatch above just wrote `scratch` -- record it,
+            // then ask the tracker whether the merge's own read needs a
+            // barrier first (always true: a write is never already visible
+            // to a later read without one). Same "record, check, barrier"
+            // shape `hazard_step` gives every other buffer, applied here to
+            // the one edge that is entirely internal to this op.
+            tracker.record(&[], Some(scratch_pointer));
+            if tracker.needs_barrier(&[scratch_pointer], None) {
+                encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+                counter!(BARRIERS_EMITTED, 1);
+                // a barrier is a full flush, so `reset` is correct -- but
+                // the caller's OWN `hazard_step`, before this op was ever
+                // encoded, already recorded this op's real output as
+                // written; restore that record so a later sibling op's own
+                // hazard check still sees it, exactly as if this intra-op
+                // edge had never touched the tracker.
+                tracker.reset();
+                tracker.record(&[], Some(output_pointer));
+            }
+        }
         let merge_uniforms = upload_uniforms(device, &pack_cached_attention_merge_uniforms(bound)?)?;
         encoder.setComputePipelineState(&merge.pipeline);
         bind_buffers(
@@ -8482,6 +8524,46 @@ mod hazard_tracker_tests {
             [barrier0, barrier1, barrier2, barrier3],
             [false, true, true, false],
             "barriers fire before op1 (RAW) and op2 (WAR), never before op0 or op3"
+        );
+    }
+
+    /// Redesign §4c's own gap: `Binding::Scratch` is written by a
+    /// `CachedAttention` split kernel and read by its merge kernel, an edge
+    /// `encode_op`'s own doc names as internal to one op. Modeled here at
+    /// the pure `HazardTracker` level (`encode_op`'s real fix threads the
+    /// SAME `scratch`/`output` identities through this exact tracker): the
+    /// split's write to `scratch`, a SIBLING op's write to an entirely
+    /// unrelated buffer in between (the concurrent-dispatch case this
+    /// tracker exists for -- two independent ops both queued before either
+    /// finishes), then the merge's read of `scratch`. The sibling's own
+    /// write must not need a barrier (it shares no identity with anything
+    /// written or read so far) and must not erase `scratch`'s own
+    /// written-since-last-barrier status (`record` only adds, `reset` is the
+    /// only thing that clears, and the sibling never triggers one) -- so the
+    /// merge's read still sees `scratch` as written and still barriers.
+    #[test]
+    fn a_sibling_op_between_the_split_write_and_the_merge_read_does_not_hide_the_scratch_raw_hazard() {
+        let mut hazards: HazardTracker<&str> = HazardTracker::new();
+
+        // the split kernel writes its partial into scratch.
+        assert!(
+            !hazard_step(&mut hazards, &[], "scratch"),
+            "scratch is a fresh identity nothing has touched yet"
+        );
+
+        // an independent sibling op, queued in between under
+        // `DispatchType::Concurrent`, touches a buffer with no relation to
+        // `scratch` at all.
+        assert!(
+            !hazard_step(&mut hazards, &[], "sibling_out"),
+            "an unrelated sibling write must not spuriously barrier"
+        );
+
+        // the merge kernel reads scratch back -- the RAW hazard the sibling
+        // must not have hidden.
+        assert!(
+            hazard_step(&mut hazards, &["scratch"], "real_output"),
+            "the merge's read of scratch must still see it as written, sibling or not"
         );
     }
 
