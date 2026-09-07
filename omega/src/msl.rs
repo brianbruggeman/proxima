@@ -3415,6 +3415,14 @@ fn render_cached_attention(
             "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long cap = {cap};\n    long chunks = u.context_chunks;\n    long splits = u.splits;\n    long chunk = vector_index % cap;\n    long group = (vector_index / cap) % query_groups;\n    long kv_head = (long)tgid % kv_heads;\n    long query_row_and_split = (long)tgid / kv_heads;\n    constexpr long grid_splits = {grid_splits};\n    long split = query_row_and_split % grid_splits;\n    long query_row = query_row_and_split / grid_splits;\n    if (split >= splits) {{ return; }}\n    long query_index = query_row * (kv_heads * query_groups) + kv_head * query_groups + group;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    long local_group_index = group * cap + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
         ));
         source.push_str(&format!("    {last_key_decl}"));
+        // Declared once here (not per `block_width` arm) because the
+        // cross-chunk merge below -- `shared_m`/`shared_l`/`shared_o` reads
+        // and the `final_store` that follows it -- runs identically whether
+        // `block_width <= 1` (bit_exact) or `> 1` (the block-staged body);
+        // only the `block_width > 1` arm additionally reuses `shared_o` as
+        // its own V-accumulate scratch (this function's own doc on that
+        // arm), never a second, separate allocation.
+        source.push_str("    threadgroup float shared_m[query_groups * cap]; threadgroup float shared_l[query_groups * cap]; threadgroup float shared_o[query_groups * cap * head_dim];\n");
         // Redesign §4c: this threadgroup's slice of the LIVE key range
         // (`last_key + 1`, ROW 366's live upper) -- `ceil_div(live, splits)`
         // sized so every split but the last is exactly `slice_len` keys and
@@ -3451,8 +3459,25 @@ fn render_cached_attention(
         if block_width <= 1 {
             source.push_str("    if (chunk < chunks) {\n    for (long key = lo + chunk; key < hi; key += chunks) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n    }\n");
         } else {
+            // The float4/ty-group V accumulate (llama's `kernel_flash_attn_
+            // ext_vec` register form, ggml-metal.metal:4125-4143) needs each
+            // `tx` lane's `v_registers` float4 loads to land on a 16-byte
+            // boundary and never read past `head_dim` floats -- true only
+            // when `head_dim` is itself a multiple of 32 (8 `tx` lanes times
+            // 4 floats/float4). Smaller/odd `head_dim` (the `head_dim == 8`
+            // fixtures below) keep today's scalar per-key V loop, byte for
+            // byte, rather than mis-sizing the vector loads or rejecting a
+            // shape the Q·K side already renders correctly.
+            let v_accumulate = if head_dim.is_multiple_of(32) {
+                let v_registers = head_dim / 8 / 4;
+                format!(
+                    "            {{\n                constexpr long v_registers = {v_registers};\n                float4 v_acc[v_registers];\n                for (long register_index = 0L; register_index < v_registers; register_index++) {{ v_acc[register_index] = float4(0.0f); }}\n                for (long cc4 = 0L; cc4 < 8L; cc4++) {{\n                    long local_index = block_start + sub + 4L * cc4 + (long)ty;\n                    bool valid = local_index < min(block_start + sub + 32L, num_local_keys);\n                    long key = slice_start + local_index * chunks;\n                    bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n                    long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n                    float key_weight = valid ? ss[local_group_index * block_width + (local_index - block_start)] : 0.0f;\n                    device const {element_type}4* v4 = (device const {element_type}4*)((cached ? in6 : in7) + kbase * 2);\n                    for (long register_index = 0L; register_index < v_registers; register_index++) {{\n                        v_acc[register_index] += valid ? float4(v4[(long)tx + 8L * register_index]) * key_weight : float4(0.0f);\n                    }}\n                }}\n                for (long register_index = 0L; register_index < v_registers; register_index++) {{\n                    v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 8);\n                    v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 16);\n                }}\n                if (ty == 0) {{\n                    threadgroup float4* shared_o4 = (threadgroup float4*)(shared_o + local_group_index * head_dim);\n                    for (long register_index = 0L; register_index < v_registers; register_index++) {{ shared_o4[(long)tx + 8L * register_index] = v_acc[register_index]; }}\n                }}\n                simdgroup_barrier(mem_flags::mem_threadgroup);\n                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n                    long local_dimension = dimension / 32L;\n                    weighted[local_dimension] += shared_o[local_group_index * head_dim + dimension];\n                }}\n                simdgroup_barrier(mem_flags::mem_threadgroup);\n            }}\n"
+                )
+            } else {
+                "            for (long local_index = block_start + sub; local_index < min(block_start + sub + 32L, num_local_keys); local_index++) {\n                long key = slice_start + local_index * chunks;\n                bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n                long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n                float key_weight = ss[local_group_index * block_width + (local_index - block_start)];\n                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n                    long local_dimension = dimension / 32L;\n                    weighted[local_dimension] += key_weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n                }\n            }\n".to_string()
+            };
             source.push_str(&format!(
-                "    constexpr long block_width = {block_width};\n    short ty = (short)(lane / 8u); short tx = (short)(lane % 8u);\n    threadgroup float ss[query_groups * cap * block_width];\n    if (chunk < chunks) {{\n    long slice_start = lo + chunk;\n    long num_local_keys = (slice_start < hi) ? ((hi - 1L - slice_start) / chunks) + 1L : 0L;\n    for (long block_start = 0L; block_start < num_local_keys; block_start += block_width) {{\n        for (long cc = 0L; cc < block_width / 4L; cc++) {{\n            long local_index = block_start + 4L * cc + (long)ty;\n            bool valid = local_index < num_local_keys;\n            long key = slice_start + local_index * chunks;\n            bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n            if (valid) {{\n                long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n                if (cached && relative < cached_lower) {{ valid = false; }}\n                if (!cached && relative > new_upper) {{ valid = false; }}\n            }}\n            long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n            float partial_score = 0.0f;\n            if (valid) {{\n                device const {element_type}4* qr4 = (device const {element_type}4*)(in0 + qbase);\n                device const {element_type}4* qi4 = (device const {element_type}4*)(in1 + qbase);\n                device const {element_type}4* kr4 = (device const {element_type}4*)((cached ? in2 : in4) + kbase);\n                device const {element_type}4* ki4 = (device const {element_type}4*)((cached ? in3 : in5) + kbase);\n                for (short index = tx; index < (short)((head_dim / 2) / 4L); index += 8) {{\n                    partial_score += dot(kr4[index], qr4[index]);\n                    partial_score += dot(ki4[index], qi4[index]);\n                }}\n            }}\n            partial_score += simd_shuffle_down(partial_score, 4);\n            partial_score += simd_shuffle_down(partial_score, 2);\n            partial_score += simd_shuffle_down(partial_score, 1);\n            if (tx == 0) {{ ss[local_group_index * block_width + 4L * cc + (long)ty] = valid ? partial_score * scale : -INFINITY; }}\n        }}\n        simdgroup_barrier(mem_flags::mem_threadgroup);\n        for (long sub = 0L; sub < block_width; sub += 32L) {{\n            long lane_index = sub + (long)lane;\n            float raw_score = ss[local_group_index * block_width + lane_index];\n            float next_max = simd_max(max(maximum, raw_score));\n            float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n            float weight = exp(raw_score - next_max);\n            sum = sum * rescale + simd_sum(weight);\n            ss[local_group_index * block_width + lane_index] = weight;\n            for (long dimension = 0L; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] *= rescale; }}\n            maximum = next_max;\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n            for (long local_index = block_start + sub; local_index < min(block_start + sub + 32L, num_local_keys); local_index++) {{\n                long key = slice_start + local_index * chunks;\n                bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n                long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n                float key_weight = ss[local_group_index * block_width + (local_index - block_start)];\n                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n                    long local_dimension = dimension / 32L;\n                    weighted[local_dimension] += key_weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n                }}\n            }}\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n        }}\n    }}\n    }}\n"
+                "    constexpr long block_width = {block_width};\n    short ty = (short)(lane / 8u); short tx = (short)(lane % 8u);\n    threadgroup float ss[query_groups * cap * block_width];\n    if (chunk < chunks) {{\n    long slice_start = lo + chunk;\n    long num_local_keys = (slice_start < hi) ? ((hi - 1L - slice_start) / chunks) + 1L : 0L;\n    for (long block_start = 0L; block_start < num_local_keys; block_start += block_width) {{\n        for (long cc = 0L; cc < block_width / 4L; cc++) {{\n            long local_index = block_start + 4L * cc + (long)ty;\n            bool valid = local_index < num_local_keys;\n            long key = slice_start + local_index * chunks;\n            bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n            if (valid) {{\n                long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n                if (cached && relative < cached_lower) {{ valid = false; }}\n                if (!cached && relative > new_upper) {{ valid = false; }}\n            }}\n            long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n            float partial_score = 0.0f;\n            if (valid) {{\n                device const {element_type}4* qr4 = (device const {element_type}4*)(in0 + qbase);\n                device const {element_type}4* qi4 = (device const {element_type}4*)(in1 + qbase);\n                device const {element_type}4* kr4 = (device const {element_type}4*)((cached ? in2 : in4) + kbase);\n                device const {element_type}4* ki4 = (device const {element_type}4*)((cached ? in3 : in5) + kbase);\n                for (short index = tx; index < (short)((head_dim / 2) / 4L); index += 8) {{\n                    partial_score += dot(kr4[index], qr4[index]);\n                    partial_score += dot(ki4[index], qi4[index]);\n                }}\n            }}\n            partial_score += simd_shuffle_down(partial_score, 4);\n            partial_score += simd_shuffle_down(partial_score, 2);\n            partial_score += simd_shuffle_down(partial_score, 1);\n            if (tx == 0) {{ ss[local_group_index * block_width + 4L * cc + (long)ty] = valid ? partial_score * scale : -INFINITY; }}\n        }}\n        simdgroup_barrier(mem_flags::mem_threadgroup);\n        for (long sub = 0L; sub < block_width; sub += 32L) {{\n            long lane_index = sub + (long)lane;\n            float raw_score = ss[local_group_index * block_width + lane_index];\n            float next_max = simd_max(max(maximum, raw_score));\n            float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n            float weight = exp(raw_score - next_max);\n            sum = sum * rescale + simd_sum(weight);\n            ss[local_group_index * block_width + lane_index] = weight;\n            for (long dimension = 0L; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] *= rescale; }}\n            maximum = next_max;\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n{v_accumulate}            simdgroup_barrier(mem_flags::mem_threadgroup);\n        }}\n    }}\n    }}\n"
             ));
         }
         // Redesign §4c ([`NumericRewrite::ContextSplitMerge`]): once the
@@ -3483,7 +3508,7 @@ fn render_cached_attention(
             )
         };
         source.push_str(&format!(
-            "    threadgroup float shared_m[query_groups * cap]; threadgroup float shared_l[query_groups * cap]; threadgroup float shared_o[query_groups * cap * head_dim];\n    if (lane == 0u) {{ shared_m[local_group_index] = maximum; shared_l[local_group_index] = sum; }}\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ shared_o[local_group_index * head_dim + dimension] = weighted[dimension / 32L]; }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    if (chunk == 0L) {{\n        float merged_max = -INFINITY;\n        for (long c = 0; c < cap; c++) {{ merged_max = max(merged_max, shared_m[group * cap + c]); }}\n        float merged_sum = 0.0f;\n        for (long c = 0; c < cap; c++) {{\n            float partial_max = shared_m[group * cap + c];\n            float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n            merged_sum += shared_l[group * cap + c] * rescale;\n        }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            float acc = 0.0f;\n            for (long c = 0; c < cap; c++) {{\n                float partial_max = shared_m[group * cap + c];\n                float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n                acc += shared_o[(group * cap + c) * head_dim + dimension] * rescale;\n            }}\n            weighted[local_dimension] = acc;\n        }}\n        sum = merged_sum;\n{final_store}    }}\n}}\n"
+            "    if (lane == 0u) {{ shared_m[local_group_index] = maximum; shared_l[local_group_index] = sum; }}\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ shared_o[local_group_index * head_dim + dimension] = weighted[dimension / 32L]; }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    if (chunk == 0L) {{\n        float merged_max = -INFINITY;\n        for (long c = 0; c < cap; c++) {{ merged_max = max(merged_max, shared_m[group * cap + c]); }}\n        float merged_sum = 0.0f;\n        for (long c = 0; c < cap; c++) {{\n            float partial_max = shared_m[group * cap + c];\n            float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n            merged_sum += shared_l[group * cap + c] * rescale;\n        }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            float acc = 0.0f;\n            for (long c = 0; c < cap; c++) {{\n                float partial_max = shared_m[group * cap + c];\n                float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n                acc += shared_o[(group * cap + c) * head_dim + dimension] * rescale;\n            }}\n            weighted[local_dimension] = acc;\n        }}\n        sum = merged_sum;\n{final_store}    }}\n}}\n"
         ));
     } else if context_chunks <= 1 {
         source.push_str("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }\n");
@@ -9654,6 +9679,74 @@ mod tests {
         assert!(
             !source.contains("simd_broadcast_first(simd_sum(partial_score)) * scale"),
             "the block-staged body must not keep the old per-key reduce expression"
+        );
+    }
+
+    /// §4b's V-accumulate port (this crate's `attention-kernel-design.md`
+    /// §4b, llama's `kernel_flash_attn_ext_vec` register form,
+    /// ggml-metal.metal:4125-4197): once `head_dim` is a multiple of 32 the
+    /// block-staged body must load V as `float4` per `tx` lane and fold the
+    /// four `ty` groups' partial sums back together with a `simd_shuffle_xor`
+    /// cross-group reduce, rather than the scalar per-key V loop the
+    /// smaller/unaligned `head_dim` fixtures above still render.
+    #[test]
+    fn block_staged_v_accumulate_uses_float4_and_a_cross_ty_reduce_when_aligned() {
+        let mut bound = cached_attention_op_dynamic(32, 7);
+        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+            unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
+        };
+        *head_dim = 32; // a multiple of 32, so the V float4 loads stay aligned
+
+        let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+            .expect("llama_relaxed renders the block-staged body for a 32-aligned head_dim");
+
+        assert!(
+            source.contains("float4* v4 = (device const float4*)((cached ? in6 : in7) + kbase * 2)"),
+            "V must be reinterpreted as a float4 pointer at the same kbase * 2 offset the \
+             scalar form used"
+        );
+        assert!(
+            source.contains("v_acc[register_index] += valid ? float4(v4[(long)tx + 8L * register_index]) * key_weight"),
+            "each tx lane accumulates its own float4 chunk of V, weighted by its ty group's own key"
+        );
+        assert!(
+            source.contains("v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 8)")
+                && source.contains("v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 16)"),
+            "the four ty groups' partials must be folded together by a butterfly \
+             simd_shuffle_xor reduce (strides 8 then 16), not left un-combined"
+        );
+        assert!(
+            !source.contains(
+                "weighted[local_dimension] += key_weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);"
+            ),
+            "an aligned head_dim must not keep the scalar per-key V loop the unaligned fixtures use"
+        );
+    }
+
+    /// The scalar V-accumulate fallback (§4b: `head_dim` not a multiple of
+    /// 32) must still be exactly today's per-key loop, byte for byte --
+    /// `block_width_above_one_renders_the_block_staged_body_under_llama_relaxed`
+    /// covers the Q·K side at this same `head_dim = 8`; this pins the V side.
+    #[test]
+    fn block_staged_v_accumulate_falls_back_to_scalar_when_head_dim_not_32_aligned() {
+        let mut bound = cached_attention_op_dynamic(32, 7);
+        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+            unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
+        };
+        *head_dim = 8; // multiple of 8 (Q/K stays aligned) but not of 32
+
+        let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+            .expect("llama_relaxed renders the block-staged body for an unaligned head_dim");
+
+        assert!(
+            source.contains(
+                "weighted[local_dimension] += key_weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);"
+            ),
+            "an unaligned head_dim must keep the scalar per-key V loop"
+        );
+        assert!(
+            !source.contains("simd_shuffle_xor"),
+            "an unaligned head_dim must never emit the float4 cross-ty reduce"
         );
     }
 
