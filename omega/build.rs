@@ -293,6 +293,17 @@ fn emit_sizing_consts() {
         "pub const ATTENTION_CONTEXT_CHUNK_CAP: u64 = {attention_context_chunks_cap};\n"
     ));
 
+    let attention_block_width = require_multiple_of_thirty_two(
+        "attention_block.width",
+        require_nonzero(
+            "attention_block.width",
+            resolve_int(&root, "attention_block", "width"),
+        ),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_BLOCK_WIDTH: u64 = {attention_block_width};\n"
+    ));
+
     let workgroup_size = require_nonzero(
         "wgsl.workgroup_size",
         resolve_int(&root, "wgsl", "workgroup_size"),

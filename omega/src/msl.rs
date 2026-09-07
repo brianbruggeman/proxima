@@ -2484,11 +2484,17 @@ fn entry_name(resolved: &BoundOp) -> String {
                 signed_name_part(*new_upper_inclusive)
             };
             if operand_count == 9 {
+                // `_b{width}` names the build-time block-staging width
+                // (`block_width_for`) -- a build-time constant, so a build
+                // whose `OMEGA_ATTENTION_BLOCK_WIDTH` override changed emits
+                // a distinct name rather than reusing a cached kernel
+                // compiled for a different in-block staging width.
                 format!(
-                    "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}",
+                    "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_b{}",
                     scale.to_bits(),
                     signed_name_part(*cached_lower_inclusive),
                     crate::sized::ATTENTION_CONTEXT_CHUNK_CAP,
+                    crate::sized::ATTENTION_BLOCK_WIDTH,
                 )
             } else {
                 format!(
@@ -3015,6 +3021,26 @@ pub(crate) fn context_chunks_for(context_length: u64, policy: NumericPolicy) -> 
         .clamp(1, crate::sized::ATTENTION_CONTEXT_CHUNK_CAP)
 }
 
+/// [`render_cached_attention`]'s single-range dynamic path's in-block
+/// Q·K/softmax/V staging width -- llama.cpp's `kernel_flash_attn_ext_vec`
+/// keys-per-block constant `C` (ggml-metal.metal:4016-4017, `ic0 += C*nsg`),
+/// ported onto our per-simdgroup key walk. Grouping `width` sequential
+/// online-softmax updates into one block-level `simd_max`/`simd_sum` combine
+/// reorders the fold as a tree instead of a left fold --
+/// [`NumericRewrite::TreeReduce`], the same permission bit
+/// [`context_chunks_for`]'s `NumericRewrite::ContextChunkMerge` already
+/// needs. Under `bit_exact` (`admit` rejects the rewrite), this returns `1`,
+/// which renders EXACTLY today's per-key loop, byte for byte -- the
+/// sequential path IS the bit-exact lowering, by construction, the same way
+/// `context_chunks_for` keeps chunk-count `1` under `bit_exact` today.
+pub(crate) fn block_width_for(policy: NumericPolicy) -> u64 {
+    if admit(policy, NumericRewrite::TreeReduce).is_err() {
+        1
+    } else {
+        crate::sized::ATTENTION_BLOCK_WIDTH
+    }
+}
+
 /// `BoundOpKind::CachedAttention`'s Metal kernel: online (running max/sum,
 /// register-resident weighted-value accumulator) softmax attention over a
 /// cached range plus a new range, one 32-lane simdgroup per
@@ -3149,6 +3175,21 @@ fn render_cached_attention(
     // "idle simdgroup, identity partial" shape llama's own dispatch-time
     // `nsg` uses against a compiled maximum (`ggml-metal.m:4887-4913`).
     let cap = crate::sized::ATTENTION_CONTEXT_CHUNK_CAP;
+    // The block-staged body's `float4` K/Q loads (below) reinterpret each
+    // real/imaginary plane offset as `device const {element_type}4*` --
+    // legal only when every `qbase`/`kbase` offset this kernel computes is a
+    // multiple of 4 floats. Both offsets are integer multiples of
+    // `head_dim / 2`, so `head_dim / 2` itself being a multiple of 4
+    // (equivalently, `head_dim` a multiple of 8) is sufficient regardless of
+    // `kv_heads`/`query_row`/`kv_head` -- see [`EmitError::
+    // AttentionBlockMisaligned`]'s own doc.
+    let block_width = block_width_for(numeric_policy);
+    if dynamic_cached_len && block_width > 1 && !head_dim.is_multiple_of(8) {
+        return Err(EmitError::AttentionBlockMisaligned {
+            node: resolved.node,
+            head_dim: *head_dim,
+        });
+    }
     // The stride loop's live upper bound: every key past this point would
     // hit the `relative > new_upper` / `relative < cached_lower` `continue`
     // on every remaining iteration within THIS simdgroup's own assigned
@@ -3184,7 +3225,30 @@ fn render_cached_attention(
         // the merge below already treats a `-INFINITY` partial as
         // zero-weight (`rescale = 0.0f`), so an idle simdgroup contributes
         // nothing to the merged result, bit-for-bit.
-        source.push_str("    if (chunk < chunks) {\n    for (long key = chunk; key <= last_key; key += chunks) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n    }\n");
+        // `block_width == 1` renders EXACTLY the strictly-sequential per-key
+        // walk (byte for byte) -- see [`block_width_for`]'s own doc for why
+        // this is the `bit_exact` lowering, not a fallback bolted on beside
+        // it. `block_width > 1` renders §4b's block-staged walk: llama's
+        // `kernel_flash_attn_ext_vec` shape (ggml-metal.metal:4014-4143)
+        // ported onto this kernel's cached/new dual-range band masking --
+        // `ss[]` stages `block_width` raw scores via a `float4` Q·K dot plus
+        // an 8-lane `simd_shuffle_down` tree reduce (`ty = lane/8` selects
+        // one of 4 concurrent keys, `tx = lane%8` selects a float4 chunk of
+        // the real/imaginary planes), one `simd_max`/`simd_sum` combine per
+        // 32-lane sub-block (not per key), then a threadgroup-broadcast read
+        // of each key's softmax weight back out of the SAME `ss[]` slots for
+        // the V accumulate -- llama's own `ss[]` reuse
+        // (ggml-metal.metal:4114, `ss[tiisg] = vs;`). `ss[]` is sized and
+        // indexed per `local_group_index` exactly like `shared_m`/
+        // `shared_l`/`shared_o` below it, so concurrent simdgroups in the
+        // same threadgroup never alias each other's staged scores.
+        if block_width <= 1 {
+            source.push_str("    if (chunk < chunks) {\n    for (long key = chunk; key <= last_key; key += chunks) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n    }\n");
+        } else {
+            source.push_str(&format!(
+                "    constexpr long block_width = {block_width};\n    short ty = (short)(lane / 8u); short tx = (short)(lane % 8u);\n    threadgroup float ss[query_groups * cap * block_width];\n    if (chunk < chunks) {{\n    long num_local_keys = (chunk <= last_key) ? ((last_key - chunk) / chunks) + 1L : 0L;\n    for (long block_start = 0L; block_start < num_local_keys; block_start += block_width) {{\n        for (long cc = 0L; cc < block_width / 4L; cc++) {{\n            long local_index = block_start + 4L * cc + (long)ty;\n            bool valid = local_index < num_local_keys;\n            long key = chunk + local_index * chunks;\n            bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n            if (valid) {{\n                long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n                if (cached && relative < cached_lower) {{ valid = false; }}\n                if (!cached && relative > new_upper) {{ valid = false; }}\n            }}\n            long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n            float partial_score = 0.0f;\n            if (valid) {{\n                device const {element_type}4* qr4 = (device const {element_type}4*)(in0 + qbase);\n                device const {element_type}4* qi4 = (device const {element_type}4*)(in1 + qbase);\n                device const {element_type}4* kr4 = (device const {element_type}4*)((cached ? in2 : in4) + kbase);\n                device const {element_type}4* ki4 = (device const {element_type}4*)((cached ? in3 : in5) + kbase);\n                for (short index = tx; index < (short)((head_dim / 2) / 4L); index += 8) {{\n                    partial_score += dot(kr4[index], qr4[index]);\n                    partial_score += dot(ki4[index], qi4[index]);\n                }}\n            }}\n            partial_score += simd_shuffle_down(partial_score, 4);\n            partial_score += simd_shuffle_down(partial_score, 2);\n            partial_score += simd_shuffle_down(partial_score, 1);\n            if (tx == 0) {{ ss[local_group_index * block_width + 4L * cc + (long)ty] = valid ? partial_score * scale : -INFINITY; }}\n        }}\n        simdgroup_barrier(mem_flags::mem_threadgroup);\n        for (long sub = 0L; sub < block_width; sub += 32L) {{\n            long lane_index = sub + (long)lane;\n            float raw_score = ss[local_group_index * block_width + lane_index];\n            float next_max = simd_max(max(maximum, raw_score));\n            float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n            float weight = exp(raw_score - next_max);\n            sum = sum * rescale + simd_sum(weight);\n            ss[local_group_index * block_width + lane_index] = weight;\n            for (long dimension = 0L; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] *= rescale; }}\n            maximum = next_max;\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n            for (long local_index = block_start + sub; local_index < min(block_start + sub + 32L, num_local_keys); local_index++) {{\n                long key = chunk + local_index * chunks;\n                bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n                long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n                float key_weight = ss[local_group_index * block_width + (local_index - block_start)];\n                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n                    long local_dimension = dimension / 32L;\n                    weighted[local_dimension] += key_weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n                }}\n            }}\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n        }}\n    }}\n    }}\n"
+            ));
+        }
         source.push_str(&format!(
             "    threadgroup float shared_m[query_groups * cap]; threadgroup float shared_l[query_groups * cap]; threadgroup float shared_o[query_groups * cap * head_dim];\n    if (lane == 0u) {{ shared_m[local_group_index] = maximum; shared_l[local_group_index] = sum; }}\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ shared_o[local_group_index * head_dim + dimension] = weighted[dimension / 32L]; }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    if (chunk == 0L) {{\n        float merged_max = -INFINITY;\n        for (long c = 0; c < cap; c++) {{ merged_max = max(merged_max, shared_m[group * cap + c]); }}\n        float merged_sum = 0.0f;\n        for (long c = 0; c < cap; c++) {{\n            float partial_max = shared_m[group * cap + c];\n            float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n            merged_sum += shared_l[group * cap + c] * rescale;\n        }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            float acc = 0.0f;\n            for (long c = 0; c < cap; c++) {{\n                float partial_max = shared_m[group * cap + c];\n                float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n                acc += shared_o[(group * cap + c) * head_dim + dimension] * rescale;\n            }}\n            weighted[local_dimension] = acc;\n        }}\n        sum = merged_sum;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n    }}\n}}\n"
         ));
@@ -9000,6 +9064,86 @@ mod tests {
             !smaller_source.contains("constexpr long context_chunks"),
             "context_chunks must be a runtime uniform, never baked as constexpr, \
              on the dynamic path"
+        );
+    }
+
+    /// §4b's `block_width == 1` arm ([`block_width_for`] under `bit_exact`,
+    /// where `NumericRewrite::TreeReduce` is rejected) must render the exact
+    /// strictly-sequential per-key body -- never the `ss[]`-staged,
+    /// `simd_shuffle_down`-reducing block body -- so a `bit_exact` plan's
+    /// generated MSL text never regresses onto the reassociated path.
+    #[test]
+    fn block_width_one_renders_the_strictly_sequential_body_never_the_block_staged_one() {
+        let bound = cached_attention_op_dynamic(32, 7);
+
+        let source = render_cached_attention(&bound, "entry", NumericPolicy::bit_exact())
+            .expect("bit_exact renders");
+
+        assert!(
+            !source.contains("block_width"),
+            "bit_exact (block_width=1) must not emit the block-staging constant"
+        );
+        assert!(
+            !source.contains("simd_shuffle_down"),
+            "bit_exact (block_width=1) must not emit the block's tree-reduce shuffles"
+        );
+        assert!(
+            source.contains("simd_broadcast_first(simd_sum(partial_score))"),
+            "bit_exact (block_width=1) must still emit today's per-key simd_sum reduce"
+        );
+    }
+
+    /// §4b's `block_width > 1` arm ([`block_width_for`] under
+    /// `llama_relaxed`, which grants `NumericRewrite::TreeReduce`) must
+    /// render the block-staged Q·K/softmax/V body: `ss[]` staging, the
+    /// 8-lane `simd_shuffle_down` tree reduce, and a `simd_max`/`simd_sum`
+    /// combine fired once per 32-lane sub-block rather than once per key.
+    #[test]
+    fn block_width_above_one_renders_the_block_staged_body_under_llama_relaxed() {
+        let mut bound = cached_attention_op_dynamic(32, 7);
+        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+            unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
+        };
+        *head_dim = 8; // a multiple of 8, so the float4 K/Q loads stay aligned
+
+        let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+            .expect("llama_relaxed renders the block-staged body for an aligned head_dim");
+
+        assert!(source.contains("block_width"), "the block-staging constant must be emitted");
+        assert!(source.contains("threadgroup float ss["), "scores must stage into ss[]");
+        assert!(
+            source.contains("simd_shuffle_down(partial_score, 4)"),
+            "the Q*K reduce must tree-reduce over the 8-lane key group"
+        );
+        assert!(source.contains("simd_max("), "one simd_max per 32-lane sub-block");
+        assert!(
+            !source.contains("simd_broadcast_first(simd_sum(partial_score)) * scale"),
+            "the block-staged body must not keep the old per-key reduce expression"
+        );
+    }
+
+    /// [`EmitError::AttentionBlockMisaligned`]'s own reachable gate: a
+    /// `head_dim` not a multiple of 8 leaves `head_dim / 2` not a multiple
+    /// of 4, so the block-staged body's `float4` K/Q reinterpretation would
+    /// read past an unaligned offset -- rejected here, named, rather than
+    /// emitted.
+    #[test]
+    fn block_staged_attention_rejects_a_head_dim_not_a_multiple_of_eight() {
+        let mut bound = cached_attention_op_dynamic(32, 7);
+        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+            unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
+        };
+        *head_dim = 12; // not a multiple of 8
+
+        let error = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+            .expect_err("a misaligned head_dim must be rejected under the block-staged policy");
+
+        assert_eq!(
+            error,
+            EmitError::AttentionBlockMisaligned {
+                node: bound.node,
+                head_dim: 12,
+            }
         );
     }
 }

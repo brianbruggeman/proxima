@@ -54,6 +54,10 @@
 //!   (always compiled) — `crate::msl::context_chunks_for`'s divisor and
 //!   ceiling for splitting cached-attention's key range across simdgroups;
 //!   see `omega-runtime.toml`'s `[attention_context_chunks]`.
+//! - [`ATTENTION_BLOCK_WIDTH`] (always compiled) — `crate::msl::
+//!   block_width_for`'s in-block staging width for cached attention's
+//!   Q·K/softmax/V loop, gated by `NumericRewrite::TreeReduce`; see
+//!   `omega-runtime.toml`'s `[attention_block]`.
 //!
 //! `msl` (this module's own crate) is alloc-tier and target-independent --
 //! emission never touches a device -- so [`SIMD_WIDTH`] is visible at every

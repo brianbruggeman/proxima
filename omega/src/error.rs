@@ -166,4 +166,17 @@ pub enum EmitError {
     /// dispatch threadgroups for.
     #[error("node {node} reached the tiled-GEMM path without the metal-tiled-gemm feature")]
     TiledGemmFeatureDisabled { node: NodeId },
+
+    /// The block-staged cached-attention body (`crate::msl::
+    /// render_cached_attention`'s `block_width > 1` arm) reinterprets each
+    /// lane's real/imaginary K and Q loads as `device const float4*` --
+    /// legal only when `head_dim / 2` (the per-key real-plane element count)
+    /// is a multiple of 4, which keeps every `qbase`/`kbase` offset a
+    /// multiple of 4 floats (16 bytes) regardless of `kv_heads`/`query_row`.
+    /// A `head_dim` this does not hold for is rejected here rather than
+    /// emitting a `float4` load Metal would refuse to validate.
+    #[error(
+        "node {node} head_dim {head_dim} is not a multiple of 8, so the block-staged attention kernel's float4 K/Q loads are not 16-byte aligned"
+    )]
+    AttentionBlockMisaligned { node: NodeId, head_dim: u64 },
 }
