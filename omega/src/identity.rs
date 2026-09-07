@@ -112,10 +112,19 @@ pub(crate) struct MetalOnlyExtras {
     /// held before): `NumericPolicy` is a 5-bit independent permission set,
     /// not a total order, so no single `MathMode` value can stand in for
     /// it (`metal::numeric_policy_as_metal_math_mode` maps many distinct
-    /// permission sets onto the same 3-rung `MathMode`). The policy token
-    /// is strictly finer than the math-mode token it replaces and subsumes
-    /// it completely — every op below folds `numeric_policy` into its
-    /// cache key ONLY through this field, never a separate math-mode token.
+    /// permission sets onto the same 3-rung `MathMode`). This subsumes the
+    /// math-mode token for every axis `numeric_policy` FIXES for a `Plan`'s
+    /// whole life (chunking, contraction, reassociation choices `emit`
+    /// bakes into source text) — it does NOT subsume it completely:
+    /// `Plan::set_math_mode` narrows `compile_pipeline`'s compiled
+    /// `MTLCompileOptions.mathMode` for an UNCHANGED `numeric_policy`, so
+    /// two resolutions can render byte-identical source through this
+    /// identity yet need different compiled pipelines. `MathMode::
+    /// cache_token` is folded back in, separately, at every
+    /// `PIPELINE_CACHE` call site (`metal::resolve_steps`, `metal::
+    /// encode_op`, `Plan::kernel_keys`) — never here, since this module has
+    /// no dependency on the macOS-only `metal` module that defines
+    /// `MathMode`.
     pub numeric_policy_token: Option<[u8; 2]>,
 }
 

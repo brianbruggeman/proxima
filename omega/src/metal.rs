@@ -821,6 +821,10 @@ impl Plan {
             .iter()
             .map(|bound| {
                 kernel_cache_key(bound, &self.packed_operands, self.numeric_policy)
+                    .map(|mut key| {
+                        key.push(self.math_mode.cache_token());
+                        key
+                    })
                     .map_err(MetalError::from)
             })
             .collect()
@@ -3781,6 +3785,8 @@ mod numeric_policy_construction_tests {
     use proxima_tensor::{DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, append, map};
 
     use super::{MathMode, MetalError, metal_math_mode_as_numeric_policy, plan};
+    #[cfg(feature = "instrument")]
+    use super::{PIPELINE_MISSES, device_and_queue, resolve_steps};
 
     #[test]
     fn metal_math_mode_round_trips_through_numeric_policy() {
@@ -3916,6 +3922,69 @@ mod numeric_policy_construction_tests {
         };
         assert_eq!(bound, NumericPolicy::llama_relaxed());
         assert_eq!(requested, NumericPolicy::fast());
+    }
+
+    #[cfg(feature = "instrument")]
+    #[test]
+    fn narrowing_math_mode_forces_a_genuine_pipeline_cache_miss_not_a_stale_hit() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        let (program, identity) = identity_program();
+        let data = [1.0f32, 2.0, 3.0, 4.0];
+        let blocks = [QuantizedBlock::Float32(&data)];
+        let mut resolved_plan = plan(
+            &program,
+            &[],
+            &blocks,
+            &[identity],
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("plans the identity program");
+        assert_eq!(
+            resolved_plan.math_mode(),
+            MathMode::Relaxed,
+            "llama_relaxed() constructs Relaxed, not the Fast that the old \
+             widest-mode-that-covers-any-permission bug would have produced"
+        );
+
+        let _ = PIPELINE_MISSES.snapshot_and_reset();
+        resolve_steps(&device, &resolved_plan).expect("first resolution compiles under Relaxed");
+        let first_misses = PIPELINE_MISSES.snapshot_and_reset();
+        assert_eq!(first_misses, 1, "the first resolution of a fresh plan is always a miss");
+        let relaxed_key = resolved_plan
+            .kernel_keys()
+            .expect("kernel_keys reads the just-resolved identity")[0]
+            .clone();
+
+        resolved_plan
+            .set_math_mode(MathMode::Safe)
+            .expect("Safe needs nothing, llama_relaxed() grants it trivially");
+        resolve_steps(&device, &resolved_plan).expect("second resolution compiles under Safe");
+        let second_misses = PIPELINE_MISSES.snapshot_and_reset();
+        assert_eq!(
+            second_misses, 1,
+            "set_math_mode(Safe) must force a genuine PIPELINE_CACHE miss, never reuse the \
+             Relaxed-compiled pipeline cached under the SAME numeric_policy token"
+        );
+        let safe_key = resolved_plan.kernel_keys().expect("kernel_keys after narrowing")[0].clone();
+        assert_ne!(
+            relaxed_key, safe_key,
+            "Relaxed's and Safe's cache keys must differ by the math-mode token even though \
+             numeric_policy (and so emit's rendered source) never changed"
+        );
+
+        let resolved_math_mode = resolved_plan
+            .resolved_steps
+            .borrow()
+            .as_ref()
+            .expect("resolve_steps populated resolved_steps")
+            .math_mode;
+        assert_eq!(
+            resolved_math_mode,
+            MathMode::Safe,
+            "resolved_steps must record the mode it just compiled under, not the plan's earlier one"
+        );
     }
 }
 
@@ -4312,6 +4381,27 @@ impl MathMode {
             MathMode::Fast => MTLMathMode::Fast,
         }
     }
+
+    /// One character folded onto [`kernel_cache_key`]'s own identity string
+    /// by every `PIPELINE_CACHE` call site ([`resolve_steps`],
+    /// [`encode_op`], [`Plan::kernel_keys`]) -- NOT a duplicate of
+    /// `identity::MetalOnlyExtras::numeric_policy_token`. That token is
+    /// strictly finer for the axes `numeric_policy` fixes for a `Plan`'s
+    /// whole life (chunking, contraction, reassociation); it does NOT track
+    /// [`Plan::set_math_mode`], which narrows `compile_pipeline`'s
+    /// `MTLCompileOptions.mathMode` for an UNCHANGED `numeric_policy`. Two
+    /// resolutions of the same `Plan` that only differ by a `set_math_mode`
+    /// call render byte-identical MSL source (`compile_pipeline` never
+    /// touches source text) but must never share a `PIPELINE_CACHE` entry,
+    /// since they were compiled with different `mathMode` compile options --
+    /// this token is what keeps them apart.
+    const fn cache_token(self) -> char {
+        match self {
+            MathMode::Safe => 'S',
+            MathMode::Relaxed => 'R',
+            MathMode::Fast => 'F',
+        }
+    }
 }
 
 /// `MTLCompileOptions.mathMode` only distinguishes 3 rungs -- a compiler
@@ -4452,17 +4542,20 @@ fn pipeline_for(
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-    // `cache_key` ([`kernel_cache_key`]) already carries the numeric-policy
-    // token as part of the shared identity (`crate::identity::
-    // kernel_identity`, via `MetalOnlyExtras::numeric_policy_token`) --
-    // `numeric_policy` fed straight into it, so there is no second fold to
-    // do here. Two BoundOps agreeing on everything else but compiled under
-    // different policies still never share a pipeline: `Safe`'s kernel body
-    // is byte-identical to `Relaxed`'s (`compile_pipeline` never touches
-    // source text, only `MTLCompileOptions`), so only the key's own token
-    // keeps the two apart -- and, per `numeric_policy_as_metal_math_mode`'s
-    // doc table, the token is keyed on the finer `NumericPolicy`, not the
-    // coarser `MathMode`, because two policies can share one `MathMode`.
+    // `cache_key` already carries BOTH axes `compile_pipeline` reads: the
+    // numeric-policy token from `kernel_cache_key`
+    // (`crate::identity::kernel_identity`, via
+    // `MetalOnlyExtras::numeric_policy_token`) plus `math_mode`'s own
+    // `MathMode::cache_token`, appended by every caller of this function
+    // (`resolve_steps`, `encode_op`) before it gets here. Two BoundOps
+    // agreeing on everything else but compiled under different policies OR
+    // different math modes still never share a pipeline: `Safe`'s kernel
+    // body is byte-identical to `Relaxed`'s (`compile_pipeline` never
+    // touches source text, only `MTLCompileOptions`), so the key's tokens
+    // are what keep them apart. The numeric-policy token alone is not
+    // enough: `Plan::set_math_mode` narrows the compiled mode for an
+    // UNCHANGED `numeric_policy`, so a `math_mode` token distinct from the
+    // policy token is required too (see `MathMode::cache_token`'s own doc).
     if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(cache_key).cloned()) {
         trace!(cache_key = %cache_key, hit = true, "pipeline cache lookup");
         #[cfg(feature = "instrument")]
@@ -6480,7 +6573,8 @@ fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<
     }
     let mut steps = Vec::with_capacity(plan.prepared.resolved.len());
     for bound in &plan.prepared.resolved {
-        let cache_key = kernel_cache_key(bound, &plan.packed_operands, plan.numeric_policy)?;
+        let mut cache_key = kernel_cache_key(bound, &plan.packed_operands, plan.numeric_policy)?;
+        cache_key.push(plan.math_mode.cache_token());
         let (bindings, grid) =
             kernel_dispatch_shape(bound, &plan.packed_operands, plan.numeric_policy)?;
         let pipeline = pipeline_for(
@@ -6572,7 +6666,8 @@ fn encode_op(
         // case, `plan_hits`/`gpu_exec`'s own row) `emit` itself is never
         // called; only a genuine miss inside `pipeline_for` pays for the
         // full render + compile.
-        let cache_key = kernel_cache_key(bound, packed_operands, numeric_policy)?;
+        let mut cache_key = kernel_cache_key(bound, packed_operands, numeric_policy)?;
+        cache_key.push(math_mode.cache_token());
         let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
         #[cfg(feature = "instrument")]
         {
