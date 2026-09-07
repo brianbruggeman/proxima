@@ -3557,6 +3557,123 @@ mod tests {
         );
     }
 
+    /// `int8-logs`, main `9a8b623c`: [`LoadedModel::forward_node_values_on_backend`]
+    /// reported `NotLowerable { reason: "operand buffer missing at
+    /// evaluation time" }` for a directly-requested `NodeId` once the
+    /// requested `node_ids` window widened past roughly one layer's own
+    /// node count, bisected in production between 35 and 40 requested
+    /// nodes. Reproduces against the real host-local checkpoint (the exact
+    /// quantized-weight, `cohort-staged-graph` CPU path production uses --
+    /// a synthetic float32-only program does not engage the same matmul
+    /// batching this needs): every `NodeId` in a wide window must come back
+    /// with the identical value it has when requested alone.
+    mod real_openchat_file {
+        use core::ffi::c_void;
+        use std::os::fd::AsFd;
+
+        use proxima_tensor::op::NodeId;
+
+        use super::super::LoadedModel;
+
+        struct MappedGguf {
+            base: *mut u8,
+            len: usize,
+            _file: std::fs::File,
+        }
+
+        impl MappedGguf {
+            fn open(path: &std::path::Path) -> std::io::Result<Self> {
+                let file = std::fs::File::open(path)?;
+                let len = usize::try_from(file.metadata()?.len())
+                    .expect("fixture file length fits in usize");
+                // SAFETY: `len` matches the just-opened file's own length;
+                // `file` is kept alive in `_file` for as long as `base` is
+                // used, and the mapping is read-only/private so no writer
+                // can observe or race it.
+                let base = unsafe {
+                    rustix::mm::mmap(
+                        core::ptr::null_mut(),
+                        len,
+                        rustix::mm::ProtFlags::READ,
+                        rustix::mm::MapFlags::PRIVATE,
+                        file.as_fd(),
+                        0,
+                    )
+                }
+                .expect("mmap host-local openchat gguf fixture")
+                .cast::<u8>();
+                Ok(Self {
+                    base,
+                    len,
+                    _file: file,
+                })
+            }
+
+            fn as_slice(&self) -> &[u8] {
+                // SAFETY: `base` points at `len` bytes mapped for `self`'s
+                // whole lifetime; this borrows `self` immutably, so nothing
+                // can unmap the region while the returned slice is alive.
+                unsafe { core::slice::from_raw_parts(self.base, self.len) }
+            }
+        }
+
+        impl Drop for MappedGguf {
+            fn drop(&mut self) {
+                // SAFETY: `base`/`len` are exactly what `open`'s `mmap`
+                // call returned; nothing else unmaps this region.
+                let _ = unsafe { rustix::mm::munmap(self.base.cast::<c_void>(), self.len) };
+            }
+        }
+
+        #[test]
+        #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+        fn forward_node_values_keeps_every_requested_node_live_across_a_layer_boundary() {
+            let model_path = crate::test_support::openchat_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+            let path = std::path::Path::new(&model_path);
+
+            let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+            let file_bytes = mapped.as_slice();
+            let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+                .expect("parse host-local openchat gguf fixture");
+            let model = LoadedModel::load(&parsed, file_bytes)
+                .expect("load real openchat checkpoint through the public path");
+
+            let window: Vec<NodeId> = (0u32..40).map(NodeId).collect();
+            let prompt = "The quick brown fox";
+
+            let batch = model
+                .forward_node_values(prompt, &window)
+                .expect("every requested node across the layer boundary must evaluate");
+
+            assert_eq!(
+                batch.len(),
+                window.len(),
+                "one value must come back per requested node"
+            );
+            // A KV-cache `Op::Input` (`kv_cache.0.k_even` etc.) is legitimately
+            // zero-length here -- this is a one-shot, fresh-KV-state forward
+            // pass (`forward_node_values`'s own doc), so "empty" is a correct
+            // answer for that node class, not evidence of eviction. NodeId(34)
+            // is the exact node this defect's own bisection named: the
+            // `activation * quantized-weight` multiply `is_quantized_matmul_operand`
+            // ordinarily fuses into its reduce, forced standalone here only
+            // because this window's own liveness protection keeps it alive --
+            // its value coming back non-empty is the falsifiable claim this
+            // test exists to prove.
+            let quantized_matmul_multiply = NodeId(34);
+            let position = window
+                .iter()
+                .position(|node| *node == quantized_matmul_multiply)
+                .expect("the chosen window must include the node this defect was bisected to");
+            assert!(
+                !batch[position].is_empty(),
+                "{quantized_matmul_multiply:?} came back with zero values -- evicted or never \
+                 materialized despite being directly requested"
+            );
+        }
+    }
+
     /// A minimal valid [`Vocab`] (every byte-level BPE vocab needs all 256
     /// base-byte tokens present or [`Vocab::new`] rejects it) plus one
     /// extra token at id `256` marked as this vocab's end-of-sequence id --

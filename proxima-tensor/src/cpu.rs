@@ -3599,6 +3599,56 @@ fn evaluate_quantized_with_scratch_impl(
     reject_non_float32_outputs(program, &quantized_weight_nodes, &effective_outputs)?;
 
     let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
+    // A caller-requested output can force a node that ordinary decode always
+    // fuses away into its own standalone `BoundOp` -- `node_retirement`
+    // below correctly keeps ANY node in `effective_outputs` alive, but
+    // "alive" and "independently computable" are different questions.
+    // `is_quantized_matmul_operand`'s own shape (an `Elementwise` multiply
+    // against a `Q4_K`/`Q5_K`/`Q3_K`/`Q6_K`/`Q8_0` weight, feeding exactly
+    // one `Reduce::Add`) is ordinarily consumed ONLY by
+    // `run_reduce_with_quantized_weights`, which reads `quantized_weights`
+    // directly and never touches `buffers` for that operand -- but once the
+    // multiply itself is a requested output (or merely shares this call's
+    // `effective_outputs` window with something that keeps it live), `bind`
+    // stops fusing it into the reduce (the same `outputs`-liveness check
+    // that protects every other requested node), and it materializes
+    // standalone through the plain `run_elementwise_dispatch` path, which
+    // has no quantized-operand awareness at all: `buffer_of` finds the
+    // weight's slot `None` (its real bytes live in `quantized_weights`, a
+    // *node* was never dequantized into `buffers`) and raises
+    // `NotLowerable { reason: "operand buffer missing at evaluation time" }`
+    // naming the WEIGHT, not the multiply that actually needed evaluating.
+    // Dequantizing any such weight into `buffers` here -- once, at bind
+    // setup, never inside the per-element hot loop -- closes the gap: it is
+    // a no-op scan over `resolved` on every ordinary decode call (no
+    // `Elementwise` node there ever reads a still-unbound quantized weight,
+    // since the fusion above already absorbed it into its reduce), and only
+    // does real work on exactly the diagnostic window this defect was
+    // reported against (`docs/discipline.md`, `int8-logs`).
+    for computed in &resolved {
+        if !matches!(computed.kind, BoundOpKind::Elementwise { .. }) {
+            continue;
+        }
+        for (operand, ..) in computed.operands() {
+            materialize_quantized_weight_output(
+                *operand,
+                &shapes,
+                &quantized_weights,
+                &mut buffers,
+            )?;
+        }
+    }
+    // The weight's own `NodeId` can ALSO be named directly in
+    // `effective_outputs` (a caller inspecting a raw checkpoint tensor, not
+    // just the activation that multiplies it) with no live `Elementwise`
+    // consumer at all left in `resolved` -- e.g. its usual multiply fused
+    // cleanly into its reduce because that multiply itself was never a
+    // requested output. The scan above never visits such a weight (nothing
+    // in `resolved` reads it as a plain operand), so it needs this second,
+    // direct pass over the request itself.
+    for &output in &effective_outputs {
+        materialize_quantized_weight_output(output, &shapes, &quantized_weights, &mut buffers)?;
+    }
     let retires = node_retirement(&resolved, &effective_outputs);
     // ROW 181 profile-gate probe: `evaluate_named` no longer reaches this
     // loop (it routes through `evaluate_named_via_arena` ->
@@ -6042,6 +6092,35 @@ fn dequantize_row(
         _ => unreachable!("codec already matched above"),
     }
     .map_err(|_| unaligned_row())
+}
+
+/// [`evaluate_quantized_with_scratch`]'s own pre-materialization pass: if
+/// `node` names a still-unbound (`buffers[node] == None`) entry in
+/// `quantized_weights`, dequantizes its WHOLE buffer via [`dequantize_row`]
+/// (`row_index: 0`, `dim` the node's own total element count -- a single
+/// "row" spanning the entire tensor, exactly [`dequantize_row`]'s own
+/// `row_bytes = (dim / block_elements) * block_bytes` arithmetic collapsed
+/// to one call) and stores it. A no-op whenever `node` already has a
+/// buffer or is not a quantized weight at all, which is every ordinary
+/// decode call -- this only does real work for the diagnostic window this
+/// defect (`docs/discipline.md`, `int8-logs`) was reported against, never
+/// inside the per-element hot loop.
+fn materialize_quantized_weight_output(
+    node: NodeId,
+    shapes: &shape::Shapes,
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+    buffers: &mut [Option<Cow<'_, [f32]>>],
+) -> Result<(), TensorError> {
+    if buffers[node.0 as usize].is_some() {
+        return Ok(());
+    }
+    let Some(block) = quantized_weights.get(&node) else {
+        return Ok(());
+    };
+    let mut dequantized = vec![0.0f32; element_count(shapes.of(node))];
+    dequantize_row(node, block, 0, dequantized.len(), &mut dequantized)?;
+    buffers[node.0 as usize] = Some(Cow::Owned(dequantized));
+    Ok(())
 }
 
 fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
