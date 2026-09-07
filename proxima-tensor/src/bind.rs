@@ -3637,19 +3637,36 @@ mod tests {
             .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })));
     }
 
-    /// ROW 364's own artifact: the ACTUAL bound program the cached decode
-    /// fixture uses (`bind::bind`, fusion on -- not `bind_with_fusion(..,
-    /// false)`, which the rule-census fixture above deliberately holds off)
-    /// for the one-layer fixture, printed op-by-op so a diff against the
+    /// ROW 364's own artifact: the ACTUAL bound program the real openchat
+    /// decode fixture uses. The production decode loop
+    /// (`proxima-model-interop::generate::build_single_range_program`)
+    /// calls `mistral_single_range_cached_forward_program` with
+    /// `DuplicateHeadPosition::None` -- NOT `mistral_cached_forward_program`,
+    /// the dual-range builder an earlier draft of this row's census
+    /// mistakenly used. The dual-range builder's toy fixture already
+    /// carried a fused SiLU epilogue on both main and this branch (a
+    /// coincidence of that builder's own gate reduce shape), so it could
+    /// not show what this row actually changes; this test builds through
+    /// the SAME single-range path production takes, one layer,
+    /// `bind::bind` (fusion on), printed op-by-op so a diff against the
     /// same test run on main names exactly which ops the epilogue-fusion
     /// landing removed or reshaped. `--nocapture` to see the list; the
     /// assertion below is the mechanical guard that the count does not
     /// silently drift once this is landed as a real (non-throwaway) test.
     #[test]
     fn row_364_per_layer_bound_op_list() {
-        let (program, logits, roots) =
-            crate::spec::mistral_cached_forward_program(32, 16, 24, 4, 2, 4, 1)
-                .expect("one-layer cached decode fixture builds");
+        let (program, logits, roots, _duplicate_head_scratch) =
+            crate::spec::mistral_single_range_cached_forward_program(
+                32,
+                16,
+                24,
+                4,
+                2,
+                4,
+                1,
+                crate::spec::DuplicateHeadPosition::None,
+            )
+            .expect("one-layer single-range decode fixture builds");
         let shapes = crate::shape::infer(&program, &[1, 1]).expect("cached decode fixture infers");
         let mut outputs = alloc::vec![logits];
         for (even, odd, value) in &roots {
@@ -3686,8 +3703,11 @@ mod tests {
 
         assert_eq!(
             bound.len(),
-            20,
-            "row 364 artifact: one-layer cached decode program's bound op count"
+            28,
+            "row 364 artifact: one-layer single-range decode program's bound op count \
+             (main at the same shape through the same builder: 34 -- three RMSNorm \
+             sites each drop from a Reduce plus a separate Elementwise tail to one \
+             fused Reduce, see `docs/discipline.md` ROW 364)"
         );
     }
 
