@@ -3460,7 +3460,29 @@ fn push_reduce_epilogue_write(
         "{indent}{element_type} epi_scratch[{}];\n",
         epilogue_operand_count + 1
     ));
-    for index in 0..epilogue_operand_count {
+    push_epilogue_operand_reads(source, 0..epilogue_operand_count, output_rank, indent, &coord);
+    source.push_str(&format!(
+        "{indent}epi_scratch[{epilogue_operand_count}] = {accumulator_expr};\n"
+    ));
+    let epi_value = push_epilogue_body_steps(source, epilogue_body, indent, element_type);
+    source.push_str(&format!("{indent}out[{out_offset_expr}] = {epi_value};\n"));
+}
+
+/// The per-element epilogue-operand read loop [`push_reduce_epilogue_write`]
+/// and the hoisted broadcast write ([`push_broadcast_epilogue_write`]) both
+/// need verbatim: read each epilogue operand (`gamma[d]`, `x[s,d]`, ...) at
+/// the current coordinate into `epi_scratch`. Pulled out once the hoist
+/// (ROW 370) needed to run it from inside a loop whose invariant steps are
+/// declared outside that same loop -- keeping one copy is what stops the two
+/// call sites drifting on the offset arithmetic.
+fn push_epilogue_operand_reads(
+    source: &mut String,
+    operand_indices: impl Iterator<Item = usize>,
+    output_rank: usize,
+    indent: &str,
+    coord: impl Fn(usize) -> String,
+) {
+    for index in operand_indices {
         source.push_str(&format!(
             "{indent}long epi_off{index} = u.epilogue_operand_base[{index}];\n"
         ));
@@ -3474,11 +3496,25 @@ fn push_reduce_epilogue_write(
             "{indent}epi_scratch[{index}] = epi{index}[epi_off{index}];\n"
         ));
     }
-    source.push_str(&format!(
-        "{indent}epi_scratch[{epilogue_operand_count}] = {accumulator_expr};\n"
-    ));
-    let epi_value = push_epilogue_body_steps(source, epilogue_body, indent, element_type);
-    source.push_str(&format!("{indent}out[{out_offset_expr}] = {epi_value};\n"));
+}
+
+/// True when `epilogue_operands[operand_index]`'s own [`Layout`] never
+/// varies along any of `reduce_dims` -- a genuine broadcast operand
+/// (`inv_dim`, `eps` in an rmsnorm chain: rank-0, every stride 0) whose
+/// value is the same on every pass of [`push_broadcast_epilogue_write`]'s
+/// per-lane loop, as opposed to a per-element operand (`x[s,d]`, `gamma[d]`)
+/// whose stride along the loop's own axis is nonzero. A gathered operand
+/// (`Lookup` present) is never treated as invariant: its effective address
+/// depends on an index buffer this analysis does not follow.
+fn epilogue_operand_is_loop_invariant(
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    reduce_dims: &[u16],
+    operand_index: usize,
+) -> bool {
+    let Some((_, layout, lookup)) = epilogue_operands.get(operand_index) else {
+        return false;
+    };
+    lookup.is_none() && reduce_dims.iter().all(|&dim| layout.stride(dim) == 0)
 }
 
 /// [`push_body_steps`]'s counterpart for [`BoundOpKind::Reduce::
@@ -6476,6 +6512,55 @@ fn push_broadcast_epilogue_write(
 ) {
     let reduce_rank = reduce_dims.len();
     let reduce_rank_len = reduce_rank.max(1);
+
+    // ROW 370: the fold scalar (`reduced_expr`) is the same value on every
+    // pass of the loop below -- any epilogue step that only ever reads it
+    // (mean_square + eps, sqrt, reciprocal for rmsnorm) is loop-invariant and
+    // is declared exactly once here, before the loop, instead of being
+    // re-derived on all 16 iterations a [1,4096] row takes at width 256.
+    let epilogue_operand_count = epilogue_operands.len();
+    let is_identity = reduce_epilogue_is_identity(epilogue_body, epilogue_operands);
+    let is_invariant_operand = |operand_index: usize| {
+        operand_index == epilogue_operand_count
+            || epilogue_operand_is_loop_invariant(epilogue_operands, reduce_dims, operand_index)
+    };
+    let mut element_body = String::new();
+    let epi_value = if is_identity {
+        reduced_expr.to_string()
+    } else {
+        source.push_str(&format!(
+            "    {element_type} epi_scratch[{}];\n",
+            epilogue_operand_count + 1
+        ));
+        push_epilogue_operand_reads(
+            source,
+            (0..epilogue_operand_count).filter(|&index| is_invariant_operand(index)),
+            rank,
+            "    ",
+            |dim| format!("full_coord[{dim}]"),
+        );
+        source.push_str(&format!(
+            "    epi_scratch[{epilogue_operand_count}] = {reduced_expr};\n"
+        ));
+        crate::epilogue::declare_steps_partitioned(
+            source,
+            &mut element_body,
+            epilogue_body,
+            "epi_scratch",
+            "epi_step",
+            is_invariant_operand,
+            scalar_op_expr,
+            |source, index, expr| {
+                source.push_str(&format!("    {element_type} epi_step{index} = {expr};\n"));
+            },
+            |source, index, expr| {
+                source.push_str(&format!(
+                    "        {element_type} epi_step{index} = {expr};\n"
+                ));
+            },
+        )
+    };
+
     source.push_str(&format!(
         "    for (long r = (long)lane; r < u.reduction_total; r += {width}) {{\n"
     ));
@@ -6502,17 +6587,19 @@ fn push_broadcast_epilogue_write(
             "        out_offset += full_coord[{dim}] * u.broadcast_out_strides[{dim}];\n"
         ));
     }
-    push_reduce_epilogue_write(
-        source,
-        epilogue_body,
-        epilogue_operands,
-        rank,
-        element_type,
-        "        ",
-        |dim| format!("full_coord[{dim}]"),
-        reduced_expr,
-        "out_offset",
-    );
+    if is_identity {
+        source.push_str(&format!("        out[out_offset] = {epi_value};\n"));
+    } else {
+        push_epilogue_operand_reads(
+            source,
+            (0..epilogue_operand_count).filter(|&index| !is_invariant_operand(index)),
+            rank,
+            "        ",
+            |dim| format!("full_coord[{dim}]"),
+        );
+        source.push_str(&element_body);
+        source.push_str(&format!("        out[out_offset] = {epi_value};\n"));
+    }
     source.push_str("    }\n");
 }
 
