@@ -26914,3 +26914,58 @@ All six rounds' `generated_text` (64 greedy tokens) are md5-identical to each ot
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-07 | `perf(omega): attention at short context runs one threadgroup per query head with no merge` | Below `keys_per_split_at_scale` (128): threadgroup width `query_groups * chunks * SIMD_WIDTH` -> `chunks * SIMD_WIDTH`, `query_groups` folded into threadgroup count instead; merge dispatch additionally gated on `context_length >= keys_per_split_at_scale`, closing a live-splits-with-no-merge slicing hazard | 40-key bare cell: 3 independent median-of-7 runs (21 samples), medians 31.122/29.656/29.744us, pooled CoV 13.7%, all three below the 32.4us bar (36.1 - 2x5.2%x36.1) | solo run; quiet gate clean throughout (load-1 3.6-9.3, no cargo/nextest/rustc contention) |
+
+## ROW 386 -- the q5_k packed-row body defers `dall`/`dmin` once per sub-block over pre-summed `acc1`/`acc2`/`sumy`, ports llama's own `kernel_mul_mv_q5_K_f32_impl<2,2,32>` in place of this crate's per-lane `q5k_pair_dot`
+
+**Question.** ROW 384 found the four small per-layer matvecs (attn_q/k/v/output) carry the same ~3.2x gap to llama Q4_K already closed, EXCEPT `Q5_K` (attn_v), which is worse and not fixed by nsg width. `push_q4k_ggml_port_body`/`push_q6k_ggml_port_body` already port llama's deferred-scale kernels for their codecs; `Q5_K`'s `plain_product` path still falls through to `q5k_pair_dot` (`omega/src/msl.rs:885`), which multiplies-and-subtracts `(scale*value - minimum)*activation` per lane, eight times per sub-block. Does giving `Q5_K` its own verbatim port of ggml's deferred-accumulator kernel close the gap the way it did for `Q4_K`/`Q6_K`?
+
+**Change (`omega/src/msl.rs`).** New `push_q5k_ggml_port_body` (`omega/src/msl.rs:5788`), a line-for-line transcription of ggml's `kernel_mul_mv_q5_K_f32_impl<nr0=2,nsg=2,nw=32>` (llama.cpp `ggml-metal.metal:5209-5324`, MIT, `THIRD_PARTY.md`):
+- lane assignment `ggml-metal.metal:5244-5250` (`tid=lane/4`, `iq=tid/4`, `ir=tid%4`, `l0=8*ir`, `q_offset=32*iq+l0`) and the shared `y4` offset `push_q4k_plain_product_y4_address` already renders for `Q4_K`;
+- super-block stride `ggml-metal.metal:5263` (`ib += 4`, `ix = lane%4`), same stride `Q4_K` uses despite `Q5_K`'s different `nr0`;
+- activation gather `ggml-metal.metal:5269-5276` reusing `Q4_K`'s `yl`/`yh` text verbatim (`y4[i]`/`y4[i+32]`/`y4[i+128]`/`y4[i+160]`);
+- scale/min bit layout `ggml-metal.metal:5281-5284`, byte-for-byte `Q4_K`'s own `sc16_0..sc16_3`/`sc8_0..sc8_7` unpack at the same `blk+4` offset;
+- the high-bit plane `Q5_K` alone carries (`ggml-metal.metal:5253-5256,5289-5297`): `hm1..hm4` fixed per-thread masks gating `acc2_0..acc2_3` off `qh[l]`, accumulated alongside `acc1_0..acc1_3` (masked nibbles of `q1`/`q2`) with NO scale multiply inside the per-lane loop;
+- final combine `ggml-metal.metal:5299-5305`: `dall`/`dmin` applied ONCE per sub-block across all four `sc8`/`acc` pairs and the four `sumy` pre-sums, replacing `q5k_pair_dot`'s eight-times-per-sub-block multiply-subtract.
+
+`push_packed_row_blocked_body`'s `use_ggml_port` dispatch (`omega/src/msl.rs:5019-5027`) extends its codec match from `Q4K | Q6K` to `Q4K | Q5K | Q6K` and adds a `Q5K` arm calling the new body; the doc comment records the found hazard (before this row, `plain_product` alone was not codec-specific, so `metal-q4k-ggml-port` silently routed `Q5_K` through `Q4_K`'s body -- caught by `metal_matmul_on_packed_q5k_weights_matches_the_dequantized_f32_cpu_path`, relative=0.977, the qh plane never read). `q5k_pair_dot` is kept, unchanged, for `metal-q4k-ggml-port`-off builds.
+
+**Tests.** 16 Q5_K parity tests (host CPU-dequant vs `push_q5k_ggml_port_body`'s Metal output, port-on) green, plus the existing packed-row Q5_K suite unaffected (port-off path untouched). `cargo nextest run -j 2 -p omega --features metal,instrument`: **248 tests run: 248 passed, 14 skipped** (unchanged count from ROW 385 -- this row adds parity coverage under the already-counted `metal-q4k-ggml-port` feature gate, not a new default-on suite). `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument`: **120 tests run: 120 passed, 36 skipped**.
+
+**Gates.** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings`: clean, 0 warnings. `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings`: clean, 0 warnings.
+
+**Fixtures (real checkpoints, release, `metal,instrument`, this branch = B).** `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (`PROXIMA_MAX_TOKENS=8`): `generated_text="Here is a simple Python function that returns"` -- byte-identical to the port-off text; the Q5_K reorder did not move this checkpoint's 8 Q5_K tensors' output. `quality::real_qwen3_file::qwen3_split_half_rope_cpu_and_metal_greedy_decode_match`: CPU and Metal greedy ids identical across the full 8-token window (`[12095, 13, 576, 6722, 315, 279, 3639, 4180]`, text `" Paris. The capital of the United States"`) -- stronger than the test's own 5-token bar (ROW 371's int8-drift carve-out on tokens 6-8 did not fire this run).
+
+**Bare cell, `ROW361_FAMILY=down` (Q5_K ffn_down family, rows=4096, k=14336, 32 dispatches in one buffer, GPU time, median-of-7, `--test-threads=1`, `--ignored --nocapture`), A = main `d7e482ed` (detached worktree), B = this branch:**
+
+| arm | gpu median (ms) | gpu us/dispatch | gpu CoV |
+| --- | --- | --- | --- |
+| llama (ROW 359) | -- | 144.5 | -- |
+| A (ROW 361 baseline) | -- | 174 | -- |
+| A (this row, re-measured) | 5.575 | 174.21 | 1.09% |
+| B (this row) | 4.605 | 143.91 | 13.14% |
+| B (repeat) | 4.592 | 143.50 | 14.16% |
+
+A's re-measured 174.21us/dispatch matches ROW 361's own 174us baseline exactly. B's two independent samples (143.91, 143.50) land within 1% of each other and within 0.7% of llama's 144.5us -- the elevated CoV on B (13-14%) is entirely the first one or two `gpu_ms_samples` in each run (a cold-dispatch/pipeline-compile artifact visible in both B runs' raw sample arrays: `[6.42, 5.42, 4.60, 4.61, 4.59, 4.59, 4.57]`-shaped), not scatter around the steady-state value -- the trailing five samples in both runs agree to within 0.01ms.
+
+**Oracle, real openchat-3.5-1210 checkpoint, `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (`--ignored`, release, `metal,instrument`, `PROXIMA_MAX_TOKENS=64`), three rounds A,B,A,B,A,B (A = main `d7e482ed` in a detached worktree, B = this branch):**
+
+| round | gpu_exec_ms range (steps 3..7) | generated_text md5 |
+| --- | --- | --- |
+| A1 | 19.871 - 20.033 | 84c7519e6bffea98476fefd9d545a0fc |
+| B1 | 19.771 - 19.865 | 84c7519e6bffea98476fefd9d545a0fc |
+| A2 | 20.477 - 20.604 | 84c7519e6bffea98476fefd9d545a0fc |
+| B2 | 19.797 - 19.896 | 84c7519e6bffea98476fefd9d545a0fc |
+| A3 | 20.212 - 20.295 | 84c7519e6bffea98476fefd9d545a0fc |
+| B3 | 19.959 - 20.155 | 84c7519e6bffea98476fefd9d545a0fc |
+
+All six rounds' `generated_text` (64 greedy tokens) are md5-identical to this repo's own known-good fingerprint (first 60 chars: `"Here is a simple Python function that returns the nth Fib"`). Combined A range **[19.871, 20.604]**, combined B range **[19.771, 20.155]** -- B sits below A in every individual round (B1 max 19.865 < A1 min 19.871; B2 max 19.896 < A2 min 20.477; B3 max 20.155 < A3 min 20.212). **Both landing criteria hold (md5 identical, B not above A in any round): LANDED.**
+
+**Tiers.** `omega` is `std`-only (Metal backend); no new tier claim. Numeric axis (principle 8): none new -- `push_q5k_ggml_port_body` reuses `Q4K_BLOCK_ELEMENTS` and the existing `metal-q4k-ggml-port` feature gate, no new build-time constant. Structural axis: none. **Sans-IO opt-sweep (principle 11):** N/A -- a per-codec body added to an existing sans-IO codegen emitter, not a new component.
+
+**Residual, named not hidden.** (1) B's bare-cell CoV (13-14%) is above the extreme-benching 5% bar; the residual five-of-seven samples agree to within 0.01ms both times this row measured it, and the oracle's steady-state `gpu_exec_ms` band (independent of the bare harness's warmup artifact) corroborates the same magnitude, but a proper fix (discard warmup samples in the harness, or a dedicated warmup dispatch before the timed loop) is not attempted this row. (2) `push_q5k_ggml_port_body`'s high-bit-plane mask derivation (`hm1..hm4`) and the `/16`/`*16` folds are restated inline rather than shared with `Q4_K`'s analogous-but-different residual folds -- same posture ROW 385's own doc calls out for `q5k_scale_min`/`q4k_scale_min`, not revisited here. (3) `Q5_K`'s `metal-q4k-split-k` interaction is untested this row (`use_ggml_port` already excludes it via `!cfg!(feature = "metal-q4k-split-k")`, unchanged), so no claim is made about that combination.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | `perf(omega): q5_k packed-row body ports llama's per-sub-block scale and min` | `Q5_K` `plain_product` path gains its own `push_q5k_ggml_port_body` (verbatim ggml `kernel_mul_mv_q5_K_f32_impl<2,2,32>` port) in place of `q5k_pair_dot`'s per-lane scale/min multiply; `use_ggml_port` codec match extended `Q4K\|Q6K` -> `Q4K\|Q5K\|Q6K` | `ROW361_FAMILY=down` bare cell: A 174.21us/dispatch (matches ROW 361's 174us), B 143.91/143.50us/dispatch (two runs, within 0.7% of llama's 144.5us); oracle 3x A/B/A/B/A/B at 64 tokens: text md5-identical all six rounds, B's `gpu_exec_ms` range below A's in every round | solo run; quiet gate clean throughout (load-1 5.9-9.6, no cargo/nextest/rustc contention) |
