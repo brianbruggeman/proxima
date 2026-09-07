@@ -94,6 +94,43 @@ impl NumericPolicy {
             && (!required.signed_zero || self.signed_zero)
             && (!required.approx_functions || self.approx_functions)
     }
+
+    /// Fluent per-permission setters -- `#[non_exhaustive]` blocks a
+    /// cross-crate struct literal (`NumericPolicy { .. }`) even with
+    /// functional-update syntax, so a caller outside this crate composing a
+    /// custom permission set (one not covered by [`Self::bit_exact`]/
+    /// [`Self::llama_relaxed`]/[`Self::fast`]) needs a builder-shaped path
+    /// on the type itself, never a second type: `NumericPolicy::bit_exact()
+    /// .with_contraction(true)`.
+    #[must_use]
+    pub const fn with_contraction(mut self, contraction: bool) -> Self {
+        self.contraction = contraction;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_reassociation(mut self, reassociation: bool) -> Self {
+        self.reassociation = reassociation;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_nan_assumptions(mut self, nan_assumptions: bool) -> Self {
+        self.nan_assumptions = nan_assumptions;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_signed_zero(mut self, signed_zero: bool) -> Self {
+        self.signed_zero = signed_zero;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_approx_functions(mut self, approx_functions: bool) -> Self {
+        self.approx_functions = approx_functions;
+        self
+    }
 }
 
 /// One rewrite class this crate or a GPU backend may apply, and the exact
