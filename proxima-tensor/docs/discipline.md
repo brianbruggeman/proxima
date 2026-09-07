@@ -26494,11 +26494,27 @@ Identical to ROW 373's own before/after text (first 5 tokens `12095, 13, 576, 67
 - `cargo nextest run -j 2 -p omega --features metal,instrument --test backend_parity` -- 2 tests run: 2 passed (Engine::Cpu call sites unaffected by the additive `CpuPlan` field).
 - `cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --ignored --test-threads=1 quality::real_openchat_file::metal_vs_cpu_reports_real_drift` -- 1 test run: 1 passed.
 
+**Follow-up (2026-09-07): the `quality_summary` numbers residual (1) above is closed.** `cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --ignored --test-threads=1 --nocapture` against the four named tests -- debug-profile `cargo nextest` was tried first and was abandoned mid-run at >1200s on one test (`exact_activations` skips the fast `q4k-int8-dot`/`q5k-int8-dot`/`q6k-int8-dot` path and falls through to a dense f32 dequant-fold per activation; unoptimized that path did not finish in tractable time), so this run used the same `--release` invocation as ROW 378's own gate line above. All four passed (`test result: ok. 4 passed; 0 failed`, `finished in 328.49s`). Note: the qwen3 run also carries ROW 373's routing fix and ROW 377's placed-KV path, both landed between ROW 378 and this follow-up, so the qwen3 delta below mixes three changes (exact-activation reference, routing fix, placed-KV), not exact-activation alone.
+
+| Model | Comparison | exact_match | top1_agreement | kl_mean | kl_max | max_abs_logit_delta |
+| --- | --- | --- | --- | --- | --- | --- |
+| openchat-3.5-1210 | Metal vs int8-CPU reference (ROW 356) | 0.906 | 0.969 | 0.001956 | 0.0263 | 1.24 |
+| openchat-3.5-1210 | Metal vs EXACT-CPU reference (this run) | 1.000000 | 1.000000 | -0.000000 (~0) | 0.000000 | 0.000046 |
+| openchat-3.5-1210 | default-vs-default degenerate control (this run) | 1.000000 | 1.000000 | -0.000000 (~0) | 0.000000 | 0.000000 |
+| qwen3-1.7B split-half-rope | Metal vs int8-CPU reference (pre-ROW-373 routing fix) | 0.0 | 0.0 | 12.4 | 26.2 | -- |
+| qwen3-1.7B split-half-rope | Metal vs EXACT-CPU reference (this run, mixes exact-ref + ROW 373 routing fix + ROW 377 placed-KV) | 1 | 1 | -0.000000011088247437666067 | 0 | 0.000022888184 |
+| qwen3-1.7B split-half-rope | default-vs-default degenerate control (this run) | 1.000000 | 1.000000 | -0.000000 (~0) | 0.000000 | 0.000000 |
+
+Both degenerate controls landed at exact 1.0 across every field, as required (both sides are Metal; the harness cannot introduce drift by construction).
+
+**One sentence, observed:** against the exact CPU reference the remaining openchat Metal-vs-CPU drift collapses to `max_abs_logit_delta=0.000046` (from 1.24 against the lossy int8 reference) -- this is the honest cross-backend number with the CPU's own Q8_K quantization noise removed, and it is labeled observed, not concluded, because the qwen3 side cannot be isolated to exact-activation alone in this run.
+
 ### Changelog
 
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `feat(tensor): cpu evaluation can request exact activations` + `test(interop): parity harnesses compare metal against the exact cpu reference` | The CPU's default `q{4,5,6}k-int8-dot` fast path was the LOSSY side of every cross-backend Metal-vs-CPU comparison; added a runtime `exact_activations` bool (default `false`, unchanged behavior) threaded through `cpu.rs`'s reduce-quantized dispatch, `omega::backend::CpuPlan`, and `ServingConfig`, wired `true` on `quality_report`'s CPU reference side only | Real Q4_K row: exact vs f64 reference relative error 1.563e-7, int8 vs f64 reference relative error 2.835e-3 (~18,140x). `metal_vs_cpu_reports_real_drift` passed against the exact reference on a real device; `quality_summary` numbers not captured this pass (residual) | Gates only; 579+120+102+2+1 tests all green; quiet gate observed two other agents' `cargo`/`cargo-nextest`/`rustc` runs across the session and waited each out, never ran concurrently |
+| 2026-09-07 | `docs(tensor): row 378 quality against the exact reference` | closed ROW 378's residual (1): captured the `quality_summary` lines for both exact-activation parity tests plus both degenerate controls | openchat Metal-vs-EXACT-CPU `max_abs_logit_delta` 0.000046 (was 1.24 against the lossy int8 reference); qwen3 exact_match/top1 both 1.0 (mixes exact-ref + ROW 373 routing fix + ROW 377 placed-KV, not isolated) | `cargo test --release`, 4/4 passed, 328.49s; debug-profile `nextest` abandoned mid-run (>1200s, one test) as intractable for `exact_activations`'s dense dequant-fold path |
 
 ## ROW 379 -- ROW 376's batched-dispatch bandwidth floor holds after porting cached-attention onto a runtime chunk count and a block-staged Q·K/softmax/V loop; the chunk cap has no headroom left before Metal's 32 KiB threadgroup-memory ceiling
 
