@@ -27413,3 +27413,35 @@ Arrays sized by `cap` force Metal to reserve that much thread/private storage fo
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-07 | `feat(interop): streaming token callback on the decode loop` | new `LoadedModel::generate_streaming` + `TokenEvent`/`Phase`/`Control`; no change to `generate`/`generate_with_serving_config`'s own output (shared loop, no-op callback for existing callers) | N/A (correctness landing; CPU debug smoke run only, no timed cells) | solo |
+
+## ROW 396 -- arena transient cap scales with the plan's query rows
+
+**Card:** production crash: `provider error: generate: arena peak_bytes=984110552 exceeds arena_transient_cap=172812125` -- a ~1100-row interactive-chat prefill rejected outright by `build_buffer_arena`'s cap, which was one fixed constant (`ARENA_TRANSIENT_CAP`) sized for decode's single-row dispatch and applied unchanged to every plan regardless of row count.
+
+**Branch:** `fix/arena-cap-scales-with-rows` (`2242afd2`), landed via `land/fixes`. Merge-base equalled main's tip (`8bf37a62`) at branch-cut time; main advanced once more (`e1bcc9cc`/`f518542c`, ROW 395's streaming callback) while this landing waited on its own gate token. Rebase onto the new tip touched only `omega/src/metal.rs` and this file; `omega/src/metal.rs` rebased as a clean no-op (zero line overlap with the streaming landing), and this file's changelog table was the only conflict, resolved by keeping both rows and renumbering this row from 395 to 396.
+
+**Mechanism.** `plan_query_rows` (`omega/src/metal.rs`, new, `cfg(feature = "metal-plan-stable-buffers")`) reads the plan's own row count off `resolved`: the max `query_rows` among every `BoundOpKind::CachedAttention` op present, or `1` when the plan carries no attention op at all (every non-attention op's transient extents already scale with the same row count, so the max over attention ops alone is the plan-wide M). `build_buffer_arena` derives `cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(query_rows.max(1))` and compares the arena's steady-state `peak_bytes` against `cap_bytes`, not the bare constant. Decode dispatches one query row at a time (`query_rows == 1` everywhere), so `cap_bytes` collapses to exactly `ARENA_TRANSIENT_CAP` there -- the constant's existing decode-sized default is preserved bit-for-bit, and only a multi-row prefill sees the cap scale up.
+
+**Typed error carries the scaled fields.** `MetalError::ArenaOverCap` gained `cap_bytes`/`query_rows`/`device_limit` fields (renamed from the bare `cap`), and its error string now reports `arena peak_bytes={peak_bytes} exceeds arena_transient_cap={cap_bytes} at query_rows={query_rows} (device_limit={device_limit})`. `device_limit` (`MTLDevice::recommendedMaxWorkingSetSize`) is carried for diagnosis only -- it is not part of the accept/reject decision, which remains `peak_bytes > cap_bytes`.
+
+**Per-site table (query_rows -> cap_bytes, `ARENA_TRANSIENT_CAP` = 172_812_125 bytes):**
+
+| query_rows | cap_bytes | production peak_bytes | fits? |
+| --- | --- | --- | --- |
+| 1 (decode) | 172_812_125 | n/a | unchanged behavior |
+| 31 (short prefix) | 5_357_175_875 | n/a | fits |
+| 1100 (ROW's own incident) | 190_093_337_500 | 984_110_552 | fits (old fixed cap rejected it) |
+
+**Parity test.** `plan_query_rows_tests::thousand_row_prefill_shape_fits_the_scaled_cap` reproduces the incident's exact `production_peak_bytes = 984_110_552` at `query_rows = 1100`, asserts it now fits under the scaled cap, and asserts it would NOT have fit under the old unscaled `ARENA_TRANSIENT_CAP` alone -- so the test only passes if the fix is both necessary and sufficient for this incident. `no_attention_op_defaults_to_one_row` and `cap_scales_linearly_with_the_plans_own_query_rows` (`query_rows` in {1, 31, 1100}) cover the fallback and the linear-scaling arithmetic. All three are pure CPU -- `plan_query_rows` never touches a device -- and run on any host without a GPU.
+
+**Gates:** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` clean; `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` clean; `cargo nextest run -j 1 -p omega --features metal,instrument`: 260 passed, 14 skipped; `cargo nextest run -j 1 -p proxima-model-interop --features metal,instrument`: 122 passed, 36 skipped.
+
+**Residual, named not hidden.** No live Metal-device run against a real ~1100-row checkpoint in this landing -- the parity tests reproduce the incident's byte counts exactly but do not re-run the original failing request end to end against real weights; that reproduction is unmeasured here.
+
+**Axes (principle 8):** numeric -- `cap_bytes` is derived (`ARENA_TRANSIENT_CAP * query_rows`), no new tunable constant. structural -- `MetalError::ArenaOverCap` gained three fields (breaking change to that variant's shape, not additive; no other caller constructs it). **Sans-IO opt-sweep (principle 11):** state machine -- N/A, arithmetic helper; bytes-first/borrowed views -- `plan_query_rows` reads `&[BoundOp]` by reference, zero allocation; SIMD/branchless -- N/A, one `max()` over a short slice at plan-build time, not a hot loop.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | `fix(omega): arena transient cap scales with the plan's query rows` | `ArenaOverCap`'s cap is now `ARENA_TRANSIENT_CAP * query_rows` instead of a fixed constant; decode (`query_rows == 1`) unchanged | N/A (correctness landing; 260+122 tests, no timed cells) | solo |
