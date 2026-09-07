@@ -1377,11 +1377,8 @@ fn compose_fused_operands(
         absorbed: &mut absorbed,
     };
     let arg = compose_operand(shapes, held, &mut state, node, map, constants);
-    if steps.is_empty() {
-        steps.push(BodyStep {
-            op: ScalarOp::Identity,
-            args: alloc::vec![arg],
-        });
+    if state.steps.is_empty() {
+        push_canonical_step(&mut state, ScalarOp::Identity, alloc::vec![arg], constants.values);
     }
     drop_absorbed(held, absorbed);
     (ComposedBody { steps }, operands)
@@ -1425,11 +1422,8 @@ fn compose(
         }
         None => compose_body(shapes, held, &mut state, body, operands, constants),
     };
-    if steps.is_empty() {
-        steps.push(BodyStep {
-            op: ScalarOp::Identity,
-            args: alloc::vec![arg],
-        });
+    if state.steps.is_empty() {
+        push_canonical_step(&mut state, ScalarOp::Identity, alloc::vec![arg], constants.values);
     }
     drop_absorbed(held, absorbed);
     (ComposedBody { steps }, resolved_operands)
@@ -3481,47 +3475,62 @@ fn compose_reduce_epilogue(
     let raw_fold_slot = new_operands.len() as u16;
     let inner_step_count = inner_epilogue_body.steps.len() as u16;
 
-    let mut steps: Vec<BodyStep> = inner_epilogue_body
-        .steps
-        .iter()
-        .map(|step| BodyStep {
-            op: step.op,
-            args: step
-                .args
-                .iter()
-                .map(|arg| match arg {
-                    StepArg::Operand(index) => {
-                        let old = *index as usize;
-                        if old == inner_epilogue_operands.len() {
-                            StepArg::Operand(raw_fold_slot)
-                        } else {
-                            StepArg::Operand(inner_remap[old])
-                        }
+    // Every BodyStep this graft produces mints through `push_canonical_step`
+    // (`proxima-tensor/src/bind.rs`'s own one mint point), not a bare
+    // `steps.push(BodyStep { .. })` — a remap can flip an arg from
+    // `StepArg::Operand` to `StepArg::Step` (the fold's own implicit result
+    // taking the place of a raw operand read), which can leave a commutative
+    // step's args in non-canonical order even though both `inner_epilogue_body`
+    // and `outer_body` were themselves minted canonically before this graft
+    // ever saw them. No constant table survives into this post-composition
+    // pass, so identity elimination never fires here (an empty `constant_value`
+    // slice makes `step_arg_constant` always return `None`) — harmless, since
+    // a remap only changes which slot an arg names, never introduces a new
+    // literal identity value, so `push_canonical_step` always appends exactly
+    // one step here and the `inner_step_count`/`outer_remap` index arithmetic
+    // below still lines up with the pushed order.
+    let mut steps: Vec<BodyStep> = Vec::new();
+    let mut absorbed: Vec<NodeId> = Vec::new();
+    let mut state = ComposeState {
+        steps: &mut steps,
+        operands: &mut new_operands,
+        absorbed: &mut absorbed,
+    };
+    for step in &inner_epilogue_body.steps {
+        let args = step
+            .args
+            .iter()
+            .map(|arg| match arg {
+                StepArg::Operand(index) => {
+                    let old = *index as usize;
+                    if old == inner_epilogue_operands.len() {
+                        StepArg::Operand(raw_fold_slot)
+                    } else {
+                        StepArg::Operand(inner_remap[old])
                     }
-                    StepArg::Step(step_index) => StepArg::Step(*step_index),
-                })
-                .collect(),
-        })
-        .collect();
+                }
+                StepArg::Step(step_index) => StepArg::Step(*step_index),
+            })
+            .collect();
+        push_canonical_step(&mut state, step.op, args, &[]);
+    }
     for step in &outer_body.steps {
-        steps.push(BodyStep {
-            op: step.op,
-            args: step
-                .args
-                .iter()
-                .map(|arg| match arg {
-                    StepArg::Operand(index) => {
-                        let old = *index as usize;
-                        if source_indices.contains(&old) {
-                            StepArg::Step(inner_step_count - 1)
-                        } else {
-                            StepArg::Operand(outer_remap[old])
-                        }
+        let args = step
+            .args
+            .iter()
+            .map(|arg| match arg {
+                StepArg::Operand(index) => {
+                    let old = *index as usize;
+                    if source_indices.contains(&old) {
+                        StepArg::Step(inner_step_count - 1)
+                    } else {
+                        StepArg::Operand(outer_remap[old])
                     }
-                    StepArg::Step(step_index) => StepArg::Step(*step_index + inner_step_count),
-                })
-                .collect(),
-        });
+                }
+                StepArg::Step(step_index) => StepArg::Step(*step_index + inner_step_count),
+            })
+            .collect();
+        push_canonical_step(&mut state, step.op, args, &[]);
     }
     Some((ComposedBody { steps }, new_operands))
 }
@@ -6413,6 +6422,120 @@ mod tests {
                 fused_buffers[output.0 as usize],
                 plain_buffers[output.0 as usize],
                 "SiLU(gate) * up must be bit-identical fused vs unfused"
+            );
+        }
+
+        /// `compose_reduce_epilogue`'s own residual: authoring the consumer
+        /// as `x + reduced` (the fold's source SECOND, not first) means the
+        /// graft flips that SECOND slot from `StepArg::Operand` to
+        /// `StepArg::Step` — the shape `reduce_then_residual_add_program`'s
+        /// own `reduced + x` authoring never exercises, because there the
+        /// fold is already first and the substitution happens to land
+        /// canonical by accident. Without routing the graft through
+        /// `push_canonical_step`, this step's args would stay
+        /// `[Operand(x), Step(fold)]`, violating the "Step sorts before
+        /// Operand" invariant `push_canonical_step`'s own doc states for
+        /// every OTHER mint site in this module. Bit-identical output alone
+        /// can't catch this — `apply_body` evaluates `Add`'s two args in
+        /// either order to the same `f32` sum — so this asserts the
+        /// STRUCTURE directly, then bit-identity as the regression check.
+        #[test]
+        fn reduce_epilogue_graft_reorders_commutative_args_to_canonical_form() {
+            let mut program = Vec::new();
+            let weights = append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(8), Extent::Static(4)],
+                    name: None,
+                },
+            );
+            let reduced = append(
+                &mut program,
+                Op::Reduce(Reduce {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: weights,
+                    in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                    out_map: IndexMap::Affine(map::projection(2, &[1])),
+                    keep: Keep::Reduce,
+                    name: None,
+                }),
+            );
+            let x = append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(4)],
+                    name: None,
+                },
+            );
+            let identity = || IndexMap::Affine(map::projection(1, &[0]));
+            let consumer = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    operands: alloc::vec![(x, identity()), (reduced, identity())],
+                    name: None,
+                },
+            );
+
+            let shapes = shape::infer(&program, &[]).expect("x+reduced program infers");
+            let plain = bind_plain(&program, &shapes, &[consumer]).expect("unfused x+reduced binds");
+            let fused = bind(&program, &shapes, &[consumer]).expect("fused x+reduced binds");
+            assert_eq!(
+                fused.len(),
+                plain.len() - 1,
+                "the residual add must fuse into the reduce's own epilogue, plain={} fused={:?}",
+                plain.len(),
+                fused
+            );
+
+            let epilogued = fused
+                .iter()
+                .find(|bound| has_real_epilogue(&bound.kind))
+                .unwrap_or_else(|| panic!("one BoundOp must carry the fused epilogue, got {fused:?}"));
+            let BoundOpKind::Reduce { epilogue_body, .. } = &epilogued.kind else {
+                panic!("epilogued BoundOp must be a Reduce, got {epilogued:?}");
+            };
+            let last_step = epilogue_body
+                .steps
+                .last()
+                .expect("epilogue body always carries at least one step");
+            assert_eq!(
+                last_step.op,
+                ScalarOp::Add,
+                "the grafted tail's final step must be the residual add, got {last_step:?}"
+            );
+            let mut sorted_args = last_step.args.clone();
+            sorted_args.sort_by_key(step_arg_sort_key);
+            assert_eq!(
+                last_step.args, sorted_args,
+                "commutative args must already be in `step_arg_sort_key` canonical order \
+                 (every Step before every Operand), got {last_step:?}"
+            );
+            assert!(
+                matches!(last_step.args[0], StepArg::Step(_)),
+                "the fold's own implicit result must sort first even though `x` was authored \
+                 first in the program, got {last_step:?}"
+            );
+
+            let mut lcg = Lcg(23);
+            let inputs = alloc::vec![
+                (
+                    weights,
+                    (0..32usize).map(|_| lcg.next_unit()).collect::<Vec<_>>()
+                ),
+                (x, (0..4usize).map(|_| lcg.next_unit()).collect::<Vec<_>>()),
+            ];
+            let plain_buffers = run_resolved(program.len(), &plain, inputs.clone());
+            let fused_buffers = run_resolved(program.len(), &fused, inputs);
+            assert_eq!(
+                fused_buffers[consumer.0 as usize],
+                plain_buffers[consumer.0 as usize],
+                "x + reduced must be bit-identical fused vs unfused"
             );
         }
 
