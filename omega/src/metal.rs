@@ -4381,9 +4381,12 @@ fn pack_cached_attention_uniforms(
         push_i64(bytes, chunks);
         // Redesign §4c: the cross-THREADGROUP sibling of `chunks` above, one
         // hardware level up -- see `crate::msl::splits_for`'s own doc. The
-        // LIVE value (never the compiled maximum `dispatch_splits` widens
-        // the grid by above), since this is what the kernel body's own
-        // `slice_len`/`lo`/`hi` computation and split extraction read.
+        // LIVE value (never the compiled maximum `dispatch_splits` widens the
+        // grid by above), since this is what the kernel body's own
+        // `slice_len`/`lo`/`hi` computation reads. `tgid`'s own decode into
+        // `query_row`/`split` divides out `dispatch_splits`, NOT this field --
+        // that grid-widening constant, not the live count, is what an idle
+        // threadgroup beyond it was actually enumerated against.
         push_i64(bytes, splits);
     }
     Ok(())

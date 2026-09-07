@@ -3390,7 +3390,21 @@ fn render_cached_attention(
     } else {
         "long last_key = cached_key_rows + new_key_rows - 1L;\n"
     };
+    // `grid_threads` widens the dispatch by the compiled `ATTENTION_SPLIT_MAX`
+    // (never the live `splits_for` result) exactly when a merge is needed --
+    // `tgid`'s own decode below must divide out that SAME compiled multiplier,
+    // not the live `u.splits` value, or a `tgid` beyond `rows * kv_heads *
+    // live_splits` (which the widened grid always dispatches) decodes a
+    // `query_row` past the real row count and reads/writes out of bounds.
+    // Computed once here so the decode and `final_store`'s scratch-vs-direct
+    // branch below can never disagree on which case this compiled kernel is.
+    let merge_needed = cached_attention_merge_needed(*cached_key_rows + *new_key_rows, numeric_policy);
     if dynamic_cached_len {
+        let grid_splits = if merge_needed {
+            crate::sized::ATTENTION_SPLIT_MAX
+        } else {
+            1
+        };
         // ONE body for every chunk count: the cross-simdgroup merge below is
         // always present, guarded at runtime by `u.context_chunks` rather
         // than selected by a compile-time `context_chunks <= 1` branch, so
@@ -3398,7 +3412,7 @@ fn render_cached_attention(
         // is 1 or `cap` -- the compiled `kv-capacity-bucket` extent no
         // longer appears anywhere in the text `entry_name` keys on.
         source.push_str(&format!(
-            "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long cap = {cap};\n    long chunks = u.context_chunks;\n    long splits = u.splits;\n    long chunk = vector_index % cap;\n    long group = (vector_index / cap) % query_groups;\n    long kv_head = (long)tgid % kv_heads;\n    long query_row_and_split = (long)tgid / kv_heads;\n    long split = query_row_and_split % splits;\n    long query_row = query_row_and_split / splits;\n    long query_index = query_row * (kv_heads * query_groups) + kv_head * query_groups + group;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    long local_group_index = group * cap + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
+            "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long cap = {cap};\n    long chunks = u.context_chunks;\n    long splits = u.splits;\n    long chunk = vector_index % cap;\n    long group = (vector_index / cap) % query_groups;\n    long kv_head = (long)tgid % kv_heads;\n    long query_row_and_split = (long)tgid / kv_heads;\n    constexpr long grid_splits = {grid_splits};\n    long split = query_row_and_split % grid_splits;\n    long query_row = query_row_and_split / grid_splits;\n    if (split >= splits) {{ return; }}\n    long query_index = query_row * (kv_heads * query_groups) + kv_head * query_groups + group;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    long local_group_index = group * cap + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
         ));
         source.push_str(&format!("    {last_key_decl}"));
         // Redesign §4c: this threadgroup's slice of the LIVE key range
@@ -3458,7 +3472,7 @@ fn render_cached_attention(
         // threadgroup value this function's own index-unpack derived from
         // `tgid` above -- at `u.splits == 1` it is always `0`, so this
         // reduces to exactly the prior forced-`0L` behaviour byte for byte.
-        let final_store = if cached_attention_merge_needed(*cached_key_rows + *new_key_rows, numeric_policy) {
+        let final_store = if merge_needed {
             format!(
                 "        constexpr long max_splits = {};\n        device float* attn_scratch = (device float*)out;\n        long scratch_index = (query_index * max_splits + split) * (2L + head_dim);\n        if (lane == 0u) {{ attn_scratch[scratch_index] = merged_max; attn_scratch[scratch_index + 1] = merged_sum; }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; attn_scratch[scratch_index + 2L + dimension] = weighted[local_dimension]; }}\n",
                 crate::sized::ATTENTION_SPLIT_MAX,
@@ -9459,6 +9473,24 @@ mod tests {
         assert!(
             source.contains("long scratch_index = (query_index * max_splits + split) * (2L + head_dim);"),
             "the scratch write must index by (query_index * max_splits + split), not query_index alone"
+        );
+        assert!(
+            source.contains("constexpr long grid_splits = 32;"),
+            "the decode modulus must be the compiled grid multiplier (ATTENTION_SPLIT_MAX = 32 \
+             here), the SAME constant grid_threads widened the dispatch by -- never the live \
+             u.splits, or a tgid the widened grid always dispatches decodes a query_row past \
+             the real row count"
+        );
+        assert!(
+            source.contains("long split = query_row_and_split % grid_splits;")
+                && source.contains("long query_row = query_row_and_split / grid_splits;"),
+            "query_row/split must divide out grid_splits, not the live splits field"
+        );
+        assert!(
+            source.contains("if (split >= splits) { return; }"),
+            "an idle split (split >= the live u.splits) must return before touching Q/K/V or \
+             scratch -- the merge kernel already reads only i < u.splits, so it must not write \
+             an identity partial either"
         );
         assert!(
             source.contains("long slice_start = lo + chunk;"),
