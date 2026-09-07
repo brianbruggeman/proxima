@@ -458,13 +458,26 @@ static inline float q4k_pair_dot(device const uchar *block, uint iq, uint ir, th
 // `word_low`/`word_high`/`h0..h3` decode across the group. `q4k_pair_dot_mr`
 // pulls that decode out of the per-token loop: `word_low`/`word_high` and
 // `h0..h3` are read/derived exactly once, then the eight-fma accumulate
-// below runs once per token against the SAME decoded values, `yl_group`/
-// `yh_group` holding `cap` tokens' worth of gathered activation flattened at
-// stride 16. `cap` (`omega-runtime.toml`'s `PACKED_ROW_ACTIVATION_GROUP`) is
-// a runtime loop bound here, not a fixed array size, so this function has no
-// build-time-value dependency of its own -- the caller sizes `yl_group`/
-// `yh_group`/`result`.
-static inline void q4k_pair_dot_mr(device const uchar *block, uint iq, uint ir, thread const float *yl_group, thread const float *yh_group, uint cap, thread float *result) {
+// below runs once per token, gathering that ONE token's 16+16 `yl`/`yh`
+// floats from `other_ptr` (via `other_base[s]`/`other_stride`/
+// `other_ib_offset`) immediately before folding them.
+//
+// CORRECTION (perf/prefill-packed-row-decode): a first version of this
+// function took pre-gathered `yl_group[cap][16]`/`yh_group[cap][16]` thread
+// arrays instead -- 256 live private floats at `cap = 8` -- and measured
+// SLOWER on a 31-token prefill than the generic per-element body it
+// replaced (step-0 GPU 13.0s on main vs 15.1-21.8s on that version). Arrays
+// sized by `cap` force Metal to reserve that much thread/private storage
+// for the whole per-block-iteration accumulate regardless of how many of
+// those `cap` slots are actually live at once, collapsing occupancy. This
+// version stages one token's `yl`/`yh` at a time inside the `s` loop below,
+// so live private state is ~40 floats (`yl`, `yh`, `result_s`, `result[]`)
+// no matter how large `cap` gets -- at the cost of re-issuing `other_ptr`'s
+// device loads once per output row (`rows_per_simdgroup`, 4 for `Q4_K`)
+// instead of once shared across all four; each repeat reads the SAME
+// address as the other three (same lane, same token, same sub-block
+// offset), so it costs a cache hit, not additional HBM traffic.
+static inline void q4k_pair_dot_mr(device const uchar *block, uint iq, uint ir, device const float *other_ptr, thread const long *other_base, long other_stride, long other_ib_offset, uint cap, thread float *result) {
     device const uchar *qs = block + 16;
     uint byte_base = 32u * iq + 8u * ir;
     device const ushort *word_low = (device const ushort *)(qs + byte_base);
@@ -476,9 +489,17 @@ static inline void q4k_pair_dot_mr(device const uchar *block, uint iq, uint ir, 
     q4k_header h3 = q4k_header_for(block, low_index + 160u);
     ushort w1[4]; ushort w2[4];
     for (uint i = 0u; i < 4u; ++i) { w1[i] = word_low[i]; w2[i] = word_high[i]; }
+    long lane_offset = (long)(64u * iq + 8u * ir) * other_stride;
     for (uint s = 0u; s < cap; ++s) {
-        thread const float *yl = yl_group + s * 16u;
-        thread const float *yh = yh_group + s * 16u;
+        device const float *y4 = other_ptr + other_base[s] + other_ib_offset + lane_offset;
+        float yl[16];
+        float yh[16];
+        for (uint i = 0u; i < 8u; ++i) {
+            yl[i] = y4[(long)i * other_stride];
+            yl[i + 8u] = y4[(long)(i + 32u) * other_stride];
+            yh[i] = y4[(long)(i + 128u) * other_stride];
+            yh[i + 8u] = y4[(long)(i + 160u) * other_stride];
+        }
         float result_s = 0.0f;
         for (uint i = 0u; i < 4u; ++i) {
             uint word1 = (uint)w1[i];
@@ -4803,9 +4824,14 @@ fn push_packed_row_multi_row_body(
 /// row-pointer hoist `push_q4k_ggml_port_body`/the M=1 `plain_product` arm
 /// already use, generalized to a `cap`-token activation group. Each weight
 /// block's header/nibble words are read ONCE per `(ib, q)` inside
-/// `q4k_pair_dot_mr` and folded against every one of the `cap` gathered
-/// activation rows, instead of once per `(ib, q, s)` the way a naive
-/// per-token call to `q4k_pair_dot` would still pay.
+/// `q4k_pair_dot_mr` and folded against every one of the `cap` activation
+/// rows -- but the activation gather itself happens ONE token at a time,
+/// inside `q4k_pair_dot_mr`'s own `s` loop, off `other_base`/`other_stride`/
+/// `other_ib_offset` (all scalars/a `cap`-long array of `long`s, not floats)
+/// rather than this function pre-gathering `yl_group[cap][16]`/
+/// `yh_group[cap][16]` and handing those arrays in. See `q4k_pair_dot_mr`'s
+/// own doc for why that pre-gather (256 live private floats at `cap = 8`)
+/// measured SLOWER than the generic body this fast path replaced.
 fn push_packed_row_multi_row_q4k_body(
     source: &mut String,
     weight: usize,
@@ -4833,26 +4859,14 @@ fn push_packed_row_multi_row_q4k_body(
     source.push_str(&format!(
         "    long y4_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
     ));
-    source.push_str(&format!("    device const float *y4_ptr[{cap}];\n"));
-    source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
-    source.push_str(&format!("        y4_ptr[s] = in{other} + other_base[s] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"));
-    source.push_str("    }\n");
-    source.push_str(&format!("    float yl_group[{cap}][16];\n"));
-    source.push_str(&format!("    float yh_group[{cap}][16];\n"));
+    source.push_str(&format!(
+        "    long other_ib_offset = (long)ib_first * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
+    ));
     source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
-    source.push_str(&format!("        for (int s = 0; s < {cap}; ++s) {{\n"));
-    source.push_str("            device const float *y4 = y4_ptr[s];\n");
-    source.push_str("            for (uint i = 0u; i < 8u; ++i) {\n");
-    source.push_str("                yl_group[s][i] = y4[(long)i * other_stride];\n");
-    source.push_str("                yl_group[s][i + 8u] = y4[(long)(i + 32u) * other_stride];\n");
-    source.push_str("                yh_group[s][i] = y4[(long)(i + 128u) * other_stride];\n");
-    source.push_str("                yh_group[s][i + 8u] = y4[(long)(i + 160u) * other_stride];\n");
-    source.push_str("            }\n");
-    source.push_str("        }\n");
     source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str(&format!("            float result[{cap}];\n"));
     source.push_str(&format!(
-        "            q4k_pair_dot_mr(blk_ptr[q], iq, ir, &yl_group[0][0], &yh_group[0][0], {cap}u, result);\n"
+        "            q4k_pair_dot_mr(blk_ptr[q], iq, ir, in{other}, other_base, other_stride, other_ib_offset, {cap}u, result);\n"
     ));
     source.push_str(&format!(
         "            for (int s = 0; s < {cap}; ++s) {{ sumf[s][q] = sumf[s][q] + result[s]; }}\n"
@@ -4861,9 +4875,7 @@ fn push_packed_row_multi_row_q4k_body(
     source.push_str(&format!(
         "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
     ));
-    source.push_str(&format!(
-        "        for (int s = 0; s < {cap}; ++s) {{ y4_ptr[s] += y4_step; }}\n"
-    ));
+    source.push_str("        other_ib_offset += y4_step;\n");
     source.push_str("    }\n");
 }
 
