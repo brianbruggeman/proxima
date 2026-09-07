@@ -9413,14 +9413,17 @@ mod tests {
         );
     }
 
-    /// Redesign §4c, item 3: a ROW 376-scoreboard-shaped context (40 keys,
-    /// well under `omega-runtime.toml`'s `keys_per_split = 128`) must render
-    /// the single, byte-identical kernel under EITHER policy --
-    /// `cached_attention_merge_needed` gained the capacity input precisely
-    /// so `llama_relaxed()` at this shape does not pay for a scratch hop and
-    /// a merge dispatch it cannot use (design risk 2).
+    /// Redesign §4c, item 3, corrected by ROW 381: a ROW 376-scoreboard-shaped
+    /// context (40 keys) still renders the single, byte-identical kernel
+    /// under `bit_exact()` (that policy withholds `ContextSplitMerge`
+    /// regardless of `keys_per_split`). ROW 381 lowered
+    /// `omega-runtime.toml`'s `[attention_splits] keys_per_split` from 128 to
+    /// 16 because the split form measured faster at this window (36.1us vs
+    /// 43.6us bare, beyond 2x CoV) -- so under `llama_relaxed()` this shape
+    /// NOW engages the scratch hop and its companion merge dispatch
+    /// (`ceil(40/16) = 3` splits), the opposite of the pre-ROW-381 invariant.
     #[test]
-    fn forty_key_plan_renders_one_kernel_under_either_policy() {
+    fn forty_key_plan_stays_one_kernel_under_bit_exact_but_splits_under_llama_relaxed() {
         let mut bound = cached_attention_op_dynamic(32, 8);
         let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
             unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
@@ -9428,20 +9431,31 @@ mod tests {
         *head_dim = 8;
         let packed_operands = PackedOperands::new();
 
-        for policy in [NumericPolicy::bit_exact(), NumericPolicy::llama_relaxed()] {
-            let kernel = emit(&bound, &packed_operands, policy)
-                .expect("a 40-key context always renders");
-            assert!(
-                !kernel.source.contains("attn_scratch"),
-                "policy={policy:?}: a 40-key context must never engage the scratch hop"
-            );
-            assert!(
-                emit_cached_attention_merge(&bound, policy)
-                    .expect("emit_cached_attention_merge never errors on a well-formed op")
-                    .is_none(),
-                "policy={policy:?}: a 40-key context must never need a companion merge dispatch"
-            );
-        }
+        let bit_exact_kernel = emit(&bound, &packed_operands, NumericPolicy::bit_exact())
+            .expect("a 40-key context always renders");
+        assert!(
+            !bit_exact_kernel.source.contains("attn_scratch"),
+            "bit_exact: a 40-key context must never engage the scratch hop"
+        );
+        assert!(
+            emit_cached_attention_merge(&bound, NumericPolicy::bit_exact())
+                .expect("emit_cached_attention_merge never errors on a well-formed op")
+                .is_none(),
+            "bit_exact: a 40-key context must never need a companion merge dispatch"
+        );
+
+        let relaxed_kernel = emit(&bound, &packed_operands, NumericPolicy::llama_relaxed())
+            .expect("a 40-key context always renders");
+        assert!(
+            relaxed_kernel.source.contains("attn_scratch"),
+            "llama_relaxed: ROW 381's keys_per_split=16 must split a 40-key context"
+        );
+        assert!(
+            emit_cached_attention_merge(&bound, NumericPolicy::llama_relaxed())
+                .expect("emit_cached_attention_merge never errors on a well-formed op")
+                .is_some(),
+            "llama_relaxed: a split 40-key context must need a companion merge dispatch"
+        );
     }
 
     /// Redesign §4c, item 1: the split kernel's own slice formula and
@@ -9643,17 +9657,17 @@ mod tests {
         );
     }
 
-    /// ROW 376's own scoreboard-window shape (40 keys) must stay
-    /// single-split even under a policy that grants
-    /// [`NumericRewrite::ContextSplitMerge`] -- `omega-runtime.toml`'s
-    /// `[attention_splits]` default (`keys_per_split = 128`) clamps a
-    /// 40-key context to exactly `ceil(40/128) = 1`, so the scoreboard
-    /// window's numerics never move: no scratch write, no merge dispatch,
-    /// byte-identical to today at that shape regardless of policy.
+    /// `bit_exact()` still withholds [`NumericRewrite::ContextSplitMerge`]
+    /// at the scoreboard window (40 keys) regardless of `keys_per_split` --
+    /// bit-identical output has no split/merge path at all under that
+    /// policy. Under `llama_relaxed()`, ROW 381 lowered `omega-runtime.toml`'s
+    /// `[attention_splits] keys_per_split` from 128 to 16 (measured 36.1us
+    /// vs 43.6us bare at this window, beyond 2x CoV), so this window now
+    /// DOES split: `ceil(40/16) = 3`, not the old single-threadgroup form.
     #[test]
-    fn forty_keys_stays_one_split_under_either_policy() {
+    fn forty_keys_stays_one_split_under_bit_exact_but_splits_under_llama_relaxed() {
         assert_eq!(splits_for(40, NumericPolicy::bit_exact()), 1);
-        assert_eq!(splits_for(40, NumericPolicy::llama_relaxed()), 1);
+        assert_eq!(splits_for(40, NumericPolicy::llama_relaxed()), 3);
     }
 
     /// `bit_exact()` withholds `ContextSplitMerge` regardless of context
