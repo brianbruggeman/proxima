@@ -42,6 +42,7 @@ use serde::Deserialize;
 
 use crate::error::InteropError;
 use crate::generate::{BackendRuntime, LoadedModel, LogitsSink, supported_serving_config};
+use crate::serving::ServingConfig;
 
 /// One held-out prompt the quality harness scores a variant decode
 /// configuration against. `source` names where `text` came from --
@@ -250,11 +251,23 @@ fn score_prompt(
     max_tokens: usize,
     #[cfg(all(feature = "metal", target_os = "macos"))] math_mode: omega::MathMode,
 ) -> Result<PromptQuality, InteropError> {
-    let reference_config = supported_serving_config(
-        reference_gpu_layers,
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        math_mode,
-    );
+    // `exact_activations: true` on the reference side ONLY -- a
+    // cross-backend comparison's reference must carry zero
+    // activation-quantization error of its own (`ServingConfig::exact_activations`'s
+    // own doc: this is the finding behind that field), so its
+    // `q{4,5,6}k-int8-dot` fast path is bypassed whether `reference` runs
+    // on `Engine::Cpu` (the flag takes effect) or `Engine::Gpu` (Metal's
+    // own kernels are already exact -- `omega::backend::plan_named_exact`
+    // is a no-op identity there, so this is safe even when `reference` and
+    // `variant` are the SAME backend, e.g. `default_vs_default_is_the_degenerate_control`).
+    let reference_config = ServingConfig {
+        exact_activations: true,
+        ..supported_serving_config(
+            reference_gpu_layers,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            math_mode,
+        )
+    };
     let variant_config = supported_serving_config(
         variant_gpu_layers,
         #[cfg(all(feature = "metal", target_os = "macos"))]

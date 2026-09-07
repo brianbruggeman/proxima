@@ -61,7 +61,9 @@ use proxima_gguf::GgmlType;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
 #[cfg(not(feature = "metal"))]
-use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
+use proxima_tensor::cpu::{
+    evaluate_quantized_named_exact_with_scratch, evaluate_quantized_named_with_scratch,
+};
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 use proxima_tensor::op::{NodeId, Op};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -72,7 +74,7 @@ use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::backend::execute_plan_named_metal_op_timed;
 #[cfg(feature = "metal")]
-use omega::backend::{Engine, Plan, execute_plan_named, mark_resident, plan_named};
+use omega::backend::{Engine, Plan, execute_plan_named, mark_resident, plan_named, plan_named_exact};
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same
 // `metal`+macos gate that type itself lives behind.
@@ -1598,6 +1600,15 @@ pub(crate) struct BackendRuntime {
     placed_plans: alloc::collections::BTreeMap<(usize, usize), omega::metal::Plan>,
     pub(crate) plan_hits: usize,
     pub(crate) plan_misses: usize,
+    /// `ServingConfig::exact_activations`, read once at construction --
+    /// `Self::evaluate`'s `Engine::Cpu` arm plans through
+    /// `omega::backend::plan_named_exact` instead of `plan_named` when
+    /// this is `true`, so a cross-backend quality harness's CPU reference
+    /// carries the same zero activation-quantization error Metal's own
+    /// kernels do (see `ServingConfig::exact_activations`'s own doc). No
+    /// effect on `Engine::Gpu`: `plan_named_exact` is a no-op identity on
+    /// that arm.
+    exact_activations: bool,
 }
 
 #[cfg(feature = "metal")]
@@ -1615,6 +1626,7 @@ impl BackendRuntime {
             placed_plans: alloc::collections::BTreeMap::new(),
             plan_hits: 0,
             plan_misses: 0,
+            exact_activations: config.exact_activations,
         }
     }
 
@@ -1644,21 +1656,34 @@ impl BackendRuntime {
         resident_names: &BTreeSet<&str>,
     ) -> Result<Evaluated, InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
+        let exact_activations = self.exact_activations;
         let plan = Self::resolve_cached_plan(
             &mut self.plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
             || {
-                let mut plan = plan_named(
-                    self.engine,
-                    None,
-                    program,
-                    symbols,
-                    named,
-                    outputs,
-                    self.numeric_policy,
-                )?;
+                let mut plan = if exact_activations {
+                    plan_named_exact(
+                        self.engine,
+                        None,
+                        program,
+                        symbols,
+                        named,
+                        outputs,
+                        self.numeric_policy,
+                    )?
+                } else {
+                    plan_named(
+                        self.engine,
+                        None,
+                        program,
+                        symbols,
+                        named,
+                        outputs,
+                        self.numeric_policy,
+                    )?
+                };
                 mark_resident(&mut plan, resident_names);
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 {
@@ -2015,6 +2040,9 @@ impl BackendRuntime {
 pub(crate) struct BackendRuntime {
     free_buffers: Vec<Vec<f32>>,
     validated_weight_nodes: Option<BTreeSet<NodeId>>,
+    /// `ServingConfig::exact_activations`, read once at construction --
+    /// see that field's own doc.
+    exact_activations: bool,
 }
 
 #[cfg(not(feature = "metal"))]
@@ -2023,6 +2051,7 @@ impl BackendRuntime {
         Self {
             free_buffers: Vec::new(),
             validated_weight_nodes: None,
+            exact_activations: _config.exact_activations,
         }
     }
 
@@ -2038,6 +2067,16 @@ impl BackendRuntime {
         outputs: &[NodeId],
         _resident_names: &BTreeSet<&str>,
     ) -> Result<Evaluated, InteropError> {
+        if self.exact_activations {
+            return Ok(evaluate_quantized_named_exact_with_scratch(
+                program,
+                symbols,
+                named,
+                outputs,
+                &mut self.free_buffers,
+                &mut self.validated_weight_nodes,
+            )?);
+        }
         Ok(evaluate_quantized_named_with_scratch(
             program,
             symbols,

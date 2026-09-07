@@ -71,7 +71,9 @@ use std::sync::OnceLock;
 use proxima_tensor::{Evaluated, NodeId, NumericPolicy, Op, QuantizedBlock, TensorError};
 
 #[cfg(feature = "cpu")]
-use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
+use proxima_tensor::cpu::{
+    evaluate_quantized_named_exact_with_scratch, evaluate_quantized_named_with_scratch,
+};
 #[cfg(feature = "cpu")]
 use proxima_tensor::resolve_named_blocks;
 
@@ -333,6 +335,14 @@ pub struct CpuPlan {
     outputs: Vec<NodeId>,
     free_buffers: Vec<Vec<f32>>,
     validated_weight_nodes: Option<std::collections::BTreeSet<NodeId>>,
+    // `false` for every existing `plan_named`/`plan_named_cpu` caller --
+    // routes through the SAME `q{4,5,6}k-int8-dot` fast path this plan
+    // always has. `true` only for a plan built via `plan_named_cpu_exact`
+    // (`plan_named_exact`'s `Engine::Cpu` arm): the CPU reference a
+    // cross-backend parity harness compares Metal's exact kernels against
+    // must itself be exact -- see `proxima_tensor::cpu::evaluate_quantized_exact`'s
+    // own doc for the finding this exists to fix.
+    exact_activations: bool,
 }
 
 /// Resolves a program into a reusable [`Plan`] for `engine`, binding blocks
@@ -577,7 +587,73 @@ fn plan_named_cpu(
         outputs: outputs.to_vec(),
         free_buffers: Vec::new(),
         validated_weight_nodes: None,
+        exact_activations: false,
     }))
+}
+
+/// [`plan_named_cpu`]'s exact-activation counterpart -- the ONLY
+/// difference is [`CpuPlan::exact_activations`], read back by
+/// [`execute_plan_named_cpu`] to pick
+/// [`evaluate_quantized_named_exact_with_scratch`] over
+/// [`evaluate_quantized_named_with_scratch`]. A sibling function rather
+/// than a parameter on [`plan_named_cpu`] itself so every one of that
+/// function's existing callers (`plan_named`'s `Engine::Cpu` arm) is
+/// untouched.
+#[cfg(feature = "cpu")]
+fn plan_named_cpu_exact(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+) -> Result<Plan, BackendError> {
+    resolve_named_blocks(program, named)?;
+    Ok(Plan::Cpu(CpuPlan {
+        program: program.to_vec(),
+        symbols: symbols.to_vec(),
+        outputs: outputs.to_vec(),
+        free_buffers: Vec::new(),
+        validated_weight_nodes: None,
+        exact_activations: true,
+    }))
+}
+
+/// [`plan_named`]'s exact-CPU-activation counterpart: identical for every
+/// `Engine::Gpu` driver (Metal's own kernels are already exact -- see
+/// `proxima_tensor::cpu::evaluate_quantized_exact`'s own doc), and routes
+/// `Engine::Cpu` through [`plan_named_cpu_exact`] instead of
+/// [`plan_named_cpu`]. The seam a cross-backend parity harness
+/// (`proxima-model-interop`'s quality harness) uses to build a CPU
+/// reference that carries the SAME zero activation-quantization error
+/// Metal's kernels do, instead of the `q{4,5,6}k-int8-dot` fast path's own
+/// ~1e-3 relative error.
+///
+/// # Errors
+/// Same as [`plan_named`].
+pub fn plan_named_exact(
+    engine: Engine,
+    gpu_driver: Option<GpuDriver>,
+    _program: &[Op],
+    _symbols: &[u64],
+    _named: &[(&str, QuantizedBlock<'_>)],
+    _outputs: &[NodeId],
+    _numeric_policy: NumericPolicy,
+) -> Result<Plan, BackendError> {
+    match engine {
+        Engine::Cpu => {
+            #[cfg(feature = "cpu")]
+            {
+                plan_named_cpu_exact(_program, _symbols, _named, _outputs)
+            }
+            #[cfg(not(feature = "cpu"))]
+            {
+                Err(BackendError::NotCompiled {
+                    backend: "cpu",
+                    feature: "cpu",
+                })
+            }
+        }
+        Engine::Gpu => plan_named(engine, gpu_driver, _program, _symbols, _named, _outputs, _numeric_policy),
+    }
 }
 
 #[cfg(feature = "cpu")]
@@ -585,14 +661,25 @@ fn execute_plan_named_cpu(
     plan: &mut CpuPlan,
     named: &[(&str, QuantizedBlock<'_>)],
 ) -> Result<Evaluated, BackendError> {
-    let evaluated = evaluate_quantized_named_with_scratch(
-        &plan.program,
-        &plan.symbols,
-        named,
-        &plan.outputs,
-        &mut plan.free_buffers,
-        &mut plan.validated_weight_nodes,
-    )?;
+    let evaluated = if plan.exact_activations {
+        evaluate_quantized_named_exact_with_scratch(
+            &plan.program,
+            &plan.symbols,
+            named,
+            &plan.outputs,
+            &mut plan.free_buffers,
+            &mut plan.validated_weight_nodes,
+        )?
+    } else {
+        evaluate_quantized_named_with_scratch(
+            &plan.program,
+            &plan.symbols,
+            named,
+            &plan.outputs,
+            &mut plan.free_buffers,
+            &mut plan.validated_weight_nodes,
+        )?
+    };
     Ok(evaluated)
 }
 

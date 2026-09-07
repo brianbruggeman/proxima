@@ -199,6 +199,17 @@ pub struct ServingConfig<'model> {
     /// `omega::metal::DispatchType`'s own doc.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub dispatch_type: DispatchType,
+    /// Not an upstream llama-server flag -- routes the CPU forward's
+    /// `Q4_K`/`Q5_K`/`Q6_K` dots through their exact dequantize-then-fold
+    /// kernels instead of the `q{4,5,6}k-int8-dot` activation-quantized
+    /// fast path those features default on
+    /// (`proxima_tensor::cpu::evaluate_quantized_exact`'s own doc names the
+    /// finding this exists for). `false` (this field's default) is today's
+    /// shipping fast path, unchanged. A cross-backend quality harness
+    /// comparing against Metal's own exact kernels sets this `true` on its
+    /// CPU-reference side so neither side's own quantization error is
+    /// misattributed to the other backend.
+    pub exact_activations: bool,
 }
 
 impl Default for ServingConfig<'static> {
@@ -244,6 +255,7 @@ impl Default for ServingConfig<'static> {
             numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
+            exact_activations: false,
         }
     }
 }
@@ -513,6 +525,7 @@ mod tests {
             numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
+            exact_activations: false,
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -649,6 +662,7 @@ mod tests {
             numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
+            exact_activations: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -713,9 +727,62 @@ mod tests {
             numeric_policy: NumericPolicy::bit_exact(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
+            exact_activations: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.numeric_policy, NumericPolicy::bit_exact());
+    }
+
+    /// `exact_activations` defaults to `false` -- today's shipping
+    /// `q{4,5,6}k-int8-dot` fast path, unchanged for every existing caller.
+    #[test]
+    fn default_exact_activations_is_false() {
+        assert!(!ServingConfig::default().exact_activations);
+    }
+
+    /// Guiding-principle 4's config-as-mirror, `exact_activations`'s own
+    /// case -- same interoperability
+    /// [`numeric_policy_agrees_across_literal_and_default_override`]
+    /// already proves for that field.
+    #[test]
+    fn exact_activations_agrees_across_literal_and_default_override() {
+        let via_default_override = ServingConfig {
+            exact_activations: true,
+            ..ServingConfig::default()
+        };
+        let via_full_literal = ServingConfig {
+            model_path: DEFAULT_MODEL_PATH,
+            context_length: 131_072,
+            parallel_sequences: 1,
+            kv_cache_key_quant: GgmlType::Q8_0,
+            kv_cache_value_quant: GgmlType::Q8_0,
+            flash_attention: true,
+            batch_size: 32,
+            ubatch_size: 32,
+            gpu_layers: GPU_LAYERS_ALL,
+            gpu_memory_fit: false,
+            kv_offload: false,
+            multimodal_projector: false,
+            reasoning_budget: 1024,
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            repeat_last_n: 64,
+            repeat_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            seed: 0,
+            kv_bucket_tokens: 32,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            math_mode: MathMode::Relaxed,
+            numeric_policy: NumericPolicy::llama_relaxed(),
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            dispatch_type: DispatchType::Concurrent,
+            exact_activations: true,
+        };
+        assert_eq!(via_default_override, via_full_literal);
+        assert!(via_default_override.exact_activations);
     }
 
     #[test]
