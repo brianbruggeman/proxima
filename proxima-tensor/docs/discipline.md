@@ -26560,3 +26560,56 @@ Consolidated: A's `3..7` range across all three rounds is `20.541-20.872`; B's i
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-07 | `perf(omega): cached-attention row counts read from a runtime uniform` + `perf(omega): attention chunk count is runtime; one pipeline serves every kv bucket` + `perf(omega): attention stages a key block's scores and reduces once per block` | Ported `render_cached_attention`'s row counts and chunk count off compile-time-per-shape constants onto runtime uniforms (one pipeline serves every KV bucket), and added block-staged Q·K/softmax/V (`block_width` keys per online-softmax combine, `block_width=1` byte-identical to pre-port); cap-swept `OMEGA_ATTENTION_CONTEXT_CHUNKS_CAP` (4/12/32) | `cap=32` (82944 static threadgroup bytes) exceeds Metal's 32 KiB limit and fails pipeline creation; `cap=12` (largest that fits, 31104 bytes) is flat against `cap=4`'s GB/s (14.6-15.3 GB/s both, ~17x below llama's 255) -- kept `cap=4`. A/B/A/B/A/B oracle at `PROXIMA_MAX_TOKENS=64`: `generated_text` md5 identical all six rounds (`84c7519e6bffea98476fefd9d545a0fc`), B's `gpu_exec_ms` never exceeds A's at any step bucket | 235+120 tests green; quiet gate retried once (30s) on a borderline load-1, waited out two other agents' `cargo`/`cargo-nextest`/`rustc` runs across the session, never ran concurrently |
+
+## ROW 380 -- the split kernel decoded `tgid` against the LIVE `u.splits` instead of the compiled grid multiplier, so a below-max split count corrupted device memory past the token-embedding gather
+
+**Card:** `fix(omega): attention split decode uses the grid's multiplier, idle threadgroups write nothing`. **Worktree/branch:** `proxima-wt-split`, `perf/attention-key-splits`.
+
+**The crash.** `row_376_cached_attention_batched::cached_attention_batched_context_512` (`splits_for(512) = 4`, `ATTENTION_SPLIT_MAX = 32`) panicked intermittently: `Tensor(GatherIndexOutOfRange { node: NodeId(2), index: 3242016549, extent: 64 })` (`bare-cell-512.log`) -- a garbage index into the token-embedding gather, i.e. a PRIOR dispatch corrupted device memory. Context 40 (`splits_for = 1`, no merge) and 4096 (`splits_for` clamps to `ATTENTION_SPLIT_MAX = 32`, so live equals compiled) ran clean 7/7 -- the failure was isolated to exactly the case where the live split count is BELOW the compiled maximum.
+
+**Root cause, `omega/src/msl.rs:3415` (pre-fix) x `omega/src/metal.rs:4339-4367`.** `grid_threads`' `CachedAttention` arm (`msl.rs:2405-2413`) widens the dispatch grid by the compiled constant `ATTENTION_SPLIT_MAX` (32) whenever `cached_attention_merge_needed` holds, and `pack_cached_attention_uniforms` (`metal.rs:4339`) uploads `u.splits` as the LIVE `splits_for` result (4 at context 512) -- both correct and intentional (`metal.rs:4384-85`'s own doc: `u.splits` must be the live count for the slice math). The bug: the split kernel's `tgid` decode also divided by this SAME live `splits` (`long split = query_row_and_split % splits; long query_row = query_row_and_split / splits;`, old `msl.rs:3401`), not the compiled multiplier the grid was actually built with. The dispatched grid always contains `rows * kv_heads * 32` threadgroups; decoding with modulus 4 instead of 32 means every `tgid` past the first `rows * kv_heads * 4` wraps `query_row` into `0..rows*8` instead of `0..rows`, so threadgroups past the real row range read Q/K/V out of bounds and their `final_store` scratch write (`(query_index * max_splits + split) * (2 + head_dim)`, `query_index` built from the wrapped `query_row`) lands outside the scratch allocation, into whatever buffer Metal placed next -- corrupting the token-embedding ids buffer the next op's gather read.
+
+**Proof, not inference.** (1) Read both sides of the boundary: `grid_threads` multiplies by `crate::sized::ATTENTION_SPLIT_MAX` (`msl.rs:2409`), `pack_cached_attention_uniforms` uploads the live `splits_for` (`metal.rs:4339,4387`) -- two DIFFERENT values feeding the SAME kernel's decode and dispatch. (2) `split_kernel_emits_the_slice_formula_and_scratch_index` (`msl.rs`, new assertions) renders the fixture at `cached_attention_op_dynamic(200, 56)` (256-key context, `splits_for(256, keys_per_split=128) = 2`, still below `ATTENTION_SPLIT_MAX = 32`) and pins the pre-fix decode text (`long split = query_row_and_split % splits;` -- the live field, confirmed present before the fix by re-running the test against the unmodified source). (3) The 512-context cell reproduced the panic on the FIRST run (`bare-cell-512.log`, 6.48s, panicked on the 6th of 7 repeats) and again on retry with a DIFFERENT garbage index (`index=1097602797` vs `index=3242016549`, `bare-cell-512-retry.log`) -- consistent with reading whatever value the prior corrupting write happened to leave, not a fixed off-by-one.
+
+**Fix.** `msl.rs:3401-3419`: compute `merge_needed` once (shared with `final_store`'s own branch, single source of truth), decode `tgid` against `constexpr long grid_splits = {ATTENTION_SPLIT_MAX or 1}` -- the SAME constant `grid_threads` multiplied the grid by -- instead of the live `u.splits`, and add `if (split >= splits) { return; }` so an idle threadgroup (`split` past the live count but still inside the widened compiled grid) returns before touching Q/K/V or scratch. No identity partial is written for an idle split: the merge kernel already reads only `i < u.splits` (`msl.rs`'s merge body, `own_max = (iwg < splits) ? in0[...] : -INFINITY`), so an unwritten idle slot is never read. Chose grid-side decode (not widening the grid to the live `splits` at encode time) because `ATTENTION_SPLIT_MAX` is already the one compile-time constant three call sites agree on -- the grid width (`grid_threads`), the scratch stride (`final_store`'s `max_splits`), and now the decode -- widening the grid to a runtime value would need a fourth site to derive independently and lose that single source of truth. `metal.rs:4382-4387`'s doc comment corrected to stop implying the live value governs "split extraction" (`tgid` decode) -- it never should have.
+
+**20-repeat reproduction, post-fix, `cached_attention_batched_context_512` (7 repeats/invocation x 3 invocations = 21 total):** all 3 rounds `ok`, 0 panics (`fix-512-round{1,2,3}.log`).
+
+**Bare cells, post-fix, `per_op_timed_kind_validated_us_per_dispatch: median` (`--nocapture`, dedicated single-test runs):**
+
+| context | median µs | cov | kv_bytes/dispatch | effective GB/s (median-based) |
+| --- | --- | --- | --- | --- |
+| 40 | 43.637 | 8.28% | 327680 | 7.51 |
+| 512 | 89.524 | 14.88% | 4194304 | 46.85 |
+| 4096 | 519.436 | 8.94% | 33554432 | 64.61 |
+
+512 and 4096 now run at all (pre-fix, 512 panicked before producing a number); both are well above ROW 379's pre-split baseline (15.59 / 14.62 GB/s at cap=4, no split) because this branch's whole point -- splitting the live key range across threadgroups -- is now safe to exercise at every split count, not only at the two split counts (1 and 32) that happened not to trigger the bug.
+
+**Oracle, A(main `f7f489f4`)/B(branch, this fix)/A/B/A/B, `PROXIMA_MAX_TOKENS=64`, `real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `gpu_exec_ms` ranges by step bucket:**
+
+| round | 3..7 | 32..63 |
+| --- | --- | --- |
+| A1 (main) | 20.082-20.271 | 20.639-21.356 |
+| B1 (branch) | 20.124-20.265 | 20.666-21.407 |
+| A2 (main) | 20.586-20.858 | 20.529-21.590 |
+| B2 (branch) | 20.612-20.864 | 20.579-21.725 |
+| A3 (main) | 20.668-20.752 | 20.679-21.526 |
+| B3 (branch) | 20.720-20.917 | 20.509-21.687 |
+
+`generated_text` md5 identical across all six runs: `84c7519e6bffea98476fefd9d545a0fc`. Mean `gpu_exec_ms` at `3..7`: A `20.545`, B `20.576` (+0.15%, inside both arms' own ~1.35% CoV, and the per-round sign flips: B1 < A1, B2 > A2 by 0.03, B3 > A3 by 0.16) -- not a systematic regression. **Caveat, named not hidden:** this fixture's context length tops out at 95 over 64 decode steps (`context_length=95` max observed), below `keys_per_split=128`, so `splits_for` never exceeds 1 here -- this oracle exercises the common (`grid_splits=1`) path's lack of regression, not the split path the bug lived in. The split path's own correctness and no-crash proof is the 21-repeat reproduction above plus `block_staged_attention_holds_parity_at_context_512`, which DOES cross the threshold (`splits_for(512)=4`) and holds `relative < 1e-4` parity against the bit-exact sequential kernel post-fix (gate run below).
+
+**Gates.**
+- `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` -- exit 0.
+- `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` -- exit 0.
+- `cargo nextest run -j 2 -p omega --features metal,instrument` -- 244 tests run: 244 passed, 14 skipped (includes `block_staged_attention_holds_parity_at_context_512`, PASS).
+- `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 120 tests run: 120 passed, 36 skipped.
+- `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (openchat text fixture): PASS, both A and B, all 3 rounds.
+- `quality::real_qwen3_file::qwen3_split_half_rope_cpu_and_metal_greedy_decode_match` (qwen3 fixture): PASS, CPU/Metal ids match exactly (`[12095, 13, 576, 6722, 315, 279, 3639, 4180]`).
+
+**Residual, named not hidden.** The A/B oracle's own fixture never crosses `keys_per_split`, so it cannot directly exercise the fixed code path -- that gap is closed by the dedicated `row_376` context-512 cell (21/21 clean) and the parity test, not by this oracle. V's float4 accumulation (register-resident weighted-value fold, currently scalar-per-`dimension`) remains ROW 379's own named next slice, untouched here.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | `fix(omega): attention split decode uses the grid's multiplier, idle threadgroups write nothing` | `tgid` decode in the split kernel now divides by the compiled `ATTENTION_SPLIT_MAX` (matching the grid `grid_threads` actually dispatched), not the live `u.splits`; an idle split (`split >= splits`) returns before touching Q/K/V or scratch instead of computing a wrapped `query_row` and corrupting device memory past the scratch buffer | Fixes `GatherIndexOutOfRange` panic at context 512 (`splits_for=4 < ATTENTION_SPLIT_MAX=32`); context 40/4096 (`splits_for` = 1 or 32) were never affected. 21/21 clean post-fix at context 512, 0/7 crashes pre-fix (this session) | 244+120 tests green; A/B oracle 6/6 rounds byte-identical text, `gpu_exec_ms` +0.15% at 3..7 (inside combined CoV) | solo run, quiet gate held at load-1 4.87, no other cargo/nextest/rustc processes at any point |
