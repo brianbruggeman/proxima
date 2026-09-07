@@ -42,7 +42,7 @@ mod qwen35;
 #[cfg(feature = "std")]
 mod quality;
 mod serving;
-#[cfg(all(test, feature = "metal", target_os = "macos"))]
+#[cfg(all(test, feature = "std"))]
 mod test_support;
 mod transform;
 

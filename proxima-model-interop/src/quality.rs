@@ -766,9 +766,9 @@ mod real_openchat_file {
     }
 
     /// Opens the host-local checkpoint the same way `bind.rs`'s own
-    /// `real_openchat_file` tests do, or returns [`None`] and prints why
-    /// this test is skipping -- callers pattern-match to `return` early on
-    /// [`None`] rather than failing a run with no host-local model cache.
+    /// `real_openchat_file` tests do -- callers check
+    /// [`crate::test_support::require_fixture`] before mapping the file, so
+    /// this always loads a real checkpoint or the caller has already failed.
     fn open_model(mapped: &MappedGguf) -> LoadedModel<'_> {
         let file_bytes = mapped.as_slice();
         let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
@@ -792,11 +792,8 @@ mod real_openchat_file {
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
     fn default_vs_default_is_the_degenerate_control() {
         let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
         let path = std::path::Path::new(&model_path);
-        if !path.exists() {
-            eprintln!("skipping: no host-local openchat gguf fixture at {model_path}");
-            return;
-        }
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let model = open_model(&mapped);
@@ -856,11 +853,8 @@ mod real_openchat_file {
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
     fn metal_vs_cpu_reports_real_drift() {
         let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
         let path = std::path::Path::new(&model_path);
-        if !path.exists() {
-            eprintln!("skipping: no host-local openchat gguf fixture at {model_path}");
-            return;
-        }
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let model = open_model(&mapped);
@@ -925,14 +919,11 @@ mod real_openchat_file {
         let reference_path = std::path::Path::new(&reference_path_string);
         let variant_path_string = variant_model_path();
         let variant_path = std::path::Path::new(&variant_path_string);
-        if !reference_path.exists() {
-            eprintln!("skipping: no host-local openchat Q4_K_S fixture at {reference_path_string}");
-            return;
-        }
-        if !variant_path.exists() {
-            eprintln!("skipping: no host-local openchat Q3_K_M fixture at {variant_path_string}");
-            return;
-        }
+        crate::test_support::require_fixture(&reference_path_string, Some("PROXIMA_OPENCHAT_GGUF"));
+        crate::test_support::require_fixture(
+            &variant_path_string,
+            Some("PROXIMA_OPENCHAT_GGUF_VARIANT"),
+        );
 
         let mapped_reference =
             MappedGguf::open(reference_path).expect("mmap host-local openchat Q4_K_S fixture");
@@ -1107,11 +1098,8 @@ mod real_qwen3_file {
     #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
     fn qwen3_split_half_rope_default_vs_default_is_the_degenerate_control() {
         let model_path = crate::test_support::qwen3_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3_GGUF"));
         let path = std::path::Path::new(&model_path);
-        if !path.exists() {
-            eprintln!("skipping: no host-local qwen3 gguf fixture at {model_path}");
-            return;
-        }
 
         let mapped = MappedGguf::open(path).expect("mmap host-local qwen3 gguf fixture");
         let model = open_model(&mapped);
@@ -1151,11 +1139,8 @@ mod real_qwen3_file {
     #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
     fn qwen3_split_half_rope_metal_vs_cpu_reports_real_drift() {
         let model_path = crate::test_support::qwen3_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3_GGUF"));
         let path = std::path::Path::new(&model_path);
-        if !path.exists() {
-            eprintln!("skipping: no host-local qwen3 gguf fixture at {model_path}");
-            return;
-        }
 
         let mapped = MappedGguf::open(path).expect("mmap host-local qwen3 gguf fixture");
         let model = open_model(&mapped);
@@ -1208,11 +1193,8 @@ mod real_qwen3_file {
     #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
     fn qwen3_split_half_rope_cpu_and_metal_greedy_decode_match() {
         let model_path = crate::test_support::qwen3_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3_GGUF"));
         let path = std::path::Path::new(&model_path);
-        if !path.exists() {
-            eprintln!("skipping: no host-local qwen3 gguf fixture at {model_path}");
-            return;
-        }
 
         let mapped = MappedGguf::open(path).expect("mmap host-local qwen3 gguf fixture");
         let model = open_model(&mapped);
