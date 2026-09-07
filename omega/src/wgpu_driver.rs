@@ -841,6 +841,16 @@ pub fn execute_plan(
                         )
                     })?
                     .as_entire_binding(),
+                // `crate::msl::Binding::Scratch`'s own doc: only the Metal
+                // driver's `CachedAttention` split/merge dispatch ever binds
+                // this -- `emit_wgsl` never renders that op kind, so this
+                // arm is unreachable in practice; kept as a loud driver
+                // error, never a silent binding, in case that ever changes.
+                Binding::Scratch => {
+                    return Err(WgpuError::Driver(
+                        "wgpu driver does not support CachedAttention's scratch binding".into(),
+                    ));
+                }
             };
             entries.push(wgpu::BindGroupEntry {
                 binding: index as u32,
