@@ -750,12 +750,18 @@ pub struct BoundOpBuilder {
     /// keeps the actual stride literal (not just whether it is `1.0`), which
     /// [`eliminate_masked_window_reduce`]'s in-bounds proof needs.
     constant_value: RefCell<Vec<Option<f32>>>,
+    /// The [`NumericPolicy`] every [`Constants`] this builder hands to
+    /// [`push_canonical_step`] carries — governs whether the
+    /// `x+0`/`max(x,-inf)`/`min(x,+inf)` identity eliminations (bit-changing
+    /// on NaN/signed-zero, [`NumericRewrite::IdentityEliminationSignedZeroNan`])
+    /// fire, on top of the always-on `x*1` case.
+    numeric_policy: NumericPolicy,
 }
 
 impl BoundOpBuilder {
     /// `retires` is normally [`live::annotate`]`(program, outputs)`.
     #[must_use]
-    pub fn new(retires: Vec<Vec<NodeId>>) -> Self {
+    pub fn new(retires: Vec<Vec<NodeId>>, numeric_policy: NumericPolicy) -> Self {
         Self {
             held: RefCell::new(BTreeMap::new()),
             retires,
@@ -763,6 +769,7 @@ impl BoundOpBuilder {
             ones: RefCell::new(Vec::new()),
             is_iota: RefCell::new(Vec::new()),
             constant_value: RefCell::new(Vec::new()),
+            numeric_policy,
         }
     }
 
@@ -906,6 +913,7 @@ impl BoundOpBuilder {
                             Constants {
                                 ones: &self.ones.borrow(),
                                 values: &self.constant_value.borrow(),
+                                numeric_policy: self.numeric_policy,
                             },
                         ),
                     )?;
@@ -952,6 +960,7 @@ impl BoundOpBuilder {
                         Constants {
                             ones: &self.ones.borrow(),
                             values: &self.constant_value.borrow(),
+                            numeric_policy: self.numeric_policy,
                         },
                     )
                 } else {
@@ -1012,6 +1021,7 @@ impl BoundOpBuilder {
                     Constants {
                         ones: &self.ones.borrow(),
                         values: &self.constant_value.borrow(),
+                        numeric_policy: self.numeric_policy,
                     },
                 ));
             }
@@ -1062,6 +1072,7 @@ impl BoundOpBuilder {
                 Constants {
                     ones: &self.ones.borrow(),
                     values: &self.constant_value.borrow(),
+                    numeric_policy: self.numeric_policy,
                 },
             );
             push_ready(emitted, node, materialized)?;
@@ -1340,6 +1351,9 @@ struct ComposeState<'a> {
 struct Constants<'a> {
     ones: &'a [bool],
     values: &'a [Option<f32>],
+    /// Threaded through to [`push_canonical_step`] — see
+    /// [`BoundOpBuilder`]'s own field of the same name.
+    numeric_policy: NumericPolicy,
 }
 
 /// Composes the single still-held node `node` — reached from its consumer
@@ -1378,7 +1392,7 @@ fn compose_fused_operands(
     };
     let arg = compose_operand(shapes, held, &mut state, node, map, constants);
     if state.steps.is_empty() {
-        push_canonical_step(&mut state, ScalarOp::Identity, alloc::vec![arg], constants.values);
+        push_canonical_step(&mut state, ScalarOp::Identity, alloc::vec![arg], constants);
     }
     drop_absorbed(held, absorbed);
     (ComposedBody { steps }, operands)
@@ -1423,7 +1437,7 @@ fn compose(
         None => compose_body(shapes, held, &mut state, body, operands, constants),
     };
     if state.steps.is_empty() {
-        push_canonical_step(&mut state, ScalarOp::Identity, alloc::vec![arg], constants.values);
+        push_canonical_step(&mut state, ScalarOp::Identity, alloc::vec![arg], constants);
     }
     drop_absorbed(held, absorbed);
     (ComposedBody { steps }, resolved_operands)
@@ -1734,17 +1748,32 @@ fn eliminate_masked_window_reduce(
 }
 
 /// The scalar identity element for `op`'s own [`ScalarOp::is_associative`]
-/// class — `x op identity == x` for every finite/inf/nan `f32` — or `None`
-/// for a `ScalarOp` with no such element. Generalizes
-/// [`eliminate_identity_multiply`]'s single hard-coded `(Multiply, 1.0)` case
-/// to the whole class `op.rs`'s own `is_associative` already names (`Add`,
-/// `Multiply`, `Maximum`, `Minimum`; `op.rs:112-117`), so `x + 0`, `max(x,
-/// -inf)`, and `min(x, +inf)` are recognized here the same way `x * 1` always
-/// was.
-const fn identity_element(op: ScalarOp) -> Option<f32> {
+/// class that is bit-exact for EVERY `f32`, including NaN and signed zero —
+/// `x * 1.0 == x` always, per IEEE 754 multiplication-by-one. Always
+/// admitted at [`NumericPolicy::BitExact`]
+/// ([`NumericRewrite::IdentityElimination`]'s own minimum level). `Add`,
+/// `Maximum`, and `Minimum` also have an algebraic identity element but are
+/// NOT bit-exact on every input — see [`identity_element_signed_zero_nan`].
+const fn identity_element_bitexact(op: ScalarOp) -> Option<f32> {
+    match op {
+        ScalarOp::Multiply => Some(1.0),
+        _ => None,
+    }
+}
+
+/// The scalar identity element for `Add`/`Maximum`/`Minimum` — `x + 0.0`,
+/// `max(x, -inf)`, `min(x, +inf)` all equal `x` for every FINITE `x`, but not
+/// for every `f32`: `max(NaN, -inf)` evaluates to `-inf` ([`f32::max`]'s own
+/// "if one argument is NaN, return the other" rule), while eliminating the
+/// op would return the survivor, `NaN`; `(-0.0) + 0.0` evaluates to `+0.0`,
+/// while eliminating the op would return `-0.0`. Classified
+/// [`NumericRewrite::IdentityEliminationSignedZeroNan`], floor
+/// [`NumericPolicy::FusedNoReassociation`] — [`push_canonical_step`] checks
+/// this only after [`identity_element_bitexact`] misses, and only fires it
+/// once [`admit`] clears the caller's [`NumericPolicy`].
+const fn identity_element_signed_zero_nan(op: ScalarOp) -> Option<f32> {
     match op {
         ScalarOp::Add => Some(0.0),
-        ScalarOp::Multiply => Some(1.0),
         ScalarOp::Maximum => Some(f32::NEG_INFINITY),
         ScalarOp::Minimum => Some(f32::INFINITY),
         _ => None,
@@ -1788,7 +1817,7 @@ fn step_arg_constant(arg: StepArg, state: &ComposeState<'_>, constant_value: &[O
 /// `state.steps.push(BodyStep { .. })` call this module used to make
 /// directly. Canonicalizes a commutative binary op's operand order
 /// ([`step_arg_sort_key`]) and eliminates an operand equal to `op`'s own
-/// [`identity_element`] before ever minting a step, so two authored orderings
+/// identity element before ever minting a step, so two authored orderings
 /// of the same algebraic expression — `a*b+c` and `c+a*b`, or a chain with an
 /// identity multiply/add folded away by an earlier rewrite — produce the
 /// identical [`StepArg`], never a step whose recognizability depends on
@@ -1797,21 +1826,41 @@ fn step_arg_constant(arg: StepArg, state: &ComposeState<'_>, constant_value: &[O
 /// doc). Mints no new `ScalarOp`/`Op` variant: every value this returns is
 /// either an existing `StepArg` unchanged or a freshly pushed `BodyStep`
 /// using `op` exactly as given.
+///
+/// [`identity_element_bitexact`] (`x*1`) always fires. The remaining three
+/// cases (`x+0`, `max(x,-inf)`, `min(x,+inf)`,
+/// [`identity_element_signed_zero_nan`]) change bits on NaN/signed-zero
+/// inputs and only fire once `constants.numeric_policy` clears
+/// [`NumericRewrite::IdentityEliminationSignedZeroNan`] via [`admit`] — under
+/// the library default ([`NumericPolicy::BitExact`]) they never fire, and a
+/// step carrying a `+0`/`max(-inf)`/`min(+inf)` operand survives unreduced.
 fn push_canonical_step(
     state: &mut ComposeState<'_>,
     op: ScalarOp,
     mut args: Vec<StepArg>,
-    constant_value: &[Option<f32>],
+    constants: Constants<'_>,
 ) -> StepArg {
     if op.is_associative() && args.len() == 2 {
         args.sort_by_key(step_arg_sort_key);
     }
-    if let (Some(identity), [first, second]) = (identity_element(op), args.as_slice()) {
-        if step_arg_constant(*first, state, constant_value) == Some(identity) {
-            return *second;
+    if let [first, second] = args.as_slice() {
+        if let Some(identity) = identity_element_bitexact(op) {
+            if step_arg_constant(*first, state, constants.values) == Some(identity) {
+                return *second;
+            }
+            if step_arg_constant(*second, state, constants.values) == Some(identity) {
+                return *first;
+            }
         }
-        if step_arg_constant(*second, state, constant_value) == Some(identity) {
-            return *first;
+        if let Some(identity) = identity_element_signed_zero_nan(op)
+            && admit(constants.numeric_policy, NumericRewrite::IdentityEliminationSignedZeroNan).is_ok()
+        {
+            if step_arg_constant(*first, state, constants.values) == Some(identity) {
+                return *second;
+            }
+            if step_arg_constant(*second, state, constants.values) == Some(identity) {
+                return *first;
+            }
         }
     }
     state.steps.push(BodyStep { op, args });
@@ -1851,7 +1900,7 @@ fn compose_body(
         .iter()
         .map(|(node, map)| compose_operand(shapes, held, state, *node, map, constants))
         .collect();
-    push_canonical_step(state, body, args, constants.values)
+    push_canonical_step(state, body, args, constants)
 }
 
 /// Composes one operand reference `(node, map)` into `steps`/`operands`:
@@ -2938,11 +2987,12 @@ pub fn bind_with_fusion(
     // `is_associative` has no such caller today).
     admit(numeric_policy, NumericRewrite::IdentityElimination)?;
     admit(numeric_policy, NumericRewrite::ChainFusion)?;
-    let built = bind_cached_attention_fusion(program, shapes, outputs, fuse_cached_attention)?;
+    let built =
+        bind_cached_attention_fusion(program, shapes, outputs, fuse_cached_attention, numeric_policy)?;
     #[cfg(feature = "reduce-epilogue-fusion")]
     {
         admit(numeric_policy, NumericRewrite::ReduceEpilogueFusion)?;
-        reduce_epilogue_fusion(built, outputs)
+        reduce_epilogue_fusion(built, outputs, numeric_policy)
     }
     #[cfg(not(feature = "reduce-epilogue-fusion"))]
     Ok(built)
@@ -2953,8 +3003,9 @@ fn bind_cached_attention_fusion(
     shapes: &Shapes,
     outputs: &[NodeId],
     fuse_cached_attention: bool,
+    numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
-    let built = bind_plain(program, shapes, outputs)?;
+    let built = bind_plain(program, shapes, outputs, numeric_policy)?;
     #[cfg(not(feature = "cached-attention-streaming"))]
     {
         let _ = fuse_cached_attention;
@@ -2991,7 +3042,7 @@ fn bind_cached_attention_fusion(
             }
         }
     }
-    let rebuilt = bind_plain(program, shapes, &planning_outputs)?;
+    let rebuilt = bind_plain(program, shapes, &planning_outputs, numeric_policy)?;
     let mut candidates = cached_attention_candidates(program, shapes, &rebuilt, outputs);
     candidates.extend(cached_attention_single_range_candidates(
         program, shapes, &rebuilt, outputs,
@@ -3196,6 +3247,7 @@ fn reduce_epilogue_candidates(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<(
 fn reduce_epilogue_fusion(
     mut resolved: Vec<BoundOp>,
     outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
     for _ in 0..resolved.len() {
         let candidates = reduce_epilogue_candidates(&resolved, outputs);
@@ -3264,6 +3316,7 @@ fn reduce_epilogue_fusion(
                 inner_epilogue_operands,
                 consumer_bound,
                 source,
+                numeric_policy,
             ) else {
                 continue;
             };
@@ -3425,6 +3478,7 @@ fn compose_reduce_epilogue(
     inner_epilogue_operands: &BoundOperands,
     consumer: &BoundOp,
     source: NodeId,
+    numeric_policy: NumericPolicy,
 ) -> Option<(ComposedBody, BoundOperands)> {
     let BoundOpKind::Elementwise {
         body: outer_body,
@@ -3483,12 +3537,23 @@ fn compose_reduce_epilogue(
     // step's args in non-canonical order even though both `inner_epilogue_body`
     // and `outer_body` were themselves minted canonically before this graft
     // ever saw them. No constant table survives into this post-composition
-    // pass, so identity elimination never fires here (an empty `constant_value`
-    // slice makes `step_arg_constant` always return `None`) — harmless, since
-    // a remap only changes which slot an arg names, never introduces a new
+    // pass (`reduce_epilogue_fusion` runs over already-`BoundOp`-resolved
+    // data, not the original `Op` program), so identity elimination never
+    // fires here regardless of `numeric_policy` (an empty `values` slice
+    // makes `step_arg_constant` always return `None`) — harmless, since a
+    // remap only changes which slot an arg names, never introduces a new
     // literal identity value, so `push_canonical_step` always appends exactly
     // one step here and the `inner_step_count`/`outer_remap` index arithmetic
-    // below still lines up with the pushed order.
+    // below still lines up with the pushed order. `numeric_policy` is still
+    // threaded through (rather than hard-coding a policy here) so this call
+    // site tracks whatever a future constant-aware version of this graft
+    // would need, instead of silently diverging from the caller's own
+    // policy.
+    let constants = Constants {
+        ones: &[],
+        values: &[],
+        numeric_policy,
+    };
     let mut steps: Vec<BodyStep> = Vec::new();
     let mut absorbed: Vec<NodeId> = Vec::new();
     let mut state = ComposeState {
@@ -3512,7 +3577,7 @@ fn compose_reduce_epilogue(
                 StepArg::Step(step_index) => StepArg::Step(*step_index),
             })
             .collect();
-        push_canonical_step(&mut state, step.op, args, &[]);
+        push_canonical_step(&mut state, step.op, args, constants);
     }
     for step in &outer_body.steps {
         let args = step
@@ -3530,7 +3595,7 @@ fn compose_reduce_epilogue(
                 StepArg::Step(step_index) => StepArg::Step(*step_index + inner_step_count),
             })
             .collect();
-        push_canonical_step(&mut state, step.op, args, &[]);
+        push_canonical_step(&mut state, step.op, args, constants);
     }
     Some((ComposedBody { steps }, new_operands))
 }
@@ -3539,9 +3604,10 @@ fn bind_plain(
     program: &[Op],
     shapes: &Shapes,
     outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
     let retires = live::annotate(program, outputs);
-    let building = BoundOpBuilder::new(retires);
+    let building = BoundOpBuilder::new(retires, numeric_policy);
     let mut built = Vec::new();
     for expr in program {
         built.extend(building.push(expr, shapes)?);
@@ -3640,6 +3706,193 @@ pub fn node_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<Node
 mod tests {
     use super::*;
 
+    /// Drives `resolved` through [`crate::cpu::Interpreter`] the same way
+    /// `reduce_epilogue_fusion_tests::run_resolved` does — inlined rather
+    /// than shared across the module boundary, since this is the only
+    /// consumer at this scope.
+    fn run_resolved(
+        program_len: usize,
+        resolved: &[BoundOp],
+        inputs: Vec<(NodeId, Vec<f32>)>,
+    ) -> Vec<Option<Vec<f32>>> {
+        use core::pin::pin;
+        use core::task::{Context, Poll, Waker};
+
+        use crate::cpu::Interpreter;
+
+        let mut buffers: Vec<Option<Vec<f32>>> = alloc::vec![None; program_len];
+        for (node, data) in inputs {
+            buffers[node.0 as usize] = Some(data);
+        }
+        let interpreter = Interpreter::new(&mut buffers);
+        for chunk in resolved.chunks(READY_BATCH_CAPACITY) {
+            let batch: ReadyBatch = chunk.iter().cloned().collect();
+            let waker = Waker::noop();
+            let mut context = Context::from_waker(waker);
+            let mut future = pin!(interpreter.call(batch));
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(result) => {
+                    result.expect("resolved batch computes");
+                }
+                Poll::Pending => unreachable!("cpu pipes never yield: no internal .await"),
+            }
+        }
+        buffers
+    }
+
+    /// `max(x, -inf)` -- owner counterexample (2026-09-06): `f32::max`'s own
+    /// "if one argument is NaN, return the other" rule means
+    /// `NaN.max(-inf) == -inf`, but eliminating the op (returning the
+    /// survivor `x`) would produce `NaN` instead. Under the library default
+    /// ([`NumericPolicy::BitExact`]) the `Maximum` step must survive and
+    /// compute the real `-inf`; only once the caller opts up to
+    /// [`NumericPolicy::ReassociationPermitted`] does
+    /// [`identity_element_signed_zero_nan`] fire and collapse the op to `x`,
+    /// producing the DIFFERENT value `NaN`.
+    #[test]
+    fn maximum_of_nan_and_negative_infinity_differs_by_numeric_policy() {
+        use crate::op::{Extent, append};
+
+        let mut program = Vec::new();
+        let x = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(1)],
+                name: None,
+            },
+        );
+        let neg_inf = append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: Vec::new(),
+                value: f32::NEG_INFINITY,
+            },
+        );
+        let identity = || IndexMap::Affine(map::projection(1, &[0]));
+        let broadcast_scalar = || IndexMap::Affine(map::projection(1, &[]));
+        let output = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Maximum,
+                operands: alloc::vec![(x, identity()), (neg_inf, broadcast_scalar())],
+                name: None,
+            },
+        );
+        let shapes = shape::infer(&program, &[]).expect("max(x,-inf) program infers");
+
+        let bit_exact = bind_with_fusion(&program, &shapes, &[output], true, NumericPolicy::BitExact)
+            .expect("bit-exact bind succeeds");
+        let bit_exact_buffers =
+            run_resolved(program.len(), &bit_exact, alloc::vec![(x, alloc::vec![f32::NAN])]);
+        let bit_exact_result = bit_exact_buffers[output.0 as usize]
+            .as_ref()
+            .expect("bit-exact output present")[0];
+        assert_eq!(
+            bit_exact_result, f32::NEG_INFINITY,
+            "BitExact must compute the real max(NaN, -inf) == -inf, not eliminate the op"
+        );
+
+        let reassociation_permitted = bind_with_fusion(
+            &program,
+            &shapes,
+            &[output],
+            true,
+            NumericPolicy::ReassociationPermitted,
+        )
+        .expect("reassociation-permitted bind succeeds");
+        let reassociation_buffers = run_resolved(
+            program.len(),
+            &reassociation_permitted,
+            alloc::vec![(x, alloc::vec![f32::NAN])],
+        );
+        let reassociation_result = reassociation_buffers[output.0 as usize]
+            .as_ref()
+            .expect("reassociation-permitted output present")[0];
+        assert!(
+            reassociation_result.is_nan(),
+            "ReassociationPermitted admits IdentityEliminationSignedZeroNan, collapsing to the \
+             surviving operand x == NaN, got {reassociation_result}"
+        );
+    }
+
+    /// `x + 0.0` -- owner counterexample (2026-09-06): `(-0.0) + 0.0`
+    /// evaluates to `+0.0` under real `f32` addition, but eliminating the op
+    /// (returning the survivor `x == -0.0`) keeps the sign bit `BitExact`
+    /// must not silently flip.
+    #[test]
+    fn add_zero_to_negative_zero_differs_by_numeric_policy() {
+        use crate::op::{Extent, append};
+
+        let mut program = Vec::new();
+        let x = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(1)],
+                name: None,
+            },
+        );
+        let zero = append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: Vec::new(),
+                value: 0.0,
+            },
+        );
+        let identity = || IndexMap::Affine(map::projection(1, &[0]));
+        let broadcast_scalar = || IndexMap::Affine(map::projection(1, &[]));
+        let output = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(x, identity()), (zero, broadcast_scalar())],
+                name: None,
+            },
+        );
+        let shapes = shape::infer(&program, &[]).expect("x+0 program infers");
+
+        let bit_exact = bind_with_fusion(&program, &shapes, &[output], true, NumericPolicy::BitExact)
+            .expect("bit-exact bind succeeds");
+        let bit_exact_buffers =
+            run_resolved(program.len(), &bit_exact, alloc::vec![(x, alloc::vec![-0.0f32])]);
+        let bit_exact_result = bit_exact_buffers[output.0 as usize]
+            .as_ref()
+            .expect("bit-exact output present")[0];
+        assert_eq!(
+            bit_exact_result.to_bits(),
+            0.0f32.to_bits(),
+            "BitExact must compute the real (-0.0)+0.0 == +0.0, not eliminate the op and keep -0.0"
+        );
+
+        let reassociation_permitted = bind_with_fusion(
+            &program,
+            &shapes,
+            &[output],
+            true,
+            NumericPolicy::ReassociationPermitted,
+        )
+        .expect("reassociation-permitted bind succeeds");
+        let reassociation_buffers = run_resolved(
+            program.len(),
+            &reassociation_permitted,
+            alloc::vec![(x, alloc::vec![-0.0f32])],
+        );
+        let reassociation_result = reassociation_buffers[output.0 as usize]
+            .as_ref()
+            .expect("reassociation-permitted output present")[0];
+        assert_eq!(
+            reassociation_result.to_bits(),
+            (-0.0f32).to_bits(),
+            "ReassociationPermitted admits IdentityEliminationSignedZeroNan, collapsing to the \
+             surviving operand x == -0.0, got {reassociation_result}"
+        );
+    }
+
     #[test]
     fn name_reports_the_variant_backends_render_error_messages_with() {
         let cached_attention = BoundOpKind::CachedAttention {
@@ -3724,8 +3977,8 @@ mod tests {
             .expect("cached attention fixture builds");
         let shapes = crate::shape::infer(&program, &[1, 1]).expect("cached attention infers");
         let outputs: &[NodeId] = &[];
-        let plain = bind_plain(&program, &shapes, outputs).expect("plain bind succeeds");
-        let cached_only = bind_cached_attention_fusion(&program, &shapes, outputs, true)
+        let plain = bind_plain(&program, &shapes, outputs, NumericPolicy::BitExact).expect("plain bind succeeds");
+        let cached_only = bind_cached_attention_fusion(&program, &shapes, outputs, true, NumericPolicy::BitExact)
             .expect("cached-attention-only bind succeeds");
         let rewritten = bind(&program, &shapes, outputs).expect("rewritten bind succeeds");
 
@@ -3918,8 +4171,8 @@ mod tests {
         }
         let shapes = crate::shape::infer(&program, &[1, 71])
             .expect("one new position against a 71-position merged range infers");
-        let plain = bind_plain(&program, &shapes, &outputs).expect("plain bind succeeds");
-        let cached_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true)
+        let plain = bind_plain(&program, &shapes, &outputs, NumericPolicy::BitExact).expect("plain bind succeeds");
+        let cached_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true, NumericPolicy::BitExact)
             .expect("cached-attention-only bind succeeds");
         let rewritten = bind(&program, &shapes, &outputs).expect("fused bind succeeds");
 
@@ -3986,7 +4239,7 @@ mod tests {
             outputs.extend_from_slice(&[*even, *odd, *value]);
         }
         let shapes = crate::shape::infer(&program, &[1, 5]).expect("single-range fixture infers");
-        let resolved = bind_plain(&program, &shapes, &outputs).expect("plain bind succeeds");
+        let resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::BitExact).expect("plain bind succeeds");
 
         let candidates =
             cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
@@ -4055,7 +4308,7 @@ mod tests {
         }
         let shapes =
             crate::shape::infer(&program, &[1, 5]).expect("single-range fixture infers");
-        let mut resolved = bind_plain(&program, &shapes, &outputs).expect("plain bind succeeds");
+        let mut resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::BitExact).expect("plain bind succeeds");
 
         let baseline = cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
         assert!(
@@ -5031,7 +5284,7 @@ mod tests {
         // makes `retires.contains(operand_node)` false for every node, so
         // every held predecessor fails the fuse check regardless of its
         // projection — isolating exactly what a single push can materialize.
-        let building = BoundOpBuilder::new(Vec::new());
+        let building = BoundOpBuilder::new(Vec::new(), NumericPolicy::BitExact);
         let mut last_emitted_len = 0;
         for expr in program.iter() {
             let emitted = building.push(expr, &shapes).expect("push succeeds");
@@ -5061,7 +5314,7 @@ mod tests {
         let retires = live::annotate(&program, &outputs);
 
         let shape_table = ShapeTable::new(&[512]);
-        let builder = BoundOpBuilder::new(retires);
+        let builder = BoundOpBuilder::new(retires, NumericPolicy::BitExact);
         let chain = shape_table.and_then(builder);
 
         let mut built_via_pipe = Vec::new();
@@ -5563,7 +5816,7 @@ mod tests {
         fn reduce_then_residual_add_fuses_into_one_epilogued_reduce() {
             let (program, reduced, consumer, _x, extra_x_use) = reduce_then_residual_add_program();
             let shapes = shape::infer(&program, &[]).expect("residual-add program infers");
-            let plain = bind_plain(&program, &shapes, &[extra_x_use])
+            let plain = bind_plain(&program, &shapes, &[extra_x_use], NumericPolicy::BitExact)
                 .expect("plain bind succeeds");
             let fused = bind(&program, &shapes, &[extra_x_use]).expect("fused bind succeeds");
 
@@ -5668,7 +5921,7 @@ mod tests {
                 "epilogued reduce must match the hand-derived sum-plus-residual exactly"
             );
 
-            let plain = bind_plain(&program, &shapes, &outputs).expect("plain bind succeeds");
+            let plain = bind_plain(&program, &shapes, &outputs, NumericPolicy::BitExact).expect("plain bind succeeds");
             let plain_buffers = run_resolved(program.len(), &plain, inputs());
             let plain_consumer = plain_buffers[consumer.0 as usize]
                 .as_ref()
@@ -5823,7 +6076,7 @@ mod tests {
             }
             let shapes = crate::shape::infer(&program, &[1, 71])
                 .expect("one new position against a 71-position merged range infers");
-            let attention_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true)
+            let attention_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true, NumericPolicy::BitExact)
                 .expect("cached-attention-only bind succeeds");
             let with_epilogue = bind(&program, &shapes, &outputs).expect("fused bind succeeds");
 
@@ -6060,7 +6313,7 @@ mod tests {
             };
 
             let with_epilogue = bind(&program, &shapes, &outputs).expect("fused bind succeeds");
-            let attention_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true)
+            let attention_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true, NumericPolicy::BitExact)
                 .expect("cached-attention-only bind succeeds");
             assert!(
                 with_epilogue
@@ -6249,7 +6502,7 @@ mod tests {
                 let (program, x, scaled) = rmsnorm_program(seq, DIM);
                 let shapes = shape::infer(&program, &[]).expect("rmsnorm program infers");
                 let plain =
-                    bind_plain(&program, &shapes, &[scaled]).expect("unfused rmsnorm binds");
+                    bind_plain(&program, &shapes, &[scaled], NumericPolicy::BitExact).expect("unfused rmsnorm binds");
                 let fused = bind(&program, &shapes, &[scaled]).expect("fused rmsnorm binds");
 
                 let fused_epilogue_count = fused
@@ -6374,7 +6627,7 @@ mod tests {
             );
 
             let shapes = shape::infer(&program, &[]).expect("silu*up program infers");
-            let plain = bind_plain(&program, &shapes, &[output]).expect("unfused silu*up binds");
+            let plain = bind_plain(&program, &shapes, &[output], NumericPolicy::BitExact).expect("unfused silu*up binds");
             let fused = bind(&program, &shapes, &[output]).expect("fused silu*up binds");
 
             // One of the two reduces (whichever `find_epilogue_source` picks
@@ -6483,7 +6736,7 @@ mod tests {
             );
 
             let shapes = shape::infer(&program, &[]).expect("x+reduced program infers");
-            let plain = bind_plain(&program, &shapes, &[consumer]).expect("unfused x+reduced binds");
+            let plain = bind_plain(&program, &shapes, &[consumer], NumericPolicy::BitExact).expect("unfused x+reduced binds");
             let fused = bind(&program, &shapes, &[consumer]).expect("fused x+reduced binds");
             assert_eq!(
                 fused.len(),
@@ -6597,7 +6850,7 @@ mod tests {
 
             let shapes = shape::infer(&program, &[]).expect("different-projection program infers");
             let plain =
-                bind_plain(&program, &shapes, &[output]).expect("unfused different-projection binds");
+                bind_plain(&program, &shapes, &[output], NumericPolicy::BitExact).expect("unfused different-projection binds");
             let fused = bind(&program, &shapes, &[output]).expect("bind with fusion enabled still binds");
 
             assert_eq!(
