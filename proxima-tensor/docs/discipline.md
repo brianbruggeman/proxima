@@ -27114,3 +27114,85 @@ No shape has fewer threadgroups on our side than llama's. The occupancy-gap hypo
 | --- | --- | --- | --- | --- |
 | 2026-09-07 | docs-only: `docs(tensor): row 388 rows-per-simdgroup sizing already at parity with llama` | Verified `Q4_K`/`Q6_K` `rows_per_simdgroup()`+nsg already equal llama's `N_R0`/`N_SG` (`ggml-metal-impl.h:32-39`); found `Q5_K`'s generic-path mismatch already bypassed by ROW 386's `push_q5k_ggml_port_body` in the default build; threadgroup-count table shows zero occupancy gap on attn_k/attn_q/ffn_gate; ROW 275 already measured this exact lever end to end, negative -- decision: no sizing change, zero timed cells run | none (analysis only) | not applicable (no timed cells; no cargo invocation beyond reading source) |
 
+## ROW 389 -- the thirteen-second prefill, per op: 225 named FFN/attention weight matmuls fall through BOTH fast Metal paths at M=31 and pay a ~568x per-byte slowdown in the one that catches them
+
+**Card:** none (measurement + mechanism, docs-only row -- no fix proven small enough to land this slice). **Worktree/branch:** `proxima-wt-pf`, `docs/row-389-prefill-profile`, off `main` at `99fee63f` (ROW 388's own commit).
+
+**Question this row answers.** r387-logs named the finding this row was dispatched to explain: the 64-token decode's step 0 -- the 31-token PREFILL -- reports `gpu_exec_ms=13064` of `step_wall_ms=13091` (production, non-instrumented), roughly 420ms/prompt-token, ~20x the measured decode rate. Per-op, which kind/op carries that time, and by what mechanism does M=31 cost so much more per byte than M=1?
+
+**Method.** `profiles_one_real_prefill_step_by_per_op_gpu_time` (`proxima-model-interop/src/bind.rs:3838`, already existed, sets `PROXIMA_METAL_OP_PROFILE_STEP=0` internally and runs `max_tokens=1` so only the prefill step executes) -- release+instrument build, `--features metal,instrument`, real openchat Q4_K_S checkpoint (`DEFAULT_MODEL_PATH`), one run, `--exact --ignored --nocapture --test-threads=1`. Log: `pf-logs/prefill-op-profile.log`.
+
+**Quiet gate.** THREE-check gate (names-only `pgrep -x cargo`/`cargo-nextest`/`rustc`, `pgrep -l 'matvec_roofline|row_376|rmsnorm_fused|proxima_model_i'`) run before the build and again before the run -- both empty each time, no retry needed.
+
+**Bucket table, per-KIND, step=0 (`op_profile_bucket`, `op_count=455` total, `total_gpu_ns=10898295821` = `10898.296ms`, `total_operand_bytes=4475849920`):**
+
+| kind | op_count | gpu_ms | gpu_ns/op | operand_bytes | share of total gpu_ms |
+| --- | --- | --- | --- | --- | --- |
+| reduce-cooperative | 290 | 10891.116 | 37,555,574 | 4,285,790,784 | **99.93%** |
+| elementwise | 129 | 3.846 | 29,815 | 157,028,864 | 0.035% |
+| cached_attention | 32 | 3.295 | 102,973 | 33,030,272 | 0.030% |
+| constant | 2 | 0.021 | 10,354 | 0 | 0.0002% |
+| iota | 2 | 0.017 | 8,646 | 0 | 0.0002% |
+
+Per-codec (`op_profile_codec`): Q4K 217 ops / 10278.148ms, Q5K 8 ops / 410.464ms, Q6K 1 op / 201.151ms, none (attention/rope/elementwise, no packed operand) 229 ops / 8.533ms. **Attention is not the culprit** -- `cached_attention` is 0.03% of GPU time at M=31; the entire cost is in the weight matmuls.
+
+Per-family (`op_profile_family`), the 225 named-weight ops inside `reduce-cooperative` sum to 10889.525ms of that bucket's 10891.116ms (99.99% of it):
+
+| family | op_count | gpu_ms | operand_bytes | gpu_ns/byte |
+| --- | --- | --- | --- | --- |
+| blk.ffn_down.weight | 32 | 2912.527 | 1,143,209,984 | 2.548 |
+| blk.ffn_up.weight | 32 | 2858.937 | 1,073,217,536 | 2.664 |
+| blk.ffn_gate.weight | 32 | 2848.017 | 1,073,217,536 | 2.654 |
+| blk.attn_q.weight | 32 | 824.019 | 318,242,816 | 2.589 |
+| blk.attn_output.weight | 32 | 782.763 | 318,242,816 | 2.460 |
+| blk.attn_v.weight | 32 | 239.582 | 93,847,552 | 2.553 |
+| blk.attn_k.weight | 32 | 222.529 | 91,750,400 | 2.425 |
+| output.weight (Q6_K head) | 1 | 201.151 | 108,034,624 | 1.862 |
+
+**Top 10 ops by GPU time (`op_profile_top`, ranked):**
+
+| rank | node | weight_name | codec | operand_bytes | gpu_ns |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 2586 | output.weight | Q6K | 108,034,624 | 201,151,291 |
+| 2 | 174 | blk.1.ffn_down.weight | Q5K | 42,147,840 | 92,126,958 |
+| 3 | 334 | blk.3.ffn_down.weight | Q5K | 42,147,840 | 91,778,708 |
+| 4 | 2334 | blk.28.ffn_down.weight | Q4K | 34,807,808 | 91,683,999 |
+| 5 | 494 | blk.5.ffn_down.weight | Q4K | 34,807,808 | 91,683,208 |
+| 6 | 1214 | blk.14.ffn_down.weight | Q4K | 34,807,808 | 91,672,374 |
+| 7 | 254 | blk.2.ffn_down.weight | Q5K | 42,147,840 | 91,593,875 |
+| 8 | 974 | blk.11.ffn_down.weight | Q4K | 34,807,808 | 91,547,375 |
+| 9 | 1294 | blk.15.ffn_down.weight | Q4K | 34,807,808 | 91,241,333 |
+| 10 | 2014 | blk.24.ffn_down.weight | Q4K | 34,807,808 | 91,116,166 |
+
+Every top-10 op is a single per-layer `ffn_down`/output weight matmul, not attention, not a per-token loop artifact visible at this granularity -- each of the 225 named ops takes roughly the same ~90-200ms regardless of which of the 32 layers it is, scaling with `operand_bytes` at a near-constant **~2.4-2.7 ns/byte** (Q4_K/Q5_K) effective rate.
+
+**Mechanism, traced to file:line.** `~2.5 ns/byte` is the number that indicts the kernel choice, not the byte count -- ROW 358's own decode-step (M=1) op-timed profile (`step=3`, identical harness/methodology) measured the model's full packed weight set (`reduce-packed-row-blocked`, 224 ops) moving in **18.229ms total**, i.e. **~223 GB/s** (`~4.07GB / 18.229ms`, ROW 112's "reads once" fact). This row's prefill (M=31) moves the SAME weight bytes (`total_operand_bytes=4,475,849,920` here vs the declared ~4.07GB set, ROW 112's question already answered: 1.0x, not 31x -- these are per-layer ops, not per-token replays) at **~393 MB/s** (`4,285,790,784 / 10,891,116,480 ns`). That is a **~568x** per-byte slowdown for logically the identical read, and it is explained by two independent gates, both traced in source:
+
+1. **The fast per-codec decode path never runs at M>1.** `push_packed_row_blocked_body` (`omega/src/msl.rs:4836`) branches at line 4849: `if packed_row_block_token_total(block, &resolved.extents) > 1` routes to `push_packed_row_multi_row_body` (`omega/src/msl.rs:4567`) instead of the single-row body's hand-tuned per-codec bit-unpacking (`q4k_run8`, paired-lane loads) that lines 4864-4936+ use for decode (M=1). The multi-row body's own doc comment (`omega/src/msl.rs:4561-4564`) states plainly: "the amortized per-codec header/nibble decode the `token_total <= 1` branch hand-tunes ... is a follow-up, not folded in here yet -- this body pays one `operand_read` per weight element, same as the generic serial path". It folds up to `PACKED_ROW_ACTIVATION_GROUP=8` token rows per streamed weight element (`omega/omega-runtime.toml:158`, `omega/src/msl.rs:4587`) -- amortizing the read 8-wide, but never applying the fast per-block nibble-decode the M=1 path uses. Because it never emits `q4k_run8(blk`/`acc1_0`/etc, `classify_kind` (`omega/src/metal.rs:3279`) cannot match its `reduce-packed-row-blocked` arm (lines 3306-3330) and falls through to the generic `reduce-cooperative` arm (lines 3331-3338, matches on `simd_sum(`) -- exactly the 0-ops-packed-row-blocked / 290-ops-reduce-cooperative split this row measured.
+2. **The kernel that WOULD avoid this at M=31 is compiled out.** `push_tiled_gemm_body`'s `simdgroup_matrix`-tiled GEMM (`omega/src/msl.rs:6172`) is gated behind `metal-tiled-gemm` (`classify_tiled_gemm`, `omega/src/msl.rs:2118`, `#[cfg(not(feature = "metal-tiled-gemm"))]` arm always returns `Err(FeatureDisabled)`), a separate, default-off Cargo feature (`omega/Cargo.toml:189`, `metal-tiled-gemm = ["metal"]`) NOT included by the `metal` feature bundle (`omega/Cargo.toml:124-144`) or by `instrument` (`omega/Cargo.toml:171`) -- this row's build, `--features metal,instrument` (exactly the brief's command, and production's own feature set), never compiles it in. Even if it were enabled it would not close the Q5_K/Q6_K share of the gap: `classify_tiled_gemm` rejects any non-`Q4_K` codec outright (`omega/src/msl.rs:2146-2148`, "Q5_K/Q6_K have never been measured on this path"), and Q5K+Q6K account for 611.6ms of the 10891.1ms bucket (top-10 ranks 1-3, 7 above are exactly this: the Q6_K head and three Q5_K `ffn_down` layers).
+
+**Wall-clock reconciliation.** `total_gpu_ns` (10898.296ms) plus this run's own metal-stage overhead (`pipeline_compile_ms=164.257` + `pipeline_lookup_ms=164.393` + `emit_ms=0.893` + `prepare_ms=11.808` + `encode_dispatch_ms=0.943` + `readback_ms=0.857` = 343.15ms) leaves ~2422ms of `step_wall_ms=13663.715` unaccounted -- consistent with `evaluate_op_timed`'s own documented cost (`bind.rs:3743`, one command buffer PER op, 455 of them here, vs production's batched dispatch) rather than a second slow kernel; r387's own production (non-instrumented, batched) run measured `step_wall_ms=13091` / `gpu_exec_ms=13064` for the identical prefill, i.e. in production essentially the WHOLE wall time is already GPU execution with no large per-command-buffer gap, confirming the slow kernel itself -- not the profiling harness -- is responsible for the observed 13-second prefill.
+
+**Residual, named not hidden.** (1) The exact split of the ~2422ms op-timed-vs-wall gap between per-command-buffer CPU submission overhead and GPU idle-while-waiting is not independently measured this row (no Metal System Trace was captured). (2) `push_packed_row_multi_row_body`'s own per-element `operand_read` cost was not benched in isolation against a hand-written amortized-decode variant -- the ~2.5 ns/byte figure is this row's only direct measurement of it; the "adding per-codec nibble-decode to the multi-row body would close most of the gap" is the fix candidate below, not something this row proved by building it. (3) Whether `PACKED_ROW_ACTIVATION_GROUP=8`'s register-tiling cap itself (vs the missing nibble-decode) contributes independently was not isolated -- both live in the same kernel body and were not ablated apart. (4) Single run, no repeat/CoV -- this is a mechanism-identification row, not a bake-off; the ~568x figure is DERIVED from comparing two separate op-timed runs (this row's step=0, ROW 358's step=3) taken on different dates, not from a paired A/B on one run (principle 18: reported as DERIVED, not re-confirmed independently).
+
+**Fix candidate for the next slice (not built or landed here).** Two independent, additive levers, either narrows the gap without touching correctness of the M=1 path: (a) port the single-row path's amortized per-codec header/nibble decode (`q4k_run8` and friends) into `push_packed_row_multi_row_body` (`omega/src/msl.rs:4567`) so the `token_total > 1` branch stops paying "one `operand_read` per weight element" -- covers all three codecs, unlike (b); (b) measure `metal-tiled-gemm` (`omega/src/msl.rs:6172`) end to end on this real checkpoint at M=31 per ROW 105's own framing ("does not earn the production default until an e2e bench shows the full stack wins with it on") -- Q4_K only (217 of 226 weight ops here), would need a parallel decision for Q5_K/Q6_K's 611.6ms regardless. Neither is a one-line change; this row lands docs-only.
+
+**Gates.** Docs-only row; no functional source change (`push_packed_row_multi_row_body`, `classify_tiled_gemm`, and `classify_kind` are read, not edited). `git status --porcelain` in this worktree, before this commit, shows only this file's edit and the untracked `pf-logs/` review directory (outside the repo, under the scratchpad).
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main (>= 99fee63f)
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test --release -p proxima-model-interop --features metal,instrument --no-run
+BIN=$(find target/release/deps -name 'proxima_model_interop-*' -type f -perm +111)
+"$BIN" bind::real_openchat_file::profiles_one_real_prefill_step_by_per_op_gpu_time \
+  --exact --ignored --nocapture --test-threads=1
+```
+(expected: one `op_profile` summary line with `step=0 op_count=455`, five `op_profile_bucket` lines summing to that count, `reduce-cooperative` carrying >99% of `gpu_ms`, a `token_breakdown` line with `step_wall_ms` in the 13-14s range.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | docs-only: `docs(tensor): row 389 the thirteen-second prefill, per op` | Per-op profile of the 31-token prefill (step 0): 290 `reduce-cooperative` ops (225 of them named FFN/attention weight matmuls) carry 99.93% of `gpu_ms` (10891.116 of 10898.296ms); top-10 by GPU time are all single-layer `ffn_down`/output-head matmuls at ~90-200ms each despite 35-108MB operands; traced to two gates in `omega/src/msl.rs` -- `push_packed_row_blocked_body`'s `token_total > 1` branch (`push_packed_row_multi_row_body`, line 4567) never applies the per-codec nibble-decode the M=1 path uses, and `push_tiled_gemm_body`'s `simdgroup_matrix` GEMM (line 6172) is compiled out (`metal-tiled-gemm` feature, default-off, Q4_K-only even if on) -- measured effective throughput ~393 MB/s vs decode's own ~223 GB/s for the same weight bytes (ROW 358), a ~568x per-byte gap (DERIVED, cross-run) that alone accounts for the ~13s prefill; two additive fix candidates named, neither built | 1 run, no repeat (mechanism-identification row, not a bake-off) | THREE-check gate PASSED before build and before run (both empty, no GPU test binaries and no cargo/rustc running) |
+
