@@ -3303,29 +3303,16 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
             Ok(kernel) if kernel.source.contains("simdgroup_multiply_accumulate") => {
                 "reduce-tiled-gemm"
             }
+            // Consults `msl::PACKED_ROW_BODY_MARKERS` rather than restating
+            // its own copy of the marker list: the restated copy is exactly
+            // what went stale before (missing `q3k_pair_dot(blk`/
+            // `q3k_element(blk`/`q6k_pair_dot(blk`, see that const's own
+            // doc), undercounting every Q3_K row-blocked dispatch and every
+            // plain-product Q6_K dispatch into `"reduce-cooperative"` below.
             Ok(kernel)
-                if kernel.source.contains("q4k_pair_dot(blk")
-                    || kernel.source.contains("q4k_pair_dot_mr(blk")
-                    || kernel.source.contains("q4k_run8(blk")
-                    || kernel.source.contains("q5k_pair_dot(blk")
-                    || kernel.source.contains("q5k_value(blk")
-                    || kernel.source.contains("q6k_value(blk")
-                    // `metal-q4k-ggml-port`'s own body (`push_q4k_ggml_port_body`)
-                    // has none of the above markers -- it never calls this
-                    // crate's own decode helpers, that is the whole point of
-                    // the port -- and it DOES end in a `simd_sum(` combine
-                    // like every other cooperative-reduce kernel, so without
-                    // this arm it fell through to "reduce-cooperative" below
-                    // and the op-profile bucket undercounted packed-row-blocked
-                    // ops by exactly the ggml-port op count (found bake-off
-                    // measuring this landing: `reduce-packed-row-blocked`
-                    // dropped from 225 to 9 ops, `reduce-cooperative` grew by
-                    // the same 216, with `packed_row_block`'s own per-family
-                    // `row_blocked_count` unchanged at 32 per family --
-                    // dispatch was always correct, only this profiler label
-                    // was wrong). `acc1_0` is unique to that body's per-thread
-                    // accumulator naming.
-                    || kernel.source.contains("acc1_0") =>
+                if crate::msl::PACKED_ROW_BODY_MARKERS
+                    .iter()
+                    .any(|marker| kernel.source.contains(marker)) =>
             {
                 "reduce-packed-row-blocked"
             }
@@ -3368,6 +3355,133 @@ fn classify_packed_kernel_variant(
         "q4k-ggml-port"
     } else {
         "other"
+    }
+}
+
+#[cfg(all(test, feature = "instrument"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod classify_kind_packed_row_marker_tests {
+    //! `classify_kind` used to restate its own copy of
+    //! [`crate::msl::PACKED_ROW_BODY_MARKERS`] and the copy went stale: it
+    //! carried `q4k_pair_dot(blk`/`q5k_pair_dot(blk`/`q5k_value(blk`/
+    //! `q6k_value(blk` but never `q3k_pair_dot(blk`/`q3k_element(blk`/
+    //! `q6k_pair_dot(blk` (`msl.rs:5142`, `5163`, `5298`), so every Q3_K
+    //! row-blocked dispatch and every plain-product Q6_K dispatch (the shape
+    //! the openchat output head actually takes) fell through to
+    //! `"reduce-cooperative"`. Renders ONE kernel per (codec, body) pair
+    //! through the real `emit` path -- the plain-product pair-dot arm (an
+    //! `Add`-reduce over a `Multiply` body) and the per-element scalar
+    //! fallback arm (any other reduce op) -- for all four K-quant codecs.
+
+    use alloc::collections::BTreeMap;
+    use alloc::vec;
+
+    use proxima_tensor::{
+        BoundOp, DType, Extent, IndexMap, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append,
+        bind, infer, map,
+    };
+
+    use super::classify_kind;
+    use crate::{PackedCodec, PackedOperands};
+
+    fn matmul_op_with_reduce(m: u32, k: u32, n: u32, reduce_op: ScalarOp) -> BoundOp {
+        let mut program = Vec::new();
+        let lhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(m), Extent::Static(k)],
+                name: None,
+            },
+        );
+        let rhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(k), Extent::Static(n)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: reduce_op,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: proxima_tensor::Keep::Reduce,
+                name: Some("matmul".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("matmul infers");
+        bind(&program, &shapes, &[], NumericPolicy::default())
+            .expect("matmul lowers")
+            .into_iter()
+            .next()
+            .expect("one fused bound emitted")
+    }
+
+    fn packed_operands_for(bound: &BoundOp, codec: PackedCodec) -> PackedOperands {
+        let mut codecs = BTreeMap::new();
+        codecs.insert(bound.operands()[0].0, codec);
+        codecs
+    }
+
+    #[test]
+    fn every_k_quant_codec_classifies_as_packed_row_blocked_plain_product() {
+        for codec in [
+            PackedCodec::Q3K,
+            PackedCodec::Q4K,
+            PackedCodec::Q5K,
+            PackedCodec::Q6K,
+        ] {
+            // Add-reduce over a plain `weight * activation` body selects the
+            // `plain_product` pair-dot arm (`push_packed_row_blocked_body`'s
+            // own `plain_product` gate) for every codec that supports it.
+            let bound = matmul_op_with_reduce(4, 256, 5, ScalarOp::Add);
+            let packed_operands = packed_operands_for(&bound, codec);
+            assert_eq!(
+                classify_kind(&bound, &packed_operands),
+                "reduce-packed-row-blocked",
+                "{codec:?} plain-product row-blocked dispatch must classify as \
+                 reduce-packed-row-blocked, not fall through to reduce-cooperative"
+            );
+        }
+    }
+
+    #[test]
+    fn every_k_quant_codec_classifies_as_packed_row_blocked_scalar_fallback() {
+        for codec in [
+            PackedCodec::Q3K,
+            PackedCodec::Q4K,
+            PackedCodec::Q5K,
+            PackedCodec::Q6K,
+        ] {
+            // A non-Add reduce op takes `push_packed_row_blocked_body`'s
+            // per-element scalar fallback arm instead of the pair-dot arm.
+            let bound = matmul_op_with_reduce(4, 256, 5, ScalarOp::Maximum);
+            let packed_operands = packed_operands_for(&bound, codec);
+            assert_eq!(
+                classify_kind(&bound, &packed_operands),
+                "reduce-packed-row-blocked",
+                "{codec:?} per-element scalar row-blocked dispatch must classify as \
+                 reduce-packed-row-blocked, not fall through to reduce-cooperative"
+            );
+        }
     }
 }
 
