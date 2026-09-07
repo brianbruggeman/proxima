@@ -3305,6 +3305,7 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
             }
             Ok(kernel)
                 if kernel.source.contains("q4k_pair_dot(blk")
+                    || kernel.source.contains("q4k_pair_dot_mr(blk")
                     || kernel.source.contains("q4k_run8(blk")
                     || kernel.source.contains("q5k_pair_dot(blk")
                     || kernel.source.contains("q5k_value(blk")
