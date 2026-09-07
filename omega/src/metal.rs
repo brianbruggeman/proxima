@@ -5799,6 +5799,38 @@ pub fn register_checkpoint_mapping(bytes: &[u8]) {
     });
 }
 
+/// Unregisters the checkpoint mapping [`register_checkpoint_mapping`]
+/// installed for `bytes`, evicting its whole-mapping no-copy buffer from
+/// [`NOCOPY_BUFFERS`] -- but ONLY when `bytes` is still the currently
+/// registered mapping. [`register_checkpoint_mapping`] already evicts a
+/// PRIOR mapping's entry the moment a new one is registered (see that
+/// function's own doc), so a dropped model racing behind a second model's
+/// load must not clear the second model's live mapping -- comparing the
+/// base pointer and length is what tells "this is still mine" apart from
+/// "someone else already superseded this". A no-op when `bytes` is empty
+/// (matching [`register_checkpoint_mapping`]'s own early return) or when no
+/// mapping this identity matches is currently registered.
+pub fn unregister_checkpoint_mapping(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let identity = (bytes.as_ptr() as usize, bytes.len());
+    let matched = CHECKPOINT_MAPPING.with(|mapping| {
+        let mut mapping = mapping.borrow_mut();
+        if *mapping == Some(identity) {
+            *mapping = None;
+            true
+        } else {
+            false
+        }
+    });
+    if matched {
+        NOCOPY_BUFFERS.with(|cache| {
+            cache.borrow_mut().remove(CHECKPOINT_MAPPING_NOCOPY_NAME);
+        });
+    }
+}
+
 /// Counts uploads served by addressing the shared checkpoint-mapping buffer
 /// at an offset, instead of copying the tensor into its own buffer -- the
 /// direct witness for the census this mechanism is meant to zero out.
@@ -5855,6 +5887,78 @@ fn checkpoint_mapping_offset(
 /// a re-registration is a deliberate cache invalidation, never a
 /// [`MetalError::ResidentNameRebound`].
 const CHECKPOINT_MAPPING_NOCOPY_NAME: &str = "__checkpoint_mapping__";
+
+/// Test-only reset -- the default std test harness reuses threads across
+/// tests in the same binary (see [`reset_nocopy_cache_for_test`]'s own
+/// doc), and [`CHECKPOINT_MAPPING`] is thread-local, so a prior test's
+/// registration would otherwise leak into a later test on the same thread.
+#[cfg(test)]
+fn reset_checkpoint_mapping_for_test() {
+    CHECKPOINT_MAPPING.with(|mapping| *mapping.borrow_mut() = None);
+    NOCOPY_BUFFERS.with(|cache| {
+        cache.borrow_mut().remove(CHECKPOINT_MAPPING_NOCOPY_NAME);
+    });
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod checkpoint_mapping_release_tests {
+    use proxima_tensor::AlignedBuffer;
+
+    use super::{
+        checkpoint_mapping_offset, device_and_queue, page_size, register_checkpoint_mapping,
+        reset_checkpoint_mapping_for_test, unregister_checkpoint_mapping,
+    };
+
+    /// The exact drop-ordering hazard `LoadedModel::drop` is written
+    /// against: model A loads (registers its mapping), model B loads
+    /// afterward (its own `register_checkpoint_mapping` call supersedes
+    /// A's, per that function's own doc), and only THEN does A's `Drop`
+    /// run. A's stale `unregister_checkpoint_mapping(bytes_a)` must be a
+    /// no-op -- it is no longer the current registration -- so B's mapping
+    /// stays resolvable. Only unregistering the CURRENTLY registered
+    /// identity actually clears it.
+    #[test]
+    fn unregister_only_clears_the_currently_registered_identity() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_checkpoint_mapping_for_test();
+
+        let page = page_size();
+        // page-aligned, one page each -- `newBufferWithBytesNoCopy`'s own
+        // precondition (`create_no_copy_buffer`'s SAFETY doc), which
+        // `checkpoint_mapping_offset` exercises via `upload_block_no_copy`.
+        let model_a = AlignedBuffer::new(page / core::mem::size_of::<f32>(), page)
+            .expect("page-aligned fixture for fake model A's checkpoint bytes");
+        let model_b = AlignedBuffer::new(page / core::mem::size_of::<f32>(), page)
+            .expect("page-aligned fixture for fake model B's checkpoint bytes");
+        let model_a_bytes =
+            unsafe { core::slice::from_raw_parts(model_a.as_ptr().cast::<u8>(), page) };
+        let model_b_bytes =
+            unsafe { core::slice::from_raw_parts(model_b.as_ptr().cast::<u8>(), page) };
+
+        register_checkpoint_mapping(model_a_bytes);
+        register_checkpoint_mapping(model_b_bytes);
+
+        // model A's drop races behind model B's load -- releasing A's own
+        // (now-stale) identity must not disturb B's live mapping.
+        unregister_checkpoint_mapping(model_a_bytes);
+        assert!(
+            checkpoint_mapping_offset(&device, model_b_bytes.as_ptr().cast(), model_b_bytes.len())
+                .is_some(),
+            "model B's own mapping must survive a stale release of model A's superseded one"
+        );
+
+        // model B's own drop releases its own, still-current identity.
+        unregister_checkpoint_mapping(model_b_bytes);
+        assert!(
+            checkpoint_mapping_offset(&device, model_b_bytes.as_ptr().cast(), model_b_bytes.len())
+                .is_none(),
+            "releasing the CURRENTLY registered identity must actually clear it"
+        );
+    }
+}
 
 thread_local! {
     /// No-copy block buffers, keyed by the exact host range they wrap.
@@ -6201,6 +6305,22 @@ fn upload_resident_copy(
     Ok(buffer)
 }
 
+/// Evicts every buffer a checkpoint's own resident weight names cached in
+/// [`NOCOPY_BUFFERS`]/[`RESIDENT_BUFFERS`] -- the drop-time counterpart to
+/// [`upload_block_no_copy`]/[`upload_resident_copy`]'s insert. Removing by
+/// NAME, never a blanket clear, is what lets a second, unrelated model
+/// loaded on this same thread keep its own entries live after the first
+/// model drops -- see `LoadedModel`'s own `Drop` impl in
+/// `proxima-model-interop` for the caller. A name absent from either cache
+/// (a resident block this run never actually uploaded) is silently
+/// skipped.
+pub fn release_resident_names<'name>(names: impl IntoIterator<Item = &'name str>) {
+    for name in names {
+        NOCOPY_BUFFERS.with(|cache| cache.borrow_mut().remove(name));
+        RESIDENT_BUFFERS.with(|cache| cache.borrow_mut().remove(name));
+    }
+}
+
 #[cfg(test)]
 fn reset_resident_cache_for_test() {
     RESIDENT_BUFFERS.with(|cache| cache.borrow_mut().clear());
@@ -6403,6 +6523,45 @@ mod resident_buffer_cache_tests {
             "a cache hit moves zero bytes, so it must add zero"
         );
     }
+
+    /// [`super::release_resident_names`]'s copy-path counterpart to
+    /// `nocopy_buffer_cache_tests`'s own
+    /// `release_resident_names_evicts_only_the_named_entry` -- the same
+    /// two-fake-model shape, this time through the misaligned/resident-copy
+    /// cache a real GGUF's odd-byte-offset tensors actually take.
+    #[test]
+    fn release_resident_names_evicts_only_the_named_resident_copy() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_resident_cache_for_test();
+
+        let model_a = vec![1.0_f32; 64];
+        let model_b = vec![2.0_f32; 64];
+        let byte_length = size_of_val(model_a.as_slice());
+
+        upload_resident_copy(&device, "fake_model_a.weight", model_a.as_ptr().cast(), byte_length)
+            .expect("bind fake model A's resident copy");
+        upload_resident_copy(&device, "fake_model_b.weight", model_b.as_ptr().cast(), byte_length)
+            .expect("bind fake model B's resident copy");
+        assert_eq!(resident_cache_len(), 2, "both fake models' copies are cached");
+
+        super::release_resident_names(["fake_model_a.weight"]);
+        assert_eq!(
+            resident_cache_len(),
+            1,
+            "releasing model A's own name must evict exactly one entry"
+        );
+
+        let reuses_before = super::RESIDENT_BUFFER_REUSES.get();
+        upload_resident_copy(&device, "fake_model_b.weight", model_b.as_ptr().cast(), byte_length)
+            .expect("model B's own name must still resolve after model A's release");
+        assert_eq!(
+            super::RESIDENT_BUFFER_REUSES.get(),
+            reuses_before + 1,
+            "model B's entry must still be a cache HIT -- it was never released"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6533,6 +6692,47 @@ mod nocopy_buffer_cache_tests {
             nocopy_cache_len(),
             0,
             "an unnamed (uncached) upload must never populate NOCOPY_BUFFERS"
+        );
+    }
+
+    /// ROW: `LoadedModel::drop` releases exactly the dropped checkpoint's
+    /// own resident names -- a SECOND, unrelated model's own no-copy entry
+    /// (a different name, same thread, both live at once, the two-model
+    /// shape the caller's `Drop` impl exists for) must survive untouched.
+    #[test]
+    fn release_resident_names_evicts_only_the_named_entry() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_nocopy_cache_for_test();
+
+        let page = page_size();
+        let model_a = AlignedBuffer::new(page / size_of::<f32>(), page)
+            .expect("page-aligned fixture for fake model A");
+        let model_b = AlignedBuffer::new(page / size_of::<f32>(), page)
+            .expect("page-aligned fixture for fake model B");
+        let byte_length = model_a.len() * size_of::<f32>();
+
+        upload_block_no_copy(&device, "fake_model_a.weight", model_a.as_ptr().cast(), byte_length)
+            .expect("bind fake model A's weight");
+        upload_block_no_copy(&device, "fake_model_b.weight", model_b.as_ptr().cast(), byte_length)
+            .expect("bind fake model B's weight");
+        assert_eq!(nocopy_cache_len(), 2, "both fake models' weights are cached");
+
+        super::release_resident_names(["fake_model_a.weight"]);
+        assert_eq!(
+            nocopy_cache_len(),
+            1,
+            "releasing model A's own name must evict exactly one entry"
+        );
+
+        let reuses_before = super::NOCOPY_BUFFER_REUSES.get();
+        upload_block_no_copy(&device, "fake_model_b.weight", model_b.as_ptr().cast(), byte_length)
+            .expect("model B's own name must still resolve after model A's release");
+        assert_eq!(
+            super::NOCOPY_BUFFER_REUSES.get(),
+            reuses_before + 1,
+            "model B's entry must still be a cache HIT -- it was never released"
         );
     }
 }

@@ -569,6 +569,34 @@ pub fn register_checkpoint_mapping(bytes: &[u8]) {
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
 pub fn register_checkpoint_mapping(_bytes: &[u8]) {}
 
+/// Evicts a dropped checkpoint's own resident weight names from the Metal
+/// driver's device-buffer caches -- see [`metal::release_resident_names`]'s
+/// own doc for the mechanism and why it evicts by name rather than
+/// clearing every cached entry. A no-op unless the Metal backend is
+/// compiled in, matching every other Metal-only knob in this module
+/// ([`mark_resident`], [`register_checkpoint_mapping`]).
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub fn release_resident_names<'name>(names: impl IntoIterator<Item = &'name str>) {
+    metal::release_resident_names(names);
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+pub fn release_resident_names<'name>(_names: impl IntoIterator<Item = &'name str>) {}
+
+/// Unregisters the checkpoint mapping [`register_checkpoint_mapping`]
+/// installed for `bytes` -- see [`metal::unregister_checkpoint_mapping`]'s
+/// own doc for why this is safe to call unconditionally at drop time even
+/// when a later model already superseded the mapping. A no-op unless the
+/// Metal backend is compiled in, matching [`register_checkpoint_mapping`]
+/// above.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub fn unregister_checkpoint_mapping(bytes: &[u8]) {
+    metal::unregister_checkpoint_mapping(bytes);
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+pub fn unregister_checkpoint_mapping(_bytes: &[u8]) {}
+
 #[cfg(feature = "cpu")]
 fn plan_named_cpu(
     program: &[Op],
