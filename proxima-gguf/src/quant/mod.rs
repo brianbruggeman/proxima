@@ -15,6 +15,8 @@
 
 pub mod bf16;
 pub mod f16;
+pub mod iq2_xs;
+pub mod iq3_xxs;
 pub mod iq4_nl;
 pub mod policy;
 pub mod q3_k;
@@ -24,6 +26,7 @@ pub mod q5_1;
 pub mod q5_k;
 pub mod q6_k;
 pub mod q8_0;
+pub mod tables;
 
 use thiserror::Error;
 
