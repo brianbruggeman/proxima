@@ -26969,3 +26969,99 @@ All six rounds' `generated_text` (64 greedy tokens) are md5-identical to this re
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-07 | `perf(omega): q5_k packed-row body ports llama's per-sub-block scale and min` | `Q5_K` `plain_product` path gains its own `push_q5k_ggml_port_body` (verbatim ggml `kernel_mul_mv_q5_K_f32_impl<2,2,32>` port) in place of `q5k_pair_dot`'s per-lane scale/min multiply; `use_ggml_port` codec match extended `Q4K\|Q6K` -> `Q4K\|Q5K\|Q6K` | `ROW361_FAMILY=down` bare cell: A 174.21us/dispatch (matches ROW 361's 174us), B 143.91/143.50us/dispatch (two runs, within 0.7% of llama's 144.5us); oracle 3x A/B/A/B/A/B at 64 tokens: text md5-identical all six rounds, B's `gpu_exec_ms` range below A's in every round | solo run; quiet gate clean throughout (load-1 5.9-9.6, no cargo/nextest/rustc contention) |
+
+## ROW 387 -- scoreboard of measured pieces on main after direct addressing (ROW 351), the Q5_K port (ROW 386), and attention at short context (ROWs 380-385): the pieces are not additive and their differences are not attribution
+
+**Card:** none (measurement-only, docs-only row). **Worktree/branch:** `proxima-wt-r387`, `docs/row-387-pieces`, off `main` at `1371392f` (ROW 386's own commit; `origin/main` at the same sha before this row's push).
+
+**Purpose.** A scoreboard, not a new measurement: four already-instrumented cells run once on today's main, each reported at the tier its own construction actually measures (bare-isolated vs in-program, synthetic-codec vs real checkpoint), against llama's same-session denominator. No cell here is subtracted from another and reported as a "cost" -- the owner's own standing rule (an ablation delta or a sum of parts is not an in-program cost, ROW 359/360's own residual) applies to every row of the table below.
+
+**Quiet gate.** THREE-check gate (names-only `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'`, `pgrep -fl 'while true' | grep -v pgrep`, load-1 < 10) run before every timed invocation, six times total: pgrep empty at all six checks; load-1 failed alone twice (10.24, cleared to 7.46 after one 30s retry; 10.51, cleared to 8.42 after one 30s retry) -- both self-inflicted by this brief's own back-to-back builds, no foreign process observed at any check.
+
+**Cell 1 -- `whole_token_matvec_sequence_bare` arm E, `ROW354_EMITTED_ONLY=1`, production build (`nsg=2`, `OMEGA_PACKED_ROW_NSG_WIDTH` unset), release, `metal,instrument`, median-of-7 (`r387-logs/cell1-arm-e.log`).** This arm synthesizes `Q4_K` for every one of its seven layer families (`ShapeCodec::Q4K` hardcoded at `omega/tests/matvec_roofline_ladder.rs:3596`) and `Q6_K` for the head -- it does NOT use this checkpoint's real mixed codec (`attn_v`/`ffn_down` are really `Q5_K`, ROW 359's own gguf-header read); this is a Q4-only synthetic proxy for the 225-dispatch whole token, not the real mix. Result: `arm=E_production_emitted_body_nsg2_relaxed dispatches=225 bytes=4033388544 median_ms=16.291 min_ms=16.282 max_ms=16.811 cov_pct=1.09 median_gbps=247.58`. This function reports wall time only -- the device-side GPU-time split (`gpu_exec_ms`) that ROW 361 added lives in the separate `ROW361_FAMILY=<name>` single-family code path, not in this whole-token function, so no `gpu_exec` number exists for this cell; wall (16.291 ms, 247.58 GB/s) sits beside ROW 354's own prior-session figure at the same arm (15.845 ms, 254.55 GB/s) -- same order, this session running ~2.8% slower, both inside a `cargo test` process sharing the box with this brief's own back-to-back builds (unlike ROW 354's dedicated session) -- and beside llama's whole-token denominator (17.4764 ms, ROW 359, 17.449 ms this session's own re-measurement below).
+
+**Cell 2 -- real-codec-mix whole-token bare arm: does not exist, not added.** `ROW361_FAMILY` restricts the SAME hand-encoded construction to one family at a time (`omega/tests/matvec_roofline_ladder.rs:3471,3587`); there is no whole-token arm that assembles all eight families in one buffer using each family's REAL codec (`Q4_K`/`Q5_K`/`Q6_K` per ROW 359's gguf-header read) rather than Q4_K-for-all. Per this row's own brief, one is not added. Cell 1's Q4-only number stands as reported, labeled as such -- no real-mix bare whole-token number is claimed.
+
+**Cell 3 -- `row_376_cached_attention_batched::cached_attention_batched_context_40`, isolated (`--exact --test-threads=1`, avoiding the `context_4096` sibling test's substring match on `context_40` and its resulting GPU contention -- a first attempt without `--exact` interleaved both tests and inflated `per_op_timed_kind_validated_us_per_dispatch` median to 481.355us, 16x this cell's clean value, `r387-logs/cell3-attention40.log`), release, `metal,instrument`, one run (`r387-logs/cell3-attention40-isolated.log`).** `context_length=40 dispatches=32 per_op_timed_kind_validated_us_per_dispatch: median=30.101 min=28.320 max=44.395 cov=16.14%`. Median sits inside ROW 385's own three-run band (29.656-31.122 us) from a dedicated session; `32 x 30.101us = 963.2us` (0.963ms) is the bare, per-dispatch-summed attention contribution at this context length -- reported as a bare cell beside the token, NOT subtracted from or added into any whole-token number below.
+
+**Cell 4 -- release+instrument 64-token decode of main, `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (`PROXIMA_MAX_TOKENS=64`, `--exact --ignored --nocapture --test-threads=1`), one run (`r387-logs/cell4-decode64.log`).**
+
+| window | `gpu_exec_ms` range | `gpu_exec_ms` mean | `step_wall_ms` range | `step_wall_ms` mean |
+| --- | --- | --- | --- | --- |
+| steps 3..7 | 20.338 - 20.535 | 20.442 | 21.045 - 21.169 | 21.113 |
+| steps 32..63 excl. step 34 | 19.892 - 20.785 | 20.385 | 20.711 - 21.535 | 21.096 |
+
+Text fingerprint per the rule: `grep -h -o 'generated_text="[^"]*"' r387-logs/cell4-decode64.log | md5` = **`84c7519e6bffea98476fefd9d545a0fc`** -- matches this document's own known value exactly. First 60 characters: `"Here is a simple Python function that returns the nth Fib"`.
+
+Step-34 line (`r387-logs/cell4-decode64.log`, the reproducible bucket-boundary step ROW 341/347/352/364 already name): `pipeline_compile_ms=0.385125 prepare_ms=11.204291` (also: `pipeline_hits=454 pipeline_misses=1 gpu_exec_ms=20.84675`).
+
+Step-3 per-kind dispatch line (`PROXIMA_METAL_OP_PROFILE_STEP=3`, a separate diagnostic invocation of `bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time`, `r387-logs/cell4-step3-perkind.log`, one command buffer per `BoundOp` instead of one for the whole step):
+
+| kind | op_count | gpu_ms | gpu_ns_per_op |
+| --- | --- | --- | --- |
+| cached_attention | 32 | 0.834483 | 26,077.59 |
+| constant | 2 | 0.007749 | 3,874.50 |
+| elementwise | 129 | 1.427071 | 11,062.57 |
+| iota | 2 | 0.007248 | 3,624.00 |
+| reduce-cooperative | 66 | 1.915972 | 29,029.88 |
+| reduce-packed-row-blocked | 224 | 18.168964 | 81,111.45 |
+
+Dispatch counts sum to 455, matching `encode_dispatch_calls=455` in the same step's `token_breakdown_metal` line. This per-op-timed diagnostic path (one command buffer per op) is itself a different instrument than the production batched path steps 3..7/32..63 above measure -- its `gpu_ms` sum here (22.36ms) is not compared against the batched `gpu_exec_ms` figures as a decomposition; ROW 358 already named that mismatch's mechanism (isolated/per-op timing does not compose additively into the batched number).
+
+**llama-bench, same session (ROW 359's own command, `r387-logs/llama-bench.log`):** `llama-bench -m openchat-3.5-1210.Q4_K_S.gguf -p 0 -n 32 -r 5 -b 2048 -ub 512 -t 8 -ngl 99 -o md` -> **57.31 +/- 0.58 t/s** (CoV 1.01%) = **17.449 ms/token**.
+
+**Table -- the measured pieces, each labeled with its construction. Not additive; no cell's difference from another is attributed as a cost.**
+
+| piece | value | construction |
+| --- | --- | --- |
+| whole-token `gpu_exec`, in-program, steady state (32..63 excl. 34) | mean 20.385 ms, range 19.892-20.785 | production batched path, real openchat checkpoint, real mixed codec, ONE run |
+| whole-token `step_wall`, in-program, steady state (32..63 excl. 34) | mean 21.096 ms, range 20.711-21.535 | same run, CPU-inclusive wall bracket around the same step |
+| llama's whole token, same session | 17.449 ms | `llama-bench`, `tg32`, 5 repeats, CoV 1.01%, same checkpoint/quant |
+| bare matvec sequence, one buffer | median 16.291 ms (247.58 GB/s), CoV 1.09% | arm E, emitted body, `nsg=2`, **Q4-only synthetic** for all 7 families, no attention/no KV, median-of-7 |
+| bare attention, per dispatch x32 | median 30.101 us/dispatch, x32 = 0.963 ms | isolated `row_376` test, context 40, kind-validated GPU time, ONE run |
+| dispatch count by kind, step 3 (in-program) | attention 32, constant 2, elementwise 129, iota 2, reduce-cooperative 66, reduce-packed-row-blocked 224 (sum 455) | per-op-timed diagnostic, one command buffer per op |
+
+**Explicit statement (owner's own rule, restated here because this row's whole purpose is to avoid violating it): these pieces are not additive, and no difference between any two of them is reported as an attributed cost.** The bare matvec sequence (16.291 ms) is a Q4-only synthetic proxy, not a measurement of the real checkpoint's mixed-codec token; the bare attention cell (0.963 ms for 32 dispatches) is isolated and, per ROW 359/360's own already-established mechanism, isolated per-shape/per-kind sums do not compose into the real shared-sequence token's cost (ROW 360's own sum-vs-token gap, 42.0% at the time, is the demonstrated case of exactly this failure mode). Subtracting the bare sequence from the in-program `gpu_exec` and calling the remainder "attention + overhead" would repeat ROW 359's own retracted framing; this row does not do that arithmetic.
+
+**Ratios, ours/llama, same-session numbers only:**
+
+- `gpu_exec` (in-program, steady state, mean of steps 32..63 excl. 34): 20.385 / 17.449 = **1.168x**.
+- `step_wall` (in-program, steady state, mean of steps 32..63 excl. 34): 21.096 / 17.449 = **1.209x**.
+
+**Residual, named not hidden.** (1) Cell 1's arm ran inside a `cargo test` process sharing the box with this brief's own preceding and following builds (unlike ROW 354's dedicated-session figure), so its 2.8% slower wall time against ROW 354's own number is plausibly session/build contention, not investigated further under this row's budget. (2) No real-mix whole-token bare arm exists (cell 2) -- closing that gap (a whole-token bare construction using each family's real codec) is a future row's harness addition, not attempted here. (3) Cell 3's `batched_us_per_dispatch` (mean 6090.076us) is reported nowhere in the table above in favor of `per_op_timed_kind_validated_us_per_dispatch` (median 30.101us) -- the two are different aggregates over the same run (the former includes host-side batching/readback overhead amortized over 32 dispatches, ROW 376's own two-metric convention), and mixing them into one number would misstate which one ROW 385's own bar compares against. (4) The step-3 per-op-timed diagnostic (one command buffer per `BoundOp`) is a structurally different measurement than the batched production path the gpu_exec/step_wall table uses -- its own `gpu_ms` sum (22.36ms, computed here only for this residual note, not claimed as a table row) is not compared against the batched 20.385ms mean as a decomposition, per ROW 358's own already-named non-composability. (5) One run each for cells 3 and 4 (per the brief's own "one run" instruction for cell 3, and budget for cell 4) -- no CoV is reported for either; cell 1 and llama-bench carry their own multi-repeat CoV (1.09%, 1.01% respectively).
+
+**Gates.** Docs-only row; no functional source change, no harness change (all four cells use already-shipped env-gated surfaces: `ROW354_EMITTED_ONLY`, the existing `row_376_cached_attention_batched` test, the existing `bind::real_openchat_file` tests). Per this brief's own instruction ("Gates: none unless the harness changed"), no clippy/nextest gate applies. `git status --porcelain` in this worktree, before this commit, shows only this file's edit and the untracked `r387-logs/` review directory (paths under `/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6e203711-bd50-48cc-9ade-409668bdafdd/scratchpad/r387-logs/`, outside this worktree, not staged).
+
+**Re-prove command (each cell):**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main (>= this row's commit)
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never ROW354_EMITTED_ONLY=1 \
+  cargo test -p omega --release --features metal,instrument --test matvec_roofline_ladder \
+  -- --ignored --nocapture whole_token_matvec_sequence_bare
+
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --release --features metal,instrument --test row_376_cached_attention_batched \
+  -- --ignored --nocapture --exact --test-threads=1 cached_attention_batched_context_40
+
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=64 \
+  cargo test -p proxima-model-interop --release --features metal,instrument --lib \
+  -- --exact --ignored --nocapture --test-threads=1 \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p proxima-model-interop --release --features metal,instrument --lib \
+  -- --exact --ignored --nocapture --test-threads=1 \
+  bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time
+
+cd /Users/brianbruggeman/repos/others/llama.cpp
+GGUF=/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf
+./build/bin/llama-bench -m "$GGUF" -p 0 -n 32 -r 5 -b 2048 -ub 512 -t 8 -ngl 99 -o md
+```
+(expected: cell 1 near `median_ms=16.29`; cell 3 near `median=30.1`us; cell 4 fingerprint `84c7519e...`, `gpu_exec_ms` near 20.4ms at both windows; llama near 57 t/s.)
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | docs-only: `docs(tensor): row 387 measured pieces after the 2026-09-06/07 landings` | Scoreboard of four already-instrumented cells (Q4-only-synthetic bare whole-token sequence 16.291ms/247.58GB/s; bare attention 30.101us/dispatch x32; in-program `gpu_exec`/`step_wall` at steps 3..7 and 32..63 excl.34; step-3 per-kind dispatch counts; llama-bench 57.31 t/s = 17.449ms/token) reported side by side with an explicit non-additivity/non-attribution statement; ratios ours/llama `gpu_exec` 1.168x, `step_wall` 1.209x (steady-state mean) | cell 1 CoV 1.09% (7 samples); cell 3, 4 one run each; llama-bench CoV 1.01% (5 repeats) | THREE-check gate PASSED at all 6 timed invocations; load-1 alone failed twice (10.24->7.46, 10.51->8.42), each cleared after one 30s retry, both self-inflicted by this brief's own builds |
+
