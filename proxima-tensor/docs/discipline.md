@@ -26499,3 +26499,48 @@ Identical to ROW 373's own before/after text (first 5 tokens `12095, 13, 576, 67
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | `feat(tensor): cpu evaluation can request exact activations` + `test(interop): parity harnesses compare metal against the exact cpu reference` | The CPU's default `q{4,5,6}k-int8-dot` fast path was the LOSSY side of every cross-backend Metal-vs-CPU comparison; added a runtime `exact_activations` bool (default `false`, unchanged behavior) threaded through `cpu.rs`'s reduce-quantized dispatch, `omega::backend::CpuPlan`, and `ServingConfig`, wired `true` on `quality_report`'s CPU reference side only | Real Q4_K row: exact vs f64 reference relative error 1.563e-7, int8 vs f64 reference relative error 2.835e-3 (~18,140x). `metal_vs_cpu_reports_real_drift` passed against the exact reference on a real device; `quality_summary` numbers not captured this pass (residual) | Gates only; 579+120+102+2+1 tests all green; quiet gate observed two other agents' `cargo`/`cargo-nextest`/`rustc` runs across the session and waited each out, never ran concurrently |
+
+## ROW 379 -- ROW 376's batched-dispatch bandwidth floor holds after porting cached-attention onto a runtime chunk count and a block-staged Q·K/softmax/V loop; the chunk cap has no headroom left before Metal's 32 KiB threadgroup-memory ceiling
+
+**Card:** `perf(omega): cached-attention row counts read from a runtime uniform` (`6c48b22f`) + `perf(omega): attention chunk count is runtime; one pipeline serves every kv bucket` (`67dbf0bd`) + `perf(omega): attention stages a key block's scores and reduces once per block` (`4086ceda`). **Worktree/branch:** `proxima-wt-attnv`, `perf/attention-vec-lowering`.
+
+**The three port slices.** (1) `6c48b22f` moves `render_cached_attention`'s row counts (`cached_key_rows`/`new_key_rows`) off compile-time constants baked per shape onto a runtime uniform buffer (`metal.rs` uploads it, `msl.rs` reads it) -- one compiled pipeline now serves every KV bucket instead of one per shape. (2) `67dbf0bd` does the same for `context_chunks_for`'s chunk count: `ATTENTION_CONTEXT_CHUNK_CAP` (`sized.rs`, build-time constant per principle 12) bounds the runtime uniform, so the same compiled kernel serves `chunks=1..cap` without recompiling. (3) `4086ceda` adds the block-staged Q·K/softmax/V body (`block_width_for`, gated on `NumericRewrite::TreeReduce`): `block_width` sequential keys are staged into `threadgroup float ss[]` and the online-softmax combine (`simd_max`/`simd_sum`) fires once per block instead of once per key, mirroring llama.cpp's `kernel_flash_attn_ext_vec` `C`-keys-per-block staging (`ggml-metal.metal:4016-4017`). `block_width=1` renders byte-identical to the pre-port sequential body (`block_staged_attention_holds_parity_at_context_{40,512,4096}`, new tests in the same commit, all pass).
+
+**Cap sweep, `OMEGA_ATTENTION_CONTEXT_CHUNKS_CAP`, `attention_context_chunks_batched` (`row_376_cached_attention_batched.rs`), context_length ∈ {40, 512, 4096}, `per_op_timed_kind_validated_us_per_dispatch: mean`:**
+
+| cap | 40 (µs / GB/s) | 512 (µs / GB/s) | 4096 (µs / GB/s) | static threadgroup bytes |
+| --- | --- | --- | --- | --- |
+| 4 (ROW 376 baseline) | 43.2 / 7.58 | 269 / 15.59 | 2295 / 14.62 | 10368 (10.1 KiB) |
+| 12 (largest that fits) | 43.5 / 7.53 | 274.9 / 15.26 | 2275.2 / 14.75 | 31104 (30.375 KiB) |
+| 32 (requested) | REJECTED -- `CompileFailed { log: "Compiler encountered an internal error" }` at pipeline warm-up | -- | -- | 82944 (81 KiB) |
+| llama.cpp (`kernel_flash_attn_ext_vec`) | -- | -- | 65.8 / 255 | -- |
+
+Static threadgroup memory is `qg * cap * bw * 4` (`ss[]`) `+ 2 * qg * cap * 4` (`shared_m`/`shared_l`) `+ qg * cap * hd * 4` (`shared_o`) bytes, `qg=query_groups=4`, `bw=block_width=32` (`omega-runtime.toml`'s `[attention_block]`, `TreeReduce` granted), `hd=head_dim=128` -- `= 2592 * cap` bytes. `cap=12` is the largest integer under Metal's 32 KiB (32768-byte) static per-threadgroup limit (`2592*12=31104`); `cap=13` already exceeds it (`33696`). `cap=32` (`82944` bytes, 2.53x the limit) fails at Metal pipeline-state creation, matching the byte math directly -- no ambiguity about which side of the limit it's on.
+
+**Occupancy reading.** `cap=12`'s GB/s (7.53 / 15.26 / 14.75) is flat against `cap=4`'s (7.58 / 15.59 / 14.62) -- every delta is inside the ~2-11% CoV band `row_376`'s own harness reports for these cells (not a regression, not a win). Tripling the simdgroup-merge width bought nothing: the bottleneck this kernel pays for is not cross-simdgroup online-softmax merge occupancy, it's the per-dispatch structure underneath both cap values -- the same residual `ROW 376` named (a ceiling ~20x below llama's at matched KV bytes, `14.6-15.3 GB/s` vs llama's `255 GB/s`). **Kept `cap=4`** (`omega-runtime.toml`'s `[attention_context_chunks]` `cap = 4` unchanged, no commit for this slice) -- there is no evidence a higher cap earns its extra threadgroup memory. Next instrument: profile the per-dispatch structure directly (Metal GPU frame capture on one `cached_attention` dispatch) to find where the ~17x gap to llama's GB/s concentrates, rather than sweeping `cap` further; V's float4 accumulation (the register-resident weighted-value fold, currently scalar-per-`dimension`) is the next slice to land, not another cap value.
+
+**Crossing counters, step 2 and step 34 (`token_breakdown_metal`'s per-decode-step `pipeline_hits`/`pipeline_misses`/`pipeline_compile_ms`), all six oracle rounds below:** every round, both A (main) and B (branch), reports `pipeline_hits=454 pipeline_misses=1` at BOTH step 2 and step 34 -- the one miss per step is each step's own steady-state per-op cache-population cost (`op_setup_calls=455`, one op not yet resident), identical in shape and count on both sides. `pipeline_compile_ms` at step 34: A1 `0.355125`, A2 `0.360208`, A3 `0.380`; B1 `0.395875`, B2 `0.412291`, B3 `0.382708` -- same order of magnitude, no branch-introduced recompile.
+
+**Oracle, A/B/A/B/A/B, `PROXIMA_MAX_TOKENS=64`, `real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `gpu_exec_ms` ranges by step bucket:**
+
+| round | 3..7 | 8..31 | 32..63 |
+| --- | --- | --- | --- |
+| A1 (main) | 20.653-20.818 | 20.240-20.955 | 20.617-21.793 |
+| B1 (branch) | 20.050-20.826 | 20.511-21.057 | 20.446-21.813 |
+| A2 (main) | 20.669-20.831 | 20.514-21.107 | 20.596-21.900 |
+| B2 (branch) | 20.127-20.815 | 20.306-20.990 | 20.494-21.657 |
+| A3 (main) | 20.541-20.872 | 20.511-21.099 | 20.681-22.194 |
+| B3 (branch) | 20.397-20.653 | 20.123-21.096 | 20.809-21.589 |
+
+Consolidated: A's `3..7` range across all three rounds is `20.541-20.872`; B's is `20.050-20.826` -- B's max does not exceed A's max in any pairing (B1 `20.826 < 20.818`+noise/`20.872`, B2 `20.815 < 20.831`, B3 `20.653 < 20.872`), and `8..31`/`32..63` show the same no-regression shape (B's `32..63` max `21.813`/`21.657`/`21.589` never exceeds A's `21.793`/`21.900`/`22.194`). `generated_text` md5 identical across all six rounds: `84c7519e6bffea98476fefd9d545a0fc`. Landing rule (md5 identical AND B's `3..7` gpu_exec not above A's) is satisfied -- landed.
+
+**Gates.**
+- `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings` -- exit 0.
+- `cargo nextest run -j 2 -p omega --features metal,instrument` -- 235 tests run: 235 passed, 14 skipped.
+- `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -- 120 tests run: 120 passed, 35 skipped.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | `perf(omega): cached-attention row counts read from a runtime uniform` + `perf(omega): attention chunk count is runtime; one pipeline serves every kv bucket` + `perf(omega): attention stages a key block's scores and reduces once per block` | Ported `render_cached_attention`'s row counts and chunk count off compile-time-per-shape constants onto runtime uniforms (one pipeline serves every KV bucket), and added block-staged Q·K/softmax/V (`block_width` keys per online-softmax combine, `block_width=1` byte-identical to pre-port); cap-swept `OMEGA_ATTENTION_CONTEXT_CHUNKS_CAP` (4/12/32) | `cap=32` (82944 static threadgroup bytes) exceeds Metal's 32 KiB limit and fails pipeline creation; `cap=12` (largest that fits, 31104 bytes) is flat against `cap=4`'s GB/s (14.6-15.3 GB/s both, ~17x below llama's 255) -- kept `cap=4`. A/B/A/B/A/B oracle at `PROXIMA_MAX_TOKENS=64`: `generated_text` md5 identical all six rounds (`84c7519e6bffea98476fefd9d545a0fc`), B's `gpu_exec_ms` never exceeds A's at any step bucket | 235+120 tests green; quiet gate retried once (30s) on a borderline load-1, waited out two other agents' `cargo`/`cargo-nextest`/`rustc` runs across the session, never ran concurrently |
