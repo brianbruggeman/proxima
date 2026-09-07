@@ -3794,6 +3794,32 @@ mod numeric_policy_construction_tests {
         }
     }
 
+    /// The fix for the two bugs ROW 4309 (this file) found: a
+    /// contraction-only policy used to be rounded UP to `Relaxed` (which
+    /// also grants `reassociation`), and a `signed_zero`-only policy up to
+    /// `Fast` (which grants everything). Every one of the 32 permission
+    /// subsets must instead map to the WIDEST mode whose own permission set
+    /// ([`metal_math_mode_as_numeric_policy`]) is a SUBSET of what the
+    /// policy actually grants ([`NumericPolicy::grants`]) -- never wider.
+    #[test]
+    fn numeric_policy_projection_never_grants_more_than_the_policy_allows() {
+        for bits in 0u8..32 {
+            let policy = NumericPolicy::bit_exact()
+                .with_contraction(bits & 0b0000_0001 != 0)
+                .with_reassociation(bits & 0b0000_0010 != 0)
+                .with_nan_assumptions(bits & 0b0000_0100 != 0)
+                .with_signed_zero(bits & 0b0000_1000 != 0)
+                .with_approx_functions(bits & 0b0001_0000 != 0);
+            let mode = super::numeric_policy_as_metal_math_mode(policy);
+            let granted = metal_math_mode_as_numeric_policy(mode);
+            assert!(
+                policy.grants(granted),
+                "subset {bits:05b} projected to {mode:?}, whose own permission set \
+                 {granted:?} exceeds what the policy {policy:?} actually grants"
+            );
+        }
+    }
+
     fn identity_program() -> (Vec<Op>, proxima_tensor::NodeId) {
         let mut program = Vec::new();
         let source = append(
@@ -4293,23 +4319,25 @@ impl MathMode {
 /// richer, orthogonal question: which algebra `bind`/the emitter are
 /// permitted to choose in the first place (chunk count, contraction,
 /// reduction order). [`MathMode`] is this narrower projection, not a
-/// duplicate ladder. This rounds UP to the nearest mode that never
-/// under-grants what `policy` actually permits, never down (a caller who
-/// asked for less than a mode's floor would silently get more): any
-/// permission at or above `contraction`/`reassociation` needs at least
-/// `Relaxed`; `nan_assumptions`/`signed_zero`/`approx_functions` need
-/// `Fast`, since `Safe`/`Relaxed` both preserve NaN/inf/zero per Apple's own
-/// doc (this type's own doc, above). See [`metal_math_mode_as_numeric_policy`]
-/// for the inverse.
+/// duplicate ladder. This selects the WIDEST mode whose own permission set
+/// ([`metal_math_mode_as_numeric_policy`]) is a SUBSET of `policy` --
+/// [`NumericPolicy::grants`] is the subset check, the same one
+/// [`Plan::set_math_mode`] already uses to refuse a widening request. It
+/// never rounds up past what `policy` actually grants: a `contraction`-only
+/// policy does not grant `llama_relaxed()` (which also needs
+/// `reassociation`), so it stays `Safe`; only a policy granting BOTH
+/// `contraction` and `reassociation` gets `Relaxed`, and only one granting
+/// every permission [`NumericPolicy::fast`] names gets `Fast`. See
+/// [`metal_math_mode_as_numeric_policy`] for the inverse.
 ///
 /// A free function, not an inherent `impl NumericPolicy` -- `NumericPolicy`
 /// is defined in `proxima-tensor`, and the orphan rule forbids an inherent
 /// `impl` for a foreign type from this crate.
 #[must_use]
 const fn numeric_policy_as_metal_math_mode(policy: NumericPolicy) -> MathMode {
-    if policy.approx_functions || policy.nan_assumptions || policy.signed_zero {
+    if policy.grants(NumericPolicy::fast()) {
         MathMode::Fast
-    } else if policy.contraction || policy.reassociation {
+    } else if policy.grants(NumericPolicy::llama_relaxed()) {
         MathMode::Relaxed
     } else {
         MathMode::Safe
