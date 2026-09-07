@@ -1972,6 +1972,13 @@ required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "run
 name = "gguf_generate"
 path = "examples/gguf_generate.rs"
 
+# proves LoadedModel::generate_streaming's on_token callback against a real
+# checkpoint: same dev-dependency shape as gguf_generate above, no
+# required-features.
+[[example]]
+name = "stream_generate"
+path = "examples/stream_generate.rs"
+
 # the `units` binary bundles 15 test modules into one link target (see
 # tests/units.rs); 3 of them (scenario_smoke, settings_to_app,
 # thread_local_composition) use #[proxima::test], which only exists behind
