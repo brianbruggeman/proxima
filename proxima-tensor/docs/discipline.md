@@ -26085,3 +26085,85 @@ for (long r = (long)lane; r < u.reduction_total; r += 256) {
 **Residual, named not hidden: the release-oracle A/B (real openchat decode, `PROXIMA_MAX_TOKENS=64`, text-identity md5 against `84c7519e6bffea98476fefd9d545a0fc`) and the 8-token `PROXIMA_METAL_OP_PROFILE_STEP=3` per-kind dispatch line this landing's own brief called for were NOT run.** The box carried sustained load-1 15-32 from other agents' `cargo`/`rustc`/GPU processes for the full session (three-check quiet gate never cleared at the release-build/measurement step, only briefly at the debug-gate steps above), and this crate's own gates plus Part 2's correctness fix took priority within the session's time budget. Since Part 1 (canonical mint) and Part 2 (NumericPolicy gating) are both behavior-preserving under every current production call path (Part 2's own residual above: no caller opts above `BitExact` today, so neither fix changes any value a real caller observes), the debug-mode whole-crate suites above are the load-bearing evidence for landing; the release-mode wall-clock oracle remains an owed regression check, not a correctness gate.
 
 **Gates (final, after both fixes).** `cargo check -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion`, exit 0. `cargo clippy -p proxima-tensor --all-targets --features cached-attention-streaming,reduce-epilogue-fusion -- -D warnings`, exit 0. `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo nextest run -j 2 -p proxima-tensor --features cached-attention-streaming,reduce-epilogue-fusion` -> 573 tests run, 573 passed, 10 skipped (includes the 5 new tests: 1 structural graft test + 2 numeric-policy counterexample tests + 2 `numeric.rs` ladder tests). `cargo nextest run -j 2 -p omega --features metal,instrument` -> 221 tests run, 221 passed, 11 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` -> 117 tests run, 117 passed, 35 skipped. `cargo nextest run -j 2 -p proxima-model-interop --features std` -> 100 tests run, 100 passed, 25 skipped. `cargo check -p proxima-tensor --no-default-features --features alloc`, exit 0.
+
+## ROW 372 -- a broadcast epilogue's loop-invariant steps (the fold scalar, plus any epilogue operand whose stride is zero across the reduction axes) are hoisted out of the per-lane write loop; AIR-confirmed, correctness held, whole-token oracle NOT run
+
+**Card:** `perf(omega): broadcast epilogue hoists loop-invariant steps out of the write loop`. **Worktree/branch:** `proxima-wt-hoist`, `perf/hoist-epilogue-invariants`.
+
+**Question this row answers.** ROW 370 diagnosed, but did not fix, the fused rmsnorm broadcast epilogue's slowdown: `push_broadcast_epilogue_write`'s per-lane loop (16 iterations at width 256 for a 4096-wide row) re-declared the whole six-step tail (`mean_square`/`+eps`/`sqrt`/`reciprocal`/`x*inv_rms`/`*gamma`) on every iteration, though four of the six steps depend only on the fold scalar and the two scalar-broadcast operands (`inv_dim`, `eps`) -- values that never change across the loop. This row hoists those steps.
+
+**The partition rule (landed in the shared step-declaration walk, `omega/src/epilogue.rs`, not msl.rs alone).** `epilogue::declare_steps_partitioned` (new function, `declare_steps` itself untouched) classifies each `ComposedBody` step as loop-invariant iff every one of its args is either `StepArg::Operand(index)` where `index` is the fold's own scratch slot OR an epilogue operand whose `Layout::stride(dim) == 0` for every dim in the loop's `reduce_dims` (a genuine broadcast operand, never a gathered one -- `Lookup::is_some()` operands are conservatively treated as per-element), or `StepArg::Step(k)` where step `k` is itself already classified invariant. Invariant steps are emitted once, into the caller's `source` before the loop; per-element steps are emitted into a second buffer the caller appends inside the loop, after that iteration's own per-element operand reads. `msl.rs::push_broadcast_epilogue_write` is the only current caller (WGSL/CUDA have no broadcast-epilogue write loop today -- `push_broadcast_epilogue_write` does not exist in `wgsl.rs`/`cuda.rs`; confirmed by grep, zero hits -- so the classifier sits in `epilogue.rs` for when they grow one, not because it is used there yet). The plain (shape-preserving) elementwise epilogue path (`push_body_steps`/`push_epilogue_body_steps`'s own non-broadcast callers) is unaffected: one thread computes one output element with no per-lane loop, so there is nothing to hoist -- `declare_steps` (unchanged) still serves it.
+
+A small helper, `push_epilogue_operand_reads` (factored out of the pre-existing `push_reduce_epilogue_write`, itself unchanged in behavior), takes an operand-index iterator so the broadcast write can call it twice: once before the loop for the invariant subset, once inside for the rest.
+
+**MSL before (reconstructed from ROW 370's own literal quote, recompiled to confirm placement) / after (the real `omega::msl::emit` output for the same `[1,4096]` rmsnorm chain, `entry=omega_reduce_r2_o1_n2_multiply_add_zero_epi4_fused_identity_o4__multiply_s0_o1__add_s1_o2__square_root_s2__reciprocal_s3__multiply_o0_s4__multiply_s5_o3`):**
+
+Before (all seven `epi_stepN` and both scalar operand reads inside the loop, ROW 370's own quoted text):
+```
+for (long r = (long)lane; r < u.reduction_total; r += 256) {
+    ... coordinate + out_offset ...
+    float epi_scratch[5];
+    ... epi0(x)/epi1(inv_dim)/epi2(eps)/epi3(gamma) reads, every one recomputed per r ...
+    float epi_step0 = epi_scratch[4];
+    float epi_step1 = (epi_step0 * epi_scratch[1]);   // * inv_dim
+    float epi_step2 = (epi_step1 + epi_scratch[2]);   // + eps
+    float epi_step3 = sqrt(epi_step2);
+    float epi_step4 = (1.0f / epi_step3);
+    float epi_step5 = (epi_scratch[0] * epi_step4);   // x * inv_rms
+    float epi_step6 = (epi_step5 * epi_scratch[3]);   // * gamma
+    out[out_offset] = epi_step6;
+}
+```
+
+After (this row, the actual `emit()` output):
+```
+float epi_scratch[5];
+long epi_off1 = u.epilogue_operand_base[1];
+epi_off1 += full_coord[0] * u.epilogue_operand_strides[1][0];
+epi_off1 += full_coord[1] * u.epilogue_operand_strides[1][1];
+epi_scratch[1] = epi1[epi_off1];                      // inv_dim, read ONCE
+long epi_off2 = u.epilogue_operand_base[2];
+epi_off2 += full_coord[0] * u.epilogue_operand_strides[2][0];
+epi_off2 += full_coord[1] * u.epilogue_operand_strides[2][1];
+epi_scratch[2] = epi2[epi_off2];                      // eps, read ONCE
+epi_scratch[4] = reduced;
+float epi_step0 = epi_scratch[4];
+float epi_step1 = (epi_step0 * epi_scratch[1]);
+float epi_step2 = (epi_step1 + epi_scratch[2]);
+float epi_step3 = sqrt(epi_step2);
+float epi_step4 = (1.0f / epi_step3);                 // inv_rms, computed ONCE
+for (long r = (long)lane; r < u.reduction_total; r += 256) {
+    ... coordinate + out_offset (unchanged) ...
+    long epi_off0 = u.epilogue_operand_base[0];
+    epi_off0 += full_coord[0] * u.epilogue_operand_strides[0][0];
+    epi_off0 += full_coord[1] * u.epilogue_operand_strides[0][1];
+    epi_scratch[0] = epi0[epi_off0];                  // x, per element
+    long epi_off3 = u.epilogue_operand_base[3];
+    epi_off3 += full_coord[0] * u.epilogue_operand_strides[3][0];
+    epi_off3 += full_coord[1] * u.epilogue_operand_strides[3][1];
+    epi_scratch[3] = epi3[epi_off3];                  // gamma, per element
+    float epi_step5 = (epi_scratch[0] * epi_step4);
+    float epi_step6 = (epi_step5 * epi_scratch[3]);
+    out[out_offset] = epi_step6;
+}
+```
+`inv_dim`/`eps` (rank-0, every stride 0) and the fold scalar are hoisted; `x`/`gamma` (stride-1 along the reduction axis) stay in the loop -- the same shape llama.cpp's own `kernel_rms_norm` takes (compute `scale` once, broadcast, then a per-element write loop with no further scalar work).
+
+**AIR-level mechanism proof (owner directive, this row addresses ROW 370's residual (3) and the coordinator's concern that repeated `sqrt` execution was never confirmed).** Both the reconstructed BEFORE kernel and the real AFTER kernel (`xcrun metal -S -emit-llvm` on the single-kernel-extracted `.metal` source, unmodified `omega::msl::emit` output) were compiled and their LLVM IR basic blocks read directly:
+
+- **Before:** block `138` (`preds = %95, %138` -- a back-edge, i.e. the loop body, executed once per iteration) contains `%161 = tail call fast float @air.fast_sqrt.f32(...)` and `%163 = fdiv fast float ...` (the reciprocal) alongside the per-element loads and the store.
+- **After:** block `94` (`preds = %92` only -- no back-edge, executed exactly once per lane) contains the `air.fast_sqrt.f32` call and the `fdiv`, then `br label %142` enters the real loop body (`142`, `preds = %94, %142`), which contains only address arithmetic (`srem`, `mul`, `add`), two loads (`x`, `gamma`), two `fmul fast`, and the store -- no transcendental, no `fdiv`.
+
+This is a MEASURED, compiled-code fact (not inferred from source text): `sqrt`/`fdiv` execute once per lane in the fixed kernel, sixteen times per lane before it.
+
+**Bare wall-clock: NOT trustworthy this slice, reported honestly.** Two `rmsnorm_fused_epilogue_cost.rs` runs were attempted (release, `--test-threads=1`). The first (before this row's second iteration, only the fold-scalar step hoisted -- an intermediate, since-corrected state) ran at 17-35% CoV; the second (after the operand-stride classifier landed, the true fix) ran at 21-143% CoV because another agent's `proxima_model_interop`/`q4k_row767_activation_probe` processes (424% and 317% CPU) started mid-run and load-1 spiked to 28 immediately after. Per the quiet-gate discipline (CoV this high "decides nothing"), **no wall-clock recovery number is reported** -- the AIR read above is the mechanism evidence for this row, not a bare-arm wall time.
+
+**Correctness (N, not a metric).** `cargo nextest run -j 2 -p omega --features metal,instrument -E 'test(epilogue) or test(reduce)'`: **23 tests run, 23 passed, 0 failed**, including `reduce_epilogue_fusion_parity::the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width` ([7,4096] Metal-vs-CPU) and `the_fused_epilogue_is_byte_identical_across_twenty_dispatches`. `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`: exit 0.
+
+**Residuals, named not hidden -- this row does NOT land on main.** (1) The whole-token A/B oracle (main `90c5e68` vs this branch, 64 tokens, 3 rounds A/B/A/B/A/B, `gpu_exec` ranges + md5 identity) the landing brief requires was **not run** -- the box was contended by other agents' cargo/rustc/GPU processes for the majority of this slice's time budget (repeated `pgrep -x cargo`/`-x rustc`/`-x cargo-nextest` and the three-check quiet gate all returned non-empty across most of the window; `uptime` load-1 peaked at 28.23), and a hard 30-minute cap on this slice did not leave room for a from-scratch release build of a detached `main` worktree plus six timed decode rounds once the box did quiet. Per the coordinator's explicit correction: report "recovering the whole-token loss" ONLY from oracle ranges, never from bare cells -- **no such claim is made here.** (2) `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` and `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument` (the two other capped gates) were **not run** for the same reason (sustained `cargo`/`rustc` contention from other agents); `msl.rs` is gated on `feature = "alloc"`, not `feature = "metal"` (`omega/src/lib.rs:52`), so the new code compiles under `wgpu-backend,cuda` regardless of whether Metal is enabled -- this is read from the `#[cfg]` attribute, not assumed, but the gate itself was not executed. (3) The "PRODUCTION pair" correction (bind the unfused arm with chain fusion on, broadcast fusion off, rather than the extra-output-root trick `rmsnorm_fused_epilogue_cost.rs` already uses) was not applied -- the harness is unchanged from ROW 368/370.
+
+**Gates run.** `cargo check -p omega --features metal,instrument`, exit 0 (three times, across the two iterations of the fix). `cargo nextest run -j 2 -p omega --features metal,instrument -E 'test(epilogue) or test(reduce)'`: 23 passed, 0 failed. `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`, exit 0. `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings`: NOT RUN (residual, above). `cargo nextest run -j 2 -p proxima-model-interop --features metal,instrument`: NOT RUN (residual, above).
+
+**Requested but not available: per-round `pipeline_compile_ms`/`pipeline_hits`/`pipeline_misses` at step 34.** The coordinator asked for these six numbers (three rounds x two arms) from the 3-round 64-token whole-token A/B this row's own oracle rule requires. That oracle was not run (residual (1) above) -- the box stayed contended (`cargo`/`cargo-nextest`/`rustc` processes from other agents, `uptime` load-1 14.6-28.2) for effectively the entire 30-minute slice, and no A/B round was ever started, so there is no `token_breakdown_metal` log line to read these fields from. Reporting a number here would be exactly the fabrication principle 18 rules out; the honest answer is that this data point requires the oracle run named as a residual, not six additional numbers on top of a run that did not happen.
+
+**Disposition (this row, pending update below).** The paragraphs above describe the PRIOR session's attempt on this branch, kept verbatim as history; the landing session that follows re-runs the missing gates and the oracle before landing. See the addendum below for what that session actually measured.
