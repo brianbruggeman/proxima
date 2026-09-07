@@ -3862,8 +3862,32 @@ fn append_mistral_single_range_cached_layer(
     k_even_cache: NodeId,
     k_odd_cache: NodeId,
     v_cache: NodeId,
+    qk_norm: bool,
     gate_before_up: bool,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
+    // `qk_norm` names TWO omissions this function has relative to its
+    // two-range sibling `append_mistral_cached_layer`, not one: (1) no
+    // `attn_q_norm.weight`/`attn_k_norm.weight` inputs and no
+    // `rmsnorm_per_head` call, and (2) below, `rotated_q_even`/`rotated_k_new_even`
+    // hard-code `RopePairing::Interleaved` unconditionally, where the
+    // two-range sibling switches to `RopePairing::SplitHalf` exactly when
+    // `qk_norm.is_some()` (`append_mistral_cached_layer`'s own comment: every
+    // checkpoint this crate binds with `attn_q_norm.weight` present is the
+    // NEOX/split-half family, so the same presence check that gates QK-norm
+    // also selects the matching RoPE pairing). A qk-norm checkpoint routed
+    // through this builder would get neither its per-head norm nor its
+    // correct RoPE pairing -- rejecting the whole checkpoint class here is
+    // the fix for the class defect (a builder silently omitting an
+    // architecture feature) rather than the caller
+    // (`build_single_range_program`) working around it with a flag list;
+    // see ROW 372.
+    if qk_norm {
+        return Err(TensorError::UnsupportedInBuilder {
+            builder: "append_mistral_single_range_cached_layer",
+            feature: "qk_norm (also implies split-half rope pairing, which this builder hard-codes as interleaved)",
+        });
+    }
+
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
     let q_product = elementwise(
@@ -3914,6 +3938,9 @@ fn append_mistral_single_range_cached_layer(
         "sud->sudi",
     )?;
 
+    // hard-coded `Interleaved`, never `SplitHalf` -- correct only because the
+    // `qk_norm` guard above already turned away every checkpoint that would
+    // need `SplitHalf` (see that guard's own comment, ROW 372).
     let (rotated_q_even, rotated_q_odd) =
         fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::Interleaved)?;
     let (rotated_k_new_even, rotated_k_new_odd) =
@@ -4205,6 +4232,17 @@ fn append_mistral_single_range_cached_layer(
 /// branch): the mixture-of-experts FFN this function's counterpart also
 /// supports is orthogonal to the attention-merge this function exists to
 /// prove, and duplicating that branch here would test nothing new.
+///
+/// `qk_norm` names ROW 372's rejection, not a feature this function
+/// implements: `append_mistral_single_range_cached_layer` has no per-head
+/// QK-norm of its own (unlike [`append_mistral_cached_layer`]'s
+/// `qk_norm: Option<(NodeId, NodeId, NodeId)>`) AND hard-codes
+/// `RopePairing::Interleaved` where the two-range sibling switches to
+/// `RopePairing::SplitHalf` exactly when `qk_norm.is_some()` -- so passing
+/// `true` here returns [`TensorError::UnsupportedInBuilder`] instead of
+/// silently building a program missing both the norm and the correct RoPE
+/// pairing. Pass `false` for every checkpoint that does not carry
+/// `attn_q_norm.weight`/`attn_k_norm.weight`.
 // ROW 326/328 diagnostic: `duplicate_head` mirrors `gate_before_up`'s own
 // mechanism (a plain, always-compiled parameter a caller sets, production
 // call sites pass a fixed literal) rather than a `#[cfg(test)]` item,
@@ -4233,6 +4271,7 @@ pub fn mistral_single_range_cached_forward_program(
     kv_heads: u32,
     head_dim: u32,
     block_count: u32,
+    qk_norm: bool,
     duplicate_head: DuplicateHeadPosition,
 ) -> Result<SingleRangeForwardProgram, TensorError> {
     let group = query_heads / kv_heads;
@@ -4434,6 +4473,7 @@ pub fn mistral_single_range_cached_forward_program(
             k_even_cache,
             k_odd_cache,
             v_cache,
+            qk_norm,
             true,
         )?;
         x = x_next;
@@ -11227,6 +11267,7 @@ value = 1.0
                 8,
                 128,
                 block_count,
+                false,
                 DuplicateHeadPosition::None,
             )
             .expect("the single-range cached forward pass lowers to a program")
@@ -11271,6 +11312,7 @@ value = 1.0
                 8,
                 128,
                 32,
+                false,
                 DuplicateHeadPosition::None,
             )
             .expect("the single-range cached forward pass lowers to a program");
@@ -11549,6 +11591,7 @@ value = 1.0
                     KV_HEADS as u32,
                     HEAD_DIM as u32,
                     BLOCK_COUNT,
+                    false,
                     DuplicateHeadPosition::None,
                 )
                 .expect("single-range cached forward pass lowers");
@@ -11819,6 +11862,7 @@ value = 1.0
             KV_HEADS,
             HEAD_DIM,
             BLOCK_COUNT,
+            false,
             DuplicateHeadPosition::None,
         )
         .expect("single-range cached forward pass lowers");
@@ -11968,6 +12012,7 @@ value = 1.0
                 KV_HEADS as u32,
                 HEAD_DIM as u32,
                 BLOCK_COUNT,
+                false,
                 DuplicateHeadPosition::None,
             )
             .expect("single-range cached forward pass lowers");
@@ -15174,7 +15219,10 @@ value = 1.0
     /// `embedding = feed_forward = 2` (small enough to read by eye, large
     /// enough that `w_gate`/`w_up`'s shapes are distinguishable from every
     /// other node's).
-    fn single_range_layer_with_order(gate_before_up: bool) -> (Vec<Op>, NodeId, NodeId) {
+    fn single_range_layer_with_order(
+        gate_before_up: bool,
+        qk_norm: bool,
+    ) -> Result<(Vec<Op>, NodeId, NodeId), TensorError> {
         let embedding = 2_u32;
         let feed_forward = 2_u32;
         let head_dim = 2_u32;
@@ -15308,7 +15356,7 @@ value = 1.0
             "ffn_down.weight",
         );
 
-        let (_, _) = append_mistral_single_range_cached_layer(
+        append_mistral_single_range_cached_layer(
             &mut program,
             x,
             inv_dim,
@@ -15332,11 +15380,49 @@ value = 1.0
             k_even_cache,
             k_odd_cache,
             v_cache,
+            qk_norm,
             gate_before_up,
-        )
-        .expect("single-range layer builds under either encode order");
+        )?;
 
-        (program, w_gate, w_up)
+        Ok((program, w_gate, w_up))
+    }
+
+    /// ROW 372: a program builder cannot omit an architecture feature
+    /// silently -- and here there are TWO features bundled behind one
+    /// checkpoint property, not one. `append_mistral_single_range_cached_layer`
+    /// has no `attn_q_norm.weight`/`attn_k_norm.weight` inputs and no
+    /// `rmsnorm_per_head` call (unlike its two-range sibling
+    /// `append_mistral_cached_layer`, which takes
+    /// `qk_norm: Option<(NodeId, NodeId, NodeId)>` and applies it), AND it
+    /// hard-codes `RopePairing::Interleaved` where the two-range sibling
+    /// switches to `RopePairing::SplitHalf` exactly when `qk_norm.is_some()`
+    /// (`append_mistral_cached_layer`'s own comment: every checkpoint this
+    /// crate binds with `attn_q_norm.weight` present is the NEOX/split-half
+    /// family). Before this row the single-range builder silently ignored a
+    /// `qk_norm` request instead of rejecting it -- a qk-norm/split-half
+    /// checkpoint got NEITHER its per-head norm NOR its correct RoPE pairing
+    /// -- and `proxima-model-interop::generate::build_single_range_program`
+    /// had to know that out-of-band via a flag list at its own call site.
+    /// This test is the drift catch: if the builder is ever called for a
+    /// qk-norm architecture, it must fail loudly, not build a structurally
+    /// wrong program.
+    #[test]
+    fn single_range_layer_rejects_qk_norm_and_the_split_half_rope_pairing_it_implies() {
+        let rejection = single_range_layer_with_order(true, true).expect_err(
+            "a qk-norm request must not silently build a program with neither qk-norm nor \
+             split-half rope pairing",
+        );
+
+        assert_eq!(
+            rejection,
+            TensorError::UnsupportedInBuilder {
+                builder: "append_mistral_single_range_cached_layer",
+                feature: "qk_norm (also implies split-half rope pairing, which this builder \
+                          hard-codes as interleaved)",
+            },
+            "the single-range builder must name itself and the missing features, not fail for \
+             an unrelated reason"
+        );
     }
 
     /// The `PROXIMA_ENCODE_ORDER=gate_first|up_first` order-swap knob
@@ -15348,8 +15434,10 @@ value = 1.0
     /// SET and every dependency is unchanged, only their relative order.
     #[test]
     fn swapping_gate_and_up_order_keeps_dataflow_identical() {
-        let (gate_first, w_gate_a, w_up_a) = single_range_layer_with_order(true);
-        let (up_first, w_gate_b, w_up_b) = single_range_layer_with_order(false);
+        let (gate_first, w_gate_a, w_up_a) = single_range_layer_with_order(true, false)
+            .expect("single-range layer builds under either encode order");
+        let (up_first, w_gate_b, w_up_b) = single_range_layer_with_order(false, false)
+            .expect("single-range layer builds under either encode order");
 
         assert_eq!(
             gate_first.len(),

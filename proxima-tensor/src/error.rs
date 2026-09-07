@@ -269,4 +269,16 @@ pub enum TensorError {
     /// has no iteration axis `len` can unambiguously describe.
     #[error("node {node} operand axis {dim} declares a len override but its address has no single term len can describe")]
     AmbiguousLenAxis { node: NodeId, dim: u16 },
+
+    /// A program builder was asked for an architecture feature its own
+    /// signature cannot express -- `feature` names the caller-visible flag
+    /// (e.g. `"qk_norm"`), never a silent lowering of the request to the
+    /// nearest supported shape. Raised, not worked around, so a caller that
+    /// ignores the return value gets a compile-visible `Result` to ignore
+    /// rather than a structurally wrong program with no error at all.
+    #[error("{builder} does not support {feature}")]
+    UnsupportedInBuilder {
+        builder: &'static str,
+        feature: &'static str,
+    },
 }

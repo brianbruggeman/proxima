@@ -4052,6 +4052,7 @@ mod tests {
                 2,
                 4,
                 1,
+                false,
                 crate::spec::DuplicateHeadPosition::None,
             )
             .expect("one-layer single-range decode fixture builds");
@@ -4162,7 +4163,7 @@ mod tests {
     #[cfg(feature = "cached-attention-streaming")]
     fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape() {
         let (program, logits, cache_roots, _) = crate::spec::mistral_single_range_cached_forward_program(
-            32_002, 4096, 14336, 32, 8, 128, 32, crate::spec::DuplicateHeadPosition::None,
+            32_002, 4096, 14336, 32, 8, 128, 32, false, crate::spec::DuplicateHeadPosition::None,
         )
         .expect("openchat-shaped single-range forward pass lowers to a program");
         let mut outputs = alloc::vec![logits];
@@ -4231,6 +4232,7 @@ mod tests {
                 2,
                 4,
                 1,
+                false,
                 crate::spec::DuplicateHeadPosition::None,
             )
             .expect("single-range fixture builds");
@@ -4299,6 +4301,7 @@ mod tests {
                 2,
                 4,
                 1,
+                false,
                 crate::spec::DuplicateHeadPosition::None,
             )
             .expect("single-range fixture builds");
@@ -6067,6 +6070,7 @@ mod tests {
                     8,
                     128,
                     32,
+                    false,
                     crate::spec::DuplicateHeadPosition::None,
                 )
                 .expect("openchat-shaped single-range forward pass lowers to a program");
@@ -6177,6 +6181,7 @@ mod tests {
                     KV_HEADS,
                     HEAD_DIM,
                     BLOCK_COUNT,
+                    false,
                     crate::spec::DuplicateHeadPosition::None,
                 )
                 .expect("single-range cached forward pass lowers");

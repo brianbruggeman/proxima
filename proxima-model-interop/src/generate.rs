@@ -128,6 +128,8 @@ use proxima_telemetry::{debug, info};
 #[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use proxima_tensor::TensorError;
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_forward_program};
 
 use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
@@ -755,6 +757,7 @@ fn find_input_node(program: &[Op], name: &str) -> Result<NodeId, InteropError> {
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 fn build_single_range_program(
     architecture: &ModelArchitecture,
+    qk_norm: bool,
 ) -> Result<Option<SingleRangeProgram>, InteropError> {
     if architecture.expert_count != 0 {
         return Ok(None);
@@ -771,8 +774,15 @@ fn build_single_range_program(
         Ok("first") => DuplicateHeadPosition::Before,
         _ => DuplicateHeadPosition::None,
     };
+    // the builder itself is the authority on what it can express: a
+    // qk-norm checkpoint (which also implies split-half RoPE pairing this
+    // builder does not implement) is turned away here by its own typed
+    // rejection (`TensorError::UnsupportedInBuilder`), not by a flag list
+    // this call site would otherwise have to keep in sync with the
+    // builder's real capability -- see
+    // `append_mistral_single_range_cached_layer` and ROW 372.
     let (program, logits_root, cache_roots, duplicate_head_scratch) =
-        mistral_single_range_cached_forward_program(
+        match mistral_single_range_cached_forward_program(
             architecture.vocab,
             architecture.embedding,
             architecture.feed_forward,
@@ -780,8 +790,13 @@ fn build_single_range_program(
             architecture.kv_heads,
             architecture.head_dim,
             architecture.block_count,
+            qk_norm,
             duplicate_head,
-        )?;
+        ) {
+            Ok(built) => built,
+            Err(TensorError::UnsupportedInBuilder { .. }) => return Ok(None),
+            Err(other) => return Err(InteropError::from(other)),
+        };
     let block_count = architecture.block_count as usize;
     let mut cache_input_nodes = Vec::with_capacity(block_count);
     for layer in 0..block_count {
@@ -1023,11 +1038,33 @@ impl<'file> LoadedModel<'file> {
         // is a second builder needing the identical q/k/v leaf and
         // extract-op rewrite `append_mistral_cached_layer` just got, and is
         // out of this change's scope).
+        //
+        // `qk_norm` no longer joins this call-site flag list (ROW 372):
+        // `append_mistral_single_range_cached_layer` (`proxima-tensor/src/spec.rs`)
+        // gained a `qk_norm` parameter it rejects with a typed
+        // `TensorError::UnsupportedInBuilder` rather than silently building
+        // a program missing BOTH Qwen3's per-head `attn_q_norm.weight`/
+        // `attn_k_norm.weight` RMSNorm AND the split-half RoPE pairing that
+        // same checkpoint property implies (that builder hard-codes
+        // interleaved pairing unconditionally) -- `build_single_range_program`
+        // below turns that rejection into `Ok(None)` itself, so this call
+        // site cannot drift out of sync with what the builder actually
+        // supports the way the previous flag list did. Before this row, a
+        // qk-norm dense checkpoint (Qwen3) on the Metal backend silently ran
+        // attention on raw, un-normed Q/K, with the wrong RoPE pairing on
+        // top, through the placed-KV fast path -- no error, just a
+        // structurally different (wrong) computation, which is why CPU
+        // decode (always the two-range path) produced correct text while
+        // Metal decode collapsed to one repeated token from step 0. The
+        // crate's own `forward_node_values_on_backend` diagnostic never
+        // caught this during triage because it evaluates `self.program`
+        // (the two-range graph `LoadedModel::load` always binds), never
+        // `self.single_range` -- the one path this bug lived on.
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let single_range = if paired_gate_up_reduce || fused_qkv_reduce {
             None
         } else {
-            build_single_range_program(&architecture)?
+            build_single_range_program(&architecture, qk_norm)?
         };
         Ok(Self {
             weights,
@@ -1098,7 +1135,7 @@ impl<'file> LoadedModel<'file> {
             false,
         )?;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let single_range = build_single_range_program(&architecture)?;
+        let single_range = build_single_range_program(&architecture, false)?;
         Ok(Self {
             weights,
             architecture,
