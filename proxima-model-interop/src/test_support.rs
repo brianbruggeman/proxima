@@ -11,6 +11,7 @@
 /// behaving exactly as it did before this knob existed), and any other
 /// value panics naming what it saw rather than silently falling back to a
 /// mode the caller did not ask for.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) fn math_mode_from_env() -> omega::MathMode {
     match std::env::var("PROXIMA_MATH_MODE").as_deref() {
         Ok("safe") => omega::MathMode::Safe,
@@ -27,6 +28,7 @@ pub(crate) fn math_mode_from_env() -> omega::MathMode {
 /// test that never sets this env var keeps behaving exactly as it did before
 /// this knob existed), and any other value panics naming what it saw rather
 /// than silently falling back to a mode the caller did not ask for.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) fn dispatch_type_from_env() -> omega::DispatchType {
     match std::env::var("PROXIMA_DISPATCH").as_deref() {
         Ok("serial") => omega::DispatchType::Serial,
@@ -54,10 +56,65 @@ pub(crate) fn openchat_gguf_path() -> String {
 /// `RopePairing::SplitHalf` -- `proxima-tensor/src/spec.rs:660`). No
 /// `ServingConfig` default exists for a second model family the way
 /// openchat has one, so this constant path is the closest analog.
+#[cfg(feature = "metal")]
 pub(crate) fn qwen3_gguf_path() -> String {
     std::env::var("PROXIMA_QWEN3_GGUF").unwrap_or_else(|_| {
         "/Users/brianbruggeman/.ollama/models/blobs/\
          sha256-3d0b790534fe4b79525fc3692950408dca41171676ed7e21db57af5c65ef6ab6"
             .to_string()
     })
+}
+
+/// Fails the calling `#[ignore]`d fixture test loudly, naming `env_var`
+/// (when the caller resolves `path` through one) and `path` itself, when
+/// the host-local checkpoint the test needs is absent -- an `#[ignore]`d
+/// test only runs when a caller explicitly asks for it (`cargo test --
+/// --ignored`), so silently returning success having executed nothing is
+/// indistinguishable, from the caller's own exit code, from having proved
+/// the thing the test's name claims. `env_var` is [`None`] for the handful
+/// of fixtures (`real_mixtral_file`, `real_lfm2_hybrid_file`) that resolve
+/// a hardcoded path with no environment override.
+pub(crate) fn require_fixture(path: &str, env_var: Option<&str>) {
+    if std::path::Path::new(path).exists() {
+        return;
+    }
+    match env_var {
+        Some(name) => panic!(
+            "no host-local gguf fixture at {path}: set {name} to a valid checkpoint path, or stage one at this default path"
+        ),
+        None => panic!("no host-local gguf fixture at {path}: stage one at this hardcoded path (no environment override exists)"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_fixture;
+
+    /// The one shape this module gates on: a missing checkpoint must fail
+    /// loudly, not return quietly having done nothing (an `#[ignore]`d
+    /// fixture test that returns `Ok` on an absent checkpoint is
+    /// indistinguishable, from its exit code, from one that actually ran).
+    /// This proves the failure, never that some real fixture exists on the
+    /// running host -- a passing fixture-present path is exactly what the
+    /// `#[ignore]`d tests above already exercise on a host that has one.
+    #[test]
+    #[should_panic(expected = "no host-local gguf fixture at")]
+    fn require_fixture_panics_when_the_path_is_absent() {
+        require_fixture(
+            "/nonexistent/path/held/out/for/this/test/proxima-model-interop.gguf",
+            Some("PROXIMA_QWEN3_GGUF"),
+        );
+    }
+
+    /// Same failure shape with no environment override to name -- the
+    /// `real_mixtral_file`/`real_lfm2_hybrid_file` fixtures resolve a
+    /// hardcoded path, so their panic message names only the path.
+    #[test]
+    #[should_panic(expected = "no environment override exists")]
+    fn require_fixture_panics_naming_no_override_when_env_var_is_none() {
+        require_fixture(
+            "/nonexistent/path/held/out/for/this/test/proxima-model-interop.gguf",
+            None,
+        );
+    }
 }

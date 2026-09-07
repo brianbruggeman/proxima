@@ -2908,7 +2908,9 @@ mod moe_memory_shape {
 // against a known activation, and check the interpreter's result against a
 // dequantize-then-multiply computed independently of both `bind` and
 // `cpu`. Opportunistic like `proxima_gguf::restack::tests::real_mixtral_file`:
-// `#[ignore]`d and skips cleanly when the host-local model cache is absent.
+// `#[ignore]`d, and fails loudly naming the missing checkpoint when the
+// host-local model cache is absent -- see
+// `crate::test_support::require_fixture`.
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod real_openchat_file {
@@ -2937,6 +2939,7 @@ mod real_openchat_file {
     #[cfg(feature = "metal")]
     use crate::generate::LogitsSink;
     use crate::loader::prefault;
+    #[cfg(feature = "metal")]
     use crate::serving::ServingConfig;
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use crate::test_support::{dispatch_type_from_env, math_mode_from_env};
@@ -3211,14 +3214,9 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
     fn runs_one_real_forward_pass_and_greedy_picks_a_real_token() {
-        let path = std::path::Path::new(ServingConfig::default().model_path);
-        if !path.exists() {
-            eprintln!(
-                "skipping: no host-local openchat gguf fixture at {}",
-                ServingConfig::default().model_path
-            );
-            return;
-        }
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
@@ -3263,14 +3261,9 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
     fn paired_gate_up_reduce_matches_the_two_matvec_baseline_byte_for_byte() {
-        let path = std::path::Path::new(ServingConfig::default().model_path);
-        if !path.exists() {
-            eprintln!(
-                "skipping: no host-local openchat gguf fixture at {}",
-                ServingConfig::default().model_path
-            );
-            return;
-        }
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
@@ -3334,14 +3327,9 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo, AND that checkpoint's own attn_v codec disagreeing with attn_q/attn_k (see this test's own doc) means it cannot currently pass against it"]
     fn fused_qkv_reduce_matches_the_three_matvec_baseline_byte_for_byte() {
-        let path = std::path::Path::new(ServingConfig::default().model_path);
-        if !path.exists() {
-            eprintln!(
-                "skipping: no host-local openchat gguf fixture at {}",
-                ServingConfig::default().model_path
-            );
-            return;
-        }
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
@@ -3396,14 +3384,9 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
     fn runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock() {
-        let path = std::path::Path::new(ServingConfig::default().model_path);
-        if !path.exists() {
-            eprintln!(
-                "skipping: no host-local openchat gguf fixture at {}",
-                ServingConfig::default().model_path
-            );
-            return;
-        }
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
@@ -3573,12 +3556,9 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
     fn row346_reports_cpu_greedy_token_ids_for_the_quality_prompts() {
-        let model_path = ServingConfig::default().model_path;
-        let path = std::path::Path::new(model_path);
-        if !path.exists() {
-            eprintln!("skipping: no host-local openchat gguf fixture at {model_path}");
-            return;
-        }
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
@@ -3644,11 +3624,8 @@ mod real_openchat_file {
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
     fn runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache() {
         let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
         let path = std::path::Path::new(&model_path);
-        if !path.exists() {
-            eprintln!("skipping: no host-local openchat gguf fixture at {model_path}");
-            return;
-        }
 
         #[cfg(feature = "instrument")]
         let telemetry_recorder = install_stdout_telemetry();
@@ -3777,14 +3754,9 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
     fn profiles_one_real_decode_step_by_per_op_gpu_time() {
-        let path = std::path::Path::new(ServingConfig::default().model_path);
-        if !path.exists() {
-            eprintln!(
-                "skipping: no host-local openchat gguf fixture at {}",
-                ServingConfig::default().model_path
-            );
-            return;
-        }
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
 
         let telemetry_recorder = install_stdout_telemetry();
 
@@ -3864,14 +3836,9 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
     fn profiles_one_real_prefill_step_by_per_op_gpu_time() {
-        let path = std::path::Path::new(ServingConfig::default().model_path);
-        if !path.exists() {
-            eprintln!(
-                "skipping: no host-local openchat gguf fixture at {}",
-                ServingConfig::default().model_path
-            );
-            return;
-        }
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
 
         let telemetry_recorder = install_stdout_telemetry();
 
@@ -4052,14 +4019,9 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
     fn q8_0_quantized_key_value_cache_cannot_cross_the_weight_matmul_quantized_seam() {
-        let path = std::path::Path::new(ServingConfig::default().model_path);
-        if !path.exists() {
-            eprintln!(
-                "skipping: no host-local openchat gguf fixture at {}",
-                ServingConfig::default().model_path
-            );
-            return;
-        }
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
@@ -4193,12 +4155,9 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
     fn binds_one_real_q4_k_block_and_matmuls_against_a_known_activation() {
-        let model_path = ServingConfig::default().model_path;
-        let path = std::path::Path::new(model_path);
-        if !path.exists() {
-            eprintln!("skipping: no host-local openchat gguf fixture at {model_path}");
-            return;
-        }
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
 
         let (parsed, file_bytes) =
             proxima_gguf::edge::read_file(path).expect("read host-local openchat gguf fixture");
@@ -4410,11 +4369,8 @@ mod real_openchat_file {
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
     fn decode_text_is_deterministic_across_repeated_runs() {
         let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
         let path = std::path::Path::new(&model_path);
-        if !path.exists() {
-            eprintln!("skipping: no host-local openchat gguf fixture at {model_path}");
-            return;
-        }
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
@@ -4506,9 +4462,9 @@ mod real_openchat_file {
 // against the ids `real_openchat_file`'s own decode loop actually produced,
 // with no second model call, and reports the mean tokens-per-verification-
 // pass a caller would have gotten had it drafted alongside that same
-// decode. `#[ignore]`d and skips cleanly when the host-local model cache is
-// absent, the same convention every other `real_*` module in this file
-// uses.
+// decode. `#[ignore]`d, and fails loudly naming the missing checkpoint when
+// the host-local model cache is absent, the same convention every other
+// `real_*` module in this file uses (`crate::test_support::require_fixture`).
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod draft_acceptance {
@@ -4522,7 +4478,6 @@ mod draft_acceptance {
     use proxima_tokenizer::draft::draft_ngram_lookup;
 
     use crate::generate::LoadedModel;
-    use crate::serving::ServingConfig;
 
     /// Same read-only mmap technique as `real_openchat_file::MappedGguf` --
     /// duplicated rather than shared because that struct is private to its
@@ -4751,14 +4706,9 @@ mod draft_acceptance {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
     fn ngram_draft_acceptance_rate_on_real_greedy_streams() {
-        let path = std::path::Path::new(ServingConfig::default().model_path);
-        if !path.exists() {
-            eprintln!(
-                "skipping: no host-local openchat gguf fixture at {}",
-                ServingConfig::default().model_path
-            );
-            return;
-        }
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
@@ -4902,10 +4852,12 @@ mod draft_acceptance {
 // `bind_moe_expert_weights` internals -- never a synthetic fixture standing
 // in for what the audit's citations already verified against this exact
 // file (`proxima-gguf/src/restack.rs`'s own `real_mixtral_file` module).
-// `#[ignore]`d and skips cleanly when the host-local model cache is absent,
-// the same convention `real_openchat_file`/`restack.rs::real_mixtral_file`
-// both use. Only the metadata/tensor-directory prefix and each of the 8
-// experts' own `Q4_K` byte range for one layer's `ffn_gate` projection are
+// `#[ignore]`d, and fails loudly naming the missing checkpoint when the
+// host-local model cache is absent, the same convention
+// `real_openchat_file`/`restack.rs::real_mixtral_file` both use
+// (`crate::test_support::require_fixture`). Only the metadata/tensor-directory
+// prefix and each of the 8 experts' own `Q4_K` byte range for one layer's
+// `ffn_gate` projection are
 // read via direct `seek`+`read` -- never the whole 25 GB file.
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -4954,11 +4906,8 @@ mod real_mixtral_file {
     #[test]
     #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo"]
     fn architecture_from_metadata_reads_the_real_mixtral_expert_config() {
+        crate::test_support::require_fixture(FIXTURE_PATH, None);
         let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local mixtral gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
 
         let mut file = std::fs::File::open(path).expect("open host-local mixtral gguf fixture");
         let mut header_buf: Vec<u8> = Vec::new();
@@ -4988,11 +4937,8 @@ mod real_mixtral_file {
     #[test]
     #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo"]
     fn inventories_the_real_checkpoints_tensor_codecs_and_chat_template() {
+        crate::test_support::require_fixture(FIXTURE_PATH, None);
         let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local mixtral gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
 
         let mut file = std::fs::File::open(path).expect("open host-local mixtral gguf fixture");
         let mut header_buf: Vec<u8> = Vec::new();
@@ -5063,11 +5009,8 @@ mod real_mixtral_file {
     #[test]
     #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo"]
     fn binds_one_real_layers_ffn_gate_experts_and_matches_independent_dequantize() {
+        crate::test_support::require_fixture(FIXTURE_PATH, None);
         let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local mixtral gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
 
         let mut file = std::fs::File::open(path).expect("open host-local mixtral gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -5163,11 +5106,8 @@ mod real_mixtral_file {
     #[test]
     #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo"]
     fn binds_the_real_f16_router_weight_packed_and_matches_independent_f16_decode() {
+        crate::test_support::require_fixture(FIXTURE_PATH, None);
         let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local mixtral gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
 
         let mut file = std::fs::File::open(path).expect("open host-local mixtral gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -5364,11 +5304,8 @@ mod real_mixtral_file {
     #[test]
     #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo"]
     fn attempts_a_real_mixtral_forward_pass_and_reports_the_outcome() {
+        crate::test_support::require_fixture(FIXTURE_PATH, None);
         let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local mixtral gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
 
         let prompt = "<|im_start|>user\nWrite one sentence about the ocean.<|im_end|>\n<|im_start|>assistant\n";
 
@@ -5464,11 +5401,8 @@ mod real_lfm2_hybrid_file {
     #[test]
     #[ignore = "depends on a ~5 GB host-local lfm2 gguf checkout outside this repo"]
     fn architecture_from_metadata_names_the_heterogeneous_kv_heads_honestly() {
+        crate::test_support::require_fixture(FIXTURE_PATH, None);
         let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local lfm2 gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
 
         let mut file = std::fs::File::open(path).expect("open host-local lfm2 gguf fixture");
         let mut header_buf: Vec<u8> = Vec::new();
@@ -5496,11 +5430,8 @@ mod real_lfm2_hybrid_file {
     #[test]
     #[ignore = "depends on a ~5 GB host-local lfm2 gguf checkout outside this repo"]
     fn rope_dimension_count_absent_derives_the_real_lfm2_head_dim() {
+        crate::test_support::require_fixture(FIXTURE_PATH, None);
         let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local lfm2 gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
 
         let mut file = std::fs::File::open(path).expect("open host-local lfm2 gguf fixture");
         let mut header_buf: Vec<u8> = Vec::new();
