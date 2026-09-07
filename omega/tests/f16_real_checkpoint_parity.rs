@@ -29,8 +29,8 @@ use proxima_gguf::quant::f16;
 use proxima_gguf::types::GgmlType;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, evaluate, map,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, evaluate, map,
 };
 
 const REAL_MIXTRAL_GGUF_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf";
@@ -209,6 +209,7 @@ fn metal_matmul_on_real_ffn_gate_inp_f16_bytes_matches_the_dequantized_f32_cpu_p
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .expect("metal executes an f16 matmul on real blk.0.ffn_gate_inp.weight bytes");
 

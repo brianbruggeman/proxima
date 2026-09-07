@@ -44,8 +44,8 @@ use proxima_autograd::loss::softmax_cross_entropy;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, map,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, map,
 };
 
 const IN_DIM: usize = 3;
@@ -370,6 +370,7 @@ fn run_one_step(
         &[],
         &named_blocks,
         &outputs,
+        NumericPolicy::default(),
     )
     .unwrap_or_else(|error| panic!("{name} plans the training step: {error}"));
     let evaluated = match execute_plan_named(&mut plan, &named_blocks) {
@@ -618,6 +619,7 @@ fn run_multi_step_on(engine: Engine, gpu_driver: Option<GpuDriver>) -> Option<Ve
             &[],
             &named_blocks,
             &outputs,
+        NumericPolicy::default(),
         )
         .unwrap_or_else(|error| panic!("{name} plans training step {step_number}: {error}"));
         let evaluated = match execute_plan_named(&mut plan, &named_blocks) {

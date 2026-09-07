@@ -167,7 +167,7 @@ pub struct GridSpec {
 /// );
 ///
 /// let shapes = proxima_tensor::infer(&program, &[])?;
-/// let bound_ops = proxima_tensor::bind(&program, &shapes, &[])?;
+/// let bound_ops = proxima_tensor::bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default())?;
 ///
 /// // no packed (quantized/half-precision) operand in this program, so an
 /// // empty codec table is exactly right -- see `PackedOperands`'s own doc.
@@ -2975,8 +2975,8 @@ fn msl_literal(value: f32) -> String {
 /// A chunk count above 1 folds partial online-softmax state across
 /// simdgroups (`render_cached_attention`'s cross-simdgroup merge) -- a
 /// reassociation of the reduce, [`NumericRewrite::ContextChunkMerge`].
-/// `policy` gates it: below [`NumericPolicy::ReassociationPermitted`],
-/// [`admit`] rejects the rewrite and this falls back to `1` (the single-pass
+/// `policy` gates it: without `reassociation` granted, [`admit`] rejects the
+/// rewrite and this falls back to `1` (the single-pass
 /// kernel `render_cached_attention` already renders for that case) rather
 /// than failing the whole plan -- the same "reject/fallback at bind time"
 /// shape `fuse_cached_attention: false` gives wgpu/cuda
@@ -6790,7 +6790,7 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("elementwise infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("elementwise lowers")
             .into_iter()
             .next()
@@ -6841,7 +6841,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("matmul infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("matmul lowers")
             .into_iter()
             .next()
@@ -6928,7 +6928,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("matmul infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("matmul lowers")
             .into_iter()
             .next()
@@ -6985,7 +6985,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("f16 matmul infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("f16 matmul lowers")
             .into_iter()
             .next()
@@ -7311,7 +7311,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("tiled gemm op infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("tiled gemm op lowers")
             .into_iter()
             .next()
@@ -7374,7 +7374,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("multi-head matmul infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("multi-head matmul lowers")
             .into_iter()
             .next()
@@ -7639,7 +7639,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("cumsum infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("cumsum lowers")
             .into_iter()
             .next()
@@ -7692,7 +7692,7 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("embedding lookup infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("embedding lookup lowers")
             .into_iter()
             .next()
@@ -7835,7 +7835,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("rank3 identity sum infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("rank3 identity sum lowers")
             .into_iter()
             .next()
@@ -7938,13 +7938,13 @@ mod tests {
             },
         );
         let f32_shapes = infer(&program, &[]).expect("f32 infers");
-        let f32_bound = bind(&program, &f32_shapes, &[])
+        let f32_bound = bind(&program, &f32_shapes, &[], NumericPolicy::default())
             .expect("f32 lowers")
             .into_iter()
             .next()
             .expect("one bound emitted");
         let f16_shapes = infer(&f16_program, &[]).expect("f16 infers");
-        let f16_bound = bind(&f16_program, &f16_shapes, &[])
+        let f16_bound = bind(&f16_program, &f16_shapes, &[], NumericPolicy::default())
             .expect("f16 lowers")
             .into_iter()
             .next()
@@ -7981,32 +7981,31 @@ mod tests {
 
         // numeric policy -- folded into `kernel_cache_key` directly now
         // (never embedded in `emit`'s own source text, so no source-side
-        // assertion here). All 4 rungs, pairwise: `BitExact` and
-        // `FusedNoReassociation` both compile the SAME `MathMode::Safe`
-        // (`metal::numeric_policy_as_metal_math_mode`'s own doc table), so
-        // a math-mode-keyed token alone could not tell them apart -- this
-        // is the case a `MathMode` token would have missed.
+        // assertion here). A permission not reflected in `MathMode` (e.g.
+        // `contraction` alone) must still change the identity, or two
+        // kernels compiling the SAME `MathMode` under different
+        // `NumericPolicy`s could share one PIPELINE_CACHE entry.
         assert_ne!(
-            kernel_cache_key(&bound, &q4k, NumericPolicy::BitExact).expect("cache key builds"),
-            kernel_cache_key(&bound, &q4k, NumericPolicy::FusedNoReassociation)
+            kernel_cache_key(&bound, &q4k, NumericPolicy::bit_exact()).expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, NumericPolicy::bit_exact().with_contraction(true))
                 .expect("cache key builds"),
-            "numeric policy must change the identity, or a BitExact- and a \
-             FusedNoReassociation-compiled kernel could share one PIPELINE_CACHE \
-             entry even though both compile MathMode::Safe"
+            "numeric policy must change the identity, or a bit_exact- and a \
+             contraction-only-compiled kernel could share one PIPELINE_CACHE \
+             entry even though both compile MathMode::Safe or MathMode::Relaxed"
         );
         assert_ne!(
-            kernel_cache_key(&bound, &q4k, NumericPolicy::BitExact).expect("cache key builds"),
-            kernel_cache_key(&bound, &q4k, NumericPolicy::ReassociationPermitted)
+            kernel_cache_key(&bound, &q4k, NumericPolicy::bit_exact()).expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, NumericPolicy::llama_relaxed())
                 .expect("cache key builds"),
-            "numeric policy must change the identity, or a BitExact- and a \
-             ReassociationPermitted-compiled kernel could share one PIPELINE_CACHE entry"
+            "numeric policy must change the identity, or a bit_exact- and a \
+             llama_relaxed-compiled kernel could share one PIPELINE_CACHE entry"
         );
         assert_ne!(
-            kernel_cache_key(&bound, &q4k, NumericPolicy::ReassociationPermitted)
+            kernel_cache_key(&bound, &q4k, NumericPolicy::llama_relaxed())
                 .expect("cache key builds"),
-            kernel_cache_key(&bound, &q4k, NumericPolicy::FastMath).expect("cache key builds"),
-            "numeric policy must change the identity, or a ReassociationPermitted- and a \
-             FastMath-compiled kernel could share one PIPELINE_CACHE entry"
+            kernel_cache_key(&bound, &q4k, NumericPolicy::fast()).expect("cache key builds"),
+            "numeric policy must change the identity, or a llama_relaxed- and a \
+             fast-compiled kernel could share one PIPELINE_CACHE entry"
         );
 
         // cooperative-reduce width -- ROW 290's own defect, at the same two
@@ -8130,7 +8129,7 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("f32 elementwise infers");
-        let f32_bound = bind(&program, &shapes, &[])
+        let f32_bound = bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("f32 elementwise lowers")
             .into_iter()
             .next()
@@ -8155,7 +8154,7 @@ mod tests {
             },
         );
         let half_shapes = infer(&half_program, &[]).expect("f16 elementwise infers");
-        let f16_bound = bind(&half_program, &half_shapes, &[])
+        let f16_bound = bind(&half_program, &half_shapes, &[], NumericPolicy::default())
             .expect("f16 elementwise lowers")
             .into_iter()
             .next()
@@ -8255,7 +8254,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("single-axis sum infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("single-axis sum lowers")
             .into_iter()
             .next()
@@ -8766,15 +8765,15 @@ mod tests {
     fn context_chunk_merge_is_gated_by_numeric_policy_for_a_real_64_key_context() {
         let context_length: u64 = 64;
         assert_eq!(
-            context_chunks_for(context_length, NumericPolicy::BitExact),
+            context_chunks_for(context_length, NumericPolicy::bit_exact()),
             1,
-            "BitExact forbids ContextChunkMerge (a reassociation), so this falls back to the \
+            "bit_exact() withholds reassociation, ContextChunkMerge, so this falls back to the \
              single-pass chunk<=1 kernel `render_cached_attention` already renders"
         );
-        let chunks = context_chunks_for(context_length, NumericPolicy::ReassociationPermitted);
+        let chunks = context_chunks_for(context_length, NumericPolicy::llama_relaxed());
         assert!(
             chunks > 1,
-            "ReassociationPermitted clears NumericRewrite::ContextChunkMerge's minimum level, \
+            "llama_relaxed() grants reassociation, clearing NumericRewrite::ContextChunkMerge, \
              so a 64-key context (4x omega-runtime.toml's 16-key chunk) must split across more \
              than one simdgroup; got {chunks}"
         );
@@ -8799,19 +8798,19 @@ mod tests {
         *cached_key_rows = 48;
         *new_key_rows = 16;
 
-        let rejected = render_cached_attention(&bound, "entry", NumericPolicy::BitExact)
-            .expect("BitExact still renders -- it falls back to the single-pass kernel");
+        let rejected = render_cached_attention(&bound, "entry", NumericPolicy::bit_exact())
+            .expect("bit_exact() still renders -- it falls back to the single-pass kernel");
         let admitted =
-            render_cached_attention(&bound, "entry", NumericPolicy::ReassociationPermitted)
-                .expect("ReassociationPermitted renders the cross-simdgroup merge kernel");
+            render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+                .expect("llama_relaxed() renders the cross-simdgroup merge kernel");
 
         assert!(
             !rejected.contains("merged_max"),
-            "BitExact must never reassociate the online-softmax fold across simdgroups"
+            "bit_exact() must never reassociate the online-softmax fold across simdgroups"
         );
         assert!(
             admitted.contains("merged_max"),
-            "ReassociationPermitted is expected to emit the cross-simdgroup merge block"
+            "llama_relaxed() is expected to emit the cross-simdgroup merge block"
         );
     }
 }

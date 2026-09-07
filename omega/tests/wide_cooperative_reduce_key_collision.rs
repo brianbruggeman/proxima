@@ -26,8 +26,8 @@ use proxima_telemetry::recorder::Recorder;
 use proxima_telemetry::tag::Tag;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append,
-    evaluate, infer, projection,
+    DType, Extent, IndexMap, Keep, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, evaluate, infer, projection,
 };
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
@@ -99,8 +99,14 @@ fn cooperative_reduce_extents_never_share_a_pipeline_cache_entry() {
     let wide_program = single_row_reduce_program(WIDE_COLS);
     let wide_input = random_vec(0x5000 + u64::from(WIDE_COLS), WIDE_COLS as usize);
     infer(&wide_program, &[]).expect("wide program infers");
-    let wide_metal = omega::execute(&wide_program, &[], &[QuantizedBlock::Float32(&wide_input)], &[])
-        .expect("wide program executes on a real Metal device");
+    let wide_metal = omega::execute(
+        &wide_program,
+        &[],
+        &[QuantizedBlock::Float32(&wide_input)],
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("wide program executes on a real Metal device");
     let wide_cpu = evaluate(&wide_program, &[], &[&wide_input], &[]).expect("wide program cpu-evaluates");
     assert!(
         (wide_cpu.root()[0] - wide_metal.root()[0]).abs() <= 1e-4,
@@ -117,6 +123,7 @@ fn cooperative_reduce_extents_never_share_a_pipeline_cache_entry() {
         &[],
         &[QuantizedBlock::Float32(&narrow_input)],
         &[],
+        NumericPolicy::default(),
     )
     .expect("narrow program executes on a real Metal device, reusing the shared pipeline cache");
     let narrow_cpu =

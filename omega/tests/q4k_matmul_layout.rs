@@ -22,8 +22,8 @@ use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
 use proxima_tensor::cpu::evaluate_quantized;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, projection,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, projection,
 };
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
@@ -143,7 +143,8 @@ fn metal_agrees_with_cpu_and_the_independent_reference_on_a_q4k_weight_declared_
     ];
 
     let cpu = evaluate_quantized(&program, &[], &blocks, &[sum]).expect("cpu runs the matmul");
-    let plan = omega::plan(&program, &[], &blocks, &[sum]).expect("metal plans the matmul");
+    let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
+        .expect("metal plans the matmul");
     let metal =
         omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
 

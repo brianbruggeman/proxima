@@ -78,7 +78,14 @@ fn run() {
         let b: Vec<f32> = (0..elements).map(|index| (index as f32) * -1e-3).collect();
         let (program, sum) = elementwise_add_program(elements);
         let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
-        let resolved = omega::plan(&program, &[], &blocks, &[sum]).expect("probe plans");
+        let resolved = omega::plan(
+            &program,
+            &[],
+            &blocks,
+            &[sum],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("probe plans");
         // warm-up: pipeline compile happens on the first call
         // (`pipeline_misses`), never on steady-state decode; discard it and
         // the counters it left behind before the timed loop.

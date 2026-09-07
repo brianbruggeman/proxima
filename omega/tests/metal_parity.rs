@@ -14,9 +14,9 @@ use omega::MetalError;
 use proxima_tensor::spec::ProgramSpec;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    AxisIndex, AxisTerm, BoundOpKind, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op,
-    QuantizedBlock, Reduce, ReduceInit, ScalarOp, TensorError, affine, append, bind, evaluate,
-    infer, projection,
+    AxisIndex, AxisTerm, BoundOpKind, DType, Extent, IndexMap, IndexPattern, Keep, NodeId,
+    NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, TensorError, affine, append,
+    bind, evaluate, infer, projection,
 };
 
 /// Asserts `cpu` and `metal` agree within `1e-6`, refusing a vacuous
@@ -517,6 +517,7 @@ fn matmul_parity_is_exact_for_integer_valued_inputs() {
         &[],
         &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)],
         &[],
+        NumericPolicy::default(),
     )
     .expect("metal matmul executes on a real device");
 
@@ -534,7 +535,7 @@ fn tanh_chain_parity_matches_within_epsilon() {
     let input = [0.1, 0.2, 0.3, 0.4f32];
 
     let cpu = evaluate(&program, &[], &[&input], &[]).expect("cpu tanh chain evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&input)], &[])
+    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&input)], &[], NumericPolicy::default())
         .expect("metal tanh chain executes on a real device");
 
     assert_parity("tanh_chain", cpu.root(), metal.root());
@@ -546,7 +547,7 @@ fn reciprocal_parity_matches_within_epsilon() {
     let input = [1.0, 2.0, 0.5, -4.0f32];
 
     let cpu = evaluate(&program, &[], &[&input], &[]).expect("cpu reciprocal evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&input)], &[])
+    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&input)], &[], NumericPolicy::default())
         .expect("metal reciprocal executes on a real device");
 
     assert_parity("reciprocal", cpu.root(), metal.root());
@@ -558,7 +559,7 @@ fn square_root_parity_matches_within_epsilon() {
     let input = [1.0, 4.0, 9.0, 0.25f32];
 
     let cpu = evaluate(&program, &[], &[&input], &[]).expect("cpu square_root evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&input)], &[])
+    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&input)], &[], NumericPolicy::default())
         .expect("metal square_root executes on a real device");
 
     assert_parity("square_root", cpu.root(), metal.root());
@@ -569,7 +570,7 @@ fn multiply_sqrt_reciprocal_chain_matches_cpu_on_a_real_device() {
     let program = multiply_sqrt_reciprocal_chain_program();
 
     let shapes = infer(&program, &[]).expect("multiply/sqrt/reciprocal chain infers");
-    let resolved = bind(&program, &shapes, &[]).expect("multiply/sqrt/reciprocal chain resolves");
+    let resolved = bind(&program, &shapes, &[], NumericPolicy::default()).expect("multiply/sqrt/reciprocal chain resolves");
     assert_eq!(
         resolved.len(),
         1,
@@ -590,6 +591,7 @@ fn multiply_sqrt_reciprocal_chain_matches_cpu_on_a_real_device() {
             QuantizedBlock::Float32(&scale_data),
         ],
         &[],
+        NumericPolicy::default(),
     )
     .expect("metal multiply/sqrt/reciprocal chain executes on a real device");
 
@@ -669,7 +671,7 @@ fn attention_block_spec_parity_matches_within_epsilon() {
 
     let cpu = evaluate(&program, &symbols, &blocks, &[]).expect("cpu attention block evaluates");
     let gpu_blocks: [QuantizedBlock<'_>; 5] = blocks.map(QuantizedBlock::Float32);
-    let metal = omega::execute(&program, &symbols, &gpu_blocks, &[])
+    let metal = omega::execute(&program, &symbols, &gpu_blocks, &[], NumericPolicy::default())
         .expect("metal attention block executes on a real device");
 
     // With uniform inputs every row collapsed and the diff floored at 0e0.
@@ -742,7 +744,7 @@ fn a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device() {
     );
 
     let shapes = infer(&program, &[]).expect("elementwise chain infers");
-    let resolved = bind(&program, &shapes, &[]).expect("elementwise chain resolves");
+    let resolved = bind(&program, &shapes, &[], NumericPolicy::default()).expect("elementwise chain resolves");
     assert_eq!(
         resolved.len(),
         1,
@@ -765,6 +767,7 @@ fn a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device() {
             QuantizedBlock::Float32(&bias_data),
         ],
         &[],
+        NumericPolicy::default(),
     )
     .expect("metal elementwise chain executes on a real device");
 
@@ -777,7 +780,7 @@ fn softmax_parity_matches_within_epsilon() {
     let input = [1.0, 2.0, 3.0, 4.0, -1.0, 0.0, 1.0, 2.0f32];
 
     let cpu = evaluate(&program, &[], &[&input], &[]).expect("cpu softmax evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&input)], &[])
+    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&input)], &[], NumericPolicy::default())
         .expect("metal softmax executes on a real device");
 
     assert_parity("softmax", cpu.root(), metal.root());
@@ -789,7 +792,7 @@ fn cumsum_parity_matches_exactly() {
     let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0f32];
 
     let cpu = evaluate(&program, &[], &[&data], &[]).expect("cpu cumsum evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&data)], &[])
+    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&data)], &[], NumericPolicy::default())
         .expect("metal cumsum executes on a real device");
 
     assert_parity("cumsum", cpu.root(), metal.root());
@@ -811,6 +814,7 @@ fn conv_window_parity_matches_within_epsilon() {
             QuantizedBlock::Float32(&signal_data),
         ],
         &[],
+        NumericPolicy::default(),
     )
     .expect("metal conv executes on a real device");
 
@@ -834,6 +838,7 @@ fn embedding_lookup_parity_is_exact_for_integer_valued_inputs() {
             QuantizedBlock::Float32(&ids_data),
         ],
         &[],
+        NumericPolicy::default(),
     )
     .expect("metal embedding lookup executes on a real device");
 
@@ -869,6 +874,7 @@ fn embedding_matmul_parity_matches_within_epsilon() {
             QuantizedBlock::Float32(&weight_data),
         ],
         &[],
+        NumericPolicy::default(),
     )
     .expect("metal embedding matmul executes on a real device");
 
@@ -896,6 +902,7 @@ fn out_of_range_gather_index_produces_the_same_error_on_cpu_and_metal() {
             QuantizedBlock::Float32(&ids_data),
         ],
         &[],
+        NumericPolicy::default(),
     )
     .expect_err("metal rejects the out-of-range gather too, not clamping it away");
 
@@ -948,6 +955,7 @@ fn multi_output_parity_covers_both_an_intermediate_and_the_root() {
         &[],
         &[QuantizedBlock::Float32(&input)],
         &[midpoint, root],
+        NumericPolicy::default(),
     )
     .expect("metal multi-output executes on a real device");
 
@@ -975,6 +983,7 @@ fn symbolic_extent_parity_holds_across_two_different_bindings() {
             &[m as u64],
             &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)],
             &[],
+            NumericPolicy::default(),
         )
         .expect("metal symbolic matmul executes on a real device, uniforms not baked");
 
@@ -996,7 +1005,7 @@ fn block_count_mismatch_produces_the_same_tensor_error_as_cpu() {
 
     let cpu_error = evaluate(&program, &[], &[], &[]).expect_err("cpu rejects missing block");
     let metal_error =
-        omega::execute(&program, &[], &[], &[]).expect_err("metal rejects missing block too");
+        omega::execute(&program, &[], &[], &[], NumericPolicy::default()).expect_err("metal rejects missing block too");
 
     match metal_error {
         MetalError::Tensor(tensor_error) => assert_eq!(tensor_error, cpu_error),
@@ -1019,7 +1028,7 @@ fn block_size_mismatch_produces_the_same_tensor_error_as_cpu() {
 
     let cpu_error =
         evaluate(&program, &[], &[&too_short], &[]).expect_err("cpu rejects wrong block size");
-    let metal_error = omega::execute(&program, &[], &[QuantizedBlock::Float32(&too_short)], &[])
+    let metal_error = omega::execute(&program, &[], &[QuantizedBlock::Float32(&too_short)], &[], NumericPolicy::default())
         .expect_err("metal rejects wrong block size too");
 
     match metal_error {
@@ -1048,6 +1057,7 @@ fn matmul_parity_holds_over_a_contraction_spanning_multiple_simd_lanes() {
         &[],
         &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)],
         &[],
+        NumericPolicy::default(),
     )
     .expect("metal matmul executes on a real device");
 
@@ -1094,7 +1104,7 @@ fn axis_reduce_parity_holds_for_every_cooperative_reduce_body() {
         let cpu = evaluate(&program, &[], &[input], &[]).unwrap_or_else(|error| {
             panic!("{case}: cpu axis reduce evaluates: {error}");
         });
-        let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(input)], &[])
+        let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(input)], &[], NumericPolicy::default())
             .unwrap_or_else(|error| {
                 panic!("{case}: metal axis reduce executes on a real device: {error}");
             });
@@ -1135,7 +1145,7 @@ fn axis_reduce_parity_holds_across_the_cooperative_serial_length_boundary() {
 
         let cpu = evaluate(&program, &[], &[&data], &[])
             .unwrap_or_else(|error| panic!("{case}: cpu axis reduce evaluates: {error}"));
-        let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&data)], &[])
+        let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&data)], &[], NumericPolicy::default())
             .unwrap_or_else(|error| panic!("{case}: metal axis reduce executes on a real device: {error}"));
 
         assert_parity_within(&case, cpu.root(), metal.root(), 1e-4);
@@ -1244,6 +1254,7 @@ fn matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle() {
         &[],
         &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)],
         &[],
+        NumericPolicy::default(),
     )
     .expect("f16 metal matmul executes on a real device");
 
@@ -1328,7 +1339,7 @@ fn page_aligned_input_takes_the_no_copy_metal_upload_path() {
 
     let cpu =
         evaluate(&program, &[], &[&aligned[..]], &[]).expect("cpu evaluates the page-sized chain");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&aligned[..])], &[])
+    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&aligned[..])], &[], NumericPolicy::default())
         .expect("metal executes the page-aligned block on a real device");
 
     let nocopy_after = omega::metal::NOCOPY_BUFFER_UPLOADS.get();
@@ -1430,6 +1441,7 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path() {
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .expect("metal executes a packed q4_k matmul on a real device");
 
@@ -1542,6 +1554,7 @@ fn metal_matmul_on_one_q4k_super_block_matches_a_hand_rolled_dequantize_then_dot
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .expect("metal executes a packed q4_k matmul on a real device");
 
@@ -1635,6 +1648,7 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_ti
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .expect("metal executes a tiled packed q4_k gemm on a real device");
 
@@ -1792,6 +1806,7 @@ fn metal_matmul_on_packed_q6k_weights_matches_the_dequantized_f32_cpu_path() {
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .expect("metal executes a packed q6_k matmul on a real device");
 
@@ -1877,6 +1892,7 @@ fn metal_matmul_on_packed_q5k_weights_matches_the_dequantized_f32_cpu_path() {
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .expect("metal executes a packed q5_k matmul on a real device");
 
@@ -2171,6 +2187,7 @@ async fn metal_matmul_parity_across_codec_and_dtype(
         &[],
         &[weight_block, QuantizedBlock::Float32(&activation)],
         &[sum],
+        NumericPolicy::default(),
     )
     .unwrap_or_else(|error| {
         panic!("{codec}@{compute_dtype:?}: metal executes on a real device: {error}")

@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use proxima_tensor::spec::mistral_cached_forward_program;
-use proxima_tensor::{bind, infer};
+use proxima_tensor::{NumericPolicy, bind, infer};
 
 fn main() {
     // openchat-3.5-1210 / Mistral-7B
@@ -62,7 +62,7 @@ fn main() {
             return;
         }
     };
-    let bound = match bind(&program, &shapes, &roots) {
+    let bound = match bind(&program, &shapes, &roots, NumericPolicy::default()) {
         Ok(bound) => bound,
         Err(error) => {
             println!("bind FAILED: {error}");

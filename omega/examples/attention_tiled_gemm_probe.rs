@@ -36,7 +36,8 @@ use std::collections::BTreeSet;
 
 use proxima_tensor::spec::mistral_cached_forward_program;
 use proxima_tensor::{
-    BoundOpKind, Keep, NodeId, Op, ScalarOp, bind, correct_packed_matmul_layouts, infer,
+    BoundOpKind, Keep, NodeId, NumericPolicy, Op, ScalarOp, bind, correct_packed_matmul_layouts,
+    infer,
 };
 
 #[cfg(feature = "instrument")]
@@ -117,7 +118,8 @@ fn main() {
         .collect();
 
     // MIRRORS `metal::prepare` exactly, same as `real_forward_packed_probe.rs`.
-    let mut bound = bind(&program, &shapes, &roots).expect("the real forward binds");
+    let mut bound =
+        bind(&program, &shapes, &roots, NumericPolicy::default()).expect("the real forward binds");
     correct_packed_matmul_layouts(&mut bound, &q4k_operands);
 
     #[cfg(feature = "instrument")]

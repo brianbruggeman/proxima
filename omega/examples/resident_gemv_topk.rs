@@ -307,8 +307,14 @@ fn run() {
                 QuantizedBlock::Float32(&corpus),
                 QuantizedBlock::Float32(&warmup_query),
             ];
-            let resolved = omega::plan(&program, &[], &blocks, &[sum])
-                .map_err(|error| format!("plan failed at rows={rows}: {error}"))?;
+            let resolved = omega::plan(
+                &program,
+                &[],
+                &blocks,
+                &[sum],
+                proxima_tensor::NumericPolicy::default(),
+            )
+            .map_err(|error| format!("plan failed at rows={rows}: {error}"))?;
             omega::execute_plan(&resolved, &blocks)
                 .map_err(|error| format!("warmup execute failed at rows={rows}: {error}"))?;
             resolved

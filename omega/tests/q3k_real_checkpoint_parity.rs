@@ -24,8 +24,8 @@ use proxima_gguf::quant::q3_k;
 use proxima_gguf::types::GgmlType;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, evaluate, map,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, evaluate, map,
 };
 
 /// Real `Q3_K_M` GGUF checkpoint path, overridable via `PROXIMA_Q3K_GGUF` --
@@ -240,6 +240,7 @@ fn metal_matmul_on_real_ffn_up_q3k_bytes_matches_the_dequantized_f32_cpu_path() 
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .expect("metal executes a packed q3_k matmul on real blk.0.ffn_up.weight bytes");
 

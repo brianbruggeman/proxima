@@ -34,8 +34,8 @@ use proxima_gguf::quant::q4_k;
 use proxima_gguf::types::GgmlType;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, evaluate, map,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, evaluate, map,
 };
 
 /// real GGUF checkpoint path, overridable via `PROXIMA_BENCH_GGUF_PATH` --
@@ -265,6 +265,7 @@ fn run_real_attn_q_parity(rows_to_check: usize) {
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .expect("metal executes a packed q4_k matmul on real blk.0.attn_q.weight bytes");
 

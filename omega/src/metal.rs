@@ -302,6 +302,18 @@ pub enum MetalError {
         cached_len: usize,
         offered_len: usize,
     },
+    /// [`Plan::check_numeric_policy`]/[`Plan::set_math_mode`]: `bound` is the
+    /// [`NumericPolicy`] this plan's program was actually compiled under
+    /// ([`plan`]/[`plan_named`]'s own argument), `requested` is what the
+    /// caller asked to confirm or narrow into. `Plan` never retains `blocks`
+    /// (see [`Plan::numeric_policy`]'s own doc), so a rebind is not
+    /// implementable in place -- the caller's only correct response is a
+    /// fresh [`plan`]/[`plan_named`] call with `requested`.
+    #[error("plan bound under {bound:?}, caller requested {requested:?} -- rebuild via plan()/plan_named()")]
+    NumericPolicyMismatch {
+        bound: NumericPolicy,
+        requested: NumericPolicy,
+    },
 }
 /// This thread's Metal device paired with its command queue — both created
 /// once per thread rather than per [`execute`] call.
@@ -396,19 +408,17 @@ pub struct Plan {
     /// way to know a caller's residency intent from codecs/shapes alone.
     resident_nodes: BTreeSet<NodeId>,
     /// Which [`MTLCompileOptions::mathMode`] every kernel this plan compiles
-    /// is compiled under -- [`MathMode::default`] (`Relaxed`) until a
-    /// caller overrides it with [`Plan::set_math_mode`]. See [`MathMode`]'s
-    /// own doc for the measured rationale.
+    /// is compiled under -- projected from `numeric_policy` at construction
+    /// ([`numeric_policy_as_metal_math_mode`]), narrowable afterward within
+    /// that policy via [`Plan::set_math_mode`]. See [`MathMode`]'s own doc
+    /// for the measured rationale.
     math_mode: MathMode,
-    /// Which bit-changing rewrites `msl::context_chunks_for` (the
-    /// cross-simdgroup attention context-chunk merge) may apply --
-    /// `NumericPolicy::ReassociationPermitted` until a caller overrides it
-    /// with [`Plan::set_numeric_policy`]. Default matches this plan's own
-    /// pre-existing, always-on chunk merge exactly (no silent behavior
-    /// change); [`Plan::set_math_mode`] narrows into this field too, so the
-    /// two axes never drift the way an unconsulted `is_associative` call
-    /// would (`proxima_tensor::op::ScalarOp::is_associative`'s only caller
-    /// today is a dtype accumulator-width check, not a reassociation gate).
+    /// Which bit-changing rewrites this plan's bound program was
+    /// constructed with -- [`plan`]/[`plan_named`]'s own `numeric_policy`
+    /// argument, fixed for this plan's whole life (see
+    /// [`Plan::numeric_policy`]'s own doc for why there is no setter).
+    /// `msl::context_chunks_for` (the cross-simdgroup attention
+    /// context-chunk merge) consults it via [`Plan::numeric_policy`].
     numeric_policy: NumericPolicy,
     /// Which [`MTLDispatchType`] [`execute_plan_with_placements`] opens its
     /// compute encoder with -- [`DispatchType::default`] (`Concurrent`)
@@ -489,17 +499,15 @@ pub struct Plan {
     block_identity: RefCell<Vec<Option<(usize, usize)>>>,
 }
 
-/// [`Plan::resolved_steps`]'s payload -- the [`NumericPolicy`] it was built
-/// under, so a later [`Plan::set_numeric_policy`] OR [`Plan::set_math_mode`]
-/// call is detected and triggers a rebuild rather than silently serving
-/// stale pipelines for the old policy. Keyed on `numeric_policy`, not
-/// `math_mode`: `numeric_policy_as_metal_math_mode` collapses `BitExact`
-/// and `FusedNoReassociation` onto the same `MathMode::Safe` (see that
-/// function's own doc table), so a `math_mode`-keyed staleness check would
-/// miss a `BitExact -> FusedNoReassociation` transition entirely and keep
-/// serving pipelines resolved for the wrong policy.
+/// [`Plan::resolved_steps`]'s payload -- the [`MathMode`] it was built
+/// under, so a later [`Plan::set_math_mode`] call is detected and triggers a
+/// rebuild rather than silently serving stale pipelines for the old mode.
+/// Keyed on `math_mode` alone, not `numeric_policy`: `numeric_policy` cannot
+/// move post-construction ([`Plan::numeric_policy`]'s own doc), so
+/// `math_mode` -- narrowable within the bound policy via
+/// [`Plan::set_math_mode`] -- is the only axis that can still go stale here.
 struct ResolvedSteps {
-    numeric_policy: NumericPolicy,
+    math_mode: MathMode,
     steps: Vec<ResolvedStep>,
 }
 
@@ -639,52 +647,72 @@ mod block_buffer_reusable_tests {
 }
 
 impl Plan {
-    /// Overrides this plan's [`MathMode`] from [`MathMode::default`]
-    /// (`Relaxed`). Safe to call any time before an `execute_plan*` call --
-    /// `pipeline_for`'s cache key folds the mode in, so switching a plan's
-    /// mode between calls never hands back a pipeline compiled for the
-    /// other one.
+    /// Narrows this plan's compiled [`MathMode`] from [`MathMode::default`]
+    /// (`Relaxed`) -- never widens it, and never touches
+    /// [`Self::numeric_policy`]. Safe to call any time before an
+    /// `execute_plan*` call -- `pipeline_for`'s cache key folds the mode in,
+    /// so switching a plan's mode between calls never hands back a pipeline
+    /// compiled for the other one.
     ///
     /// [`MathMode`] is a 3-rung compiler flag; [`NumericPolicy`] is the
-    /// richer, orthogonal axis this plan actually gates rewrites on (see
-    /// [`Self::set_numeric_policy`]). This projects the legacy 3-rung call
-    /// onto what Metal's compiler actually admits under each mode --
-    /// `Safe -> BitExact`, `Relaxed -> ReassociationPermitted`, `Fast ->
-    /// FastMath`. Metal's `MTLMathMode::Relaxed` documents that it permits
-    /// reassociation and contraction and only preserves NaN/inf handling
-    /// (see [`MathMode`]'s own doc for the header reference); ROW 296-362
-    /// measured every context-chunk-merge cell under `Relaxed`, so a
-    /// caller using only the old API still gets the rewrite the branch
-    /// landed, never a silent narrowing back to `FusedNoReassociation`
-    /// that this projection used to apply.
-    pub fn set_math_mode(&mut self, math_mode: MathMode) {
-        self.math_mode = math_mode;
-        self.numeric_policy = match math_mode {
-            MathMode::Safe => NumericPolicy::BitExact,
-            MathMode::Relaxed => NumericPolicy::ReassociationPermitted,
-            MathMode::Fast => NumericPolicy::FastMath,
-        };
+    /// richer, orthogonal 5-permission set this plan's bound program was
+    /// actually constructed under ([`plan`]/[`plan_named`]'s own argument,
+    /// fixed for this plan's whole life -- see [`Self::numeric_policy`]'s
+    /// own doc for why there is no setter for it). `math_mode` may only
+    /// request what `numeric_policy` already grants
+    /// ([`metal_math_mode_as_numeric_policy`]); requesting `Fast` on a plan
+    /// bound under `bit_exact()` is a caller error, not a silent widening,
+    /// so this returns [`MetalError::NumericPolicyMismatch`] instead of
+    /// mutating `numeric_policy` the way this setter used to.
+    ///
+    /// # Errors
+    /// [`MetalError::NumericPolicyMismatch`] when `math_mode` needs a
+    /// permission `self.numeric_policy` does not grant.
+    pub fn set_math_mode(&mut self, math_mode: MathMode) -> Result<(), MetalError> {
+        let requested = metal_math_mode_as_numeric_policy(math_mode);
+        if self.numeric_policy.grants(requested) {
+            self.math_mode = math_mode;
+            Ok(())
+        } else {
+            Err(MetalError::NumericPolicyMismatch {
+                bound: self.numeric_policy,
+                requested,
+            })
+        }
     }
 
-    /// Overrides this plan's [`NumericPolicy`] from
-    /// `NumericPolicy::ReassociationPermitted` (this plan's pre-existing,
-    /// always-on context-chunk-merge behavior). The primary setter for the
-    /// numeric axis -- [`Self::set_math_mode`] is a narrower legacy
-    /// convenience over the same field. Also narrows `math_mode` via
-    /// [`numeric_policy_as_metal_math_mode`], so [`Self::math_mode`] always
-    /// reflects the last setter called, whichever axis a caller used.
-    pub fn set_numeric_policy(&mut self, numeric_policy: NumericPolicy) {
-        self.numeric_policy = numeric_policy;
-        self.math_mode = numeric_policy_as_metal_math_mode(numeric_policy);
-    }
-
-    /// This plan's currently applied [`NumericPolicy`] -- the read side of
-    /// [`Self::set_numeric_policy`]/[`Self::set_math_mode`], consulted by
-    /// `msl::context_chunks_for` before it reassociates the cross-simdgroup
-    /// attention merge.
+    /// The [`NumericPolicy`] this plan's bound program was constructed under
+    /// ([`plan`]/[`plan_named`]'s own `numeric_policy` argument) -- fixed
+    /// for this plan's whole life. There is no setter: the bound program's
+    /// topology (which identity eliminations fired, whether chain/reduce-
+    /// epilogue fusion ran) is decided once, at bind time, and cannot be
+    /// patched after without rebuilding it from `blocks`, which this type
+    /// does not retain (the data is call-scoped, not plan-scoped -- see
+    /// `Plan`'s own struct doc). Build a fresh [`Plan`] via [`plan`]/
+    /// [`plan_named`] with a different policy instead; use
+    /// [`Self::check_numeric_policy`] to confirm a `Plan` from elsewhere (a
+    /// test fixture, a cached plan) matches before trusting it.
     #[must_use]
     pub fn numeric_policy(&self) -> NumericPolicy {
         self.numeric_policy
+    }
+
+    /// `Ok(())` when `desired` matches the policy this plan was bound
+    /// under, `Err` otherwise. See [`Self::numeric_policy`]'s own doc for
+    /// why there is no in-place rebind.
+    ///
+    /// # Errors
+    /// [`MetalError::NumericPolicyMismatch`] when `desired` differs from
+    /// [`Self::numeric_policy`].
+    pub fn check_numeric_policy(&self, desired: NumericPolicy) -> Result<(), MetalError> {
+        if self.numeric_policy == desired {
+            Ok(())
+        } else {
+            Err(MetalError::NumericPolicyMismatch {
+                bound: self.numeric_policy,
+                requested: desired,
+            })
+        }
     }
 
     /// Overrides this plan's [`DispatchType`] from [`DispatchType::default`]
@@ -838,10 +866,11 @@ pub fn plan(
     symbols: &[u64],
     blocks: &[QuantizedBlock<'_>],
     outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
 ) -> Result<Plan, MetalError> {
     #[cfg(feature = "instrument")]
     let prepare_started = read_ticks();
-    let prepared = prepare(program, symbols, blocks, outputs)?;
+    let prepared = prepare(program, symbols, blocks, outputs, numeric_policy)?;
     #[cfg(feature = "instrument")]
     {
         counter!(PREPARE_CALLS, 1);
@@ -865,8 +894,8 @@ pub fn plan(
         packed_operands,
         block_dtypes,
         resident_nodes: BTreeSet::new(),
-        math_mode: MathMode::default(),
-        numeric_policy: NumericPolicy::ReassociationPermitted,
+        math_mode: numeric_policy_as_metal_math_mode(numeric_policy),
+        numeric_policy,
         dispatch_type: DispatchType::default(),
         #[cfg(feature = "instrument")]
         encoder_split_at: None,
@@ -894,8 +923,9 @@ pub fn execute(
     symbols: &[u64],
     blocks: &[QuantizedBlock<'_>],
     outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
 ) -> Result<Evaluated, MetalError> {
-    let resolved_plan = plan(program, symbols, blocks, outputs)?;
+    let resolved_plan = plan(program, symbols, blocks, outputs, numeric_policy)?;
     execute_plan(&resolved_plan, blocks)
 }
 
@@ -2026,9 +2056,10 @@ pub fn plan_named(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'_>)],
     outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
 ) -> Result<Plan, MetalError> {
     let blocks = resolve_named_blocks(program, named)?;
-    plan(program, symbols, &blocks, outputs)
+    plan(program, symbols, &blocks, outputs, numeric_policy)
 }
 
 /// [`execute_plan`] against a name-keyed block set. The plan owns its
@@ -3224,6 +3255,7 @@ fn prepare(
     symbols: &[u64],
     blocks: &[QuantizedBlock<'_>],
     outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
 ) -> Result<Prepared, MetalError> {
     let shapes = infer(program, symbols)?;
 
@@ -3291,7 +3323,7 @@ fn prepare(
         outputs.to_vec()
     };
 
-    let mut resolved = bind(program, &shapes, &effective_outputs)?;
+    let mut resolved = bind(program, &shapes, &effective_outputs, numeric_policy)?;
     // A stateless driver has no persistent arena to skip a dead slot inside
     // between calls (unlike `proxima_tensor::cpu::StaticArena`'s own
     // execution-time skip set) -- the only way to avoid dispatching a kernel
@@ -3734,6 +3766,135 @@ fn pack_uniforms_into(
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+mod numeric_policy_construction_tests {
+    //! [`plan`]/[`plan_named`] now take `numeric_policy` as a required
+    //! constructor argument and record it once, at bind time -- the fix for
+    //! the two bugs this design closes (a conflated permission ladder, and
+    //! a policy that never reached `bind`). These tests prove the round
+    //! trip through [`numeric_policy_as_metal_math_mode`]/
+    //! [`metal_math_mode_as_numeric_policy`], and that a [`Plan`] reports
+    //! exactly the policy it was constructed under -- never a later
+    //! default, and never silently narrowed by [`Plan::set_math_mode`].
+
+    use alloc::vec;
+
+    use proxima_tensor::{DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, append, map};
+
+    use super::{MathMode, MetalError, metal_math_mode_as_numeric_policy, plan};
+
+    #[test]
+    fn metal_math_mode_round_trips_through_numeric_policy() {
+        for mode in [MathMode::Safe, MathMode::Relaxed, MathMode::Fast] {
+            let policy = metal_math_mode_as_numeric_policy(mode);
+            assert_eq!(
+                super::numeric_policy_as_metal_math_mode(policy),
+                mode,
+                "mode {mode:?} must round-trip through its own exact permission set"
+            );
+        }
+    }
+
+    fn identity_program() -> (Vec<Op>, proxima_tensor::NodeId) {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let identity = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: proxima_tensor::ScalarOp::Identity,
+                operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+        (program, identity)
+    }
+
+    #[test]
+    fn plan_records_the_policy_it_bound_under_not_a_later_default() {
+        let (program, identity) = identity_program();
+        let data = [1.0f32, 2.0, 3.0, 4.0];
+        let blocks = [QuantizedBlock::Float32(&data)];
+        let resolved_plan = plan(
+            &program,
+            &[],
+            &blocks,
+            &[identity],
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("plans the identity program");
+        assert_eq!(resolved_plan.numeric_policy(), NumericPolicy::llama_relaxed());
+        assert!(
+            resolved_plan
+                .check_numeric_policy(NumericPolicy::llama_relaxed())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn plan_refuses_a_mismatched_policy_instead_of_silently_narrowing() {
+        let (program, identity) = identity_program();
+        let data = [1.0f32, 2.0, 3.0, 4.0];
+        let blocks = [QuantizedBlock::Float32(&data)];
+        let resolved_plan = plan(
+            &program,
+            &[],
+            &blocks,
+            &[identity],
+            NumericPolicy::bit_exact(),
+        )
+        .expect("plans the identity program");
+        let error = resolved_plan
+            .check_numeric_policy(NumericPolicy::fast())
+            .expect_err("bit-exact-bound plan does not satisfy fast");
+        let MetalError::NumericPolicyMismatch { bound, requested } = error else {
+            panic!("expected NumericPolicyMismatch, got {error:?}");
+        };
+        assert_eq!(bound, NumericPolicy::bit_exact());
+        assert_eq!(requested, NumericPolicy::fast());
+    }
+
+    #[test]
+    fn set_math_mode_narrows_within_the_bound_policy_but_never_widens_it() {
+        let (program, identity) = identity_program();
+        let data = [1.0f32, 2.0, 3.0, 4.0];
+        let blocks = [QuantizedBlock::Float32(&data)];
+        let mut resolved_plan = plan(
+            &program,
+            &[],
+            &blocks,
+            &[identity],
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("plans the identity program");
+        resolved_plan
+            .set_math_mode(MathMode::Safe)
+            .expect("Safe needs nothing, llama_relaxed() grants it trivially");
+        assert_eq!(resolved_plan.math_mode(), MathMode::Safe);
+        assert_eq!(
+            resolved_plan.numeric_policy(),
+            NumericPolicy::llama_relaxed(),
+            "narrowing math_mode must never change the bound numeric_policy"
+        );
+        let error = resolved_plan
+            .set_math_mode(MathMode::Fast)
+            .expect_err("Fast needs nan_assumptions/signed_zero/approx_functions, llama_relaxed() withholds all three");
+        let MetalError::NumericPolicyMismatch { bound, requested } = error else {
+            panic!("expected NumericPolicyMismatch, got {error:?}");
+        };
+        assert_eq!(bound, NumericPolicy::llama_relaxed());
+        assert_eq!(requested, NumericPolicy::fast());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod pack_uniforms_byte_len_tests {
     //! [`super::pack_uniforms_byte_len`] mirrors [`super::pack_uniforms`]'s
     //! match arms field-for-field rather than calling it -- these tests are
@@ -3783,7 +3944,7 @@ mod pack_uniforms_byte_len_tests {
             },
         );
         let shapes = infer(&program, &[]).expect("elementwise infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("elementwise lowers")
             .into_iter()
             .next_back()
@@ -3834,7 +3995,7 @@ mod pack_uniforms_byte_len_tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("matmul infers");
-        bind(&program, &shapes, &[])
+        bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("matmul lowers")
             .into_iter()
             .next_back()
@@ -4090,10 +4251,13 @@ fn nserror_description(error: &NSError) -> String {
 /// floating-point optimizations but preserves infs and nans"; `Fast`
 /// "allows aggressive, unsafe floating-point optimizations" with no such
 /// preservation. `Relaxed`'s wording -- aggressive optimization, NaN/inf
-/// preserved -- is exactly [`NumericPolicy::ReassociationPermitted`]:
-/// reordering an associative fold is permitted, nothing beyond it (no
-/// approximate transcendentals) is. See [`Self::set_math_mode`] for the
-/// full projection table both directions.
+/// preserved -- is exactly [`NumericPolicy::llama_relaxed`]: contraction and
+/// reassociation are permitted, `nan_assumptions`/`signed_zero`/
+/// `approx_functions` are withheld because Relaxed's own contract
+/// explicitly preserves NaN/inf/zero behavior. See
+/// [`numeric_policy_as_metal_math_mode`] and
+/// [`metal_math_mode_as_numeric_policy`] for the full projection both
+/// directions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MathMode {
     /// IEEE-safe float math -- bit-parity with
@@ -4129,30 +4293,46 @@ impl MathMode {
 /// richer, orthogonal question: which algebra `bind`/the emitter are
 /// permitted to choose in the first place (chunk count, contraction,
 /// reduction order). [`MathMode`] is this narrower projection, not a
-/// duplicate ladder. The two directions of the mapping are NOT mirror
-/// images of each other, because Metal has 3 rungs and [`NumericPolicy`]
-/// has 4:
-///
-/// | `NumericPolicy` (4 rungs)   | [`Self::set_math_mode`] input | this fn's output |
-/// |------------------------------|--------------------------------|-------------------|
-/// | `BitExact`                   | `Safe`                          | `Safe`            |
-/// | `FusedNoReassociation`        | (unreachable via `set_math_mode`) | `Safe` (down --  no Metal rung sits here; `Safe` is the nearest rung that never over-grants) |
-/// | `ReassociationPermitted`      | `Relaxed`                       | `Relaxed`         |
-/// | `FastMath`                    | `Fast`                          | `Fast`            |
+/// duplicate ladder. This rounds UP to the nearest mode that never
+/// under-grants what `policy` actually permits, never down (a caller who
+/// asked for less than a mode's floor would silently get more): any
+/// permission at or above `contraction`/`reassociation` needs at least
+/// `Relaxed`; `nan_assumptions`/`signed_zero`/`approx_functions` need
+/// `Fast`, since `Safe`/`Relaxed` both preserve NaN/inf/zero per Apple's own
+/// doc (this type's own doc, above). See [`metal_math_mode_as_numeric_policy`]
+/// for the inverse.
 ///
 /// A free function, not an inherent `impl NumericPolicy` -- `NumericPolicy`
 /// is defined in `proxima-tensor`, and the orphan rule forbids an inherent
 /// `impl` for a foreign type from this crate.
 #[must_use]
 const fn numeric_policy_as_metal_math_mode(policy: NumericPolicy) -> MathMode {
-    match policy {
-        NumericPolicy::BitExact | NumericPolicy::FusedNoReassociation => MathMode::Safe,
-        NumericPolicy::ReassociationPermitted => MathMode::Relaxed,
-        // `FastMath`, and any rung a future, non-exhaustive addition to
-        // `NumericPolicy` introduces above it on the ladder -- Metal has no
-        // rung past `Fast`, so everything at or above `FastMath` compiles
-        // under it.
-        _ => MathMode::Fast,
+    if policy.approx_functions || policy.nan_assumptions || policy.signed_zero {
+        MathMode::Fast
+    } else if policy.contraction || policy.reassociation {
+        MathMode::Relaxed
+    } else {
+        MathMode::Safe
+    }
+}
+
+/// The inverse of [`numeric_policy_as_metal_math_mode`]: the exact
+/// permission set Apple's own `MTLMathMode` doc commits to for `mode` --
+/// `Safe` grants nothing ([`NumericPolicy::bit_exact`]), `Relaxed` grants
+/// contraction+reassociation only, NaN/inf/zero preserved per the header
+/// ([`NumericPolicy::llama_relaxed`]), `Fast` grants everything
+/// ([`NumericPolicy::fast`]). Loses nothing: it round-trips through
+/// [`numeric_policy_as_metal_math_mode`] for all three modes. What the
+/// OTHER direction loses: every point in the 32-state permission space that
+/// isn't one of these 3 Metal natively supports (e.g. `contraction` alone
+/// without `reassociation` compiles identically to both granted, since
+/// Metal has no finer compiler flag).
+#[must_use]
+const fn metal_math_mode_as_numeric_policy(mode: MathMode) -> NumericPolicy {
+    match mode {
+        MathMode::Safe => NumericPolicy::bit_exact(),
+        MathMode::Relaxed => NumericPolicy::llama_relaxed(),
+        MathMode::Fast => NumericPolicy::fast(),
     }
 }
 
@@ -6252,19 +6432,21 @@ fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Result<Option<&MetalBu
 }
 
 /// Builds `plan.resolved_steps` on its first call, or when
-/// [`Plan::set_numeric_policy`] (or [`Plan::set_math_mode`], which also
-/// moves `numeric_policy` -- see its own doc) moved the policy since the
-/// last build -- every later call for the SAME policy is a no-op. Called
-/// once per [`execute_plan_with_placements`] invocation, before that
-/// function's own per-position loop, so a plan-cache HIT never pays
-/// [`kernel_cache_key`] or [`kernel_dispatch_shape`] again: the loop below
-/// indexes `plan.resolved_steps` by position instead.
+/// [`Plan::set_math_mode`] moved the compiled mode since the last build --
+/// every later call for the SAME mode is a no-op. `numeric_policy` cannot
+/// move post-construction ([`Plan::numeric_policy`]'s own doc), so
+/// `math_mode` -- the one axis that can still narrow after [`plan`] --  is
+/// the only staleness key this needs. Called once per
+/// [`execute_plan_with_placements`] invocation, before that function's own
+/// per-position loop, so a plan-cache HIT never pays [`kernel_cache_key`] or
+/// [`kernel_dispatch_shape`] again: the loop below indexes
+/// `plan.resolved_steps` by position instead.
 fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<(), MetalError> {
     let stale = plan
         .resolved_steps
         .borrow()
         .as_ref()
-        .is_none_or(|resolved| resolved.numeric_policy != plan.numeric_policy);
+        .is_none_or(|resolved| resolved.math_mode != plan.math_mode);
     if !stale {
         return Ok(());
     }
@@ -6288,7 +6470,7 @@ fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<
         });
     }
     *plan.resolved_steps.borrow_mut() = Some(ResolvedSteps {
-        numeric_policy: plan.numeric_policy,
+        math_mode: plan.math_mode,
         steps,
     });
     Ok(())
@@ -7171,6 +7353,7 @@ mod arena_tests {
             &[],
             &[QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)],
             &outputs,
+            NumericPolicy::default(),
         )
         .expect("plans the chain once -- its arena and plan uniforms build lazily below");
         let pooled = execute_plan_with_placements(
@@ -7207,7 +7390,7 @@ mod arena_tests {
         let outputs = [stage_zero, stage_one, stage_two];
         let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
         let resolved_plan =
-            plan(&program, &[], &blocks, &outputs).expect("plans the three-stage chain");
+            plan(&program, &[], &blocks, &outputs, NumericPolicy::default()).expect("plans the three-stage chain");
 
         execute_plan(&resolved_plan, &blocks).expect("runs the unplaced program");
 
@@ -7246,7 +7429,7 @@ mod arena_tests {
         let blocks: Vec<QuantizedBlock<'_>> =
             core::iter::repeat_n(QuantizedBlock::Float32(a.as_slice()), 5).collect();
         let resolved_plan =
-            plan(&program, &[], &blocks, &outputs).expect("plans the five-diamond program");
+            plan(&program, &[], &blocks, &outputs, NumericPolicy::default()).expect("plans the five-diamond program");
         arena_placement(&resolved_plan, 0).expect("builds the arena on first placement lookup");
 
         let arena = resolved_plan.arena.get().expect("arena was just built above");
@@ -7302,7 +7485,7 @@ mod arena_tests {
         let outputs = [stage_zero, stage_one, stage_two];
         let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
         let resolved_plan =
-            plan(&program, &[], &blocks, &outputs).expect("plans the pinned-output chain");
+            plan(&program, &[], &blocks, &outputs, NumericPolicy::default()).expect("plans the pinned-output chain");
         arena_placement(&resolved_plan, 0).expect("builds the arena on first placement lookup");
         let arena = resolved_plan.arena.get().expect("arena was just built above");
 
@@ -7335,7 +7518,7 @@ mod arena_tests {
         let outputs = [stage_zero, stage_two];
         let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
         let resolved_plan =
-            plan(&program, &[], &blocks, &outputs).expect("plans the size-mismatched chain");
+            plan(&program, &[], &blocks, &outputs, NumericPolicy::default()).expect("plans the size-mismatched chain");
         arena_placement(&resolved_plan, 0).expect("builds the arena on first placement lookup");
         let arena = resolved_plan.arena.get().expect("arena was just built above");
 
@@ -7398,7 +7581,7 @@ mod arena_tests {
         let outputs = [*nodes.last().expect("ten stages were pushed")];
         let blocks = [QuantizedBlock::Float32(&a)];
         let resolved_plan =
-            plan(&program, &[], &blocks, &outputs).expect("plans the ten-stage chain");
+            plan(&program, &[], &blocks, &outputs, NumericPolicy::default()).expect("plans the ten-stage chain");
         arena_placement(&resolved_plan, 0).expect("builds the arena on first placement lookup");
 
         let slot_count = resolved_plan
@@ -7427,7 +7610,7 @@ mod arena_tests {
         let outputs = [stage_zero, stage_two];
         let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
         let resolved_plan =
-            plan(&program, &[], &blocks, &outputs).expect("plans the identical-uniform chain");
+            plan(&program, &[], &blocks, &outputs, NumericPolicy::default()).expect("plans the identical-uniform chain");
         plan_uniform_buffer(&resolved_plan, 0).expect("builds the uniforms on first lookup");
 
         let position_of = |node: NodeId| {
@@ -7478,8 +7661,8 @@ mod block_node_attribution_tests {
     use alloc::vec;
 
     use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-        TensorError, append, projection,
+        DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
+        ReduceInit, ScalarOp, TensorError, append, projection,
     };
 
     use super::{MetalError, plan};
@@ -7565,7 +7748,7 @@ mod block_node_attribution_tests {
             QuantizedBlock::Float32(&activation_data),
         ];
 
-        let error = match plan(&program, &[], &blocks, &[]) {
+        let error = match plan(&program, &[], &blocks, &[], NumericPolicy::default()) {
             Ok(_) => panic!("misordered blocks must never silently plan"),
             Err(error) => error,
         };
@@ -7611,7 +7794,7 @@ mod block_node_attribution_tests {
             QuantizedBlock::Q6K(&packed_weight),
         ];
 
-        plan(&program, &[], &blocks, &[]).expect("declaration-ordered blocks must plan");
+        plan(&program, &[], &blocks, &[], NumericPolicy::default()).expect("declaration-ordered blocks must plan");
     }
 }
 
@@ -7859,7 +8042,7 @@ mod hazard_tracker_tests {
         );
         let shapes = infer(&program, &[]).expect("epilogue fixture infers");
         let resolved =
-            bind(&program, &shapes, &[consumer, extra_y_use]).expect("epilogue fixture binds");
+            bind(&program, &shapes, &[consumer, extra_y_use], NumericPolicy::default()).expect("epilogue fixture binds");
         assert_eq!(
             resolved.len(),
             3,

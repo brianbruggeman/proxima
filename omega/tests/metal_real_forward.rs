@@ -15,7 +15,7 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::{BoundOpKind, NodeId, bind, infer};
+use proxima_tensor::{BoundOpKind, NodeId, NumericPolicy, bind, infer};
 #[cfg(feature = "metal-buffer-pool")]
 use proxima_tensor::Reduce;
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
@@ -46,7 +46,7 @@ fn metal_runs_the_real_forward_graph_and_agrees_with_the_cpu() {
     )
     .expect("cpu runs the real forward");
 
-    let plan = omega::plan_named(&program, &symbols, &named, &roots)
+    let plan = omega::plan_named(&program, &symbols, &named, &roots, NumericPolicy::default())
         .expect("metal plans the real forward");
     let metal = omega::execute_plan_named(&plan, &named)
         .expect("metal runs the real forward on a real device");
@@ -110,7 +110,7 @@ fn metal_agrees_with_cpu_on_a_nonempty_kv_cache() {
     )
     .expect("cpu runs the real forward with a non-empty cache");
 
-    let plan = omega::plan_named(&program, &symbols, &named, &all_nodes)
+    let plan = omega::plan_named(&program, &symbols, &named, &all_nodes, NumericPolicy::default())
         .expect("metal plans the real forward with a non-empty cache");
     let metal = omega::execute_plan_named(&plan, &named)
         .expect("metal runs the real forward with a non-empty cache on a real device");
@@ -157,7 +157,7 @@ fn fused_cached_attention_root_agrees_between_cpu_and_metal() {
     let output_roots = [roots[0]];
     let named = as_named_blocks(&owned);
     let shapes = infer(&program, &symbols).expect("cached fixture infers");
-    let resolved = bind(&program, &shapes, &output_roots).expect("cached fixture binds");
+    let resolved = bind(&program, &shapes, &output_roots, NumericPolicy::default()).expect("cached fixture binds");
     assert!(resolved
         .iter()
         .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })));
@@ -173,7 +173,7 @@ fn fused_cached_attention_root_agrees_between_cpu_and_metal() {
         &mut validated,
     )
     .expect("cpu runs the fused cached root");
-    let plan = omega::plan_named(&program, &symbols, &named, &output_roots)
+    let plan = omega::plan_named(&program, &symbols, &named, &output_roots, NumericPolicy::default())
         .expect("metal plans the fused cached root");
     let metal = omega::execute_plan_named(&plan, &named)
         .expect("metal runs the fused cached root");
@@ -211,7 +211,7 @@ fn running_the_same_plan_twice_reproduces_the_first_run_exactly() {
     let named = as_named_blocks(&owned);
     let all_nodes: Vec<NodeId> = (0..program.len() as u32).map(NodeId).collect();
 
-    let plan = omega::plan_named(&program, &symbols, &named, &all_nodes)
+    let plan = omega::plan_named(&program, &symbols, &named, &all_nodes, NumericPolicy::default())
         .expect("metal plans the real forward with a non-empty cache");
 
     let first = omega::execute_plan_named(&plan, &named).expect("first metal run succeeds");

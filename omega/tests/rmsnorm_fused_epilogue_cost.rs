@@ -296,7 +296,7 @@ fn run_cell(label: &str, seq: u32, dim: u32, fused: bool) {
     let named_blocks = as_named_blocks(&named);
 
     let shapes = infer(&program, &symbols).expect("rmsnorm batch program infers");
-    let resolved = bind(&program, &shapes, &roots).expect("rmsnorm batch program binds");
+    let resolved = bind(&program, &shapes, &roots, NumericPolicy::default()).expect("rmsnorm batch program binds");
     let fused_count = epilogued_reduce_count(&resolved);
     println!(
         "=== ROW 368 {label} seq={seq} dim={dim} fused_requested={fused} \
@@ -312,7 +312,7 @@ fn run_cell(label: &str, seq: u32, dim: u32, fused: bool) {
             matches!(&bound.kind, BoundOpKind::Reduce { epilogue_operands, .. } if !epilogue_operands.is_empty())
         }) {
             let packed_operands = Default::default();
-            let kernel = omega::msl::emit(bound, &packed_operands, NumericPolicy::BitExact)
+            let kernel = omega::msl::emit(bound, &packed_operands, NumericPolicy::bit_exact())
                 .expect("fused rmsnorm reduce emits MSL");
             println!("--- ROW 368 fused rmsnorm MSL (entry={}) ---\n{}", kernel.entry, kernel.source);
         }
@@ -324,8 +324,14 @@ fn run_cell(label: &str, seq: u32, dim: u32, fused: bool) {
         );
     }
 
-    let plan = omega::plan_named(&program, &symbols, &named_blocks, &roots)
-        .expect("metal plans the rmsnorm batch");
+    let plan = omega::plan_named(
+        &program,
+        &symbols,
+        &named_blocks,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("metal plans the rmsnorm batch");
 
     omega::execute_plan_named(&plan, &named_blocks).expect("warm-up run");
     let mut samples_ms = Vec::with_capacity(REPEATS);
@@ -469,7 +475,7 @@ fn compile_to_air(source: &str, label: &str) -> (String, DivisionCounts) {
 fn air_division_count_for_shape(label: &str, seq: u32, dim: u32) {
     let (program, symbols, roots, _named) = build_batch(seq, dim, true);
     let shapes = infer(&program, &symbols).expect("rmsnorm batch program infers");
-    let resolved = bind(&program, &shapes, &roots).expect("rmsnorm batch program binds");
+    let resolved = bind(&program, &shapes, &roots, NumericPolicy::default()).expect("rmsnorm batch program binds");
     let bound = resolved
         .iter()
         .find(|bound| {
@@ -477,7 +483,7 @@ fn air_division_count_for_shape(label: &str, seq: u32, dim: u32) {
         })
         .expect("at least one fused rmsnorm reduce");
     let packed_operands = Default::default();
-    let kernel = omega::msl::emit(bound, &packed_operands, NumericPolicy::BitExact)
+    let kernel = omega::msl::emit(bound, &packed_operands, NumericPolicy::bit_exact())
         .expect("fused rmsnorm reduce emits MSL");
 
     let rewritten = row368_direct_write_loop_rewrite(&kernel.source);

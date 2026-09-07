@@ -55,8 +55,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use omega::execute;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, projection,
+    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
+    ScalarOp, append, projection,
 };
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
@@ -150,7 +150,7 @@ fn bench_reduce_cooperative(criterion: &mut Criterion) {
         group.throughput(Throughput::Bytes(u64::from(cols) * 4));
         group.bench_with_input(BenchmarkId::new(label, cols), &cols, |bencher, _cols| {
             bencher.iter(|| {
-                let result = execute(&program, &[], &blocks, &[])
+                let result = execute(&program, &[], &blocks, &[], NumericPolicy::default())
                     .expect("cooperative reduce executes on a real device");
                 black_box(result.root()[0]);
             });

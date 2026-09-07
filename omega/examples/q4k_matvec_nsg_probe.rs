@@ -219,7 +219,14 @@ fn run() {
         // diverges at these row counts, not Metal).
         let reference = independent_reference(&packed, k as usize, rows as usize, &activation);
         let cpu = evaluate_quantized(&program, &[], &blocks, &[sum]).expect("cpu evaluates");
-        let plan = omega::plan(&program, &[], &blocks, &[sum]).expect("metal plans");
+        let plan = omega::plan(
+            &program,
+            &[],
+            &blocks,
+            &[sum],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("metal plans");
         let metal = omega::execute_plan(&plan, &blocks).expect("metal executes");
         let cpu_root = cpu.root();
         let metal_root = metal.root();

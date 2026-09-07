@@ -29,8 +29,8 @@
 use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, affine, append, projection,
+    AxisTerm, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
+    ReduceInit, ScalarOp, affine, append, projection,
 };
 
 /// How far apart consecutive activation elements sit in the physical
@@ -183,7 +183,8 @@ fn metal_agrees_with_the_independent_reference_on_a_q6k_weight_against_an_interl
     // assumption independent of this landing's Metal addressing and out of
     // this row's scope. The independent dequantize+dot reference below is
     // oracle enough for the Metal claim this test exists to make.
-    let plan = omega::plan(&program, &[], &blocks, &[sum]).expect("metal plans the matmul");
+    let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
+        .expect("metal plans the matmul");
     let metal =
         omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
 
