@@ -42,6 +42,7 @@
 #![cfg(all(
     feature = "metal",
     feature = "reduce-epilogue-fusion",
+    feature = "instrument",
     target_os = "macos"
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
