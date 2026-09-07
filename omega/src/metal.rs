@@ -3804,7 +3804,12 @@ fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
     let gather = gather_count(bound);
 
     match &bound.kind {
-        BoundOpKind::CachedAttention { .. } => WORD,
+        BoundOpKind::CachedAttention { .. } => {
+            // Mirrors `pack_cached_attention_uniforms`: the single-range
+            // fused form (nine operands) appends `cached_key_rows` and
+            // `new_key_rows` as runtime uniform fields.
+            if operand_count == 9 { 3 * WORD } else { WORD }
+        }
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => WORD,
         BoundOpKind::Elementwise { .. } => {
             (1 + rank_len + operand_count + operand_count * rank_len) * WORD
@@ -4266,6 +4271,14 @@ fn pack_cached_attention_uniforms(
         / *head_dim as i64
         * chunks;
     push_i64(bytes, total);
+    // Mirrors `render_cached_attention`'s `struct Uniforms` (`omega/src/msl.rs`):
+    // the single-range fused form (nine operands) declares two extra `long`
+    // fields so the kernel body reads the live row counts off the uniform
+    // buffer instead of a value baked as `constexpr` at render time.
+    if bound.operands().len() == 9 {
+        push_i64(bytes, *cached_key_rows as i64);
+        push_i64(bytes, *new_key_rows as i64);
+    }
     Ok(())
 }
 
