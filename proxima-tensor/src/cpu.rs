@@ -24576,6 +24576,7 @@ mod tests {
     fn execute_composes_through_pipe_ext_matching_the_free_function() {
         use crate::bind::BoundOpBuilder;
         use crate::live;
+        use crate::numeric::NumericPolicy;
         use crate::shape::ShapeTable;
         use proxima_primitives::block_on;
         use proxima_primitives::pipe::{Pipe, PipeExt};
@@ -24588,7 +24589,7 @@ mod tests {
         let outputs: Vec<NodeId> = Vec::new();
         let retires = live::annotate(&program, &outputs);
         let shapes = ShapeTable::new(&[]);
-        let builder = BoundOpBuilder::new(retires);
+        let builder = BoundOpBuilder::new(retires, NumericPolicy::BitExact);
 
         // `matmul_program` always appends `lhs` then `rhs` first.
         let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];

@@ -45,8 +45,22 @@ pub enum NumericPolicy {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumericRewrite {
-    /// [`crate::bind`]'s identity-elimination fold (`x*1`, `x+0`, ...).
+    /// [`crate::bind`]'s identity-elimination fold, restricted to the ONE
+    /// sub-case that is bit-exact for every `f32` including NaN and signed
+    /// zero: `x * 1.0`. Always admitted at [`NumericPolicy::BitExact`].
     IdentityElimination,
+    /// [`crate::bind`]'s identity-elimination fold for `x + 0.0`,
+    /// `max(x, -inf)`, and `min(x, +inf)` -- each collapses to `x` for every
+    /// FINITE input, but not for every `f32`: `max(NaN, -inf)` evaluates to
+    /// `-inf` (IEEE 754 `maxNum`/[`f32::max`]'s own "if one argument is NaN,
+    /// return the other" rule), while eliminating the op returns the
+    /// survivor `NaN` instead; `(-0.0) + 0.0` evaluates to `+0.0`, while
+    /// eliminating the op returns `-0.0`. This changes bits without
+    /// reassociating anything (no operand order changes, no operand count
+    /// changes -- an op simply vanishes), so [`NumericPolicy::BitExact`]
+    /// does NOT admit it; its floor is [`NumericPolicy::FusedNoReassociation`],
+    /// the first rung this crate's ladder allows to change bits at all.
+    IdentityEliminationSignedZeroNan,
     /// [`crate::bind`]'s elementwise/reduce chain fusion.
     ChainFusion,
     /// [`crate::bind`]'s reduce-epilogue fusion.
@@ -71,7 +85,9 @@ impl NumericRewrite {
             Self::IdentityElimination | Self::ChainFusion | Self::ReduceEpilogueFusion => {
                 NumericPolicy::BitExact
             }
-            Self::FmaContraction => NumericPolicy::FusedNoReassociation,
+            Self::IdentityEliminationSignedZeroNan | Self::FmaContraction => {
+                NumericPolicy::FusedNoReassociation
+            }
             Self::TreeReduce | Self::ContextChunkMerge | Self::DequantScaleFactoring => {
                 NumericPolicy::ReassociationPermitted
             }
@@ -137,5 +153,44 @@ mod tests {
     fn reassociating_rewrite_admitted_once_the_policy_opts_up() {
         assert!(admit(NumericPolicy::ReassociationPermitted, NumericRewrite::ContextChunkMerge).is_ok());
         assert!(admit(NumericPolicy::FastMath, NumericRewrite::ContextChunkMerge).is_ok());
+    }
+
+    /// The NaN/signed-zero-changing identity eliminations (`x+0`,
+    /// `max(x,-inf)`, `min(x,+inf)`) are NOT admitted at the library
+    /// default -- only `x*1` (plain [`NumericRewrite::IdentityElimination`])
+    /// is bit-exact for every float and clears [`NumericPolicy::BitExact`].
+    #[test]
+    fn signed_zero_nan_identity_elimination_rejected_under_bit_exact_policy() {
+        let policy = NumericPolicy::default();
+        assert_eq!(policy, NumericPolicy::BitExact);
+        assert!(admit(policy, NumericRewrite::IdentityElimination).is_ok());
+        let error = admit(policy, NumericRewrite::IdentityEliminationSignedZeroNan)
+            .expect_err("x+0/max(x,-inf)/min(x,+inf) change bits on NaN/signed-zero inputs");
+        assert_eq!(
+            error,
+            TensorError::NumericPolicyTooStrict {
+                rewrite: NumericRewrite::IdentityEliminationSignedZeroNan,
+                minimum: NumericPolicy::FusedNoReassociation,
+                granted: NumericPolicy::BitExact,
+            }
+        );
+    }
+
+    #[test]
+    fn signed_zero_nan_identity_elimination_admitted_once_the_policy_opts_up() {
+        assert!(
+            admit(
+                NumericPolicy::FusedNoReassociation,
+                NumericRewrite::IdentityEliminationSignedZeroNan
+            )
+            .is_ok()
+        );
+        assert!(
+            admit(
+                NumericPolicy::ReassociationPermitted,
+                NumericRewrite::IdentityEliminationSignedZeroNan
+            )
+            .is_ok()
+        );
     }
 }
