@@ -5004,24 +5004,26 @@ fn push_packed_row_blocked_body(
         // `metal-q4k-split-k`-aware, same posture as `push_q4k_single_fetch_body`
         // above and for the identical reason: its `ib` loop has no
         // `sgitg`/`split` stride of its own. ALSO requires the codec be one
-        // this file has a verbatim ggml body for (`Q4K`, `Q6K`): each of
-        // `push_q4k_ggml_port_body`/`push_q6k_ggml_port_body` transcribes a
-        // SPECIFIC ggml kernel's own fixed byte offsets and decode shape.
-        // `plain_product` alone is not codec-specific (it is also true for
-        // `Q5_K` once `metal-q5k-pair-dot` is on, and that feature rides
-        // along inside the `metal` umbrella every `metal-q4k-ggml-port`
-        // build already carries) -- without this guard, enabling
-        // `metal-q4k-ggml-port` silently routed every packed-row `Q5_K`
-        // matmul through the `Q4_K`-shaped body too (found via
+        // this file has a verbatim ggml body for (`Q4K`, `Q5K`, `Q6K`): each
+        // of `push_q4k_ggml_port_body`/`push_q5k_ggml_port_body`/
+        // `push_q6k_ggml_port_body` transcribes a SPECIFIC ggml kernel's own
+        // fixed byte offsets and decode shape. `plain_product` alone is not
+        // codec-specific (every codec with `supports_pair_dot` reaches this
+        // arm) -- without this guard, enabling `metal-q4k-ggml-port` silently
+        // routed every packed-row `Q5_K` matmul through the `Q4_K`-shaped
+        // body too (found via
         // `metal_matmul_on_packed_q5k_weights_matches_the_dequantized_f32_cpu_path`,
         // relative=0.977, essentially uncorrelated output -- the qh plane was
-        // simply never read).
+        // simply never read). `Q5_K` now has its own body
+        // ([`push_q5k_ggml_port_body`]) instead of falling through to `Q4_K`'s.
         let use_ggml_port = plain_product
-            && matches!(codec, PackedCodec::Q4K | PackedCodec::Q6K)
+            && matches!(codec, PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K)
             && cfg!(feature = "metal-q4k-ggml-port")
             && !cfg!(feature = "metal-q4k-split-k");
         if use_ggml_port && matches!(codec, PackedCodec::Q6K) {
             push_q6k_ggml_port_body(source, weight, other, rows, block_bytes, other_stride_is_one);
+        } else if use_ggml_port && matches!(codec, PackedCodec::Q5K) {
+            push_q5k_ggml_port_body(source, weight, other, rows, block_bytes, other_stride_is_one);
         } else if use_ggml_port {
             push_q4k_ggml_port_body(source, weight, other, rows, block_bytes, other_stride_is_one);
         } else if use_single_fetch {
@@ -5763,6 +5765,193 @@ fn push_q4k_ggml_port_body(
     );
     source.push_str(
         "                                       (acc2_2 + (1.0f/256.0f) * acc2_3) * (float)sc8_5 * (1.0f/16.0f)) -\n",
+    );
+    source.push_str(
+        "                      dmin * (sumy0 * (float)sc8_2 + sumy1 * (float)sc8_3 + sumy2 * (float)sc8_6 + sumy3 * (float)sc8_7);\n",
+    );
+    source.push_str("        }\n");
+    source.push_str(&format!(
+        "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
+    ));
+    source.push_str("        y4 += y4_step;\n");
+    source.push_str("    }\n");
+}
+
+// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
+// master/LICENSE) `kernel_mul_mv_q5_K_f32_impl<2,2,32>`
+// (ggml-metal.metal:5209-5324), transcribed line-for-line onto this crate's
+// operand-base/stride addressing, the same posture as
+// [`push_q4k_ggml_port_body`].
+//
+// Copyright (c) 2023-2024 The ggml authors. MIT-licensed; see THIRD_PARTY.md.
+//
+/// `metal-q4k-ggml-port` (default-off, same feature `push_q4k_ggml_port_body`
+/// answers to): a VERBATIM port of ggml's `kernel_mul_mv_q5_K_f32_impl<nr0=2,
+/// nsg=2, nw=32>` (`ggml-metal.metal:5209-5324`) -- the fix for this crate's
+/// own `q5k_pair_dot`, whose non-deferred `(scale*value - minimum)*activation`
+/// per lane (`docs/discipline.md` ROW 361/384) does the scale/min multiply-
+/// subtract EIGHT times per sub-block; this body applies `dall`/`dmin` ONCE
+/// per sub-block over pre-summed `acc1`/`acc2`/`sumy`, the same deferral
+/// `push_q4k_ggml_port_body` already ports for `Q4_K`.
+///
+/// Lane assignment (`ggml-metal.metal:5244-5250`), same shape as
+/// [`push_q4k_ggml_port_body`]'s own `tid`/`ix`/`iq`/`ir` (`Q5_K`'s `tid =
+/// tiisg/4` divides by 4 where `Q4_K`'s divides by 8, because `Q5_K` has no
+/// second `it/4` split -- `iq = tid/4`, `ir = tid%4` read directly off `tid`):
+/// `l0 = 8*ir`; `q_offset = 32*iq + l0` (byte offset into `qs`, unused here --
+/// folded into the `48 + q_offset` pointer below); `y_offset = 64*iq + l0`,
+/// IDENTICAL to `Q4_K`'s own `y4` lane offset, so this body shares
+/// [`push_q4k_plain_product_y4_address`] rather than a second copy.
+///
+/// Super-block iteration (`ggml-metal.metal:5263`): `for (i = ix; i < nb; i
+/// += 4)`, `ix = tiisg%4` -- same stride `4` as `Q4_K`'s own `ib_step`
+/// despite `Q5_K`'s `nr0=2` (this function still iterates `rows` generically,
+/// the same posture [`push_q6k_ggml_port_body`]'s own doc calls out for its
+/// `nr0=1`).
+///
+/// Activation gather (`ggml-metal.metal:5269-5276`): `y2 = y1 + 128`, so
+/// `y2[l] == y1[128+l]` and `y2[l+32] == y1[160+l]` -- textually the SAME
+/// `yl[i]/yl[i+8]/yh[i]/yh[i+8]` gather from `y4[i]/y4[i+32]/y4[i+128]/
+/// y4[i+160]` [`push_q4k_ggml_port_body`] already renders, so this body
+/// reuses that exact source text rather than a second copy.
+///
+/// Scale/min extraction (`ggml-metal.metal:5281-5284`): `Q5_K`'s
+/// `scales`/`kmask1`/`kmask2`/`kmask3` bit layout is byte-for-byte `Q4_K`'s
+/// own (`sc16_0 = sc[0] & 0x3f3f`, ..., `sc16_2 = ((sc[4]>>0) & 0x0f0f) |
+/// ((sc[0]&0xc0c0)>>2)`, ...) at the SAME `blk + 4` byte offset -- restated
+/// here rather than shared, same posture `q5k_scale_min` already takes on
+/// `q4k_scale_min`.
+///
+/// High-bit plane (`ggml-metal.metal:5253-5256,5289-5297`, the part `Q4_K`
+/// has no analogue for): `hm1 = 1 << (2*iq)`, `hm2 = hm1<<1`, `hm3 = hm1<<4`,
+/// `hm4 = hm2<<4`, each fixed per-thread (depends only on `iq`, hoisted once
+/// outside the `ib` loop). `qh = blk + 16 + l0`; per lane `l`, `q1 = blk + 48
+/// + q_offset`, `q2 = q1 + 64`: `acc1[k]` sums `yl_or_yh[l(+8)]` times the
+/// masked nibble byte (low or high half of `q1`/`q2`), `acc2[k]` sums the
+/// same activation gated by `qh[l] & hm_k` -- no scale multiply inside this
+/// loop at all, unlike `q5k_pair_dot`'s per-element
+/// `scale*(nibble+high)-minimum`.
+///
+/// Final combine (`ggml-metal.metal:5299-5305`): `dall`/`dmin` applied ONCE,
+/// `sumf[row] += dall*(sc8_0*(acc1_0+16*acc2_0) + sc8_1*(acc1_1/16 +
+/// 16*acc2_1) + sc8_4*(acc1_2+16*acc2_2) + sc8_5*(acc1_3/16+16*acc2_3)) -
+/// dmin*(sumy0*sc8_2 + sumy1*sc8_3 + sumy2*sc8_6 + sumy3*sc8_7)` -- the
+/// `/16`/`*16` folds are `Q5_K`'s own bit-position residuals (the low
+/// sub-block's high-nibble term `q1[l]&0xF0` sits 16x too large), not
+/// `Q4_K`'s `1/256` word-packed residual, because this body reads plain
+/// `uchar` bytes rather than `Q4_K`'s packed `ushort` words.
+///
+/// SIMD reduction: unchanged from every other row-blocked arm, handled by
+/// the shared `push_packed_row_combine_and_write` tail this function's
+/// caller still invokes after it returns.
+#[allow(clippy::too_many_arguments)]
+fn push_q5k_ggml_port_body(
+    source: &mut String,
+    weight: usize,
+    other: usize,
+    rows: usize,
+    block_bytes: usize,
+    other_stride_is_one: bool,
+) {
+    source.push_str("    uint tid = (uint)lane / 4u;\n");
+    source.push_str("    uint ix = (uint)lane % 4u;\n");
+    source.push_str("    uint iq = tid / 4u;\n");
+    source.push_str("    uint ir = tid % 4u;\n");
+    source.push_str("    uint l0 = 8u * ir;\n");
+    source.push_str("    uint q_offset = 32u * iq + l0;\n");
+    source.push_str("    uchar hm1 = (uchar)(1u << (2u * iq));\n");
+    source.push_str("    uchar hm2 = (uchar)(hm1 << 1u);\n");
+    source.push_str("    uchar hm3 = (uchar)(hm1 << 4u);\n");
+    source.push_str("    uchar hm4 = (uchar)(hm2 << 4u);\n");
+    source.push_str(&format!(
+        "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
+    ));
+    source.push_str("    float yl[16];\n");
+    source.push_str("    float yh[16];\n");
+    source.push_str("    int ib_first = (int)ix;\n    int ib_step = 4;\n");
+    source.push_str(&format!(
+        "    long blk_step = (long)ib_step * {block_bytes};\n"
+    ));
+    source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
+    source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ib_first) * {block_bytes};\n"
+    ));
+    source.push_str("    }\n");
+    push_q4k_plain_product_y4_address(source, other, other_stride_is_one);
+    source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
+    source.push_str("        float sumy0 = 0.0f; float sumy1 = 0.0f; float sumy2 = 0.0f; float sumy3 = 0.0f;\n");
+    if other_stride_is_one {
+        source.push_str(
+            "        for (uint i = 0u; i < 8u; ++i) {\n            yl[i] = y4[i]; sumy0 += yl[i];\n",
+        );
+        source.push_str("            yl[i + 8u] = y4[i + 32u]; sumy1 += yl[i + 8u];\n");
+        source.push_str("            yh[i] = y4[i + 128u]; sumy2 += yh[i];\n");
+        source.push_str("            yh[i + 8u] = y4[i + 160u]; sumy3 += yh[i + 8u];\n");
+    } else {
+        source.push_str(
+            "        for (uint i = 0u; i < 8u; ++i) {\n            yl[i] = y4[(long)i * other_stride]; sumy0 += yl[i];\n",
+        );
+        source.push_str(
+            "            yl[i + 8u] = y4[(long)(i + 32u) * other_stride]; sumy1 += yl[i + 8u];\n",
+        );
+        source.push_str(
+            "            yh[i] = y4[(long)(i + 128u) * other_stride]; sumy2 += yh[i];\n",
+        );
+        source.push_str(
+            "            yh[i + 8u] = y4[(long)(i + 160u) * other_stride]; sumy3 += yh[i + 8u];\n",
+        );
+    }
+    source.push_str("        }\n");
+    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str("            device const uchar *blk = blk_ptr[q];\n");
+    source.push_str("            device const ushort *sc = (device const ushort *)(blk + 4) + iq;\n");
+    source.push_str("            device const uchar *qh = blk + 16u + l0;\n");
+    source.push_str("            device const uchar *q1 = blk + 48u + q_offset;\n");
+    source.push_str("            device const uchar *q2 = q1 + 64u;\n");
+    source.push_str("            device const half *dh = (device const half *)blk;\n");
+    source.push_str("            ushort sc16_0 = sc[0] & (ushort)0x3f3fu;\n");
+    source.push_str("            ushort sc16_1 = sc[2] & (ushort)0x3f3fu;\n");
+    source.push_str(
+        "            ushort sc16_2 = (ushort)(((sc[4] >> 0) & (ushort)0x0f0fu) | ((sc[0] & (ushort)0xc0c0u) >> 2));\n",
+    );
+    source.push_str(
+        "            ushort sc16_3 = (ushort)(((sc[4] >> 4) & (ushort)0x0f0fu) | ((sc[2] & (ushort)0xc0c0u) >> 2));\n",
+    );
+    source.push_str("            uchar sc8_0 = (uchar)(sc16_0 & 0xffu); uchar sc8_1 = (uchar)(sc16_0 >> 8);\n");
+    source.push_str("            uchar sc8_2 = (uchar)(sc16_1 & 0xffu); uchar sc8_3 = (uchar)(sc16_1 >> 8);\n");
+    source.push_str("            uchar sc8_4 = (uchar)(sc16_2 & 0xffu); uchar sc8_5 = (uchar)(sc16_2 >> 8);\n");
+    source.push_str("            uchar sc8_6 = (uchar)(sc16_3 & 0xffu); uchar sc8_7 = (uchar)(sc16_3 >> 8);\n");
+    source.push_str(
+        "            float acc1_0 = 0.0f; float acc1_1 = 0.0f; float acc1_2 = 0.0f; float acc1_3 = 0.0f;\n",
+    );
+    source.push_str(
+        "            float acc2_0 = 0.0f; float acc2_1 = 0.0f; float acc2_2 = 0.0f; float acc2_3 = 0.0f;\n",
+    );
+    source.push_str("            for (uint l = 0u; l < 8u; ++l) {\n");
+    source.push_str("                uchar h = qh[l];\n");
+    source.push_str("                acc1_0 += yl[l] * (float)(q1[l] & 0x0Fu);\n");
+    source.push_str("                acc1_1 += yl[l + 8u] * (float)(q1[l] & 0xF0u);\n");
+    source.push_str("                acc1_2 += yh[l] * (float)(q2[l] & 0x0Fu);\n");
+    source.push_str("                acc1_3 += yh[l + 8u] * (float)(q2[l] & 0xF0u);\n");
+    source.push_str("                acc2_0 += (h & hm1) != 0u ? yl[l] : 0.0f;\n");
+    source.push_str("                acc2_1 += (h & hm2) != 0u ? yl[l + 8u] : 0.0f;\n");
+    source.push_str("                acc2_2 += (h & hm3) != 0u ? yh[l] : 0.0f;\n");
+    source.push_str("                acc2_3 += (h & hm4) != 0u ? yh[l + 8u] : 0.0f;\n");
+    source.push_str("            }\n");
+    source.push_str("            float dall = (float)dh[0];\n");
+    source.push_str("            float dmin = (float)dh[1];\n");
+    source.push_str(
+        "            sumf[q] = sumf[q] + dall * ((float)sc8_0 * (acc1_0 + 16.0f * acc2_0) +\n",
+    );
+    source.push_str(
+        "                                       (float)sc8_1 * (acc1_1 * (1.0f/16.0f) + 16.0f * acc2_1) +\n",
+    );
+    source.push_str(
+        "                                       (float)sc8_4 * (acc1_2 + 16.0f * acc2_2) +\n",
+    );
+    source.push_str(
+        "                                       (float)sc8_5 * (acc1_3 * (1.0f/16.0f) + 16.0f * acc2_3)) -\n",
     );
     source.push_str(
         "                      dmin * (sumy0 * (float)sc8_2 + sumy1 * (float)sc8_3 + sumy2 * (float)sc8_6 + sumy3 * (float)sc8_7);\n",
