@@ -716,6 +716,16 @@ fn strip_layer_index(name: &str) -> String {
 pub struct LoadedModel<'file> {
     weights: BoundWeights<'file>,
     architecture: ModelArchitecture,
+    /// This checkpoint's own weight bytes, by class
+    /// (`crate::bind::tensor_bytes_by_class`'s own dense/expert/table
+    /// split, plus the SSM state bytes a qwen35 checkpoint's layers hold)
+    /// -- kept as a plain [`crate::memory_fit::WeightClassBytes`] rather
+    /// than re-borrowing `file_bytes`/`parsed` themselves, since
+    /// [`Self::generate_with_serving_config`]'s own load-time memory-fit
+    /// gate (`crate::memory_fit`) needs these byte counts long after
+    /// `load_inner`'s local `parsed`/`file_bytes` bindings have gone out of
+    /// scope.
+    checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes,
     vocab: Vocab,
     program: Vec<Op>,
     logits_root: NodeId,
@@ -1030,6 +1040,12 @@ impl<'file> LoadedModel<'file> {
         // registration is a no-op (compiled out) when that feature is off.
         #[cfg(feature = "metal")]
         omega::backend::register_checkpoint_mapping(file_bytes);
+        // `crate::memory_fit`'s own load-time gate needs these three sums
+        // long after `parsed` has gone out of scope -- computed once, here,
+        // before any weight is bound, shared by both the qwen35 and dense
+        // branches below.
+        let (dense_weight_bytes, expert_weight_bytes, table_weight_bytes) =
+            crate::bind::tensor_bytes_by_class(parsed);
         // `general.architecture` read directly, before `architecture_from_metadata`
         // (which assumes the dense per-layer shape every other checkpoint this
         // crate binds has) -- qwen35's hybrid attention+state-space layers
@@ -1067,6 +1083,15 @@ impl<'file> LoadedModel<'file> {
             return Ok(Self {
                 weights,
                 architecture,
+                checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
+                    dense_bytes: dense_weight_bytes,
+                    expert_bytes: expert_weight_bytes,
+                    table_bytes: table_weight_bytes,
+                    ssm_state_bytes: qwen35_ssm_state_bytes(
+                        ssm_shape,
+                        qwen_architecture.block_count,
+                    ),
+                },
                 vocab,
                 program,
                 logits_root,
@@ -1155,6 +1180,12 @@ impl<'file> LoadedModel<'file> {
         Ok(Self {
             weights,
             architecture,
+            checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
+                dense_bytes: dense_weight_bytes,
+                expert_bytes: expert_weight_bytes,
+                table_bytes: table_weight_bytes,
+                ssm_state_bytes: 0,
+            },
             vocab,
             program,
             logits_root,
@@ -1227,6 +1258,18 @@ impl<'file> LoadedModel<'file> {
         Ok(Self {
             weights,
             architecture,
+            // safetensors carries no `_exps.`-style naming convention this
+            // crate has confirmed against a real checkpoint the way
+            // `crate::bind::tensor_bytes_by_class` has for GGUF -- every
+            // byte counts as dense here rather than guessing a split;
+            // `expert_bytes`/`table_bytes` stay `0` until a real HF MoE
+            // checkpoint proves what its own expert-tensor names look like.
+            checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
+                dense_bytes: file_bytes.len() as u64,
+                expert_bytes: 0,
+                table_bytes: 0,
+                ssm_state_bytes: 0,
+            },
             vocab,
             program,
             logits_root,
@@ -1264,6 +1307,18 @@ fn qwen35_ssm_shape(architecture: &crate::qwen35::Qwen35Architecture) -> Qwen35S
             * architecture.ssm_group_count
             * ssm_group) as usize,
     }
+}
+
+/// [`Qwen35SsmShape`]'s own resident bytes across every layer -- one
+/// [`SsmLayerCache::new`]'s worth (`conv_rows * qkv_dim` conv-history
+/// elements plus `state_len` state elements, both `f32`) times
+/// `block_count` layers. `crate::memory_fit`'s own load-time gate reads
+/// this as the SSM class of [`crate::memory_fit::WeightClassBytes`] -- `0`
+/// for every non-qwen35 checkpoint, which never builds a
+/// [`Qwen35SsmShape`] at all.
+fn qwen35_ssm_state_bytes(shape: Qwen35SsmShape, block_count: u32) -> u64 {
+    let per_layer_elements = (shape.conv_rows * shape.qkv_dim + shape.state_len) as u64;
+    per_layer_elements * core::mem::size_of::<f32>() as u64 * u64::from(block_count)
 }
 
 pub(crate) enum LogitsSink<'sink> {
@@ -2443,10 +2498,116 @@ impl<'file> LoadedModel<'file> {
         &self,
         prompt: &str,
         max_tokens: usize,
-        serving_config: ServingConfig,
+        mut serving_config: ServingConfig,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        self.apply_memory_fit_gate(&mut serving_config)?;
         let mut runtime = BackendRuntime::new(&serving_config);
         self.run_decode_loop(prompt, max_tokens, &serving_config, &mut runtime)
+    }
+
+    /// The first auto-tune step (`crate::memory_fit`'s own module doc):
+    /// derives this checkpoint's device-memory budget from its own shape at
+    /// `serving_config.context_length`, probes the host's own device facts
+    /// ([`omega::metal::system_memory_facts`]), and either leaves
+    /// `serving_config.context_length` unchanged, reduces it to the
+    /// largest value that fits (emitting a `context_length_reduced` warn
+    /// event under `feature = "instrument"` -- callers that need the
+    /// reduced value read it back off `serving_config` after this call
+    /// returns, since it takes `&mut`), or refuses with
+    /// [`InteropError::MemoryBudgetExceeded`] -- always
+    /// before [`Self::generate_with_serving_config`]'s own next line
+    /// ([`BackendRuntime::new`]) asks a device for a single buffer.
+    ///
+    /// A no-op when `serving_config.gpu_memory_fit` is `false` (the
+    /// caller's explicit override, matching every other opt-out knob
+    /// [`ServingConfig`]'s own doc already has) or when this host has no
+    /// Metal device at all ([`omega::metal::system_memory_facts`] returning
+    /// `Err`) -- a probe failure means this method has nothing to gate
+    /// against, not that the load itself is unsafe, so it fails OPEN
+    /// (proceeds unchanged) rather than refusing a load this crate cannot
+    /// actually evaluate.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::MemoryBudgetExceeded`] when even a context length of
+    /// `1` cannot fit this checkpoint's own weights plus the fixed arena
+    /// allowance inside the host's own reported limit.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn apply_memory_fit_gate(&self, serving_config: &mut ServingConfig) -> Result<(), InteropError> {
+        if !serving_config.gpu_memory_fit {
+            return Ok(());
+        }
+        let Ok(facts) = omega::metal::system_memory_facts() else {
+            return Ok(());
+        };
+        let limit = crate::memory_fit::HostMemoryLimit {
+            limit_bytes: facts
+                .recommended_max_working_set_size
+                .min(facts.physical_memory_bytes),
+            os_headroom_bytes: omega::sized::LOAD_TIME_FIT_OS_HEADROOM_BYTES,
+        };
+        // Page-rounded on the dense class only: the checkpoint's whole
+        // mmap is ONE no-copy `MTLBuffer`
+        // (`omega::metal::checkpoint_mapping_offset`'s own doc), so the
+        // real device allocation is `file_bytes.len()` rounded up to a
+        // page, not the plain sum of per-tensor byte counts (which excludes
+        // the GGUF header/metadata region) -- rounding the dense class
+        // absorbs that difference without inventing a fourth bucket for a
+        // few-KB header.
+        let weights = crate::memory_fit::WeightClassBytes {
+            dense_bytes: self
+                .checkpoint_weight_bytes
+                .dense_bytes
+                .next_multiple_of(omega::metal::page_size() as u64),
+            ..self.checkpoint_weight_bytes
+        };
+        let requested_context_length = serving_config.context_length;
+        let (context_length, outcome) = crate::memory_fit::fit_context_length(
+            weights,
+            self.architecture.block_count,
+            self.architecture.kv_heads,
+            self.architecture.head_dim,
+            requested_context_length,
+            omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
+            limit,
+        )?;
+        #[cfg(feature = "instrument")]
+        {
+            let budget = crate::memory_fit::MemoryBudget::derive(
+                weights,
+                self.architecture.block_count,
+                self.architecture.kv_heads,
+                self.architecture.head_dim,
+                context_length,
+                omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
+            );
+            info!(
+                dense_weights_bytes = budget.dense_weights_bytes,
+                expert_weights_bytes = budget.expert_weights_bytes,
+                table_weights_bytes = budget.table_weights_bytes,
+                kv_cache_bytes = budget.kv_cache_bytes,
+                ssm_state_bytes = budget.ssm_state_bytes,
+                arena_allowance_bytes = budget.arena_allowance_bytes,
+                total_bytes = budget.total_bytes(),
+                limit_bytes = limit.limit_bytes,
+                os_headroom_bytes = limit.os_headroom_bytes,
+                "memory_budget: load-time device-memory budget derived from checkpoint shape, by class"
+            );
+        }
+        if matches!(outcome, crate::memory_fit::FitOutcome::ReducedContext { .. }) {
+            #[cfg(feature = "instrument")]
+            if let crate::memory_fit::FitOutcome::ReducedContext { from, to } = outcome {
+                proxima_telemetry::warn!(
+                    from = from,
+                    to = to,
+                    "context_length_reduced: requested context length did not fit, reduced \
+                     to the largest value that does"
+                );
+            }
+            serving_config.context_length = context_length;
+        }
+        Ok(())
     }
 
     /// Shared by [`Self::generate_with_serving_config`] and this crate's
@@ -4513,6 +4674,128 @@ mod placed_plan_mode_tests {
         assert!(
             error.to_string().contains("bit_exact") || error.to_string().contains("false"),
             "error must name the bound policy: {error}"
+        );
+    }
+}
+
+/// [`LoadedModel::apply_memory_fit_gate`]'s own contract, exercised
+/// directly against a struct-literal [`LoadedModel`] -- private-field
+/// construction is legitimate here (same module tree) and cheaper than a
+/// full loadable checkpoint: the gate only ever reads
+/// `self.checkpoint_weight_bytes`/`self.architecture`, never `self.weights`/
+/// `self.program`/`self.vocab`, so those fields are empty stand-ins.
+/// Requires a real Metal device (`omega::metal::system_memory_facts`), the
+/// same requirement [`crate::memory_fit`]'s own doc names for anything
+/// beyond its pure formulas.
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod memory_fit_gate_tests {
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use proxima_tokenizer::Vocab;
+
+    use crate::bind::{BoundWeights, ModelArchitecture};
+    use crate::serving::ServingConfig;
+
+    use super::LoadedModel;
+
+    /// A minimal valid byte-level BPE vocab -- every base-byte token
+    /// present ([`Vocab::new`]'s own precondition), no merges, no special
+    /// tokens beyond the one this gate never reads anyway (the fit gate
+    /// touches `self.architecture`/`self.checkpoint_weight_bytes` only).
+    fn tiny_vocab() -> Vocab {
+        let tokens: Vec<String> = (0..=255u8)
+            .map(|byte| format!("<0x{byte:02X}>"))
+            .collect();
+        Vocab::new(tokens, &[], None, None, None).expect("minimal vocab builds")
+    }
+
+    fn tiny_architecture() -> ModelArchitecture {
+        ModelArchitecture {
+            vocab: 1,
+            embedding: 1,
+            feed_forward: 1,
+            query_heads: 1,
+            kv_heads: 2,
+            head_dim: 64,
+            block_count: 2,
+            expert_count: 0,
+            expert_used_count: 0,
+            rope_freq_base: 10_000.0,
+            rms_epsilon: 1e-5,
+            tied_embeddings: false,
+        }
+    }
+
+    fn model_with(dense_weight_bytes: u64) -> LoadedModel<'static> {
+        LoadedModel {
+            weights: BoundWeights {
+                resident_bytes: 0,
+                owned: Vec::new(),
+                packed: Vec::new(),
+                packed_owned: Vec::new(),
+            },
+            architecture: tiny_architecture(),
+            checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
+                dense_bytes: dense_weight_bytes,
+                expert_bytes: 0,
+                table_bytes: 0,
+                ssm_state_bytes: 0,
+            },
+            vocab: tiny_vocab(),
+            program: Vec::new(),
+            logits_root: proxima_tensor::op::NodeId(0),
+            layer_roots: Vec::new(),
+            qwen35_ssm_shape: None,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            single_range: None,
+        }
+    }
+
+    /// (d) the gate off: an absurd `context_length` that would otherwise
+    /// need reducing (or would exceed the limit outright) passes through
+    /// completely unchanged when `gpu_memory_fit` is `false` -- the
+    /// caller's explicit opt-out.
+    #[test]
+    fn gate_off_leaves_an_otherwise_infeasible_context_length_untouched() {
+        let model = model_with(1_000_000);
+        let mut serving_config = ServingConfig {
+            gpu_memory_fit: false,
+            context_length: u32::MAX,
+            ..ServingConfig::default()
+        };
+
+        model
+            .apply_memory_fit_gate(&mut serving_config)
+            .expect("gate must be a no-op when gpu_memory_fit is false");
+
+        assert_eq!(
+            serving_config.context_length,
+            u32::MAX,
+            "gate must not touch context_length when the caller opted out"
+        );
+    }
+
+    /// (a) fits: this fixture's tiny weights and default 131072 context
+    /// budget are well inside any real Metal device's own reported limit.
+    #[test]
+    fn gate_on_leaves_a_generously_fitting_context_length_unchanged() {
+        let model = model_with(1_000_000);
+        let mut serving_config = ServingConfig {
+            gpu_memory_fit: true,
+            ..ServingConfig::default()
+        };
+        let requested = serving_config.context_length;
+
+        model
+            .apply_memory_fit_gate(&mut serving_config)
+            .expect("a real device's own limit must comfortably fit this fixture's budget");
+
+        assert_eq!(
+            serving_config.context_length, requested,
+            "a generously fitting budget must not reduce context_length"
         );
     }
 }

@@ -93,7 +93,19 @@ pub struct ServingConfig<'model> {
     /// `-ngl`: number of layers to offload to a GPU. [`GPU_LAYERS_ALL`]
     /// for "all", `0` for CPU-only, `N` for an explicit layer count.
     pub gpu_layers: i32,
-    /// `-fit`: automatically fit the KV cache size to available VRAM.
+    /// `-fit`: derive this checkpoint's device-memory budget from its own
+    /// shape (weights bytes + placed-KV bytes at `context_length` + a fixed
+    /// arena allowance) and refuse to run, or reduce `context_length` to
+    /// the largest value that fits, before
+    /// [`crate::generate::LoadedModel::generate_with_serving_config`] asks a
+    /// device for a single buffer (`crate::memory_fit`'s own module doc).
+    /// `true` (this field's own default) unlike the owner's real `-fit off`
+    /// invocation ([`ServingConfig::default`]'s own doc) -- a load that
+    /// silently exceeds the host's own memory rather than refusing or
+    /// shrinking is the defect this field exists to close, so the safe
+    /// behavior is what a caller gets without having to ask for it; pass
+    /// `false` to opt back out, the same explicit-override shape every
+    /// other knob on this struct already has.
     pub gpu_memory_fit: bool,
     /// `--no-kv-offload` inverted: `true` allows the KV cache to live on
     /// the GPU, `false` (the owner's `--no-kv-offload`) keeps it resident
@@ -213,15 +225,17 @@ pub struct ServingConfig<'model> {
 }
 
 impl Default for ServingConfig<'static> {
-    /// The repo owner's exact invocation, verbatim:
-    /// `-c 131072 -np 1 -ctk q8_0 -ctv q8_0 -fa on -b 32 -ub 32 -ngl all
-    /// -fit off --no-kv-offload --no-mmproj --reasoning-budget 1024
-    /// --min-p 0`. The owner's invocation names no sampling flags at all,
-    /// so every sampling knob defaults to its own disabled value
-    /// (`temperature: 0.0`, not upstream's own `0.80` default -- see that
-    /// field's own doc for why) -- the exact greedy path this forward has
-    /// always run, byte-for-byte, proved in `generate.rs`'s own
-    /// `real_openchat_file` acceptance test.
+    /// The repo owner's exact invocation, verbatim, with ONE deliberate
+    /// deviation: `-c 131072 -np 1 -ctk q8_0 -ctv q8_0 -fa on -b 32 -ub 32
+    /// -ngl all -fit off --no-kv-offload --no-mmproj --reasoning-budget 1024
+    /// --min-p 0`. `gpu_memory_fit` (`-fit`) defaults `true` here, not the
+    /// invocation's own `off` -- see that field's own doc for why the safe
+    /// default won this argument over exact invocation fidelity. Every
+    /// other field, and every sampling knob (the invocation names none, so
+    /// each defaults to its own disabled value -- `temperature: 0.0`, not
+    /// upstream's own `0.80`, see that field's own doc), remains the exact
+    /// greedy path this forward has always run, byte-for-byte, proved in
+    /// `generate.rs`'s own `real_openchat_file` acceptance test.
     fn default() -> Self {
         Self {
             model_path: DEFAULT_MODEL_PATH,
@@ -233,7 +247,7 @@ impl Default for ServingConfig<'static> {
             batch_size: 32,
             ubatch_size: 32,
             gpu_layers: GPU_LAYERS_ALL,
-            gpu_memory_fit: false,
+            gpu_memory_fit: true,
             kv_offload: false,
             multimodal_projector: false,
             reasoning_budget: 1024,
@@ -352,14 +366,12 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
         )));
     }
 
-    if config.gpu_memory_fit {
-        return Err(InteropError::UnsupportedServingConfig(
-            "gpu_memory_fit=true (-fit on): auto-fitting the KV cache to available VRAM \
-             presupposes both a GPU backend and a KV cache to size, neither of which \
-             exists on this forward path yet"
-                .into(),
-        ));
-    }
+    // `gpu_memory_fit` (`-fit`) is no longer rejected here: it is the load-time
+    // memory-fit gate's own switch (`crate::generate::LoadedModel::apply_memory_fit_gate`,
+    // `crate::memory_fit`'s own module doc), evaluated once per
+    // `generate_with_serving_config` call, before this per-step
+    // `apply_serving_config` validation walk ever runs -- there is nothing
+    // left for THIS function to reject.
 
     if config.kv_offload {
         return Err(InteropError::UnsupportedServingConfig(
@@ -434,7 +446,10 @@ mod tests {
     /// The struct-literal surface (guiding-principle 4's config-as-mirror):
     /// every field the owner's invocation sets is present and matches the
     /// invocation's own values, checked flag by flag against the verbatim
-    /// command line this module's doc quotes.
+    /// command line this module's doc quotes -- except `gpu_memory_fit`,
+    /// this default's one deliberate deviation from the invocation
+    /// (`ServingConfig::default`'s own doc, `gpu_memory_fit`'s own field
+    /// doc), asserted `true` here instead.
     #[test]
     fn default_matches_owner_invocation_semantics() {
         let config = ServingConfig::default();
@@ -447,7 +462,10 @@ mod tests {
         assert_eq!(config.batch_size, 32, "-b 32");
         assert_eq!(config.ubatch_size, 32, "-ub 32");
         assert_eq!(config.gpu_layers, GPU_LAYERS_ALL, "-ngl all");
-        assert!(!config.gpu_memory_fit, "-fit off");
+        assert!(
+            config.gpu_memory_fit,
+            "gpu_memory_fit defaults true, deliberately overriding the owner's own -fit off"
+        );
         assert!(!config.kv_offload, "--no-kv-offload");
         assert!(!config.multimodal_projector, "--no-mmproj");
         assert_eq!(config.reasoning_budget, 1024, "--reasoning-budget 1024");
