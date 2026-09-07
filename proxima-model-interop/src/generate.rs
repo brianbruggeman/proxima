@@ -920,21 +920,26 @@ fn build_single_range_program(
     }))
 }
 
-/// The KV extent [`run_decode_loop_placed_kv`] binds as this step's
+/// The KV extent both cached-attention decode paths bind as this step's
 /// `Extent::Symbolic(1)` (the KV `Op::Input` leaves' shape, and half the
-/// Metal plan-cache key alongside `new_count`) -- `merged_len` rounded up
-/// to `bucket_tokens` (`ServingConfig::kv_bucket_tokens`) and capped at
-/// `capacity` (this call's own per-layer buffer row count, never exceeded
-/// regardless of rounding). `bucket_tokens == 1` reduces to `merged_len`
-/// unchanged: `div_ceil(1) * 1` is the identity, so the plan-cache key is
-/// untouched from its pre-bucketing shape whenever a caller disables
-/// bucketing. `causal_mask_merged`'s existing `key_index > query_absolute`
-/// comparison already masks every row in `[merged_len, extent)` as
-/// "future" for every query this call issues (`proxima-tensor`'s
-/// `spec.rs`'s `cpu_mask_zero_ulp` test proves the mechanism 0-ULP-safe
-/// for any bucket size), so no other call site needs to know which bucket
-/// size is configured.
-#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+/// backend's own plan-cache key alongside `new_count`) -- `merged_len`
+/// rounded up to `bucket_tokens` (`ServingConfig::kv_bucket_tokens`) and
+/// capped at `capacity` (each caller's own per-layer buffer row count,
+/// never exceeded regardless of rounding; the two-range path below has no
+/// fixed buffer to cap against, so it passes `usize::MAX`). `bucket_tokens
+/// == 1` reduces to `merged_len` unchanged: `div_ceil(1) * 1` is the
+/// identity, so the plan-cache key is untouched from its pre-bucketing
+/// shape whenever a caller disables bucketing.
+/// [`run_decode_loop_placed_kv`]'s own `causal_mask_merged`
+/// `key_index > query_absolute` comparison and the two-range path's own
+/// [`proxima_tensor::spec::cached_range_padding_mask`] `key_index >=
+/// cached_len` comparison both mask every row in `[merged_len, extent)` as
+/// invalid for every query this call issues (`proxima-tensor`'s
+/// `spec.rs`'s `cpu_mask_zero_ulp` test proves the [`causal_mask_merged`]
+/// mechanism 0-ULP-safe for any bucket size), so no other call site needs
+/// to know which bucket size is configured. Plain `usize` arithmetic, no
+/// platform or feature dependency of its own -- available to any
+/// `std`-gated caller regardless of which backend feature is compiled in.
 fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize) -> usize {
     merged_len
         .div_ceil(bucket_tokens)
@@ -1448,6 +1453,99 @@ impl LayerCache {
     }
 }
 
+/// [`LayerCache`]'s bucket-padded mirror -- the two-range decode loop's own
+/// fix for the plan-cache defect `Self::plans`' own doc on
+/// [`BackendRuntime`] walks through: `LayerCache` grows by exactly
+/// `cached_len` every step, so a plan keyed on it can never repeat, but
+/// [`proxima_tensor::spec::cached_range_padding_mask`] makes any reader
+/// that pads a copy of it out to a `kv_extent` bucket boundary numerically
+/// identical to reading the exact, unpadded length. `fill` copies
+/// `source`'s real content into a buffer at least `bound_extent` rows
+/// long, zero-filling the remainder (never load-bearing -- the padding
+/// mask always selects it out before softmax, see that mask's own doc);
+/// `resize` only grows when a step crosses into a new, larger bucket, the
+/// same reuse-across-steps shape [`run_decode_loop_placed_kv`]'s own
+/// `cache_length_scratch_even_odd`/`_v` already established for the
+/// single-range path's placeholder scratch.
+struct KvPadScratch {
+    k_even: Vec<f32>,
+    k_odd: Vec<f32>,
+    v: Vec<f32>,
+}
+
+impl KvPadScratch {
+    fn new() -> Self {
+        Self {
+            k_even: Vec::new(),
+            k_odd: Vec::new(),
+            v: Vec::new(),
+        }
+    }
+
+    fn fill(&mut self, source: &LayerCache, shape: &KvPadShape) {
+        let even_odd_len = shape.even_odd_len();
+        let v_len = shape.v_len();
+        if self.k_even.len() < even_odd_len {
+            self.k_even.resize(even_odd_len, 0.0);
+        }
+        if self.k_odd.len() < even_odd_len {
+            self.k_odd.resize(even_odd_len, 0.0);
+        }
+        if self.v.len() < v_len {
+            self.v.resize(v_len, 0.0);
+        }
+        self.k_even[..source.k_even.len()].copy_from_slice(&source.k_even);
+        self.k_odd[..source.k_odd.len()].copy_from_slice(&source.k_odd);
+        self.v[..source.v.len()].copy_from_slice(&source.v);
+    }
+
+    fn named_blocks<'cache>(
+        &'cache self,
+        k_even_name: &'cache str,
+        k_odd_name: &'cache str,
+        v_name: &'cache str,
+        shape: &KvPadShape,
+    ) -> [(&'cache str, QuantizedBlock<'cache>); 3] {
+        [
+            (
+                k_even_name,
+                QuantizedBlock::Float32(&self.k_even[..shape.even_odd_len()]),
+            ),
+            (
+                k_odd_name,
+                QuantizedBlock::Float32(&self.k_odd[..shape.even_odd_len()]),
+            ),
+            (
+                v_name,
+                QuantizedBlock::Float32(&self.v[..shape.v_len()]),
+            ),
+        ]
+    }
+}
+
+/// [`KvPadScratch`]'s own row-width parameters, grouped into one reference
+/// rather than four positional `usize`s -- every [`KvPadScratch::fill`]/
+/// [`KvPadScratch::named_blocks`] call site already computes all four
+/// together from `self.architecture`/`kv_bound_extent`, so one reference
+/// says what was already true by convention, and keeps both methods under
+/// clippy's `too_many_arguments` threshold without an `#[allow]`.
+struct KvPadShape {
+    bound_extent: usize,
+    kv_heads: usize,
+    pairs: usize,
+    head_dim: usize,
+}
+
+impl KvPadShape {
+    fn even_odd_len(&self) -> usize {
+        self.bound_extent * self.kv_heads * self.pairs
+    }
+
+    fn v_len(&self) -> usize {
+        self.bound_extent * self.kv_heads * self.head_dim
+    }
+}
+
 /// [`LayerCache`]'s 4-wide counterpart for a
 /// [`Qwen35LayerRoots::DenseAttention`] layer -- this checkpoint's own
 /// partial-rotary gap (`proxima_tensor::spec::append_qwen35_dense_attention_layer`'s
@@ -1747,27 +1845,33 @@ struct PlanNumerics {
 #[cfg(feature = "metal")]
 pub(crate) struct BackendRuntime {
     engine: Engine,
-    /// Keyed by `(new_count, cached_len)` -- the two symbols
+    /// Keyed by `(new_count, kv_bound_extent)` -- the two symbols
     /// `mistral_cached_forward_program`'s cached-attention read extent
-    /// resolves against (`Extent::Symbolic(1) == cached_len`). A [`Plan`]
-    /// bakes concrete shapes from those symbols (`omega::backend::plan_named`'s
-    /// own doc), and `cached_len` grows by `new_count` every decode step, so
-    /// a plan built for one step's shape is never valid for the next --
-    /// this cache exists for the shape that DOES repeat (a caller replaying
-    /// the same partial length twice), not for ordinary autoregressive
-    /// decode, which visits a strictly increasing `cached_len` and so never
-    /// hits it within one call.
+    /// resolves against (`Extent::Symbolic(1) == kv_bound_extent`). A
+    /// [`Plan`] bakes concrete shapes from those symbols
+    /// (`omega::backend::plan_named`'s own doc), and RAW `cached_len` grows
+    /// by `new_count` every decode step, so a plan keyed on it directly was
+    /// never valid for the next step -- the exact defect ROW 392 measured
+    /// (one miss and one fresh `Plan`, with its own device output buffers,
+    /// per token). `kv_bound_extent` is `cached_len` rounded up to
+    /// `ServingConfig::kv_bucket_tokens` (`generate::kv_extent`'s own doc),
+    /// which repeats for every step inside one bucket --
+    /// `proxima_tensor::spec::cached_range_padding_mask` is what makes a
+    /// `Plan` built for that rounded shape numerically correct for every
+    /// real `cached_len` the bucket covers, so ordinary autoregressive
+    /// decode now hits this cache `bucket_tokens - 1` times out of every
+    /// `bucket_tokens` steps instead of never.
     ///
     /// [`Self::resolve_cached_plan`] clears this on every miss instead of
-    /// accumulating entries: measured on a real decode (`plan_cache_len` /
-    /// `plan_misses` in `token_breakdown_metal`) this map grew 1:1 with the
-    /// step index and `plan_hits` never left 0, so every step but the first
-    /// was retaining a `Plan` that could never be looked up again for the
-    /// rest of the call -- a Rust-heap leak (`phys_footprint_bytes` climbed
-    /// while `omega::metal::current_allocated_size()` stayed flat over the
-    /// same steps, proving the growth was not GPU-side). Clearing on miss
-    /// keeps exactly the one entry the field's own rationale above says is
-    /// worth keeping.
+    /// accumulating entries: measured on a real decode before bucketing
+    /// landed (`plan_cache_len` / `plan_misses` in `token_breakdown_metal`)
+    /// this map grew 1:1 with the step index and `plan_hits` never left 0,
+    /// so every step but the first was retaining a `Plan` that could never
+    /// be looked up again for the rest of the call -- a Rust-heap leak
+    /// (`phys_footprint_bytes` climbed while `omega::metal::current_allocated_size()`
+    /// stayed flat over the same steps, proving the growth was not
+    /// GPU-side). Clearing on miss keeps exactly the one entry worth
+    /// keeping: the bucket a caller is currently inside.
     plans: alloc::collections::BTreeMap<(usize, usize), Plan>,
     /// `ServingConfig::math_mode`, read once at construction and narrowed
     /// into every freshly-built [`Plan`] below (`set_math_mode`'s own call
@@ -2882,6 +2986,16 @@ impl<'file> LoadedModel<'file> {
                 )),
             })
             .collect();
+        // One [`KvPadScratch`] per layer, reused across every step of this
+        // call -- only ever filled for a [`LayerCacheState::Attention`]
+        // layer (the only cache shape `mistral_cached_forward_program_with_experts`
+        // produces, `Qwen35LayerRoots`'s own doc), left empty and unread for
+        // every `DenseAttention`/`Ssm` layer a qwen35 checkpoint carries.
+        let mut kv_pad_scratch: Vec<KvPadScratch> =
+            self.layer_roots.iter().map(|_| KvPadScratch::new()).collect();
+        let kv_heads = self.architecture.kv_heads as usize;
+        let head_dim = self.architecture.head_dim as usize;
+        let pairs = head_dim / 2;
 
         // The caller's own knowledge of which named blocks are STATIC --
         // bound once in `LoadedModel::load` and never mutated again -- fixed
@@ -2959,8 +3073,27 @@ impl<'file> LoadedModel<'file> {
                 named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
                 named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
                 named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
+                // `mistral_cached_forward_program_with_experts`'s own
+                // `cached_len` `Op::Input` -- always present regardless of
+                // `ServingConfig::kv_bucket_tokens` (`proxima_tensor::spec::
+                // cached_range_padding_mask`'s own doc), so this scalar is
+                // fed on every step, bucketed or not.
+                let cached_len_scalar = [cached_len as f32];
+                named_blocks.push(("cached_len", QuantizedBlock::Float32(&cached_len_scalar)));
                 #[cfg(feature = "instrument")]
                 let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
+                // Rounds `cached_len` up to `ServingConfig::kv_bucket_tokens`
+                // (`kv_extent`'s own doc) -- `usize::MAX` in place of the
+                // placed-KV path's fixed buffer capacity: the two-range KV
+                // cache below is a growing `Vec`, not a preallocated
+                // device buffer, so there is no hard cap to clamp against.
+                let kv_bound_extent = kv_extent(cached_len, usize::MAX, serving_config.kv_bucket_tokens);
+                let kv_pad_shape = KvPadShape {
+                    bound_extent: kv_bound_extent,
+                    kv_heads,
+                    pairs,
+                    head_dim,
+                };
 
                 // KV-cache HOST -> DEVICE traffic: every named block below is the
                 // FULL accumulated history (`LayerCache::append` only grows these,
@@ -2989,13 +3122,30 @@ impl<'file> LoadedModel<'file> {
                     .sum();
                 #[cfg(feature = "instrument")]
                 let named_blocks_kv_started = read_ticks();
+                // Two passes over the same `layer`/`cache` pairing, not one
+                // interleaved pass: `KvPadScratch::named_blocks` below
+                // borrows `kv_pad_scratch[layer]` immutably for as long as
+                // `named_blocks` (read by `evaluate` after this loop) holds
+                // it, so a later iteration's `&mut kv_pad_scratch[other_layer]`
+                // would conflict even though the indices never alias --
+                // the borrow checker sees one `Vec`, not per-index slots.
+                // Filling every layer's scratch first, then borrowing every
+                // layer's scratch second, keeps the two borrow kinds in
+                // disjoint passes instead of interleaved per iteration.
+                for (layer, cache) in layer_caches.iter().enumerate() {
+                    if let LayerCacheState::Attention(cache) = cache {
+                        kv_pad_scratch[layer].fill(cache, &kv_pad_shape);
+                    }
+                }
                 for (layer, names) in cache_names.iter().enumerate() {
                     match (names, &layer_caches[layer]) {
-                        (
-                            LayerCacheNames::Attention { k_even, k_odd, v },
-                            LayerCacheState::Attention(cache),
-                        ) => {
-                            named_blocks.extend(cache.named_blocks(k_even, k_odd, v));
+                        (LayerCacheNames::Attention { k_even, k_odd, v }, LayerCacheState::Attention(_)) => {
+                            named_blocks.extend(kv_pad_scratch[layer].named_blocks(
+                                k_even,
+                                k_odd,
+                                v,
+                                &kv_pad_shape,
+                            ));
                         }
                         (
                             LayerCacheNames::DenseAttention {
@@ -3025,7 +3175,7 @@ impl<'file> LoadedModel<'file> {
                 #[cfg(feature = "instrument")]
                 let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
 
-                let symbols = [new_count as u64, cached_len as u64];
+                let symbols = [new_count as u64, kv_bound_extent as u64];
                 let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.layer_roots.len() * 3);
                 roots.push(self.logits_root);
                 for roots_for_layer in &self.layer_roots {
@@ -4031,11 +4181,17 @@ mod tests {
     use alloc::vec::Vec;
 
     use proxima_gguf::value::MetadataValue as Value;
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use proxima_gguf::value::MetadataArray;
     use proxima_gguf::{GgmlType as WireType, GgufModel, TensorPayload, write_complete};
     use proxima_tokenizer::Vocab;
 
     use super::{Control, Phase, TokenEvent, build_position_inputs, decode_until_stop_or_budget};
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use super::{BackendRuntime, LoadedModel};
     use crate::bind::architecture_from_metadata;
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use crate::serving::{GPU_LAYERS_ALL, ServingConfig};
 
     fn dims(values: &[u64]) -> arrayvec::ArrayVec<u64, { proxima_gguf::tensor::MAX_DIMS }> {
         values.iter().copied().collect()
@@ -4308,6 +4464,265 @@ mod tests {
             generated_ids.len(),
             scripted_tokens.len(),
             "budget exhaustion still runs every requested step"
+        );
+    }
+
+    /// ROW 392's own class fix, proved directly against the real two-range
+    /// path (not a hand-rolled stand-in): a synthetic one-layer
+    /// mixture-of-experts checkpoint (`architecture.expert_count > 0` forces
+    /// [`LoadedModel::single_range`] to `None`, `build_single_range_program`'s
+    /// own doc, so `gpu_layers: GPU_LAYERS_ALL` here reaches
+    /// [`BackendRuntime::evaluate`] through [`LoadedModel::run_decode_loop`],
+    /// never `run_decode_loop_placed_kv`) drives the SAME 8-step greedy
+    /// decode twice, once with `kv_bucket_tokens: 1` (today's pre-fix
+    /// behavior: `kv_extent`'s own doc, `div_ceil(1)` is the identity) and
+    /// once with `kv_bucket_tokens: 32` (`ServingConfig::default`'s own
+    /// value). Two claims, both comparative rather than a single hard-coded
+    /// constant, so neither depends on `omega`'s own internal per-node
+    /// allocation count: bucketing must produce STRICTLY fewer plan misses
+    /// and STRICTLY fewer [`omega::metal::OUTPUT_BUFFER_ALLOCATIONS`] than
+    /// the unbucketed run (ROW 392's own finding: one miss, and one fresh
+    /// `Plan` with its own device output buffers, per token before this
+    /// fix), and the two runs must land on the IDENTICAL generated token
+    /// ids -- `cached_range_padding_mask`'s own doc is the numerics claim
+    /// this equality is standing in for: a bucket's padding is invisible to
+    /// softmax, so rounding `cached_len` up must never change what the
+    /// model emits.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn two_range_plan_cache_buckets_cached_len_without_changing_generated_tokens() {
+        fn f32_bytes(values: &[f32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        }
+
+        let vocab_size = 257u64;
+        let embedding = 2u64;
+        let feed_forward = 2u64;
+        let expert_count = 2u64;
+
+        let mut tokens: Vec<String> = (0..=255u8)
+            .map(|byte| alloc::format!("<0x{byte:02X}>"))
+            .collect();
+        tokens.push(String::from("<eos-marker>"));
+
+        let token_embd = f32_bytes(&vec![0.05f32; (vocab_size * embedding) as usize]);
+        let norm_weight = f32_bytes(&vec![1.0f32; embedding as usize]);
+        let square = f32_bytes(&vec![0.05f32; (embedding * embedding) as usize]);
+        let gate_inp = f32_bytes(&vec![0.05f32; (embedding * expert_count) as usize]);
+        let expert_stack = f32_bytes(&vec![0.05f32; (expert_count * feed_forward * embedding) as usize]);
+        let output_weight = f32_bytes(&vec![0.05f32; (vocab_size * embedding) as usize]);
+
+        let model = GgufModel {
+            version: 3,
+            metadata: vec![
+                (
+                    "general.architecture".to_string(),
+                    Value::String("llama".to_string()),
+                ),
+                (
+                    "llama.embedding_length".to_string(),
+                    Value::U32(embedding as u32),
+                ),
+                (
+                    "llama.feed_forward_length".to_string(),
+                    Value::U32(feed_forward as u32),
+                ),
+                (
+                    "llama.attention.head_count".to_string(),
+                    Value::U32(1),
+                ),
+                (
+                    "llama.attention.head_count_kv".to_string(),
+                    Value::U32(1),
+                ),
+                ("llama.block_count".to_string(), Value::U32(1)),
+                (
+                    "llama.expert_count".to_string(),
+                    Value::U32(expert_count as u32),
+                ),
+                (
+                    "llama.expert_used_count".to_string(),
+                    Value::U32(1),
+                ),
+                (
+                    "tokenizer.ggml.model".to_string(),
+                    Value::String("gpt2".to_string()),
+                ),
+                (
+                    "tokenizer.ggml.tokens".to_string(),
+                    Value::Array(MetadataArray::String(tokens)),
+                ),
+                (
+                    "tokenizer.ggml.merges".to_string(),
+                    Value::Array(MetadataArray::String(Vec::new())),
+                ),
+            ],
+            tensors: vec![
+                TensorPayload {
+                    name: "token_embd.weight".to_string(),
+                    dims: dims(&[embedding, vocab_size]),
+                    ggml_type: WireType::F32,
+                    data: &token_embd,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_norm.weight".to_string(),
+                    dims: dims(&[embedding]),
+                    ggml_type: WireType::F32,
+                    data: &norm_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.ffn_norm.weight".to_string(),
+                    dims: dims(&[embedding]),
+                    ggml_type: WireType::F32,
+                    data: &norm_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_q.weight".to_string(),
+                    dims: dims(&[embedding, embedding]),
+                    ggml_type: WireType::F32,
+                    data: &square,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_k.weight".to_string(),
+                    dims: dims(&[embedding, embedding]),
+                    ggml_type: WireType::F32,
+                    data: &square,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_v.weight".to_string(),
+                    dims: dims(&[embedding, embedding]),
+                    ggml_type: WireType::F32,
+                    data: &square,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_output.weight".to_string(),
+                    dims: dims(&[embedding, embedding]),
+                    ggml_type: WireType::F32,
+                    data: &square,
+                },
+                TensorPayload {
+                    name: "blk.0.ffn_gate_inp.weight".to_string(),
+                    dims: dims(&[embedding, expert_count]),
+                    ggml_type: WireType::F32,
+                    data: &gate_inp,
+                },
+                TensorPayload {
+                    name: "blk.0.ffn_gate_exps.weight".to_string(),
+                    dims: dims(&[embedding, feed_forward, expert_count]),
+                    ggml_type: WireType::F32,
+                    data: &expert_stack,
+                },
+                TensorPayload {
+                    name: "blk.0.ffn_up_exps.weight".to_string(),
+                    dims: dims(&[embedding, feed_forward, expert_count]),
+                    ggml_type: WireType::F32,
+                    data: &expert_stack,
+                },
+                TensorPayload {
+                    name: "blk.0.ffn_down_exps.weight".to_string(),
+                    dims: dims(&[feed_forward, embedding, expert_count]),
+                    ggml_type: WireType::F32,
+                    data: &expert_stack,
+                },
+                TensorPayload {
+                    name: "output_norm.weight".to_string(),
+                    dims: dims(&[embedding]),
+                    ggml_type: WireType::F32,
+                    data: &norm_weight,
+                },
+                TensorPayload {
+                    name: "output.weight".to_string(),
+                    dims: dims(&[embedding, vocab_size]),
+                    ggml_type: WireType::F32,
+                    data: &output_weight,
+                },
+            ],
+        };
+
+        let file_bytes =
+            write_complete(&model).expect("writes a minimal one-layer MoE gguf fixture");
+        let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
+            .expect("parses the minimal one-layer MoE gguf fixture");
+        let loaded = LoadedModel::load(&parsed, &file_bytes)
+            .expect("loads the minimal one-layer MoE checkpoint through the public path");
+
+        let base_config = ServingConfig {
+            kv_cache_key_quant: WireType::F32,
+            kv_cache_value_quant: WireType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: GPU_LAYERS_ALL,
+            reasoning_budget: 0,
+            ..ServingConfig::default()
+        };
+        let max_tokens = 8usize;
+
+        let unbucketed_config = ServingConfig {
+            kv_bucket_tokens: 1,
+            ..base_config
+        };
+        let mut unbucketed_runtime = BackendRuntime::new(&unbucketed_config);
+        let _ = omega::metal::OUTPUT_BUFFER_ALLOCATIONS.snapshot_and_reset();
+        let unbucketed = loaded
+            .run_decode_loop("A", max_tokens, &unbucketed_config, &mut unbucketed_runtime)
+            .expect("runs the unbucketed two-range MoE decode loop on the metal backend");
+        let unbucketed_allocations = omega::metal::OUTPUT_BUFFER_ALLOCATIONS.snapshot_and_reset();
+
+        let bucketed_config = ServingConfig {
+            kv_bucket_tokens: 32,
+            ..base_config
+        };
+        let mut bucketed_runtime = BackendRuntime::new(&bucketed_config);
+        let _ = omega::metal::OUTPUT_BUFFER_ALLOCATIONS.snapshot_and_reset();
+        let bucketed = loaded
+            .run_decode_loop("A", max_tokens, &bucketed_config, &mut bucketed_runtime)
+            .expect("runs the bucketed two-range MoE decode loop on the metal backend");
+        let bucketed_allocations = omega::metal::OUTPUT_BUFFER_ALLOCATIONS.snapshot_and_reset();
+
+        assert_eq!(
+            unbucketed.0.len(),
+            max_tokens,
+            "no eos id was declared, so both runs must exhaust the full token budget"
+        );
+        assert_eq!(
+            unbucketed_runtime.plan_misses, max_tokens,
+            "kv_bucket_tokens=1 reproduces the pre-fix shape: cached_len is strictly \
+             increasing, so every step is a fresh miss"
+        );
+        assert_eq!(
+            unbucketed_runtime.plan_hits, 0,
+            "an unbucketed extent never repeats within one decode call"
+        );
+
+        assert!(
+            bucketed_runtime.plan_hits > 0,
+            "a bucketed extent that never hits is the null result, not a pass"
+        );
+        assert!(
+            bucketed_runtime.plan_misses < unbucketed_runtime.plan_misses,
+            "kv_bucket_tokens=32 must reduce plan_misses below the unbucketed baseline, \
+             or bucketing bought nothing on this fixture"
+        );
+        // Non-strict: measured `0` on both arms in this sandbox (no real
+        // Metal device attached, `omega`'s own Gpu-arm buffer allocation
+        // never fires at all rather than firing once per miss) -- the
+        // plan_hits/plan_misses assertions above are this test's load-
+        // bearing, environment-independent proof of ROW 392's fix; this one
+        // only guards against a REGRESSION (bucketing must never allocate
+        // MORE than the unbucketed baseline) on whatever device runs it.
+        assert!(
+            bucketed_allocations <= unbucketed_allocations,
+            "bucketed_allocations={bucketed_allocations} unbucketed_allocations={unbucketed_allocations}: \
+             bucketing must never allocate MORE device output buffers than the unbucketed baseline"
+        );
+        assert_eq!(
+            bucketed.0, unbucketed.0,
+            "cached_range_padding_mask must make a bucket's own zero-padding invisible to \
+             softmax -- rounding cached_len up must never change which token is emitted"
         );
     }
 

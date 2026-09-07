@@ -4343,14 +4343,17 @@ mod real_openchat_file {
     /// needs `runtime`'s plan-cache hit/miss counters, which
     /// `(Vec<u32>, String, bool)` has no room for.
     ///
-    /// **Finding, not a pass/fail on generated text**: `mistral_cached_forward_program`'s
-    /// key/value-cache read extent bakes `cached_len` into a `Plan`'s concrete
-    /// shapes (`omega::backend::plan_named`'s own doc), and `cached_len` grows
-    /// by `new_count` every decode step -- so within one autoregressive decode
-    /// call, `(new_count, cached_len)` is a different pair every single step,
-    /// and the plan cache cannot hit even once. This test asserts exactly
-    /// that (`plan_hits == 0`, `plan_misses == one per forward step taken`)
-    /// rather than hoping for reuse the shape itself rules out.
+    /// A real openchat checkpoint builds a `single_range` program
+    /// (`LoadedModel::single_range`'s own doc), so `gpu_layers:
+    /// GPU_LAYERS_ALL` here drives `run_decode_loop_placed_kv`, not the
+    /// two-range `evaluate` path -- `runtime.plan_hits`/`plan_misses` below
+    /// are `Self::placed_plans`' counters. This test's own history is the
+    /// class defect ROW 392 later found on the two-range path too: before
+    /// `ServingConfig::kv_bucket_tokens` bucketing landed here, `(new_count,
+    /// cached_len)` was a different pair every step and `plan_hits` never
+    /// left 0. Bucketing makes `plan_hits > 0` and `plan_misses <
+    /// forward_calls_taken` the actual claim below, not a hoped-for
+    /// property the shape itself would otherwise rule out.
     #[cfg(feature = "metal")]
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]

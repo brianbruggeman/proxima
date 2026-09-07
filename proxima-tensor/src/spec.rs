@@ -1040,6 +1040,45 @@ fn causal_mask_merged(program: &mut Vec<Op>, cached_len: NodeId) -> Result<NodeI
     )
 }
 
+/// [`append_mistral_cached_layer`]/[`append_mistral_cached_moe_layer`]'s
+/// two-range plan-cache bucketing counterpart: masks the CACHED range's own
+/// zero-padding a caller introduces when it rounds `cached_len` up to a
+/// bucket boundary (`ServingConfig::kv_bucket_tokens`, the same
+/// `kv_extent` the single-range path already buckets with) so the `Plan`
+/// built for one bucket stays valid for every real `cached_len` inside it.
+/// Every padded slot lives at `[cached_len, extent)` -- always in the past
+/// relative to any query (`append_mistral_cached_layer`'s own "never
+/// masked, a cached position is always in the past" comment), so unlike
+/// [`causal_mask_merged`] this is query-independent: `key_index >=
+/// cached_len`, built as `key_index + 1 > cached_len` to reuse
+/// [`ScalarOp::Greater`] (this crate has no `GreaterEqual`). `bucket_tokens
+/// == 1` makes the caller's `extent == cached_len` exactly, so `key_index`
+/// never reaches `cached_len` and this mask is always `false` -- the
+/// unbucketed case degenerates to an always-true score-cached read with a
+/// few extra never-firing nodes, not a behavior change.
+fn cached_range_padding_mask(program: &mut Vec<Op>, cached_len: NodeId) -> Result<NodeId, TensorError> {
+    let key_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Symbolic(1),
+        },
+    );
+    let one = scalar_constant(program, 1.0);
+    let key_index_next = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(key_index, "t->t"), (one, "->t")],
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(key_index_next, "t->t"), (cached_len, "->t")],
+    )
+}
+
 /// One transformer layer, node-for-node the same graph
 /// `specs/mistral_layer.toml` spells — attention (RoPE + GQA + causal mask)
 /// then the SwiGLU feed-forward, each wrapped in its own residual. `x` in,
@@ -2639,6 +2678,7 @@ fn append_mistral_cached_layer(
     head_shape_ones: NodeId,
     kv_head_shape_ones: NodeId,
     is_future: NodeId,
+    cached_mask: NodeId,
     group: u32,
     head_dim: u32,
     query_heads: u32,
@@ -2843,8 +2883,11 @@ fn append_mistral_cached_layer(
     )?;
 
     // cached block: query `s` against every already-rotated cached key `t`
-    // (symbol 1's extent, zero on the very first call) -- never masked, a
-    // cached position is always in the past of a new query.
+    // (symbol 1's extent, zero on the very first call) -- a real cached
+    // position is always in the past of a new query and never masked;
+    // `cached_mask` only fires against a caller's own bucket padding past
+    // the real `cached_len` (`cached_range_padding_mask`'s own doc), added
+    // right after `score_cached_scaled` below.
     let score_cached_even_product = elementwise(
         program,
         DType::Float32,
@@ -2892,6 +2935,21 @@ fn append_mistral_cached_layer(
         DType::Float32,
         ScalarOp::Multiply,
         &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
+    )?;
+    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+    // `cached_mask` masks only the bucket padding a caller may have added
+    // past the real `cached_len` (`cached_range_padding_mask`'s own doc) --
+    // every real cached position still reaches this block unmasked, same
+    // as before this parameter existed.
+    let score_cached_masked = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[
+            (cached_mask, "t->stug"),
+            (neg_infinity, "->stug"),
+            (score_cached_scaled, "stug->stug"),
+        ],
     )?;
 
     // new block: query `s` against this call's own freshly rotated key `w`
@@ -2948,7 +3006,6 @@ fn append_mistral_cached_layer(
         ScalarOp::Multiply,
         &[(score_new, "swug->swug"), (inv_sqrt_head_dim, "->swug")],
     )?;
-    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
     let score_new_masked = elementwise(
         program,
         DType::Float32,
@@ -2967,7 +3024,7 @@ fn append_mistral_cached_layer(
         DType::Float32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
-        score_cached_scaled,
+        score_cached_masked,
         "stug->stug",
         "sug->stug",
     )?;
@@ -2992,7 +3049,7 @@ fn append_mistral_cached_layer(
         DType::Float32,
         ScalarOp::Subtract,
         &[
-            (score_cached_scaled, "stug->stug"),
+            (score_cached_masked, "stug->stug"),
             (global_max, "sug->stug"),
         ],
     )?;
@@ -4593,6 +4650,7 @@ fn append_mistral_cached_moe_layer(
     sin_new: NodeId,
     group_ones: NodeId,
     is_future: NodeId,
+    cached_mask: NodeId,
     group: u32,
     attn_norm_weight: NodeId,
     ffn_norm_weight: NodeId,
@@ -4802,6 +4860,19 @@ fn append_mistral_cached_moe_layer(
         ScalarOp::Multiply,
         &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
+    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+    // see `append_mistral_cached_layer`'s identical `score_cached_masked`
+    // for what `cached_mask` guards.
+    let score_cached_masked = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[
+            (cached_mask, "t->stug"),
+            (neg_infinity, "->stug"),
+            (score_cached_scaled, "stug->stug"),
+        ],
+    )?;
 
     let score_new_even_product = elementwise(
         program,
@@ -4854,7 +4925,6 @@ fn append_mistral_cached_moe_layer(
         ScalarOp::Multiply,
         &[(score_new, "swug->swug"), (inv_sqrt_head_dim, "->swug")],
     )?;
-    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
     let score_new_masked = elementwise(
         program,
         DType::Float32,
@@ -4871,7 +4941,7 @@ fn append_mistral_cached_moe_layer(
         DType::Float32,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
-        score_cached_scaled,
+        score_cached_masked,
         "stug->stug",
         "sug->stug",
     )?;
@@ -4896,7 +4966,7 @@ fn append_mistral_cached_moe_layer(
         DType::Float32,
         ScalarOp::Subtract,
         &[
-            (score_cached_scaled, "stug->stug"),
+            (score_cached_masked, "stug->stug"),
             (global_max, "sug->stug"),
         ],
     )?;
@@ -7344,6 +7414,16 @@ pub fn mistral_cached_forward_program_with_experts(
         (ones, ones)
     };
     let (is_future, _neg_infinity) = causal_mask(&mut program)?;
+    // Rank-0 `Op::Input`, same precedent `eps`/`rope_cos`/`rope_sin` set
+    // (`causal_mask_merged`'s own doc): the host supplies the REAL
+    // `cached_len` every call, independent of `kv_cache.{layer}.*`'s own
+    // `Extent::Symbolic(1)` extent, so a caller can round that extent up to
+    // a bucket boundary (`ServingConfig::kv_bucket_tokens`) without
+    // rebuilding this program -- `cached_range_padding_mask` is what makes
+    // the padding between the real and rounded length invisible to every
+    // layer's cached-range attention below.
+    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    let cached_mask = cached_range_padding_mask(&mut program, cached_len)?;
 
     let mut cache_roots: Vec<CachedLayerRoots> = Vec::with_capacity(block_count as usize);
 
@@ -7507,6 +7587,7 @@ pub fn mistral_cached_forward_program_with_experts(
                 head_shape_ones,
                 kv_head_shape_ones,
                 is_future,
+                cached_mask,
                 group,
                 head_dim,
                 query_heads,
@@ -7575,6 +7656,7 @@ pub fn mistral_cached_forward_program_with_experts(
                 sin_new,
                 group_ones,
                 is_future,
+                cached_mask,
                 group,
                 attn_norm_weight,
                 ffn_norm_weight,
