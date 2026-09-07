@@ -25,25 +25,38 @@ use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::{BoundOpKind, NumericPolicy, bind};
 
 mod support;
-use support::{as_named_blocks, real_single_range_forward_fixture_with_padding};
+use support::{as_named_blocks, production_numeric_policy, real_single_range_forward_fixture_with_padding};
 
 /// One padding value's worth of the parity check, shared by every case in
 /// [`the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding`]
 /// so a failure names the exact padding it happened at without three copies
-/// of the same body.
+/// of the same body. `NumericPolicy::default()` (bit-exact) never admits
+/// `ContextSplitMerge`, so `splits_for` is pinned at `1` here and the merge
+/// path this file's `m_greater_than_one_prefill_holds_parity_past_the_split_knee`
+/// exercises never engages -- this arm is purely the cooperative-load body.
 fn assert_parity_at_padding(padding: u64) {
-    const CACHED_LEN: u64 = 5;
-    const NEW_COUNT: u64 = 1;
+    assert_parity_at_shape(5, 1, padding, NumericPolicy::default());
+}
 
+/// [`assert_parity_at_padding`] generalized over `cached_len`/`new_count`/
+/// `policy` so the M > 1 (prefill) case below can share the same body --
+/// production (2026-09-07): a chat's second turn (~100 new rows atop ~600
+/// cached keys, merged context 664 past the
+/// `ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE` (128) knee, under
+/// `NumericPolicy::llama_relaxed()` -- the policy `ServingConfig::default()`
+/// actually runs, which is what admits `ContextSplitMerge` and engages the
+/// split+merge kernels at all) produced 1024 tokens of `!!!!` (token id 0),
+/// while turn one (prefill from empty) was fine.
+fn assert_parity_at_shape(cached_len: u64, new_count: u64, padding: u64, policy: NumericPolicy) {
     let (program, symbols, roots, owned) =
-        real_single_range_forward_fixture_with_padding(CACHED_LEN, NEW_COUNT, padding);
+        real_single_range_forward_fixture_with_padding(cached_len, new_count, padding);
     let output_roots = [roots[0]];
     let named = as_named_blocks(&owned);
 
     let shapes = proxima_tensor::infer(&program, &symbols)
         .expect("single-range padded fixture infers");
-    let resolved = bind(&program, &shapes, &output_roots, NumericPolicy::default())
-        .expect("single-range padded fixture binds");
+    let resolved =
+        bind(&program, &shapes, &output_roots, policy).expect("single-range padded fixture binds");
     let fused = resolved
         .iter()
         .find(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
@@ -51,8 +64,9 @@ fn assert_parity_at_padding(padding: u64) {
     assert_eq!(
         fused.operands().len(),
         9,
-        "padding={padding}: the single-range candidate must carry the dynamic \
-         ninth `cached_len` operand, not the static eight-operand two-range shape"
+        "cached_len={cached_len} new_count={new_count} padding={padding}: the single-range \
+         candidate must carry the dynamic ninth `cached_len` operand, not the static \
+         eight-operand two-range shape"
     );
 
     let mut free_buffers = Vec::new();
@@ -67,20 +81,18 @@ fn assert_parity_at_padding(padding: u64) {
     )
     .expect("cpu runs the padded single-range program");
 
-    let plan = omega::plan_named(
-        &program,
-        &symbols,
-        &named,
-        &output_roots,
-        NumericPolicy::default(),
-    )
-    .expect("metal plans the padded single-range program");
+    let plan = omega::plan_named(&program, &symbols, &named, &output_roots, policy)
+        .expect("metal plans the padded single-range program");
     let metal = omega::execute_plan_named(&plan, &named)
         .expect("metal runs the padded single-range program on a real device");
 
     let expected = cpu.root();
     let actual = metal.root();
-    assert_eq!(actual.len(), expected.len(), "padding={padding}");
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "cached_len={cached_len} new_count={new_count} padding={padding}"
+    );
 
     let max_magnitude = expected
         .iter()
@@ -93,13 +105,13 @@ fn assert_parity_at_padding(padding: u64) {
         .fold(0.0f32, f32::max);
     let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
     eprintln!(
-        "single-range coop-load parity: padding={padding} max_diff={max_diff} \
-         max_magnitude={max_magnitude} relative={relative}"
+        "single-range coop-load parity: cached_len={cached_len} new_count={new_count} \
+         padding={padding} max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"
     );
     assert!(
         relative < 1e-4,
-        "padding={padding}: metal disagrees with cpu on the single-range fused root: \
-         relative={relative} max_diff={max_diff}"
+        "cached_len={cached_len} new_count={new_count} padding={padding}: metal disagrees with \
+         cpu on the single-range fused root: relative={relative} max_diff={max_diff}"
     );
 }
 
@@ -108,4 +120,18 @@ fn the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_paddin
     for padding in [0u64, 1, 5] {
         assert_parity_at_padding(padding);
     }
+}
+
+/// ROW: a prefill dispatch (`query_rows > 1`) whose merged context (664)
+/// sits past the split-at-scale knee (128) must still agree with the CPU
+/// reference. `cached_attention_scratch_len` (`omega/src/metal.rs`) sizes
+/// the scratch buffer by the LIVE `splits_for(664, ..) == 6`, but
+/// `render_cached_attention`'s split kernel and `render_cached_attention_merge`
+/// both address that buffer with the COMPILED `ATTENTION_SPLIT_MAX == 32` as
+/// the per-row stride -- every `query_index > 0` writes past its allocated
+/// 6-split slot, corrupting neighboring rows and, once `query_index` is a
+/// handful of rows in, running past the buffer entirely.
+#[test]
+fn m_greater_than_one_prefill_holds_parity_past_the_split_knee() {
+    assert_parity_at_shape(600, 64, 0, production_numeric_policy());
 }

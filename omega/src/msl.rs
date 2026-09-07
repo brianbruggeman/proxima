@@ -3622,22 +3622,28 @@ fn render_cached_attention(
         // `bit_exact` arm below normalizes straight into `out`) is instead
         // the SPLIT kernel's own partial for split 0 -- written raw
         // (un-normalized) into the scratch buffer this position's
-        // `Binding::Scratch` slot backs, at `max_splits` stride so a later
+        // `Binding::Scratch` slot backs, at `splits` (the LIVE `u.splits`
+        // value, not the compiled `ATTENTION_SPLIT_MAX`) stride so a later
         // slice's real `split = threadgroup_index % splits` can address its
-        // own slot with the identical layout. `render_cached_attention_merge`
-        // reads exactly this layout back and performs the online-softmax
-        // combine over every live split -- the final `weighted[..] / sum`
-        // normalize this arm always did is deferred to that kernel,
-        // generalizing this exact combine one hardware level up
-        // (`ContextSplitMerge`'s own doc). `split` is the real per-
-        // threadgroup value this function's own index-unpack derived from
-        // `tgid` above -- at `u.splits == 1` it is always `0`, so this
-        // reduces to exactly the prior forced-`0L` behaviour byte for byte.
+        // own slot with the identical layout. This must be the same live
+        // value `crate::metal::cached_attention_scratch_len` sizes the
+        // buffer with (`splits_for(cached_key_rows + new_key_rows, ..)` at
+        // `query_rows > 1`, the compiled max only at `query_rows == 1`) --
+        // striding by the compiled max here while the buffer holds only
+        // `splits` slots per row was an out-of-bounds write on every
+        // `query_index > 0` (production, 2026-09-07: turn two of a chat,
+        // ~600 cached keys plus ~100 new rows, produced 1024 `!!!!` tokens).
+        // `render_cached_attention_merge` reads exactly this layout back and
+        // performs the online-softmax combine over every live split -- the
+        // final `weighted[..] / sum` normalize this arm always did is
+        // deferred to that kernel, generalizing this exact combine one
+        // hardware level up (`ContextSplitMerge`'s own doc). `split` is the
+        // real per-threadgroup value this function's own index-unpack
+        // derived from `tgid` above -- at `u.splits == 1` it is always `0`,
+        // so this reduces to exactly the prior forced-`0L` behaviour byte
+        // for byte.
         let final_store = if merge_needed {
-            format!(
-                "        constexpr long max_splits = {};\n        device float* attn_scratch = (device float*)out;\n        long scratch_index = (query_index * max_splits + split) * (2L + head_dim);\n        if (lane == 0u) {{ attn_scratch[scratch_index] = merged_max; attn_scratch[scratch_index + 1] = merged_sum; }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; attn_scratch[scratch_index + 2L + dimension] = weighted[local_dimension]; }}\n",
-                crate::sized::ATTENTION_SPLIT_MAX,
-            )
+            "        device float* attn_scratch = (device float*)out;\n        long scratch_index = (query_index * splits + split) * (2L + head_dim);\n        if (lane == 0u) { attn_scratch[scratch_index] = merged_max; attn_scratch[scratch_index + 1] = merged_sum; }\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) { long local_dimension = dimension / 32L; attn_scratch[scratch_index + 2L + dimension] = weighted[local_dimension]; }\n".to_string()
         } else {
             format!(
                 "        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n"
@@ -3731,9 +3737,16 @@ fn render_cached_attention_merge(resolved: &BoundOp, entry: &str) -> Result<Stri
     source.push_str(
         "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n",
     );
+    // `splits` is the SAME live `u.splits` value the split kernel's own
+    // `final_store` addresses its scratch write with
+    // (`render_cached_attention`'s doc) -- and the same value
+    // `crate::metal::cached_attention_scratch_len` sized this buffer's
+    // per-row extent against. Reading it back with the compiled
+    // `ATTENTION_SPLIT_MAX` instead (this function's own bug until fixed
+    // alongside the split kernel) would address a stride the allocator
+    // never reserved.
     source.push_str(&format!(
-        "    constexpr long head_dim = {head_dim}; constexpr long max_splits = {};\n    long query_index = vector_index;\n    long splits = u.splits;\n    long iwg = (long)lane;\n    long own_scratch = (query_index * max_splits + iwg) * (2L + head_dim);\n    float own_max = (iwg < splits) ? in0[own_scratch] : -INFINITY;\n    float own_sum = (iwg < splits) ? in0[own_scratch + 1] : 0.0f;\n    float global_max = simd_max(own_max);\n    float own_weight = (own_max == -INFINITY) ? 0.0f : exp(own_max - global_max);\n    float total_sum = simd_sum(own_weight * own_sum);\n    float inv_sum = (total_sum == 0.0f) ? 0.0f : 1.0f / total_sum;\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n        float accumulated = 0.0f;\n        for (long split = 0; split < splits; split++) {{\n            long scratch_index = (query_index * max_splits + split) * (2L + head_dim);\n            float split_max = in0[scratch_index];\n            float split_weight = (split_max == -INFINITY) ? 0.0f : exp(split_max - global_max);\n            accumulated += split_weight * in0[scratch_index + 2L + dimension];\n        }}\n        out[query_index * head_dim + dimension] = ({element_type})(accumulated * inv_sum);\n    }}\n}}\n",
-        crate::sized::ATTENTION_SPLIT_MAX,
+        "    constexpr long head_dim = {head_dim};\n    long query_index = vector_index;\n    long splits = u.splits;\n    long iwg = (long)lane;\n    long own_scratch = (query_index * splits + iwg) * (2L + head_dim);\n    float own_max = (iwg < splits) ? in0[own_scratch] : -INFINITY;\n    float own_sum = (iwg < splits) ? in0[own_scratch + 1] : 0.0f;\n    float global_max = simd_max(own_max);\n    float own_weight = (own_max == -INFINITY) ? 0.0f : exp(own_max - global_max);\n    float total_sum = simd_sum(own_weight * own_sum);\n    float inv_sum = (total_sum == 0.0f) ? 0.0f : 1.0f / total_sum;\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n        float accumulated = 0.0f;\n        for (long split = 0; split < splits; split++) {{\n            long scratch_index = (query_index * splits + split) * (2L + head_dim);\n            float split_max = in0[scratch_index];\n            float split_weight = (split_max == -INFINITY) ? 0.0f : exp(split_max - global_max);\n            accumulated += split_weight * in0[scratch_index + 2L + dimension];\n        }}\n        out[query_index * head_dim + dimension] = ({element_type})(accumulated * inv_sum);\n    }}\n}}\n"
     ));
     Ok(source)
 }
@@ -10032,8 +10045,11 @@ mod tests {
             "the slice formula must be exactly ceil_div(live, splits), [lo, hi)"
         );
         assert!(
-            source.contains("long scratch_index = (query_index * max_splits + split) * (2L + head_dim);"),
-            "the scratch write must index by (query_index * max_splits + split), not query_index alone"
+            source.contains("long scratch_index = (query_index * splits + split) * (2L + head_dim);"),
+            "the scratch write must index by (query_index * splits + split) using the LIVE \
+             u.splits value cached_attention_scratch_len sized the buffer with, not the \
+             compiled ATTENTION_SPLIT_MAX -- ROW: production, 2026-09-07, striding by the \
+             compiled max wrote past every query_index > 0's allocated slot"
         );
         assert!(
             source.contains("constexpr long grid_splits = 32;"),
