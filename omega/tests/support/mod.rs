@@ -153,6 +153,7 @@ pub fn real_single_range_forward_fixture_with_padding(
         KV_HEADS,
         HEAD_DIM,
         LAYERS,
+        false,
         DuplicateHeadPosition::None,
     )
     .expect("the single-range forward program builds");
