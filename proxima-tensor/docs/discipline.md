@@ -27445,3 +27445,39 @@ Arrays sized by `cap` force Metal to reserve that much thread/private storage fo
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-07 | `fix(omega): arena transient cap scales with the plan's query rows` | `ArenaOverCap`'s cap is now `ARENA_TRANSIENT_CAP * query_rows` instead of a fixed constant; decode (`query_rows == 1`) unchanged | N/A (correctness landing; 260+122 tests, no timed cells) | solo |
+
+## ROW 397 -- prefill attention scratch stride shared by allocator and kernels
+
+**Card:** regression after ROW 394 (`4909a018`): `cached_attention_scratch_len` (`omega/src/metal.rs`) started sizing the prefill scratch buffer by the LIVE `splits_for(cached_len + new_count, ..)`, but the split kernel (`render_cached_attention`) and the merge kernel (`render_cached_attention_merge`, both `omega/src/msl.rs`) kept indexing every row's slot at the compiled `ATTENTION_SPLIT_MAX` stride. At `query_rows > 1` (prefill) over ~600 cached keys the live `splits_for` returns 6 while the compiled max is 32 -- every `query_index > 0` wrote and read past its allocated 6-split slot, corrupting neighboring rows and eventually running past the buffer. Production (2026-09-07): turn two of a chat, ~600 cached keys plus ~100 new rows, produced 1024 `!!!!` (token id 0) tokens; turn one (prefill from empty, `splits == 1`) was fine because `max_splits`/`splits` coincide there.
+
+**Branch:** `fix/prefill-scratch-stride` (`bf23398f`), landed via `land/stride`. Merge-base equalled main's tip (`8bf37a62`) at branch-cut time; main advanced twice more (`e1bcc9cc`/`f518542c` ROW 395's streaming callback, `5360c66a`/`c82bf8d7` ROW 396's arena cap) while this landing waited on its own gate token. Rebase onto the new tip was a clean no-op -- zero file overlap: this branch touches only `omega/src/msl.rs` and `omega/tests/cached_attention_coop_load_parity.rs`, disjoint from main's `omega/src/metal.rs`/`proxima-model-interop/*`/`proxima-tokenizer/*` changes.
+
+**Mechanism.** Both kernel sites in `omega/src/msl.rs` are rewritten to stride by the SAME live `u.splits` value the allocator and the dispatch uniforms already use, in place of the compiled `ATTENTION_SPLIT_MAX`:
+- `render_cached_attention`'s `final_store` (`omega/src/msl.rs:3622-3651` region): `scratch_index = (query_index * max_splits + split) * (2L + head_dim)` -> `scratch_index = (query_index * splits + split) * (2L + head_dim)`, dropping the `constexpr long max_splits = {ATTENTION_SPLIT_MAX}` binding entirely since the write site no longer needs the compiled constant.
+- `render_cached_attention_merge` (`omega/src/msl.rs:3737-3760` region): both `own_scratch` and the per-split `scratch_index` inside the accumulate loop switch from `query_index * max_splits + ...` to `query_index * splits + ...`, again dropping the now-unused `constexpr long max_splits` binding.
+
+The per-site table this row closes:
+
+| Site | Formula before | Formula after | Buffer sized by |
+| --- | --- | --- | --- |
+| allocator (`cached_attention_scratch_len`, `metal.rs:7100-7118`) | `splits_for(len)` (unchanged) | `splits_for(len)` (unchanged) | live splits |
+| dispatch uniforms (`4504-4587` / `4603-4631`) | live `u.splits` (unchanged) | live `u.splits` (unchanged) | live splits |
+| dispatch grid (`3540-3544`) | unchanged | unchanged | n/a |
+| split kernel write (`render_cached_attention`, msl.rs) | `query_index * ATTENTION_SPLIT_MAX + split` | `query_index * splits + split` | now matches allocator |
+| merge kernel read (`render_cached_attention_merge`, msl.rs) | `query_index * ATTENTION_SPLIT_MAX + split` | `query_index * splits + split` | now matches allocator |
+
+Only the two kernel sites moved; the allocator, the uniforms, and the dispatch grid were already correct since ROW 394 and are unchanged here.
+
+**Proof.** `m_greater_than_one_prefill_holds_parity_past_the_split_knee` (`omega/tests/cached_attention_coop_load_parity.rs`) reproduces the incident's exact shape -- `cached_len=600`, `new_count=64`, `production_numeric_policy()` (the policy `ServingConfig::default()` actually runs, which is what admits `ContextSplitMerge` and engages the split+merge kernels at all; `NumericPolicy::default()`'s bit-exact policy never does). Against main's pre-fix formula this reproduction measured relative error 0.598 (max_diff 5.155) -- the `!!!!`-class corruption; after the fix it holds `relative < 1e-4`. `assert_parity_at_padding` was generalized into `assert_parity_at_shape(cached_len, new_count, padding, policy)` so the new M>1 case shares the existing M=1 cooperative-load body instead of duplicating it.
+
+**Gates:** `cargo clippy -p omega --all-targets --features metal,instrument,reduce-epilogue-fusion -- -D warnings` clean; `cargo clippy -p omega --all-targets --features wgpu-backend,cuda -- -D warnings` clean; `cargo nextest run -j 1 -p omega --features metal,instrument`: 261 passed, 14 skipped (incl. `m_greater_than_one_prefill_holds_parity_past_the_split_knee`).
+
+**Residual, named not hidden.** Prefill still reserves split scratch at all -- splits are fundamentally a decode-time mechanism (splitting one row's long context across threadgroups), and a prefill dispatch of many rows paying that same per-row split/merge overhead is unexamined here; that reshaping is the next cut, not this one.
+
+**Axes (principle 8):** numeric -- none new; no tunable constant changed, only which existing live value (`u.splits`) two kernel sites read. structural -- no type/signature change; both kernel-source-generating functions keep their existing signatures. **Sans-IO opt-sweep (principle 11):** state machine -- N/A, generated-source string assembly; bytes-first/borrowed views -- N/A, MSL source text; SIMD/branchless -- N/A at the Rust layer; the generated kernel itself is unchanged in structure, only the addressed stride.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-07 | `fix(omega): one stride for prefill attention scratch across allocator and kernels` | split/merge kernels now index scratch by live `u.splits` instead of the compiled `ATTENTION_SPLIT_MAX`, matching the allocator's sizing | N/A (correctness landing; 261 tests, no timed cells) | solo |
