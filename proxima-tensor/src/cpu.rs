@@ -178,7 +178,8 @@ use half::{bf16, f16};
 // modules `QuantizedBlock::element_count` composes down to, not the scalar
 // float types.
 use proxima_gguf::quant::{
-    bf16 as gguf_bf16, f16 as gguf_f16, iq4_nl, q3_k, q4_0, q4_k, q5_1, q5_k, q6_k, q8_0,
+    bf16 as gguf_bf16, f16 as gguf_f16, iq2_xs, iq3_xxs, iq4_nl, q3_k, q4_0, q4_k, q5_1, q5_k,
+    q6_k, q8_0,
 };
 
 use crate::bind::{
@@ -3296,6 +3297,19 @@ pub enum QuantizedBlock<'a> {
     /// borrows unchanged. The target checkpoint's per-layer-token-embedding
     /// ngram table codec (dims `[160, 320001536]`, 28.8 GB) -- decode-only.
     Iq4Nl(&'a [u8]),
+    /// Raw packed `IQ2_XS` bytes -- 256-element super-blocks, one `f16`
+    /// scale, 8 sub-block scale nibbles, and a 512-entry grid + 128-entry
+    /// sign codebook per element group; see
+    /// [`proxima_gguf::quant::iq2_xs`] for the on-disk layout this borrows
+    /// unchanged. Part of the `UD-Q2_K_XL` codec set -- decode-only.
+    Iq2Xs(&'a [u8]),
+    /// Raw packed `IQ3_XXS` bytes -- 256-element super-blocks, one `f16`
+    /// scale, 8 packed 32-bit aux words (4-bit sub-block scale + four 7-bit
+    /// sign fields), and a 256-entry grid codebook shared with no other
+    /// format; see [`proxima_gguf::quant::iq3_xxs`] for the on-disk layout
+    /// this borrows unchanged. Part of the `UD-Q2_K_XL` codec set --
+    /// decode-only.
+    Iq3Xxs(&'a [u8]),
     /// Raw packed IEEE-754 binary16 bytes, little-endian, two per element,
     /// no block or scale structure at all -- unlike every other
     /// non-`Float32` variant above, a half-precision weight is not
@@ -3377,6 +3391,18 @@ impl QuantizedBlock<'_> {
                 bytes.len(),
                 iq4_nl::BLOCK_BYTES,
                 iq4_nl::blocks_for_bytes(bytes.len()).map(iq4_nl::elements_for_blocks),
+            ),
+            QuantizedBlock::Iq2Xs(bytes) => (
+                "iq2_xs",
+                bytes.len(),
+                iq2_xs::BLOCK_BYTES,
+                iq2_xs::blocks_for_bytes(bytes.len()).map(iq2_xs::elements_for_blocks),
+            ),
+            QuantizedBlock::Iq3Xxs(bytes) => (
+                "iq3_xxs",
+                bytes.len(),
+                iq3_xxs::BLOCK_BYTES,
+                iq3_xxs::blocks_for_bytes(bytes.len()).map(iq3_xxs::elements_for_blocks),
             ),
             // f16/bf16 blocks are one element wide (`QK_F16`/`QK_BF16` == 1),
             // so a block count already IS the element count -- neither module
@@ -3596,6 +3622,8 @@ fn evaluate_quantized_with_scratch_impl(
             | QuantizedBlock::Q4_0(_)
             | QuantizedBlock::Q5_1(_)
             | QuantizedBlock::Iq4Nl(_)
+            | QuantizedBlock::Iq2Xs(_)
+            | QuantizedBlock::Iq3Xxs(_)
             | QuantizedBlock::Float16(_)
             | QuantizedBlock::BFloat16(_) => {
                 quantized_weights.insert(*node, block);
@@ -6090,7 +6118,7 @@ fn dequantize_row(
     dim: usize,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
-    use proxima_gguf::quant::{iq4_nl, q3_k, q4_k, q5_1, q5_k, q6_k, q8_0};
+    use proxima_gguf::quant::{iq2_xs, iq3_xxs, iq4_nl, q3_k, q4_k, q5_1, q5_k, q6_k, q8_0};
     let unaligned_row = || TensorError::NotLowerable {
         node,
         reason: "quantized embedding row width does not divide the codec's own block width",
@@ -6105,6 +6133,8 @@ fn dequantize_row(
         // per-row lookup path is exactly what that table's gather needs.
         QuantizedBlock::Iq4Nl(data) => (data, iq4_nl::BLOCK_BYTES, iq4_nl::QK4_NL),
         QuantizedBlock::Q5_1(data) => (data, q5_1::BLOCK_BYTES, q5_1::QK5_1),
+        QuantizedBlock::Iq2Xs(data) => (data, iq2_xs::BLOCK_BYTES, iq2_xs::QK_K),
+        QuantizedBlock::Iq3Xxs(data) => (data, iq3_xxs::BLOCK_BYTES, iq3_xxs::QK_K),
         QuantizedBlock::Float32(_)
         | QuantizedBlock::Q4_0(_)
         | QuantizedBlock::Float16(_)
@@ -6126,6 +6156,8 @@ fn dequantize_row(
         QuantizedBlock::Q8_0(_) => q8_0::dequantize(row_bytes_slice, output),
         QuantizedBlock::Iq4Nl(_) => iq4_nl::dequantize(row_bytes_slice, output),
         QuantizedBlock::Q5_1(_) => q5_1::dequantize(row_bytes_slice, output),
+        QuantizedBlock::Iq2Xs(_) => iq2_xs::dequantize(row_bytes_slice, output),
+        QuantizedBlock::Iq3Xxs(_) => iq3_xxs::dequantize(row_bytes_slice, output),
         _ => unreachable!("codec already matched above"),
     }
     .map_err(|_| unaligned_row())
@@ -7366,6 +7398,8 @@ fn build_matmul_stage_plan<'weights>(
         QuantizedBlock::Q4_0(bytes) => (bytes, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS),
         QuantizedBlock::Q5_1(bytes) => (bytes, Q5_1_BLOCK_BYTES, Q5_1_BLOCK_ELEMENTS),
         QuantizedBlock::Iq4Nl(bytes) => (bytes, IQ4_NL_BLOCK_BYTES, IQ4_NL_BLOCK_ELEMENTS),
+        QuantizedBlock::Iq2Xs(bytes) => (bytes, IQ2_XS_BLOCK_BYTES, IQ2_XS_BLOCK_ELEMENTS),
+        QuantizedBlock::Iq3Xxs(bytes) => (bytes, IQ3_XXS_BLOCK_BYTES, IQ3_XXS_BLOCK_ELEMENTS),
         QuantizedBlock::Float16(bytes) => (bytes, HALF_PRECISION_ELEMENT_BYTES, 1),
         QuantizedBlock::BFloat16(bytes) => (bytes, HALF_PRECISION_ELEMENT_BYTES, 1),
     };
@@ -7921,6 +7955,8 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         QuantizedBlock::Q4_0(bytes) => (bytes, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS),
         QuantizedBlock::Q5_1(bytes) => (bytes, Q5_1_BLOCK_BYTES, Q5_1_BLOCK_ELEMENTS),
         QuantizedBlock::Iq4Nl(bytes) => (bytes, IQ4_NL_BLOCK_BYTES, IQ4_NL_BLOCK_ELEMENTS),
+        QuantizedBlock::Iq2Xs(bytes) => (bytes, IQ2_XS_BLOCK_BYTES, IQ2_XS_BLOCK_ELEMENTS),
+        QuantizedBlock::Iq3Xxs(bytes) => (bytes, IQ3_XXS_BLOCK_BYTES, IQ3_XXS_BLOCK_ELEMENTS),
         QuantizedBlock::Float16(bytes) => (bytes, HALF_PRECISION_ELEMENT_BYTES, 1),
         QuantizedBlock::BFloat16(bytes) => (bytes, HALF_PRECISION_ELEMENT_BYTES, 1),
     };
@@ -8203,6 +8239,8 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             QuantizedBlock::Q4_0(_) => matmul_q4_0_f32(weights, rows, activation_row)?,
             QuantizedBlock::Q5_1(_) => matmul_q5_1_f32(weights, rows, activation_row)?,
             QuantizedBlock::Iq4Nl(_) => matmul_iq4_nl_f32(weights, rows, activation_row)?,
+            QuantizedBlock::Iq2Xs(_) => matmul_iq2_xs_f32(weights, rows, activation_row)?,
+            QuantizedBlock::Iq3Xxs(_) => matmul_iq3_xxs_f32(weights, rows, activation_row)?,
             QuantizedBlock::Float16(_) => matmul_f16_f32(weights, rows, activation_row)?,
             QuantizedBlock::BFloat16(_) => matmul_bf16_f32(weights, rows, activation_row)?,
         };
@@ -8235,6 +8273,8 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 QuantizedBlock::Q4_0(_) => {}
                 QuantizedBlock::Q5_1(_) => {}
                 QuantizedBlock::Iq4Nl(_) => {}
+                QuantizedBlock::Iq2Xs(_) => {}
+                QuantizedBlock::Iq3Xxs(_) => {}
                 QuantizedBlock::Float16(_) | QuantizedBlock::BFloat16(_) => {}
             }
         }
@@ -13574,6 +13614,164 @@ pub fn matmul_iq4_nl_f32(
         "matmul_iq4_nl_f32 called with zero rows",
         "weight byte length is not a whole multiple of the row count",
         dot_iq4_nl_f32,
+    )
+}
+
+/// Packed bytes per `IQ2_XS` super-block -- 74 bytes for 256 elements
+/// ([`crate::cpu::QuantizedBlock::Iq2Xs`]'s own doc).
+const IQ2_XS_BLOCK_BYTES: usize = proxima_gguf::quant::iq2_xs::BLOCK_BYTES;
+
+/// Decoded `f32` elements per `IQ2_XS` super-block (`QK_K`, 256) -- the same
+/// super-block width as the K-quant family, unlike `Q4_0`/`Q8_0`'s 32.
+const IQ2_XS_BLOCK_ELEMENTS: usize = proxima_gguf::quant::iq2_xs::QK_K;
+
+/// [`dot_q4_0_f32`]'s mechanism applied to `IQ2_XS`: dequantizes one
+/// 256-element super-block at a time into a reused stack buffer via
+/// [`proxima_gguf::quant::iq2_xs::dequantize_block`], then folds against the
+/// matching activation slice with the same [`dot_fold_fused_multiply_add`]
+/// fold. No `dot_fn_for` entry exists for this codec (no shared int8-wide
+/// fold path); this plain scalar dequantize-then-fold path is the only one
+/// this codec takes on the CPU backend.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`IQ2_XS_BLOCK_BYTES`], or `activation.len()` does not
+/// equal the row's block count times [`IQ2_XS_BLOCK_ELEMENTS`].
+fn dot_iq2_xs_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(IQ2_XS_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the iq2_xs block size",
+        });
+    }
+    let block_count = weight_row.len() / IQ2_XS_BLOCK_BYTES;
+    if activation.len() != block_count * IQ2_XS_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+
+    let mut scratch = [0.0f32; IQ2_XS_BLOCK_ELEMENTS];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .as_chunks::<IQ2_XS_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<IQ2_XS_BLOCK_ELEMENTS>().0)
+    {
+        proxima_gguf::quant::iq2_xs::dequantize_block(block, &mut scratch);
+        acc = dot_fold_fused_multiply_add(
+            &scratch,
+            activation_chunk,
+            DotFold {
+                len: IQ2_XS_BLOCK_ELEMENTS,
+                init: acc,
+                seeded: true,
+            },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `IQ2_XS`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector -- `dot_iq2_xs_f32`'s per-row kernel, same scalar
+/// dequantize-then-fold shape as [`matmul_q4_0_f32`] (no packed int8-dot
+/// wide fold exists for this codec either).
+///
+/// # Errors
+/// Propagates `dot_iq2_xs_f32`'s [`TensorError::QuantizedShapeMismatch`],
+/// or reports the same error if `weights.len()` is not a whole multiple of
+/// `rows`.
+pub fn matmul_iq2_xs_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_iq2_xs_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_iq2_xs_f32,
+    )
+}
+
+/// Packed bytes per `IQ3_XXS` super-block -- 98 bytes for 256 elements
+/// ([`crate::cpu::QuantizedBlock::Iq3Xxs`]'s own doc).
+const IQ3_XXS_BLOCK_BYTES: usize = proxima_gguf::quant::iq3_xxs::BLOCK_BYTES;
+
+/// Decoded `f32` elements per `IQ3_XXS` super-block (`QK_K`, 256) -- same
+/// super-block width as [`IQ2_XS_BLOCK_ELEMENTS`].
+const IQ3_XXS_BLOCK_ELEMENTS: usize = proxima_gguf::quant::iq3_xxs::QK_K;
+
+/// [`dot_iq2_xs_f32`]'s mechanism applied to `IQ3_XXS`: dequantizes one
+/// 256-element super-block at a time into a reused stack buffer via
+/// [`proxima_gguf::quant::iq3_xxs::dequantize_block`], then folds against
+/// the matching activation slice with the same
+/// [`dot_fold_fused_multiply_add`] fold. No `dot_fn_for` entry exists for
+/// this codec either; this plain scalar dequantize-then-fold path is the
+/// only one this codec takes on the CPU backend.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`IQ3_XXS_BLOCK_BYTES`], or `activation.len()` does
+/// not equal the row's block count times [`IQ3_XXS_BLOCK_ELEMENTS`].
+fn dot_iq3_xxs_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(IQ3_XXS_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the iq3_xxs block size",
+        });
+    }
+    let block_count = weight_row.len() / IQ3_XXS_BLOCK_BYTES;
+    if activation.len() != block_count * IQ3_XXS_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+
+    let mut scratch = [0.0f32; IQ3_XXS_BLOCK_ELEMENTS];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .as_chunks::<IQ3_XXS_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<IQ3_XXS_BLOCK_ELEMENTS>().0)
+    {
+        proxima_gguf::quant::iq3_xxs::dequantize_block(block, &mut scratch);
+        acc = dot_fold_fused_multiply_add(
+            &scratch,
+            activation_chunk,
+            DotFold {
+                len: IQ3_XXS_BLOCK_ELEMENTS,
+                init: acc,
+                seeded: true,
+            },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `IQ3_XXS`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector -- `dot_iq3_xxs_f32`'s per-row kernel, same scalar
+/// dequantize-then-fold shape as [`matmul_q4_0_f32`] (no packed int8-dot
+/// wide fold exists for this codec either).
+///
+/// # Errors
+/// Propagates `dot_iq3_xxs_f32`'s [`TensorError::QuantizedShapeMismatch`],
+/// or reports the same error if `weights.len()` is not a whole multiple of
+/// `rows`.
+pub fn matmul_iq3_xxs_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_iq3_xxs_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_iq3_xxs_f32,
     )
 }
 
@@ -19991,6 +20189,8 @@ mod tests {
             "q4_0" => QuantizedBlock::Q4_0(bytes),
             "q5_1" => QuantizedBlock::Q5_1(bytes),
             "iq4_nl" => QuantizedBlock::Iq4Nl(bytes),
+            "iq2_xs" => QuantizedBlock::Iq2Xs(bytes),
+            "iq3_xxs" => QuantizedBlock::Iq3Xxs(bytes),
             "float16" => QuantizedBlock::Float16(bytes),
             "bfloat16" => QuantizedBlock::BFloat16(bytes),
             other => panic!("packed_block: unknown test codec {other}"),
@@ -20010,6 +20210,8 @@ mod tests {
     #[case::q4_0_five_blocks("q4_0", q4_0::BLOCK_BYTES, q4_0::QK4_0, 5)]
     #[case::q5_1_three_blocks("q5_1", q5_1::BLOCK_BYTES, q5_1::QK5_1, 3)]
     #[case::iq4_nl_five_blocks("iq4_nl", iq4_nl::BLOCK_BYTES, iq4_nl::QK4_NL, 5)]
+    #[case::iq2_xs_two_super_blocks("iq2_xs", iq2_xs::BLOCK_BYTES, iq2_xs::QK_K, 2)]
+    #[case::iq3_xxs_three_super_blocks("iq3_xxs", iq3_xxs::BLOCK_BYTES, iq3_xxs::QK_K, 3)]
     #[case::float16_seven_elements("float16", gguf_f16::BLOCK_BYTES, 1, 7)]
     #[case::bfloat16_two_elements("bfloat16", gguf_bf16::BLOCK_BYTES, 1, 2)]
     async fn quantized_block_element_count_multiplies_block_count_by_elements_per_block(
