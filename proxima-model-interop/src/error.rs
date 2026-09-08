@@ -368,4 +368,27 @@ pub enum InteropError {
         "weight_precision rule for {tensor:?} names target {target:?}, which proxima_gguf::quant has no encoder for"
     )]
     UnsupportedWeightPrecisionTarget { tensor: String, target: GgmlType },
+
+    /// [`crate::architecture::Architecture::step_inputs`] returned a
+    /// [`crate::architecture::StepInput`] whose name does not match any
+    /// [`proxima_tensor::Op::Input`] leaf in this checkpoint's own forward
+    /// program -- the architecture computed a leaf the program never
+    /// declared, a caller mistake surfaced as data rather than the value
+    /// silently sitting in `named_blocks` unread.
+    #[error(
+        "architecture step_inputs returned {name:?}, which this program declares no Op::Input leaf for"
+    )]
+    UnknownStepInput { name: String },
+
+    /// A forward program leaf beyond the decode loop's own builtin
+    /// `ids`/`eps`/`rope_cos`/`rope_sin`/`cached_len`/`kv_cache.*` set was
+    /// left unbound after [`crate::architecture::Architecture::step_inputs`]
+    /// ran -- either the architecture's own
+    /// [`crate::architecture::Architecture::bind`] declared a leaf its
+    /// [`crate::architecture::Architecture::step_inputs`] never feeds, or
+    /// (the default, no-op override) an architecture with a custom leaf
+    /// never overrode [`crate::architecture::Architecture::step_inputs`] at
+    /// all.
+    #[error("forward program leaf {name:?} is left unbound; no builtin block and no architecture step_inputs supplied it")]
+    MissingStepInput { name: String },
 }

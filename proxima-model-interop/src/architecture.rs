@@ -22,6 +22,7 @@
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
+use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::Qwen35LayerRoots;
 
@@ -136,6 +137,73 @@ pub trait Architecture: Send + Sync {
     fn step_state(&self, parsed: &ParsedGguf) -> Result<Option<StepState>, InteropError> {
         let _ = parsed;
         Ok(None)
+    }
+
+    /// One extra token-derived [`Op::Input`] leaf per name, appended to
+    /// this step's named blocks alongside the builtin `ids`/`eps`/
+    /// `rope_cos`/`rope_sin`/`cached_len`/`kv_cache.*` set
+    /// (`crate::generate::LoadedModel::run_decode_loop_observed_seeded`'s
+    /// own `named_blocks` build) -- the seam an n-gram hash table, a
+    /// retrieval index, or any other architecture whose forward program
+    /// declares a leaf this crate does not know about reaches to feed it,
+    /// without `run_decode_loop_observed_seeded` special-casing that
+    /// architecture by name. `out` is reused across steps (the caller
+    /// `clear()`s it before each call), so pushing is the only allocation
+    /// this default costs a caller that never overrides it: nothing.
+    /// Default pushes nothing -- every architecture whose forward program
+    /// declares no leaf beyond the builtin set (every architecture this
+    /// crate ships) needs no override.
+    fn step_inputs(&self, context: &StepInputContext<'_>, out: &mut Vec<StepInput>) {
+        let _ = context;
+        let _ = out;
+    }
+}
+
+/// What [`Architecture::step_inputs`] reads to derive its own per-step
+/// leaves -- the token history the decode loop already holds, sliced by
+/// [`Self::new_start`]/[`Self::new_count`] into "already cached" vs "new
+/// this step" the same way [`crate::generate::LoadedModel`]'s own
+/// `cached_len`/`new_count` split already does for the KV cache.
+/// `all_token_ids` is prompt + every token generated so far, INCLUDING the
+/// tokens this step is about to evaluate (so an n-gram hash table lookup
+/// over `tokens[i-k..=i]` can read the trailing context of the newest
+/// token, not just tokens already cached).
+pub struct StepInputContext<'ids> {
+    pub all_token_ids: &'ids [u32],
+    /// Index into [`Self::all_token_ids`] of the first token this step
+    /// evaluates -- `0` on the prefill step (`new_count ==` the whole
+    /// prompt), `all_token_ids.len() - 1` on every decode step after
+    /// (single new token per step).
+    pub new_start: usize,
+    /// `all_token_ids.len() - new_start` -- carried directly rather than
+    /// recomputed, since it is also the block length every
+    /// [`Architecture::step_inputs`] override must produce per new
+    /// position.
+    pub new_count: usize,
+}
+
+/// One named leaf [`Architecture::step_inputs`] hands back for this step --
+/// the value representation matches the decode loop's own builtin blocks
+/// exactly ([`QuantizedBlock::Float32`], the same shape `ids`/`eps`/
+/// `rope_cos`/`rope_sin` already bind as), so `run_decode_loop_observed_seeded`
+/// pushes this straight into its `named_blocks` with no conversion.
+/// `values` is owned (not borrowed) since it is derived fresh from token
+/// ids each step, not read out of a resident buffer the way a weight
+/// tensor is.
+pub struct StepInput {
+    pub name: &'static str,
+    pub values: Vec<f32>,
+}
+
+impl StepInput {
+    /// Borrows [`Self::values`] as the [`QuantizedBlock::Float32`] shape a
+    /// `named_blocks` entry needs -- the one call site
+    /// `crate::generate::LoadedModel`'s own decode loop makes per returned
+    /// [`StepInput`], pulled out so that call site reads as "push this
+    /// leaf" rather than reaching into the enum itself.
+    #[must_use]
+    pub fn as_named_block(&self) -> (&str, QuantizedBlock<'_>) {
+        (self.name, QuantizedBlock::Float32(self.values.as_slice()))
     }
 }
 
