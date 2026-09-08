@@ -67,9 +67,9 @@ pub use bind::gguf_tensor_as_packed_block;
 pub use bind::{ModelArchitecture, architecture_from_metadata, gguf_tensor_as_f32};
 #[cfg(feature = "std")]
 pub use bind::{
-    BoundWeights, bind_dense, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as,
-    find_tensor, metadata_f32_optional, metadata_str, metadata_str_opt, metadata_u32,
-    metadata_u32_optional_or, vocab_from_token_embedding,
+    BoundWeights, PackedOwnedKind, bind_dense, bind_dense_as, bind_matmul_weight,
+    bind_matmul_weight_as, find_tensor, metadata_f32_optional, metadata_str, metadata_str_opt,
+    metadata_u32, metadata_u32_optional_or, vocab_from_token_embedding,
 };
 #[cfg(feature = "std")]
 pub use dense::DenseArch;

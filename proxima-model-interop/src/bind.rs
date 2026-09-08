@@ -685,7 +685,7 @@ pub fn vocab_from_token_embedding(
 /// borrowed straight out of `file_bytes` (see [`bind_dense`]/
 /// [`bind_matmul_weight`]), and owned-but-still-quantized packed blocks
 /// (see [`PackedOwnedKind`]) for a MoE expert stack that has no single
-/// contiguous on-disk byte range to borrow from ([`bind_moe_expert_weights`]'s
+/// contiguous on-disk byte range to borrow from (`bind_moe_expert_weights`'s
 /// restack fallback). `pub(crate)`: [`crate::generate::LoadedModel`]
 /// is the one place outside this module that constructs or reads one.
 ///
@@ -727,13 +727,50 @@ impl<'file> BoundWeights<'file> {
             precision: weight_precision,
         }
     }
+
+    /// Bytes resident on the device once every weight this bind pass wrote
+    /// is uploaded -- the running total [`bind_dense`]/[`bind_matmul_weight`]
+    /// (and every `Architecture::bind` that calls them) accumulate as they
+    /// go, read back here so a foreign `Architecture` impl's own bind can
+    /// report the same number [`crate::generate::LoadedModel::checkpoint_bytes`]'s
+    /// callers already expect.
+    #[must_use]
+    pub fn resident_bytes(&self) -> usize {
+        self.resident_bytes
+    }
+
+    /// Every norm (plus `token_embd.weight`) bound as an owned `f32` buffer,
+    /// name-tagged -- see this struct's own doc for why these tensors are
+    /// owned rather than borrowed.
+    #[must_use]
+    pub fn owned(&self) -> &[(alloc::string::String, Vec<f32>)] {
+        &self.owned
+    }
+
+    /// Every matmul operand bound zero-copy straight out of `file_bytes`,
+    /// name-tagged -- see [`bind_dense`]/[`bind_matmul_weight`]'s own doc
+    /// for the borrow this wraps.
+    #[must_use]
+    pub fn packed(&self) -> &[(alloc::string::String, proxima_tensor::cpu::QuantizedBlock<'file>)] {
+        &self.packed
+    }
+
+    /// Every packed-but-still-quantized tensor this bind pass restacked
+    /// into its own buffer rather than borrowing from `file_bytes`, plus
+    /// the [`PackedOwnedKind`] a caller re-wraps those bytes with -- see
+    /// [`PackedOwnedKind`]'s own doc for why these cannot live in
+    /// [`Self::packed`] at `'file`.
+    #[must_use]
+    pub fn packed_owned(&self) -> &[(alloc::string::String, Vec<u8>, PackedOwnedKind)] {
+        &self.packed_owned
+    }
 }
 
 /// Which [`proxima_tensor::cpu::QuantizedBlock`] byte-borrowing variant to
 /// re-wrap a [`BoundWeights::packed_owned`] entry's bytes in at read time.
 /// Exists because `QuantizedBlock<'a>` borrows for a caller-chosen lifetime
 /// `'a`, but the bytes it would borrow here are a restacked buffer this
-/// crate allocated ([`bind_moe_expert_weights`]'s restack fallback), not a
+/// crate allocated (`bind_moe_expert_weights`'s restack fallback), not a
 /// slice of `file_bytes` -- so [`BoundWeights`] cannot store the already-built
 /// enum at `'file` the way [`BoundWeights::packed`] does. Storing the raw
 /// bytes plus this tag instead lets [`crate::generate::LoadedModel`]
@@ -741,15 +778,15 @@ impl<'file> BoundWeights<'file> {
 /// that call site needs.
 #[cfg(feature = "std")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PackedOwnedKind {
+pub enum PackedOwnedKind {
     Q4K,
     Q5K,
     Q6K,
     Q8_0,
-    /// Added alongside [`recode_tensor`]: `proxima_gguf::quant::q3_k` ships
-    /// both directions, and [`recode_tensor`]'s target set is "every codec
+    /// Added alongside `recode_tensor`: `proxima_gguf::quant::q3_k` ships
+    /// both directions, and `recode_tensor`'s target set is "every codec
     /// with an encoder", not the four this tag originally covered for
-    /// [`bind_moe_expert_weights`]'s restack fallback.
+    /// `bind_moe_expert_weights`'s restack fallback.
     Q3K,
     Q4_0,
     Float16,
@@ -761,7 +798,7 @@ impl PackedOwnedKind {
     /// Borrows `bytes` as the [`proxima_tensor::cpu::QuantizedBlock`] variant
     /// this tag names -- the deferred half of the split [`PackedOwnedKind`]'s
     /// own doc describes.
-    pub(crate) fn as_block<'bytes>(
+    pub fn as_block<'bytes>(
         self,
         bytes: &'bytes [u8],
     ) -> proxima_tensor::cpu::QuantizedBlock<'bytes> {
