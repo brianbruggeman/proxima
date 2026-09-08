@@ -269,6 +269,7 @@ mod tests {
                 },
                 program: Vec::new(),
                 logits_root: NodeId(0),
+                hidden_root: None,
                 layer_roots: Vec::new(),
             })
         }
