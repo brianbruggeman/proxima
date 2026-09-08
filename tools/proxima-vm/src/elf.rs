@@ -9,8 +9,8 @@
 //! `proxima_protocols::dns::frame_codec`): a free function and POD views
 //! over `&[u8]`, never a `Pipe` — an ELF image is a byte buffer to decode,
 //! not a stream to transform. [`parse_elf`] itself is a driver loop over
-//! an explicit discriminated-enum state machine ([`Cursor`]/[`Step`]) per
-//! `AGENTS.md` principle 11 — see [`Cursor`]'s doc comment for the stage
+//! an explicit discriminated-enum state machine (`Cursor`/`Step`) per
+//! `AGENTS.md` principle 11 — see `Cursor`'s doc comment for the stage
 //! shape and why "consumed length" is per-step rather than cumulative for
 //! a whole-buffer format like this one.
 //!
@@ -555,7 +555,7 @@ impl<'a, const MAX_SEGMENTS: usize> Cursor<'a, MAX_SEGMENTS> {
 /// sections — `.text`, `.rodata`, `.data` — so `MAX_SEGMENTS = 4` covers it
 /// with headroom).
 ///
-/// Drives [`Cursor::advance`] to completion — see [`Cursor`] for the state
+/// Drives `Cursor::advance` to completion — see `Cursor` for the state
 /// shape. Every check below is one `Cursor` transition:
 ///
 /// - the ELF64 magic, class (`ELFCLASS64`), and endianness (`ELFDATA2LSB`)
