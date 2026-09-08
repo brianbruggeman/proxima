@@ -2448,16 +2448,37 @@ pub fn reset_evaluate_quantized_phase() {
 /// identity), and this is a routing EVENT, so it is a trait a caller
 /// implements, not a counter a caller reads.
 pub trait ExpertObserver: Sync {
-    /// `layer` is the gathered reduce op's own [`NodeId`] value, cast to
-    /// `usize` -- the same "compiled program's `NodeId` is a stable
-    /// per-layer identity" fact [`crate::cpu::record_expert_selection`]'s
-    /// own doc already relies on, since this crate's evaluator never
-    /// decodes an architecture's layer numbering. `expert` is the resolved
-    /// `expert_index` a real routed token selected; `token_position` is
-    /// this call's own position within the batch this evaluation covers
-    /// (`0` for a single-token decode step, `0..sequence_len` during
-    /// prefill).
-    fn on_expert_routed(&self, layer: usize, expert: usize, token_position: usize);
+    /// Fired once per layer per new position, from the decode loop itself
+    /// (`proxima-model-interop`'s `generate.rs`) -- not from this kernel's
+    /// gathered-weight loop, which never sees the compiled program's own
+    /// [`crate::spec::MoeSite`] layer numbering. See [`ExpertRouting`]'s own
+    /// field docs for what each field carries.
+    fn on_expert_routed(&self, event: &ExpertRouting<'_>);
+}
+
+/// One layer's routing decision for one new decode position, handed to
+/// [`ExpertObserver::on_expert_routed`] by the decode loop after it
+/// evaluates a step's [`crate::spec::MoeSite`] outputs -- the event shape
+/// this trait answers "which expert did THIS token, THIS layer just route
+/// to" with (this type's own doc up above, on [`ExpertObserver`] itself).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExpertRouting<'a> {
+    /// [`crate::spec::MoeSite::layer`] -- the architecture's own layer
+    /// index, not a [`crate::op::NodeId`] cast (the shape this event
+    /// replaced relied on the latter; the decode loop knows the former
+    /// directly since it built the forward program).
+    pub layer: u32,
+    /// The absolute sequence position this routing decision covers:
+    /// `cached_len + local` for a decode step continuing an existing
+    /// cache, `local` alone during prefill (`cached_len == 0`).
+    pub position: u64,
+    /// One resolved expert index per [`crate::spec::MoeSite::selected`]
+    /// round, in round order -- `expert_used_count` entries.
+    pub experts: &'a [u32],
+    /// One renormalized weight per entry in `experts`, in the same order,
+    /// summing to (approximately) `1.0` -- [`crate::spec::MoeSite::weights`]'s
+    /// own per-round values divided by their `weight_total`.
+    pub weights: &'a [f32],
 }
 
 /// [`set_expert_observer`] already having a registrant -- a caller may
@@ -2520,20 +2541,27 @@ fn dyn_pointer_halves(observer: &'static dyn ExpertObserver) -> (u64, u64) {
     (halves[0] as u64, halves[1] as u64)
 }
 
-/// [`crate::cpu::run_reduce_quantized`]'s own routing-decision call site:
-/// a no-op when no [`ExpertObserver`] is registered, so a program that
-/// never calls [`set_expert_observer`] pays one `OnceLock::get` (a relaxed
-/// load after first access) per gathered position, not a branch into
+/// The registered [`ExpertObserver`], if any -- `proxima-model-interop`'s
+/// decode loop reads this once per step (never per position) to decide
+/// whether [`crate::spec::MoeSite`] outputs are worth requesting as extra
+/// evaluation outputs at all; a step with no registered observer skips that
+/// request entirely rather than evaluating routing nodes nobody reads.
+#[must_use]
+pub fn expert_observer() -> Option<&'static dyn ExpertObserver> {
+    EXPERT_OBSERVER.get().copied()
+}
+
+/// The decode loop's own per-layer, per-position routing-decision call
+/// site: a no-op when no [`ExpertObserver`] is registered, so a program
+/// that never calls [`set_expert_observer`] pays one `OnceLock::get` (a
+/// relaxed load after first access) per notification, not a branch into
 /// missing-observer handling.
-pub(crate) fn notify_expert_routed(layer: usize, expert: usize, token_position: usize) {
+pub fn notify_expert_routed(event: &ExpertRouting<'_>) {
     // proxima-debugger: same-shaped `debug!` as `set_expert_observer`'s,
-    // throttled to once per 10_000 calls -- this is the routing hot path
-    // (`crate::cpu::run_reduce_quantized`'s per-position loop), so an
-    // unconditional emit here would perturb the very thing under
-    // diagnosis. `NOTIFY_EXPERT_ROUTED_CALLS` is the raw call counter this
-    // throttle reads; comparing it against a registered observer's OWN
-    // "calls I actually received" counter answers whether this function
-    // body ever ran at all versus ran but the observer never saw it.
+    // throttled to once per 10_000 calls -- this now fires once per layer
+    // per decode step rather than once per gathered position, so the
+    // throttle window matters far less than it used to, but keeping it
+    // avoids a behavior change to this diagnostic's own cadence.
     let raw_calls = NOTIFY_EXPERT_ROUTED_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
     let registered = EXPERT_OBSERVER.get();
     if raw_calls % 10_000 == 1 {
@@ -2542,13 +2570,15 @@ pub(crate) fn notify_expert_routed(layer: usize, expert: usize, token_position: 
             static_address = (core::ptr::addr_of!(EXPERT_OBSERVER) as usize) as u64,
             raw_calls,
             registered = registered.is_some(),
+            layer = event.layer,
+            position = event.position,
             data_ptr,
             vtable_ptr,
             "expert routed notification"
         );
     }
     if let Some(observer) = registered {
-        observer.on_expert_routed(layer, expert, token_position);
+        observer.on_expert_routed(event);
     }
 }
 

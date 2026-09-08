@@ -210,8 +210,9 @@ fn external_crate_composes_a_one_layer_forward_program() {
         ],
         "expert_w_down",
     );
-    let routed_out = append_moe_ffn(
+    let (routed_out, _moe_site) = append_moe_ffn(
         &mut program,
+        0,
         hidden,
         gate_inp,
         expert_w_gate,

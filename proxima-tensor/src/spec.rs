@@ -1531,6 +1531,30 @@ pub enum ExpertGatingFunc {
     Sigmoid,
 }
 
+/// One [`append_moe_ffn`] call's routing decision, returned alongside its
+/// output node so the decode loop -- not this kernel-building function --
+/// decides whether to evaluate and observe it. `selected` holds one
+/// [`NodeId`] per `expert_used_count` round (each round's own `route`
+/// reduce, `Int32`, one value per token position); `weights` holds each
+/// round's own `weight` node in the same order, followed by the final
+/// `weight_total` node used to renormalize them -- so `weights.len() ==
+/// selected.len() + 1`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoeSite {
+    pub layer: u32,
+    pub selected: Vec<NodeId>,
+    pub weights: Vec<NodeId>,
+}
+
+/// Every [`MoeSite`] a forward-program builder's [`append_moe_ffn`] calls
+/// produced, in layer order -- empty for a dense (non-MoE) program. The
+/// decode loop ([`crate::instrument::ExpertObserver`]'s consumer) reads
+/// this to know which extra nodes to request as evaluation outputs, rather
+/// than the kernel emitting a routing event per gathered position the way
+/// [`crate::instrument::notify_expert_routed`] used to.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MoeSites(pub Vec<MoeSite>);
+
 /// The routed feed-forward `specs/moe_block.toml`/`specs/moe_topk2_probe.toml`
 /// describe: a gate projects `x` to one logit per expert, `expert_used_count`
 /// rounds of top-1 argmax-with-exclusion each route one token to one more
@@ -1577,6 +1601,7 @@ pub enum ExpertGatingFunc {
 #[allow(clippy::too_many_arguments)]
 pub fn append_moe_ffn(
     program: &mut Vec<Op>,
+    layer: u32,
     x: NodeId,
     gate_inp: NodeId,
     expert_w_gate: NodeId,
@@ -1587,7 +1612,7 @@ pub fn append_moe_ffn(
     ones: NodeId,
     gating: ExpertGatingFunc,
     expert_bias: Option<NodeId>,
-) -> Result<NodeId, TensorError> {
+) -> Result<(NodeId, MoeSite), TensorError> {
     if expert_used_count == 0 || expert_used_count > expert_count {
         return Err(TensorError::InvalidExpertConfig {
             expert_count,
@@ -1662,6 +1687,8 @@ pub fn append_moe_ffn(
     let mut weighted_sum: Option<NodeId> = None;
     let mut weight_total: Option<NodeId> = None;
     let mut max_selection_0: Option<NodeId> = None;
+    let mut selected_routes: Vec<NodeId> = Vec::with_capacity(expert_used_count as usize);
+    let mut round_weights: Vec<NodeId> = Vec::with_capacity(expert_used_count as usize);
 
     for round in 0..expert_used_count {
         let max_selection = reduce(
@@ -1731,6 +1758,8 @@ pub fn append_moe_ffn(
                 )?
             }
         };
+        selected_routes.push(route);
+        round_weights.push(weight);
 
         let gate_expert_product = gathered_expert_product(program, expert_w_gate, route, x);
         let gate_expert = reduce(
@@ -1857,12 +1886,19 @@ pub fn append_moe_ffn(
         ScalarOp::Reciprocal,
         &[(weight_total, "s->s")],
     )?;
-    elementwise(
+    let output = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
         &[(weighted_sum, "sd->sd"), (inv_weight_total, "s->sd")],
-    )
+    )?;
+    round_weights.push(weight_total);
+    let site = MoeSite {
+        layer,
+        selected: selected_routes,
+        weights: round_weights,
+    };
+    Ok((output, site))
 }
 
 /// [`append_mistral_layer`]'s mixture-of-experts counterpart: identical
@@ -1875,6 +1911,7 @@ pub fn append_moe_ffn(
 #[allow(clippy::too_many_arguments)]
 pub fn append_mistral_moe_layer(
     program: &mut Vec<Op>,
+    layer: u32,
     x: NodeId,
     inv_dim: NodeId,
     eps: NodeId,
@@ -1898,7 +1935,7 @@ pub fn append_mistral_moe_layer(
     expert_w_down: NodeId,
     expert_count: u32,
     expert_used_count: u32,
-) -> Result<NodeId, TensorError> {
+) -> Result<(NodeId, MoeSite), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
     let q_product = elementwise(
@@ -2188,8 +2225,9 @@ pub fn append_mistral_moe_layer(
 
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
-    let ffn_out = append_moe_ffn(
+    let (ffn_out, site) = append_moe_ffn(
         program,
+        layer,
         normed2,
         gate_inp,
         expert_w_gate,
@@ -2202,12 +2240,13 @@ pub fn append_mistral_moe_layer(
         None,
     )?;
 
-    elementwise(
+    let output = elementwise(
         program,
         DType::Float32,
         ScalarOp::Add,
         &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
-    )
+    )?;
+    Ok((output, site))
 }
 
 /// The whole model as one program: token embedding lookup, `block_count`
@@ -2296,6 +2335,7 @@ pub fn mistral_forward_program(
         },
     );
     let (is_future, neg_infinity) = causal_mask(&mut program)?;
+    let mut moe_sites: Vec<MoeSite> = Vec::new();
 
     for layer in 0..block_count {
         let attn_norm_weight = input_leaf(
@@ -2432,8 +2472,9 @@ pub fn mistral_forward_program(
                 &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
             );
 
-            append_mistral_moe_layer(
+            let (next_x, site) = append_mistral_moe_layer(
                 &mut program,
+                layer,
                 x,
                 inv_dim,
                 eps,
@@ -2457,7 +2498,9 @@ pub fn mistral_forward_program(
                 expert_w_down,
                 expert_count,
                 expert_used_count,
-            )?
+            )?;
+            moe_sites.push(site);
+            next_x
         };
     }
 
@@ -2531,10 +2574,11 @@ type SingleRangeForwardProgram = (Vec<Op>, NodeId, Vec<CachedLayerRoots>, Option
 
 /// [`mistral_cached_forward_program_with_experts_and_layer_taps`]'s own
 /// return shape: the lowered program, its [`ForwardRoots`], one
-/// [`CachedLayerRoots`] per layer, and one residual [`NodeId`] per layer
-/// (that function's own doc on what the last element is for).
+/// [`CachedLayerRoots`] per layer, one residual [`NodeId`] per layer
+/// (that function's own doc on what the fourth element is for), and one
+/// [`MoeSite`] per MoE layer (empty on a dense checkpoint).
 type MistralMoeForwardProgramWithLayerTaps =
-    (Vec<Op>, ForwardRoots, Vec<CachedLayerRoots>, Vec<NodeId>);
+    (Vec<Op>, ForwardRoots, Vec<CachedLayerRoots>, Vec<NodeId>, MoeSites);
 
 /// Where, if anywhere, the ROW 326/328 diagnostic duplicate `output.weight`
 /// reduce is emitted relative to the real head -- ROW 328 turns ROW 326's
@@ -5159,6 +5203,7 @@ pub fn duplicate_head_reduce(
 #[allow(clippy::too_many_arguments)]
 pub fn append_mistral_cached_moe_layer(
     program: &mut Vec<Op>,
+    layer: u32,
     x: NodeId,
     inv_dim: NodeId,
     eps: NodeId,
@@ -5186,7 +5231,7 @@ pub fn append_mistral_cached_moe_layer(
     k_odd_cache: NodeId,
     v_cache: NodeId,
     qk_norm: Option<(NodeId, NodeId, NodeId)>,
-) -> Result<(NodeId, CachedLayerRoots), TensorError> {
+) -> Result<(NodeId, CachedLayerRoots, MoeSite), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
     let q_product = elementwise(
@@ -5556,8 +5601,9 @@ pub fn append_mistral_cached_moe_layer(
 
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
-    let ffn_out = append_moe_ffn(
+    let (ffn_out, site) = append_moe_ffn(
         program,
+        layer,
         normed2,
         gate_inp,
         expert_w_gate,
@@ -5577,7 +5623,7 @@ pub fn append_mistral_cached_moe_layer(
         &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
     )?;
 
-    Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new)))
+    Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new), site))
 }
 
 /// Which mixer one transformer block runs. LFM2.5-8B-A1B (`general.architecture
@@ -7394,7 +7440,7 @@ pub fn lfm2_forward_program_with_experts(
     leading_dense_block_count: u32,
     l_cache: u32,
     layer_kinds: &[LayerKind],
-) -> Result<(Vec<Op>, NodeId), TensorError> {
+) -> Result<(Vec<Op>, NodeId, MoeSites), TensorError> {
     if layer_kinds.len() != block_count as usize {
         return Err(TensorError::LayerKindCountMismatch {
             expected: block_count,
@@ -7447,6 +7493,7 @@ pub fn lfm2_forward_program_with_experts(
         },
     );
     let (is_future, neg_infinity) = causal_mask(&mut program)?;
+    let mut moe_sites: Vec<MoeSite> = Vec::new();
 
     for (layer, kind) in layer_kinds.iter().enumerate() {
         let layer = layer as u32;
@@ -7747,8 +7794,9 @@ pub fn lfm2_forward_program_with_experts(
                 alloc::vec![Extent::Static(expert_count)],
                 &alloc::format!("blk.{layer}.exp_probs_b.bias"),
             );
-            append_moe_ffn(
+            let (ffn_out, site) = append_moe_ffn(
                 &mut program,
+                layer,
                 normed2,
                 gate_inp,
                 expert_w_gate,
@@ -7759,7 +7807,9 @@ pub fn lfm2_forward_program_with_experts(
                 ones,
                 ExpertGatingFunc::Sigmoid,
                 Some(expert_bias),
-            )?
+            )?;
+            moe_sites.push(site);
+            ffn_out
         };
 
         x = elementwise(
@@ -7800,7 +7850,7 @@ pub fn lfm2_forward_program_with_experts(
         "sv->sdv",
     )?;
 
-    Ok((program, logits))
+    Ok((program, logits, MoeSites(moe_sites)))
 }
 
 /// [`mistral_forward_program`]'s key/value-cached counterpart: the same
@@ -7853,7 +7903,7 @@ pub fn mistral_cached_forward_program(
         false,
         false,
     )
-    .map(|(program, roots, cache_roots)| (program, roots.logits, cache_roots))
+    .map(|(program, roots, cache_roots, _moe_sites)| (program, roots.logits, cache_roots))
 }
 
 /// [`mistral_cached_forward_program`]'s Qwen3 dense-attention counterpart:
@@ -7889,7 +7939,7 @@ pub fn qwen3_cached_forward_program(
         false,
         false,
     )
-    .map(|(program, roots, cache_roots)| (program, roots.logits, cache_roots))
+    .map(|(program, roots, cache_roots, _moe_sites)| (program, roots.logits, cache_roots))
 }
 
 /// [`mistral_cached_forward_program`]'s mixture-of-experts-capable
@@ -7935,8 +7985,8 @@ pub fn mistral_cached_forward_program_with_experts(
     qk_norm: bool,
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
-) -> Result<(Vec<Op>, ForwardRoots, Vec<CachedLayerRoots>), TensorError> {
-    let (program, roots, cache_roots, _layer_residuals) =
+) -> Result<(Vec<Op>, ForwardRoots, Vec<CachedLayerRoots>, MoeSites), TensorError> {
+    let (program, roots, cache_roots, _layer_residuals, moe_sites) =
         mistral_cached_forward_program_with_experts_and_layer_taps(
             vocab,
             embedding,
@@ -7951,7 +8001,7 @@ pub fn mistral_cached_forward_program_with_experts(
             paired_gate_up_reduce,
             fused_qkv_reduce,
         )?;
-    Ok((program, roots, cache_roots))
+    Ok((program, roots, cache_roots, moe_sites))
 }
 
 /// [`mistral_cached_forward_program_with_experts`]'s full implementation,
@@ -8079,6 +8129,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
 
     let mut cache_roots: Vec<CachedLayerRoots> = Vec::with_capacity(block_count as usize);
     let mut layer_residuals: Vec<NodeId> = Vec::with_capacity(block_count as usize);
+    let mut moe_sites: Vec<MoeSite> = Vec::new();
 
     for layer in 0..block_count {
         let attn_norm_weight = input_leaf(
@@ -8312,8 +8363,9 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
                 (q_norm_weight, k_norm_weight, inv_head_dim)
             });
 
-            append_mistral_cached_moe_layer(
+            let (next_x, next_roots, site) = append_mistral_cached_moe_layer(
                 &mut program,
+                layer,
                 x,
                 inv_dim,
                 eps,
@@ -8341,7 +8393,9 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
                 k_odd_cache,
                 v_cache,
                 qk_norm_weights,
-            )?
+            )?;
+            moe_sites.push(site);
+            (next_x, next_roots)
         };
         x = x_next;
         cache_roots.push(layer_roots);
@@ -8386,6 +8440,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
         },
         cache_roots,
         layer_residuals,
+        MoeSites(moe_sites),
     ))
 }
 
@@ -9334,11 +9389,11 @@ mod tests {
     /// flag, the exact invariant the bug violated.
     #[test]
     fn mistral_cached_forward_program_with_experts_qk_norm_changes_the_moe_program() {
-        let (qk_norm_off, _, _) = mistral_cached_forward_program_with_experts(
+        let (qk_norm_off, _, _, _) = mistral_cached_forward_program_with_experts(
             32_000, 256, 128, 4, 2, 64, 1, 4, 1, false, false, false,
         )
         .expect("moe program without qk_norm lowers");
-        let (qk_norm_on, _, _) = mistral_cached_forward_program_with_experts(
+        let (qk_norm_on, _, _, _) = mistral_cached_forward_program_with_experts(
             32_000, 256, 128, 4, 2, 64, 1, 4, 1, true, false, false,
         )
         .expect("moe program with qk_norm lowers");
@@ -9361,12 +9416,12 @@ mod tests {
     /// `layer_residuals[layer]` directly.
     #[test]
     fn layer_taps_variant_matches_the_plain_program_and_returns_one_tap_per_layer() {
-        let (plain_program, plain_roots, plain_cache_roots) =
+        let (plain_program, plain_roots, plain_cache_roots, _plain_moe_sites) =
             mistral_cached_forward_program_with_experts(
                 32_000, 256, 128, 4, 2, 64, 3, 4, 1, true, false, false,
             )
             .expect("plain moe program lowers");
-        let (taps_program, taps_roots, taps_cache_roots, layer_residuals) =
+        let (taps_program, taps_roots, taps_cache_roots, layer_residuals, _taps_moe_sites) =
             mistral_cached_forward_program_with_experts_and_layer_taps(
                 32_000, 256, 128, 4, 2, 64, 3, 4, 1, true, false, false,
             )
@@ -9403,7 +9458,7 @@ mod tests {
     /// before any real-checkpoint embedding test would even hint at it.
     #[test]
     fn forward_roots_hidden_is_an_operand_of_the_lm_head_product() {
-        let (program, roots, _cache_roots) = mistral_cached_forward_program_with_experts(
+        let (program, roots, _cache_roots, _moe_sites) = mistral_cached_forward_program_with_experts(
             32_002, 4096, 14336, 32, 8, 128, 2, 0, 0, false, false, false,
         )
         .expect("the dense cached forward pass lowers to a program");
@@ -10673,8 +10728,9 @@ shape = ["seq"]
         );
         let ones = scalar_constant(&mut program, 1.0);
 
-        let root = append_moe_ffn(
+        let (root, _site) = append_moe_ffn(
             &mut program,
+            0,
             x_node,
             gate_inp_node,
             expert_w_gate_node,
@@ -10939,8 +10995,9 @@ shape = ["seq"]
         );
         let ones = scalar_constant(&mut program, 1.0);
 
-        let root = append_moe_ffn(
+        let (root, _site) = append_moe_ffn(
             &mut program,
+            0,
             x_node,
             gate_inp_node,
             expert_w_gate_node,
@@ -11381,8 +11438,9 @@ shape = ["seq"]
         );
         let ones = scalar_constant(&mut program, 1.0);
 
-        let root = append_moe_ffn(
+        let (root, _site) = append_moe_ffn(
             &mut program,
+            0,
             x_node,
             gate_inp_node,
             expert_w_gate_node,
@@ -15158,7 +15216,7 @@ value = 1.0
             .filter(|op| matches!(&op.kind, crate::bind::BoundOpKind::Reduce { .. }))
             .count();
 
-        let (paired_program, paired_roots_bundle, paired_roots) =
+        let (paired_program, paired_roots_bundle, paired_roots, _paired_moe_sites) =
             mistral_cached_forward_program_with_experts(
                 32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, true, false,
             )
@@ -15305,7 +15363,7 @@ value = 1.0
             .filter(|op| matches!(&op.kind, crate::bind::BoundOpKind::Reduce { .. }))
             .count();
 
-        let (fused_program, fused_roots_bundle, fused_roots) =
+        let (fused_program, fused_roots_bundle, fused_roots, _fused_moe_sites) =
             mistral_cached_forward_program_with_experts(
                 32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, false, true,
             )
@@ -15634,7 +15692,7 @@ value = 1.0
             .collect();
 
         let build_start = std::time::Instant::now();
-        let (program, _logits) = lfm2_forward_program_with_experts(
+        let (program, _logits, _moe_sites) = lfm2_forward_program_with_experts(
             128_000,
             2048,
             7168,
