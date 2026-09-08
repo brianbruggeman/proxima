@@ -254,7 +254,7 @@ pub enum TensorError {
         granted: NumericPolicy,
     },
 
-    /// [`crate::shape::fold_iteration_extents`] re-derives a [`crate::op::Reduce`]'s
+    /// `crate::shape::fold_iteration_extents` re-derives a [`crate::op::Reduce`]'s
     /// iteration extents from its already-resolved operand shape and does not
     /// thread the symbol table needed to resolve a [`crate::map::AxisIndex::len`]
     /// override — see that function's own doc. A `len`-marked axis on a

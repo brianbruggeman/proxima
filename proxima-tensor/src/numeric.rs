@@ -141,27 +141,27 @@ impl NumericPolicy {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumericRewrite {
-    /// [`crate::bind`]'s identity-elimination fold, restricted to the ONE
+    /// [`mod@crate::bind`]'s identity-elimination fold, restricted to the ONE
     /// sub-case that is bit-exact for every `f32` including NaN and signed
     /// zero: `x * 1.0`. Needs nothing.
     IdentityElimination,
-    /// [`crate::bind`]'s identity-elimination fold for `x + 0.0` --
+    /// [`mod@crate::bind`]'s identity-elimination fold for `x + 0.0` --
     /// changes bits only on signed zero (`(-0.0) + 0.0` evaluates to
     /// `+0.0`, while eliminating the op returns the survivor `-0.0`). Needs
     /// `signed_zero` alone; does NOT need `nan_assumptions` -- `NaN + 0.0`
     /// stays `NaN` whichever path is taken.
     IdentityEliminationSignedZero,
-    /// [`crate::bind`]'s identity-elimination fold for `max(x, -inf)` and
+    /// [`mod@crate::bind`]'s identity-elimination fold for `max(x, -inf)` and
     /// `min(x, +inf)` -- changes bits only on NaN handling (IEEE 754
     /// `maxNum`/[`f32::max`]'s own "if one argument is NaN, return the
     /// other" rule: `max(NaN, -inf)` evaluates to `NaN`, while eliminating
     /// the op returns the survivor `-inf`). Needs `nan_assumptions` alone;
     /// does NOT need `signed_zero` -- no zero literal is involved.
     IdentityEliminationNanAssumption,
-    /// [`crate::bind`]'s elementwise/reduce chain fusion. Bit-exact by
+    /// [`mod@crate::bind`]'s elementwise/reduce chain fusion. Bit-exact by
     /// construction. Needs nothing.
     ChainFusion,
-    /// [`crate::bind`]'s reduce-epilogue fusion. Bit-exact by construction.
+    /// [`mod@crate::bind`]'s reduce-epilogue fusion. Bit-exact by construction.
     /// Needs nothing.
     ReduceEpilogueFusion,
     /// Merging a multiply and an add into one hardware FMA.

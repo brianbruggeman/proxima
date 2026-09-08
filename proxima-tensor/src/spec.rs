@@ -566,7 +566,7 @@ fn lookup(resolved: &BTreeMap<String, NodeId>, reference: &str) -> Result<NodeId
 }
 
 /// Appends one [`Op::Elementwise`], parsing each operand's `operand->
-/// iteration` notation through the same [`parse_operand_pattern`] the TOML
+/// iteration` notation through the same `parse_operand_pattern` the TOML
 /// lowering above uses. This is the whole reason a hand-built full-model
 /// program stays honest to the TOML one node kind spells: both paths run the
 /// identical grammar, so a generated layer cannot silently drift from
@@ -664,7 +664,7 @@ impl RopePairing {
 
 /// Builds RoPE for one tensor (`source`, e.g. `q`/`k`/`k_new`, addressed
 /// whole -- never a pre-sliced half) as two [`Op::Elementwise`] chains
-/// reading `source` directly through [`RopePairing::offsets`] instead of
+/// reading `source` directly through `RopePairing::offsets` instead of
 /// through a separately-materialized `per_head_channel_range` slice.
 /// Returns `(first, second)`: `(rotated_even, rotated_odd)` under
 /// [`RopePairing::Interleaved`], `(rotated_first, rotated_second)` under
@@ -885,7 +885,7 @@ pub fn rmsnorm(
     )
 }
 
-/// [`rmsnorm`]'s per-head counterpart -- [`Lfm2MoeAttention.q_layernorm`]/
+/// [`rmsnorm`]'s per-head counterpart -- `Lfm2MoeAttention.q_layernorm`/
 /// `.k_layernorm`'s own shape (`transformers/models/lfm2_moe/modeling_lfm2_moe.py:317-318,331-332`):
 /// normalizes over the head-dim axis only, broadcasting per token AND per
 /// head, applied to Q/K right after the head reshape and BEFORE RoPE
@@ -5576,7 +5576,7 @@ impl LayerKind {
 ///
 /// `specs/conv2d.toml`'s own doc already proved the naive route is closed:
 /// windowing `x` directly with a negative-offset `Affine` map
-/// (`s-(l_cache-1)+l`) fails [`shape::bounds_check`] globally, because an
+/// (`s-(l_cache-1)+l`) fails `shape::bounds_check` globally, because an
 /// iteration axis always starts at 0 and the check is over the *whole*
 /// symbolic extent, not per element -- at `s=0, l=0` the window reaches
 /// index `-(l_cache-1)`, unconditionally out of bounds regardless of how
@@ -6131,7 +6131,7 @@ pub fn l2norm(
 
 /// `x * sigmoid(x)`, `ggml_silu`'s own contract (`qwen35.cpp:391-392`, run on
 /// `conv_output_proper` before the q/k/v split) -- composed from
-/// [`ScalarOp::Negate`]/[`Exponential`]/[`Add`]/[`Reciprocal`], the same
+/// [`ScalarOp::Negate`]/[`ScalarOp::Exponential`]/[`ScalarOp::Add`]/[`ScalarOp::Reciprocal`], the same
 /// `1/(1+e^-x)` chain [`ExpertGatingFunc::Sigmoid`] already builds, then one
 /// more [`ScalarOp::Multiply`] against the un-gated input. No dedicated
 /// `Sigmoid`/`Silu` [`ScalarOp`] exists, matching that chain's own precedent
@@ -6157,7 +6157,7 @@ pub fn silu(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<
 /// fused conv output) that a plain offset [`AxisIndex`] slice cannot give it:
 /// [`append_lfm2_conv_mixer`]'s own doc already proves a *nonzero*-offset
 /// slice of a wider operand needs a same-width "donor" operand to escape
-/// [`shape::unify_iteration_space`]'s pure-projection extent rule, and
+/// `shape::unify_iteration_space`'s pure-projection extent rule, and
 /// `shape.rs`'s own
 /// `an_offset_zero_slice_narrower_than_its_operand_is_still_ambiguous` test
 /// proves the donor trick still fails at *zero* offset (`q`'s own case here,
@@ -6424,11 +6424,11 @@ pub fn append_qwen35_conv_branch(
 /// broadcasts across it for free (`rotated_k`'s `"tui->stugi"` there never
 /// mentions `g`), and multiplying against an all-ones donor of the new
 /// letters' shape (`group_ones`, `"ug->sugi"`) is what makes
-/// [`shape::unify_iteration_space`] resolve `g`'s extent at all -- `x` alone
+/// `shape::unify_iteration_space` resolve `g`'s extent at all -- `x` alone
 /// (real axis `u`, no `g` term) leaves `g` unconstrained.
 ///
 /// This never merges `u`/`g` back into one physical `h = group*u+g` axis:
-/// [`shape::project_output_shape`] rejects any `Reduce` `out_map` axis that
+/// `shape::project_output_shape` rejects any `Reduce` `out_map` axis that
 /// is not a pure single-term projection ("reduce output maps must be pure
 /// projections in v1"), and a plain [`Op::Elementwise`]'s output shape *is*
 /// its iteration space, so two loop letters cannot collapse into one output
@@ -6500,7 +6500,7 @@ pub fn sigmoid(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Resu
 ///
 /// The `u,g` seam: [`repeat_kv_heads`]'s own doc proves this algebra can
 /// never merge a `u` (kv-head)/`g` (group) split back into one physical head
-/// axis -- [`shape::project_output_shape`] rejects any `Reduce` `out_map`
+/// axis -- `shape::project_output_shape` rejects any `Reduce` `out_map`
 /// axis that is not a pure single-term projection, and a plain
 /// `Elementwise`'s output shape IS its iteration space, so two loop letters
 /// cannot collapse into one output letter. [`append_qwen35_delta_net_step`]'s

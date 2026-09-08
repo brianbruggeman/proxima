@@ -96,12 +96,12 @@ fn l2_norm(vector: &[f32]) -> f32 {
 /// row of `matrix` (`matrix.len() / dim` rows, row-major), returning the top
 /// `k` rows as `(row_index, cosine_similarity)`, highest similarity first.
 ///
-/// The dot products backing every cosine score come from [`row_dot_products`]
+/// The dot products backing every cosine score come from `row_dot_products`
 /// -- one [`Op::Elementwise`]+[`Op::Reduce`] pair evaluated by
 /// [`crate::cpu::evaluate`], not a per-row scalar loop. Row and query norms
 /// are `sqrt(sum_d(x[d]^2))`, a plain `O(n * dim)` scalar fold with no
 /// cross-row structure to route through the tensor evaluator profitably --
-/// [`l2_norm`] is that fold, called once per row plus once for `query`.
+/// `l2_norm` is that fold, called once per row plus once for `query`.
 ///
 /// # Errors
 ///
