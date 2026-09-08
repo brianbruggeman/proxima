@@ -325,3 +325,181 @@ fn moe_gather_parity_q8_0_within_measured_tolerance_on_metal() {
          max_abs_diff={max_diff}"
     );
 }
+
+/// `K` here is `q4_k::QK_K`/`q6_k::QK_K` (256), not the `Q8_0` test's 32 --
+/// a K-quant super-block covers 256 elements, so a row narrower than that
+/// can't be quantized at all through the real encoder. Real qwen3moe 30B-A3B
+/// checkpoint codecs (`ffn_gate_exps`/`ffn_up_exps` are `Q4_K`,
+/// `ffn_down_exps` is `Q6_K`) -- this closes the gap S3's own parity left
+/// (f32 and `Q8_0` only).
+///
+/// MEASURED, not a wrong-value bug: a per-element trace of every output
+/// (`cpu`/`metal`/`diff` printed per index during root-causing) showed
+/// `max_abs_diff` scaling with the OUTPUT's own magnitude -- `q4_k`'s worst
+/// index was `diff=4.62` on `cpu=4578.56` (relative `1.01e-3`), `q6_k`'s
+/// worst was `diff=4.42` on `cpu=4612.81` (relative `9.59e-4`) -- not a
+/// fixed offset, not a wrong-expert 9x factor (`KQUANT_EXPERT_SCALES`'
+/// own discriminator), and not concentrated in one nibble/sub-block
+/// position. That is the signature of the SAME per-thread-reduction-order
+/// float noise `moe_gather_parity_q8_0_within_measured_tolerance_on_metal`'s
+/// own doc already names for its 32-wide reduce (CPU strict serial `+=` vs
+/// Metal's per-thread accumulation order) -- here the reduce is 256-wide
+/// (`KQUANT_K`), 8x `Q8_0`'s fixture, so proportionally larger
+/// float-reassociation error across the wider sum is exactly what this
+/// mechanism predicts, not a new defect. A manual trace of `q4k_element`/
+/// `q6k_element` (`msl.rs`'s `Q4K_UNPACK_MSL`/`Q6K_UNPACK_MSL`) against
+/// `proxima_gguf::quant::q4_k::dequantize_block`/`q6_k::dequantize_block`
+/// found the block-index math (`group`/`within`/`sub_block`/`byte_index`),
+/// the `d`/`dmin`/scale/min decode, and `Q4K_BLOCK_ELEMENTS`/
+/// `*_BLOCK_BYTES` byte-pointer arithmetic bit-for-bit identical to the
+/// Rust reference -- no addressing bug to fix. Asserted as a RELATIVE
+/// tolerance (not `Q8_0`'s fixed absolute one) because this fixture's
+/// output magnitude (~400-5300) makes a fixed absolute bound meaningless
+/// across codecs/scales; bounded at `2e-3`, roughly double the measured
+/// worst case, the same "measured value plus headroom" convention `Q8_0`'s
+/// own tolerance uses.
+const KQUANT_N_EXPERTS: u32 = 2;
+const KQUANT_ROWS: u32 = 4;
+const KQUANT_K: u32 = 256;
+const KQUANT_SEQ: u32 = 2;
+const KQUANT_ROUTE_DATA: [f32; 2] = [1.0, 0.0];
+const KQUANT_EXPERT_SCALES: [f32; 2] = [1.0, 9.0];
+
+fn kquant_expert_weight_f32(expert: usize, scale: f32) -> Vec<f32> {
+    random_vec(301 + expert as u64, KQUANT_ROWS as usize * KQUANT_K as usize)
+        .into_iter()
+        .map(|value| (value * 4.0 - 2.0) * scale)
+        .collect()
+}
+
+fn kquant_activation_f32() -> Vec<f32> {
+    random_vec(411, KQUANT_SEQ as usize * KQUANT_K as usize)
+        .into_iter()
+        .map(|value| value * 2.0 - 1.0)
+        .collect()
+}
+
+/// Shared body for the `Q4_K`/`Q6_K` cells: only the quantizer/codec/block
+/// size differ, so both cases call this with their own encoder rather than
+/// duplicating the whole fixture -- the two-case parameterization
+/// `#[case::q4_k]`/`#[case::q6_k]` would need if `proxima::test` were used
+/// here, but this crate's test binary is a plain `#[test]` file (no
+/// `proxima-test` dev-dependency wired for `omega`'s own integration tests),
+/// so two named functions calling one shared body is the existing shape
+/// this file's own `moe_gather_parity_f32_bit_exact_on_metal`/
+/// `moe_gather_parity_q8_0_within_measured_tolerance_on_metal` already use
+/// (two standalone `#[test]` functions, not a parameterized case).
+fn kquant_gather_parity<Q>(codec_name: &str, block_bytes: usize, quantize_row: Q, tolerance: f32)
+where
+    Q: Fn(&[f32], &mut [u8]),
+{
+    let (program, sum) = gathered_expert_program(
+        DType::UInt8,
+        KQUANT_N_EXPERTS,
+        KQUANT_ROWS,
+        KQUANT_K,
+        KQUANT_SEQ,
+    );
+    let mut stacked_weight: Vec<u8> = Vec::new();
+    for (expert, &scale) in KQUANT_EXPERT_SCALES
+        .iter()
+        .enumerate()
+        .take(KQUANT_N_EXPERTS as usize)
+    {
+        let weight_f32 = kquant_expert_weight_f32(expert, scale);
+        let mut blocks = vec![0u8; KQUANT_ROWS as usize * block_bytes];
+        // `KQUANT_K`/`block_bytes` are `usize` values, not literals
+        // `as_chunks::<N>()` needs spelled at the call site -- the same
+        // reason the `Q8_0` fixture above allows this lint on its own
+        // identically-shaped chunking loop.
+        #[allow(clippy::chunks_exact_to_as_chunks)]
+        for (row_f32, row_blocks) in weight_f32
+            .chunks_exact(KQUANT_K as usize)
+            .zip(blocks.chunks_exact_mut(block_bytes))
+        {
+            quantize_row(row_f32, row_blocks);
+        }
+        stacked_weight.extend_from_slice(&blocks);
+    }
+    let activation = kquant_activation_f32();
+
+    let symbols: Vec<u64> = Vec::new();
+    let weight_block = match codec_name {
+        "q4_k" => QuantizedBlock::Q4K(&stacked_weight),
+        "q6_k" => QuantizedBlock::Q6K(&stacked_weight),
+        other => panic!("kquant_gather_parity: unknown codec {other}"),
+    };
+    let named = [
+        ("weight", weight_block),
+        ("route", QuantizedBlock::Float32(&KQUANT_ROUTE_DATA)),
+        ("activation", QuantizedBlock::Float32(&activation)),
+    ];
+    let outputs = [sum];
+
+    let _shapes = infer(&program, &symbols)
+        .unwrap_or_else(|error| panic!("{codec_name} gathered expert fixture infers: {error:?}"));
+
+    let mut free_buffers = Vec::new();
+    let mut validated = None;
+    let cpu = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
+        &program,
+        &symbols,
+        &named,
+        &outputs,
+        &mut free_buffers,
+        &mut validated,
+    )
+    .unwrap_or_else(|error| panic!("cpu runs the {codec_name} gathered expert fixture: {error:?}"));
+
+    proxima_tensor::instrument::reset_path();
+    let plan = omega::plan_named(
+        &program,
+        &symbols,
+        &named,
+        &outputs,
+        bit_exact_numeric_policy(),
+    )
+    .unwrap_or_else(|error| panic!("metal plans the {codec_name} gathered expert fixture: {error:?}"));
+    let metal = omega::execute_plan_named(&plan, &named).unwrap_or_else(|error| {
+        panic!("metal runs the {codec_name} gathered expert fixture on a real device: {error:?}")
+    });
+
+    assert!(
+        path_totals().op_kind_gathered_expert >= 1,
+        "{codec_name}: metal execution must record at least one GatheredExpert op kind, not fall back to CPU"
+    );
+
+    let max_relative_diff = cpu
+        .root()
+        .iter()
+        .zip(metal.root())
+        .map(|(&want, &got)| (want - got).abs() / want.abs().max(1.0))
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_relative_diff <= tolerance,
+        "{codec_name} gathered expert product exceeded the measured reduce-order tolerance: \
+         max_relative_diff={max_relative_diff} (tolerance={tolerance})"
+    );
+}
+
+#[test]
+fn moe_gather_parity_q4_k_within_tolerance_on_metal() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, quantize};
+    kquant_gather_parity(
+        "q4_k",
+        BLOCK_BYTES,
+        |row, blocks| quantize(row, blocks).expect("row length is one q4_k super-block"),
+        2e-3,
+    );
+}
+
+#[test]
+fn moe_gather_parity_q6_k_within_tolerance_on_metal() {
+    use proxima_gguf::quant::q6_k::{BLOCK_BYTES, quantize};
+    kquant_gather_parity(
+        "q6_k",
+        BLOCK_BYTES,
+        |row, blocks| quantize(row, blocks).expect("row length is one q6_k super-block"),
+        2e-3,
+    );
+}
