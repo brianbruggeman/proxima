@@ -913,6 +913,159 @@ mod tests {
         );
     }
 
+    /// [`bind_all_weights_from_safetensors`]'s family gate, proven through
+    /// the real bind pipeline over [`tiny_dense_architecture`]'s `head_dim =
+    /// 4` (two pairs per head, so a wrong-convention regression is
+    /// distinguishable -- see
+    /// [`permute_rope_rows_interleaves_split_half_pairs_when_two_pairs_exist`]'s
+    /// own doc for why `head_dim = 2` cannot tell): a checkpoint that also
+    /// carries `model.layers.0.self_attn.q_norm.weight` (Qwen3's own
+    /// split-half/NEOX family, per [`safetensors_has_qk_norm`]'s doc) must
+    /// bind `attn_q`/`attn_k` with rows exactly as HF wrote them, while the
+    /// identical checkpoint minus that tensor (llama/mistral's `rotate_half`
+    /// family) must bind them permuted -- the defect this guards is
+    /// [`hf_bind_rope_weight`] applying [`permute_rope_rows`]
+    /// unconditionally, which scrambles Qwen3's `attn_q`/`attn_k`
+    /// (downstream evidence: `rel_err ~= 1.15` permuted vs. `~= 0.043` left
+    /// in place, against a known-good GGUF).
+    #[test]
+    fn qwen3_hf_bind_leaves_q_and_k_rows_in_place() {
+        let mut architecture = tiny_dense_architecture();
+        architecture.head_dim = 4;
+        architecture.query_heads = 1;
+        architecture.kv_heads = 1;
+        architecture.embedding = 4;
+        architecture.feed_forward = 8;
+
+        let llama_family_bytes = dense_checkpoint_with_extra_tensors(&architecture, &[]);
+        let qwen3_family_bytes = dense_checkpoint_with_extra_tensors(
+            &architecture,
+            &[("model.layers.0.self_attn.q_norm.weight".into(), 4)],
+        );
+
+        let llama_manifest = proxima_safetensors::parse_complete(&llama_family_bytes)
+            .expect("parses real safetensors buffer");
+        let qwen3_manifest = proxima_safetensors::parse_complete(&qwen3_family_bytes)
+            .expect("parses real safetensors buffer");
+
+        let llama_data_start = header_data_start(&llama_family_bytes);
+        let qwen3_data_start = header_data_start(&qwen3_family_bytes);
+
+        let llama_bound = bind_all_weights_from_safetensors(
+            &llama_manifest,
+            &llama_family_bytes,
+            llama_data_start,
+            &architecture,
+        )
+        .expect("binds a rotate_half-family checkpoint");
+        let qwen3_bound = bind_all_weights_from_safetensors(
+            &qwen3_manifest,
+            &qwen3_family_bytes,
+            qwen3_data_start,
+            &architecture,
+        )
+        .expect("binds a split-half/NEOX-family checkpoint");
+
+        let llama_attn_q = attn_q_rows(&llama_bound);
+        let qwen3_attn_q = attn_q_rows(&qwen3_bound);
+
+        // on-disk `q_proj.weight` is [out_dim=4, in_dim=4] row-major,
+        // values `index * 0.5` for `index` in `0..16` (`dense_checkpoint_with_extra_tensors`'s
+        // own fixture generator); `attn_q_rows` reads back
+        // [`crate::bind::transpose_out_in_to_in_out`]'s `[in_dim, out_dim]`
+        // storage, so both expectations below are that same matrix
+        // transposed, by hand, after (Qwen3) or before (llama) permuting
+        // its rows.
+        let qwen3_expected = vec![
+            0.0, 2.0, 4.0, 6.0, 0.5, 2.5, 4.5, 6.5, 1.0, 3.0, 5.0, 7.0, 1.5, 3.5, 5.5, 7.5,
+        ];
+        let llama_expected = vec![
+            0.0, 4.0, 2.0, 6.0, 0.5, 4.5, 2.5, 6.5, 1.0, 5.0, 3.0, 7.0, 1.5, 5.5, 3.5, 7.5,
+        ];
+
+        assert_eq!(
+            qwen3_attn_q, qwen3_expected,
+            "a split-half/NEOX family (Qwen3) must leave attn_q rows exactly as HF wrote them"
+        );
+        assert_eq!(
+            llama_attn_q, llama_expected,
+            "a rotate_half family (llama/mistral) must still permute attn_q rows before transposing"
+        );
+        assert_ne!(
+            llama_attn_q, qwen3_attn_q,
+            "the two families must bind attn_q into genuinely different row orders"
+        );
+    }
+
+    /// [`hf_bind_matmul_weight`]'s bind stores `attn_q` transposed
+    /// (`[in_dim, out_dim]`), so this reads it back row-major over
+    /// `out_dim` to compare directly against [`permute_rope_rows`]'s own
+    /// `[out_dim, in_dim]` convention -- `in_dim == embedding == 4` here,
+    /// matching [`qwen3_hf_bind_leaves_q_and_k_rows_in_place`]'s fixture.
+    fn attn_q_rows(bound: &BoundWeights<'_>) -> Vec<f32> {
+        bound
+            .owned
+            .iter()
+            .find(|(name, _)| name == &node_names::attn_q(0))
+            .map(|(_, values)| values.clone())
+            .expect("attn_q.weight bound as an owned buffer")
+    }
+
+    /// [`tiny_dense_checkpoint`] plus whatever `(name, element_count)` pairs
+    /// `extra` names -- lets a fixture add `q_norm.weight`/`k_norm.weight`
+    /// without duplicating every other tensor
+    /// [`bind_all_weights_from_safetensors`] looks up.
+    fn dense_checkpoint_with_extra_tensors(
+        architecture: &ModelArchitecture,
+        extra: &[(String, usize)],
+    ) -> Vec<u8> {
+        let embedding = architecture.embedding as usize;
+        let feed_forward = architecture.feed_forward as usize;
+        let kv_dim = architecture.kv_heads as usize * architecture.head_dim as usize;
+        let vocab = architecture.vocab as usize;
+
+        let mut owned_data: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut push = |name: String, elements: usize| {
+            let values: Vec<f32> = (0..elements).map(|index| index as f32 * 0.5).collect();
+            owned_data.push((name, f32_bytes(&values)));
+        };
+
+        push(names::embed_tokens(), vocab * embedding);
+        push(names::input_layernorm(0), embedding);
+        push(names::post_attention_layernorm(0), embedding);
+        push(names::q_proj(0), embedding * embedding);
+        push(names::k_proj(0), kv_dim * embedding);
+        push(names::v_proj(0), kv_dim * embedding);
+        push(names::o_proj(0), embedding * embedding);
+        push(names::gate_proj(0), feed_forward * embedding);
+        push(names::up_proj(0), feed_forward * embedding);
+        push(names::down_proj(0), embedding * feed_forward);
+        push(names::final_norm(), embedding);
+        push(names::lm_head(), vocab * embedding);
+        for (name, elements) in extra {
+            push(name.clone(), *elements);
+        }
+
+        let tensors = owned_data
+            .iter()
+            .map(|(name, bytes)| {
+                let elements = bytes.len() / 4;
+                TensorPayload {
+                    name: name.clone(),
+                    dtype: DType::Float32,
+                    shape: vec![elements as u64],
+                    data: bytes.as_slice(),
+                }
+            })
+            .collect();
+
+        write_complete(&SafetensorsModel {
+            tensors,
+            metadata: alloc::collections::BTreeMap::new(),
+        })
+        .expect("writes a real safetensors buffer")
+    }
+
     /// A real bf16 embedding table must bind as an OWNED f32 buffer, never
     /// packed -- the exact defect this row's own fix closes, reproduced
     /// directly rather than only through the full multi-tensor pipeline:
