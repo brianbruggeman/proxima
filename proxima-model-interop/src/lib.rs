@@ -78,7 +78,7 @@ pub use hf_bind::{names as hf_names, node_names as hf_node_names, permute_rope_r
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
 #[cfg(feature = "std")]
-pub use generate::{Control, LoadedModel, Phase, TokenEvent};
+pub use generate::{Control, LoadedModel, Phase, PrefixState, TokenEvent};
 pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};
 #[cfg(feature = "std")]
 pub use lfm2::{
