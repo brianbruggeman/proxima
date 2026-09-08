@@ -626,6 +626,98 @@ mod tests {
         );
     }
 
+    /// A single dominant outlier super-block against an otherwise-zero
+    /// signal.
+    #[test]
+    fn quantize_dequantize_single_outlier_block() {
+        let mut input = vec![0.0f32; QK_K];
+        input[0] = 50.0;
+        let mut packed = vec![0u8; BLOCK_BYTES];
+        quantize(&input, &mut packed).expect("one block");
+        let mut output = vec![0.0f32; QK_K];
+        dequantize(&packed, &mut output).expect("one block");
+        let max_error = output
+            .iter()
+            .zip(input.iter())
+            .map(|(got, want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        debug!(max_error, "quant.q5_k single-outlier round trip");
+        assert!(max_error < 0.3, "max_error={max_error} exceeds loose sanity bound");
+    }
+
+    /// Alternating-sign super-block at constant magnitude.
+    #[test]
+    fn quantize_dequantize_alternating_sign_block() {
+        let input: Vec<f32> = (0..QK_K)
+            .map(|index| if index % 2 == 0 { 3.0 } else { -3.0 })
+            .collect();
+        let mut packed = vec![0u8; BLOCK_BYTES];
+        quantize(&input, &mut packed).expect("one block");
+        let mut output = vec![0.0f32; QK_K];
+        dequantize(&packed, &mut output).expect("one block");
+        let max_error = output
+            .iter()
+            .zip(input.iter())
+            .map(|(got, want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        debug!(max_error, "quant.q5_k alternating-sign round trip");
+        assert!(max_error < 0.3, "max_error={max_error} exceeds loose sanity bound");
+    }
+
+    /// Encoding the same input twice must yield byte-identical output.
+    #[test]
+    fn quantize_is_deterministic_across_repeated_calls() {
+        let elements = QK_K * 2;
+        let input: Vec<f32> = (0..elements)
+            .map(|index| (index as f32 * 0.31).sin() * 3.0)
+            .collect();
+        let mut first = vec![0u8; BLOCK_BYTES * 2];
+        let mut second = vec![0u8; BLOCK_BYTES * 2];
+        quantize(&input, &mut first).expect("two blocks");
+        quantize(&input, &mut second).expect("two blocks");
+        assert_eq!(first, second);
+    }
+
+    /// `encode(dequant(encode(x))) == encode(x)`.
+    #[test]
+    fn quantize_is_idempotent_at_the_codec_grid() {
+        let elements = QK_K * 2;
+        let input: Vec<f32> = (0..elements)
+            .map(|index| (index as f32 * 0.17).cos() * 2.0)
+            .collect();
+        let mut once = vec![0u8; BLOCK_BYTES * 2];
+        quantize(&input, &mut once).expect("two blocks");
+        let mut on_grid = vec![0.0f32; elements];
+        dequantize(&once, &mut on_grid).expect("two blocks");
+        let mut twice = vec![0u8; BLOCK_BYTES * 2];
+        quantize(&on_grid, &mut twice).expect("two blocks");
+        assert_eq!(once, twice);
+    }
+
+    /// Real weight data (principle 9), re-encoded through `Q5_K`.
+    #[cfg(feature = "std")]
+    #[test]
+    fn quantize_dequantize_real_qwen3_weights_round_trip_error() {
+        let input = crate::quant::real_weights::qwen3_token_embd_f32(QK_K * 32);
+        let blocks = input.len() / QK_K;
+        let mut packed = vec![0u8; BLOCK_BYTES * blocks];
+        quantize(&input, &mut packed).expect("real-weight blocks");
+        let mut output = vec![0.0f32; input.len()];
+        dequantize(&packed, &mut output).expect("real-weight blocks");
+
+        let mut max_error = 0.0f32;
+        let mut sum_sq_error = 0.0f64;
+        for (got, want) in output.iter().zip(input.iter()) {
+            let diff = (got - want).abs();
+            max_error = max_error.max(diff);
+            sum_sq_error += f64::from(diff) * f64::from(diff);
+        }
+        let rms_error = (sum_sq_error / input.len() as f64).sqrt();
+        debug!(max_error, rms_error, "quant.q5_k real-qwen3-weights round trip");
+        assert!(max_error < 0.3, "max_error={max_error} exceeds loose sanity bound");
+        assert!(rms_error < 0.1, "rms_error={rms_error} exceeds loose sanity bound");
+    }
+
     #[test]
     fn dequantize_rejects_non_block_multiple_length() {
         let data = vec![0u8; BLOCK_BYTES - 1];

@@ -163,6 +163,30 @@ mod tests {
         );
     }
 
+    /// Encoding the same input twice must yield byte-identical output.
+    #[test]
+    fn quantize_is_deterministic_across_repeated_calls() {
+        let input = vec![1.0f32, -2.5, 0.0, 100.0, -0.125];
+        let mut first = vec![0u8; input.len() * BLOCK_BYTES];
+        let mut second = vec![0u8; input.len() * BLOCK_BYTES];
+        quantize(&input, &mut first).expect("well-formed input");
+        quantize(&input, &mut second).expect("well-formed input");
+        assert_eq!(first, second);
+    }
+
+    /// `encode(dequant(encode(x))) == encode(x)`.
+    #[test]
+    fn quantize_is_idempotent_at_the_codec_grid() {
+        let input = vec![1.0f32 + 2.0f32.powi(-10) + 2.0f32.powi(-12), -3.0, 42.0];
+        let mut once = vec![0u8; input.len() * BLOCK_BYTES];
+        quantize(&input, &mut once).expect("well-formed input");
+        let mut on_grid = vec![0.0f32; input.len()];
+        dequantize(&once, &mut on_grid).expect("well-formed packed bytes");
+        let mut twice = vec![0u8; input.len() * BLOCK_BYTES];
+        quantize(&on_grid, &mut twice).expect("well-formed input");
+        assert_eq!(once, twice);
+    }
+
     #[test]
     fn dequantize_rejects_non_block_multiple_length() {
         let data = vec![0u8; BLOCK_BYTES + 1];
