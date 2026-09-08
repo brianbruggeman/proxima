@@ -339,4 +339,17 @@ pub enum InteropError {
         limit_bytes: u64,
         os_headroom_bytes: u64,
     },
+
+    /// `crate::bind`'s per-tensor precision recode
+    /// (`crate::serving::ServingConfig::weight_precision`) matched `tensor`
+    /// against a rule naming `target`, but [`proxima_gguf::quant`] ships no
+    /// encoder for `target` (`Q2_K`, the `Iq*` family, `Q4_1`/`Q5_1`/`Q8_1`,
+    /// or an integer/`F64`/`Tq*` type) -- silently keeping the tensor at its
+    /// on-disk codec instead would make the rule a no-op nobody could see,
+    /// so this surfaces as a typed, named gap instead.
+    #[cfg(feature = "std")]
+    #[error(
+        "weight_precision rule for {tensor:?} names target {target:?}, which proxima_gguf::quant has no encoder for"
+    )]
+    UnsupportedWeightPrecisionTarget { tensor: String, target: GgmlType },
 }

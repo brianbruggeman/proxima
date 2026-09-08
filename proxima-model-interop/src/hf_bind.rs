@@ -503,6 +503,7 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        precision: &[],
     };
 
     let embedding = architecture.embedding as usize;
@@ -888,6 +889,7 @@ mod tests {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            precision: &[],
         };
         hf_bind_dense(
             &manifest,
@@ -1061,6 +1063,7 @@ mod tests {
                     owned: Vec::new(),
                     packed: Vec::new(),
                     packed_owned: Vec::new(),
+                    precision: &[],
                 },
             );
 
@@ -1156,6 +1159,7 @@ mod tests {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            precision: &[],
         };
         hf_bind_matmul_weight(
             &manifest,

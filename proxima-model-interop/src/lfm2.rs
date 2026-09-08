@@ -362,6 +362,7 @@ pub(crate) fn bind_lfm2_weights<'file>(
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        precision: &[],
     };
 
     let embedding = architecture.embedding as usize;
@@ -868,6 +869,7 @@ mod tests {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            precision: &[],
         };
 
         bind_lfm2_shortconv_in_proj(&parsed, &file_bytes, 0, embedding, &mut state)
@@ -966,6 +968,7 @@ mod tests {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            precision: &[],
         };
 
         let outcome =

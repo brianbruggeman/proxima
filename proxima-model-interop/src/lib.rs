@@ -77,7 +77,7 @@ pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, qua
 #[cfg(all(feature = "std", feature = "instrument"))]
 pub use quality::print_quality_report;
 pub use serving::{
-    DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, REASONING_BUDGET_UNBOUNDED, ServingConfig,
-    apply_serving_config,
+    DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, NamePattern, REASONING_BUDGET_UNBOUNDED, ServingConfig,
+    WeightPrecisionRule, apply_serving_config,
 };
 pub use transform::{gguf_to_safetensors, safetensors_to_gguf};
