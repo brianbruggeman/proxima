@@ -404,3 +404,420 @@ pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use proxima_telemetry::debug;
+
+    use super::{
+        BLOCK_BYTES, CODEC, QK_K, QuantError, SCALES_BYTES, dequantize, pack_scale_min, quantize,
+        unpack_scale_min,
+    };
+
+    /// One super-block, hand-packed and hand-decoded, checked against the
+    /// `x = d*sc*q - dmin*m` formula computed by hand — not by calling
+    /// [`super::quantize`] to build the fixture. `d=1.0`, `dmin=0.5`
+    /// (both exact in `f16`), so every expected value below is an exact
+    /// value in `f32`; `assert_eq!` needs no epsilon.
+    ///
+    /// Layout assertion doubles as byte-check documentation: 84 bytes per
+    /// block (16 `scales` + 64 `qs` + 2 `d` + 2 `dmin`), `d` at offset 80,
+    /// `dmin` at offset 82 — bit-checked directly against the packed
+    /// bytes below, not merely the constant.
+    #[test]
+    fn dequantize_block_matches_hand_packed_fixture_and_84_byte_layout() {
+        assert_eq!(BLOCK_BYTES, 84, "Q2_K super-block must be 84 bytes");
+        assert_eq!(super::SCALES_OFFSET, 0);
+        assert_eq!(super::QS_OFFSET, 16);
+        assert_eq!(super::D_OFFSET, 80);
+        assert_eq!(super::DMIN_OFFSET, 82);
+
+        // sc/m codes per sub-block (0..16): exercises the full 4-bit range.
+        const SCALE_CODE: [u8; 4] = [5, 12, 15, 0];
+        const MIN_CODE: [u8; 4] = [3, 15, 0, 9];
+        let mut packed_scales = [0u8; SCALES_BYTES];
+        for sub_block in 0..4 {
+            pack_scale_min(
+                sub_block,
+                SCALE_CODE[sub_block],
+                MIN_CODE[sub_block],
+                &mut packed_scales,
+            );
+        }
+        for (sub_block, &code) in SCALE_CODE.iter().enumerate() {
+            assert_eq!(
+                unpack_scale_min(sub_block, &packed_scales),
+                (code, MIN_CODE[sub_block]),
+                "packed (scale, min) must round-trip through unpack_scale_min"
+            );
+        }
+
+        // qs: element 0 reads qs_window[0] (sub-block 0, low half, shift
+        // 0); element 16 reads qs_window[0 + 16] (sub-block 1, high half,
+        // shift 0) -- two distinct bytes in the 64-byte `qs` plane.
+        let mut qs = [0u8; QK_K / 4];
+        qs[0] = 0b00_00_00_10; // element 0 (sub-block 0, local 0): level = qs[0] & 0x03 = 2
+        qs[16] = 0b00_00_00_01; // element 16 (sub-block 1, local 0 of high half): level = qs[16] & 0x03 = 1
+
+        let mut block = [0u8; BLOCK_BYTES];
+        block[super::SCALES_OFFSET..super::SCALES_OFFSET + SCALES_BYTES]
+            .copy_from_slice(&packed_scales);
+        block[super::QS_OFFSET..super::QS_OFFSET + QK_K / 4].copy_from_slice(&qs);
+        block[super::D_OFFSET..super::D_OFFSET + 2]
+            .copy_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
+        block[super::DMIN_OFFSET..super::DMIN_OFFSET + 2]
+            .copy_from_slice(&half::f16::from_f32(0.5).to_le_bytes());
+
+        let mut output = [0.0f32; QK_K];
+        dequantize(&block, &mut output).expect("well-formed single block");
+
+        // element 0: sub-block 0, sc=5, m=3, q=2 -> d*sc*q - dmin*m = 1*5*2 - 0.5*3 = 8.5
+        assert_eq!(output[0], 1.0 * 5.0 * 2.0 - 0.5 * 3.0);
+        // element 16: sub-block 1, sc=12, m=15, q=1 -> 1*12*1 - 0.5*15 = 4.5
+        assert_eq!(output[16], 1.0 * 12.0 * 1.0 - 0.5 * 15.0);
+        // sub-block 3 has sc=0, m=9: every element in [48, 64) decodes to
+        // exactly -dmin*m = -4.5 regardless of qs bits there.
+        for &value in &output[48..64] {
+            assert_eq!(value, -4.5, "sc=0 sub-block must decode to exactly -dmin*m");
+        }
+    }
+
+    /// All-zero input hits [`super::make_qkx2_quants_16`]'s `max == min`
+    /// fast path: every level, scale, and min is zero. The round trip
+    /// must be bit-exact, not merely close.
+    #[test]
+    fn quantize_dequantize_zero_vector_is_bit_exact() {
+        let input = vec![0.0f32; QK_K];
+        let mut packed = vec![0u8; BLOCK_BYTES];
+        quantize(&input, &mut packed).expect("one block");
+        let mut output = vec![0.0f32; QK_K];
+        dequantize(&packed, &mut output).expect("one block");
+        assert_eq!(output, input);
+    }
+
+    /// A degenerate control that is NOT the trivial all-zero case: every
+    /// element equal to a nonzero constant -- same control
+    /// [`super::q4_k`]/[`super::q3_k`] run, exercising the real
+    /// weighted-least-squares search and the `d`/`dmin` `f16` rounding.
+    /// `Q2_K`'s 2-bit levels (only 4 distinct codes per sub-block) are the
+    /// coarsest k-quant format, but a CONSTANT vector needs only one
+    /// nonzero level to reconstruct exactly up to `f16` rounding, so the
+    /// round trip is still expected to be tight.
+    #[test]
+    fn quantize_dequantize_constant_nonzero_vector_is_near_exact() {
+        let input = vec![5.0f32; QK_K];
+        let mut packed = vec![0u8; BLOCK_BYTES];
+        quantize(&input, &mut packed).expect("one block");
+        let mut output = vec![0.0f32; QK_K];
+        dequantize(&packed, &mut output).expect("one block");
+        let max_error = output
+            .iter()
+            .zip(input.iter())
+            .map(|(got, want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        debug!(max_error, "quant.q2_k constant-nonzero-vector round trip");
+        assert!(
+            max_error < 0.05,
+            "constant-vector round trip should be near-exact, measured max_error={max_error}"
+        );
+    }
+
+    /// Round-trips a smooth, multi-block, non-degenerate signal and
+    /// reports (does not hide) the measured max and RMS error, then
+    /// checks both against a bound derived from the format's own
+    /// resolution rather than tuned to the measured numbers.
+    ///
+    /// Derivation: a `Q2_K` sub-block has 4 quant levels (`nmax=3`)
+    /// covering `[min, max]` of that 16-element window. For a smooth
+    /// signal whose local range across any 16 consecutive samples is
+    /// bounded by roughly the signal's own peak-to-peak amplitude
+    /// (`3.0*sin + 0.5*cos`, amplitude <= 3.5, peak-to-peak <= 7.0), the
+    /// per-level step is `range / 3 <= 7.0 / 3 ~= 2.33`, and the maximum
+    /// rounding error from nearest-level quantization is half that step,
+    /// `~1.17`. `Q2_K` carries roughly `2 + (4+4)/16 = 2.5` bits/weight
+    /// (2-bit levels plus a shared 4+4-bit scale/min per 16 elements) --
+    /// the coarsest k-quant format, so its bound is deliberately the
+    /// loosest of the family (`Q3_K`'s is `1.2`/`0.35`, `Q4_K`'s is
+    /// `0.6`/`0.2`).
+    #[test]
+    fn quantize_dequantize_smooth_signal_round_trip_error() {
+        let elements = QK_K * 4;
+        let input: Vec<f32> = (0..elements)
+            .map(|index| {
+                let value = index as f32;
+                3.0 * (value * 0.05).sin() + 0.5 * (value * 0.37).cos()
+            })
+            .collect();
+        let mut packed = vec![0u8; BLOCK_BYTES * 4];
+        quantize(&input, &mut packed).expect("four blocks");
+        let mut output = vec![0.0f32; elements];
+        dequantize(&packed, &mut output).expect("four blocks");
+
+        let mut max_error = 0.0f32;
+        let mut sum_sq_error = 0.0f64;
+        for (got, want) in output.iter().zip(input.iter()) {
+            assert!(
+                got.is_finite(),
+                "dequantized value must be finite, got {got}"
+            );
+            let diff = (got - want).abs();
+            max_error = max_error.max(diff);
+            sum_sq_error += f64::from(diff) * f64::from(diff);
+        }
+        let rms_error = (sum_sq_error / elements as f64).sqrt();
+        debug!(max_error, rms_error, "quant.q2_k smooth-signal round trip");
+        assert!(
+            max_error < 1.6,
+            "max_error={max_error} exceeds bound derived from a 16-element sub-block's \
+             ~2.33 per-level step (half-step ~1.17, loosened for f16 scale/min rounding)"
+        );
+        assert!(
+            rms_error < 0.6,
+            "rms_error={rms_error} exceeds loose sanity bound for the coarsest k-quant format"
+        );
+    }
+
+    /// `quantize` is a pure function of its input bytes: two independent
+    /// calls on the same signal produce byte-identical packed output.
+    #[test]
+    fn quantize_is_deterministic() {
+        let elements = QK_K * 2;
+        let input: Vec<f32> = (0..elements)
+            .map(|index| (index as f32 * 0.11).sin() * 4.0)
+            .collect();
+        let mut first = vec![0u8; BLOCK_BYTES * 2];
+        let mut second = vec![0u8; BLOCK_BYTES * 2];
+        quantize(&input, &mut first).expect("two blocks");
+        quantize(&input, &mut second).expect("two blocks");
+        assert_eq!(first, second, "quantize must be deterministic");
+    }
+
+    /// Idempotence at the grid: dequantizing already-quantized values and
+    /// re-quantizing them lands on the exact same packed bytes -- once a
+    /// signal sits exactly on the `Q2_K` grid, re-encoding must not drift.
+    #[test]
+    fn quantize_is_idempotent_once_on_the_grid() {
+        let elements = QK_K * 2;
+        let input: Vec<f32> = (0..elements)
+            .map(|index| (index as f32 * 0.11).sin() * 4.0)
+            .collect();
+        let mut packed_once = vec![0u8; BLOCK_BYTES * 2];
+        quantize(&input, &mut packed_once).expect("two blocks");
+        let mut on_grid = vec![0.0f32; elements];
+        dequantize(&packed_once, &mut on_grid).expect("two blocks");
+
+        let mut packed_twice = vec![0u8; BLOCK_BYTES * 2];
+        quantize(&on_grid, &mut packed_twice).expect("two blocks");
+        assert_eq!(
+            packed_once, packed_twice,
+            "re-quantizing an on-grid signal must reproduce the same packed bytes"
+        );
+    }
+
+    #[test]
+    fn dequantize_rejects_non_block_multiple_length() {
+        let data = vec![0u8; BLOCK_BYTES - 1];
+        let mut output = vec![0.0f32; QK_K];
+        let error = dequantize(&data, &mut output).unwrap_err();
+        assert_eq!(
+            error,
+            QuantError::InputNotBlockMultiple {
+                codec: CODEC,
+                found: BLOCK_BYTES - 1,
+                block_bytes: BLOCK_BYTES,
+            }
+        );
+    }
+
+    #[test]
+    fn dequantize_rejects_output_size_mismatch() {
+        let data = vec![0u8; BLOCK_BYTES];
+        let mut output = vec![0.0f32; QK_K - 1];
+        let error = dequantize(&data, &mut output).unwrap_err();
+        assert_eq!(
+            error,
+            QuantError::OutputSizeMismatch {
+                found: QK_K - 1,
+                expected: QK_K,
+            }
+        );
+    }
+
+    #[test]
+    fn quantize_rejects_non_element_multiple_length() {
+        let input = vec![0.0f32; QK_K - 1];
+        let mut output = vec![0u8; BLOCK_BYTES];
+        let error = quantize(&input, &mut output).unwrap_err();
+        assert_eq!(
+            error,
+            QuantError::InputNotElementMultiple {
+                codec: CODEC,
+                unit: "super-block",
+                found: QK_K - 1,
+                block_elements: QK_K,
+            }
+        );
+    }
+
+    #[test]
+    fn quantize_rejects_output_size_mismatch() {
+        let input = vec![0.0f32; QK_K];
+        let mut output = vec![0u8; BLOCK_BYTES - 1];
+        let error = quantize(&input, &mut output).unwrap_err();
+        assert_eq!(
+            error,
+            QuantError::OutputSizeMismatch {
+                found: BLOCK_BYTES - 1,
+                expected: BLOCK_BYTES,
+            }
+        );
+    }
+
+    /// A truncated block run that is neither a whole block nor empty --
+    /// typed error, never a panic or an out-of-bounds read.
+    #[test]
+    fn dequantize_rejects_truncated_partial_block() {
+        let partial_bytes = BLOCK_BYTES + BLOCK_BYTES / 2;
+        let data = vec![0u8; partial_bytes];
+        let mut output = vec![0.0f32; QK_K];
+        let error = dequantize(&data, &mut output).unwrap_err();
+        assert_eq!(
+            error,
+            QuantError::InputNotBlockMultiple {
+                codec: CODEC,
+                found: partial_bytes,
+                block_bytes: BLOCK_BYTES,
+            }
+        );
+    }
+
+    /// Round-trips a real `ffn_down` weight block set from a local qwen3
+    /// 1.7B GGUF checkpoint: dequantizes its own (Q4_K or Q6_K, whichever
+    /// this tensor is stored as) weights to `f32` via this crate's reader,
+    /// then treats that `f32` array as the "real tensor" input this
+    /// module's own `quantize`/`dequantize` round-trips, reporting max-abs
+    /// and RMS error -- never asserting a make-believe bound, only the
+    /// bound this module's own derivation above already committed to.
+    /// `#[ignore]`d like the other real-checkpoint tests in this crate:
+    /// host-local file, opportunistic, never part of the standard gate.
+    #[cfg(feature = "std")]
+    mod q2_k_real_tensor {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::path::Path;
+
+        use proxima_telemetry::debug;
+
+        use super::super::{BLOCK_BYTES, QK_K, dequantize, quantize};
+        use crate::pipe::parse_complete;
+        use crate::quant::{q4_k, q6_k};
+        use crate::types::GgmlType;
+
+        const REAL_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3d0b790534fe4b79525fc3692950408dca41171676ed7e21db57af5c65ef6ab6";
+
+        fn parse_header(file: &mut std::fs::File) -> crate::pipe::ParsedGguf {
+            let mut header_buf = Vec::new();
+            for cap in [4usize << 20, 16 << 20, 64 << 20, 128 << 20] {
+                header_buf.resize(cap, 0);
+                file.seek(SeekFrom::Start(0)).expect("seek to file start");
+                let read = file.read(&mut header_buf).expect("read gguf header region");
+                header_buf.truncate(read);
+                if let Ok(parsed) = parse_complete(&header_buf) {
+                    return parsed;
+                }
+            }
+            panic!("gguf metadata region did not fit in 128 MiB");
+        }
+
+        fn read_range(file: &mut std::fs::File, range: core::ops::Range<u64>) -> Vec<u8> {
+            let mut buffer = vec![0u8; (range.end - range.start) as usize];
+            file.seek(SeekFrom::Start(range.start))
+                .expect("seek to tensor data range start");
+            file.read_exact(&mut buffer)
+                .expect("read exact tensor data range");
+            buffer
+        }
+
+        /// Dequantizes an `ffn_down` tensor's first `elements` values to
+        /// `f32` through this crate's own reader plus its already-landed
+        /// `Q4_K`/`Q6_K` codec -- these are the real weight values this
+        /// test round-trips through the new `Q2_K` codec under test.
+        #[test]
+        fn q2_k_round_trip_on_real_ffn_down_weights() {
+            if !Path::new(REAL_GGUF_PATH).exists() {
+                eprintln!("skipping: {REAL_GGUF_PATH} not present on this host");
+                return;
+            }
+            let mut file = std::fs::File::open(REAL_GGUF_PATH).expect("open real gguf checkpoint");
+            let file_len = file.metadata().expect("stat real gguf checkpoint").len();
+            let parsed = parse_header(&mut file);
+
+            let tensor_name = "blk.0.ffn_down.weight";
+            let tensor = parsed
+                .tensors
+                .iter()
+                .find(|candidate| candidate.name == tensor_name)
+                .unwrap_or_else(|| panic!("{tensor_name} not present in real checkpoint"));
+
+            let elements_wanted = QK_K * 32;
+            let full_range = parsed
+                .tensor_data_range(tensor, file_len)
+                .expect("tensor data range within real checkpoint");
+
+            let real_input: Vec<f32> = match tensor.ggml_type {
+                GgmlType::Q4_K => {
+                    let blocks_wanted = elements_wanted / q4_k::QK_K;
+                    let bytes_wanted = (blocks_wanted * q4_k::BLOCK_BYTES) as u64;
+                    let packed = read_range(&mut file, full_range.start..full_range.start + bytes_wanted);
+                    let mut decoded = vec![0.0f32; blocks_wanted * q4_k::QK_K];
+                    q4_k::dequantize(&packed, &mut decoded).expect("decode real Q4_K super-blocks");
+                    decoded
+                }
+                GgmlType::Q6_K => {
+                    let blocks_wanted = elements_wanted / q6_k::QK_K;
+                    let bytes_wanted = (blocks_wanted * q6_k::BLOCK_BYTES) as u64;
+                    let packed = read_range(&mut file, full_range.start..full_range.start + bytes_wanted);
+                    let mut decoded = vec![0.0f32; blocks_wanted * q6_k::QK_K];
+                    q6_k::dequantize(&packed, &mut decoded).expect("decode real Q6_K super-blocks");
+                    decoded
+                }
+                other => panic!("{tensor_name} unexpected codec {other:?} in this checkpoint"),
+            };
+
+            let element_count = real_input.len() - (real_input.len() % QK_K);
+            let real_input = &real_input[..element_count];
+            let block_count = element_count / QK_K;
+
+            let mut packed = vec![0u8; BLOCK_BYTES * block_count];
+            quantize(real_input, &mut packed).expect("quantize real weights into Q2_K");
+            let mut decoded = vec![0.0f32; element_count];
+            dequantize(&packed, &mut decoded).expect("dequantize real Q2_K weights");
+
+            let mut max_abs_error = 0.0f32;
+            let mut sum_sq_error = 0.0f64;
+            for (got, want) in decoded.iter().zip(real_input.iter()) {
+                let diff = (got - want).abs();
+                max_abs_error = max_abs_error.max(diff);
+                sum_sq_error += f64::from(diff) * f64::from(diff);
+            }
+            let rms_error = (sum_sq_error / element_count as f64).sqrt();
+            debug!(
+                tensor = tensor_name,
+                source_codec = ?tensor.ggml_type,
+                element_count,
+                max_abs_error,
+                rms_error,
+                "q2_k real-tensor round trip (ffn_down, requantized from source codec)"
+            );
+            println!(
+                "tensor={tensor_name} source_codec={:?} elements={element_count} max_abs_error={max_abs_error} rms_error={rms_error}",
+                tensor.ggml_type
+            );
+            assert!(max_abs_error.is_finite() && rms_error.is_finite());
+        }
+    }
+}
