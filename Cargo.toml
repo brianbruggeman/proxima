@@ -1507,6 +1507,20 @@ required-features = [
     "macros",
 ]
 
+# OpenAI-compatible chat-completions server backed by a real GGUF checkpoint,
+# served over the same tokio-free h1 listener as h1_native_prime_round_trip
+# above (PrimeServeExt::serve_http). See the file's own doc comment.
+[[example]]
+name = "openai_serve_gguf"
+path = "examples/openai_serve_gguf.rs"
+required-features = [
+    "http1-native",
+    "runtime-prime-executor",
+    "runtime-prime-inbox-alloc",
+    "runtime-prime-reactor",
+    "runtime-prime-bgpool",
+]
+
 # The wire-to-weights combo demo: HTTP request in -> real mnist.onnx forward
 # -> response out, composed end to end as `Pipe`s (see
 # examples/support/wire_to_weights_pipeline.rs for the composition). Mirrors
