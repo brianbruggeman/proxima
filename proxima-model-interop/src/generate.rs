@@ -67,7 +67,7 @@ use proxima_tensor::cpu::{
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use proxima_tensor::DType;
-use proxima_tensor::op::{NodeId, Op};
+use proxima_tensor::op::{Extent, NodeId, Op};
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use proxima_tensor::op::ScalarOp;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -822,16 +822,6 @@ pub struct LoadedModel<'file> {
     /// recomputed every decode step. `None` on the dense path, which never
     /// has an [`Qwen35LayerRoots::Ssm`] entry to size.
     qwen35_ssm_shape: Option<Qwen35SsmShape>,
-    /// [`Some`] only for a qwen35-architecture checkpoint --
-    /// `{architecture}.attention.key_length` (`crate::qwen35::Qwen35Architecture::attn_head_dim`'s
-    /// own doc on why this is not derivable from [`ModelArchitecture::head_dim`],
-    /// the PARTIAL-rotary width). [`Self::run_decode_loop_observed`]'s
-    /// two-range loop needs it to size a [`Qwen35DenseAttentionCache`]'s own
-    /// `k_pass`/`v` row widths when padding a `DenseAttention` layer's cache
-    /// out to a `kv_extent` bucket boundary, the same reason
-    /// [`Self::run_decode_loop_observed`] already carries `qwen35_ssm_shape`
-    /// as a separate field rather than re-deriving it from `layer_roots`.
-    qwen35_attn_head_dim: Option<u32>,
     /// The single-range, device-resident-KV counterpart of `program`/
     /// `logits_root`/`layer_roots` above -- `None` unless this build was
     /// compiled with `metal-output-placement` AND this checkpoint took the
@@ -1279,7 +1269,6 @@ impl<'file> LoadedModel<'file> {
                 model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
                 checkpoint_bytes: file_bytes.len(),
                 qwen35_ssm_shape: step_state.as_ref().map(|state| state.ssm_shape),
-                qwen35_attn_head_dim: step_state.as_ref().map(|state| state.attn_head_dim),
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 single_range,
                 checkpoint_mapping: file_bytes,
@@ -1385,7 +1374,6 @@ impl<'file> LoadedModel<'file> {
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
             checkpoint_bytes: file_bytes.len(),
             qwen35_ssm_shape: None,
-            qwen35_attn_head_dim: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
             checkpoint_mapping: file_bytes,
@@ -1478,7 +1466,6 @@ impl<'file> LoadedModel<'file> {
             model_name: None,
             checkpoint_bytes: file_bytes.len(),
             qwen35_ssm_shape: None,
-            qwen35_attn_head_dim: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
             checkpoint_mapping: file_bytes,
@@ -1628,27 +1615,30 @@ impl KvPadScratch {
 }
 
 /// [`KvPadScratch`]'s own row-width parameters, grouped into one reference
-/// rather than four positional `usize`s -- every [`KvPadScratch::fill`]/
-/// [`KvPadScratch::named_blocks`] call site already computes all four
-/// together from `self.architecture`/`kv_bound_extent`, so one reference
-/// says what was already true by convention, and keeps both methods under
-/// clippy's `too_many_arguments` threshold without an `#[allow]`.
+/// rather than two positional `usize`s -- every [`KvPadScratch::fill`]/
+/// [`KvPadScratch::named_blocks`] call site already computes both together
+/// from `kv_bound_extent` and this layer's own [`LayerPadRowWidths`], so
+/// one reference says what was already true by convention. `even_odd_row`/
+/// `v_row` are each `kv_heads * width` for their own leaf, read back off
+/// this layer's declared `Op::Input` shape by [`cache_leaf_row_elements`]
+/// -- never derived from `ModelArchitecture` scalars a foreign bind may
+/// leave zero/unset (that doc's own paragraph on why).
 struct KvPadShape {
     bound_extent: usize,
-    kv_heads: usize,
-    pairs: usize,
-    head_dim: usize,
+    even_odd_row: usize,
+    v_row: usize,
 }
 
 impl KvPadShape {
     fn even_odd_len(&self) -> usize {
-        self.bound_extent * self.kv_heads * self.pairs
+        self.bound_extent * self.even_odd_row
     }
 
     fn v_len(&self) -> usize {
-        self.bound_extent * self.kv_heads * self.head_dim
+        self.bound_extent * self.v_row
     }
 }
+
 
 /// [`LayerCache`]'s 4-wide counterpart for a
 /// [`Qwen35LayerRoots::DenseAttention`] layer -- this checkpoint's own
@@ -1691,23 +1681,22 @@ impl Qwen35DenseAttentionCache {
 /// widths rather than reusing [`KvPadShape::v_len`].
 struct Qwen35DenseAttentionPadShape {
     bound_extent: usize,
-    kv_heads: usize,
-    pairs: usize,
-    pass_dim: usize,
-    attn_head_dim: usize,
+    even_odd_row: usize,
+    pass_row: usize,
+    v_row: usize,
 }
 
 impl Qwen35DenseAttentionPadShape {
     fn even_odd_len(&self) -> usize {
-        self.bound_extent * self.kv_heads * self.pairs
+        self.bound_extent * self.even_odd_row
     }
 
     fn pass_len(&self) -> usize {
-        self.bound_extent * self.kv_heads * self.pass_dim
+        self.bound_extent * self.pass_row
     }
 
     fn v_len(&self) -> usize {
-        self.bound_extent * self.kv_heads * self.attn_head_dim
+        self.bound_extent * self.v_row
     }
 }
 
@@ -1972,6 +1961,79 @@ fn bound_cache_kind(roots: &Qwen35LayerRoots) -> DeclaredCacheKind {
         Qwen35LayerRoots::Attention(_) => DeclaredCacheKind::Attention,
         Qwen35LayerRoots::DenseAttention(_) => DeclaredCacheKind::DenseAttention,
         Qwen35LayerRoots::Ssm { .. } => DeclaredCacheKind::Ssm,
+    }
+}
+
+/// `name`'s own declared [`Op::Input`] shape, read back out of the program
+/// that emitted it, collapsed to the flat element count one cached
+/// position occupies -- every `kv_cache.{layer}.*` leaf is
+/// `[Extent::Symbolic(KV_BOUND), heads, width]`
+/// (`proxima_tensor::spec`'s `append_qwen35_dense_attention_layer`/
+/// `append_mistral_cached_layer` own `input_leaf` calls for these exact
+/// names), so the row width [`KvPadShape`]/[`Qwen35DenseAttentionPadShape`]
+/// need is the PRODUCT of every extent after the leading symbolic
+/// bound-extent slot, not a single dimension. This is the single source of
+/// truth those two shapes size their scratch buffers from -- never
+/// `ModelArchitecture`/[`crate::architecture::Architecture::step_state`]
+/// scalars a foreign bind may leave zero or unset -- the real defect this
+/// function replaces: `LoadedModel` used to carry a single model-wide
+/// `qwen35_attn_head_dim: Option<u32>`, read from a trait method whose
+/// default impl is `Ok(None)`, silently sizing every `DenseAttention`
+/// layer's `v`/`k_pass` scratch to zero on any foreign
+/// [`crate::architecture::Architecture`] that never overrides it.
+///
+/// `None` when `name` is not declared at all, or when the program declared
+/// it with an unexpected shape (fewer than two dimensions, or a second
+/// symbolic extent) -- [`layer_pad_row_widths`] reads either case as row
+/// width `0`, which a still-unchecked `fill`-time `copy_from_slice` catches
+/// (as a panic, for now) as soon as a real, nonzero-length cache actually
+/// needs to copy into it.
+fn cache_leaf_row_elements(program: &[Op], name: &str) -> Option<usize> {
+    let shape = program.iter().find_map(|op| match op {
+        Op::Input {
+            name: Some(leaf_name),
+            shape,
+            ..
+        } if leaf_name == name => Some(shape.as_slice()),
+        _ => None,
+    })?;
+    let (_bound_extent, row_dims) = shape.split_first()?;
+    row_dims.iter().try_fold(1usize, |product, extent| match extent {
+        Extent::Static(value) => Some(product * (*value as usize)),
+        Extent::Symbolic(_) => None,
+    })
+}
+
+/// [`KvPadShape`]/[`Qwen35DenseAttentionPadShape`]'s own row widths for one
+/// layer, read once (`self.program` never changes for the lifetime of a
+/// decode call) rather than re-derived from architecture scalars every
+/// step -- see [`cache_leaf_row_elements`]'s own doc for why this is the
+/// authoritative source.
+enum LayerPadRowWidths {
+    Attention { even_odd_row: usize, v_row: usize },
+    DenseAttention { even_odd_row: usize, pass_row: usize, v_row: usize },
+    Ssm,
+}
+
+/// Builds [`LayerPadRowWidths`] for one layer from its own
+/// [`LayerCacheNames`] leaf names, looking each one's declared shape up in
+/// `program`. A leaf [`cache_leaf_row_elements`] cannot resolve (not
+/// declared, or an unexpected shape) reads as row width `0` here --
+/// deliberately, not a setup-time error: `0` reproduces exactly the
+/// starting state a genuinely absent leaf already left this scratch buffer
+/// in before this function existed.
+fn layer_pad_row_widths(program: &[Op], names: &LayerCacheNames) -> LayerPadRowWidths {
+    match names {
+        LayerCacheNames::Attention { k_even, v, .. } => LayerPadRowWidths::Attention {
+            even_odd_row: cache_leaf_row_elements(program, k_even).unwrap_or(0),
+            v_row: cache_leaf_row_elements(program, v).unwrap_or(0),
+        },
+        LayerCacheNames::DenseAttention { k_first, k_pass, v, .. } => LayerPadRowWidths::DenseAttention {
+            even_odd_row: cache_leaf_row_elements(program, k_first).unwrap_or(0),
+            pass_row: cache_leaf_row_elements(program, k_pass).unwrap_or(0),
+            v_row: cache_leaf_row_elements(program, v).unwrap_or(0),
+        },
+        LayerCacheNames::Ssm { .. } => LayerPadRowWidths::Ssm,
     }
 }
 
@@ -3590,11 +3652,16 @@ impl<'file> LoadedModel<'file> {
             .iter()
             .map(|_| Qwen35DenseAttentionPadScratch::new())
             .collect();
-        let kv_heads = self.architecture.kv_heads as usize;
-        let head_dim = self.architecture.head_dim as usize;
-        let pairs = head_dim / 2;
-        let attn_head_dim = self.qwen35_attn_head_dim.unwrap_or(0) as usize;
-        let pass_dim = attn_head_dim.saturating_sub(head_dim);
+        // Every layer's own pad-scratch row widths, read once off THIS
+        // layer's declared `Op::Input` cache leaves ([`layer_pad_row_widths`]'s
+        // own doc) -- never a single model-wide `kv_heads`/`head_dim`/
+        // `attn_head_dim` scalar pulled off `self.architecture`/
+        // `self.qwen35_attn_head_dim`, which for a `DenseAttention` layer
+        // depends on `crate::architecture::Architecture::step_state`, a
+        // trait method whose default impl a foreign bind can silently
+        // never override.
+        let layer_row_widths: Vec<LayerPadRowWidths> =
+            cache_names.iter().map(|names| layer_pad_row_widths(&self.program, names)).collect();
 
         // The caller's own knowledge of which named blocks are STATIC --
         // bound once in `LoadedModel::load` and never mutated again -- fixed
@@ -3719,22 +3786,6 @@ impl<'file> LoadedModel<'file> {
                 // cache below is a growing `Vec`, not a preallocated
                 // device buffer, so there is no hard cap to clamp against.
                 let kv_bound_extent = kv_extent(cached_len, usize::MAX, serving_config.kv_bucket_tokens);
-                let kv_pad_shape = KvPadShape {
-                    bound_extent: kv_bound_extent,
-                    kv_heads,
-                    pairs,
-                    head_dim,
-                };
-                // Same `kv_bound_extent`, same [`Extent::Symbolic(1)`] slot
-                // (`Qwen35DenseAttentionPadScratch`'s own doc) -- a
-                // `DenseAttention` layer's row widths, not `Attention`'s.
-                let qwen35_dense_pad_shape = Qwen35DenseAttentionPadShape {
-                    bound_extent: kv_bound_extent,
-                    kv_heads,
-                    pairs,
-                    pass_dim,
-                    attn_head_dim,
-                };
 
                 // KV-cache HOST -> DEVICE traffic: every named block below is the
                 // FULL accumulated history (`LayerCache::append` only grows these,
@@ -3774,24 +3825,57 @@ impl<'file> LoadedModel<'file> {
                 // layer's scratch second, keeps the two borrow kinds in
                 // disjoint passes instead of interleaved per iteration.
                 for (layer, cache) in layer_caches.iter().enumerate() {
-                    match cache {
-                        LayerCacheState::Attention(cache) => {
-                            kv_pad_scratch[layer].fill(cache, &kv_pad_shape);
+                    match (cache, &layer_row_widths[layer]) {
+                        (
+                            LayerCacheState::Attention(cache),
+                            LayerPadRowWidths::Attention { even_odd_row, v_row },
+                        ) => {
+                            let shape = KvPadShape {
+                                bound_extent: kv_bound_extent,
+                                even_odd_row: *even_odd_row,
+                                v_row: *v_row,
+                            };
+                            kv_pad_scratch[layer].fill(cache, &shape);
                         }
-                        LayerCacheState::DenseAttention(cache) => {
-                            qwen35_dense_pad_scratch[layer].fill(cache, &qwen35_dense_pad_shape);
+                        (
+                            LayerCacheState::DenseAttention(cache),
+                            LayerPadRowWidths::DenseAttention {
+                                even_odd_row,
+                                pass_row,
+                                v_row,
+                            },
+                        ) => {
+                            let shape = Qwen35DenseAttentionPadShape {
+                                bound_extent: kv_bound_extent,
+                                even_odd_row: *even_odd_row,
+                                pass_row: *pass_row,
+                                v_row: *v_row,
+                            };
+                            qwen35_dense_pad_scratch[layer].fill(cache, &shape);
                         }
-                        LayerCacheState::Ssm(_) => {}
+                        (LayerCacheState::Ssm(_), LayerPadRowWidths::Ssm) => {}
+                        _ => unreachable!(
+                            "layer_row_widths built from the same cache_names as layer_caches, in lockstep"
+                        ),
                     }
                 }
                 for (layer, names) in cache_names.iter().enumerate() {
-                    match (names, &layer_caches[layer]) {
-                        (LayerCacheNames::Attention { k_even, k_odd, v }, LayerCacheState::Attention(_)) => {
+                    match (names, &layer_caches[layer], &layer_row_widths[layer]) {
+                        (
+                            LayerCacheNames::Attention { k_even, k_odd, v },
+                            LayerCacheState::Attention(_),
+                            LayerPadRowWidths::Attention { even_odd_row, v_row },
+                        ) => {
+                            let shape = KvPadShape {
+                                bound_extent: kv_bound_extent,
+                                even_odd_row: *even_odd_row,
+                                v_row: *v_row,
+                            };
                             named_blocks.extend(kv_pad_scratch[layer].named_blocks(
                                 k_even,
                                 k_odd,
                                 v,
-                                &kv_pad_shape,
+                                &shape,
                             ));
                         }
                         (
@@ -3802,13 +3886,24 @@ impl<'file> LoadedModel<'file> {
                                 v,
                             },
                             LayerCacheState::DenseAttention(_),
+                            LayerPadRowWidths::DenseAttention {
+                                even_odd_row,
+                                pass_row,
+                                v_row,
+                            },
                         ) => {
+                            let shape = Qwen35DenseAttentionPadShape {
+                                bound_extent: kv_bound_extent,
+                                even_odd_row: *even_odd_row,
+                                pass_row: *pass_row,
+                                v_row: *v_row,
+                            };
                             named_blocks.extend(qwen35_dense_pad_scratch[layer].named_blocks(
                                 k_first,
                                 k_second,
                                 k_pass,
                                 v,
-                                &qwen35_dense_pad_shape,
+                                &shape,
                             ));
                         }
                         (
@@ -3817,11 +3912,12 @@ impl<'file> LoadedModel<'file> {
                                 state,
                             },
                             LayerCacheState::Ssm(cache),
+                            LayerPadRowWidths::Ssm,
                         ) => {
                             named_blocks.extend(cache.named_blocks(conv_history, state));
                         }
                         _ => unreachable!(
-                            "cache_names/layer_caches built from the same layer_roots, in lockstep"
+                            "cache_names/layer_caches/layer_row_widths built from the same layer_roots, in lockstep"
                         ),
                     }
                 }
@@ -6652,7 +6748,6 @@ mod memory_fit_gate_tests {
             layer_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
             qwen35_ssm_shape: None,
-            qwen35_attn_head_dim: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range: None,
         }
