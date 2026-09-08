@@ -156,6 +156,36 @@ pub enum TensorError {
     )]
     GatherExtentExceedsExactFloat { node: NodeId, extent: u64 },
 
+    /// [`crate::expert_source::ExpertSource`]'s own shape guard: an entry's
+    /// `out_dim`/`in_dim` must agree with the program's own resolved
+    /// `rows`/`k` for the gathered reduce it is bound to -- a mismatch means
+    /// the entry was swapped in for the wrong expert or the wrong layer,
+    /// never a silent wrong-shape read.
+    #[error(
+        "node {node} expert {expert} source entry shape {entry_out}x{entry_in} does not match \
+         the program's declared expert shape {expected_out}x{expected_in}"
+    )]
+    ExpertSourceShapeMismatch {
+        node: NodeId,
+        expert: u32,
+        entry_out: u32,
+        entry_in: u32,
+        expected_out: u32,
+        expected_in: u32,
+    },
+
+    /// [`crate::cpu::expert_entries_from_stack`]'s own bind-time guard: a
+    /// contiguous stack's packed byte length must divide evenly by
+    /// `expert_count`, the same block-aligned-by-construction contract
+    /// [`proxima_gguf::restack::plan_stack`] already establishes for the
+    /// stack itself -- re-checked here rather than trusted blind, so a
+    /// corrupt or mis-sized stack is a typed rejection, never a
+    /// misaligned alias into the wrong expert's bytes.
+    #[error(
+        "expert stack of {bytes} bytes does not evenly divide by expert_count {expert_count}"
+    )]
+    ExpertStackNotAligned { expert_count: usize, bytes: usize },
+
     /// A chunk of a threaded nest never completed: the background pool
     /// caught and discarded a worker panic (see
     /// `prime::os::background::worker`'s `catch_unwind`) rather than

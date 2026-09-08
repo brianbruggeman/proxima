@@ -3499,7 +3499,193 @@ pub enum QuantizedBlock<'a> {
     BFloat16(&'a [u8]),
 }
 
-impl QuantizedBlock<'_> {
+/// One expert's own gathered-reduce weight, resolved by
+/// [`ExpertSource::entry`] at read time -- a [`QuantizedBlock`] naming its
+/// own codec (Q4_K, Q2_K, Q8_0, ... any of them, independently per entry,
+/// so a hi-precision copy and a lo-precision copy of the same layer's
+/// expert can coexist in one [`ExpertSource`]) plus the declared
+/// `[out_dim, in_dim]` shape [`run_reduce_quantized`]'s own program-derived
+/// `rows`/`k` must agree with before this entry's bytes are ever dotted
+/// against an activation row.
+#[derive(Debug, Clone, Copy)]
+pub struct ExpertEntry<'a> {
+    pub block: QuantizedBlock<'a>,
+    pub out_dim: u32,
+    pub in_dim: u32,
+    /// Captured once, at the start of the evaluation step that borrows this
+    /// entry's [`ExpertSource`] -- not consulted by [`run_reduce_quantized`]
+    /// itself (there is nothing yet to compare it against mid-step), and
+    /// carried here so a caller snapshotting a table for one step can tell
+    /// two entries for the same expert slot apart across steps. The borrow
+    /// itself is what actually prevents promotion/eviction from changing
+    /// bytes under a running step (see [`ExpertSource`]'s own doc); `epoch`
+    /// is the caller-visible label for which snapshot a step ran against.
+    pub epoch: u64,
+}
+
+/// A per-expert weight table for [`run_reduce_quantized`]'s gathered-reduce
+/// read path, standing in for one contiguous [`QuantizedBlock`] stack
+/// (`proxima-gguf::restack`'s own byte-concatenation contract) when a
+/// caller needs experts whose codec, or whose underlying allocation, differ
+/// from each other -- e.g. one expert promoted to a higher-precision copy
+/// while its siblings stay at the checkpoint's native codec.
+///
+/// Borrowed for the duration of exactly one evaluation step: the executor
+/// snapshots (builds) this table when the step begins, and every gathered
+/// read inside that step resolves through the SAME borrowed `entries`
+/// slice. A residency policy that promotes or evicts an expert between
+/// steps does so by handing the NEXT step's evaluation a new `ExpertSource`
+/// borrow over the new bytes -- it can never mutate bytes a running step
+/// already borrowed, because the borrow checker, not a runtime lock, is
+/// what forbids it. This is the whole of the lifetime contract: codec,
+/// address, and layout agree for the entry's whole `'a` lifetime, and that
+/// lifetime never outlives one step.
+///
+/// [`bind_moe_stacked_experts`](../../proxima-model-interop/src/bind.rs)'s
+/// own default construction slices one contiguous stack into `entries` that
+/// alias the stack's own bytes -- zero copy, and bit-identical to reading
+/// the stack directly (see `cpu.rs`'s own `expert_source_matches_stack_gather`
+/// test).
+#[derive(Debug, Clone, Copy)]
+pub struct ExpertSource<'a> {
+    entries: &'a [ExpertEntry<'a>],
+}
+
+impl<'a> ExpertSource<'a> {
+    /// Borrows `entries` as-is, one per expert index -- `entries[e]` is
+    /// expert `e`'s own weight. No validation here; [`Self::entry`] is
+    /// where an out-of-range or wrong-shape expert becomes a typed error,
+    /// at the point [`run_reduce_quantized`] actually needs it.
+    #[must_use]
+    pub const fn new(entries: &'a [ExpertEntry<'a>]) -> Self {
+        Self { entries }
+    }
+
+    /// Resolves expert `index`'s own entry, rejecting a shape that
+    /// disagrees with the program's own resolved `[expected_out,
+    /// expected_in]` for this gathered reduce -- [`TensorError::ExpertSourceShapeMismatch`],
+    /// naming `node` and `expert` for the caller, never a silent
+    /// wrong-shape dot product.
+    fn entry(
+        &self,
+        node: NodeId,
+        index: usize,
+        expected_out: u32,
+        expected_in: u32,
+    ) -> Result<ExpertEntry<'a>, TensorError> {
+        let entry = *self.entries.get(index).ok_or(TensorError::GatherIndexOutOfRange {
+            node,
+            index: index as i64,
+            extent: self.entries.len() as u64,
+        })?;
+        if entry.out_dim != expected_out || entry.in_dim != expected_in {
+            return Err(TensorError::ExpertSourceShapeMismatch {
+                node,
+                expert: index as u32,
+                entry_out: entry.out_dim,
+                entry_in: entry.in_dim,
+                expected_out,
+                expected_in,
+            });
+        }
+        Ok(entry)
+    }
+}
+
+/// [`ExpertSource`]'s own default construction: `stack` is one contiguous
+/// [`QuantizedBlock`] carrying `expert_count` back-to-back `[out_dim,
+/// in_dim]` slabs (`proxima-gguf::restack`'s own byte-concatenation
+/// contract) -- the entries this builds ALIAS `stack`'s own bytes, one
+/// `stack.packed_bytes().len() / expert_count`-wide slice per expert, zero
+/// copy, and bit-identical to reading the stack directly at
+/// `expert_index * per_expert_bytes` the way [`run_reduce_quantized`]'s own
+/// non-`ExpertSource` gather branch does today (see this crate's own
+/// `expert_source_matches_stack_gather` test).
+///
+/// # Errors
+/// [`TensorError::ExpertStackNotAligned`] if `stack`'s packed byte length is
+/// not a whole multiple of `expert_count`.
+#[must_use = "an unused expert table alias is a no-op"]
+pub fn expert_entries_from_stack(
+    stack: QuantizedBlock<'_>,
+    expert_count: usize,
+    out_dim: u32,
+    in_dim: u32,
+    epoch: u64,
+) -> Result<Vec<ExpertEntry<'_>>, TensorError> {
+    let bytes = stack
+        .packed_bytes()
+        .ok_or(TensorError::ExpertStackNotAligned { expert_count, bytes: 0 })?;
+    if expert_count == 0 || !bytes.len().is_multiple_of(expert_count) {
+        return Err(TensorError::ExpertStackNotAligned { expert_count, bytes: bytes.len() });
+    }
+    let per_expert_bytes = bytes.len() / expert_count;
+    Ok(bytes
+        .chunks_exact(per_expert_bytes)
+        .map(|chunk| ExpertEntry { block: stack.with_bytes(chunk), out_dim, in_dim, epoch })
+        .collect())
+}
+
+impl<'a> QuantizedBlock<'a> {
+    /// The packed byte slice underneath any codec, or `None` for
+    /// [`Self::Float32`] (which carries `&[f32]`, not packed bytes) --
+    /// [`ExpertSource`]'s own gather read uses this to swap an
+    /// [`ExpertEntry`]'s bytes into the per-codec matmul dispatch below
+    /// without re-deriving which variant carries a `&[u8]` payload a second
+    /// time. Bound to `'a`, not `&self`'s own borrow, so a caller reading
+    /// this out of a short-lived local (e.g. one loop iteration's own
+    /// resolved [`ExpertEntry`]) still gets bytes that outlive that local.
+    #[must_use]
+    pub const fn packed_bytes(&self) -> Option<&'a [u8]> {
+        match self {
+            QuantizedBlock::Float32(_) => None,
+            QuantizedBlock::Q4K(bytes)
+            | QuantizedBlock::Q5K(bytes)
+            | QuantizedBlock::Q3K(bytes)
+            | QuantizedBlock::Q2K(bytes)
+            | QuantizedBlock::Q6K(bytes)
+            | QuantizedBlock::Q8_0(bytes)
+            | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Q5_1(bytes)
+            | QuantizedBlock::Iq4Nl(bytes)
+            | QuantizedBlock::Iq2Xs(bytes)
+            | QuantizedBlock::Iq3Xxs(bytes)
+            | QuantizedBlock::Float16(bytes)
+            | QuantizedBlock::BFloat16(bytes) => Some(bytes),
+        }
+    }
+
+    /// Rewraps `self`'s own codec discriminant around a different `'a`
+    /// byte slice -- [`expert_entries_from_stack`]'s own per-expert slicing,
+    /// and `run_reduce_quantized`'s per-position gather read, both need "the
+    /// same codec, different bytes" without restating this crate's own
+    /// codec list a second time. [`Self::Float32`] cannot itself hold
+    /// `&'a [u8]` (it wraps `&'a [f32]`), so that arm rewraps to an
+    /// arbitrary packed variant (`Q4K`) instead -- never reached in
+    /// practice, since [`Self::packed_bytes`] already returns `None` for
+    /// `Float32` and every caller of this method checks that first before
+    /// ever reaching here. Kept total rather than partial so this stays a
+    /// plain function, not a fallible one, at every other call site.
+    #[must_use]
+    pub const fn with_bytes(&self, bytes: &'a [u8]) -> Self {
+        match self {
+            QuantizedBlock::Float32(_) => QuantizedBlock::Q4K(bytes),
+            QuantizedBlock::Q4K(_) => QuantizedBlock::Q4K(bytes),
+            QuantizedBlock::Q5K(_) => QuantizedBlock::Q5K(bytes),
+            QuantizedBlock::Q3K(_) => QuantizedBlock::Q3K(bytes),
+            QuantizedBlock::Q2K(_) => QuantizedBlock::Q2K(bytes),
+            QuantizedBlock::Q6K(_) => QuantizedBlock::Q6K(bytes),
+            QuantizedBlock::Q8_0(_) => QuantizedBlock::Q8_0(bytes),
+            QuantizedBlock::Q4_0(_) => QuantizedBlock::Q4_0(bytes),
+            QuantizedBlock::Q5_1(_) => QuantizedBlock::Q5_1(bytes),
+            QuantizedBlock::Iq4Nl(_) => QuantizedBlock::Iq4Nl(bytes),
+            QuantizedBlock::Iq2Xs(_) => QuantizedBlock::Iq2Xs(bytes),
+            QuantizedBlock::Iq3Xxs(_) => QuantizedBlock::Iq3Xxs(bytes),
+            QuantizedBlock::Float16(_) => QuantizedBlock::Float16(bytes),
+            QuantizedBlock::BFloat16(_) => QuantizedBlock::BFloat16(bytes),
+        }
+    }
+
     /// Element count this block decodes to, derived from its own codec's
     /// block geometry -- [`proxima_gguf::quant`]'s per-format
     /// `blocks_for_bytes`/`elements_for_blocks` pair, never `bytes.len()`
@@ -8166,11 +8352,18 @@ pub fn emit_expert_selection_event() {
 /// flat row dimension was split into. `leading_total = output.len() / rows`
 /// then folds every one of those non-reduced output axes (`s`, `h`, `d`,
 /// ...) into one batch loop, one [`matmul_q4k_f32`] call per position.
+// `expert_source` is this slice's own addition, pushing this already-large
+// interpreter arm one argument past clippy's default threshold; splitting
+// it into a params struct here would cost every existing positional call
+// site (there is exactly one) more churn than the eight arguments cost a
+// reader.
+#[allow(clippy::too_many_arguments)]
 fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
     weight_block: QuantizedBlock,
     weight_node: NodeId,
+    expert_source: Option<ExpertSource<'_>>,
     session: Option<&MatmulSession<'_>>,
     exact_activations: bool,
     output: &mut [f32],
@@ -8510,6 +8703,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     counter!(instrument::MATMUL_POSITION_LOOP_ITERS, leading_total as u64);
     for position in 0..leading_total {
         let activation_row = &activation[position * k..(position + 1) * k];
+        let mut expert_entry: Option<ExpertEntry<'_>> = None;
         let weights: &[u8] = if let Some(gather) = weight_gather.as_ref() {
             unflatten_into(position as u64, &leading_extents, &mut leading_coordinate);
             merge_coordinates_into(
@@ -8542,13 +8736,36 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 expert_index as usize,
                 position,
             );
-            let start = expert_index as usize * per_expert_bytes;
-            weights
-                .get(start..start + per_expert_bytes)
-                .ok_or_else(shape_error)?
+            // An `ExpertSource` resolves expert `expert_index`'s own entry
+            // instead of slicing a fixed offset out of one contiguous
+            // stack -- each entry names its own codec and bytes
+            // independently (see `ExpertSource`'s own doc), so a mixed
+            // table (e.g. one promoted expert at a higher precision) reads
+            // correctly here without this loop knowing anything changed.
+            if let Some(source) = expert_source.as_ref() {
+                let rows_u32 = u32::try_from(rows).map_err(|_| shape_error())?;
+                let k_u32 = u32::try_from(k).map_err(|_| shape_error())?;
+                let entry =
+                    source.entry(resolved.node, expert_index as usize, rows_u32, k_u32)?;
+                let bytes = entry.block.packed_bytes().ok_or_else(shape_error)?;
+                expert_entry = Some(entry);
+                bytes
+            } else {
+                let start = expert_index as usize * per_expert_bytes;
+                weights
+                    .get(start..start + per_expert_bytes)
+                    .ok_or_else(shape_error)?
+            }
         } else {
             weights
         };
+        // `expert_entry` names its own codec (possibly different from
+        // `weight_block`'s -- a mixed-codec `ExpertSource`), so the
+        // per-position dispatch below matches on ITS discriminant when one
+        // was resolved, falling back to `weight_block`'s own discriminant
+        // (paired with `weights` above, already re-sliced for this
+        // position) on every path that predates `ExpertSource`.
+        let dispatch_block = expert_entry.map_or(weight_block, |entry| entry.block);
         // proxima-debugger diagnostic: per-position, per-codec call timer
         // plus `rows * k` mac count -- localizes whether the missing 2x is
         // inside one codec's kernel (ns/mac far above the isolated
@@ -8557,7 +8774,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         // position, never folded into a single wider row-batch).
         #[cfg(feature = "instrument")]
         let diag_call_started = instrument::read_ticks();
-        let result = match weight_block {
+        let result = match dispatch_block {
             QuantizedBlock::Float32(_) => return Err(shape_error()),
             QuantizedBlock::Q4K(_) => {
                 // reachable when `exact_activations` is set (the wide fold
@@ -8706,6 +8923,13 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
             buffers,
             weight_block,
             weight_node,
+            // No caller threads a per-step `ExpertSource` snapshot through
+            // `evaluate_quantized`'s own `quantized_weights` map yet -- this
+            // slice builds the indirection and proves it at
+            // `run_reduce_quantized`'s own boundary; wiring a snapshot
+            // through the executor's step setup is a follow-on, not this
+            // change's scope.
+            None,
             session,
             exact_activations,
             output,
@@ -28647,6 +28871,394 @@ mod tests {
                 "token {token} routed to expert {expert}: gathered result does not bit-match that \
                  expert's own standalone matmul call"
             );
+        }
+    }
+
+    /// Shared rig for the `ExpertSource` tests below: binds
+    /// [`gathered_quantized_matmul_program`]'s program, resolves the
+    /// gathered reduce node's own [`BoundOp`], and hands back everything
+    /// [`run_reduce_quantized`] itself needs to run that ONE node directly
+    /// -- the same setup [`evaluate_quantized_with_scratch_impl`] does for a
+    /// whole program, narrowed to one node so these tests can pass an
+    /// [`ExpertSource`] `run_reduce_quantized` has no public plumbing to
+    /// reach yet (see this crate's own call site in
+    /// `run_reduce_with_quantized_weights`, which always passes `None`).
+    fn resolve_gathered_reduce_for_expert_source_test<'a>(
+        program: &'a [Op],
+        sum: NodeId,
+        route_data: &'a [f32],
+        activation: &'a [f32],
+    ) -> (BoundOp, Vec<Option<Cow<'a, [f32]>>>, NodeId) {
+        let shapes = shape::infer(program, &[]).expect("shape inference succeeds");
+        let resolved =
+            bind::bind(program, &shapes, &[sum], NumericPolicy::bit_exact()).expect("bind succeeds");
+        let block_nodes = block_node_ids(program);
+        let mut buffers: Vec<Option<Cow<'a, [f32]>>> = vec![None; program.len()];
+        // `gathered_quantized_matmul_program` emits exactly three `Op::Input`
+        // nodes in this order: the packed weight (skipped -- it never rides
+        // in `buffers`, only `weight_block`/`ExpertSource` below), the route
+        // indices, then the activation.
+        let weight_node = block_nodes[0];
+        let route_node = block_nodes[1];
+        let activation_node = block_nodes[2];
+        buffers[route_node.0 as usize] = Some(Cow::Borrowed(route_data));
+        buffers[activation_node.0 as usize] = Some(Cow::Borrowed(activation));
+        let bound = resolved
+            .into_iter()
+            .find(|op| op.node == sum)
+            .expect("the gathered reduce node is present in the bound program");
+        (bound, buffers, weight_node)
+    }
+
+    /// [`ExpertSource`]'s zero-copy default: an alias table built by
+    /// [`expert_entries_from_stack`] over the SAME contiguous `Q4_K` stack
+    /// [`evaluate_quantized_gathered_moe_weight_matches_the_routed_experts_own_matmul`]
+    /// reads directly produces a bit-identical product for every routed
+    /// token -- proving the indirection changes nothing when nothing asked
+    /// it to.
+    #[test]
+    fn expert_source_matches_stack_gather() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let n_experts: u32 = 3;
+        let rows: u32 = 4;
+        let k = QK_K as u32;
+        let seq: u32 = 3;
+        let route_data = [2.0f32, 0.0, 1.0];
+        let expert_scales = [1.0f32, 5.0, 20.0];
+
+        let mut expert_blocks: Vec<Vec<u8>> = Vec::new();
+        for (expert, &scale) in expert_scales.iter().enumerate() {
+            let weight_f32: Vec<f32> = random_vec(301 + expert as u64, rows as usize * k as usize)
+                .into_iter()
+                .map(|value| (value * 4.0 - 2.0) * scale)
+                .collect();
+            let block_bytes = BLOCK_BYTES;
+            let mut blocks = vec![0u8; rows as usize * block_bytes];
+            for (row_f32, row_blocks) in
+                weight_f32.chunks_exact(k as usize).zip(blocks.chunks_exact_mut(block_bytes))
+            {
+                quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+            }
+            expert_blocks.push(blocks);
+        }
+        let stacked_weight: Vec<u8> = expert_blocks.iter().flatten().copied().collect();
+        let activation: Vec<f32> = random_vec(311, seq as usize * k as usize)
+            .into_iter()
+            .map(|value| value * 2.0 - 1.0)
+            .collect();
+
+        let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
+        let weight_block = QuantizedBlock::Q4K(&stacked_weight);
+        let entries =
+            expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
+                .expect("a block-aligned contiguous stack slices evenly");
+        let source = ExpertSource::new(&entries);
+
+        let (resolved, buffers, weight_node) = resolve_gathered_reduce_for_expert_source_test(
+            &program,
+            sum,
+            &route_data,
+            &activation,
+        );
+        let mut via_source = vec![0.0f32; seq as usize * rows as usize];
+        run_reduce_quantized(
+            &resolved,
+            &buffers,
+            weight_block,
+            weight_node,
+            Some(source),
+            None,
+            false,
+            &mut via_source,
+        )
+        .expect("ExpertSource-backed gather evaluates");
+
+        let mut via_stack = vec![0.0f32; seq as usize * rows as usize];
+        run_reduce_quantized(
+            &resolved,
+            &buffers,
+            weight_block,
+            weight_node,
+            None,
+            None,
+            false,
+            &mut via_stack,
+        )
+        .expect("the plain stack gather evaluates");
+
+        assert_eq!(
+            via_source, via_stack,
+            "an ExpertSource aliasing one contiguous stack must be bit-identical to reading \
+             that stack directly"
+        );
+    }
+
+    /// A mixed-codec `ExpertSource` -- expert 1 re-encoded `Q2_K` from the
+    /// same f32 rows, experts 0 and 2 left at their native `Q4_K` -- reads
+    /// each expert through its OWN codec: routing to expert 1 must match a
+    /// direct `Q2_K` dequantize-and-fold, not the `Q4_K` bytes at the same
+    /// stack offset.
+    #[test]
+    fn expert_source_resolves_each_entry_through_its_own_codec() {
+        use proxima_gguf::quant::q2_k;
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let n_experts: u32 = 3;
+        let rows: u32 = 4;
+        let k = QK_K as u32;
+        let seq: u32 = 1;
+        // Route the single token straight at the re-encoded expert.
+        let route_data = [1.0f32];
+        let expert_scales = [1.0f32, 5.0, 20.0];
+
+        let mut expert_f32: Vec<Vec<f32>> = Vec::new();
+        let mut expert_blocks: Vec<Vec<u8>> = Vec::new();
+        for (expert, &scale) in expert_scales.iter().enumerate() {
+            let weight_f32: Vec<f32> = random_vec(401 + expert as u64, rows as usize * k as usize)
+                .into_iter()
+                .map(|value| (value * 4.0 - 2.0) * scale)
+                .collect();
+            let block_bytes = BLOCK_BYTES;
+            let mut blocks = vec![0u8; rows as usize * block_bytes];
+            for (row_f32, row_blocks) in
+                weight_f32.chunks_exact(k as usize).zip(blocks.chunks_exact_mut(block_bytes))
+            {
+                quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+            }
+            expert_blocks.push(blocks);
+            expert_f32.push(weight_f32);
+        }
+        let stacked_weight: Vec<u8> = expert_blocks.iter().flatten().copied().collect();
+
+        let q2k_block_bytes = q2_k::BLOCK_BYTES;
+        let mut expert1_q2k = vec![0u8; rows as usize * q2k_block_bytes];
+        for (row_f32, row_blocks) in expert_f32[1]
+            .chunks_exact(k as usize)
+            .zip(expert1_q2k.chunks_exact_mut(q2k_block_bytes))
+        {
+            q2_k::quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+        }
+
+        let activation: Vec<f32> = random_vec(411, seq as usize * k as usize)
+            .into_iter()
+            .map(|value| value * 2.0 - 1.0)
+            .collect();
+
+        let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
+        let weight_block = QuantizedBlock::Q4K(&stacked_weight);
+        let mut entries =
+            expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
+                .expect("a block-aligned contiguous stack slices evenly");
+        entries[1] = ExpertEntry {
+            block: QuantizedBlock::Q2K(&expert1_q2k),
+            out_dim: rows,
+            in_dim: k,
+            epoch: 1,
+        };
+        let source = ExpertSource::new(&entries);
+
+        let (resolved, buffers, weight_node) = resolve_gathered_reduce_for_expert_source_test(
+            &program,
+            sum,
+            &route_data,
+            &activation,
+        );
+        let mut actual = vec![0.0f32; seq as usize * rows as usize];
+        run_reduce_quantized(
+            &resolved,
+            &buffers,
+            weight_block,
+            weight_node,
+            Some(source),
+            None,
+            false,
+            &mut actual,
+        )
+        .expect("mixed-codec ExpertSource evaluates");
+
+        let expected = matmul_q2k_f32(&expert1_q2k, rows as usize, &activation)
+            .expect("the re-encoded expert's own standalone Q2_K matmul evaluates");
+        assert_eq!(
+            actual, expected,
+            "routing to a Q2_K-re-encoded entry must match that entry's own codec, not the \
+             Q4_K bytes the stack carries at the same offset"
+        );
+    }
+
+    /// Swapping one `ExpertSource` entry between two evaluations changes
+    /// only that expert's own product, by exactly the codec's own error --
+    /// the second evaluation must equal the direct `Q2_K` product, never
+    /// the first evaluation's `Q4_K` product, proving the borrow (not a
+    /// mutation) is what "promotion" means here: two DISTINCT tables, one
+    /// per step, never one table mutated mid-step.
+    #[test]
+    fn expert_source_swap_between_evaluations_reads_the_new_entry_cleanly() {
+        use proxima_gguf::quant::q2_k;
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let n_experts: u32 = 2;
+        let rows: u32 = 4;
+        let k = QK_K as u32;
+        let seq: u32 = 1;
+        let route_data = [1.0f32];
+        let expert_scales = [1.0f32, 5.0];
+
+        let mut expert_f32: Vec<Vec<f32>> = Vec::new();
+        let mut expert_blocks: Vec<Vec<u8>> = Vec::new();
+        for (expert, &scale) in expert_scales.iter().enumerate() {
+            let weight_f32: Vec<f32> = random_vec(501 + expert as u64, rows as usize * k as usize)
+                .into_iter()
+                .map(|value| (value * 4.0 - 2.0) * scale)
+                .collect();
+            let block_bytes = BLOCK_BYTES;
+            let mut blocks = vec![0u8; rows as usize * block_bytes];
+            for (row_f32, row_blocks) in
+                weight_f32.chunks_exact(k as usize).zip(blocks.chunks_exact_mut(block_bytes))
+            {
+                quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+            }
+            expert_blocks.push(blocks);
+            expert_f32.push(weight_f32);
+        }
+        let stacked_weight: Vec<u8> = expert_blocks.iter().flatten().copied().collect();
+
+        let q2k_block_bytes = q2_k::BLOCK_BYTES;
+        let mut expert1_q2k = vec![0u8; rows as usize * q2k_block_bytes];
+        for (row_f32, row_blocks) in expert_f32[1]
+            .chunks_exact(k as usize)
+            .zip(expert1_q2k.chunks_exact_mut(q2k_block_bytes))
+        {
+            q2_k::quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+        }
+
+        let activation: Vec<f32> = random_vec(511, seq as usize * k as usize)
+            .into_iter()
+            .map(|value| value * 2.0 - 1.0)
+            .collect();
+
+        let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
+        let weight_block = QuantizedBlock::Q4K(&stacked_weight);
+        let entries_q4k =
+            expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
+                .expect("a block-aligned contiguous stack slices evenly");
+
+        let (resolved, buffers, weight_node) = resolve_gathered_reduce_for_expert_source_test(
+            &program,
+            sum,
+            &route_data,
+            &activation,
+        );
+
+        let mut first = vec![0.0f32; seq as usize * rows as usize];
+        run_reduce_quantized(
+            &resolved,
+            &buffers,
+            weight_block,
+            weight_node,
+            Some(ExpertSource::new(&entries_q4k)),
+            None,
+            false,
+            &mut first,
+        )
+        .expect("the first (Q4_K) evaluation succeeds");
+
+        let mut entries_swapped = entries_q4k.clone();
+        entries_swapped[1] = ExpertEntry {
+            block: QuantizedBlock::Q2K(&expert1_q2k),
+            out_dim: rows,
+            in_dim: k,
+            epoch: 1,
+        };
+        let mut second = vec![0.0f32; seq as usize * rows as usize];
+        run_reduce_quantized(
+            &resolved,
+            &buffers,
+            weight_block,
+            weight_node,
+            Some(ExpertSource::new(&entries_swapped)),
+            None,
+            false,
+            &mut second,
+        )
+        .expect("the second (Q2_K) evaluation, over a NEW borrowed table, succeeds");
+
+        assert_ne!(
+            first, second,
+            "swapping expert 1's own entry between two evaluations must change that expert's \
+             own product"
+        );
+        let expected_q2k = matmul_q2k_f32(&expert1_q2k, rows as usize, &activation)
+            .expect("the swapped-in expert's own standalone Q2_K matmul evaluates");
+        assert_eq!(
+            second, expected_q2k,
+            "the second evaluation must read the SWAPPED entry's own codec exactly, not a \
+             stale Q4_K read left over from the first evaluation's table"
+        );
+    }
+
+    /// [`ExpertSource::entry`]'s own shape guard: an entry declaring a
+    /// different `[out_dim, in_dim]` than the program's own resolved
+    /// expert shape is rejected by name, never silently dotted against the
+    /// wrong-length activation row.
+    #[test]
+    fn expert_source_rejects_an_entry_whose_shape_disagrees_with_the_program() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let n_experts: u32 = 2;
+        let rows: u32 = 4;
+        let k = QK_K as u32;
+        let seq: u32 = 1;
+        let route_data = [0.0f32];
+
+        let mut expert_blocks: Vec<Vec<u8>> = Vec::new();
+        for expert in 0..n_experts {
+            let weight_f32: Vec<f32> = random_vec(601 + u64::from(expert), rows as usize * k as usize);
+            let block_bytes = BLOCK_BYTES;
+            let mut blocks = vec![0u8; rows as usize * block_bytes];
+            for (row_f32, row_blocks) in
+                weight_f32.chunks_exact(k as usize).zip(blocks.chunks_exact_mut(block_bytes))
+            {
+                quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+            }
+            expert_blocks.push(blocks);
+        }
+        let stacked_weight: Vec<u8> = expert_blocks.iter().flatten().copied().collect();
+        let activation: Vec<f32> = random_vec(611, seq as usize * k as usize);
+
+        let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
+        let weight_block = QuantizedBlock::Q4K(&stacked_weight);
+        let mut entries =
+            expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
+                .expect("a block-aligned contiguous stack slices evenly");
+        // Expert 0's own entry now lies about its row count.
+        entries[0].out_dim = rows + 1;
+
+        let (resolved, buffers, weight_node) = resolve_gathered_reduce_for_expert_source_test(
+            &program,
+            sum,
+            &route_data,
+            &activation,
+        );
+        let mut output = vec![0.0f32; seq as usize * rows as usize];
+        let error = run_reduce_quantized(
+            &resolved,
+            &buffers,
+            weight_block,
+            weight_node,
+            Some(ExpertSource::new(&entries)),
+            None,
+            false,
+            &mut output,
+        )
+        .expect_err("a shape-mismatched entry must be rejected, not silently dotted");
+        match error {
+            TensorError::ExpertSourceShapeMismatch { expert, entry_out, expected_out, .. } => {
+                assert_eq!(expert, 0, "expert 0's own entry is the one that lied about its shape");
+                assert_eq!(entry_out, rows + 1);
+                assert_eq!(expected_out, rows);
+            }
+            other => panic!("expected ExpertSourceShapeMismatch, got {other}"),
         }
     }
 
