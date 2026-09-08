@@ -5467,11 +5467,16 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
             reason: "cached attention requires eight or nine affine, gather-free operands",
         });
     }
-    // The optional ninth operand is the single-range fusion's runtime
-    // `cached_len` scalar (see `BoundOpKind::CachedAttention`'s own doc) --
-    // read here, not looped over with the eight Q/K/V sources below, since
-    // it is a bare rank-0 value rather than a contiguous tensor tail.
-    let dynamic_new_upper_inclusive = match operands.get(8) {
+    // The optional ninth operand shares its slot between two DIFFERENT
+    // runtime scalars, discriminated by `cached_key_rows`
+    // (`BoundOpKind::CachedAttention`'s own doc): `cached_key_rows == 0`
+    // (single-range fusion) is the real `new_upper_inclusive`; `cached_key_
+    // rows != 0` (two-range fusion, `cached_attention_candidates`) is the
+    // CACHED range's own live row count, substituted for the compiled
+    // (bucket-padded) `cached_key_rows` below. Read here, not looped over
+    // with the eight Q/K/V sources below, since it is a bare rank-0 value
+    // rather than a contiguous tensor tail.
+    let dynamic_ninth = match operands.get(8) {
         Some((node, layout, _)) => {
             if layout.base != 0 || !layout.strides.is_empty() {
                 return Err(TensorError::NotLowerable {
@@ -5484,20 +5489,41 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
                 node: resolved.node,
                 reason: "cached attention's cached_len operand is empty",
             })?;
-            Some(cached_len_value as i64)
+            Some(cached_len_value)
         }
         None => None,
     };
-    let new_upper_inclusive = dynamic_new_upper_inclusive.unwrap_or(*new_upper_inclusive);
-    // The runtime `cached_len` value is a live position count, never larger
-    // than the compiled buffer extent it indexes into -- a value at or past
-    // `new_key_rows` means the caller handed a stale or wrong-bucket length.
-    if dynamic_new_upper_inclusive.is_some() && new_upper_inclusive >= *new_key_rows as i64 {
-        return Err(TensorError::NotLowerable {
-            node: resolved.node,
-            reason: "cached attention's runtime cached_len operand exceeds its buffer extent",
-        });
-    }
+    let (new_upper_inclusive, live_cached_key_rows) = match dynamic_ninth {
+        Some(cached_len_value) if *cached_key_rows == 0 => {
+            let dynamic_new_upper_inclusive = cached_len_value as i64;
+            // The runtime `cached_len` value is a live position count, never
+            // larger than the compiled buffer extent it indexes into -- a
+            // value at or past `new_key_rows` means the caller handed a
+            // stale or wrong-bucket length.
+            if dynamic_new_upper_inclusive >= *new_key_rows as i64 {
+                return Err(TensorError::NotLowerable {
+                    node: resolved.node,
+                    reason: "cached attention's runtime cached_len operand exceeds its buffer extent",
+                });
+            }
+            (dynamic_new_upper_inclusive, *cached_key_rows)
+        }
+        Some(cached_len_value) => {
+            let live = cached_len_value as u64;
+            // The live cached length a `kv-capacity-bucket` caller rounded
+            // UP to the compiled `cached_key_rows` -- never past it, or the
+            // caller handed a length that does not fit the bucket this
+            // `BoundOp` was compiled for.
+            if live > *cached_key_rows {
+                return Err(TensorError::NotLowerable {
+                    node: resolved.node,
+                    reason: "cached attention's runtime cached_len operand exceeds its buffer extent",
+                });
+            }
+            (*new_upper_inclusive, live)
+        }
+        None => (*new_upper_inclusive, *cached_key_rows),
+    };
     let mut sources = operands.iter().take(8).map(|(node, layout, _)| {
         if layout.base != 0 || layout.strides.last().copied() != Some(1) {
             return Err(TensorError::NotLowerable {
@@ -5539,6 +5565,26 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         node: resolved.node,
         reason: "cached attention new-value source is missing",
     })??;
+    // `two_range_cached_bound` (`live_cached_key_rows < *cached_key_rows`)
+    // takes only the LIVE prefix of each cached-range buffer: every padded
+    // row a `kv-capacity-bucket` caller rounded `cached_key_rows` up past
+    // lives at `[live_cached_key_rows, *cached_key_rows)`
+    // (`proxima_tensor::bind::BoundOpKind::CachedAttention`'s own doc) --
+    // slicing the prefix here, rather than passing the full compiled-size
+    // buffer through, is what lets `AttentionExtents.cached_key_rows` below
+    // carry the live count without `stream_cached_attention_split_gqa`'s own
+    // exact-length shape check rejecting the mismatch.
+    let pair_dim = (*head_dim / 2) as usize;
+    let live_cached_key_rows_usize = live_cached_key_rows as usize;
+    let live_pair_len = live_cached_key_rows_usize * *kv_heads as usize * pair_dim;
+    let live_value_len = live_cached_key_rows_usize * *kv_heads as usize * *head_dim as usize;
+    let out_of_range = TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "cached attention's live cached_key_rows exceeds its own buffer length",
+    };
+    let cached_key_even = cached_key_even.get(..live_pair_len).ok_or(out_of_range.clone())?;
+    let cached_key_odd = cached_key_odd.get(..live_pair_len).ok_or(out_of_range.clone())?;
+    let cached_value = cached_value.get(..live_value_len).ok_or(out_of_range)?;
     let streamed = crate::physical::stream_cached_attention_split_gqa(
         [query_even, query_odd],
         [
@@ -5549,7 +5595,7 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         output,
         crate::physical::AttentionExtents {
             query_rows: *query_rows,
-            cached_key_rows: *cached_key_rows,
+            cached_key_rows: live_cached_key_rows,
             new_key_rows: *new_key_rows,
             kv_heads: *kv_heads,
             query_groups: *query_groups,

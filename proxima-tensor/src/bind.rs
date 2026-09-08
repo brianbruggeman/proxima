@@ -227,17 +227,34 @@ pub enum BoundOpKind {
     /// One backend-neutral cached-attention step. The operands are the
     /// already-bound Q/K/V sources; CPU and GPU own only the kernel body.
     ///
-    /// `operands` carries exactly eight Q/K/V sources for a two-range fusion
-    /// (`cached_attention_candidates`) and a ninth, rank-0 `cached_len`
-    /// scalar for a single-range fusion
-    /// (`cached_attention_single_range_candidates`): that call's
-    /// `causal_mask_merged` band depends on the true `cached_len` VALUE, not
-    /// on any shape the bind-time extents alone determine (`kv-capacity-
-    /// bucket` widens the key extent past the merged length, so a shape
-    /// difference silently overstates it). `new_upper_inclusive` is the
-    /// bound an executor uses only when `operands.len() == 8`; when it is 9,
-    /// every executor reads the real bound from `operands[8]`'s buffer at
-    /// run time instead, and `new_upper_inclusive` here is unused filler.
+    /// `operands` carries exactly eight Q/K/V sources when neither range is
+    /// bucketed, and a NINTH, rank-0 runtime scalar in two shapes that share
+    /// this one slot rather than each minting its own
+    /// (`cached_key_rows != 0` is the discriminator both an executor and
+    /// `entry_name` read to tell them apart — no tenth operand, because the
+    /// two shapes are never both live on one op):
+    ///
+    /// - `cached_key_rows == 0` (`cached_attention_single_range_candidates`):
+    ///   the whole context is folded into the "new" slot, and the ninth
+    ///   operand is the real `cached_len` `causal_mask_merged`'s band
+    ///   depends on — a VALUE, not a shape, because `kv-capacity-bucket`
+    ///   widens the key extent past the merged length and a shape
+    ///   difference alone would silently overstate it. `new_upper_inclusive`
+    ///   is unused filler in this case; every executor reads the real bound
+    ///   from `operands[8]` at run time instead.
+    /// - `cached_key_rows != 0` (`cached_attention_candidates`'s own
+    ///   two-range fusion): the cached and new ranges are still separate,
+    ///   and the ninth operand is the CACHED range's own live row count —
+    ///   a caller may round `cached_key_rows` up to a `kv_extent` bucket
+    ///   boundary so one compiled `Plan` serves every real length inside
+    ///   it, and every executor substitutes this runtime count for the
+    ///   compiled `cached_key_rows` wherever it addresses or bounds the
+    ///   cached range, excluding the bucket's own zero-padded tail rows
+    ///   without a mask node anywhere in the graph
+    ///   (`cached_attention_candidates`'s own doc on why no such node
+    ///   exists). `cached_lower_inclusive`/`new_upper_inclusive` are
+    ///   unaffected — this bound is query-independent, unlike the
+    ///   single-range case's causal band.
     CachedAttention {
         operands: BoundOperands,
         query_rows: u64,
@@ -2369,6 +2386,24 @@ fn exact_merged_causal_mask_cached_len(program: &[Op], node: NodeId) -> Option<N
     matches!(program.get(cached_len.0 as usize), Some(Op::Input { .. })).then_some(*cached_len)
 }
 
+/// The rank-0 [`Op::Input`] leaf named `name`, found by NAME rather than by
+/// arithmetic shape — the precedent [`Op::Input`]'s own doc states
+/// (`"name is identity, not decoration"`): a distributed cut edge delivers a
+/// tensor over a wire keyed by name, and this is the same lookup, run
+/// locally. [`cached_attention_candidates`]'s own `cached_len` operand needs
+/// this rather than [`exact_merged_causal_mask_cached_len`]'s mask-arithmetic
+/// walk because a two-range program's cached-range attention feeds no
+/// arithmetic from `cached_len` at all — the bucket's padding is excluded by
+/// a runtime BOUND on the fused op, never by a mask node in this graph, so
+/// there is no expression here to walk backward from.
+#[cfg(feature = "cached-attention-streaming")]
+fn find_named_input(program: &[Op], name: &str) -> Option<NodeId> {
+    program.iter().enumerate().find_map(|(position, op)| {
+        let is_named = matches!(op, Op::Input { .. }) && op.name() == Some(name);
+        is_named.then_some(NodeId(position as u32))
+    })
+}
+
 #[cfg(feature = "cached-attention-streaming")]
 fn cached_attention_candidates(
     program: &[Op],
@@ -2585,6 +2620,33 @@ fn cached_attention_candidates(
         }
         if !resolved.iter().any(|bound| bound.node == output) {
             continue;
+        }
+        // Every caller of `mistral_cached_forward_program_with_experts`
+        // supplies a rank-0 "cached_len" `Op::Input` unconditionally
+        // (`find_named_input`'s own doc) -- when a program predates that
+        // (a hand-built test fixture with no such leaf), fall back to the
+        // eight-operand, unbounded shape rather than erroring: today's
+        // behavior for every caller that never opted into bucketing.
+        // `cached_key_shape[0] == 0` (the very first decode step, before any
+        // token is cached) is skipped even when the leaf exists: an empty
+        // cached range has no padding to exclude, and giving it the ninth
+        // operand anyway would make its `cached_key_rows == 0` collide with
+        // `single_range_dynamic`'s own discriminator (`BoundOpKind::
+        // CachedAttention`'s own doc) -- the two shapes are structurally
+        // indistinguishable at that value, so this is the one case that
+        // must stay eight-operand regardless of bucketing.
+        if cached_key_shape[0] > 0
+            && let Some(cached_len_node) = find_named_input(program, "cached_len")
+            && shapes.of(cached_len_node).is_empty()
+        {
+            operands.push((
+                cached_len_node,
+                Layout {
+                    base: 0,
+                    strides: SmallVec::new(),
+                },
+                None,
+            ));
         }
         let fused = BoundOp {
             node: output,

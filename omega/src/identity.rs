@@ -311,13 +311,20 @@ pub(crate) fn kernel_identity(
             new_upper_inclusive,
             ..
         } => {
-            // `operand_count == 9` means the ninth operand carries the real
-            // `new_upper_inclusive` at run time -- see `BoundOpKind::
-            // CachedAttention`'s own doc -- so the identity names the
+            // `operand_count == 9` names a runtime ninth operand, but two
+            // DIFFERENT scalars share that slot, discriminated by
+            // `cached_key_rows` (`BoundOpKind::CachedAttention`'s own doc).
+            // `cached_key_rows == 0` (single-range) means the ninth operand
+            // IS the real `new_upper_inclusive`, so the identity names the
             // STRUCTURE ("dyn") rather than that filler value, which must
             // never appear to vary the key across calls whose real bound
-            // differs.
-            let upper_token = if operand_count == 9 {
+            // differs. `cached_key_rows != 0` (two-range, cached-bound) bakes
+            // `new_upper_inclusive` as a compiled `constexpr` instead (`omega::
+            // msl::render_cached_attention`'s own doc) -- collapsing it to
+            // "dyn" here would let two ops with different real bounds share
+            // one compiled kernel with the WRONG bound baked in, so this path
+            // keeps the real, varying token.
+            let upper_token = if operand_count == 9 && *cached_key_rows == 0 {
                 String::from("dyn")
             } else {
                 signed_name_part(*new_upper_inclusive)
@@ -331,8 +338,19 @@ pub(crate) fn kernel_identity(
             // compiled for the wrong chunk count.
             let context_chunks =
                 crate::msl::context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy);
+            // `two_range_cached_bound` (nine operands, `cached_key_rows !=
+            // 0`) renders a runtime `long cached_key_rows = (long)in8[0];`
+            // read where the eight-operand form bakes the identical-looking
+            // `c{cached_key_rows}` token as a compiled `constexpr` -- without
+            // this marker the two would collide on one identity string
+            // despite generating different kernel bodies.
+            let cached_bound_token = if operand_count == 9 && *cached_key_rows != 0 {
+                "_cb"
+            } else {
+                ""
+            };
             format!(
-                "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{context_chunks}",
+                "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{context_chunks}{cached_bound_token}",
                 scale.to_bits(),
                 signed_name_part(*cached_lower_inclusive),
             )

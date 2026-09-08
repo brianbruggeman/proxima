@@ -2468,7 +2468,14 @@ fn grid_threads(
             // `final_store` branch keeps grid width and kernel body in
             // lock-step: both flip together, at the same context length.
             let context_length = *cached_key_rows + *new_key_rows;
-            let (chunks, splits) = if resolved.operands().len() == 9 {
+            // Only the single-range fused path (nine operands, `cached_key_rows
+            // == 0`) widens to the compiled cap -- `two_range_cached_bound`
+            // (nine operands, `cached_key_rows != 0`) already dispatches
+            // against a bucket-padded, compile-time-fixed `context_length`, so
+            // its live `chunks`/`splits` never grow between calls the way the
+            // single-range path's do (`render_cached_attention`'s own doc).
+            let single_range_dynamic = resolved.operands().len() == 9 && *cached_key_rows == 0;
+            let (chunks, splits) = if single_range_dynamic {
                 (
                     crate::sized::ATTENTION_CONTEXT_CHUNK_CAP,
                     if cached_attention_merge_needed(context_length, numeric_policy) {
@@ -2617,24 +2624,25 @@ fn entry_name(resolved: &BoundOp) -> String {
             new_upper_inclusive,
             ..
         } => {
-            // `operand_count == 9` means the ninth operand carries the real
-            // `new_upper_inclusive` at run time (see `BoundOpKind::
-            // CachedAttention`'s own doc) -- the static field here is unused
-            // filler in that case, so the plan-cache key names the STRUCTURE
-            // ("dyn") rather than that filler value, which must never appear
-            // to vary the key across calls whose real bound differs. On this
-            // SAME path, `cached_key_rows`/`new_key_rows` are also runtime
-            // `Uniforms` fields now (redesign §5 option 2's
-            // `render_cached_attention`), so the row-count tokens drop from
-            // the name entirely -- two different `kv-capacity-bucket`
-            // extents share one compiled kernel, keyed only by the compiled
-            // MAXIMUM chunk count (`_x{cap}`), never by the live capacity.
-            let upper_token = if operand_count == 9 {
+            // `operand_count == 9` names a runtime ninth operand, but that
+            // operand carries two DIFFERENT scalars discriminated by
+            // `cached_key_rows` (`BoundOpKind::CachedAttention`'s own doc):
+            // `cached_key_rows == 0` is `single_range_dynamic` -- the ninth
+            // operand IS the real `new_upper_inclusive`, so the static field
+            // here is unused filler and the key names the STRUCTURE ("dyn")
+            // rather than that filler value. `cached_key_rows != 0` is
+            // `two_range_cached_bound` -- the ninth operand is the CACHED
+            // range's own live row count, but `new_upper_inclusive` is still
+            // the real, query-independent compiled bound (this path's causal
+            // band never depends on it), so that token is real, not "dyn".
+            let single_range_dynamic = operand_count == 9 && *cached_key_rows == 0;
+            let two_range_cached_bound = operand_count == 9 && *cached_key_rows != 0;
+            let upper_token = if single_range_dynamic {
                 "dyn".to_string()
             } else {
                 signed_name_part(*new_upper_inclusive)
             };
-            if operand_count == 9 {
+            if single_range_dynamic {
                 // `_b{width}` names the build-time block-staging width
                 // (`block_width_for`) -- a build-time constant, so a build
                 // whose `OMEGA_ATTENTION_BLOCK_WIDTH` override changed emits
@@ -2647,7 +2655,14 @@ fn entry_name(resolved: &BoundOp) -> String {
                 // compiled kernel, but the two regimes render genuinely
                 // different MSL text (a different `tgid` decode -- see
                 // `render_cached_attention`'s own doc) and so cannot be
-                // allowed to collide on the same cache key.
+                // allowed to collide on the same cache key. On this SAME
+                // path, `cached_key_rows`/`new_key_rows` are also runtime
+                // `Uniforms` fields now (redesign §5 option 2's
+                // `render_cached_attention`), so the row-count tokens drop
+                // from the name entirely -- two different `kv-capacity-
+                // bucket` extents share one compiled kernel, keyed only by
+                // the compiled MAXIMUM chunk count (`_x{cap}`), never by the
+                // live capacity.
                 let per_query_head_grid =
                     cached_attention_per_query_head_grid(true, *cached_key_rows + *new_key_rows);
                 format!(
@@ -2657,6 +2672,20 @@ fn entry_name(resolved: &BoundOp) -> String {
                     crate::sized::ATTENTION_CONTEXT_CHUNK_CAP,
                     crate::sized::ATTENTION_BLOCK_WIDTH,
                     u8::from(per_query_head_grid),
+                )
+            } else if two_range_cached_bound {
+                // `_cb` marks the ninth-operand, runtime-`cached_key_rows`
+                // body (`long cached_key_rows = (long)in8[0];` --
+                // `render_cached_attention`'s own doc) as structurally
+                // distinct from the eight-operand, fully-`constexpr` body
+                // below: same row counts, same upper token, same grid, but a
+                // different buffer signature (the extra `in8` param) and a
+                // different generated statement for `cached_key_rows`, so
+                // the two must never share a compiled pipeline.
+                format!(
+                    "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_cb",
+                    scale.to_bits(),
+                    signed_name_part(*cached_lower_inclusive),
                 )
             } else {
                 format!(
@@ -3372,18 +3401,27 @@ fn render_cached_attention(
     } else {
         format!("{cached_lower_inclusive}L")
     };
-    // A single-range fusion's ninth operand carries the true `cached_len` at
-    // run time (`BoundOpKind::CachedAttention`'s own doc) -- `new_upper`
-    // reads that buffer instead of baking the (unused-in-that-case) static
-    // field as a `constexpr`, so the band tracks the real cache length under
-    // `kv-capacity-bucket` padding rather than a value fixed when this
-    // kernel was compiled and cached by structure (`entry_name`'s own "dyn"
-    // marker is what lets one compiled kernel serve every `cached_len`).
-    let dynamic_cached_len = resolved.operands().len() == 9;
-    let (cached_len_param, new_upper_decl) = if dynamic_cached_len {
+    // The ninth operand slot carries two DIFFERENT runtime scalars,
+    // discriminated by `cached_key_rows` (`BoundOpKind::CachedAttention`'s
+    // own doc): `cached_key_rows == 0` is the single-range fusion's true
+    // `cached_len`, read here as `new_upper`; `cached_key_rows != 0` is the
+    // two-range fusion's own live cached-row count, read further down as a
+    // runtime `cached_key_rows` (`row_count_decl`) instead -- that shape
+    // needs no dynamic `new_upper` at all, since its "new" range is never
+    // bucketed. `entry_name`'s own "dyn"/"cb" markers are what let one
+    // compiled kernel serve every live value on each path.
+    let has_ninth_operand = resolved.operands().len() == 9;
+    let single_range_dynamic = has_ninth_operand && *cached_key_rows == 0;
+    let two_range_cached_bound = has_ninth_operand && *cached_key_rows != 0;
+    let (cached_len_param, new_upper_decl) = if single_range_dynamic {
         (
             format!(", device const {element_type}* in8 [[buffer(8)]]"),
             "long new_upper = (long)in8[0];".to_string(),
+        )
+    } else if two_range_cached_bound {
+        (
+            format!(", device const {element_type}* in8 [[buffer(8)]]"),
+            format!("constexpr long new_upper = {new_upper_inclusive}L;"),
         )
     } else {
         (
@@ -3400,13 +3438,13 @@ fn render_cached_attention(
     // does not carry that assumption. Only the single-range dynamic path
     // dispatches more than one threadgroup per `(query_row, kv_head)` pair,
     // so only that path declares the parameter.
-    let tgid_param = if dynamic_cached_len {
+    let tgid_param = if single_range_dynamic {
         ", uint tgid [[threadgroup_position_in_grid]]"
     } else {
         ""
     };
     let (out_buffer_index, uniforms_buffer_index) =
-        if dynamic_cached_len { (9, 10) } else { (8, 9) };
+        if has_ninth_operand { (9, 10) } else { (8, 9) };
     // `cached_key_rows`/`new_key_rows` are runtime `Uniforms` fields on the
     // single-range fused path (`dynamic_cached_len`, the ninth-operand
     // form). Redesign §5 option 2: `context_chunks` joins them as a fourth
@@ -3428,13 +3466,24 @@ fn render_cached_attention(
     // consumes it (see this crate's `attention-kernel-design.md` §4c, risk
     // 1: the scratch-buffer plumbing this needs is unverified against
     // `metal.rs`'s current allocation call sites and is out of scope here).
-    let uniforms_struct = if dynamic_cached_len {
+    let uniforms_struct = if single_range_dynamic {
         "struct Uniforms { long total_elements; long cached_key_rows; long new_key_rows; long context_chunks; long splits; };\n\n"
     } else {
         "struct Uniforms { long total_elements; };\n\n"
     };
-    let row_count_decl = if dynamic_cached_len {
+    // `two_range_cached_bound` substitutes a runtime-read `cached_key_rows`
+    // for the compiled `constexpr` everywhere downstream that name already
+    // appears (`bool cached = key < cached_key_rows`, the `new_index`
+    // offset subtraction, `last_key_decl`'s sum below) -- one declaration
+    // site changes what every existing use of the variable name means,
+    // rather than a new gate at each of those uses (`BoundOpKind::
+    // CachedAttention`'s own doc on why this is the fewer-renderer-lines
+    // shape). `new_key_rows` is never bucketed on this path, so it stays a
+    // compiled constant.
+    let row_count_decl = if single_range_dynamic {
         "long cached_key_rows = u.cached_key_rows; long new_key_rows = u.new_key_rows;"
+    } else if two_range_cached_bound {
+        "long cached_key_rows = (long)in8[0]; constexpr long new_key_rows = {new_key_rows};"
     } else {
         "constexpr long cached_key_rows = {cached_key_rows}; constexpr long new_key_rows = {new_key_rows};"
     };
@@ -3494,7 +3543,7 @@ fn render_cached_attention(
     // `kv_heads`/`query_row`/`kv_head` -- see [`EmitError::
     // AttentionBlockMisaligned`]'s own doc.
     let block_width = block_width_for(numeric_policy);
-    if dynamic_cached_len && block_width > 1 && !head_dim.is_multiple_of(8) {
+    if single_range_dynamic && block_width > 1 && !head_dim.is_multiple_of(8) {
         return Err(EmitError::AttentionBlockMisaligned {
             node: resolved.node,
             head_dim: *head_dim,
@@ -3513,7 +3562,7 @@ fn render_cached_attention(
     // is evaluated per simdgroup, independently of the chunk-sizing decision
     // above. `new_key_rows` is still the compiled buffer extent (the read
     // bound never moves); only the iteration count does.
-    let last_key_decl = if dynamic_cached_len {
+    let last_key_decl = if single_range_dynamic {
         "long last_key = cached_key_rows + min(new_key_rows - 1L, query_row + new_upper);\n"
     } else {
         "long last_key = cached_key_rows + new_key_rows - 1L;\n"
@@ -3535,8 +3584,8 @@ fn render_cached_attention(
     // changes the text below -- the compiled `kv-capacity-bucket` extent
     // still never appears in the text ITSELF, only this boolean does.
     let per_query_head_grid =
-        cached_attention_per_query_head_grid(dynamic_cached_len, *cached_key_rows + *new_key_rows);
-    if dynamic_cached_len {
+        cached_attention_per_query_head_grid(single_range_dynamic, *cached_key_rows + *new_key_rows);
+    if single_range_dynamic {
         let grid_splits = if merge_needed {
             crate::sized::ATTENTION_SPLIT_MAX
         } else {
@@ -6716,7 +6765,11 @@ fn tiled_gemm_threadgroup_width(
         // than `local_group_index`'s own `cap`-sized addressing assumes,
         // which is an out-of-bounds `threadgroup` memory write, not merely a
         // wrong answer.
-        let dynamic_cached_len = resolved.operands().len() == 9;
+        // Same `cached_key_rows == 0` discriminator as `grid_threads`'s own
+        // `CachedAttention` arm -- `two_range_cached_bound` never widens to
+        // the compiled cap, since its `context_length` is already the
+        // bucket-padded compile-time value.
+        let dynamic_cached_len = resolved.operands().len() == 9 && *cached_key_rows == 0;
         let context_length = *cached_key_rows + *new_key_rows;
         let chunks = if dynamic_cached_len {
             crate::sized::ATTENTION_CONTEXT_CHUNK_CAP
@@ -7860,13 +7913,21 @@ mod tests {
         }
     }
 
-    /// The single-range fused (nine-operand, `dynamic_cached_len`) sibling
+    /// The single-range fused (nine-operand, `single_range_dynamic`) sibling
     /// of [`cached_attention_op`] -- the ninth operand carries the live
     /// `cached_len` at run time (`BoundOpKind::CachedAttention`'s own doc),
-    /// so `cached_key_rows`/`new_key_rows` here are the COMPILED
-    /// `kv-capacity-bucket` extent a test can vary freely to prove
-    /// `entry_name`/the rendered body do not key on it (redesign §5 option
-    /// 2).
+    /// and that shape is real, structural `cached_key_rows == 0`
+    /// (`cached_attention_single_range_candidates`'s own bind-time
+    /// construction folds the WHOLE context into the "new" slot). The two
+    /// `u64` parameters here are kept as the COMPILED `kv-capacity-bucket`
+    /// extent's two halves for every existing call site's own doc/comments
+    /// ("capacity N") to stay accurate, but both fold into `new_key_rows`
+    /// alone so the constructed op matches the real single-range invariant
+    /// -- a test can still vary their SUM freely to prove `entry_name`/the
+    /// rendered body do not key on it (redesign §5 option 2), since neither
+    /// field is ever baked as a literal on this path (`row_count_decl`'s own
+    /// `single_range_dynamic` arm reads both off `u.cached_key_rows`/
+    /// `u.new_key_rows` at run time instead).
     fn cached_attention_op_dynamic(cached_key_rows: u64, new_key_rows: u64) -> BoundOp {
         let operands = (0..9)
             .map(|index| {
@@ -7887,8 +7948,8 @@ mod tests {
             kind: BoundOpKind::CachedAttention {
                 operands,
                 query_rows: 1,
-                cached_key_rows,
-                new_key_rows,
+                cached_key_rows: 0,
+                new_key_rows: cached_key_rows + new_key_rows,
                 kv_heads: 1,
                 query_groups: 1,
                 head_dim: 4,
@@ -9991,8 +10052,12 @@ mod tests {
         else {
             unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
         };
-        *cached_key_rows = 200;
-        *new_key_rows = 56;
+        // Structural `cached_key_rows == 0` (the real single-range
+        // invariant, `cached_attention_op_dynamic`'s own doc) -- the past-
+        // the-knee 256-key total this test's own doc names lands entirely
+        // in `new_key_rows`.
+        *cached_key_rows = 0;
+        *new_key_rows = 256;
 
         let quantized: Vec<Option<PackedCodec>> = Vec::new();
         let narrow_width = tiled_gemm_threadgroup_width(&narrow, &quantized, NumericPolicy::bit_exact())
@@ -10116,13 +10181,18 @@ mod tests {
     fn dynamic_cached_attention_kernel_identity_is_stable_across_kv_capacity_buckets() {
         let smaller_bucket = cached_attention_op_dynamic(32, 7); // capacity 39
         let larger_bucket = cached_attention_op_dynamic(64, 7); // capacity 71
+        // `cached_attention_op_dynamic` folds both arguments into
+        // `new_key_rows` alone (`cached_key_rows` stays the real, structural
+        // `0` every single-range op carries) -- the compiled capacity this
+        // test crosses is that SUM, so the fixture-sanity check reads it off
+        // `new_key_rows`, not `cached_key_rows`.
         assert_ne!(
             match &smaller_bucket.kind {
-                BoundOpKind::CachedAttention { cached_key_rows, .. } => *cached_key_rows,
+                BoundOpKind::CachedAttention { new_key_rows, .. } => *new_key_rows,
                 _ => unreachable!(),
             },
             match &larger_bucket.kind {
-                BoundOpKind::CachedAttention { cached_key_rows, .. } => *cached_key_rows,
+                BoundOpKind::CachedAttention { new_key_rows, .. } => *new_key_rows,
                 _ => unreachable!(),
             },
             "the fixture must actually cross a different compiled capacity"
