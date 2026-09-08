@@ -330,7 +330,14 @@ pub enum InteropError {
     /// class so a later allocation step (per-expert precision as a
     /// budget-constrained top-n selection, `crate::memory_fit`'s own module
     /// doc) can read the record without re-deriving the split.
-    #[cfg(feature = "std")]
+    // mirrors `crate::memory_fit`'s own module gate exactly
+    // (`lib.rs`'s `mod memory_fit`) rather than `feature = "std"`: that
+    // module is forced into every `cargo test` build regardless of
+    // features (so its own unit tests always run), so a variant it
+    // constructs must be reachable there too -- `feature = "std"` alone
+    // left this variant absent under a bare `cargo nextest run` with no
+    // features, breaking the module that names it in its own doc comment.
+    #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
     #[error(
         "load-time memory budget exceeded: dense_weights_bytes={dense_weights_bytes} \
          expert_weights_bytes={expert_weights_bytes} table_weights_bytes={table_weights_bytes} \
