@@ -131,6 +131,7 @@ use proxima_tensor::TensorError;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_forward_program};
 
+use crate::architecture::{Architecture, StepInput, StepInputContext};
 use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
 use crate::error::InteropError;
 use crate::hf_bind::bind_all_weights_from_safetensors;
@@ -719,6 +720,13 @@ fn strip_layer_index(name: &str) -> String {
 pub struct LoadedModel<'file> {
     weights: BoundWeights<'file>,
     architecture: ModelArchitecture,
+    /// [`Self::load`]'s resolved [`crate::architecture::Architecture`] impl,
+    /// kept so [`Self::run_decode_loop_observed_seeded`] can call
+    /// [`Architecture::step_inputs`] every step -- `None` only on the
+    /// narrow `load_inner` fallthrough that predates the registry seam
+    /// (`paired_gate_up_reduce`/`fused_qkv_reduce` on a non-qwen35
+    /// checkpoint), which never resolves against an `Architecture` at all.
+    architecture_impl: Option<&'static dyn Architecture>,
     /// This checkpoint's own weight bytes, by class
     /// (`crate::bind::tensor_bytes_by_class`'s own dense/expert/table
     /// split, plus the SSM state bytes a qwen35 checkpoint's layers hold)
@@ -824,6 +832,26 @@ impl Drop for LoadedModel<'_> {
         release_resident_names(self.resident_names().iter().copied());
         unregister_checkpoint_mapping(self.checkpoint_mapping);
     }
+}
+
+/// The first `program` [`Op::Input`] leaf `named` carries no entry for --
+/// the same name-resolution [`proxima_tensor::cpu::resolve_named_blocks`]
+/// performs internally (and would itself error on), surfaced here as the
+/// typed, architecture-facing [`InteropError::MissingStepInput`] instead
+/// of the generic [`proxima_tensor::TensorError::UnboundInputName`] a
+/// caller several layers down [`BackendRuntime::evaluate`] would otherwise
+/// see: a program leaf beyond the decode loop's own builtin set is, by
+/// construction, one [`crate::architecture::Architecture::step_inputs`]
+/// either never fed or fed with the wrong name.
+fn missing_program_input(program: &[Op], named: &[(&str, QuantizedBlock<'_>)]) -> Option<String> {
+    program.iter().find_map(|op| match op {
+        Op::Input { name: Some(name), .. }
+            if !named.iter().any(|(bound_name, _)| bound_name == name) =>
+        {
+            Some(name.clone())
+        }
+        _ => None,
+    })
 }
 
 /// [`mistral_single_range_cached_forward_program`]'s compiled output, plus
@@ -1181,6 +1209,7 @@ impl<'file> LoadedModel<'file> {
             return Ok(Self {
                 weights: bound.weights,
                 architecture: bound.architecture,
+                architecture_impl: Some(resolved),
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                     dense_bytes: dense_weight_bytes,
@@ -1284,6 +1313,7 @@ impl<'file> LoadedModel<'file> {
         Ok(Self {
             weights,
             architecture,
+            architecture_impl: None,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: dense_weight_bytes,
@@ -1367,6 +1397,7 @@ impl<'file> LoadedModel<'file> {
         Ok(Self {
             weights,
             architecture,
+            architecture_impl: None,
             // safetensors carries no `_exps.`-style naming convention this
             // crate has confirmed against a real checkpoint the way
             // `crate::bind::tensor_bytes_by_class` has for GGUF -- every
@@ -3358,6 +3389,10 @@ impl<'file> LoadedModel<'file> {
         let mut cached_len = seed_cached_len;
         let mut next_ids = ids.clone();
         let vocab_size = self.architecture.vocab as usize;
+        // Reused across every step ([`Architecture::step_inputs`]'s own
+        // doc) -- cleared, never reallocated from scratch, at the top of
+        // each closure invocation below.
+        let mut step_input_scratch: Vec<StepInput> = Vec::new();
 
         let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
             &self.vocab,
@@ -3427,6 +3462,33 @@ impl<'file> LoadedModel<'file> {
                 // bucketed or not.
                 let cached_len_scalar = [cached_len as f32];
                 named_blocks.push(("cached_len", QuantizedBlock::Float32(&cached_len_scalar)));
+                // A foreign `Architecture`'s own per-step leaves --
+                // `token_history` already carries exactly `cached_len +
+                // new_count` entries at this point (the same invariant
+                // `recent_tokens`'s repeat-penalty slice below relies on),
+                // so no separate accumulator is needed. `step_input_scratch`
+                // is cleared, not reallocated, every step.
+                step_input_scratch.clear();
+                if let Some(architecture_impl) = self.architecture_impl {
+                    let step_context = StepInputContext {
+                        all_token_ids: &token_history,
+                        new_start: cached_len,
+                        new_count,
+                    };
+                    architecture_impl.step_inputs(&step_context, &mut step_input_scratch);
+                }
+                for step_input in &step_input_scratch {
+                    if !self
+                        .program
+                        .iter()
+                        .any(|op| op.name() == Some(step_input.name))
+                    {
+                        return Err(InteropError::UnknownStepInput {
+                            name: String::from(step_input.name),
+                        });
+                    }
+                    named_blocks.push(step_input.as_named_block());
+                }
                 #[cfg(feature = "instrument")]
                 let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
                 // Rounds `cached_len` up to `ServingConfig::kv_bucket_tokens`
@@ -3568,6 +3630,10 @@ impl<'file> LoadedModel<'file> {
                             roots.push(*state_out);
                         }
                     }
+                }
+
+                if let Some(name) = missing_program_input(&self.program, &named_blocks) {
+                    return Err(InteropError::MissingStepInput { name });
                 }
 
                 #[cfg(feature = "instrument")]
@@ -6279,6 +6345,7 @@ mod memory_fit_gate_tests {
                 precision: &[],
             },
             architecture: tiny_architecture(),
+            architecture_impl: None,
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: dense_weight_bytes,
                 expert_bytes: 0,

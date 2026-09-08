@@ -61,7 +61,9 @@ mod test_support;
 mod transform;
 
 #[cfg(feature = "std")]
-pub use architecture::{Architecture, ArchitectureRegistry, BoundProgram, StepState};
+pub use architecture::{
+    Architecture, ArchitectureRegistry, BoundProgram, StepInput, StepInputContext, StepState,
+};
 #[cfg(feature = "std")]
 pub use bind::gguf_tensor_as_packed_block;
 pub use bind::{ModelArchitecture, architecture_from_metadata, gguf_tensor_as_f32};
