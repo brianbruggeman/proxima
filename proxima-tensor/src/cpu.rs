@@ -7881,7 +7881,7 @@ pub fn snapshot_expert_selection_top_n(top_n: usize) -> Vec<(NodeId, u32, u64, f
         .into_iter()
         .map(|((node, expert), entry)| (NodeId(node), expert, entry.count, entry.ema))
         .collect();
-    entries.sort_unstable_by(|left, right| right.2.cmp(&left.2));
+    entries.sort_unstable_by_key(|entry| core::cmp::Reverse(entry.2));
     entries.truncate(top_n);
     entries
 }
