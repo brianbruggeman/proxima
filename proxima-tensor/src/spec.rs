@@ -3739,8 +3739,19 @@ mod hyper_connection_tests {
 /// The full-attention layer [`qwen35_forward_program`] calls once per
 /// `full_attention_interval`'th layer -- see it there for the worked
 /// example of wiring this builder's cache inputs and outputs.
+///
+/// Attention block only -- everything up to and including the residual add
+/// after `o_proj`, no FFN. [`append_qwen35_dense_attention_layer`] is a thin
+/// wrapper adding the dense-FFN tail on top of this; a caller whose FFN is
+/// NOT dense (a routed-MoE checkpoint such as `qwen35moe`, which carries no
+/// `blk.N.ffn_{gate,up,down}.weight` on its attention layers at all) calls
+/// this directly and appends its own FFN + residual against the returned
+/// node, the same "per-layer builders are pub so a foreign crate can
+/// compose them" contract this module's own
+/// `public_builders_compose_a_one_layer_forward_program` test proves for
+/// [`append_qwen35_ssm_mixer`].
 #[allow(clippy::too_many_arguments)]
-pub fn append_qwen35_dense_attention_layer(
+pub fn append_qwen35_dense_attention_only(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -3757,7 +3768,6 @@ pub fn append_qwen35_dense_attention_layer(
     rotary_dim: u32,
     attn_head_dim: u32,
     attn_norm_weight: NodeId,
-    ffn_norm_weight: NodeId,
     q_norm_weight: NodeId,
     k_norm_weight: NodeId,
     wq: NodeId,
@@ -3765,9 +3775,6 @@ pub fn append_qwen35_dense_attention_layer(
     wk: NodeId,
     wv: NodeId,
     wo: NodeId,
-    w_gate: NodeId,
-    w_up: NodeId,
-    w_down: NodeId,
     k_first_cache: NodeId,
     k_second_cache: NodeId,
     k_pass_cache: NodeId,
@@ -4202,6 +4209,79 @@ pub fn append_qwen35_dense_attention_layer(
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
 
+    Ok((residual1, (rotated_k_new_first, rotated_k_new_second, k_pass, v_new)))
+}
+
+/// [`append_qwen35_dense_attention_only`] plus the dense (non-MoE) SwiGLU
+/// FFN tail `qwen35_forward_program`'s own non-routed checkpoints carry on
+/// every layer -- see that function for the worked example of wiring this
+/// builder's cache inputs and outputs. A caller whose FFN is routed
+/// (`qwen35moe`-shaped) calls [`append_qwen35_dense_attention_only`]
+/// directly instead of this wrapper.
+#[allow(clippy::too_many_arguments)]
+pub fn append_qwen35_dense_attention_layer(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    ones: NodeId,
+    inv_sqrt_attn_head_dim: NodeId,
+    inv_attn_head_dim: NodeId,
+    cos_new: NodeId,
+    sin_new: NodeId,
+    group_ones: NodeId,
+    is_future: NodeId,
+    cached_len: NodeId,
+    group: u32,
+    rotary_dim: u32,
+    attn_head_dim: u32,
+    attn_norm_weight: NodeId,
+    ffn_norm_weight: NodeId,
+    q_norm_weight: NodeId,
+    k_norm_weight: NodeId,
+    wq: NodeId,
+    w_gate_q: NodeId,
+    wk: NodeId,
+    wv: NodeId,
+    wo: NodeId,
+    w_gate: NodeId,
+    w_up: NodeId,
+    w_down: NodeId,
+    k_first_cache: NodeId,
+    k_second_cache: NodeId,
+    k_pass_cache: NodeId,
+    v_cache: NodeId,
+) -> Result<(NodeId, Qwen35DenseAttentionRoots), TensorError> {
+    let (residual1, roots) = append_qwen35_dense_attention_only(
+        program,
+        x,
+        inv_dim,
+        eps,
+        ones,
+        inv_sqrt_attn_head_dim,
+        inv_attn_head_dim,
+        cos_new,
+        sin_new,
+        group_ones,
+        is_future,
+        cached_len,
+        group,
+        rotary_dim,
+        attn_head_dim,
+        attn_norm_weight,
+        q_norm_weight,
+        k_norm_weight,
+        wq,
+        w_gate_q,
+        wk,
+        wv,
+        wo,
+        k_first_cache,
+        k_second_cache,
+        k_pass_cache,
+        v_cache,
+    )?;
+
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
     let gate_product2 = elementwise(
@@ -4280,7 +4360,7 @@ pub fn append_qwen35_dense_attention_layer(
         &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
     )?;
 
-    Ok((x_next, (rotated_k_new_first, rotated_k_new_second, k_pass, v_new)))
+    Ok((x_next, roots))
 }
 
 /// [`append_mistral_cached_layer`]'s single-range counterpart: the SAME
