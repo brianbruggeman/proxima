@@ -4692,7 +4692,7 @@ fn pack_cached_attention_uniforms(
     } else {
         chunks
     };
-    let dispatch_splits = if dynamic_cached_len && crate::msl::cached_attention_merge_needed(context_length, numeric_policy) {
+    let dispatch_splits = if dynamic_cached_len && crate::msl::cached_attention_merge_needed(&bound.kind, numeric_policy) {
         i64::try_from(crate::sized::ATTENTION_SPLIT_MAX).unwrap_or(splits)
     } else {
         1
@@ -4731,7 +4731,7 @@ fn pack_cached_attention_uniforms(
         // own raw result -- the kernel body's `slice_len = ceil(live/splits)`
         // would otherwise slice off keys with no second dispatch left to
         // merge the slices back, an out-of-bounds-shaped undercount.
-        let live_splits = if crate::msl::cached_attention_merge_needed(context_length, numeric_policy) {
+        let live_splits = if crate::msl::cached_attention_merge_needed(&bound.kind, numeric_policy) {
             splits
         } else {
             1
