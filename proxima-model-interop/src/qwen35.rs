@@ -481,6 +481,66 @@ pub fn bind_qwen35_checkpoint(
 /// caller-constructed [`Qwen35Architecture`] carries `full_attention_interval
 /// == 0` (the real checkpoint never does; `qwen35_architecture_from_metadata`
 /// reads it straight off `{architecture}.full_attention_interval`).
+/// [`crate::generate::LoadedModel`]'s own `SsmLayerCache::new` fixed sizes,
+/// all derived from [`Qwen35Architecture`]'s ssm hyperparameters at load
+/// time -- `qwen35.cpp:57-60`'s same derivation this module's
+/// `bind_qwen35_attn_qkv_split` already walks through for the fused
+/// `attn_qkv.weight` split.
+#[derive(Debug, Clone, Copy)]
+pub struct Qwen35SsmShape {
+    /// `2 * ssm_key_dim + ssm_d_inner` -- one `qkv_mixed` row's width,
+    /// matching `proxima_tensor::spec::qwen35_forward_program`'s own
+    /// `ssm_cache.{layer}.conv_history` leaf shape's second axis.
+    pub qkv_dim: usize,
+    /// `ssm_d_conv - 1` -- the rolling conv-history window's fixed row
+    /// count `append_qwen35_ssm_mixer`'s doc names (the causal conv1d
+    /// kernel's own left-context width).
+    pub conv_rows: usize,
+    /// `ssm_d_state * head_v_dim * ssm_n_group * ssm_group` -- the gated
+    /// DeltaNet recurrent state's flat element count, matching
+    /// `qwen35_forward_program`'s own `ssm_cache.{layer}.state` leaf shape.
+    pub state_len: usize,
+}
+
+/// [`Qwen35SsmShape`]'s own derivation off a real checkpoint's ssm
+/// hyperparameters -- `qwen35.cpp:57-60`'s same arithmetic
+/// [`Qwen35Architecture`]'s own `ssm_key_dim`/`ssm_value_dim` derivation
+/// already uses for the fused `attn_qkv.weight` row split, plus
+/// `head_v_dim = ssm_inner_size / ssm_time_step_rank` and `ssm_group =
+/// ssm_time_step_rank / ssm_group_count`
+/// (`proxima_tensor::spec::qwen35_forward_program`'s own `head_v_dim`/
+/// `ssm_group` locals).
+#[must_use]
+pub fn qwen35_ssm_shape(architecture: &Qwen35Architecture) -> Qwen35SsmShape {
+    let ssm_key_dim = architecture.ssm_state_size * architecture.ssm_group_count;
+    let head_v_dim = architecture.ssm_inner_size / architecture.ssm_time_step_rank;
+    let ssm_group = architecture.ssm_time_step_rank / architecture.ssm_group_count;
+    Qwen35SsmShape {
+        qkv_dim: (2 * ssm_key_dim + architecture.ssm_inner_size) as usize,
+        conv_rows: (architecture.ssm_conv_kernel.saturating_sub(1)) as usize,
+        state_len: (architecture.ssm_state_size
+            * head_v_dim
+            * architecture.ssm_group_count
+            * ssm_group) as usize,
+    }
+}
+
+/// [`Qwen35SsmShape`]'s own resident bytes across every layer -- one
+/// `SsmLayerCache::new`'s worth (`conv_rows * qkv_dim` conv-history
+/// elements plus `state_len` state elements, both `f32`) times
+/// `block_count` layers. `crate::memory_fit`'s own load-time gate reads
+/// this as the SSM class of `crate::memory_fit::WeightClassBytes` -- `0`
+/// for every non-qwen35 checkpoint, which never builds a [`Qwen35SsmShape`]
+/// at all. Plain arithmetic, no platform dependency -- unlike the field it
+/// used to feed directly, this function itself is not `metal`-gated, so
+/// [`crate::architecture::Architecture::step_state`] can call it on every
+/// build.
+#[must_use]
+pub fn qwen35_ssm_state_bytes(shape: Qwen35SsmShape, block_count: u32) -> u64 {
+    let per_layer_elements = (shape.conv_rows * shape.qkv_dim + shape.state_len) as u64;
+    per_layer_elements * core::mem::size_of::<f32>() as u64 * u64::from(block_count)
+}
+
 pub fn qwen35_forward_program(
     architecture: &Qwen35Architecture,
 ) -> Result<(Vec<Op>, NodeId, Vec<proxima_tensor::spec::Qwen35LayerRoots>), InteropError> {
@@ -502,6 +562,83 @@ pub fn qwen35_forward_program(
         architecture.rms_epsilon,
     )?;
     Ok((program, logits_root, layer_roots))
+}
+
+/// The [`crate::architecture::Architecture`] registered under the name
+/// `"qwen35"` -- [`crate::architecture::ArchitectureRegistry::with_builtin`]'s
+/// hybrid-checkpoint arm, and the worked example that trait's own doc
+/// points a foreign architecture at. Named distinctly from
+/// [`Qwen35Architecture`] (the per-checkpoint metadata this arm derives
+/// inside [`Architecture::bind`]) because the two are different kinds of
+/// value: `Qwen35Arch` is a stateless, `'static` marker one `bind` call
+/// derives fresh metadata against every load; `Qwen35Architecture` is that
+/// derived, per-checkpoint data.
+pub struct Qwen35Arch;
+
+/// The one registered [`Qwen35Arch`] value -- see
+/// [`crate::architecture::ArchitectureRegistry::with_builtin`]'s own doc
+/// for why a `'static` marker, not an owned value, is what a registry
+/// entry is.
+pub static QWEN35: Qwen35Arch = Qwen35Arch;
+
+impl crate::architecture::Architecture for Qwen35Arch {
+    fn name(&self) -> &'static str {
+        "qwen35"
+    }
+
+    fn bind<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+    ) -> Result<crate::architecture::BoundProgram<'file>, InteropError> {
+        let qwen_architecture = qwen35_architecture_from_metadata(parsed)?;
+        let weights = bind_qwen35_weights(parsed, file_bytes, &qwen_architecture)?;
+        let (program, logits_root, layer_roots) = qwen35_forward_program(&qwen_architecture)?;
+        let architecture = crate::bind::ModelArchitecture {
+            vocab: qwen_architecture.vocab,
+            embedding: qwen_architecture.embedding,
+            feed_forward: qwen_architecture.feed_forward,
+            query_heads: qwen_architecture.query_heads,
+            kv_heads: qwen_architecture.kv_heads,
+            head_dim: qwen_architecture.head_dim,
+            block_count: qwen_architecture.block_count,
+            // Qwen3.5 never routes FFN through experts
+            // (`qwen35_forward_program`'s own doc, `qwen35.cpp:471`), so
+            // this checkpoint reads the same `expert_count == 0` dense-FFN
+            // branch every other checkpoint without a
+            // `{architecture}.expert_count` key does.
+            expert_count: 0,
+            expert_used_count: 0,
+            rope_freq_base: qwen_architecture.rope_freq_base,
+            rms_epsilon: qwen_architecture.rms_epsilon,
+            tied_embeddings: false,
+        };
+        Ok(crate::architecture::BoundProgram {
+            weights,
+            architecture,
+            program,
+            logits_root,
+            hidden_root: None,
+            layer_roots,
+        })
+    }
+
+    fn step_state(
+        &self,
+        parsed: &ParsedGguf,
+    ) -> Result<Option<crate::architecture::StepState>, InteropError> {
+        // Re-derives `Qwen35Architecture` from `parsed`'s own metadata --
+        // the same pure, file-free read `Architecture::bind` just did --
+        // rather than threading it through `BoundProgram` for this one
+        // hook's sake (see the trait method's own doc).
+        let qwen_architecture = qwen35_architecture_from_metadata(parsed)?;
+        let shape = qwen35_ssm_shape(&qwen_architecture);
+        Ok(Some(crate::architecture::StepState {
+            ssm_shape: shape,
+            attn_head_dim: qwen_architecture.attn_head_dim,
+            ssm_state_bytes: qwen35_ssm_state_bytes(shape, qwen_architecture.block_count),
+        }))
+    }
 }
 
 #[cfg(test)]

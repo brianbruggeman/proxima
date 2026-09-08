@@ -75,6 +75,15 @@ pub enum InteropError {
     #[error("gguf metadata is missing required key {key:?}")]
     MissingMetadataKey { key: String },
 
+    /// [`crate::architecture::ArchitectureRegistry::resolve`] read
+    /// `general.architecture` as `name`, and no registered
+    /// [`crate::architecture::Architecture`] declares that name, nor is
+    /// the registry's own fallback architecture set to catch it -- a
+    /// foreign crate loading a checkpoint whose architecture it never
+    /// registered gets this instead of a panic or a silent misbind.
+    #[error("no registered architecture matches general.architecture = {name:?}")]
+    UnknownArchitecture { name: String },
+
     /// [`crate::bind::architecture_from_metadata`]'s vocab derivation: the
     /// `token_embd.weight` tensor's element count did not divide evenly by
     /// `embedding_length`.
