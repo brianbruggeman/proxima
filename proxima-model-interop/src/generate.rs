@@ -6351,7 +6351,10 @@ mod memory_fit_gate_tests {
         use core::ffi::c_void;
         use std::os::fd::AsFd;
 
-        use super::super::{Control, LoadedModel, Phase, supported_serving_config};
+        use super::super::{
+            BackendRuntime, Control, LoadedModel, LogitsSink, Phase, PrefixState,
+            supported_serving_config,
+        };
         use crate::serving::GPU_LAYERS_ALL;
 
         struct MappedGguf {
@@ -6439,6 +6442,106 @@ mod memory_fit_gate_tests {
         const SUFFIX_A: &str = "Grit in a sensitive instrument, or a crack in one of his own high-power lenses, would not be more disturbing than a strong emotion in a nature such as his.";
 
         const SUFFIX_B: &str = "And yet there was but one woman to him, and that woman was the late Irene Adler, of dubious and questionable memory.";
+
+        /// Root-cause proof for ROW 406's own open residual: direct
+        /// (`force_two_range: false`, [`LoadedModel::generate_with_serving_config`]'s
+        /// own path -- Metal's single-range placed-KV fast path for this
+        /// checkpoint) vs resumed (`force_two_range: true`, the
+        /// [`PrefixState`] two-range path) compared at LOGIT precision, not
+        /// post-argmax, across 5 decode steps. `PREFIX` alone tokenizes to
+        /// 183 rows -- already past `ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE`
+        /// (128, `omega/src/msl.rs`), the split-at-scale knee `omega/tests/
+        /// qwen3_gqa_qk_norm_two_range_parity.rs`'s own regression test pins.
+        /// Before `fix(omega): two-range cached attention skips split merge
+        /// dispatch` (cherry-picked to `main` ahead of this test), the
+        /// two-range `cached_attention_merge_needed` predicate answered
+        /// `true` for this op past that knee and routed it through the
+        /// single-range-only `ContextSplitMerge` protocol, which
+        /// reinterpreted the resumed path's already-correct, already-
+        /// normalized attention output as `(max, sum, weighted[head_dim])`
+        /// triples and overwrote it with garbage -- exactly the shape the
+        /// prior divergent-token failure this test replaces had. With that
+        /// fix on `main`, `max_diff` here is noise-floor
+        /// (~1e-5, ordinary Metal-vs-Metal reduction-order float noise) at
+        /// every one of the 5 steps, and both paths agree on every argmax.
+        #[test]
+        #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
+        fn generate_from_prefix_matches_generate_at_logit_precision_across_five_steps() {
+            let model_path = crate::test_support::qwen3_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen3 gguf fixture");
+            let model = open_model(&mapped);
+            let serving_config = greedy_serving_config();
+            let steps = 5;
+
+            let full_prompt = alloc::format!("{PREFIX}{SUFFIX_A}");
+            let mut direct_runtime = BackendRuntime::new(&serving_config);
+            let mut direct_logits: Vec<Vec<f32>> = Vec::new();
+            let (direct_ids, _, _, _direct_final) = model
+                .run_decode_loop_observed_seeded(
+                    &full_prompt,
+                    steps,
+                    &serving_config,
+                    &mut direct_runtime,
+                    None,
+                    &mut LogitsSink::Collect(&mut direct_logits),
+                    &mut |_event| Control::Continue,
+                    None,
+                    false,
+                )
+                .expect("direct greedy generate over the concatenated prompt");
+
+            let prefix = model
+                .prefill_prefix(PREFIX, &serving_config)
+                .expect("prefill the shared prefix once");
+            let mut resumed_runtime = BackendRuntime::new(&serving_config);
+            let seed = PrefixState {
+                ids: prefix.ids.clone(),
+                layer_caches: prefix.layer_caches.clone(),
+                cached_len: prefix.cached_len,
+            };
+            let mut resumed_logits: Vec<Vec<f32>> = Vec::new();
+            let (resumed_ids, _, _, _resumed_final) = model
+                .run_decode_loop_observed_seeded(
+                    SUFFIX_A,
+                    steps,
+                    &serving_config,
+                    &mut resumed_runtime,
+                    None,
+                    &mut LogitsSink::Collect(&mut resumed_logits),
+                    &mut |_event| Control::Continue,
+                    Some(seed),
+                    true,
+                )
+                .expect("resume decoding from the cached prefix");
+
+            assert_eq!(
+                direct_logits.len(),
+                resumed_logits.len(),
+                "both paths must run the same number of decode steps"
+            );
+            for (step, (direct_step, resumed_step)) in
+                direct_logits.iter().zip(resumed_logits.iter()).enumerate()
+            {
+                let max_diff = direct_step
+                    .iter()
+                    .zip(resumed_step.iter())
+                    .map(|(expected, actual)| (expected - actual).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    max_diff < 1e-3,
+                    "step={step}: direct and resumed logits diverge past noise floor \
+                     (max_diff={max_diff}) -- the two-range split/merge dispatch \
+                     regression (omega/src/msl.rs's cached_attention_merge_needed) \
+                     if it comes back"
+                );
+            }
+            assert_eq!(
+                resumed_ids, direct_ids,
+                "resumed and direct must sample the identical greedy tokens over 5 steps"
+            );
+        }
 
         /// (a) parity: resuming from a cached prefix must produce the
         /// IDENTICAL greedy token ids as decoding the concatenated prompt
