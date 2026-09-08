@@ -38,7 +38,7 @@
 //! # G1–G9 contract
 //!
 //! `Command` MUST NOT carry any of the
-//! [`WithoutFilesystem`/`Network`/`Spawn`/`Time`/`Random`]
+//! \[`WithoutFilesystem`/`Network`/`Spawn`/`Time`/`Random`\]
 //! markers, must NOT impl `Deterministic`/`IsPure`/`NoStd`/
 //! `AllocFree`. Spawning a subprocess is the wholly unconstrained
 //! ground: filesystem, network, spawn, time, random, allocation,
@@ -494,7 +494,7 @@ impl Command {
     /// to the descriptor, applies [`SpawnOptions`], fork+execs.
     /// Returns a [`Child`] with the parent-side fds for any
     /// `Stdio::Piped` slots — no chain/dispatch wiring here
-    /// (use [`Pipe::call`] for that — it handles the dispatch
+    /// (use [`Pipe::call`](proxima_primitives::pipe::Pipe::call) for that — it handles the dispatch
     /// thread lifecycle alongside the byte shuttle).
     pub fn spawn(&mut self) -> Result<Child, ProximaError> {
         let descriptor = self.to_descriptor()?;

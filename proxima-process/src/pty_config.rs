@@ -1,6 +1,6 @@
 //! `PtyConfig` + `PtySizeConfig` — first-class config surface for
-//! [`PtyCommandPipe`](super::pty_pipe::PtyCommandPipe), mirroring
-//! [`CommandConfig`](super::command_config::CommandConfig) for the
+//! [`PtyCommandPipe`], mirroring
+//! [`CommandConfig`] for the
 //! plain-spawn path.
 //!
 //! Per principle 4 in the pty-tester guiding-principles doc, every

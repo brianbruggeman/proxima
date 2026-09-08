@@ -20,7 +20,7 @@
 //! serialisable (raw fds are process-local handles, not data).
 //! `CommandConfig::into_command` is the inverse and produces a
 //! `CommandDescriptor` ready to hand to the typestate
-//! [`CommandPipe`](super::command_pipe::CommandPipe) builder.
+//! [`CommandPipe`] builder.
 
 extern crate alloc;
 
@@ -180,8 +180,8 @@ pub enum DispatchChoice {
 impl DispatchChoice {
     /// Materialise the choice into the type-erased
     /// [`alloc_tier::PipeHandle`] that
-    /// [`CommandPipe::from_config_dispatch`] feeds to the
-    /// typestate builder.
+    /// [`CommandPipeBuilder::dispatch`](super::command_pipe::CommandPipeBuilder::dispatch)
+    /// feeds to the typestate builder.
     #[must_use]
     pub fn into_dyn_chain(self) -> DispatchChainHandle {
         match self {
@@ -305,7 +305,7 @@ impl CommandConfig {
     }
 
     /// `umask` + `controlling_tty` materialised into the runtime
-    /// [`SpawnOptions`] shape. `dispatch_fd` stays `None` here —
+    /// [`SpawnOptions`](super::spawn::SpawnOptions) shape. `dispatch_fd` stays `None` here —
     /// the dispatch socket is allocated by `spawn_and_dispatch`,
     /// not by config.
     #[must_use]
@@ -422,7 +422,7 @@ impl super::command::Command {
     /// Snapshot the std-tier [`Command`](super::command::Command)
     /// into a serialisable [`CommandConfig`] — the **Built →
     /// Config** half of the principle-4 interop contract. The
-    /// snapshot lowers via [`Command::to_descriptor`], then maps
+    /// snapshot lowers via [`Command::to_descriptor`](super::command::Command::to_descriptor), then maps
     /// the descriptor to a `CommandConfig`, finally lifts the
     /// additive flags (`controlling_tty`, `umask`, `libc_shim`)
     /// onto the result.
