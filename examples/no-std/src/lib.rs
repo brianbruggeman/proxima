@@ -1,4 +1,4 @@
-//! proxima's sans-IO core — a [`Pipe`](proxima_primitives::pipe::Pipe) — compiling
+//! proxima's sans-IO core — a [`Pipe`] — compiling
 //! with **no std and no runtime**. `RING_SLOTS` / `RING_SLOT_BYTES` below are
 //! not read at runtime: `build.rs` bakes them from `no-std.toml` into
 //! `pub const`s once, at compile time. This is the no-runtime tier of
