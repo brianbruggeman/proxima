@@ -1573,7 +1573,17 @@ impl KvPadScratch {
         }
     }
 
-    fn fill(&mut self, source: &LayerCache, shape: &KvPadShape) {
+    /// # Errors
+    ///
+    /// [`InteropError::CacheScratchShapeMismatch`] when `source` (this
+    /// layer's real, unpadded cache) holds more elements in a leaf than
+    /// `shape` sized that leaf's own scratch buffer to -- `shape`'s row
+    /// widths come from the bound program's own declared cache-leaf
+    /// extents ([`layer_pad_row_widths`]'s own doc), so this only fires
+    /// when a foreign bind's program under-declares a leaf its own
+    /// [`LayerCache::append`] then over-fills, not on any checkpoint whose
+    /// program and cache stay in agreement.
+    fn fill(&mut self, source: &LayerCache, shape: &KvPadShape, layer: usize) -> Result<(), InteropError> {
         let even_odd_len = shape.even_odd_len();
         let v_len = shape.v_len();
         if self.k_even.len() < even_odd_len {
@@ -1585,9 +1595,10 @@ impl KvPadScratch {
         if self.v.len() < v_len {
             self.v.resize(v_len, 0.0);
         }
-        self.k_even[..source.k_even.len()].copy_from_slice(&source.k_even);
-        self.k_odd[..source.k_odd.len()].copy_from_slice(&source.k_odd);
-        self.v[..source.v.len()].copy_from_slice(&source.v);
+        copy_into_padded(&mut self.k_even, &source.k_even, layer, "k_even")?;
+        copy_into_padded(&mut self.k_odd, &source.k_odd, layer, "k_odd")?;
+        copy_into_padded(&mut self.v, &source.v, layer, "v")?;
+        Ok(())
     }
 
     fn named_blocks<'cache>(
@@ -1639,6 +1650,33 @@ impl KvPadShape {
     }
 }
 
+/// Copies `source` into `dest`'s own leading rows -- the shared bounds
+/// check every [`KvPadScratch::fill`]/[`Qwen35DenseAttentionPadScratch::fill`]
+/// leaf copy needs: `dest` was just resized to (at least) `shape`'s own
+/// declared row width, so `source` (this layer's real, unpadded cache)
+/// fitting inside it is the invariant the whole pad-scratch mechanism
+/// depends on. Previously an unchecked `copy_from_slice`, panicking with
+/// "range end index out of range" the moment a foreign bind's declared
+/// shape undercounted a leaf's true width; now a named, typed error.
+///
+/// # Errors
+///
+/// [`InteropError::CacheScratchShapeMismatch`] when `source.len() >
+/// dest.len()`.
+fn copy_into_padded(dest: &mut [f32], source: &[f32], layer: usize, leaf: &'static str) -> Result<(), InteropError> {
+    let expected = dest.len();
+    let found = source.len();
+    if found > expected {
+        return Err(InteropError::CacheScratchShapeMismatch {
+            layer,
+            leaf,
+            expected,
+            found,
+        });
+    }
+    dest[..found].copy_from_slice(source);
+    Ok(())
+}
 
 /// [`LayerCache`]'s 4-wide counterpart for a
 /// [`Qwen35LayerRoots::DenseAttention`] layer -- this checkpoint's own
@@ -1730,7 +1768,26 @@ impl Qwen35DenseAttentionPadScratch {
         }
     }
 
-    fn fill(&mut self, source: &Qwen35DenseAttentionCache, shape: &Qwen35DenseAttentionPadShape) {
+    /// # Errors
+    ///
+    /// [`InteropError::CacheScratchShapeMismatch`] when `source` (this
+    /// layer's real, unpadded cache) holds more elements in a leaf than
+    /// `shape` sized that leaf's own scratch buffer to -- see
+    /// [`KvPadScratch::fill`]'s own doc for why this can only fire on a
+    /// bind whose program under-declares a leaf its own
+    /// [`Qwen35DenseAttentionCache::append`] then over-fills. This is the
+    /// exact defect measured on the real `qwen3.6:35b-a3b` checkpoint: a
+    /// foreign bind's [`crate::architecture::Architecture::step_state`]
+    /// left `attn_head_dim` at the trait default (`Ok(None)`), which used
+    /// to size `v`'s scratch to `0` while `source.v` held real data --
+    /// this fill no longer reads `attn_head_dim` at all, so that failure
+    /// mode is gone; the check stays as the general safety net.
+    fn fill(
+        &mut self,
+        source: &Qwen35DenseAttentionCache,
+        shape: &Qwen35DenseAttentionPadShape,
+        layer: usize,
+    ) -> Result<(), InteropError> {
         let even_odd_len = shape.even_odd_len();
         let pass_len = shape.pass_len();
         let v_len = shape.v_len();
@@ -1746,10 +1803,11 @@ impl Qwen35DenseAttentionPadScratch {
         if self.v.len() < v_len {
             self.v.resize(v_len, 0.0);
         }
-        self.k_first[..source.k_first.len()].copy_from_slice(&source.k_first);
-        self.k_second[..source.k_second.len()].copy_from_slice(&source.k_second);
-        self.k_pass[..source.k_pass.len()].copy_from_slice(&source.k_pass);
-        self.v[..source.v.len()].copy_from_slice(&source.v);
+        copy_into_padded(&mut self.k_first, &source.k_first, layer, "k_first")?;
+        copy_into_padded(&mut self.k_second, &source.k_second, layer, "k_second")?;
+        copy_into_padded(&mut self.k_pass, &source.k_pass, layer, "k_pass")?;
+        copy_into_padded(&mut self.v, &source.v, layer, "v")?;
+        Ok(())
     }
 
     fn named_blocks<'cache>(
@@ -1985,8 +2043,8 @@ fn bound_cache_kind(roots: &Qwen35LayerRoots) -> DeclaredCacheKind {
 /// `None` when `name` is not declared at all, or when the program declared
 /// it with an unexpected shape (fewer than two dimensions, or a second
 /// symbolic extent) -- [`layer_pad_row_widths`] reads either case as row
-/// width `0`, which a still-unchecked `fill`-time `copy_from_slice` catches
-/// (as a panic, for now) as soon as a real, nonzero-length cache actually
+/// width `0`, which the `fill`-time [`crate::error::InteropError::CacheScratchShapeMismatch`]
+/// check then catches as soon as a real, nonzero-length cache actually
 /// needs to copy into it.
 fn cache_leaf_row_elements(program: &[Op], name: &str) -> Option<usize> {
     let shape = program.iter().find_map(|op| match op {
@@ -2021,7 +2079,10 @@ enum LayerPadRowWidths {
 /// declared, or an unexpected shape) reads as row width `0` here --
 /// deliberately, not a setup-time error: `0` reproduces exactly the
 /// starting state a genuinely absent leaf already left this scratch buffer
-/// in before this function existed.
+/// in before this function existed, so the SAME `fill`-time bounds check
+/// ([`InteropError::CacheScratchShapeMismatch`]) catches it, at the point
+/// the mismatch actually matters, instead of two divergent error paths for
+/// what is the same defect.
 fn layer_pad_row_widths(program: &[Op], names: &LayerCacheNames) -> LayerPadRowWidths {
     match names {
         LayerCacheNames::Attention { k_even, v, .. } => LayerPadRowWidths::Attention {
@@ -3835,7 +3896,7 @@ impl<'file> LoadedModel<'file> {
                                 even_odd_row: *even_odd_row,
                                 v_row: *v_row,
                             };
-                            kv_pad_scratch[layer].fill(cache, &shape);
+                            kv_pad_scratch[layer].fill(cache, &shape, layer)?;
                         }
                         (
                             LayerCacheState::DenseAttention(cache),
@@ -3851,7 +3912,7 @@ impl<'file> LoadedModel<'file> {
                                 pass_row: *pass_row,
                                 v_row: *v_row,
                             };
-                            qwen35_dense_pad_scratch[layer].fill(cache, &shape);
+                            qwen35_dense_pad_scratch[layer].fill(cache, &shape, layer)?;
                         }
                         (LayerCacheState::Ssm(_), LayerPadRowWidths::Ssm) => {}
                         _ => unreachable!(

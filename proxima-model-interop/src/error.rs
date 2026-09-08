@@ -435,4 +435,24 @@ pub enum InteropError {
     /// count, never grown at runtime.
     #[error("expert {expert} of layer {layer} is out of range for this checkpoint's expert slab")]
     ExpertSlabIndexOutOfRange { layer: usize, expert: usize },
+
+    /// A pad-scratch buffer's row width (`expected`, elements) came out
+    /// smaller than the growing per-layer cache it was about to copy from
+    /// (`found`) -- `crate::generate::Qwen35DenseAttentionPadScratch::fill`
+    /// (and its `KvPadScratch` counterpart)'s own row widths are read back
+    /// off `layer`'s `kv_cache.{layer}.*` `Op::Input` leaves as declared by
+    /// the bound program, which is authoritative; this only fires if a
+    /// foreign `crate::architecture::Architecture::bind` compiled a program
+    /// whose declared cache-leaf shape is narrower than the cache rows it
+    /// actually appends per step, a bind-time defect this scratch resize
+    /// cannot self-heal from. Previously an unchecked `copy_from_slice`
+    /// panic (`range end index out of range for slice of length N`); this
+    /// is that same condition, named.
+    #[error("layer {layer} cache scratch {leaf:?} is sized for {expected} elements, but the cache holds {found}")]
+    CacheScratchShapeMismatch {
+        layer: usize,
+        leaf: &'static str,
+        expected: usize,
+        found: usize,
+    },
 }
