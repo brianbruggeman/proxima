@@ -70,7 +70,7 @@ impl ListenerBuilderEntry for Listener {
 /// same ones). A few axes are honestly asymmetric and shadow or extend the
 /// trait method with an inherent one carrying more than a client ever
 /// needs: `.tls(TlsConfig)` (real cert material, no trait minted at all —
-/// see [`Self::tls`]), `.grpc()` (url-less — a listener dispatches to a
+/// see `Self::tls`, feature-gated behind `tls`), `.grpc()` (url-less — a listener dispatches to a
 /// `.handle(pipe)` already on hand, it doesn't dial out), `.h2()` (inherent,
 /// no client twin), and `.pgwire(query)` (real query engine — see its own
 /// doc). `.proxy(url)` has no listener meaning at all (it lives only on
@@ -183,7 +183,7 @@ impl ListenerBuilder {
 
     /// The socket address to listen on. Required before `.serve()` unless
     /// `.http(bind.to_string())` (or `Listener::http(bind)`, which calls it
-    /// for you) already carried it — see [`bind_from_spec`].
+    /// for you) already carried it — see `bind_from_spec`.
     #[must_use]
     pub fn bind(mut self, addr: SocketAddr) -> Self {
         self.bind = Some(addr);
@@ -222,7 +222,7 @@ impl ListenerBuilder {
     /// per-listener `.any_handler(name, handler)` override if present,
     /// else the `App`-level default (`App::register_any_default_handler`),
     /// else — for a candidate whose expected handler type happens to be a
-    /// [`PipeHandle`](crate::pipe::PipeHandle) (h1/h2's shape) — the
+    /// [`PipeHandle`] (h1/h2's shape) — the
     /// `.handle(pipe)` this builder already required, erased. A candidate
     /// with no handler resolvable ANY of those three ways logs a named
     /// config error per connection rather than silently dropping it — see
@@ -268,7 +268,7 @@ impl ListenerBuilder {
     /// calls `.protocol(..)` doesn't also have to remember `.any()`), an
     /// existing `All` stays `All`, and an existing `Subset` only gains this
     /// name rather than being narrowed to it. The candidate itself is
-    /// registered into `App::any_registry()` inside [`any_listen_protocol`]
+    /// registered into `App::any_registry()` inside `any_listen_protocol` (private)
     /// at `.serve()` time, the same place `.deny()`'s `DenySignature`
     /// candidates register — `ListenerBuilder` cannot register any earlier
     /// since the `App` (and its registry) doesn't exist until `.serve()`
@@ -296,7 +296,7 @@ impl ListenerBuilder {
     /// future candidate's own name). `handler` is erased via
     /// [`proxima_listen::any::erase_handler`] and downcast back inside that
     /// SAME candidate's own `AnyProtocol::drive` — see that trait's doc for
-    /// why the handler type isn't fixed to [`PipeHandle`](crate::pipe::PipeHandle).
+    /// why the handler type isn't fixed to [`PipeHandle`].
     /// Calling this WITHOUT a prior `.any()`/`.accepts()`/`.accept()`
     /// implicitly restricts the listener to just the named protocol
     /// (mirroring `.pgwire(query)` carrying its own engine without a
@@ -425,7 +425,7 @@ impl ListenerBuilder {
     }
 
     /// Terminal: resolve the accumulated spec to a `ListenProtocol` (via
-    /// [`resolve_listen_protocol`] — the listen-side mirror of the client's
+    /// `resolve_listen_protocol` — the listen-side mirror of the client's
     /// `load(Spec)` factory dispatch), bind, and return the running
     /// `Server`. Composes `App::new` + `App::mount` + `App::serve` — the
     /// exact `into_handle(pipe) -> App::new()? -> app.mount(...)? ->

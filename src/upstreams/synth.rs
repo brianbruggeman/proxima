@@ -218,7 +218,7 @@ async fn expand_template_body(
 }
 
 /// Base64-encoded timed chunk in a synth streaming body — the config twin of
-/// [`ChunkSpec`]. `ts_ms` is the absolute offset from the start of the response;
+/// `ChunkSpec` (private). `ts_ms` is the absolute offset from the start of the response;
 /// deltas drive the inter-chunk sleep when `delay_chunks` is set.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkConfig {

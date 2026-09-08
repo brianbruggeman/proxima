@@ -8,7 +8,7 @@
 //! - [`HttpListener`] — plain TCP HTTP/1.1 (with optional h2 prior-
 //!   knowledge dispatch on the listener side — that's a property of
 //!   `HttpListenProtocol`, not the spec).
-//! - [`HttpsListener`] — TCP + TLS termination + ALPN.
+//! - `HttpsListener` (feature-gated behind `tls`) — TCP + TLS termination + ALPN.
 //! - [`HttpUdsListener`] — UDS-bound HTTP/1.1, used by the daemon
 //!   control plane and any local-only pipe surface.
 

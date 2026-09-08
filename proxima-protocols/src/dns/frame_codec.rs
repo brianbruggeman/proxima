@@ -15,7 +15,8 @@
 //! [`FrameCodec::Frame`] here is ONE type, `&'a [u8]` — the message body
 //! bytes, minus the 2-byte length prefix — used identically for both
 //! directions. No sum type, no unreachable arm (contrast
-//! [`super::super::memcached::frame_codec::MemcachedFrame`], whose
+//! `super::super::memcached::frame_codec::MemcachedFrame` (feature-gated
+//! behind `memcached-codec-trait`), whose
 //! `Request`/`Reply` split memcached's genuinely asymmetric wire).
 //!
 //! [`DnsTcpCodec::parse_frame`] only ever answers "is a complete frame

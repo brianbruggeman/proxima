@@ -1,9 +1,11 @@
 //! Cassette policy: how record/replay data is kept fresh and when it may be
 //! destroyed. Three escape hatches, in order of preference: a
-//! `conflaguration`-first [`CassetteConfig`] (env `PROXIMA_CASSETTE_*` or a
+//! `conflaguration`-first [`CassetteConfig`](crate::cassette_config::CassetteConfig)
+//! (env `PROXIMA_CASSETTE_*` or a
 //! committed `tests/cassettes/config.toml`), the fluent
-//! [`CassetteConfig::layered`] / bon builder surface, and — last resort —
-//! programmable [`CassetteHooks`] that override the declarative policy
+//! [`CassetteConfig::layered`](crate::cassette_config::CassetteConfig::layered)
+//! / bon builder surface, and — last resort —
+//! programmable [`CassetteHooks`](crate::cassette_config::CassetteHooks) that override the declarative policy
 //! per-decision. Hooks are deliberately NOT serializable: the built config
 //! remains one wire form, hooks are code.
 

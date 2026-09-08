@@ -386,7 +386,7 @@ impl Client {
 }
 
 /// `Client` is itself a [`Handler`](crate::pipe::Handler): composing it as a transport
-/// stage routes the request through [`dispatch`](Client::dispatch), so the
+/// stage routes the request through `Client::dispatch` (crate-private), so the
 /// on/off-worker hop + self-owned runtime apply everywhere `Client` is used —
 /// not just via the `call(..).send()` builder. This is the seam the OTLP exporter
 /// (and any codec/middleware chain) composes so the wire send always goes through

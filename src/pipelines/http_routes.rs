@@ -29,12 +29,12 @@ use std::collections::BTreeMap;
 /// | POST   | /pipelines/submit                     | submit               |
 /// | GET    | /pipelines                            | list                 |
 /// | GET    | /pipelines/resolve?q=…                | resolve              |
-/// | GET    | /pipelines/<id>                       | inspect              |
-/// | GET    | /pipelines/<id>/tail                  | subscribe (chunked)  |
+/// | GET    | /pipelines/\<id\>                       | inspect              |
+/// | GET    | /pipelines/\<id\>/tail                  | subscribe (chunked)  |
 /// | GET    | /events                               | subscribe (chunked)  |
-/// | GET    | /pipelines/<id>/explain?stage=…       | (501, G7)            |
-/// | POST   | /pipelines/<id>/replay                | (501, G8)            |
-/// | GET    | /pipelines/<id>/artifact?stage=&path= | (501, G9)            |
+/// | GET    | /pipelines/\<id\>/explain?stage=…       | (501, G7)            |
+/// | POST   | /pipelines/\<id\>/replay                | (501, G8)            |
+/// | GET    | /pipelines/\<id\>/artifact?stage=&path= | (501, G9)            |
 pub struct PipelineControlPlanePipe {
     plane: DynPipelineControlPlane,
     label: String,

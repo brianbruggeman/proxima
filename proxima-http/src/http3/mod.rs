@@ -11,7 +11,8 @@
 //! - **`quinn-compat`** (default) — bridge over the upstream
 //!   non-proxima crates (`quinn` + `h3` + `h3-quinn`). For consumers
 //!   that want to ride the canonical implementations. Mounted at
-//!   [`listener::H3ListenProtocol`].
+//!   `listener::H3ListenProtocol` (`crate::http3::listener::H3ListenProtocol`,
+//!   feature-gated behind `http3-quinn-compat`).
 //!
 //! Both protocols are exported from `proxima::listeners`; consumers
 //! pick by name in their listener spec (`"h3"` for legacy,

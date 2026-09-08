@@ -37,7 +37,8 @@
 /// override): the inline capacity of the `SmallVec` backing
 /// [`h1::RequestHead::headers`]. Only meaningful on the alloc tier —
 /// the bare no_std no-alloc subset never builds that type. Deliberately
-/// NOT reused by [`frame_codec_pipe::OwnedFrame::headers`], which stays
+/// NOT reused by `frame_codec_pipe::OwnedFrame::headers` (feature-gated
+/// behind `http1_codec-frame-pipe`), which stays
 /// a plain `Vec` — see that field's doc for why inlining it measured
 /// as a net latency loss.
 #[cfg(feature = "http1_codec-alloc")]

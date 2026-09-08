@@ -1,4 +1,4 @@
-//! Middleware [`Pipe`](crate::Pipe) implementations — each wraps an
+//! Middleware [`Pipe`](crate::pipe::Pipe) implementations — each wraps an
 //! inner `Pipe` and transforms request, response, or call decision.
 //! Top-down reading order = request execution order; the response
 //! unwinds in reverse.
@@ -32,11 +32,11 @@
 //! authenticated work. Pick deliberately.
 //!
 //! Each module below is a single middleware. Cross-cutting
-//! composition primitives ([`Tee`](crate::Tee),
-//! [`Diff`](crate::Diff), [`Isolate`](crate::Isolate),
+//! composition primitives (`Tee`,
+//! [`Diff`], [`Isolate`],
 //! [`Causal`](crate::Causal), [`SwappablePipe`](crate::SwappablePipe),
-//! [`WriteBack`](crate::WriteBack)) live alongside as their own
-//! top-level modules; see the [`crate::pipe`] module rustdoc for the
+//! [`WriteBack`]) live alongside as their own
+//! top-level modules; see the [`mod@crate::pipe`] module rustdoc for the
 //! full menu (core primitives, recording-as-Pipe, serving).
 
 pub use proxima_patterns::middleware::auth;

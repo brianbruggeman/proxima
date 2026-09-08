@@ -193,7 +193,7 @@ impl From<ChainConfig> for Spec {
 /// Fluent twin of [`ChainConfig`]. Compose a policy chain programmatically —
 /// `Chain::builder().retry(cfg).rate_limit(cfg)…upstream(leaf)` — then either
 /// project it to config ([`ChainBuilder::to_config`]) or build the runtime
-/// handle ([`ChainBuilder::build`]). Carries a `ChainConfig` so both surfaces
+/// handle ([`ChainConfig::build`]). Carries a `ChainConfig` so both surfaces
 /// are one shape and round-trip losslessly.
 #[derive(Debug, Clone)]
 pub struct ChainBuilder {

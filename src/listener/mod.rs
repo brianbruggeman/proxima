@@ -1,4 +1,4 @@
-//! The serve-side peer of [`Client`](crate::Client) — same [`SpecBuilder`]
+//! The serve-side peer of [`Client`](crate::Client) — same [`SpecBuilder`](crate::SpecBuilder)
 //! coin, opposite face. `Client::builder()` accumulates a spec and resolves
 //! it via `load(Spec)` into a dialing `PipeHandle`; `Listener::builder()`
 //! accumulates a spec and resolves it via the [`ListenRegistry`](crate::ListenRegistry)

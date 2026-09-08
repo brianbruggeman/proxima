@@ -3,7 +3,7 @@
 //! here; both walkers return a [`Report`] the caller emits as text
 //! or JSON.
 //!
-//! - [`verify_static`](static_walker::verify_static) — graph
+//! - [`verify_static`] — graph
 //!   invariants over a parsed spec ([`serde_json::Value`]). v1 ships
 //!   `no_cycles` and `all_upstreams_have_timeouts` plus the
 //!   custom-predicate runner.

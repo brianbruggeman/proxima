@@ -1,7 +1,8 @@
 //! [`FrameCodecPipe`](crate::codec_pipe::FrameCodecPipe)`<C>` — the GENERIC adapter proving ANY
 //! [`proxima_codec::FrameCodec`] composes directly as a
 //! `proxima_primitives::pipe::Pipe` with no codec rewrite,
-//! not just [`crate::http1_codec::codec_trait::H1RequestCodec`].
+//! not just `crate::http1_codec::codec_trait::H1RequestCodec` (feature-gated
+//! behind `http1_codec-codec-trait`).
 //!
 //! Generalized from the H1-only spike
 //! (`http1_codec::frame_codec_pipe::FrameCodecPipe`, see git history):

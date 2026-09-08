@@ -4,7 +4,7 @@
 //! no trait minted for it (it needs real cert material a client never
 //! carries). A client's `.tls()` is a zero-arg ASSERTION over a dial url it
 //! already carries via `.http(url)` — the wire must be TLS, not a silent
-//! `auto`-negotiated fallback. See [`crate::load::canonical_http`]'s
+//! `auto`-negotiated fallback. See `load.rs`'s `canonical_http`'s
 //! `transport` forwarding and
 //! `proxima_http::http1::prime_upstream::build_prime_upstream`'s
 //! `transport == "tls"` + `http://` scheme rejection for where this is

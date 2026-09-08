@@ -7,17 +7,15 @@
 //! handshake forward: bytes in via `read_handshake`, bytes out via
 //! `write_handshake`, secrets + events pushed via [`TlsEventSink`].
 //!
-//! Concrete providers ship in sibling crates: [`MockTlsProvider`] for
+//! Concrete providers ship in sibling crates: `MockTlsProvider`
+//! (`mock::MockTlsProvider`, feature-gated behind `test`/`quic-mock-tls`) for
 //! deterministic tests (this crate), `RustlsProvider` (std-tier
 //! `proxima-quic-rustls`), `EmbeddedTlsProvider` (tier-1
 //! `proxima-quic-embedded-tls`). The proto crate compiles with **zero**
 //! TLS-stack knowledge — only the trait surface here.
 //!
 //! Decisive shape per `/research-rigor` self-play tournament documented
-//! in [`docs/proxima-quic/edges.md`].
-//!
-//! [`MockTlsProvider`]: mock::MockTlsProvider
-//! [`docs/proxima-quic/edges.md`]: ../../docs/proxima-quic/edges.md
+//! in `docs/proxima-quic/edges.md`.
 
 use core::fmt;
 use core::ops::Range;
