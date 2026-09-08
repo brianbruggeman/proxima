@@ -210,7 +210,6 @@ rustix.workspace = true
 # `generate.rs`'s own doc for why that pipe never yields.
 proxima = { workspace = true, features = ["test-support"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["hf"] }
-tempfile.workspace = true
 
 # Both examples below need `LoadedModel` (`std`-gated in `lib.rs`) and
 # `proxima_telemetry`'s recorder/macros (only pulled in by `instrument`,
