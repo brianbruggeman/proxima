@@ -5752,8 +5752,9 @@ fn reject_non_float32(
     let referenced_nodes = referenced_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
         let node = NodeId(position as u32);
-        let is_quantized_weight =
-            quantized_weights.contains(&node) && is_quantized_matmul_operand(program, node);
+        let is_quantized_weight = quantized_weights.contains(&node)
+            && (is_quantized_matmul_operand(program, node)
+                || is_quantized_gather_operand(program, node));
         // an `Op::Input` `bind::BoundOpBuilder::push` never materializes into
         // a `BoundOp` (see that match arm's own `Op::Input { .. } => {}`) —
         // it is a pure buffer handle, read directly by whichever node
@@ -5808,8 +5809,9 @@ fn reject_non_float32_outputs(
         let Some(expr) = program.get(node.0 as usize) else {
             continue;
         };
-        let is_quantized_weight =
-            quantized_weights.contains(&node) && is_quantized_matmul_operand(program, node);
+        let is_quantized_weight = quantized_weights.contains(&node)
+            && (is_quantized_matmul_operand(program, node)
+                || is_quantized_gather_operand(program, node));
         if expr.dtype() != DType::Float32 && !index_nodes.contains(&node) && !is_quantized_weight {
             return Err(TensorError::NotLowerable {
                 node,
@@ -5892,6 +5894,42 @@ fn is_quantized_matmul_operand(program: &[Op], node: NodeId) -> bool {
         }
     }
     used_as_matmul_operand
+}
+
+/// Whether `node` appears, anywhere in `program`, ONLY as the SOLE operand of
+/// an `Identity` [`Op::Elementwise`] addressed through an
+/// [`crate::map::IndexMap::Computed`] pattern -- the exact "quantized
+/// embedding table" gather shape [`embedding_lookup`](crate::spec::embedding_lookup)
+/// builds and [`run_embedding_gather_quantized`] already executes,
+/// dequantizing one row at a time straight out of the packed bytes rather
+/// than materializing the whole table as f32. [`reject_non_float32`]'s
+/// f32-only gate predates that execution path -- it only ever recognized
+/// [`is_quantized_matmul_operand`]'s multiply-then-reduce shape, so a
+/// quantized table used purely as a gather was rejected here before
+/// [`run_node_into`]'s own `quantized_gather_operand` dispatch ever got a
+/// chance to run it (see this module's `q8_0_embedding_gather_is_not_rejected_as_non_float32`
+/// test, added against exactly that gap).
+fn is_quantized_gather_operand(program: &[Op], node: NodeId) -> bool {
+    let mut used_as_gather_operand = false;
+    for expr in program {
+        let Op::Elementwise { body, operands, .. } = expr else {
+            continue;
+        };
+        if !operands.iter().any(|(source, _)| *source == node) {
+            continue;
+        }
+        let [(source, index_map)] = operands.as_slice() else {
+            return false;
+        };
+        if *source != node || *body != ScalarOp::Identity {
+            return false;
+        }
+        if !matches!(index_map, crate::map::IndexMap::Computed { .. }) {
+            return false;
+        }
+        used_as_gather_operand = true;
+    }
+    used_as_gather_operand
 }
 
 fn buffer_of<T, B: Deref<Target = [T]>>(
