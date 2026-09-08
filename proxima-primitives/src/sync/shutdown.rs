@@ -139,7 +139,7 @@ pub fn drain_current_core() -> usize {
 /// 3. Caller invokes `broadcast_drop` here: every core runs
 ///    `drain_current_core` in its own LocalSet so `!Send` hooks fire on
 ///    their owning core. The future resolves when every core acks, or
-///    when [`BROADCAST_DROP_DEADLINE`] elapses, whichever comes first.
+///    when `BROADCAST_DROP_DEADLINE` elapses, whichever comes first.
 /// 4. Caller drops the `Arc<Runtime>` to join worker threads.
 #[cfg(feature = "std")]
 pub struct ShutdownBarrier {
