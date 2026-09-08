@@ -212,7 +212,7 @@ use proxima_telemetry::trace;
 #[cfg(feature = "instrument")]
 use objc2_metal::{MTLCounterSampleBuffer, MTLCounterSet};
 #[cfg(feature = "instrument")]
-use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
+use proxima_tensor::instrument::{OpKind, elapsed_ticks, read_ticks, record_op_kind, ticks_to_nanos};
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, NumericPolicy, Op,
     QuantizedBlock, Shapes, TensorError, bind, block_node_ids, correct_packed_matmul_layouts,
@@ -7666,6 +7666,22 @@ fn encode_op(
     // here so a build without that feature does not warn on an unused param.
     #[cfg(not(feature = "metal-plan-stable-buffers"))]
     let _ = uniform_scratch;
+    // `cpu::run_node_into`'s own `BoundOpKind::CachedAttention` arm
+    // (`proxima-tensor/src/cpu.rs:5210-5215`) is the only place
+    // `instrument::record_op_kind` was ever called -- the CPU evaluator's
+    // per-node dispatch. `encode_op` is `omega::metal`'s own per-op dispatch
+    // (once per bound op in a plan, on the actual backend production
+    // decode runs), and it never touched that counter: a Metal build's
+    // `path_totals().op_kind_cached_attention` read 0 on every step
+    // regardless of whether the fused kernel ran. Recording it here, at the
+    // one point every `CachedAttention` op passes through regardless of
+    // cache-hit/miss or placement, makes the interop's per-step
+    // `cached_attention_ops` field truthful on the backend it actually
+    // reports for.
+    #[cfg(feature = "instrument")]
+    if matches!(bound.kind, BoundOpKind::CachedAttention { .. }) {
+        record_op_kind(OpKind::CachedAttention);
+    }
     // `resolved` is `Some` only from `execute_plan_with_placements`, once
     // `resolve_steps` has run: this whole block -- `kernel_cache_key`'s
     // `String`, `kernel_dispatch_shape`'s `Vec<Binding>`, and
