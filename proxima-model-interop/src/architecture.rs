@@ -216,3 +216,131 @@ impl ArchitectureRegistry {
             .ok_or_else(|| InteropError::UnknownArchitecture { name: name.into() })
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use alloc::string::ToString;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use proxima_gguf::value::MetadataValue as Value;
+    use proxima_gguf::{GgufModel, write_complete};
+
+    use super::*;
+
+    /// A foreign crate's own [`Architecture`], registered against nothing
+    /// this crate ships -- the seam
+    /// [`ArchitectureRegistry::with_builtin`]'s own doc says a checkpoint
+    /// family can add without a proxima PR. `BOUND` is the observable proof
+    /// [`Architecture::bind`] actually ran (not just that `resolve` picked
+    /// the right entry), the same shape `Qwen35Arch`/`DenseArch` would need
+    /// if they wanted to assert the same thing from outside this crate.
+    struct FakeArchitecture;
+
+    static FAKE_BIND_CALLED: AtomicBool = AtomicBool::new(false);
+    static FAKE: FakeArchitecture = FakeArchitecture;
+
+    impl Architecture for FakeArchitecture {
+        fn name(&self) -> &'static str {
+            "fake-test-arch"
+        }
+
+        fn bind<'file>(
+            &self,
+            _parsed: &ParsedGguf,
+            _file_bytes: &'file [u8],
+        ) -> Result<BoundProgram<'file>, InteropError> {
+            FAKE_BIND_CALLED.store(true, Ordering::SeqCst);
+            Ok(BoundProgram {
+                weights: BoundWeights::new(&[]),
+                architecture: ModelArchitecture {
+                    vocab: 0,
+                    embedding: 0,
+                    feed_forward: 0,
+                    query_heads: 0,
+                    kv_heads: 0,
+                    head_dim: 0,
+                    block_count: 0,
+                    expert_count: 0,
+                    expert_used_count: 0,
+                    rope_freq_base: 0.0,
+                    rms_epsilon: 0.0,
+                    tied_embeddings: false,
+                },
+                program: Vec::new(),
+                logits_root: NodeId(0),
+                layer_roots: Vec::new(),
+            })
+        }
+    }
+
+    /// A minimal GGUF whose only load-bearing content is
+    /// `general.architecture = name` -- every test in this module reads
+    /// nothing else off it, since [`ArchitectureRegistry::resolve`] itself
+    /// reads nothing else.
+    fn gguf_with_architecture(name: &str) -> (proxima_gguf::pipe::ParsedGguf, Vec<u8>) {
+        let model = GgufModel {
+            version: 3,
+            metadata: alloc::vec![(
+                "general.architecture".to_string(),
+                Value::String(name.to_string()),
+            )],
+            tensors: Vec::new(),
+        };
+        let file_bytes = write_complete(&model).expect("writes a minimal gguf");
+        // leaked so the parsed borrow can outlive this function -- a test
+        // fixture, not a hot path (the same reason
+        // `bind.rs`'s own fixtures never worry about freeing this).
+        let leaked: &'static [u8] = Vec::leak(file_bytes.clone());
+        let parsed =
+            proxima_gguf::parse_complete(leaked).expect("parses a minimal gguf");
+        (parsed, file_bytes)
+    }
+
+    #[test]
+    fn a_foreign_architecture_registers_and_its_bind_is_called_by_name() {
+        FAKE_BIND_CALLED.store(false, Ordering::SeqCst);
+        let mut registry = ArchitectureRegistry::with_builtin();
+        registry.register(&FAKE);
+        let (parsed, file_bytes) = gguf_with_architecture("fake-test-arch");
+
+        let resolved = registry
+            .resolve(&parsed)
+            .expect("the registered fake architecture resolves by its own name");
+        assert_eq!(resolved.name(), "fake-test-arch");
+
+        resolved
+            .bind(&parsed, &file_bytes)
+            .expect("the fake architecture's own bind always succeeds");
+        assert!(
+            FAKE_BIND_CALLED.load(Ordering::SeqCst),
+            "resolve must return the SAME architecture whose bind a caller then calls"
+        );
+    }
+
+    #[test]
+    fn resolve_on_an_unregistered_name_with_no_default_returns_the_typed_error() {
+        let registry = ArchitectureRegistry {
+            entries: Vec::new(),
+            default: None,
+        };
+        let (parsed, _file_bytes) = gguf_with_architecture("totally-unknown-checkpoint-family");
+
+        match registry.resolve(&parsed) {
+            Err(InteropError::UnknownArchitecture { name }) => {
+                assert_eq!(name, "totally-unknown-checkpoint-family");
+            }
+            Ok(resolved) => panic!(
+                "expected InteropError::UnknownArchitecture, resolved {:?} instead",
+                resolved.name()
+            ),
+            Err(other) => panic!("expected InteropError::UnknownArchitecture, got {other}"),
+        }
+    }
+
+    #[test]
+    fn with_builtin_registers_exactly_dense_and_qwen35_by_name() {
+        let registry = ArchitectureRegistry::with_builtin();
+        assert_eq!(registry.names(), alloc::vec!["qwen35", "dense"]);
+    }
+}
