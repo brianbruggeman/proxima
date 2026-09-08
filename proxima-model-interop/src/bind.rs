@@ -459,7 +459,7 @@ pub(crate) fn tensor_bytes_by_class(parsed: &ParsedGguf) -> (u64, u64, u64) {
 pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitecture, InteropError> {
     let architecture = metadata_str(parsed, "general.architecture")?;
     let embedding = metadata_u32(parsed, &alloc::format!("{architecture}.embedding_length"))?;
-    let feed_forward = metadata_u32(
+    let dense_feed_forward = metadata_u32(
         parsed,
         &alloc::format!("{architecture}.feed_forward_length"),
     )?;
@@ -478,6 +478,25 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_count"));
     let expert_used_count =
         metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_used_count"));
+    // A dense checkpoint's `feed_forward_length` doubles as the routed
+    // expert width too (Mixtral-8x7B: no separate key exists). Some MoE
+    // architectures (qwen3moe confirmed: `expert_feed_forward_length=768`
+    // vs. `feed_forward_length=6144` on the real 30B-A3B checkpoint) declare
+    // a *distinct*, smaller per-expert width under its own key --
+    // `architecture_from_hf_config` (`hf_config.rs`) already makes this same
+    // `expert_count == 0` split for the safetensors/HF-config path
+    // (`moe_intermediate_size` vs. `intermediate_size`); this mirrors it for
+    // the GGUF path rather than adding a parallel field nothing but this
+    // branch would read.
+    let feed_forward = if expert_count == 0 {
+        dense_feed_forward
+    } else {
+        metadata_u32_optional_or(
+            parsed,
+            &alloc::format!("{architecture}.expert_feed_forward_length"),
+            dense_feed_forward,
+        )
+    };
     let rope_freq_base = metadata_f32_optional(
         parsed,
         &alloc::format!("{architecture}.rope.freq_base"),
