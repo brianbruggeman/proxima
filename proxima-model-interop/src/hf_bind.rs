@@ -265,12 +265,41 @@ pub fn permute_rope_rows(flat: &[f32], head_count: usize, head_dim: usize, in_di
     permuted
 }
 
+/// Whether `manifest` carries per-head QK-norm weights
+/// (`model.layers.0.self_attn.q_norm.weight`) -- the HF-naming counterpart
+/// of [`crate::bind::checkpoint_has_qk_norm`]'s GGUF-side presence check,
+/// same "read the file, don't assume the shape from a name" reasoning.
+///
+/// Doubles as this module's RoPE-convention discriminator: every checkpoint
+/// this crate has evaluated that carries QK-norm (Qwen3's own `q_norm`/
+/// `k_norm`, `modeling_qwen3.py`'s `Qwen3Attention`) is also the family
+/// `llama.cpp`'s own GGUF converter leaves in HF's native split-half RoPE
+/// layout on disk (`LLM_ARCH_QWEN3`'s `rope_type = LLAMA_ROPE_TYPE_NEOX`,
+/// see `proxima_tensor::spec`'s own `qk_norm.is_some()` RoPE-pairing
+/// branch) -- confirmed downstream by tensor-by-tensor comparison of a
+/// Qwen3-1.7B safetensors `attn_q`/`attn_k` bind against a known-good GGUF:
+/// permuting rows lands `rel_err ~= 1.15` (scrambled), leaving them in
+/// place lands `rel_err ~= 0.043` (quant noise). A family with neither
+/// QK-norm nor the split-half convention (llama/mistral) still needs
+/// [`permute_rope_rows`] to convert HF's `rotate_half` layout into this
+/// crate's interleaved RoPE pairing, which is why this same presence check
+/// gates both.
+fn safetensors_has_qk_norm(manifest: &Manifest) -> bool {
+    manifest
+        .tensor("model.layers.0.self_attn.q_norm.weight")
+        .is_some()
+}
+
 /// [`hf_bind_matmul_weight`]'s counterpart for `q_proj`/`k_proj` alone:
 /// always decodes to an owned `[out_dim, in_dim]` buffer (never takes the
 /// packed zero-copy path -- [`permute_rope_rows`]'s reorder is a physical
 /// byte move a borrowed packed block cannot express) and applies
-/// [`permute_rope_rows`] before the same transpose
-/// [`hf_bind_matmul_weight`] already does.
+/// [`permute_rope_rows`] before the same transpose [`hf_bind_matmul_weight`]
+/// already does, but ONLY for a `rotate_half` family (`permute_rows`,
+/// [`safetensors_has_qk_norm`]'s doc names which families set this) -- a
+/// split-half/NEOX family (Qwen3) already carries its rows in this crate's
+/// expected interleaved layout, and permuting them again would scramble
+/// `attn_q`/`attn_k`.
 // one weight's own real shape (lookup/store names, head geometry, in_dim)
 // plus the file/state every binder in this module threads through -- the
 // same shape `proxima_tensor::spec::append_mistral_cached_moe_layer`
@@ -285,15 +314,20 @@ fn hf_bind_rope_weight<'file>(
     head_count: usize,
     head_dim: usize,
     in_dim: usize,
+    permute_rows: bool,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
     let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &lookup_name)?;
-    let permuted = permute_rope_rows(&decoded, head_count, head_dim, in_dim);
+    let rows = if permute_rows {
+        permute_rope_rows(&decoded, head_count, head_dim, in_dim)
+    } else {
+        decoded
+    };
     let out_dim = head_count * head_dim;
-    state.resident_bytes += permuted.len() * core::mem::size_of::<f32>();
+    state.resident_bytes += rows.len() * core::mem::size_of::<f32>();
     state.owned.push((
         store_name,
-        transpose_out_in_to_in_out(&permuted, &lookup_name, out_dim, in_dim)?,
+        transpose_out_in_to_in_out(&rows, &lookup_name, out_dim, in_dim)?,
     ));
     Ok(())
 }
@@ -539,6 +573,7 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
     let kv_dim = architecture.kv_heads as usize * architecture.head_dim as usize;
     let feed_forward = architecture.feed_forward as usize;
     let vocab = architecture.vocab as usize;
+    let permute_rope_rows = !safetensors_has_qk_norm(manifest);
 
     hf_bind_dense(
         manifest,
@@ -575,6 +610,7 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
             architecture.query_heads as usize,
             architecture.head_dim as usize,
             embedding,
+            permute_rope_rows,
             &mut state,
         )?;
         hf_bind_rope_weight(
@@ -586,6 +622,7 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
             architecture.kv_heads as usize,
             architecture.head_dim as usize,
             embedding,
+            permute_rope_rows,
             &mut state,
         )?;
         hf_bind_matmul_weight(
