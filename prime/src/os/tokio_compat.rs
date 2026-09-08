@@ -16,7 +16,7 @@
 //!    keeping its scheduler + reactor + timer driver alive for the prime
 //!    runtime's lifetime.
 //! 2. Stash each sister runtime's `Handle` on the matching prime worker
-//!    via [`core_shard::launch_with_lanes_and_setup`]'s `WorkerSetup`
+//!    via [`core_shard::launch_with_lanes_and_setup`](crate::os::core_shard::launch_with_lanes_and_setup)'s `WorkerSetup`
 //!    hook. The worker leaks the `Handle` to get `&'static Handle`, calls
 //!    `.enter()` to obtain `EnterGuard<'static>`, and holds the guard on
 //!    its stack for the rest of its life.
@@ -81,7 +81,7 @@ type CompatTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 /// its sister's `Handle` for thread-local re-entry.
 ///
 /// Lives behind an `Arc` inside `PrimeRuntime`; drop tears down all
-/// sister threads via [`Self::shutdown`].
+/// sister threads via its own `Drop` impl.
 pub struct TokioCompatHandles {
     cores: Vec<TokioCompatCore>,
 }
@@ -138,7 +138,8 @@ impl TokioCompatHandles {
     }
 
     /// Build a [`WorkerSetup`] closure for `core_id`. Pass to
-    /// [`core_shard::launch_with_lanes_and_setup`] so the prime worker
+    /// [`core_shard::launch_with_lanes_and_setup`](crate::os::core_shard::launch_with_lanes_and_setup)
+    /// so the prime worker
     /// thread enters the sister tokio handle for its lifetime.
     ///
     /// The closure leaks one `Box<tokio::runtime::Handle>` (a single

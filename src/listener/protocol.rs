@@ -1,11 +1,13 @@
-//! Protocol axis for [`ListenerBuilder`] — TYPE-SPECIFIC (no blanket impl
+//! Protocol axis for `ListenerBuilder`
+//! (`crate::listener::handle::ListenerBuilder`) — TYPE-SPECIFIC (no blanket impl
 //! over every `SpecBuilder`, unlike the retired
 //! `proxima_config::sugar::ProtocolSugar`). `.http()`/`.https()`/`.grpc()`
 //! are the url-less listener twins of the client's own axis (a listener
 //! dispatches to a `.handle(pipe)` already on hand, it doesn't dial out).
 //! `.kafka()`/`.mqtt()`/`.amqp()`/`.memcached()`/`.redis()` take the crate's
 //! typed handle and delegate to the existing
-//! [`ListenerBuilder::protocol`](crate::listener::handle::ListenerBuilder::protocol)
+//! `ListenerBuilder::protocol` (`crate::listener::handle::ListenerBuilder::protocol`,
+//! feature-gated behind `any-listener`)
 //! seam — the SAME mechanism a third-party protocol uses (see the
 //! `TestThriftExt`-style test in `tests/e2e`). `.pgwire()` (bespoke — see
 //! its own doc), `.dns()` (registers TWO candidates, TCP and UDP, under one
@@ -23,7 +25,7 @@
 /// scope with `use proxima::ListenerProtocolExt;` (or `proxima::prelude::*`).
 pub trait ListenerProtocolExt: Sized {
     /// Bind address carrier (the `http` spec key) — see
-    /// [`bind_from_spec`](crate::listener::handle::bind_from_spec). Not a
+    /// `bind_from_spec` (`crate::listener::handle::bind_from_spec`, private). Not a
     /// dial url on this side; a listener dispatches to `.handle(pipe)`.
     ///
     /// Requires the `http1-native` feature (or `http1`) — the `"http"`
@@ -76,7 +78,7 @@ pub trait ListenerProtocolExt: Sized {
     /// scheme, on the listener side (a client's `.https(url)` instead reads
     /// the scheme out of its dial url; a listener has no url to read a
     /// scheme from, so `.tls(TlsConfig)` is the only on/off switch). See
-    /// [`crate::listener::handle::ListenerBuilder::tls`] for cert material.
+    /// `crate::listener::handle::ListenerBuilder::tls` (feature-gated behind `tls`) for cert material.
     ///
     /// Requires the `http1-native` feature (or `http1`) — the `"http"`
     /// listen protocol is not registered under bare default features.

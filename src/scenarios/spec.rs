@@ -327,7 +327,7 @@ pub enum Expectation {
     SuccessRateGe {
         ratio: f64,
     },
-    /// CEL expression. Bindings: `success_rate` (f64 in [0,1]),
+    /// CEL expression. Bindings: `success_rate` (f64 in \[0,1\]),
     /// `completed` / `successes` / `failures` (u64), `metric.<name>`
     /// (u64). example: `"success_rate >= 0.99"`
     Cel {

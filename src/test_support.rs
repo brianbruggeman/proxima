@@ -2,8 +2,9 @@
 //! Tier-1 (runtime drivers, `TestCtx`, panic capture) lives in `proxima-test`.
 //!
 //! Cassettes: a `#[proxima::test(cassette = "name")]` body obtains a record-or-
-//! replay `Handler` from [`cassette_pipe`]. Record uses a deterministic
-//! synchronous tee ([`RecordingTee`]) over the recording-core event model +
+//! replay `Handler` from [`cassette_pipe`](crate::test_support::cassette_pipe).
+//! Record uses a deterministic
+//! synchronous tee (`RecordingTee`, private) over the recording-core event model +
 //! `JsonlSink` (NOT the serving-path `RecordUpstream`, whose detached drainer
 //! has no completion signal). Replay uses `ReplayUpstream::from_jsonl`. The
 //! spec-to-path rule the ctx applies lives in `proxima-test/src/harness.rs`.

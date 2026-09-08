@@ -38,7 +38,7 @@ struct BuiltIn {
 }
 
 /// Run the static walker against a parsed spec value (as produced by
-/// [`crate::load::load_value_from_path`] or
+/// `load.rs`'s `load_value_from_path` (private) or
 /// [`crate::settings::ProximaSettings::from_path`] re-serialized).
 ///
 /// Accepts both the **named-map** form (`[pipes.api] chain = [...]`)

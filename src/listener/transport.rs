@@ -1,7 +1,7 @@
 //! Transport axis for [`ListenerBuilder`] — TYPE-SPECIFIC (no blanket impl
 //! over every `SpecBuilder`, unlike the retired
 //! `proxima_config::sugar::TransportSugar`). Picks the wire
-//! [`resolve_listen_protocol`](crate::listener::handle::resolve_listen_protocol)
+//! `resolve_listen_protocol` (`crate::listener::handle::resolve_listen_protocol`, private)
 //! reads. There is no listener-side `.proxy()` — a listener has no upstream
 //! to route through (see `reject_dead_axes`, which still hard-errors if a
 //! caller reaches `.proxy()` through some other door).
@@ -66,12 +66,12 @@ pub trait ListenerTransportExt: Sized {
     /// is retired: `.dns(handler)` now registers a TCP AND a UDP
     /// `AnyProtocol` candidate under one `.any()`-fanned listener regardless
     /// of whether `.tcp()`/`.udp()` was ever called (see
-    /// [`crate::ListenerProtocolExt::dns`]'s own doc). Pairing `.udp()` with
+    /// `crate::ListenerProtocolExt::dns` (feature-gated behind `dns-listener`)'s own doc). Pairing `.udp()` with
     /// `.any()`/`.kafka()`/`.mqtt()`/… is likewise no longer rejected — it's
     /// redundant at worst, since a registered candidate's own
     /// `AnyProtocol::wants_datagram` already decides whether `.any()` binds
     /// a UDP socket, with no `.udp()` call needed either way (see
-    /// [`crate::ListenerProtocolExt::kafka`]'s doc for the ONE transport
+    /// `crate::ListenerProtocolExt::kafka` (feature-gated behind `kafka-listener`)'s doc for the ONE transport
     /// pairing that IS still a named [`crate::ProximaError::Config`]:
     /// `.quic()`, whose DCID connection-demux is a different mechanism
     /// entirely).

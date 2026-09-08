@@ -568,7 +568,7 @@ pub mod prelude {
 
 /// Drive a future to completion — expression sugar over the `block_on` verb.
 /// Two arities, both pointing down to a concrete `block_on`:
-/// - `block_on!(fut)` — the no-runtime [`block_on`](crate::block_on) poll loop
+/// - `block_on!(fut)` — the no-runtime [`block_on`](crate::block_on()) poll loop
 ///   (drives on the calling thread, no runtime, no reactor).
 /// - `block_on!(rt, fut)` — the runtime-holding
 ///   [`block_on`](crate::runtime::block_on): drives `fut` on core 0 of the
@@ -592,8 +592,8 @@ macro_rules! block_on {
 /// - `run!(fut)` — adaptive [`run`](crate::runtime::run) (prime when compiled,
 ///   else tokio).
 /// - `run!(prime, fut)` — [`run_prime`](crate::runtime::run_prime).
-/// - `run!(tokio, fut)` — [`run_tokio`](crate::runtime::run_tokio), the
-///   multi-thread tokio drive the adaptive path falls back to.
+/// - `run!(tokio, fut)` — `crate::runtime::run_tokio` (feature-gated behind
+///   `tokio`), the multi-thread tokio drive the adaptive path falls back to.
 #[macro_export]
 macro_rules! run {
     (prime, $fut:expr) => {

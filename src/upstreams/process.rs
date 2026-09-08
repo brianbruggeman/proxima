@@ -488,7 +488,7 @@ fn default_ready_timeout_ms() -> u64 {
 }
 
 /// Serialisable readiness probe — the config mirror of [`ReadyProbe`]. Tagged
-/// by `type`; the `tcp` variant parses its `addr` to a [`SocketAddr`] at
+/// by `type`; the `tcp` variant parses its `addr` to a [`SocketAddr`](std::net::SocketAddr) at
 /// [`ProcessConfig::into_spec`] time so the wire form stays a plain string.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

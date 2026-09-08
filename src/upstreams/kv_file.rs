@@ -482,7 +482,7 @@ impl Validate for KvFileConfig {
 }
 
 impl KvFileConfig {
-    /// Build the disk-backed cache (without the [`KvUpstream`] wrapper).
+    /// Build the disk-backed cache (without the [`KvUpstream`](crate::upstreams::kv_upstream::KvUpstream) wrapper).
     pub fn into_backend(self) -> Result<Arc<KvFile>, ProximaError> {
         self.validate()
             .map_err(|err| ProximaError::Config(format!("{err}")))?;
@@ -507,7 +507,7 @@ impl KvFileConfig {
         }
     }
 
-    /// Materialise the full `kv:file` pipe (backend + [`KvUpstream`] wrapper).
+    /// Materialise the full `kv:file` pipe (backend + [`KvUpstream`](crate::upstreams::kv_upstream::KvUpstream) wrapper).
     pub fn from_config(
         self,
     ) -> Result<crate::upstreams::kv_upstream::KvUpstream<KvFile>, ProximaError> {

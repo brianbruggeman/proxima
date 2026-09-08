@@ -111,7 +111,7 @@ impl PrimeRuntime {
     }
 
     /// Returns the sister tokio runtime handles when this runtime was
-    /// built with [`Builder::tokio_compat`]. `None` for vanilla prime.
+    /// built with [`Builder::tokio_compat`](crate::config::Builder::tokio_compat). `None` for vanilla prime.
     /// Useful for diagnostics, benches, and tests that need to verify
     /// the compat plumbing is in place; user code rarely needs this
     /// (the EnterGuard on each worker covers the common path).

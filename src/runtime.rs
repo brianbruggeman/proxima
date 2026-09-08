@@ -118,14 +118,14 @@ impl RuntimeBackend {
 /// `listeners::udp`'s dispatch sites need. The mismatch the sentence above
 /// warns about stays unrepresentable here too: every field is DERIVED from
 /// the one `runtime` argument by [`from_prime`](Self::from_prime)/
-/// [`from_tokio`](Self::from_tokio) — there is no constructor that lets a
+/// `from_tokio` (`Self::from_tokio`, feature-gated behind `runtime-tokio`) — there is no constructor that lets a
 /// caller hand-pick factories from different backends.
 ///
 /// `datagram_factory`/`unix_upstream_factory`/`packet_listener_factory` are
 /// `Option` for forward-compatibility — a future backend need not implement
 /// every optional axis — not because today's bundle is partially filled:
 /// both prime and tokio implement all four (see
-/// [`proxima_net::tokio::TokioDatagramFactory`]).
+/// `proxima_net::tokio::TokioDatagramFactory`, feature-gated behind `tokio`).
 ///
 /// Every field here is `pub`, so nothing at the type level stops a caller
 /// hand-assembling a `RuntimeSelection` whose `datagram_factory` targets a
@@ -456,7 +456,8 @@ impl PrimeServeExt for PrimeRuntime {
 /// dedicated driver core so `future` never deadlocks a serving worker.
 ///
 /// Prefer this for the proxima serve/chain path — it runs the future on the
-/// same per-core runtime production serves on. See [`run_tokio`] for
+/// same per-core runtime production serves on. See `run_tokio`
+/// (feature-gated behind `tokio`) for
 /// hyper/axum/`TokioPerCoreRuntime`-shaped bins.
 ///
 /// # Errors
@@ -496,7 +497,7 @@ where
 ///
 /// Internally boots one EXTRA worker beyond the App-visible placement and
 /// runs `future` there, disjoint from the App-visible workers — see
-/// [`AdoptedRuntime`]'s doc for why (`Listener::run_with_runtime`'s readiness
+/// `AdoptedRuntime`'s doc (private) for why (`Listener::run_with_runtime`'s readiness
 /// gate is a genuine OS-thread-blocking wait; running `future` on the same
 /// core a listener lane targets deadlocks the one thread that would need to
 /// both block and drain that lane). The extra worker is invisible to `App` —
@@ -769,7 +770,7 @@ where
 ///
 /// # Errors
 /// Propagates the backend's build/dispatch error (see [`run_prime`] /
-/// [`run_tokio`]). The prime backend additionally requires `F::Output:
+/// `run_tokio`, feature-gated behind `tokio`). The prime backend additionally requires `F::Output:
 /// Send + 'static` (the value crosses the per-core channel); the tokio
 /// backend does not.
 #[cfg(all(

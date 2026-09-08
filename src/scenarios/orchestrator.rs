@@ -789,7 +789,7 @@ pub struct OpenLoopSummary {
 ///
 /// Cadence rides [`Runtime::timer_at`] — no `tokio::time::interval` /
 /// `tokio::sync::Semaphore`. The whole driver runs on a runtime worker core
-/// (via [`drive_on_core`]) and dispatches each request with
+/// (via `drive_on_core`, private) and dispatches each request with
 /// `Runtime::spawn_on_current_core`, so it is runtime-agnostic: identical
 /// behaviour on `TokioPerCoreRuntime` and the prime-native `PrimeRuntime`.
 pub async fn drive_workload_open(

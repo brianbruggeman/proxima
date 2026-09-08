@@ -1,5 +1,6 @@
 //! `FramedClient` — the client counterpart to
-//! [`FramedListenProtocol`](crate::listeners::FramedListenProtocol): dials a
+//! `FramedListenProtocol` (`crate::listeners::FramedListenProtocol`,
+//! feature-gated behind `tcp`/`unix` + `tokio`): dials a
 //! length-delimited `[u32 BE len][payload]` listener and holds the
 //! connection across many round trips. Frames identically to the listener
 //! — same [`proxima_codec::LengthDelimitedCodec`], same 4-byte big-endian

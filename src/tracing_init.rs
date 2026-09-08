@@ -63,8 +63,8 @@ impl LogFormat {
 /// pulled in by `tracing-init`, which additionally bridges `tracing::`-crate
 /// events (see [`init_tracing`]). Delegates to
 /// [`install_console_recorder`](proxima_telemetry::export::install_console_recorder)
-/// (or [`install_console_logging`](proxima_telemetry::export::install_console_logging)
-/// when `tracing-init` is on) — this crate carries no parallel implementation of either.
+/// (or `proxima_telemetry::export::install_console_logging`, feature-gated
+/// behind `tracing-init`) — this crate carries no parallel implementation of either.
 ///
 /// The returned `Arc<Recorder>` does not need to be held for logging to keep
 /// working — [`proxima_telemetry::export::set_default_recorder`] and the

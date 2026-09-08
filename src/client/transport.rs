@@ -1,7 +1,7 @@
 //! Transport axis for [`ClientBuilder`] — TYPE-SPECIFIC (no blanket impl over
 //! every `SpecBuilder`, unlike the retired `proxima_config::sugar::TransportSugar`).
 //! Picks the wire under the app protocol (`.http`/`.grpc`/…) and the egress
-//! route. Lowers to the `transport` / `proxy` spec keys [`crate::load`]'s
+//! route. Lowers to the `transport` / `proxy` spec keys [`mod@crate::load`]'s
 //! factory dispatch reads.
 
 use crate::client::handle::ClientBuilder;
@@ -42,7 +42,7 @@ pub trait ClientTransportExt: Sized {
 
     /// Force HTTP/3 over QUIC — dispatches through the native h3 upstream
     /// (`h3-native`) instead of the h1/h2 prime client. See
-    /// [`crate::load::canonical_h3`] for the field-forwarding contract.
+    /// `load.rs`'s `canonical_h3` for the field-forwarding contract.
     ///
     /// ```
     /// use proxima::{Client, ClientProtocolExt, ClientTransportExt};

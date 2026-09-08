@@ -309,7 +309,7 @@ impl Validate for KvCacheConfig {
 }
 
 impl KvCacheConfig {
-    /// Build the cache backend (without the [`KvUpstream`] wrapper).
+    /// Build the cache backend (without the [`KvUpstream`](crate::upstreams::kv_upstream::KvUpstream) wrapper).
     pub fn into_backend(self) -> Result<Arc<KvCache>, ProximaError> {
         self.validate()
             .map_err(|err| ProximaError::Config(format!("{err}")))?;
@@ -334,7 +334,7 @@ impl KvCacheConfig {
         }
     }
 
-    /// Materialise the full `kv:cache` pipe (backend + [`KvUpstream`] wrapper).
+    /// Materialise the full `kv:cache` pipe (backend + [`KvUpstream`](crate::upstreams::kv_upstream::KvUpstream) wrapper).
     pub fn from_config(
         self,
     ) -> Result<crate::upstreams::kv_upstream::KvUpstream<KvCache>, ProximaError> {

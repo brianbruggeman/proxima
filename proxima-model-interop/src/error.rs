@@ -369,8 +369,8 @@ pub enum InteropError {
     )]
     UnsupportedWeightPrecisionTarget { tensor: String, target: GgmlType },
 
-    /// [`crate::architecture::Architecture::step_inputs`] returned a
-    /// [`crate::architecture::StepInput`] whose name does not match any
+    /// `crate::Architecture::step_inputs` (feature-gated behind `std`) returned a
+    /// `crate::StepInput` (feature-gated behind `std`) whose name does not match any
     /// [`proxima_tensor::Op::Input`] leaf in this checkpoint's own forward
     /// program -- the architecture computed a leaf the program never
     /// declared, a caller mistake surfaced as data rather than the value
@@ -382,22 +382,22 @@ pub enum InteropError {
 
     /// A forward program leaf beyond the decode loop's own builtin
     /// `ids`/`eps`/`rope_cos`/`rope_sin`/`cached_len`/`kv_cache.*` set was
-    /// left unbound after [`crate::architecture::Architecture::step_inputs`]
-    /// ran -- either the architecture's own
-    /// [`crate::architecture::Architecture::bind`] declared a leaf its
-    /// [`crate::architecture::Architecture::step_inputs`] never feeds, or
+    /// left unbound after `crate::Architecture::step_inputs` (feature-gated
+    /// behind `std`) ran -- either the architecture's own
+    /// `crate::Architecture::bind` declared a leaf its
+    /// `crate::Architecture::step_inputs` never feeds, or
     /// (the default, no-op override) an architecture with a custom leaf
-    /// never overrode [`crate::architecture::Architecture::step_inputs`] at
+    /// never overrode `crate::Architecture::step_inputs` at
     /// all.
     #[error("forward program leaf {name:?} is left unbound; no builtin block and no architecture step_inputs supplied it")]
     MissingStepInput { name: String },
 
-    /// [`crate::architecture::Architecture::step_inputs`] returned a
-    /// [`crate::architecture::StepInput`] whose `symbol` names a slot the
+    /// `crate::Architecture::step_inputs` (feature-gated behind `std`) returned a
+    /// `crate::StepInput` (feature-gated behind `std`) whose `symbol` names a slot the
     /// decode loop itself already binds
-    /// (`crate::architecture::symbols::NEW_COUNT`/`crate::architecture::symbols::KV_BOUND`)
+    /// (`crate::symbols::NEW_COUNT`/`crate::symbols::KV_BOUND`)
     /// -- a foreign architecture's own slot must start at
-    /// [`crate::architecture::symbols::FIRST_FREE`], never overwrite a
+    /// `crate::symbols::FIRST_FREE` (feature-gated behind `std`), never overwrite a
     /// builtin one out from under the loop.
     #[error("architecture step_inputs named reserved symbol slot {slot}; foreign slots start at FIRST_FREE")]
     ReservedSymbolSlot { slot: u16 },
