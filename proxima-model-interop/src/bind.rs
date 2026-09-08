@@ -546,6 +546,11 @@ pub fn metadata_str<'parsed>(
 /// indicator's label), never a bind precondition the way `metadata_str`'s
 /// other callers' keys are, so a checkpoint that omits it loads exactly the
 /// same as one that carries it.
+// sole caller is `generate.rs`'s `LoadedModel::model_name`, `feature =
+// "std"`-gated -- without this gate a bare `cargo test` (no features)
+// compiles this `pub fn` with no reachable caller (its own `pub use` is
+// also std-gated, `lib.rs`) and `-D dead-code` rejects it.
+#[cfg(feature = "std")]
 pub fn metadata_str_opt<'parsed>(
     parsed: &'parsed ParsedGguf,
     key: &str,
@@ -3104,6 +3109,10 @@ mod tests {
     /// the shared setup every `weight_precision` recode test below starts
     /// from, so each test's own body is the recode assertion, not fixture
     /// plumbing.
+    // every caller below is a `#[cfg(feature = "std")]` recode test -- bare
+    // `cargo test` (no features) compiles this with no reachable caller and
+    // `-D dead-code` rejects it.
+    #[cfg(feature = "std")]
     fn one_tensor_gguf(
         ggml_type: WireType,
         data: &[u8],

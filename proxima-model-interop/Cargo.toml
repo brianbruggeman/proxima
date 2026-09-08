@@ -266,3 +266,10 @@ required-features = ["std"]
 [[example]]
 name = "mixtral_architecture_dump"
 required-features = ["std"]
+
+# Runs a synthesized Qwen3.5 checkpoint through `generate::LoadedModel`
+# (`std`-gated) -- same reason as the examples above: a bare default-features
+# build has no `LoadedModel` in the crate root, so this needs the same gate.
+[[example]]
+name = "synth_qwen35_decode"
+required-features = ["std"]

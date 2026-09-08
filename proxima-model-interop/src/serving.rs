@@ -72,6 +72,11 @@ pub enum NamePattern<'model> {
 }
 
 impl NamePattern<'_> {
+    // sole caller chain is `matching_precision_target` ->
+    // `precision_target_for` (`bind.rs`), both `feature = "std"`-gated --
+    // without this gate a bare `cargo test` (no features) compiles this
+    // method with no reachable caller and `-D dead-code` rejects it.
+    #[cfg(feature = "std")]
     #[must_use]
     fn matches(&self, name: &str) -> bool {
         match self {
@@ -103,6 +108,7 @@ pub struct WeightPrecisionRule<'model> {
 
 impl<'model> WeightPrecisionRule<'model> {
     /// `true` when `name` matches this rule's [`NamePattern`].
+    #[cfg(feature = "std")]
     #[must_use]
     pub(crate) fn matches(&self, name: &str) -> bool {
         self.pattern.matches(name)
@@ -112,6 +118,7 @@ impl<'model> WeightPrecisionRule<'model> {
 /// Walks `rules` in order and returns the first match's `target` --
 /// [`WeightPrecisionRule`]'s own doc: first match wins, so callers never
 /// need to know how many later rules would also have matched.
+#[cfg(feature = "std")]
 #[must_use]
 pub(crate) fn matching_precision_target(
     rules: &[WeightPrecisionRule<'_>],
