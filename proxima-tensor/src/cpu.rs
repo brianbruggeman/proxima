@@ -178,8 +178,8 @@ use half::{bf16, f16};
 // modules `QuantizedBlock::element_count` composes down to, not the scalar
 // float types.
 use proxima_gguf::quant::{
-    bf16 as gguf_bf16, f16 as gguf_f16, iq2_xs, iq3_xxs, iq4_nl, q3_k, q4_0, q4_k, q5_1, q5_k,
-    q6_k, q8_0,
+    bf16 as gguf_bf16, f16 as gguf_f16, iq2_xs, iq3_xxs, iq4_nl, q2_k, q3_k, q4_0, q4_k, q5_1,
+    q5_k, q6_k, q8_0,
 };
 
 use crate::bind::{
@@ -3260,6 +3260,14 @@ pub enum QuantizedBlock<'a> {
     /// d*sc*q`); see [`proxima_gguf::quant::q3_k`] for the on-disk layout
     /// this borrows unchanged.
     Q3K(&'a [u8]),
+    /// Raw packed `Q2_K` bytes -- 256 elements, 16 sub-blocks of 16, one
+    /// 4-bit scale AND 4-bit min per sub-block, packed one byte per
+    /// sub-block (`x = d*sc*q - dmin*m`); see
+    /// [`proxima_gguf::quant::q2_k`] for the on-disk layout this borrows
+    /// unchanged. No `dot_fn_for` entry (no shared int8-wide-fold path,
+    /// same reasoning as [`Self::Q3K`]) -- this codec's only CPU path is
+    /// the scalar dequantize-then-fold [`dot_q2k_f32`].
+    Q2K(&'a [u8]),
     /// Raw packed `Q6_K` bytes -- 256 elements, 16 sub-blocks of 16, one
     /// signed 8-bit scale per sub-block and no `dmin` term; see
     /// [`proxima_gguf::quant::q6_k`] for the on-disk layout this borrows
@@ -3361,6 +3369,12 @@ impl QuantizedBlock<'_> {
                 bytes.len(),
                 q3_k::BLOCK_BYTES,
                 q3_k::blocks_for_bytes(bytes.len()).map(q3_k::elements_for_blocks),
+            ),
+            QuantizedBlock::Q2K(bytes) => (
+                "q2_k",
+                bytes.len(),
+                q2_k::BLOCK_BYTES,
+                q2_k::blocks_for_bytes(bytes.len()).map(q2_k::elements_for_blocks),
             ),
             QuantizedBlock::Q6K(bytes) => (
                 "q6_k",
@@ -3617,6 +3631,7 @@ fn evaluate_quantized_with_scratch_impl(
             QuantizedBlock::Q4K(_)
             | QuantizedBlock::Q5K(_)
             | QuantizedBlock::Q3K(_)
+            | QuantizedBlock::Q2K(_)
             | QuantizedBlock::Q6K(_)
             | QuantizedBlock::Q8_0(_)
             | QuantizedBlock::Q4_0(_)
@@ -6164,7 +6179,7 @@ fn dequantize_row(
     dim: usize,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
-    use proxima_gguf::quant::{iq2_xs, iq3_xxs, iq4_nl, q3_k, q4_k, q5_1, q5_k, q6_k, q8_0};
+    use proxima_gguf::quant::{iq2_xs, iq3_xxs, iq4_nl, q2_k, q3_k, q4_k, q5_1, q5_k, q6_k, q8_0};
     let unaligned_row = || TensorError::NotLowerable {
         node,
         reason: "quantized embedding row width does not divide the codec's own block width",
@@ -6173,6 +6188,7 @@ fn dequantize_row(
         QuantizedBlock::Q4K(data) => (data, q4_k::BLOCK_BYTES, q4_k::QK_K),
         QuantizedBlock::Q5K(data) => (data, q5_k::BLOCK_BYTES, q5_k::QK_K),
         QuantizedBlock::Q3K(data) => (data, q3_k::BLOCK_BYTES, q3_k::QK_K),
+        QuantizedBlock::Q2K(data) => (data, q2_k::BLOCK_BYTES, q2_k::QK_K),
         QuantizedBlock::Q6K(data) => (data, q6_k::BLOCK_BYTES, q6_k::QK_K),
         QuantizedBlock::Q8_0(data) => (data, q8_0::BLOCK_BYTES, q8_0::QK8_0),
         // the target checkpoint's ngram embedding table is IQ4_NL -- this
@@ -6198,6 +6214,7 @@ fn dequantize_row(
         QuantizedBlock::Q4K(_) => q4_k::dequantize(row_bytes_slice, output),
         QuantizedBlock::Q5K(_) => q5_k::dequantize(row_bytes_slice, output),
         QuantizedBlock::Q3K(_) => q3_k::dequantize(row_bytes_slice, output),
+        QuantizedBlock::Q2K(_) => q2_k::dequantize(row_bytes_slice, output),
         QuantizedBlock::Q6K(_) => q6_k::dequantize(row_bytes_slice, output),
         QuantizedBlock::Q8_0(_) => q8_0::dequantize(row_bytes_slice, output),
         QuantizedBlock::Iq4Nl(_) => iq4_nl::dequantize(row_bytes_slice, output),
@@ -7439,6 +7456,7 @@ fn build_matmul_stage_plan<'weights>(
         QuantizedBlock::Q4K(bytes) => (bytes, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q3K(bytes) => (bytes, Q3K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
+        QuantizedBlock::Q2K(bytes) => (bytes, Q2K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
         QuantizedBlock::Q4_0(bytes) => (bytes, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS),
@@ -8134,6 +8152,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         QuantizedBlock::Q4K(bytes) => (bytes, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q3K(bytes) => (bytes, Q3K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
+        QuantizedBlock::Q2K(bytes) => (bytes, Q2K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
         QuantizedBlock::Q4_0(bytes) => (bytes, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS),
@@ -8430,6 +8449,9 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             // back to this same shape only when their own int8-dot feature
             // is off.
             QuantizedBlock::Q3K(_) => matmul_q3k_f32(weights, rows, activation_row)?,
+            // No int8-dot kernel exists for `Q2_K` either -- same reasoning
+            // as `Q3K`'s own note just above.
+            QuantizedBlock::Q2K(_) => matmul_q2k_f32(weights, rows, activation_row)?,
             QuantizedBlock::Q8_0(_) => matmul_q8_0_f32(weights, rows, activation_row)?,
             QuantizedBlock::Q4_0(_) => matmul_q4_0_f32(weights, rows, activation_row)?,
             QuantizedBlock::Q5_1(_) => matmul_q5_1_f32(weights, rows, activation_row)?,
@@ -8464,6 +8486,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                     counter!(instrument::MATMUL_Q6K_CALL_TICKS, diag_call_ticks);
                 }
                 QuantizedBlock::Q3K(_) => {}
+                QuantizedBlock::Q2K(_) => {}
                 QuantizedBlock::Q8_0(_) => {}
                 QuantizedBlock::Q4_0(_) => {}
                 QuantizedBlock::Q5_1(_) => {}
@@ -13087,6 +13110,10 @@ const Q5K_BLOCK_BYTES: usize = proxima_gguf::quant::q5_k::BLOCK_BYTES;
 /// byte count differs (no per-sub-block min, a 6-bit scale-only field).
 const Q3K_BLOCK_BYTES: usize = proxima_gguf::quant::q3_k::BLOCK_BYTES;
 
+/// Packed bytes per `Q2_K` super-block — same reasoning as
+/// [`Q5K_BLOCK_BYTES`].
+const Q2K_BLOCK_BYTES: usize = proxima_gguf::quant::q2_k::BLOCK_BYTES;
+
 /// Packed bytes per `Q6_K` super-block — same reasoning as
 /// [`Q5K_BLOCK_BYTES`].
 const Q6K_BLOCK_BYTES: usize = proxima_gguf::quant::q6_k::BLOCK_BYTES;
@@ -13395,6 +13422,77 @@ pub fn matmul_q3k_f32(
         "matmul_q3k_f32 called with zero rows",
         "weight byte length is not a whole multiple of the row count",
         dot_q3k_f32,
+    )
+}
+
+/// [`dot_q4k_f32`]'s mechanism applied to `Q2_K`: dequantizes one
+/// super-block at a time via [`proxima_gguf::quant::q2_k::dequantize_block`],
+/// then folds against the matching activation slice. `Q2_K`'s super-block
+/// shares the same 256-element width as every other k-quant, so this reuses
+/// [`Q4K_BLOCK_ELEMENTS`] for the activation chunk width -- same shape
+/// [`dot_q3k_f32`]/[`dot_q6k_f32`] already share.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`Q2K_BLOCK_BYTES`], or `activation.len()` does not
+/// equal the row's block count times [`Q4K_BLOCK_ELEMENTS`].
+fn dot_q2k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q2K_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q2_k block size",
+        });
+    }
+    let block_count = weight_row.len() / Q2K_BLOCK_BYTES;
+    if activation.len() != block_count * Q4K_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+
+    let mut scratch = [0.0f32; Q4K_BLOCK_ELEMENTS];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .as_chunks::<Q2K_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<Q4K_BLOCK_ELEMENTS>().0)
+    {
+        proxima_gguf::quant::q2_k::dequantize_block(block, &mut scratch);
+        acc = dot_fold_fused_multiply_add(
+            &scratch,
+            activation_chunk,
+            DotFold {
+                len: Q4K_BLOCK_ELEMENTS,
+                init: acc,
+                seeded: true,
+            },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `Q2_K`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector — `dot_q2k_f32`'s per-row kernel through the shared
+/// `matmul_quantized_dispatch` pool dispatch, same shape as
+/// [`matmul_q3k_f32`]. No `q2k-int8-dot` kernel exists yet, unconditionally
+/// -- same reasoning as [`matmul_q3k_f32`]'s own doc.
+///
+/// # Errors
+/// Propagates `dot_q2k_f32`'s [`TensorError::QuantizedShapeMismatch`], or
+/// reports the same error if `weights.len()` is not a whole multiple of
+/// `rows`.
+pub fn matmul_q2k_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_q2k_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_q2k_f32,
     )
 }
 
@@ -30256,5 +30354,54 @@ mod tests {
             &[40.0, 40.0, 20.0],
             "dest[0]=src[0]+src[2] (collision), dest[1]=src[3], dest[2]=src[1]"
         );
+    }
+
+    /// The CPU decode route's `Q2_K` matvec ([`matmul_q2k_f32`], reached
+    /// from [`run_reduce_quantized`] whenever a bound weight is
+    /// [`QuantizedBlock::Q2K`]) against the naive reference: dequantize the
+    /// same packed bytes to `f32` via
+    /// [`proxima_gguf::quant::q2_k::dequantize`], then compute the matvec
+    /// with plain scalar dot products. Both paths decode the identical
+    /// packed bytes, so any gap here is a kernel bug in
+    /// [`dot_q2k_f32`]'s fold or block/activation indexing, never
+    /// quantization error -- the `1e-5` bound is a float-summation-order
+    /// tolerance, not a quantization tolerance.
+    #[test]
+    fn matmul_q2k_f32_matches_naive_dequantize_then_dot_matvec() {
+        let rows = 3usize;
+        let cols = proxima_gguf::quant::q2_k::QK_K; // one super-block per row
+        let mut rng = Lcg(0x51EA_2A1E);
+        let weights_f32: Vec<f32> = (0..rows * cols).map(|_| rng.next_unit() * 3.0).collect();
+        let activation: Vec<f32> = (0..cols).map(|_| rng.next_unit()).collect();
+
+        let mut packed = vec![0u8; proxima_gguf::quant::q2_k::BLOCK_BYTES * rows];
+        proxima_gguf::quant::q2_k::quantize(&weights_f32, &mut packed)
+            .expect("rows*cols is a whole number of q2_k super-blocks");
+
+        let mut dequantized = vec![0.0f32; rows * cols];
+        proxima_gguf::quant::q2_k::dequantize(&packed, &mut dequantized)
+            .expect("packed bytes are a whole number of q2_k super-blocks");
+
+        let expected: Vec<f32> = dequantized
+            .chunks_exact(cols)
+            .map(|row| {
+                row.iter()
+                    .zip(activation.iter())
+                    .map(|(weight, value)| weight * value)
+                    .sum()
+            })
+            .collect();
+
+        let got = matmul_q2k_f32(&packed, rows, &activation)
+            .expect("well-formed q2_k weight matrix matvec");
+
+        assert_eq!(got.len(), rows);
+        for (row, (&got_value, &expected_value)) in got.iter().zip(expected.iter()).enumerate() {
+            let diff = (got_value - expected_value).abs();
+            assert!(
+                diff < 1e-5,
+                "row {row}: matmul_q2k_f32={got_value} vs naive dequantize-then-dot={expected_value}, diff={diff}"
+            );
+        }
     }
 }
