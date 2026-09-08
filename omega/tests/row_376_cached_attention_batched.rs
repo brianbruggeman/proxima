@@ -213,12 +213,14 @@ fn run_cell(label: &str, context_length: u64) {
     let batched_stat = stats(&batched_us_per_dispatch);
 
     let (_evaluated, warm_op_timings) =
-        omega::metal::execute_plan_named_op_timed(&plan, &named_blocks).expect("per-op warm-up run");
+        omega::metal::execute_plan_named_op_timed(&plan, &named_blocks, None)
+            .expect("per-op warm-up run");
     drop(warm_op_timings);
     let mut per_op_us_per_dispatch = Vec::with_capacity(REPEATS);
     for _ in 0..REPEATS {
         let (_evaluated, timings) =
-            omega::metal::execute_plan_named_op_timed(&plan, &named_blocks).expect("per-op validation run");
+            omega::metal::execute_plan_named_op_timed(&plan, &named_blocks, None)
+                .expect("per-op validation run");
         let attention: Vec<&omega::metal::OpGpuTiming> =
             timings.iter().filter(|timing| timing.kind == ATTENTION_KIND).collect();
         assert_eq!(
