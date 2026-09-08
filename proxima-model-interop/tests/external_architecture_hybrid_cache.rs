@@ -214,6 +214,7 @@ fn checkpoint_bytes(architecture_name: &str) -> Vec<u8> {
 
 const CORRECT_NAME: &str = "acme-qwen35moe-correct";
 const MISTAGGED_NAME: &str = "acme-qwen35moe-mistagged";
+const NO_STEP_STATE_NAME: &str = "acme-qwen35moe-no-step-state";
 
 /// Delegates entirely to the builtin [`Qwen35Arch`] -- same tensor bind,
 /// same `qwen35_forward_program` compile, same `layer_roots` it derives --
@@ -268,6 +269,47 @@ impl Architecture for MistaggedHybridArch {
     }
 }
 
+/// Same bind AND same `ssm_shape`/`ssm_state_bytes` as [`CorrectHybridArch`]
+/// -- only `attn_head_dim` comes back `0` instead of the real
+/// [`Qwen35Arch`] value, the exact shape measured on `qwen3.6:35b-a3b`
+/// through a foreign `Architecture` registered via `load_with_registry`:
+/// that bind derives `head_dim` from `attention.key_length` alone
+/// (`bind.rs`'s header-only derivation) and never fills a per-layer
+/// `attn_head_dim` the way [`Qwen35Arch::step_state`] does, so it comes
+/// back `0`/unset on the real checkpoint too. Every other [`StepState`]
+/// field stays real so this isolates the ONE broken field -- an SSM
+/// layer's own cache (sized from `ssm_shape`, a different [`StepState`]
+/// field entirely) is not this file's bug and must stay correctly sized
+/// for this test to exercise only the `DenseAttention` path.
+///
+/// The bound program still declares `kv_cache.{layer}.k_first`/`k_second`/
+/// `k_pass`/`v` correctly (`bind` never changes what it compiles from a
+/// broken `step_state`), but `LoadedModel::run_decode_loop_observed_seeded`
+/// used to read `step_state.map(|state| state.attn_head_dim)` as `0` and
+/// size the `DenseAttention` layer's `v`/`k_pass` pad-scratch to ZERO
+/// elements, panicking on a later decode step's `copy_from_slice` the
+/// moment that layer's real (nonzero) cache tried to copy in
+/// (`Qwen35DenseAttentionPadScratch::fill`, `generate.rs`).
+struct NoStepStateHybridArch;
+
+impl Architecture for NoStepStateHybridArch {
+    fn name(&self) -> &'static str {
+        NO_STEP_STATE_NAME
+    }
+
+    fn bind<'file>(&self, parsed: &ParsedGguf, file_bytes: &'file [u8]) -> Result<BoundProgram<'file>, InteropError> {
+        Qwen35Arch.bind(parsed, file_bytes)
+    }
+
+    fn step_state(&self, parsed: &ParsedGguf) -> Result<Option<StepState>, InteropError> {
+        let state = Qwen35Arch.step_state(parsed)?;
+        Ok(state.map(|real| StepState {
+            attn_head_dim: 0,
+            ..real
+        }))
+    }
+}
+
 fn registry_with(architecture: &'static dyn Architecture) -> ArchitectureRegistry {
     let mut registry = ArchitectureRegistry::with_builtin();
     registry.register(architecture);
@@ -276,6 +318,7 @@ fn registry_with(architecture: &'static dyn Architecture) -> ArchitectureRegistr
 
 static CORRECT: CorrectHybridArch = CorrectHybridArch;
 static MISTAGGED: MistaggedHybridArch = MistaggedHybridArch;
+static NO_STEP_STATE: NoStepStateHybridArch = NoStepStateHybridArch;
 
 /// The mechanism this file exists to prove: a correctly-bound hybrid
 /// program (one SSM layer, one full-attention layer, registered under a
@@ -321,4 +364,30 @@ async fn a_mistagged_layer_roots_entry_is_rejected_before_any_step_runs() {
         Ok(_) => panic!("expected LayerCacheKindMismatch: the mistagged layer's roots disagree with its program"),
         Err(other) => panic!("expected LayerCacheKindMismatch, got {other}"),
     }
+}
+
+/// The real defect measured on `qwen3.6:35b-a3b` through
+/// `LoadedModel::load_with_registry`: a foreign `Architecture` that never
+/// overrides `step_state` (the trait's own `Ok(None)` default) used to
+/// leave the `DenseAttention` layer's `v`/`k_pass` pad-scratch sized to
+/// zero elements, panicking on the first decode step with `range end index
+/// .. out of range for slice of length 0` the moment that layer's real
+/// cache tried to copy in. The pad-scratch shape now comes from the bound
+/// program's own declared `kv_cache.{layer}.*` `Op::Input` extents
+/// (`generate.rs`'s `cache_leaf_row_elements`/`layer_pad_row_widths`),
+/// never from `Architecture::step_state`, so a hybrid checkpoint decodes
+/// correctly even when a foreign bind leaves that hook at its default.
+#[proxima::test]
+async fn a_foreign_architecture_with_no_step_state_override_still_decodes() {
+    let file_bytes = checkpoint_bytes(NO_STEP_STATE_NAME);
+    let parsed = parse_complete(&file_bytes).expect("parses the synthetic hybrid checkpoint");
+    let registry = registry_with(&NO_STEP_STATE);
+
+    let model = LoadedModel::load_with_registry(&parsed, &file_bytes, &registry)
+        .expect("loads a hybrid program through a foreign registry entry with no step_state override");
+
+    let (generated_ids, _text, _stopped) = Pipe::call(&model, ("ab".to_string(), 3))
+        .await
+        .expect("dense-attention pad-scratch is sized from the program's declared cache leaves, not step_state");
+    assert_eq!(generated_ids.len(), 3, "max_tokens=3 produces exactly three token ids");
 }
