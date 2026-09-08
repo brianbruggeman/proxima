@@ -30,13 +30,21 @@ use alloc::vec::Vec;
 
 use proxima_gguf::MetadataValue;
 use proxima_gguf::pipe::ParsedGguf;
+#[cfg(feature = "std")]
+use proxima_gguf::quant::QuantError;
 use proxima_gguf::quant::{q3_k, q4_k, q5_k, q6_k, q8_0};
+#[cfg(feature = "std")]
+use proxima_gguf::quant::{bf16, f16, q4_0};
 #[cfg(feature = "std")]
 use proxima_gguf::restack::{discover_experts, plan_stack, restack_into};
 use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::types::GgmlType;
 
 use crate::error::InteropError;
+#[cfg(feature = "std")]
+use crate::serving::matching_precision_target;
+#[cfg(all(feature = "std", feature = "instrument"))]
+use proxima_telemetry::debug;
 
 /// Looks `name` up in `parsed`'s tensor directory, slices its bytes out of
 /// `file_bytes`, and decodes them to an owned `f32` buffer -- copied
@@ -649,6 +657,13 @@ pub(crate) fn vocab_from_token_embedding(
 /// contiguous on-disk byte range to borrow from ([`bind_moe_expert_weights`]'s
 /// restack fallback). `pub(crate)`: [`crate::generate::LoadedModel`]
 /// is the one place outside this module that constructs or reads one.
+///
+/// `precision` carries [`crate::serving::ServingConfig::weight_precision`]'s
+/// per-tensor recode rules -- threaded here, not as an extra parameter on
+/// every `bind_dense`/`bind_matmul_weight` call, because `state: &mut
+/// BoundWeights` is already the one value every one of those calls already
+/// takes. [`bind_dense_as`]/[`bind_matmul_weight_as`] consult it before
+/// [`gguf_tensor_as_packed_block`] runs.
 #[cfg(feature = "std")]
 pub(crate) struct BoundWeights<'file> {
     pub(crate) resident_bytes: usize,
@@ -658,6 +673,7 @@ pub(crate) struct BoundWeights<'file> {
         proxima_tensor::cpu::QuantizedBlock<'file>,
     )>,
     pub(crate) packed_owned: Vec<(alloc::string::String, Vec<u8>, PackedOwnedKind)>,
+    pub(crate) precision: &'file [crate::serving::WeightPrecisionRule<'file>],
 }
 
 /// Which [`proxima_tensor::cpu::QuantizedBlock`] byte-borrowing variant to
@@ -677,6 +693,14 @@ pub(crate) enum PackedOwnedKind {
     Q5K,
     Q6K,
     Q8_0,
+    /// Added alongside [`recode_tensor`]: `proxima_gguf::quant::q3_k` ships
+    /// both directions, and [`recode_tensor`]'s target set is "every codec
+    /// with an encoder", not the four this tag originally covered for
+    /// [`bind_moe_expert_weights`]'s restack fallback.
+    Q3K,
+    Q4_0,
+    Float16,
+    BFloat16,
 }
 
 #[cfg(feature = "std")]
@@ -693,22 +717,53 @@ impl PackedOwnedKind {
             PackedOwnedKind::Q5K => proxima_tensor::cpu::QuantizedBlock::Q5K(bytes),
             PackedOwnedKind::Q6K => proxima_tensor::cpu::QuantizedBlock::Q6K(bytes),
             PackedOwnedKind::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes),
+            PackedOwnedKind::Q3K => proxima_tensor::cpu::QuantizedBlock::Q3K(bytes),
+            PackedOwnedKind::Q4_0 => proxima_tensor::cpu::QuantizedBlock::Q4_0(bytes),
+            PackedOwnedKind::Float16 => proxima_tensor::cpu::QuantizedBlock::Float16(bytes),
+            PackedOwnedKind::BFloat16 => proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes),
         }
     }
 
     /// The [`GgmlType`] this tag corresponds to, or `None` for a codec
-    /// [`bind_moe_expert_weights`]'s restack fallback still must dequantize
-    /// (`F32` stays dequantized-then-transposed: `run_reduce_quantized`'s
-    /// gather rejects a `Float32` weight block outright,
-    /// `proxima_tensor::cpu::run_reduce_quantized`'s own `shape_error` arm for
-    /// that variant).
+    /// neither [`bind_moe_expert_weights`]'s restack fallback nor
+    /// [`recode_tensor`] can pack (`F32` stays dequantized-then-transposed:
+    /// `run_reduce_quantized`'s gather rejects a `Float32` weight block
+    /// outright, `proxima_tensor::cpu::run_reduce_quantized`'s own
+    /// `shape_error` arm for that variant; and every `GgmlType` with no
+    /// [`proxima_gguf::quant`] encoder at all -- `Q2_K`, the `Iq*` family,
+    /// `Q4_1`/`Q5_1`/`Q8_1`, the integer/`F64`/`Tq*` types).
     fn from_ggml_type(ggml_type: GgmlType) -> Option<Self> {
         match ggml_type {
             GgmlType::Q4_K => Some(PackedOwnedKind::Q4K),
             GgmlType::Q5_K => Some(PackedOwnedKind::Q5K),
             GgmlType::Q6_K => Some(PackedOwnedKind::Q6K),
             GgmlType::Q8_0 => Some(PackedOwnedKind::Q8_0),
+            GgmlType::Q3_K => Some(PackedOwnedKind::Q3K),
+            GgmlType::Q4_0 => Some(PackedOwnedKind::Q4_0),
+            GgmlType::F16 => Some(PackedOwnedKind::Float16),
+            GgmlType::Bf16 => Some(PackedOwnedKind::BFloat16),
             _ => None,
+        }
+    }
+
+    /// The GGUF/llama.cpp lowercase codec name [`recode_tensor`] appends to
+    /// a recoded tensor's own resident name (`<name>@<suffix>`) -- the
+    /// proved-name discipline this crate follows for a bind-time recode:
+    /// a rebind is a NEW name, never an in-place rewrite of the on-disk-
+    /// codec entry's own name, so a plan already bound against the old name
+    /// stays valid until the plan itself is dropped, and a later policy
+    /// change is a rebind to a different name, never a silent swap under
+    /// the name a compiled program already resolved.
+    fn name_suffix(self) -> &'static str {
+        match self {
+            PackedOwnedKind::Q4K => "q4_k",
+            PackedOwnedKind::Q5K => "q5_k",
+            PackedOwnedKind::Q6K => "q6_k",
+            PackedOwnedKind::Q8_0 => "q8_0",
+            PackedOwnedKind::Q3K => "q3_k",
+            PackedOwnedKind::Q4_0 => "q4_0",
+            PackedOwnedKind::Float16 => "f16",
+            PackedOwnedKind::BFloat16 => "bf16",
         }
     }
 }
@@ -764,6 +819,9 @@ pub(crate) fn bind_dense_as<'file>(
     target_name: alloc::string::String,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
+    if let Some(target) = precision_target_for(state, parsed, source_name)? {
+        return recode_tensor(parsed, file_bytes, source_name, target_name, target, None, state);
+    }
     match gguf_tensor_as_packed_block(parsed, file_bytes, source_name) {
         Ok(block @ proxima_tensor::cpu::QuantizedBlock::Float32(borrowed)) => {
             state.resident_bytes += core::mem::size_of_val(borrowed);
@@ -865,6 +923,17 @@ pub(crate) fn bind_matmul_weight_as<'file>(
     in_dim: usize,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
+    if let Some(target) = precision_target_for(state, parsed, source_name)? {
+        return recode_tensor(
+            parsed,
+            file_bytes,
+            source_name,
+            target_name,
+            target,
+            Some((out_dim, in_dim)),
+            state,
+        );
+    }
     match gguf_tensor_as_packed_block(parsed, file_bytes, source_name) {
         Ok(proxima_tensor::cpu::QuantizedBlock::Float32(_)) | Err(_) => {
             let decoded = gguf_tensor_as_f32(parsed, file_bytes, source_name)?;
@@ -875,6 +944,175 @@ pub(crate) fn bind_matmul_weight_as<'file>(
         Ok(block) => state.packed.push((target_name, block)),
     }
     Ok(())
+}
+
+/// [`bind_dense_as`]/[`bind_matmul_weight_as`]'s shared first step: `None`
+/// when `state.precision` has no rule for `source_name`, or when the one
+/// rule that matches names the tensor's own on-disk [`GgmlType`] (a matched
+/// rule that is already satisfied is not a recode). `Some(target)` tells the
+/// caller to route through [`recode_tensor`] instead of
+/// [`gguf_tensor_as_packed_block`].
+#[cfg(feature = "std")]
+fn precision_target_for(
+    state: &BoundWeights<'_>,
+    parsed: &ParsedGguf,
+    source_name: &str,
+) -> Result<Option<GgmlType>, InteropError> {
+    let Some(target) = matching_precision_target(state.precision, source_name) else {
+        return Ok(None);
+    };
+    let on_disk = find_tensor(parsed, source_name)?.ggml_type;
+    Ok(if target == on_disk { None } else { Some(target) })
+}
+
+/// [`crate::serving::ServingConfig::weight_precision`]'s bind-time recode
+/// step: dequantize `source_name`'s on-disk bytes to `f32` with
+/// [`gguf_tensor_as_f32`] (the same decoder [`bind_dense_as`]'s own owned
+/// fallback already uses), then re-encode at `target` and push the result
+/// into [`BoundWeights::owned`] (`target == GgmlType::F32`) or
+/// [`BoundWeights::packed_owned`] (every other target, tagged with the
+/// matching [`PackedOwnedKind`]) -- composing [`proxima_gguf::quant`]'s
+/// existing decoder/encoder pair rather than adding a new codec path.
+///
+/// Never recodes on the token path: this runs once, at bind time, before
+/// [`crate::generate::LoadedModel`] compiles a single forward step, never
+/// inside a decode loop.
+///
+/// Binds the recoded tensor under a NEW name, `{target_name}@{suffix}`
+/// (`f32` for an F32 target, [`PackedOwnedKind::name_suffix`] otherwise) --
+/// never overwrites or replaces whatever entry `target_name` itself already
+/// names. This is the proved-name discipline a cache keyed by name (not by
+/// address) requires: a compiled plan resolves its own `Input` operand by
+/// the exact name it was bound against, so a plan already bound under
+/// `target_name`'s on-disk-codec entry stays valid and unaffected by a
+/// later `weight_precision` change -- rebinding at a different precision
+/// produces a DIFFERENT name for a caller to bind a NEW plan against, not a
+/// silent swap underneath a name an existing plan already resolved.
+///
+/// `transpose` is `Some((out_dim, in_dim))` only for
+/// [`bind_matmul_weight_as`]'s own F32 target: a re-encoded QUANTIZED
+/// operand stays row-major exactly like [`bind_matmul_weight_as`]'s own
+/// packed arm (dequantize-then-requantize preserves element order, so no
+/// axis correction is needed for a packed kernel that reads GGUF's native
+/// `[out, in]` layout directly), but an owned F32 operand needs the same
+/// `[out, in]` -> `[in, out]` correction [`bind_matmul_weight_as`]'s own
+/// Float32/undecodable-packed arm already applies -- see that function's own
+/// doc for why F32 is the one codec this crate always transposes.
+///
+/// # Errors
+///
+/// Whatever [`gguf_tensor_as_f32`] can fail with; [`transpose_out_in_to_in_out`]'s
+/// errors when `transpose` is `Some` and the decoded element count disagrees
+/// with `out_dim * in_dim`;
+/// [`InteropError::UnsupportedWeightPrecisionTarget`] if `target` is a
+/// `GgmlType` [`proxima_gguf::quant`] has no encoder for.
+#[cfg(feature = "std")]
+fn recode_tensor<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    source_name: &str,
+    target_name: alloc::string::String,
+    target: GgmlType,
+    transpose: Option<(usize, usize)>,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    let tensor = find_tensor(parsed, source_name)?;
+    let source_type = tensor.ggml_type;
+    let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
+    let bytes_before = (range.end - range.start) as usize;
+
+    let decoded = gguf_tensor_as_f32(parsed, file_bytes, source_name)?;
+
+    if target == GgmlType::F32 {
+        let final_buffer = match transpose {
+            Some((out_dim, in_dim)) => {
+                transpose_out_in_to_in_out(&decoded, source_name, out_dim, in_dim)?
+            }
+            None => decoded,
+        };
+        let bytes_after = final_buffer.len() * core::mem::size_of::<f32>();
+        state.resident_bytes += bytes_after;
+        let recoded_name = alloc::format!("{target_name}@f32");
+        emit_weight_recoded(&recoded_name, source_type, target, bytes_before, bytes_after);
+        state.owned.push((recoded_name, final_buffer));
+    } else {
+        let kind = PackedOwnedKind::from_ggml_type(target).ok_or_else(|| {
+            InteropError::UnsupportedWeightPrecisionTarget {
+                tensor: source_name.into(),
+                target,
+            }
+        })?;
+        let layout = target.block_layout();
+        let element_count = decoded.len() as u64;
+        if layout.block_elements == 0 || !element_count.is_multiple_of(layout.block_elements) {
+            return Err(InteropError::Quant(QuantError::InputNotElementMultiple {
+                codec: "weight_precision recode target",
+                unit: "block",
+                found: decoded.len(),
+                block_elements: layout.block_elements as usize,
+            }));
+        }
+        let byte_len = (element_count / layout.block_elements * layout.block_bytes) as usize;
+        let mut encoded = vec![0u8; byte_len];
+        quantize_to_kind(kind, &decoded, &mut encoded)?;
+        state.resident_bytes += byte_len;
+        let recoded_name = alloc::format!("{target_name}@{}", kind.name_suffix());
+        emit_weight_recoded(&recoded_name, source_type, target, bytes_before, byte_len);
+        state.packed_owned.push((recoded_name, encoded, kind));
+    }
+
+    Ok(())
+}
+
+/// One `weight_recoded` structured event per tensor [`recode_tensor`]
+/// recodes -- `name`/`from`/`to`/`bytes_before`/`bytes_after` are exactly
+/// the fields this crate's own task doc names as the memory-budget-visible
+/// record of a bind-time precision change. A no-op call when the
+/// `instrument` feature is off, matching every other diagnostic event in
+/// this crate (`generate.rs`'s own `#[cfg(feature = "instrument")]` gating).
+#[cfg(feature = "std")]
+#[cfg_attr(not(feature = "instrument"), allow(unused_variables))]
+fn emit_weight_recoded(
+    name: &str,
+    from: GgmlType,
+    to: GgmlType,
+    bytes_before: usize,
+    bytes_after: usize,
+) {
+    #[cfg(feature = "instrument")]
+    debug!(
+        name = %name,
+        from = ?from,
+        to = ?to,
+        bytes_before,
+        bytes_after,
+        "weight_recoded"
+    );
+}
+
+/// [`recode_tensor`]'s encode dispatch -- one arm per
+/// [`PackedOwnedKind`] variant, each backed by a real
+/// [`proxima_gguf::quant`] `quantize` function. Takes [`PackedOwnedKind`]
+/// rather than [`GgmlType`] so every arm is a codec [`proxima_gguf::quant`]
+/// actually ships an encoder for -- the type itself rules out the
+/// no-encoder case [`PackedOwnedKind::from_ggml_type`] already filtered,
+/// instead of this function re-deciding it with an unreachable arm.
+#[cfg(feature = "std")]
+fn quantize_to_kind(
+    kind: PackedOwnedKind,
+    decoded: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantError> {
+    match kind {
+        PackedOwnedKind::Q8_0 => q8_0::quantize(decoded, output),
+        PackedOwnedKind::Q4K => q4_k::quantize(decoded, output),
+        PackedOwnedKind::Q5K => q5_k::quantize(decoded, output),
+        PackedOwnedKind::Q6K => q6_k::quantize(decoded, output),
+        PackedOwnedKind::Q3K => q3_k::quantize(decoded, output),
+        PackedOwnedKind::Q4_0 => q4_0::quantize(decoded, output),
+        PackedOwnedKind::Float16 => f16::quantize(decoded, output),
+        PackedOwnedKind::BFloat16 => bf16::quantize(decoded, output),
+    }
 }
 
 /// Binds `gate_name`/`up_name` (`blk.{layer}.ffn_gate.weight`/
@@ -1366,7 +1604,19 @@ pub(crate) fn bind_moe_expert_weights<'file>(
 /// `GgmlType` this crate has no decoder for -- a checkpoint using an
 /// undecoded codec fails the load with a typed error rather than aborting
 /// the process (see [`bind_dense`]/[`bind_matmul_weight`]); whatever
-/// [`bind_moe_expert_weights`] can fail with, for a MoE checkpoint.
+/// [`bind_moe_expert_weights`] can fail with, for a MoE checkpoint;
+/// whatever [`recode_tensor`] can fail with, for a tensor `weight_precision`
+/// matches.
+///
+/// `weight_precision`: [`crate::serving::ServingConfig::weight_precision`]'s
+/// per-tensor recode rules, stored on the returned [`BoundWeights`] and
+/// consulted by [`bind_dense_as`]/[`bind_matmul_weight_as`] before either
+/// binds a tensor at its on-disk codec. Not yet threaded from
+/// [`crate::generate::LoadedModel::load`]'s own `ServingConfig` (that
+/// constructor's signature has 22 call sites across this crate and is a
+/// separate change) -- today's one caller passes `&[]`, reproducing
+/// pre-recode behavior exactly; a future slice's job is wiring `load`'s own
+/// config through to this parameter.
 #[cfg(feature = "std")]
 pub(crate) fn bind_all_weights<'file>(
     parsed: &ParsedGguf,
@@ -1374,12 +1624,14 @@ pub(crate) fn bind_all_weights<'file>(
     architecture: &ModelArchitecture,
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
+    weight_precision: &'file [crate::serving::WeightPrecisionRule<'file>],
 ) -> Result<BoundWeights<'file>, InteropError> {
     let mut state = BoundWeights {
         resident_bytes: file_bytes.len(),
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        precision: weight_precision,
     };
 
     let embedding = architecture.embedding as usize;
@@ -1696,6 +1948,7 @@ mod tests {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            precision: &[],
         };
         bind_matmul_weight_as(
             &parsed,
@@ -1964,6 +2217,7 @@ mod tests {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            precision: &[],
         };
         bind_matmul_weight_as(
             &parsed,
@@ -2090,6 +2344,7 @@ mod tests {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            precision: &[],
         };
         bind_matmul_weight_as(
             &parsed,
@@ -2661,6 +2916,418 @@ mod tests {
             Err(InteropError::MissingMetadataKey { key }) if key == "general.architecture"
         ));
     }
+
+    /// Builds a one-tensor GGUF fixture whose `blk.0.ffn_down.weight` is
+    /// `ggml_type` real on-disk bytes for `rows` rows of `k` elements each --
+    /// the shared setup every `weight_precision` recode test below starts
+    /// from, so each test's own body is the recode assertion, not fixture
+    /// plumbing.
+    fn one_tensor_gguf(
+        ggml_type: WireType,
+        data: &[u8],
+        rows: u64,
+        k: u64,
+    ) -> (Vec<u8>, alloc::string::String) {
+        let name = "blk.0.ffn_down.weight".to_string();
+        let model = GgufModel {
+            version: 3,
+            metadata: Vec::new(),
+            tensors: vec![TensorPayload {
+                name: name.clone(),
+                dims: dims(&[k, rows]),
+                ggml_type,
+                data,
+            }],
+        };
+        (
+            write_complete(&model).expect("writes single-tensor gguf fixture"),
+            name,
+        )
+    }
+
+    /// (a): a `weight_precision` rule recoding one `Q4_K` tensor to `Q8_0`
+    /// lands in [`BoundWeights::packed_owned`] tagged [`PackedOwnedKind::Q8_0`],
+    /// `bytes_after` matches `Q8_0`'s own block arithmetic for the tensor's
+    /// dims, and dequantizing the recoded bytes agrees with dequantizing the
+    /// original `Q4_K` bytes within `Q8_0`'s own computed quantization error
+    /// bound (`d = amax / 127`, `proxima_gguf::quant::q8_0::quantize`'s own
+    /// doc) -- not `assert!(close)`, the actual per-block bound the source
+    /// formula produces.
+    #[cfg(feature = "std")]
+    #[test]
+    fn weight_precision_rule_recodes_q4_k_to_q8_0_within_q8_0_error_bound() {
+        use proxima_gguf::quant::{q4_k, q8_0};
+
+        let rows = 2usize;
+        let k = q4_k::QK_K;
+        let element_count = rows * k;
+        let original_f32: Vec<f32> = (0..element_count)
+            .map(|index| ((index % 37) as f32 - 18.0) * 0.37)
+            .collect();
+
+        let mut q4k_bytes = vec![0u8; rows * q4_k::BLOCK_BYTES];
+        q4_k::quantize(&original_f32, &mut q4k_bytes)
+            .expect("q4_k::quantize handles a multi-super-block run directly");
+
+        let (file_bytes, name) =
+            one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
+        let parsed =
+            proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
+
+        let rules = [crate::serving::WeightPrecisionRule {
+            pattern: crate::serving::NamePattern::Exact(name.as_str()),
+            target: GgmlType::Q8_0,
+        }];
+        let mut state = BoundWeights {
+            resident_bytes: 0,
+            owned: Vec::new(),
+            packed: Vec::new(),
+            packed_owned: Vec::new(),
+            precision: &rules,
+        };
+        bind_dense_as(
+            &parsed,
+            &file_bytes,
+            &name,
+            "recoded".to_string(),
+            &mut state,
+        )
+        .expect("recodes a q4_k tensor to q8_0");
+
+        assert!(
+            state.packed.is_empty(),
+            "a recoded tensor must not also take the on-disk packed-codec path"
+        );
+        assert!(
+            state.owned.is_empty(),
+            "a q8_0 target must not land in the owned f32 slot"
+        );
+        assert_eq!(
+            state.packed_owned.len(),
+            1,
+            "exactly one recoded tensor expected"
+        );
+        let (recoded_name, recoded_bytes, kind) = &state.packed_owned[0];
+        assert_eq!(
+            recoded_name, "recoded@q8_0",
+            "a recode binds under a NEW proved name, never overwriting `target_name` itself"
+        );
+        assert_eq!(*kind, PackedOwnedKind::Q8_0);
+
+        let expected_bytes = element_count / q8_0::QK8_0 * q8_0::BLOCK_BYTES;
+        assert_eq!(recoded_bytes.len(), expected_bytes);
+        assert_eq!(state.resident_bytes, expected_bytes);
+
+        let mut original_dequant = vec![0.0f32; element_count];
+        q4_k::dequantize(&q4k_bytes, &mut original_dequant)
+            .expect("dequantizes the original q4_k bytes");
+        let mut recoded_dequant = vec![0.0f32; element_count];
+        q8_0::dequantize(recoded_bytes, &mut recoded_dequant)
+            .expect("dequantizes the recoded q8_0 bytes");
+
+        for (block_index, block) in original_dequant.chunks_exact(q8_0::QK8_0).enumerate() {
+            let block_max = block.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
+            // `quantize_block`'s own formula: `d = amax / 127`, each level
+            // rounds to the nearest multiple of `d`, so the worst-case
+            // per-element rounding error is half that step; `+ f32::EPSILON`
+            // covers the block scale's own `f16` storage rounding.
+            let bound = (block_max / 127.0) / 2.0 + f32::EPSILON;
+            let start = block_index * q8_0::QK8_0;
+            for offset in 0..q8_0::QK8_0 {
+                let difference =
+                    (original_dequant[start + offset] - recoded_dequant[start + offset]).abs();
+                assert!(
+                    difference <= bound,
+                    "element {} differs by {difference}, exceeds q8_0's own half-step bound {bound}",
+                    start + offset
+                );
+            }
+        }
+    }
+
+    /// (b): a `weight_precision` rule targeting `F32` lands the recoded
+    /// tensor in [`BoundWeights::owned`], bit-identical to dequantizing the
+    /// same on-disk bytes directly through [`gguf_tensor_as_f32`].
+    #[cfg(feature = "std")]
+    #[test]
+    fn weight_precision_rule_recodes_to_f32_bit_identical_to_direct_dequant() {
+        use proxima_gguf::quant::q4_k;
+
+        let rows = 2usize;
+        let k = q4_k::QK_K;
+        let element_count = rows * k;
+        let original_f32: Vec<f32> = (0..element_count)
+            .map(|index| ((index % 29) as f32 - 14.0) * 0.11)
+            .collect();
+        let mut q4k_bytes = vec![0u8; rows * q4_k::BLOCK_BYTES];
+        q4_k::quantize(&original_f32, &mut q4k_bytes)
+            .expect("q4_k::quantize handles a multi-super-block run directly");
+
+        let (file_bytes, name) =
+            one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
+        let parsed =
+            proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
+
+        let direct_dequant =
+            gguf_tensor_as_f32(&parsed, &file_bytes, &name).expect("direct dequant baseline");
+
+        let rules = [crate::serving::WeightPrecisionRule {
+            pattern: crate::serving::NamePattern::Exact(name.as_str()),
+            target: GgmlType::F32,
+        }];
+        let mut state = BoundWeights {
+            resident_bytes: 0,
+            owned: Vec::new(),
+            packed: Vec::new(),
+            packed_owned: Vec::new(),
+            precision: &rules,
+        };
+        bind_dense_as(
+            &parsed,
+            &file_bytes,
+            &name,
+            "recoded".to_string(),
+            &mut state,
+        )
+        .expect("recodes a q4_k tensor to f32");
+
+        assert!(state.packed.is_empty());
+        assert!(state.packed_owned.is_empty());
+        assert_eq!(state.owned.len(), 1);
+        let (recoded_name, recoded_values) = &state.owned[0];
+        assert_eq!(
+            recoded_name, "recoded@f32",
+            "a recode binds under a NEW proved name, never overwriting `target_name` itself"
+        );
+        assert_eq!(
+            recoded_values, &direct_dequant,
+            "an f32-target recode must be bit-identical to dequantizing the same bytes directly"
+        );
+        assert_eq!(
+            state.resident_bytes,
+            direct_dequant.len() * core::mem::size_of::<f32>()
+        );
+    }
+
+    /// (c): a `weight_precision` rule naming a target with no
+    /// [`proxima_gguf::quant`] encoder (`Iq1S`) surfaces
+    /// [`InteropError::UnsupportedWeightPrecisionTarget`] rather than
+    /// silently falling back to the on-disk codec.
+    #[cfg(feature = "std")]
+    #[test]
+    fn weight_precision_rule_to_unencodable_target_names_the_typed_error() {
+        use proxima_gguf::quant::q4_k;
+
+        let rows = 1usize;
+        let k = q4_k::QK_K;
+        let element_count = rows * k;
+        let original_f32 = vec![0.5f32; element_count];
+        let mut q4k_bytes = vec![0u8; rows * q4_k::BLOCK_BYTES];
+        q4_k::quantize(&original_f32, &mut q4k_bytes).expect("one QK_K-sized row");
+
+        let (file_bytes, name) =
+            one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
+        let parsed =
+            proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
+
+        let rules = [crate::serving::WeightPrecisionRule {
+            pattern: crate::serving::NamePattern::Exact(name.as_str()),
+            target: GgmlType::Iq1S,
+        }];
+        let mut state = BoundWeights {
+            resident_bytes: 0,
+            owned: Vec::new(),
+            packed: Vec::new(),
+            packed_owned: Vec::new(),
+            precision: &rules,
+        };
+        let error = bind_dense_as(
+            &parsed,
+            &file_bytes,
+            &name,
+            "recoded".to_string(),
+            &mut state,
+        )
+        .expect_err("iq1_s has no proxima_gguf::quant encoder");
+        assert!(matches!(
+            error,
+            InteropError::UnsupportedWeightPrecisionTarget { target, .. } if target == GgmlType::Iq1S
+        ));
+    }
+
+    /// (d): no matching rule leaves [`bind_dense_as`]'s output byte-identical
+    /// to before `weight_precision` existed -- the no-op path is proven, not
+    /// assumed.
+    #[cfg(feature = "std")]
+    #[test]
+    fn no_matching_weight_precision_rule_is_byte_identical_to_the_no_rule_path() {
+        use proxima_gguf::quant::q4_k;
+
+        let rows = 1usize;
+        let k = q4_k::QK_K;
+        let element_count = rows * k;
+        let original_f32: Vec<f32> = (0..element_count).map(|index| index as f32 * 0.01).collect();
+        let mut q4k_bytes = vec![0u8; rows * q4_k::BLOCK_BYTES];
+        q4_k::quantize(&original_f32, &mut q4k_bytes).expect("one QK_K-sized row");
+
+        let (file_bytes, name) =
+            one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
+        let parsed =
+            proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
+
+        // A rule that names a DIFFERENT tensor must never fire here.
+        let non_matching_rules = [crate::serving::WeightPrecisionRule {
+            pattern: crate::serving::NamePattern::Exact("blk.9.ffn_down.weight"),
+            target: GgmlType::Q8_0,
+        }];
+        let mut with_rules = BoundWeights {
+            resident_bytes: 0,
+            owned: Vec::new(),
+            packed: Vec::new(),
+            packed_owned: Vec::new(),
+            precision: &non_matching_rules,
+        };
+        bind_dense_as(
+            &parsed,
+            &file_bytes,
+            &name,
+            "target".to_string(),
+            &mut with_rules,
+        )
+        .expect("binds with a non-matching rule set present");
+
+        let mut without_rules = BoundWeights {
+            resident_bytes: 0,
+            owned: Vec::new(),
+            packed: Vec::new(),
+            packed_owned: Vec::new(),
+            precision: &[],
+        };
+        bind_dense_as(
+            &parsed,
+            &file_bytes,
+            &name,
+            "target".to_string(),
+            &mut without_rules,
+        )
+        .expect("binds with no rule set at all");
+
+        assert_eq!(with_rules.resident_bytes, without_rules.resident_bytes);
+        assert_eq!(with_rules.owned, without_rules.owned);
+        assert_eq!(with_rules.packed.len(), without_rules.packed.len());
+        assert_eq!(
+            with_rules.packed_owned, without_rules.packed_owned,
+            "a non-matching rule must leave bind_dense_as byte-identical to having no rules"
+        );
+        for (with_block, without_block) in with_rules.packed.iter().zip(without_rules.packed.iter())
+        {
+            assert_eq!(with_block.0, without_block.0);
+        }
+    }
+
+    /// (I5): binding the SAME source tensor twice under the SAME
+    /// `target_name` but two DIFFERENT `weight_precision` targets in
+    /// sequence produces two DISTINCT proved names
+    /// (`{target_name}@q8_0`/`{target_name}@q5_k`), and the first call's own
+    /// entry is byte-for-byte untouched by the second -- a later policy
+    /// change is a rebind to a new name, never an in-place rewrite of the
+    /// name a plan already bound against ([`recode_tensor`]'s own doc).
+    #[cfg(feature = "std")]
+    #[test]
+    fn sequential_weight_precision_rebinds_produce_distinct_names_and_leave_the_first_entry_untouched()
+     {
+        use proxima_gguf::quant::q4_k;
+
+        let rows = 1usize;
+        let k = q4_k::QK_K;
+        let element_count = rows * k;
+        let original_f32: Vec<f32> = (0..element_count).map(|index| index as f32 * 0.02).collect();
+        let mut q4k_bytes = vec![0u8; rows * q4_k::BLOCK_BYTES];
+        q4_k::quantize(&original_f32, &mut q4k_bytes).expect("one QK_K-sized row");
+
+        let (file_bytes, name) =
+            one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
+        let parsed =
+            proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
+
+        let first_rules = [crate::serving::WeightPrecisionRule {
+            pattern: crate::serving::NamePattern::Exact(name.as_str()),
+            target: GgmlType::Q8_0,
+        }];
+        let second_rules = [crate::serving::WeightPrecisionRule {
+            pattern: crate::serving::NamePattern::Exact(name.as_str()),
+            target: GgmlType::Q5_K,
+        }];
+
+        let mut state = BoundWeights {
+            resident_bytes: 0,
+            owned: Vec::new(),
+            packed: Vec::new(),
+            packed_owned: Vec::new(),
+            precision: &first_rules,
+        };
+        bind_dense_as(
+            &parsed,
+            &file_bytes,
+            &name,
+            "shared_target".to_string(),
+            &mut state,
+        )
+        .expect("first recode, to q8_0");
+
+        let entry_after_first = state.packed_owned[0].clone();
+
+        state.precision = &second_rules;
+        bind_dense_as(
+            &parsed,
+            &file_bytes,
+            &name,
+            "shared_target".to_string(),
+            &mut state,
+        )
+        .expect("second recode, to q5_k, under the same target_name base");
+
+        assert_eq!(
+            state.packed_owned.len(),
+            2,
+            "a rebind must APPEND a new entry, never replace the first"
+        );
+        assert_eq!(
+            state.packed_owned[0], entry_after_first,
+            "the first call's own entry must be byte-for-byte untouched by the second call"
+        );
+        assert_eq!(state.packed_owned[0].0, "shared_target@q8_0");
+        assert_eq!(state.packed_owned[1].0, "shared_target@q5_k");
+        assert_ne!(
+            state.packed_owned[0].0, state.packed_owned[1].0,
+            "two different precision targets for the same target_name must produce distinct names"
+        );
+    }
+
+    /// (e): [`ServingConfig`]'s config-as-mirror -- a config built as a full
+    /// struct literal with an explicit `weight_precision` slice and one
+    /// built via [`ServingConfig::with_weight_precision`]'s fluent builder
+    /// agree bit for bit, the same interoperability
+    /// [`crate::serving::tests::kv_bucket_tokens_agrees_across_literal_and_default_override`]
+    /// already proves for a plain field.
+    #[test]
+    fn weight_precision_config_and_builder_surfaces_agree() {
+        use crate::serving::{NamePattern, ServingConfig, WeightPrecisionRule};
+
+        let rules = [WeightPrecisionRule {
+            pattern: NamePattern::Suffix("_exps.weight"),
+            target: GgmlType::Q8_0,
+        }];
+
+        let via_builder = ServingConfig::default().with_weight_precision(&rules);
+        let via_field = ServingConfig {
+            weight_precision: &rules,
+            ..ServingConfig::default()
+        };
+
+        assert_eq!(via_builder, via_field);
+        assert_eq!(via_builder.weight_precision, &rules);
+    }
 }
 
 /// The allocation-shape gate this change exists for: a mixture-of-experts
@@ -2796,6 +3463,7 @@ mod moe_memory_shape {
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
+            precision: &[],
         }
     }
 
@@ -4083,7 +4751,7 @@ mod real_openchat_file {
                 .expect("parse host-local openchat gguf fixture");
             let architecture = architecture_from_metadata(&parsed)
                 .expect("derive architecture from real metadata");
-            let weights = bind_all_weights(&parsed, file_bytes, &architecture, false, false)
+            let weights = bind_all_weights(&parsed, file_bytes, &architecture, false, false, &[])
                 .expect("bind real openchat checkpoint weights");
 
             use proxima_tensor::spec::mistral_cached_forward_program;

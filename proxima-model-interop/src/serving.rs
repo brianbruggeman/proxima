@@ -52,6 +52,77 @@ use proxima_tensor::NumericPolicy;
 
 use crate::error::InteropError;
 
+/// Which tensor names a [`WeightPrecisionRule`] applies to. Deliberately not
+/// a glob: `crate::bind::bind_dense_as`/`bind_matmul_weight_as` (this rule's
+/// two consumers) run once per tensor at bind time, so the match itself must
+/// stay allocation-free and `no_std`-safe -- an exact name, a `blk.3.`-style
+/// prefix, or a `_exps.weight`-style suffix cover every selection this
+/// crate's own tensor-naming convention needs (per-layer, per-family, or
+/// one specific tensor) without pulling in a glob/regex dependency for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamePattern<'model> {
+    /// Matches one tensor name exactly, e.g. `"output.weight"`.
+    Exact(&'model str),
+    /// Matches every tensor name starting with this, e.g. `"blk.3."` for
+    /// every tensor in layer 3.
+    Prefix(&'model str),
+    /// Matches every tensor name ending with this, e.g. `"_exps.weight"`
+    /// for every mixture-of-experts stacked weight regardless of layer.
+    Suffix(&'model str),
+}
+
+impl NamePattern<'_> {
+    #[must_use]
+    fn matches(&self, name: &str) -> bool {
+        match self {
+            NamePattern::Exact(pattern) => *pattern == name,
+            NamePattern::Prefix(prefix) => name.starts_with(prefix),
+            NamePattern::Suffix(suffix) => name.ends_with(suffix),
+        }
+    }
+}
+
+/// One per-tensor recode instruction: bind `name`-matching tensors at
+/// `target` instead of whatever [`GgmlType`] the checkpoint stored them at
+/// on disk. [`ServingConfig::weight_precision`] is an ordered list of these
+/// -- the first rule whose [`NamePattern`] matches a given tensor name wins,
+/// so a specific [`NamePattern::Exact`]/narrow-[`NamePattern::Prefix`] rule
+/// must sit before a broader catch-all in the slice for it to take effect.
+///
+/// Composes two existing primitives rather than adding a new bind path:
+/// [`proxima_gguf::quant`]'s decoder for the tensor's on-disk codec, then its
+/// encoder for `target` (`crate::bind::bind_dense_as`/`bind_matmul_weight_as`'s
+/// own doc names exactly where this rule set is consulted, and
+/// [`crate::error::InteropError::UnsupportedWeightPrecisionTarget`] for what
+/// happens when `target` has no encoder).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeightPrecisionRule<'model> {
+    pub pattern: NamePattern<'model>,
+    pub target: GgmlType,
+}
+
+impl<'model> WeightPrecisionRule<'model> {
+    /// `true` when `name` matches this rule's [`NamePattern`].
+    #[must_use]
+    pub(crate) fn matches(&self, name: &str) -> bool {
+        self.pattern.matches(name)
+    }
+}
+
+/// Walks `rules` in order and returns the first match's `target` --
+/// [`WeightPrecisionRule`]'s own doc: first match wins, so callers never
+/// need to know how many later rules would also have matched.
+#[must_use]
+pub(crate) fn matching_precision_target(
+    rules: &[WeightPrecisionRule<'_>],
+    name: &str,
+) -> Option<GgmlType> {
+    rules
+        .iter()
+        .find(|rule| rule.matches(name))
+        .map(|rule| rule.target)
+}
+
 /// `-ngl all` (upstream's own `n_gpu_layers = -1` convention for "offload
 /// every layer"), reused verbatim rather than adding an `enum` variant for
 /// the same idea.
@@ -222,6 +293,38 @@ pub struct ServingConfig<'model> {
     /// CPU-reference side so neither side's own quantization error is
     /// misattributed to the other backend.
     pub exact_activations: bool,
+    /// Not an upstream llama-server flag -- per-tensor bind-time recode
+    /// rules ([`WeightPrecisionRule`]'s own doc), applied by
+    /// `crate::bind::bind_dense_as`/`bind_matmul_weight_as` before either
+    /// binds a tensor at its on-disk [`GgmlType`]. Empty (this field's
+    /// default) reproduces today's behavior byte-for-byte: every tensor
+    /// binds at whatever codec the checkpoint stored it in, unchanged.
+    /// [`apply_serving_config`] does not walk this field -- unlike every
+    /// other field on this struct, it is a bind-time choice consulted once
+    /// per tensor before the forward program ever compiles, not a
+    /// per-sequence decode knob, so there is nothing here for a per-`sequence`
+    /// check to validate; a rule naming a target with no encoder surfaces at
+    /// bind time as [`crate::error::InteropError::UnsupportedWeightPrecisionTarget`]
+    /// instead.
+    pub weight_precision: &'model [WeightPrecisionRule<'model>],
+}
+
+impl<'model> ServingConfig<'model> {
+    /// The fluent surface guiding-principle 4 asks every config type carry
+    /// alongside its data surface: `ServingConfig { weight_precision: rules,
+    /// ..config }` expressed as a chainable call instead of a struct-update
+    /// literal. Consumes and returns `self` so it composes with other
+    /// `with_*` calls on one line, the same shape a caller already gets from
+    /// `..Default::default()`'s struct-update syntax -- this module's own
+    /// doc: no bespoke builder type, no `bon`/`conflaguration` dependency.
+    #[must_use]
+    pub const fn with_weight_precision(
+        mut self,
+        weight_precision: &'model [WeightPrecisionRule<'model>],
+    ) -> Self {
+        self.weight_precision = weight_precision;
+        self
+    }
 }
 
 impl Default for ServingConfig<'static> {
@@ -270,6 +373,7 @@ impl Default for ServingConfig<'static> {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
             exact_activations: false,
+            weight_precision: &[],
         }
     }
 }
@@ -544,6 +648,7 @@ mod tests {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
             exact_activations: false,
+            weight_precision: &[],
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -681,6 +786,7 @@ mod tests {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
             exact_activations: false,
+            weight_precision: &[],
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -746,6 +852,7 @@ mod tests {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
             exact_activations: false,
+            weight_precision: &[],
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.numeric_policy, NumericPolicy::bit_exact());

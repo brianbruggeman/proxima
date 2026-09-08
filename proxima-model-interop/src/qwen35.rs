@@ -251,6 +251,7 @@ pub fn bind_qwen35_weights<'file>(
         owned: Vec::new(),
         packed: Vec::new(),
         packed_owned: Vec::new(),
+        precision: &[],
     };
 
     bind_dense(parsed, file_bytes, "token_embd.weight".into(), &mut state)?;

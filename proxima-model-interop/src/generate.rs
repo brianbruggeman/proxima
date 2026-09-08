@@ -1113,12 +1113,17 @@ impl<'file> LoadedModel<'file> {
 
         let architecture = architecture_from_metadata(parsed)?;
         let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
+        // `&[]`: `Self::load`/`load_with_*` take no `ServingConfig`, so
+        // there is no `weight_precision` rule set to thread here yet --
+        // `crate::bind::bind_all_weights`'s own doc names this as the
+        // wiring a future slice does.
         let weights = bind_all_weights(
             parsed,
             file_bytes,
             &architecture,
             paired_gate_up_reduce,
             fused_qkv_reduce,
+            &[],
         )?;
         // `architecture.expert_count`/`expert_used_count` read `0` for every
         // dense checkpoint (`ModelArchitecture`'s own doc), which selects
