@@ -1462,29 +1462,53 @@ fn restack_error_as_interop_error(
 }
 
 /// A native, single, pre-stacked `blk.{layer}.{projection}_exps.weight`
-/// tensor (the layout some GGUF exporters use): one on-disk byte range
-/// covering every expert already. Bound zero-copy *only* when it is `F32`
-/// -- [`proxima_tensor::cpu::QuantizedBlock::Float32`] is the one packed
-/// variant [`proxima_tensor::cpu`]'s own evaluator binds straight through
-/// as a plain `&[f32]` buffer (never inserted into its `quantized_weights`
-/// map), so a gather over it (`IndexMap::Computed`, which
-/// `specs/moe_block.toml`'s routed FFN uses to pick one expert's slab per
-/// token) resolves exactly like any other f32 operand.
+/// tensor (the layout some GGUF exporters use, qwen3moe's real 30B-A3B
+/// checkpoint among them): one on-disk byte range covering every expert
+/// already, GGUF `dims` (innermost-first) reading as `[in_dim, out_dim,
+/// expert_count]` -- i.e. the flat on-disk buffer's own physical layout is
+/// `[expert_count, out_dim, in_dim]`, expert-slowest, each expert's own
+/// `[out_dim, in_dim]` slab row-major exactly like a dense weight's own
+/// on-disk convention. `run_reduce_quantized`'s gather
+/// (`proxima-tensor/src/cpu.rs`, "weight's own physical shape is
+/// `[n_experts, rows, k]`") slices `expert_index * per_expert_bytes`
+/// straight out of that SAME physical layout, so no reshape is needed for
+/// ANY codec [`gguf_tensor_as_packed_block`] decodes zero-copy -- not just
+/// `F32`.
 ///
-/// Every OTHER packed codec ([`gguf_tensor_as_packed_block`] can decode
-/// `Q4_K`/`Q5_K`/`Q6_K` too) still falls back to dequantize-then-
-/// [`transpose_expert_stack`] here (not [`transpose_out_in_to_in_out`]: the
-/// flat buffer is `[expert_count, out_dim, in_dim]`, not one 2-D matrix, so
-/// a plain global transpose would scramble the expert axis into the wrong
-/// place in memory) even though [`bind_moe_expert_weights`]'s own restack
-/// fallback now binds those same codecs packed: a real, live, already-
-/// verified checkpoint (LFM2.5-8B-A1B) reaches THIS function today with a
-/// native `Q4_K` `_exps` stack, and widening this arm too, untested against
-/// that file's own real forward output, is exactly the kind of change this
-/// crate's own discipline log requires a fresh proof for before it lands --
-/// not bundled into the memory-ceiling fix [`bind_moe_expert_weights`]'s own
-/// doc names, which is scoped to the restack (per-expert-tensor) fallback
-/// only.
+/// Bound zero-copy whenever [`PackedOwnedKind::from_ggml_type`] recognizes
+/// the codec (`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`Q3_K`/`Q4_0`/`F16`/`Bf16`) --
+/// the exact codec set [`bind_moe_expert_weights`]'s own restack (per-
+/// expert-tensor) fallback already trusts as packed with no transpose
+/// (`restack_into`'s byte-concat produces this identical `[expert, out,
+/// in]` physical shape from `n` separate expert tensors; a native single
+/// stacked tensor already on disk in that shape needs no restacking at
+/// all). The two MoE tensor-layout conventions feed the same gather, so
+/// they must trust the same codec set -- this closes the fresh-proof gap
+/// this function's own prior doc revision named (widening was previously
+/// deferred pending a real checkpoint and a gathered-matvec-vs-dequantized
+/// cross-check; `real_qwen3moe_file`/`packed_expert_gather_matches_the_
+/// dequantized_reference` below are that proof, against the real
+/// checkpoint's own `Q4_K`/`Q6_K` `_exps` tensors and a synthetic `Q4_K`
+/// 2-expert stack respectively).
+///
+/// `F32` alone still needs no [`PackedOwnedKind`] check: [`aligned_f32_view`]
+/// already fails loudly ([`InteropError::MisalignedFloat32Tensor`]) rather
+/// than silently falling back, and [`QuantizedBlock::Float32`] is the one
+/// variant [`proxima_tensor::cpu`]'s evaluator binds as a plain `&[f32]`
+/// buffer rather than through `quantized_weights`, both unaffected by this
+/// widening.
+///
+/// A codec [`gguf_tensor_as_packed_block`] cannot represent at all
+/// ([`InteropError::UnrepresentableGgmlType`]) is the only remaining path
+/// to dequantize-then-[`transpose_expert_stack`] (not
+/// [`transpose_out_in_to_in_out`]: the flat buffer is `[expert_count,
+/// out_dim, in_dim]`, not one 2-D matrix, so a plain global transpose would
+/// scramble the expert axis into the wrong place in memory) -- but every
+/// codec that arm actually decodes already returns a typed
+/// [`QuantizedBlock`] variant [`PackedOwnedKind::from_ggml_type`] also
+/// recognizes, so in practice this fallback is now unreachable for any
+/// codec this crate can decode; it stays as the typed-error path for a
+/// checkpoint using a codec neither function has ever seen.
 ///
 /// # Errors
 ///
@@ -1501,9 +1525,13 @@ fn bind_moe_stacked_experts<'file>(
     in_dim: usize,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
+    let tensor = find_tensor(parsed, &name)?;
     match gguf_tensor_as_packed_block(parsed, file_bytes, &name) {
         Ok(block @ proxima_tensor::cpu::QuantizedBlock::Float32(_)) => {
-            state.packed.push((name, block))
+            state.packed.push((name, block));
+        }
+        Ok(block) if PackedOwnedKind::from_ggml_type(tensor.ggml_type).is_some() => {
+            state.packed.push((name, block));
         }
         Ok(_) | Err(_) => {
             let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)?;
