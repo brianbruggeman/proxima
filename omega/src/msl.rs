@@ -183,7 +183,7 @@ pub struct GridSpec {
 /// // no packed (quantized/half-precision) operand in this program, so an
 /// // empty codec table is exactly right -- see `PackedOperands`'s own doc.
 /// let packed_operands = omega::PackedOperands::new();
-/// let kernel = omega::emit(&bound_ops[0], &packed_operands, NumericPolicy::default())?;
+/// let kernel = omega::emit(&bound_ops[0], &packed_operands, proxima_tensor::NumericPolicy::default())?;
 /// assert!(kernel.source.contains("kernel void"));
 /// assert!(kernel.source.contains("tanh("));
 /// assert_eq!(kernel.bindings.len(), 3); // one input, one output, uniforms
