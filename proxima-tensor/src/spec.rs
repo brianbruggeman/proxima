@@ -571,7 +571,7 @@ fn lookup(resolved: &BTreeMap<String, NodeId>, reference: &str) -> Result<NodeId
 /// program stays honest to the TOML one node kind spells: both paths run the
 /// identical grammar, so a generated layer cannot silently drift from
 /// `specs/mistral_layer.toml`'s own addressing.
-fn elementwise(
+pub fn elementwise(
     program: &mut Vec<Op>,
     dtype: DType,
     body: ScalarOp,
@@ -594,7 +594,7 @@ fn elementwise(
 
 /// Appends one [`Op::Reduce`], same notation-parsing rationale as
 /// [`elementwise`].
-fn reduce(
+pub fn reduce(
     program: &mut Vec<Op>,
     dtype: DType,
     body: ScalarOp,
@@ -627,7 +627,7 @@ fn reduce(
 /// `ggml-metal.metal:2795-2845`) for one with it -- mirroring the
 /// `qk_norm.is_some()` match a few call sites below this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RopePairing {
+pub enum RopePairing {
     Interleaved,
     SplitHalf { pairs: u32 },
 }
@@ -685,7 +685,7 @@ impl RopePairing {
 /// runtime bug. This form still removes the two-op-per-half
 /// `per_head_channel_range` mask-and-reduce this crate used to build
 /// `q_first`/`q_second`/`k_first`/`k_second` before rotating them.
-fn fused_rope_pair(
+pub fn fused_rope_pair(
     program: &mut Vec<Op>,
     source: NodeId,
     head_letter: char,
@@ -748,7 +748,8 @@ fn fused_rope_pair(
 /// it is the one constant here that cannot become an [`Op::Constant`]
 /// without `mistral_forward_program` taking it as a parameter.
 /// `inv_dim`/`ones`/`group_ones` all could, and did — see [`scalar_constant`].
-fn symbolic_leaf(program: &mut Vec<Op>, dtype: DType, name: &str) -> NodeId {
+#[must_use]
+pub fn symbolic_leaf(program: &mut Vec<Op>, dtype: DType, name: &str) -> NodeId {
     input_leaf(program, dtype, alloc::vec![Extent::Symbolic(0)], name)
 }
 
@@ -774,7 +775,8 @@ pub fn input_leaf(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>, name:
 /// `inv_sqrt_head_dim` and `neg_infinity` were a bound `Input` or a
 /// multi-node `Iota` derivation before the variant existed, and
 /// [`Op::Constant`]'s own doc records what each cost.
-fn scalar_constant(program: &mut Vec<Op>, value: f32) -> NodeId {
+#[must_use]
+pub fn scalar_constant(program: &mut Vec<Op>, value: f32) -> NodeId {
     op::append(
         program,
         Op::Constant {
@@ -823,7 +825,7 @@ pub fn embedding_lookup(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> No
 /// node: `x` normalized by its own root-mean-square, then scaled by `gamma`
 /// (`[embedding]`, broadcast `d->sd`), the checkpoint's learned
 /// `*_norm.weight` — RMSNorm without it is a different, un-trained function.
-fn rmsnorm(
+pub fn rmsnorm(
     program: &mut Vec<Op>,
     x: NodeId,
     gamma: NodeId,
@@ -900,7 +902,7 @@ fn rmsnorm(
 /// algebra cannot merge into one physical axis -- since every interpolation
 /// site here (`s{head}d`, `s{head}`) treats `head` as an opaque run of
 /// letters, not a single character.
-fn rmsnorm_per_head(
+pub fn rmsnorm_per_head(
     program: &mut Vec<Op>,
     x: NodeId,
     gamma: NodeId,
@@ -983,7 +985,7 @@ fn rmsnorm_per_head(
 /// `-inf`, three nodes and a materialized `[?0]` tensor per call to say a
 /// number that never varies. It is now one rank-0 [`Op::Constant`], which
 /// is also why it broadcasts as `"->stug"` rather than `"s->stug"`.
-fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorError> {
+pub fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorError> {
     let query_index = op::append(
         program,
         Op::Iota {
@@ -1019,7 +1021,7 @@ fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorError> {
 /// [`Op::Input`], the same precedent `eps`/`rope_cos`/`rope_sin` set: a
 /// value the host supplies per call, not a build-time constant, because it
 /// grows every decode step without the graph being rebuilt.
-fn causal_mask_merged(program: &mut Vec<Op>, cached_len: NodeId) -> Result<NodeId, TensorError> {
+pub fn causal_mask_merged(program: &mut Vec<Op>, cached_len: NodeId) -> Result<NodeId, TensorError> {
     let query_index = op::append(
         program,
         Op::Iota {
@@ -1056,7 +1058,7 @@ fn causal_mask_merged(program: &mut Vec<Op>, cached_len: NodeId) -> Result<NodeI
 /// or one of the position-only constants [`causal_mask`]/`cos`/`sin` share
 /// across every layer.
 #[allow(clippy::too_many_arguments)]
-fn append_mistral_layer(
+pub fn append_mistral_layer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -1471,7 +1473,8 @@ fn append_mistral_layer(
 /// over `d_in` to finish the matmul. The same [`IndexMap::Computed`] gather
 /// [`embedding_lookup`] uses, with one extra non-gathered axis (`d_out`)
 /// spliced in after the gathered one instead of none.
-fn gathered_expert_product(
+#[must_use]
+pub fn gathered_expert_product(
     program: &mut Vec<Op>,
     stack: NodeId,
     route: NodeId,
@@ -1870,7 +1873,7 @@ pub fn append_moe_ffn(
 /// program bytes — never changes shape by so much as one node merely
 /// because this function exists next to it.
 #[allow(clippy::too_many_arguments)]
-fn append_mistral_moe_layer(
+pub fn append_mistral_moe_layer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -2658,7 +2661,7 @@ enum QkvSource {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn append_mistral_cached_layer(
+pub fn append_mistral_cached_layer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -4327,7 +4330,7 @@ pub fn append_qwen35_dense_attention_layer(
 /// checkpoint; it now builds it, node-for-node the same attention block the
 /// two-range sibling would.
 #[allow(clippy::too_many_arguments)]
-fn append_mistral_single_range_cached_layer(
+pub fn append_mistral_single_range_cached_layer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -5030,7 +5033,7 @@ pub fn mistral_single_range_cached_forward_program(
 /// `Before`/`After` positions differ only in which activation node (`x`
 /// pre-layer-0 vs `normed_final` post-layer-31) they read, never in the
 /// reduce shape itself.
-fn duplicate_head_reduce(
+pub fn duplicate_head_reduce(
     program: &mut Vec<Op>,
     activation: NodeId,
     lm_head: NodeId,
@@ -5062,7 +5065,7 @@ fn duplicate_head_reduce(
 /// node sequence never changes shape merely because this function exists
 /// next to it.
 #[allow(clippy::too_many_arguments)]
-fn append_mistral_cached_moe_layer(
+pub fn append_mistral_cached_moe_layer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -5593,7 +5596,7 @@ impl LayerKind {
 /// Taps whose *unclamped* position is negative (real left-padding) are zeroed
 /// post-gather via `Select`, mirroring how [`causal_mask`] masks attention
 /// scores rather than ever reading an invalid position.
-fn causal_conv1d(
+pub fn causal_conv1d(
     program: &mut Vec<Op>,
     x: NodeId,
     weight: NodeId,
@@ -5816,7 +5819,7 @@ fn causal_conv1d(
 /// `input[t - (K-1)]`, the same pairing this function's own weight map
 /// (`ld->sld`) uses.
 #[allow(clippy::too_many_arguments)]
-fn append_lfm2_conv_mixer(
+pub fn append_lfm2_conv_mixer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -5955,7 +5958,7 @@ fn append_lfm2_conv_mixer(
 /// itself is per-head and never mixes heads, so nothing in its math depends
 /// on the head space being one physical axis.
 #[allow(clippy::too_many_arguments)]
-fn append_qwen35_delta_net_step(
+pub fn append_qwen35_delta_net_step(
     program: &mut Vec<Op>,
     query: NodeId,
     key: NodeId,
@@ -6065,7 +6068,7 @@ fn append_qwen35_delta_net_step(
 /// the same compose-not-mint move [`ExpertGatingFunc::Sigmoid`]'s own
 /// `neg -> exp -> +1 -> reciprocal` chain already makes for a activation this
 /// crate has no dedicated variant for.
-fn softplus(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
+pub fn softplus(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
     let target = map.rsplit("->").next().unwrap_or(map);
     let one_map = alloc::format!("->{target}");
     let exp_x = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(x, map)])?;
@@ -6085,7 +6088,7 @@ fn softplus(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<
 /// trailing `gamma` multiply. `map`/`sum_map` follow [`rmsnorm_per_head`]'s
 /// own per-axis convention so the same function serves whichever axis (head
 /// dim here, embedding elsewhere) is being normalized.
-fn l2norm(
+pub fn l2norm(
     program: &mut Vec<Op>,
     x: NodeId,
     eps: NodeId,
@@ -6133,7 +6136,7 @@ fn l2norm(
 /// more [`ScalarOp::Multiply`] against the un-gated input. No dedicated
 /// `Sigmoid`/`Silu` [`ScalarOp`] exists, matching that chain's own precedent
 /// for an activation this crate composes rather than mints.
-pub(crate) fn silu(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
+pub fn silu(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
     let target = map.rsplit("->").next().unwrap_or(map);
     let one_map = alloc::format!("->{target}");
     let neg_x = elementwise(program, DType::Float32, ScalarOp::Negate, &[(x, map)])?;
@@ -6170,7 +6173,7 @@ pub(crate) fn silu(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> 
 /// applied here to a compile-time-constant one. Zero offset costs nothing
 /// extra by this route, unlike the donor slice which cannot express it at
 /// all.
-fn channel_slice(
+pub fn channel_slice(
     program: &mut Vec<Op>,
     x: NodeId,
     total_channels: u32,
@@ -6233,7 +6236,7 @@ fn channel_slice(
 /// total_channels + offset`); the extra `Iota` over `heads` folds that
 /// per-head stride into the same `target` the mask compares against, one
 /// mask covering every head's window in a single select-then-reduce pass.
-fn per_head_channel_slice(
+pub fn per_head_channel_slice(
     program: &mut Vec<Op>,
     x: NodeId,
     heads: u32,
@@ -6312,7 +6315,7 @@ fn per_head_channel_slice(
 /// SAME extent, so a bare projection off `x`'s own `total_channels`-wide
 /// axis pins `i` at `total_channels`, not `width`; only the mask-then-reduce
 /// route can produce a genuinely narrower output.
-fn per_head_channel_range(
+pub fn per_head_channel_range(
     program: &mut Vec<Op>,
     x: NodeId,
     head: &str,
@@ -6386,7 +6389,7 @@ fn per_head_channel_range(
 // program (mirroring `lfm2_forward_program_with_experts`'s own prefill-only
 // scope) is this function's real caller, not built this session.
 #[allow(dead_code, clippy::too_many_arguments)]
-fn append_qwen35_conv_branch(
+pub fn append_qwen35_conv_branch(
     program: &mut Vec<Op>,
     qkv_mixed: NodeId,
     conv_weight: NodeId,
@@ -6436,7 +6439,7 @@ fn append_qwen35_conv_branch(
 /// `h = group*u+g` destination (the same [`IndexMap::Computed`] shape
 /// [`causal_conv1d`]'s own `clamped_position` gather already uses for a
 /// data-computed *source*); not built this session.
-fn repeat_kv_heads(
+pub fn repeat_kv_heads(
     program: &mut Vec<Op>,
     x: NodeId,
     kv_heads: u32,
@@ -6463,7 +6466,7 @@ fn repeat_kv_heads(
 /// [`append_qwen35_ssm_mixer`] needs it twice (`beta`, the attention gate),
 /// the same "worth naming at two callers" threshold [`silu`]/[`softplus`]
 /// already crossed for their own chains.
-fn sigmoid(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
+pub fn sigmoid(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
     let target = map.rsplit("->").next().unwrap_or(map);
     let one_map = alloc::format!("->{target}");
     let neg_x = elementwise(program, DType::Float32, ScalarOp::Negate, &[(x, map)])?;
@@ -6886,7 +6889,7 @@ pub fn append_qwen35_ssm_mixer(
 /// path's own generated program bytes never change shape because this
 /// function exists next to it.
 #[allow(clippy::too_many_arguments)]
-fn append_attention_mixer(
+pub fn append_attention_mixer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
