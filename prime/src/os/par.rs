@@ -23,7 +23,7 @@
 //!     trampolining; current `scope` is safe and covers most use cases.
 //!
 //! constraints (per the workspace perf-design-constraints memory):
-//!   - zero-copy: slice borrowed by leaves via Arc<[T]>; Acc moves through tree
+//!   - zero-copy: slice borrowed by leaves via `Arc<[T]>`; Acc moves through tree
 //!   - branchless hot path: leaf fold is a tight `for` over a contiguous slice
 //!   - stack allocations: only the per-spawn Box on bgpool's typed path; no extra heap per element
 //!   - types: fully generic; no dyn-trait on the public API

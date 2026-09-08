@@ -582,7 +582,7 @@ pub fn launch_with_lanes_and_setup(
 /// drive a real prime shard's timers deterministically — see
 /// `proxima`'s `tests/units/virtual_time.rs` for a cross-crate proof.
 /// Every production launcher (`launch`, `launch_with_lanes`,
-/// `launch_with_lanes_and_setup`) always passes [`StdClock::real`] —
+/// `launch_with_lanes_and_setup`) always passes `StdClock::real` —
 /// this function touches no production code path.
 #[cfg(any(test, feature = "runtime-prime-virtual-clock"))]
 pub fn launch_with_virtual_clock(

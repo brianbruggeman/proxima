@@ -47,7 +47,7 @@
 //! the park is an unbounded `park()`, not `park_timeout`. an earlier
 //! revision bounded every park at 50us, blaming "OS scheduling" for a
 //! stranding that was actually a store-buffer ordering bug at the `round`
-//! bump and at [`wait_for_round`]'s arm-then-recheck — Release/Acquire on
+//! bump and at `wait_for_round`'s arm-then-recheck — Release/Acquire on
 //! two distinct locations does not order them against each other, so both
 //! sides could miss (measured: 345 strands per 300,000 rounds on aarch64,
 //! where `load(Acquire)` lowers to RCpc `ldapr`). those four operations are
@@ -57,7 +57,7 @@
 //! it only masked the bug by re-polling `round` on a timer — and it cost a
 //! resident cohort roughly 6,600 spurious wakes per 330ms forward pass (one
 //! per member per timeout), each contending the P-cores the leader needs.
-//! see [`wait_for_round`] for the SeqCst argument the unbounded park relies on.
+//! see `wait_for_round` for the SeqCst argument the unbounded park relies on.
 //!
 //! # completion is a dial, not a constant
 //!
