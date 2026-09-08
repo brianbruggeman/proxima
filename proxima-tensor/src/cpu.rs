@@ -28507,6 +28507,112 @@ mod tests {
         }
     }
 
+    /// proxima-debugger reproduction of a reported real-model contradiction:
+    /// a consumer registered a `Box::leak`ed observer (lock-free per-position
+    /// buffer, not a `static`) from a thread other than the one that later
+    /// drives decode, and reported `on_expert_routed` calls == 0 while
+    /// [`record_expert_selection`]'s own drain table (the adjacent,
+    /// unconditional statement at the same call site,
+    /// `cpu.rs::run_reduce_quantized`) populated normally. Same fixture as
+    /// [`expert_observer_hook_receives_one_call_per_token_matching_the_real_route`];
+    /// only the registration SHAPE changes -- `&'static dyn ExpertObserver`
+    /// obtained via `Box::leak` instead of a `static` item, set from a
+    /// spawned-and-joined thread instead of the test's own thread, and an
+    /// interior lock-free per-position buffer (fixed `[AtomicI64; 3]`, one
+    /// slot per token position, `-1` sentinel for "not yet written") instead
+    /// of a `Mutex<Vec<_>>`. If this shape also reaches `seq` calls, the
+    /// process-global `OnceLock` genuinely does not care how the `&'static
+    /// dyn` was obtained or which thread called `set_expert_observer`, and
+    /// the reported zero has to come from something the consumer's own
+    /// binary did differently, not from this hook.
+    #[cfg(feature = "instrument")]
+    #[test]
+    fn expert_observer_leaked_across_thread_boundary_still_receives_calls() {
+        use crate::instrument::{ExpertObserver, set_expert_observer};
+        use std::sync::atomic::{AtomicI64, AtomicUsize};
+
+        struct LeakedQueueObserver {
+            raw_calls: AtomicUsize,
+            per_position_expert: [AtomicI64; 3],
+        }
+
+        impl ExpertObserver for LeakedQueueObserver {
+            fn on_expert_routed(&self, _layer: usize, expert: usize, token_position: usize) {
+                self.raw_calls.fetch_add(1, Ordering::Relaxed);
+                if let Some(slot) = self.per_position_expert.get(token_position) {
+                    slot.store(expert as i64, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let leaked: &'static LeakedQueueObserver = Box::leak(Box::new(LeakedQueueObserver {
+            raw_calls: AtomicUsize::new(0),
+            per_position_expert: [
+                AtomicI64::new(-1),
+                AtomicI64::new(-1),
+                AtomicI64::new(-1),
+            ],
+        }));
+
+        std::thread::spawn(move || {
+            set_expert_observer(leaked).expect("the only registration this process makes");
+        })
+        .join()
+        .expect("registration thread does not panic");
+
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let n_experts: u32 = 3;
+        let rows: u32 = 4;
+        let blocks_per_row = 1;
+        let k = QK_K as u32 * blocks_per_row as u32;
+        let seq: u32 = 3;
+        let route_data = [2.0f32, 0.0, 1.0];
+        let expected_experts = [2i64, 0, 1];
+        let expert_scales = [1.0f32, 5.0, 20.0];
+
+        let mut stacked_weight: Vec<u8> = Vec::new();
+        for (expert, &scale) in expert_scales.iter().enumerate() {
+            let weight_f32: Vec<f32> = random_vec(401 + expert as u64, rows as usize * k as usize)
+                .into_iter()
+                .map(|value| (value * 4.0 - 2.0) * scale)
+                .collect();
+            let mut blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+            {
+                quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+            }
+            stacked_weight.extend_from_slice(&blocks);
+        }
+
+        let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
+        let activation: Vec<f32> = random_vec(311, seq as usize * k as usize);
+        let quantized_blocks = [
+            QuantizedBlock::Q4K(&stacked_weight),
+            QuantizedBlock::Float32(&route_data),
+            QuantizedBlock::Float32(&activation),
+        ];
+        evaluate_quantized(&program, &[], &quantized_blocks, &[sum])
+            .expect("gathered quantized moe matmul evaluates end to end");
+
+        assert_eq!(
+            leaked.raw_calls.load(Ordering::Relaxed),
+            seq as usize,
+            "a Box::leak'd &'static dyn ExpertObserver, registered from a joined spawned \
+             thread, receives one on_expert_routed call per position -- same as a static item \
+             registered from the test's own thread"
+        );
+        for (position, &expected) in expected_experts.iter().enumerate() {
+            assert_eq!(
+                leaked.per_position_expert[position].load(Ordering::Relaxed),
+                expected,
+                "position {position} must have its own slot written by on_expert_routed"
+            );
+        }
+    }
+
     /// Hand-computes the exact `ema` [`ExpertSelectionEntry::record`]'s own
     /// recurrence produces after `selections` calls, starting from `0.0` --
     /// same formula, same floating-point operation order, so this is a
