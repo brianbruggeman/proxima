@@ -67,9 +67,9 @@ struct LayerSlab<'file> {
     weight_node: Option<NodeId>,
 }
 
-/// The model's own owned/aliased expert bytes, one [`LayerSlab`] per
-/// forward-program layer carrying a routed MoE weight. See the module doc
-/// for the ownership and step-boundary contract.
+/// The model's own owned/aliased expert bytes, one `LayerSlab` (private,
+/// this module) per forward-program layer carrying a routed MoE weight.
+/// See the module doc for the ownership and step-boundary contract.
 #[derive(Debug, Clone, Default)]
 pub struct ExpertSlab<'file> {
     layers: Vec<LayerSlab<'file>>,
