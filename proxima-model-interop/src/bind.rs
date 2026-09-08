@@ -321,8 +321,9 @@ pub struct ModelArchitecture {
     /// added under the square root before the reciprocal) --
     /// `RMS_EPSILON_DEFAULT` (llama.cpp's own default for a llama/mistral
     /// checkpoint, matching openchat-3.5's own declared value) when the key
-    /// is absent. [`crate::qwen35::Qwen35Architecture::rms_epsilon`]/
-    /// [`crate::lfm2::Lfm2Architecture::rms_epsilon`] read the same metadata
+    /// is absent. `crate::qwen35::Qwen35Architecture::rms_epsilon`
+    /// (`std`-gated) and `crate::lfm2::Lfm2Architecture::rms_epsilon`
+    /// (`std`-gated) read the same metadata
     /// key with their own architecture-specific defaults (`1e-6`) --
     /// duplicated per architecture rather than shared because each
     /// architecture module owns its own default, not because the key

@@ -98,7 +98,8 @@ impl NamePattern<'_> {
 /// [`proxima_gguf::quant`]'s decoder for the tensor's on-disk codec, then its
 /// encoder for `target` (`crate::bind::bind_dense_as`/`bind_matmul_weight_as`'s
 /// own doc names exactly where this rule set is consulted, and
-/// [`crate::error::InteropError::UnsupportedWeightPrecisionTarget`] for what
+/// `crate::error::InteropError::UnsupportedWeightPrecisionTarget`
+/// (`std`-gated) for what
 /// happens when `target` has no encoder).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WeightPrecisionRule<'model> {
@@ -175,7 +176,8 @@ pub struct ServingConfig<'model> {
     /// shape (weights bytes + placed-KV bytes at `context_length` + a fixed
     /// arena allowance) and refuse to run, or reduce `context_length` to
     /// the largest value that fits, before
-    /// [`crate::generate::LoadedModel::generate_with_serving_config`] asks a
+    /// `crate::generate::LoadedModel::generate_with_serving_config`
+    /// (`std`-gated) asks a
     /// device for a single buffer (`crate::memory_fit`'s own module doc).
     /// `true` (this field's own default) unlike the owner's real `-fit off`
     /// invocation ([`ServingConfig::default`]'s own doc) -- a load that
@@ -311,8 +313,8 @@ pub struct ServingConfig<'model> {
     /// per tensor before the forward program ever compiles, not a
     /// per-sequence decode knob, so there is nothing here for a per-`sequence`
     /// check to validate; a rule naming a target with no encoder surfaces at
-    /// bind time as [`crate::error::InteropError::UnsupportedWeightPrecisionTarget`]
-    /// instead.
+    /// bind time as `crate::error::InteropError::UnsupportedWeightPrecisionTarget`
+    /// (`std`-gated) instead.
     pub weight_precision: &'model [WeightPrecisionRule<'model>],
 }
 
