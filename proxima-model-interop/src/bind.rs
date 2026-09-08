@@ -5379,6 +5379,8 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local checkpoint outside this repo (PROXIMA_OPENCHAT_GGUF) and a real Metal device"]
     fn bisects_per_layer_residual_taps_cpu_vs_metal_on_one_prefill_step() {
+        #[cfg(feature = "instrument")]
+        let _telemetry = install_stdout_telemetry();
         let model_path = crate::test_support::openchat_gguf_path();
         crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
         let path = std::path::Path::new(&model_path);

@@ -8018,7 +8018,7 @@ fn encode_op(
     #[cfg(feature = "instrument")]
     let encode_dispatch_started = read_ticks();
     encoder.setComputePipelineState(&pipeline);
-    bind_buffers(
+    if let Err(err) = bind_buffers(
         encoder,
         bindings,
         device_buffers,
@@ -8026,7 +8026,16 @@ fn encode_op(
         scratch,
         &uniforms,
         fault.as_ref(),
-    )?;
+    ) {
+        debug!(
+            node = bound.node.0,
+            kind = bound.kind.name(),
+            ?bindings,
+            resident = device_buffers.len() as u64,
+            "encode_op failed binding this op's operands"
+        );
+        return Err(err);
+    }
     dispatch(encoder, &pipeline, grid);
     // Redesign §4c: the split kernel above wrote its partial into `scratch`
     // (its own `Binding::Scratch` slot, never `output`); this second
