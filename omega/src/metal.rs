@@ -4203,12 +4203,18 @@ fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
     let gather = gather_count(bound);
 
     match &bound.kind {
-        BoundOpKind::CachedAttention { .. } => {
+        BoundOpKind::CachedAttention { cached_key_rows, .. } => {
             // Mirrors `pack_cached_attention_uniforms`: the single-range
-            // fused form (nine operands) appends `cached_key_rows`,
-            // `new_key_rows`, `context_chunks`, and `splits` as runtime
+            // fused form (nine operands, `cached_key_rows == 0`) appends
+            // `cached_key_rows`, `new_key_rows`, `context_chunks`, and
+            // `splits` as runtime
             // uniform fields (`total_elements` plus these four = 5 words).
-            if operand_count == 9 { 5 * WORD } else { WORD }
+            // `two_range_cached_bound` (nine operands, `cached_key_rows !=
+            // 0`) reads its runtime bound straight off `in8` in the kernel
+            // body instead (`render_cached_attention`'s own doc) and keeps
+            // the minimal one-word struct, so only the single-range form
+            // widens the uniform blob.
+            if operand_count == 9 && *cached_key_rows == 0 { 5 * WORD } else { WORD }
         }
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => WORD,
         BoundOpKind::Elementwise { .. } => {
@@ -4661,7 +4667,13 @@ fn pack_cached_attention_uniforms(
             found: bound.kind.name(),
         });
     };
-    let dynamic_cached_len = bound.operands().len() == 9;
+    // Same `cached_key_rows == 0` discriminator as `crate::msl::render_
+    // cached_attention` / `grid_threads` -- `two_range_cached_bound` (nine
+    // operands, `cached_key_rows != 0`) reads its live bound off `in8`
+    // inside the kernel body instead of widening the dispatch or the
+    // uniforms struct, so it takes the same path as the eight-operand,
+    // unbucketed case below.
+    let dynamic_cached_len = bound.operands().len() == 9 && *cached_key_rows == 0;
     let context_length = *cached_key_rows + *new_key_rows;
     let chunks = crate::msl::context_chunks_for(context_length, numeric_policy) as i64;
     let splits = crate::msl::splits_for(context_length, numeric_policy) as i64;

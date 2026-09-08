@@ -931,15 +931,18 @@ fn build_single_range_program(
 /// identity, so the plan-cache key is untouched from its pre-bucketing
 /// shape whenever a caller disables bucketing.
 /// [`run_decode_loop_placed_kv`]'s own `causal_mask_merged`
-/// `key_index > query_absolute` comparison and the two-range path's own
-/// [`proxima_tensor::spec::cached_range_padding_mask`] `key_index >=
-/// cached_len` comparison both mask every row in `[merged_len, extent)` as
-/// invalid for every query this call issues (`proxima-tensor`'s
-/// `spec.rs`'s `cpu_mask_zero_ulp` test proves the [`causal_mask_merged`]
-/// mechanism 0-ULP-safe for any bucket size), so no other call site needs
-/// to know which bucket size is configured. Plain `usize` arithmetic, no
-/// platform or feature dependency of its own -- available to any
-/// `std`-gated caller regardless of which backend feature is compiled in.
+/// `key_index > query_absolute` comparison masks every row in `[merged_len,
+/// extent)` as invalid for every query the single-range path issues
+/// (`proxima-tensor`'s `spec.rs`'s `cpu_mask_zero_ulp` test proves the
+/// [`causal_mask_merged`] mechanism 0-ULP-safe for any bucket size); the
+/// two-range path excludes the identical padding with a runtime BOUND on
+/// the fused `BoundOpKind::CachedAttention` op instead of a mask node
+/// (`proxima_tensor::bind::cached_attention_candidates`'s own doc on the
+/// `cached_key_rows != 0` discriminator), so no other call site needs to
+/// know which bucket size is configured either way. Plain `usize`
+/// arithmetic, no platform or feature dependency of its own -- available to
+/// any `std`-gated caller regardless of which backend feature is compiled
+/// in.
 fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize) -> usize {
     merged_len
         .div_ceil(bucket_tokens)
@@ -1456,16 +1459,16 @@ impl LayerCache {
 /// [`LayerCache`]'s bucket-padded mirror -- the two-range decode loop's own
 /// fix for the plan-cache defect `Self::plans`' own doc on
 /// [`BackendRuntime`] walks through: `LayerCache` grows by exactly
-/// `cached_len` every step, so a plan keyed on it can never repeat, but
-/// [`proxima_tensor::spec::cached_range_padding_mask`] makes any reader
-/// that pads a copy of it out to a `kv_extent` bucket boundary numerically
-/// identical to reading the exact, unpadded length. `fill` copies
-/// `source`'s real content into a buffer at least `bound_extent` rows
-/// long, zero-filling the remainder (never load-bearing -- the padding
-/// mask always selects it out before softmax, see that mask's own doc);
-/// `resize` only grows when a step crosses into a new, larger bucket, the
-/// same reuse-across-steps shape [`run_decode_loop_placed_kv`]'s own
-/// `cache_length_scratch_even_odd`/`_v` already established for the
+/// `cached_len` every step, so a plan keyed on it can never repeat, but the
+/// fused `BoundOpKind::CachedAttention` op's own runtime bound
+/// (`proxima_tensor::bind::cached_attention_candidates`'s own doc) makes any
+/// reader that pads a copy of it out to a `kv_extent` bucket boundary
+/// numerically identical to reading the exact, unpadded length. `fill`
+/// copies `source`'s real content into a buffer at least `bound_extent` rows
+/// long, zero-filling the remainder (never load-bearing -- the runtime bound
+/// always excludes it before softmax, see that bound's own doc); `resize`
+/// only grows when a step crosses into a new, larger bucket, the same
+/// reuse-across-steps shape [`run_decode_loop_placed_kv`]'s own
 /// single-range path's placeholder scratch.
 struct KvPadScratch {
     k_even: Vec<f32>,
@@ -1855,10 +1858,11 @@ pub(crate) struct BackendRuntime {
     /// (one miss and one fresh `Plan`, with its own device output buffers,
     /// per token). `kv_bound_extent` is `cached_len` rounded up to
     /// `ServingConfig::kv_bucket_tokens` (`generate::kv_extent`'s own doc),
-    /// which repeats for every step inside one bucket --
-    /// `proxima_tensor::spec::cached_range_padding_mask` is what makes a
-    /// `Plan` built for that rounded shape numerically correct for every
-    /// real `cached_len` the bucket covers, so ordinary autoregressive
+    /// which repeats for every step inside one bucket -- the fused
+    /// `BoundOpKind::CachedAttention` op's own runtime bound
+    /// (`proxima_tensor::bind::cached_attention_candidates`'s own doc) is
+    /// what makes a `Plan` built for that rounded shape numerically correct
+    /// for every real `cached_len` the bucket covers, so ordinary autoregressive
     /// decode now hits this cache `bucket_tokens - 1` times out of every
     /// `bucket_tokens` steps instead of never.
     ///
@@ -3075,9 +3079,10 @@ impl<'file> LoadedModel<'file> {
                 named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
                 // `mistral_cached_forward_program_with_experts`'s own
                 // `cached_len` `Op::Input` -- always present regardless of
-                // `ServingConfig::kv_bucket_tokens` (`proxima_tensor::spec::
-                // cached_range_padding_mask`'s own doc), so this scalar is
-                // fed on every step, bucketed or not.
+                // `ServingConfig::kv_bucket_tokens` (`proxima_tensor::bind::
+                // cached_attention_candidates`'s own doc on the runtime bound
+                // that reads it), so this scalar is fed on every step,
+                // bucketed or not.
                 let cached_len_scalar = [cached_len as f32];
                 named_blocks.push(("cached_len", QuantizedBlock::Float32(&cached_len_scalar)));
                 #[cfg(feature = "instrument")]
@@ -4484,10 +4489,10 @@ mod tests {
     /// the unbucketed run (ROW 392's own finding: one miss, and one fresh
     /// `Plan` with its own device output buffers, per token before this
     /// fix), and the two runs must land on the IDENTICAL generated token
-    /// ids -- `cached_range_padding_mask`'s own doc is the numerics claim
-    /// this equality is standing in for: a bucket's padding is invisible to
-    /// softmax, so rounding `cached_len` up must never change what the
-    /// model emits.
+    /// ids -- `proxima_tensor::bind::cached_attention_candidates`'s own doc
+    /// on the fused op's runtime bound is the numerics claim this equality
+    /// is standing in for: a bucket's padding is invisible to softmax, so
+    /// rounding `cached_len` up must never change what the model emits.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     #[test]
     fn two_range_plan_cache_buckets_cached_len_without_changing_generated_tokens() {
@@ -4721,8 +4726,9 @@ mod tests {
         );
         assert_eq!(
             bucketed.0, unbucketed.0,
-            "cached_range_padding_mask must make a bucket's own zero-padding invisible to \
-             softmax -- rounding cached_len up must never change which token is emitted"
+            "the fused CachedAttention op's runtime bound must make a bucket's own \
+             zero-padding invisible to softmax -- rounding cached_len up must never \
+             change which token is emitted"
         );
     }
 

@@ -119,6 +119,17 @@ pub fn real_forward_fixture_with_cached_len(cached_len: u64) -> RealForwardFixtu
             vec![3.0f32; count]
         } else if name == "eps" {
             vec![1e-5f32; count]
+        } else if name == "cached_len" {
+            // the REAL cached length, not a random fill -- `bind::
+            // cached_attention_candidates` reads this named leaf as the
+            // fused op's own ninth, runtime `cached_key_rows` operand
+            // (`BoundOpKind::CachedAttention`'s own doc), so a random value
+            // here would corrupt only the GPU-fused path's mask/bound while
+            // the CPU evaluator (which folds directly from the program's
+            // own shapes, never this scalar) stayed correct -- exactly the
+            // silent CPU/Metal divergence `fused_cached_attention_root_
+            // agrees_between_cpu_and_metal` exists to catch.
+            vec![cached_len as f32]
         } else {
             random_vec(position as u64 + 1, count)
         };
