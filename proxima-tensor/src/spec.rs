@@ -7785,6 +7785,15 @@ pub fn qwen35_forward_program(
         },
     );
     let (is_future, _neg_infinity) = causal_mask(&mut program)?;
+    // Same rank-0 leaf [`mistral_cached_forward_program_with_experts`] adds
+    // right after its own `causal_mask` call, and for the same reason: named
+    // "cached_len" so `bind::cached_attention_candidates`'s `find_named_input`
+    // picks it up by NAME (not by threading a `NodeId` through
+    // `append_qwen35_dense_attention_layer`'s already-long parameter list) and
+    // carries the live cached length in as the fused `CachedAttention` op's
+    // ninth runtime operand -- one leaf here covers every dense-attention
+    // layer in this program, since the lookup walks the whole program vector.
+    let _cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
 
     let mut layer_roots: Vec<Qwen35LayerRoots> = Vec::with_capacity(block_count as usize);
 
