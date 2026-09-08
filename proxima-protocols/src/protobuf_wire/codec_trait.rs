@@ -3,7 +3,7 @@
 //! protobuf is the canonical example of a wire-level field iterator:
 //! a message is a sequence of (tag, value) pairs, parsed one at a
 //! time, with the caller deciding when to stop. the existing
-//! [`crate::Fields`] iterator already yields `Result<Field<'a>,
+//! [`crate::protobuf_wire::Fields`] iterator already yields `Result<Field<'a>,
 //! ParseError>` — `WireCodec::iter_fields` matches that shape
 //! exactly.
 

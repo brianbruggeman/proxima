@@ -1,12 +1,17 @@
-//! Sans-IO RFC 6455 session state machine — bytes in, [`Event`] out;
-//! queued reply bytes drained via [`Session::poll_transmit`]. One shared
-//! FSM serves BOTH roles: [`Session`] (bare name, `IS_CLIENT = false`)
-//! is the SERVER session; [`ClientSession`] (`Session<true>`) is the
+//! Sans-IO RFC 6455 session state machine — bytes in,
+//! [`Event`](crate::websocket_frame::session::Event) out;
+//! queued reply bytes drained via
+//! [`Session::poll_transmit`](crate::websocket_frame::session::Session::poll_transmit).
+//! One shared FSM serves BOTH roles:
+//! [`Session`](crate::websocket_frame::session::Session) (bare name, `IS_CLIENT = false`)
+//! is the SERVER session;
+//! [`ClientSession`](crate::websocket_frame::session::ClientSession) (`Session<true>`) is the
 //! CLIENT session. RFC 6455 defines the client and server as the same
 //! framing state machine with the masking rule reversed (§5.1/§5.3) —
 //! reassembly, control-frame automation, UTF-8 validation (§8.1), and
 //! close-code semantics (§7.4) are IDENTICAL for both, so this module
-//! parameterizes the role as a `const IS_CLIENT: bool` on [`Session`]
+//! parameterizes the role as a `const IS_CLIENT: bool` on
+//! [`Session`](crate::websocket_frame::session::Session)
 //! rather than forking a second FSM: every method below except the
 //! four listed in "role split" is written once, shared by both
 //! instantiations, and the masking decision reduces to a compile-time
@@ -16,8 +21,10 @@
 //! `advance` shape (a byte-STREAM sans-IO connection, not a per-datagram
 //! one — WebSocket rides TCP, so the h1/redis shape fits, not
 //! `proxima_listen`'s `DatagramProtocol`, which exists for connectionless
-//! transports). Unlike `redis::Connection::advance`, [`Session::poll_event`]
-//! never needs a separate `consume()` step: a reassembled [`Message`] borrows
+//! transports). Unlike `redis::Connection::advance`,
+//! [`Session::poll_event`](crate::websocket_frame::session::Session::poll_event)
+//! never needs a separate `consume()` step: a reassembled
+//! [`Message`](crate::websocket_frame::session::Message) borrows
 //! either straight from the wire buffer (the common single-frame case, zero
 //! copy) or from `Session`'s own `completed_message` field (the fragmented
 //! case, one copy per completed message — unavoidable, since fragments are
@@ -28,8 +35,9 @@
 //! `consumed` field.
 //!
 //! Built entirely on the existing frame codec
-//! ([`super::parse_frame`], [`super::encode_header`],
-//! [`super::unmask_in_place`]) — this module adds none of its own framing,
+//! ([`super::parse_frame`](crate::websocket_frame::parse_frame),
+//! [`super::encode_header`](crate::websocket_frame::encode_header),
+//! [`super::unmask_in_place`](crate::websocket_frame::unmask_in_place)) — this module adds none of its own framing,
 //! only the RFC business rules a bare frame parser cannot express:
 //! fragmentation reassembly, control-frame automation (PING -> automatic
 //! PONG, CLOSE -> the closing handshake), §5.1 masking enforcement (a
@@ -41,10 +49,16 @@
 //! # Role split
 //!
 //! Only four methods differ by role, and only in SIGNATURE (never in the
-//! FSM logic they call into): [`Session::new`]/[`Session::server`] vs
-//! [`ClientSession::client`] (construction needs no entropy — see
-//! below), and [`Session::poll_event`]/[`Session::close`] vs
-//! [`ClientSession::poll_event`]/[`ClientSession::close`] (the CLIENT
+//! FSM logic they call into):
+//! [`Session::new`](crate::websocket_frame::session::Session::new)/
+//! [`Session::server`](crate::websocket_frame::session::Session::server) vs
+//! [`ClientSession::client`](crate::websocket_frame::session::ClientSession::client)
+//! (construction needs no entropy — see
+//! below), and
+//! [`Session::poll_event`](crate::websocket_frame::session::Session::poll_event)/
+//! [`Session::close`](crate::websocket_frame::session::Session::close) vs
+//! [`ClientSession::poll_event`](crate::websocket_frame::session::ClientSession::poll_event)/
+//! [`ClientSession::close`](crate::websocket_frame::session::ClientSession::close) (the CLIENT
 //! forms take a `rng: &mut R` because only a client ever needs to mask
 //! one of ITS OWN auto-generated frames — a PONG echo, a CLOSE echo, or
 //! a protocol-violation CLOSE). Same method names, different
@@ -62,8 +76,9 @@
 //! `alloc`+`std` build, owning a concrete CSPRNG here would be a real
 //! dependency this crate doesn't otherwise need (`rand_core` is a
 //! trait-only, zero-dependency, `no_std` crate: it defines `Rng` /
-//! `CryptoRng` but ships no generator). Instead, [`ClientSession::poll_event`]
-//! and [`ClientSession::close`] take `rng: &mut impl CryptoRng + Rng` as a
+//! `CryptoRng` but ships no generator). Instead,
+//! [`ClientSession::poll_event`](crate::websocket_frame::session::ClientSession::poll_event)
+//! and [`ClientSession::close`](crate::websocket_frame::session::ClientSession::close) take `rng: &mut impl CryptoRng + Rng` as a
 //! plain per-call parameter — the exact shape `proxima_protocols::quic`
 //! already uses for the same reason (see `quic::path::PathChallenger::issue`,
 //! `quic::retry_token`'s `issue`): the caller (who has std/getrandom/whatever
@@ -71,7 +86,7 @@
 //! ever calls `rng.fill_bytes` once per call, for at most the one frame that
 //! call might emit. A poll that doesn't end up emitting a frame still draws
 //! one fresh 4-byte key and discards it — a deliberate simplicity trade
-//! (see [`ClientSession::poll_event`]'s doc): the alternative (threading a
+//! (see [`ClientSession::poll_event`](crate::websocket_frame::session::ClientSession::poll_event)'s doc): the alternative (threading a
 //! key-source object several calls deep so it's only drawn from if-and-when
 //! a reply is actually queued) was prototyped and rejected — it bought
 //! nothing observable (poll_event is a cold, per-FRAME call, not a
@@ -82,19 +97,22 @@
 //! wire (2-byte header + <=125-byte payload per §5.5, +4 more for a
 //! client's mask key) — queuing them costs one small, bounded `Vec`
 //! allocation on this COLD path (RFC violations and keepalive pings are
-//! not the hot path; the existing [`super::encode_header`] signature
+//! not the hot path; the existing
+//! [`super::encode_header`](crate::websocket_frame::encode_header) signature
 //! already takes `&mut Vec<u8>`, so reusing it as-is here — rather than
 //! hand-rolling a second, fixed-buffer encoder just to dodge one
 //! cold-path alloc — is the RISC-reuse answer, principle 1). The hot
 //! path (a complete unfragmented text/binary message) allocates nothing:
-//! [`Event::Message`] borrows the wire buffer directly.
+//! [`Event::Message`](crate::websocket_frame::session::Event::Message) borrows the wire buffer directly.
 //!
 //! Sending application data (`Text`/`Binary`) is deliberately NOT owned
-//! by [`Session`] for either role — exactly as before this module grew a
+//! by [`Session`](crate::websocket_frame::session::Session) for either role — exactly as before this module grew a
 //! client role: a SERVER never masks its own data frames, so it always
-//! could build them directly with [`super::encode_header`]
+//! could build them directly with
+//! [`super::encode_header`](crate::websocket_frame::encode_header)
 //! (`mask: None`); a CLIENT masks every frame it sends, and can build one
-//! directly the same way (`mask: Some(key)`, then [`super::unmask_in_place`]
+//! directly the same way (`mask: Some(key)`, then
+//! [`super::unmask_in_place`](crate::websocket_frame::unmask_in_place)
 //! to apply the mask — its own inverse per §5.3) using ITS OWN entropy at
 //! the point it decides to send, exactly as the tests below do. `Session`'s
 //! job stays "the business rules a bare frame parser can't express";

@@ -76,7 +76,7 @@ impl Flags {
     /// Build the flags word for an outbound query: `QR=0`, `OPCODE=0`
     /// (standard query, RFC 1035 §4.1.1), `RD` set per `recursion_desired`.
     /// Every other bit (AA/TC/RA/Z/RCODE) is meaningless on a query and
-    /// left zero. See [`encode::encode_query`](super::encode::encode_query).
+    /// left zero. See [`encode::encode_query`].
     #[must_use]
     pub fn for_query(recursion_desired: bool) -> Self {
         Self(if recursion_desired { 0x0100 } else { 0x0000 })
@@ -86,7 +86,7 @@ impl Flags {
     /// `RD` echoed from the query being answered (RFC 1035 §4.1.1: "this
     /// bit is copied into the response"), `AA`/`RA` set per the caller,
     /// `RCODE` in the low 4 bits. See
-    /// [`encode::encode_response`](super::encode::encode_response).
+    /// [`encode::encode_response`].
     #[must_use]
     pub fn for_response(
         recursion_desired: bool,

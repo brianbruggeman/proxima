@@ -47,7 +47,7 @@ pub enum KeyChoice {
     DropNoNextKeys,
 }
 
-/// Errors from [`KeyUpdateManager::initiate`].
+/// Errors from `KeyUpdateManager::initiate`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KeyUpdateError {

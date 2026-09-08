@@ -1,8 +1,9 @@
 //! `proxima_codec::FrameCodec` impl for the `[u32 BE len][payload]`
 //! length-prefixed JSON framing — the plug-and-play-floor sweep's
 //! spot-check that "could cleanly impl `FrameCodec`" is the right call
-//! for this codec, not a guess. [`codec::encode_header`]/
-//! [`codec::decode_header`] already have the EXACT shape
+//! for this codec, not a guess.
+//! [`codec::encode_header`](crate::json_framing::codec::encode_header)/
+//! [`codec::decode_header`](crate::json_framing::codec::decode_header) already have the EXACT shape
 //! `proxima_codec::LengthDelimitedCodec` hand-implements inline (a
 //! `[u32 BE len][payload]` frame is the length-delimited shape by
 //! definition); this impl is a thin wrapper reusing them, not new

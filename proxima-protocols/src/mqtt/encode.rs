@@ -92,7 +92,7 @@ pub fn encode_connack(session_present: bool, return_code: u8, out: &mut Vec<u8>)
 
 /// `PUBLISH`, either direction. `packet_id` must be `Some` for `qos > 0`
 /// and `None` for `qos == 0` — the caller (not this encoder) enforces that
-/// invariant, matching [`super::parse_publish`]'s own read side.
+/// invariant, matching `super::parse_publish`'s own read side.
 pub fn encode_publish(
     topic: &[u8],
     packet_id: Option<u16>,

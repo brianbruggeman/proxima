@@ -11,7 +11,7 @@
 //! Simpler than the RESP connection it mirrors: memcached has no
 //! CLIENT-REPLY-mode gate (no pub/sub, so no equivalent of RESP's
 //! `ConnMode::Subscriber`) — the only protocol state this FSM owns beyond
-//! the buffer is the DoS guard. [`super::parse_command`] itself trusts an
+//! the buffer is the DoS guard. [`super::parse_command`](crate::memcached::parse_command) itself trusts an
 //! attacker-controlled `<bytes>` length on every storage command with no
 //! cap of its own (it only checks the buffer already holds the declared
 //! total, surfacing [`ParseError::PartialValue`] otherwise); an attacker
@@ -135,7 +135,7 @@ impl Connection {
 
     /// Advance past a parsed command's bytes (the `consumed` an
     /// [`Advanced::Command`] carried). Compacts the buffer once the
-    /// consumed prefix grows past [`COMPACT_THRESHOLD_BYTES`], or clears it
+    /// consumed prefix grows past `COMPACT_THRESHOLD_BYTES`, or clears it
     /// outright once every buffered byte is consumed, so a long-lived
     /// pipelined connection's buffer stays bounded.
     pub fn consume(&mut self, amount: usize) {

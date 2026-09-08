@@ -21,9 +21,9 @@
 //!
 //! Mask application (caller-side):
 //!
-//! - **Long header**: first_byte ^= mask[0] & 0x0f (low 4 bits hold pn-length + reserved).
-//! - **Short header**: first_byte ^= mask[0] & 0x1f (low 5 bits hold spin + reserved + key-phase + pn-length).
-//! - Packet number bytes: pn[i] ^= mask[1 + i] for i in 0..pn_len.
+//! - **Long header**: `first_byte ^= mask[0] & 0x0f` (low 4 bits hold pn-length + reserved).
+//! - **Short header**: `first_byte ^= mask[0] & 0x1f` (low 5 bits hold spin + reserved + key-phase + pn-length).
+//! - Packet number bytes: `pn[i] ^= mask[1 + i]` for `i` in `0..pn_len`.
 //!
 //! XOR is its own inverse, so the same function applies and removes
 //! protection — see [`apply_mask`].

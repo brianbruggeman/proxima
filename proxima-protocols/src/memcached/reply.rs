@@ -1,5 +1,5 @@
 //! Sans-IO memcached reply model: the server -> client wire shapes
-//! [`super::parse_command`] has no counterpart for (it only parses the
+//! [`super::parse_command`](crate::memcached::parse_command) has no counterpart for (it only parses the
 //! client -> server request direction). `parse_command` stays untouched —
 //! this module adds only what the reply direction needs: an owned,
 //! `'static` [`Reply`] (mirrors `crate::redis::RespValue`'s role as the

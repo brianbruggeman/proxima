@@ -12,7 +12,7 @@ use super::{Frame, ParseError, encode_header, parse_frame, unmask_in_place};
 /// `parse_frame` runs the strict RFC 6455 §5.2 path with no
 /// negotiated extensions — RSV bits trigger `ReservedBits`. Callers
 /// that have negotiated permessage-deflate (RFC 7692) should keep
-/// using [`crate::parse_frame_with_extensions`] directly instead of
+/// using [`crate::websocket_frame::parse_frame_with_extensions`] directly instead of
 /// the trait shape.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WebSocketFrameCodec;

@@ -12,8 +12,8 @@
 //!
 //! # Zero-copy re-owning (workspace principles 1, 11)
 //!
-//! `key`/`value`/`args` are [`Bytes`] windows sliced from the same backing
-//! buffer the wire command was parsed from via [`Bytes::slice_ref`] — an
+//! `key`/`value`/`args` are [`Bytes`](bytes::Bytes) windows sliced from the same backing
+//! buffer the wire command was parsed from via [`Bytes::slice_ref`](bytes::Bytes::slice_ref) — an
 //! `Arc` refcount bump, not a copy — mirroring the pattern
 //! `grpc_framing::frame_codec_pipe`/`http1_codec::frame_codec_pipe`/
 //! `websocket_frame::frame_codec_pipe` already ship on the same
@@ -32,7 +32,7 @@
 //! principle 11 — SIMD byte scan) one pass, zero allocation. A single key
 //! is just a span the iterator walks once — there is no separate
 //! single-key/multi-key code path, and no cap to enforce: the DoS bound is
-//! [`super::frame_codec::MemcachedCodec::max_message_bytes`] at
+//! [`super::frame_codec::MemcachedCodec::max_message_bytes`](crate::memcached::frame_codec::MemcachedCodec::max_message_bytes) at
 //! `parse_frame` (the whole command, keys span included, must already fit
 //! before a `Command::Get` is ever produced).
 //!
@@ -40,13 +40,13 @@
 //! construction) — the claim is O(payload) copied → O(1) re-owned (one
 //! `Arc` refcount bump, already paid once per request, not per key), on
 //! this alloc tier, not zero-alloc and not the no-alloc floor. The bare
-//! no_std FSM tier ([`super::connection`]) is the genuine zero-alloc
+//! no_std FSM tier ([`super::connection`](crate::memcached::connection)) is the genuine zero-alloc
 //! floor: borrowed `Command<'a>` in, borrowed `Command<'a>` out.
 //!
 //! # Buffer genericity (component C4)
 //!
 //! [`MemcachedRequest`] is generic over `T: ShareBuf`, defaulted to
-//! [`Bytes`] — a caller drives the codec over their OWN buffer type (an
+//! [`Bytes`](bytes::Bytes) — a caller drives the codec over their OWN buffer type (an
 //! `Arc<[u8]>`-backed window, a DPDK `rte_mbuf`, ...) with no behavior or
 //! allocation change on the `T = Bytes` path. `share` (not
 //! `Bytes::slice_ref`) is the re-owning primitive throughout this module;
@@ -302,7 +302,8 @@ fn write_noreply(dest: &mut Vec<u8>, noreply: bool) {
     }
 }
 
-/// Encode a [`MemcachedRequest`] as the wire command [`super::parse_command`]
+/// Encode a [`MemcachedRequest`] as the wire command
+/// [`super::parse_command`](crate::memcached::parse_command)
 /// accepts back — the client's outbound path. Not routed through
 /// [`Command`] (there is no existing request encoder to reuse).
 /// `Get::keys` is already the space-joined wire span, so it is written

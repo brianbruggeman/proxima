@@ -104,7 +104,7 @@ impl DeviceStatus {
     /// The raw status byte a `Status` register read returns for this state
     /// (spec §4.2.2): the accumulated legal bits, or the exact byte the
     /// device (or driver) reported failure with for [`Self::Failed`].
-    /// Reuses [`Self::canonical_bits`] rather than re-deriving the bit
+    /// Reuses `Self::canonical_bits` rather than re-deriving the bit
     /// pattern a second time (the same `Negotiation::write_status` already
     /// computes and validates transitions against).
     #[must_use]

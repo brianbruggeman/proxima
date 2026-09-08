@@ -1,4 +1,4 @@
-//! [`FrameCodecPipe<C>`] — the GENERIC adapter proving ANY
+//! [`FrameCodecPipe`](crate::codec_pipe::FrameCodecPipe)`<C>` — the GENERIC adapter proving ANY
 //! [`proxima_codec::FrameCodec`] composes directly as a
 //! `proxima_primitives::pipe::Pipe` with no codec rewrite,
 //! not just [`crate::http1_codec::codec_trait::H1RequestCodec`].
@@ -13,8 +13,8 @@
 //! payload, ...) and (2) how a codec's `Error` signals "not enough
 //! bytes yet" vs a hard parse failure (each codec names this
 //! differently — `H1RequestCodec`'s `FrameError::Partial`, gRPC's
-//! `ParseError::Short`/`PartialPayload`, ...). [`OwnFrame`] and
-//! [`Incomplete`] are exactly those two per-codec seams; this adapter
+//! `ParseError::Short`/`PartialPayload`, ...). [`OwnFrame`](crate::codec_pipe::OwnFrame) and
+//! [`Incomplete`](crate::codec_pipe::Incomplete) are exactly those two per-codec seams; this adapter
 //! is generic over both, so `FrameCodecPipe<C>` needs writing ONCE
 //! (RISC, guiding-principle 1) and each codec supplies a small,
 //! codec-specific `OwnFrame`/`Incomplete` impl — the same shape as

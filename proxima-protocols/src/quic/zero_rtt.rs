@@ -31,7 +31,7 @@ pub type ResumptionTicket = ArrayVec<u8, MAX_RESUMPTION_TICKET_LEN>;
 
 /// Replay-protection policy for 0-RTT data. The application protocol
 /// MUST attest to its own per-RFC-§9.2 replay-mitigation analysis
-/// before selecting [`Required`] or [`Allowed`].
+/// before selecting [`ZeroRttPolicy::Required`] or [`ZeroRttPolicy::Allowed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum ZeroRttPolicy {
