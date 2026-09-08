@@ -5057,13 +5057,18 @@ pub fn duplicate_head_reduce(
 
 /// [`append_mistral_cached_layer`]'s mixture-of-experts counterpart, the
 /// same relationship [`append_mistral_moe_layer`] bears to
-/// [`append_mistral_layer`]: identical cached attention block (RoPE + GQA +
-/// online-softmax combine over the cached/new key split, node-for-node the
-/// same code as [`append_mistral_cached_layer`]), [`append_moe_ffn`] in
-/// place of the dense SwiGLU triple. Kept as a separate function for the
-/// same reason [`append_mistral_moe_layer`] is: the dense cached path's own
-/// node sequence never changes shape merely because this function exists
-/// next to it.
+/// [`append_mistral_layer`]: cached attention block (RoPE + GQA +
+/// online-softmax combine over the cached/new key split, the same shape as
+/// [`append_mistral_cached_layer`]'s own, including that function's
+/// `qk_norm`-gated per-head Q/K norm and RoPE-pairing switch -- Qwen3-MoE's
+/// own checkpoint carries `attn_q_norm.weight`/`attn_k_norm.weight` on every
+/// layer, every one of them MoE, so this arm needs the identical switch or
+/// every MoE layer silently skips QK-norm and rotates Q/K with the wrong
+/// (interleaved, not NEOX split-half) pairing), [`append_moe_ffn`] in place
+/// of the dense SwiGLU triple. Kept as a separate function for the same
+/// reason [`append_mistral_moe_layer`] is: the dense cached path's own node
+/// sequence never changes shape merely because this function exists next to
+/// it.
 #[allow(clippy::too_many_arguments)]
 pub fn append_mistral_cached_moe_layer(
     program: &mut Vec<Op>,
@@ -5077,6 +5082,7 @@ pub fn append_mistral_cached_moe_layer(
     group_ones: NodeId,
     is_future: NodeId,
     group: u32,
+    head_dim: u32,
     attn_norm_weight: NodeId,
     ffn_norm_weight: NodeId,
     wq: NodeId,
@@ -5092,6 +5098,7 @@ pub fn append_mistral_cached_moe_layer(
     k_even_cache: NodeId,
     k_odd_cache: NodeId,
     v_cache: NodeId,
+    qk_norm: Option<(NodeId, NodeId, NodeId)>,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
@@ -5101,7 +5108,7 @@ pub fn append_mistral_cached_moe_layer(
         ScalarOp::Multiply,
         &[(normed, "si->shdi"), (wq, "ihd->shdi")],
     )?;
-    let q = reduce(
+    let q_raw = reduce(
         program,
         DType::Float32,
         ScalarOp::Add,
@@ -5117,7 +5124,7 @@ pub fn append_mistral_cached_moe_layer(
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wk, "iud->sudi")],
     )?;
-    let k_new = reduce(
+    let k_new_raw = reduce(
         program,
         DType::Float32,
         ScalarOp::Add,
@@ -5126,6 +5133,15 @@ pub fn append_mistral_cached_moe_layer(
         "sudi->sudi",
         "sud->sudi",
     )?;
+
+    let (q, k_new) = match qk_norm {
+        Some((q_norm_weight, k_norm_weight, inv_head_dim)) => {
+            let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
+            let k_new = rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+            (q, k_new)
+        }
+        None => (q_raw, k_new_raw),
+    };
 
     let v_product = elementwise(
         program,
@@ -5143,79 +5159,28 @@ pub fn append_mistral_cached_moe_layer(
         "sud->sudi",
     )?;
 
-    let q_even_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i->shi"), (cos_new, "si->shi")],
-    )?;
-    let q_odd_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i+1->shi"), (sin_new, "si->shi")],
-    )?;
-    let rotated_q_even = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")],
-    )?;
-    let q_even_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i->shi"), (sin_new, "si->shi")],
-    )?;
-    let q_odd_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i+1->shi"), (cos_new, "si->shi")],
-    )?;
-    let rotated_q_odd = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")],
-    )?;
-
-    let k_new_even_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k_new, "s,u,2*i->sui"), (cos_new, "si->sui")],
-    )?;
-    let k_new_odd_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k_new, "s,u,2*i+1->sui"), (sin_new, "si->sui")],
-    )?;
-    let rotated_k_new_even = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(k_new_even_cos, "sui->sui"), (k_new_odd_sin, "sui->sui")],
-    )?;
-    let k_new_even_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k_new, "s,u,2*i->sui"), (sin_new, "si->sui")],
-    )?;
-    let k_new_odd_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k_new, "s,u,2*i+1->sui"), (cos_new, "si->sui")],
-    )?;
-    let rotated_k_new_odd = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(k_new_even_sin, "sui->sui"), (k_new_odd_cos, "sui->sui")],
-    )?;
+    // Same `qk_norm.is_some()` switch as [`append_mistral_cached_layer`]
+    // (see that function's own doc): a checkpoint carrying `attn_q_norm.weight`
+    // is NEOX-family (Qwen3), whose on-disk Q/K rows stay in HF's native
+    // split-half layout, never llama.cpp's converter-permuted interleaved
+    // pairing a no-qk_norm (Mistral/LLaMA) checkpoint uses.
+    let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match qk_norm {
+        Some(_) => {
+            let pairs = head_dim / 2;
+            let (rotated_q_first, rotated_q_second) =
+                fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
+            let (rotated_k_first, rotated_k_second) =
+                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
+            (rotated_q_first, rotated_q_second, rotated_k_first, rotated_k_second)
+        }
+        None => {
+            let (rotated_q_even, rotated_q_odd) =
+                fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::Interleaved)?;
+            let (rotated_k_new_even, rotated_k_new_odd) =
+                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::Interleaved)?;
+            (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd)
+        }
+    };
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
@@ -8097,6 +8062,21 @@ pub fn mistral_cached_forward_program_with_experts(
                 ],
                 &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
             );
+            let qk_norm_weights = inv_head_dim.map(|inv_head_dim| {
+                let q_norm_weight = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(head_dim)],
+                    &alloc::format!("blk.{layer}.attn_q_norm.weight"),
+                );
+                let k_norm_weight = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(head_dim)],
+                    &alloc::format!("blk.{layer}.attn_k_norm.weight"),
+                );
+                (q_norm_weight, k_norm_weight, inv_head_dim)
+            });
 
             append_mistral_cached_moe_layer(
                 &mut program,
@@ -8110,6 +8090,7 @@ pub fn mistral_cached_forward_program_with_experts(
                 group_ones,
                 is_future,
                 group,
+                head_dim,
                 attn_norm_weight,
                 ffn_norm_weight,
                 wq,
@@ -8125,6 +8106,7 @@ pub fn mistral_cached_forward_program_with_experts(
                 k_even_cache,
                 k_odd_cache,
                 v_cache,
+                qk_norm_weights,
             )?
         };
         x = x_next;
@@ -9100,6 +9082,37 @@ mod tests {
         assert!(
             logits_values.iter().all(|value| value.is_finite()),
             "every logit must be finite: {logits_values:?}"
+        );
+    }
+
+    /// Regression proof for the qk-norm-dropped-on-MoE-layers bug fixed
+    /// alongside this test: before the fix, `append_mistral_cached_moe_layer`
+    /// took no `qk_norm` parameter at all, so `mistral_cached_forward_program_with_experts`
+    /// silently discarded the `qk_norm` argument for every routed (MoE)
+    /// layer -- flipping it produced the byte-identical program. A
+    /// Qwen3-MoE-shaped checkpoint (`expert_count > 0`) carries
+    /// `attn_q_norm.weight`/`attn_k_norm.weight` on every layer, so
+    /// `qk_norm=true` must now append the extra per-head rmsnorm reduces
+    /// (and swap RoPE pairing) the dense `qk_norm` path already gets --
+    /// this asserts the MoE program's own length actually changes with the
+    /// flag, the exact invariant the bug violated.
+    #[test]
+    fn mistral_cached_forward_program_with_experts_qk_norm_changes_the_moe_program() {
+        let (qk_norm_off, _, _) = mistral_cached_forward_program_with_experts(
+            32_000, 256, 128, 4, 2, 64, 1, 4, 1, false, false, false,
+        )
+        .expect("moe program without qk_norm lowers");
+        let (qk_norm_on, _, _) = mistral_cached_forward_program_with_experts(
+            32_000, 256, 128, 4, 2, 64, 1, 4, 1, true, false, false,
+        )
+        .expect("moe program with qk_norm lowers");
+
+        assert_ne!(
+            qk_norm_off.len(),
+            qk_norm_on.len(),
+            "a Qwen3-MoE-shaped forward program (expert_count > 0) must grow when qk_norm \
+             flips on -- an unchanged length means the MoE layer builder is still dropping \
+             attn_q_norm/attn_k_norm on the floor"
         );
     }
 
