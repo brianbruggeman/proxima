@@ -4370,9 +4370,9 @@ mod real_openchat_file {
     use proxima_tensor::map::{self, IndexMap};
     use proxima_tensor::op::{self, Extent, Keep, Op, Reduce, ReduceInit, ScalarOp, append};
 
-    #[cfg(feature = "instrument")]
+    #[cfg(all(feature = "metal", feature = "instrument"))]
     use proxima_telemetry::export::Exporter;
-    #[cfg(feature = "instrument")]
+    #[cfg(all(feature = "metal", feature = "instrument"))]
     use proxima_telemetry::recorder::Recorder;
 
     use crate::generate::LoadedModel;
@@ -4538,13 +4538,13 @@ mod real_openchat_file {
     /// caller's own final [`Self::drain_and_total`] call) has drained,
     /// immune to the race a single terminal `drain()` call has against that
     /// pump (see [`install_stdout_telemetry`]'s own doc).
-    #[cfg(feature = "instrument")]
+    #[cfg(all(feature = "metal", feature = "instrument"))]
     struct TelemetryProbe {
         recorder: std::sync::Arc<Recorder>,
         drained_total: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
-    #[cfg(feature = "instrument")]
+    #[cfg(all(feature = "metal", feature = "instrument"))]
     impl TelemetryProbe {
         /// Final catch-up drain plus the running pump total, so a step
         /// emitted between the pump's last pass and this call is still
@@ -4584,7 +4584,7 @@ mod real_openchat_file {
     /// [`TelemetryProbe::drained_total`] (so the count survives regardless
     /// of which side drains any given batch) is the only shape that gets
     /// both properties at once.
-    #[cfg(feature = "instrument")]
+    #[cfg(all(feature = "metal", feature = "instrument"))]
     fn install_stdout_telemetry() -> TelemetryProbe {
         proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse(
             "debug",
@@ -5194,6 +5194,41 @@ mod real_openchat_file {
         crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
         let path = std::path::Path::new(&model_path);
 
+        // Root-cause diagnostic (proxima-debugger): registers the process's
+        // one `ExpertObserver` (`proxima_tensor::instrument`) before the
+        // decode loop runs, so this real checkpoint's own gathered-MoE
+        // matmul calls are counted at their one call site
+        // (`cpu.rs::run_reduce_quantized`'s `notify_expert_routed`) rather
+        // than inferred from the synthetic fixture test above. Zero calls
+        // here, with correct decoded text, would mean this checkpoint's
+        // routed-FFN product never reaches that call site at all.
+        #[cfg(feature = "instrument")]
+        struct RouteCountingObserver {
+            calls: std::sync::atomic::AtomicUsize,
+            distinct_layer_positions: std::sync::Mutex<alloc::collections::BTreeSet<(usize, usize)>>,
+        }
+
+        #[cfg(feature = "instrument")]
+        impl proxima_tensor::instrument::ExpertObserver for RouteCountingObserver {
+            fn on_expert_routed(&self, layer: usize, _expert: usize, token_position: usize) {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.distinct_layer_positions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert((layer, token_position));
+            }
+        }
+
+        #[cfg(feature = "instrument")]
+        static ROUTE_OBSERVER: RouteCountingObserver = RouteCountingObserver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            distinct_layer_positions: std::sync::Mutex::new(alloc::collections::BTreeSet::new()),
+        };
+
+        #[cfg(feature = "instrument")]
+        proxima_tensor::instrument::set_expert_observer(&ROUTE_OBSERVER)
+            .expect("the only registration this process makes");
+
         let mapped = MappedGguf::open(path).expect("mmap host-local checkpoint fixture");
         let file_bytes = mapped.as_slice();
         let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
@@ -5224,6 +5259,19 @@ mod real_openchat_file {
             total_elapsed.as_secs_f64() * 1000.0,
             generated.1
         );
+        #[cfg(feature = "instrument")]
+        {
+            let total_calls = ROUTE_OBSERVER.calls.load(std::sync::atomic::Ordering::Relaxed);
+            let distinct_layer_positions = ROUTE_OBSERVER
+                .distinct_layer_positions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len();
+            std::println!(
+                "expert_observer_summary on_expert_routed_calls={total_calls} \
+                 distinct_layer_positions={distinct_layer_positions}"
+            );
+        }
         assert!(
             !generated.1.is_empty(),
             "degenerate control: cpu decode loop produced no text"
