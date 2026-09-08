@@ -31,15 +31,17 @@ mod error;
 mod header_codec;
 mod parser;
 mod pipe;
+mod shard_index;
 pub mod sized;
 mod version;
 mod writer;
 
-pub use dtype::{dtype_to_wire, map_dtype};
+pub use dtype::{dtype_to_wire, f8_block_dequant, f8_e4m3_to_f32, map_dtype};
 pub use error::SafetensorsError;
 pub use header_codec::HeaderCodec;
 pub use parser::{Manifest, SafetensorsParser, TensorEntry};
 pub use pipe::parse_complete;
+pub use shard_index::{ShardedIndex, parse_sharded_index};
 pub use sized::{
     FORMAT_VERSION_KEY, FORMAT_VERSION_MAJOR, FORMAT_VERSION_MINOR, HEADER_LEN_BYTES,
     MAX_HEADER_BYTES,
