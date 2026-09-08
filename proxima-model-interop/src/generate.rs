@@ -62,7 +62,8 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
 #[cfg(not(feature = "metal"))]
 use proxima_tensor::cpu::{
-    evaluate_quantized_named_exact_with_scratch, evaluate_quantized_named_with_scratch,
+    evaluate_quantized_named_exact_with_scratch_and_experts,
+    evaluate_quantized_named_with_scratch_and_experts,
 };
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -855,6 +856,28 @@ pub struct LoadedModel<'file> {
         allow(dead_code, reason = "only `Drop`, itself `metal`-gated, reads this")
     )]
     checkpoint_mapping: &'file [u8],
+    /// This checkpoint's own paged/aliased MoE expert bytes -- see
+    /// [`crate::expert_slab::ExpertSlab`]'s own module doc for the
+    /// ownership contract. [`crate::bind::build_expert_slab`] builds it once
+    /// at bind time from `weights`/`program`'s own `_exps.weight` nodes;
+    /// empty for a dense checkpoint. Behind a [`std::sync::Mutex`], not a
+    /// bare [`core::cell::RefCell`]: `examples/openai_serve_gguf.rs` holds a
+    /// `LoadedModel` inside an `Arc` and serves it from a multi-threaded
+    /// `SendPipe` (`proxima-primitives/src/pipe/primitives.rs`'s own
+    /// `Send + Sync + 'static` bound), so this type must stay `Sync` --
+    /// `RefCell` is not, `Mutex` is (`cargo check --workspace --all-targets`
+    /// is what caught the `RefCell` attempt failing that example's own
+    /// build). `proxima_lock::Mutex` (this workspace's canonical
+    /// tier-resolved mutex, principle 21) does not exist as a crate in this
+    /// repo -- grepped for it before falling back to `std::sync::Mutex`
+    /// here, which is legitimate per that principle's own tier-3 case: a
+    /// synchronous lock guarding a step boundary no code ever holds across
+    /// an `.await`. Every acquire recovers from poisoning
+    /// (`unwrap_or_else(PoisonError::into_inner)`) rather than panicking --
+    /// this crate's own no-panic rule -- since a poisoned lock here would
+    /// mean an earlier panic mid-decode already violated that rule
+    /// somewhere else; recovering is strictly better than a second panic.
+    expert_slab: std::sync::Mutex<crate::expert_slab::ExpertSlab<'file>>,
 }
 
 /// Releases every device buffer this checkpoint's own load caused: the
@@ -1248,7 +1271,10 @@ impl<'file> LoadedModel<'file> {
                 let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
                 build_single_range_program(&bound.architecture, qk_norm)?
             };
+            let expert_slab =
+                crate::bind::build_expert_slab(&bound.architecture, &bound.program, &bound.weights);
             return Ok(Self {
+                expert_slab: std::sync::Mutex::new(expert_slab),
                 weights: bound.weights,
                 architecture: bound.architecture,
                 architecture_impl: Some(resolved),
@@ -1352,7 +1378,9 @@ impl<'file> LoadedModel<'file> {
         } else {
             build_single_range_program(&architecture, qk_norm)?
         };
+        let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
         Ok(Self {
+            expert_slab: std::sync::Mutex::new(expert_slab),
             weights,
             architecture,
             architecture_impl: None,
@@ -1436,7 +1464,9 @@ impl<'file> LoadedModel<'file> {
         let logits_root = forward_roots.logits;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let single_range = build_single_range_program(&architecture, false)?;
+        let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
         Ok(Self {
+            expert_slab: std::sync::Mutex::new(expert_slab),
             weights,
             architecture,
             architecture_impl: None,
@@ -2372,6 +2402,12 @@ impl BackendRuntime {
     /// `Plan` object that was already marked). See `omega::metal::Plan::mark_resident`'s
     /// own doc for why this needs a name set the tensor program itself
     /// cannot derive.
+    // `expert_sources` is not yet wired through `omega::backend`'s
+    // polymorphic plan cache (this crate's GPU path) -- CPU-only for now,
+    // see `crate::expert_slab`'s own module doc. Accepted and ignored here
+    // purely so this method keeps the SAME signature as the non-`metal`
+    // `BackendRuntime::evaluate` below and the decode loop's one call site
+    // never needs a `cfg` of its own.
     fn evaluate(
         &mut self,
         program: &[Op],
@@ -2379,7 +2415,9 @@ impl BackendRuntime {
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
+        expert_sources: Option<&alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>>,
     ) -> Result<Evaluated, InteropError> {
+        let _ = expert_sources;
         let shape = (symbols[0] as usize, symbols[1] as usize);
         let exact_activations = self.exact_activations;
         let plan = Self::resolve_cached_plan(
@@ -2877,24 +2915,27 @@ impl BackendRuntime {
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
         _resident_names: &BTreeSet<&str>,
+        expert_sources: Option<&alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>>,
     ) -> Result<Evaluated, InteropError> {
         if self.exact_activations {
-            return Ok(evaluate_quantized_named_exact_with_scratch(
+            return Ok(evaluate_quantized_named_exact_with_scratch_and_experts(
                 program,
                 symbols,
                 named,
                 outputs,
                 &mut self.free_buffers,
                 &mut self.validated_weight_nodes,
+                expert_sources,
             )?);
         }
-        Ok(evaluate_quantized_named_with_scratch(
+        Ok(evaluate_quantized_named_with_scratch_and_experts(
             program,
             symbols,
             named,
             outputs,
             &mut self.free_buffers,
             &mut self.validated_weight_nodes,
+            expert_sources,
         )?)
     }
 }
@@ -3124,6 +3165,30 @@ fn wants_bos(vocab: &Vocab) -> bool {
         .unwrap_or_else(|| vocab.bos_token_id().is_some())
 }
 
+/// Calls [`crate::expert_slab::ExpertSlab::end_step`] on every exit from the
+/// decode loop's own per-step closure -- normal return AND an early `?`
+/// error -- so [`crate::expert_slab::ExpertSlab::begin_step`]'s
+/// `step_in_progress` guard never gets stuck `true` after a step that
+/// failed partway through (a missing program input, a shape mismatch, ...).
+struct EndStepOnDrop<'a, 'file> {
+    slab: &'a std::sync::Mutex<crate::expert_slab::ExpertSlab<'file>>,
+}
+
+impl Drop for EndStepOnDrop<'_, '_> {
+    fn drop(&mut self) {
+        lock_expert_slab(self.slab).end_step();
+    }
+}
+
+/// Every `LoadedModel::expert_slab` acquire, in one place -- recovers from
+/// poisoning instead of panicking (see that field's own doc for why) rather
+/// than each call site repeating the same `unwrap_or_else`.
+fn lock_expert_slab<'lock, 'file>(
+    slab: &'lock std::sync::Mutex<crate::expert_slab::ExpertSlab<'file>>,
+) -> std::sync::MutexGuard<'lock, crate::expert_slab::ExpertSlab<'file>> {
+    slab.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl<'file> LoadedModel<'file> {
     /// [`Self::generate_with_serving_config`] against
     /// [`supported_serving_config`] -- the reachable path every existing
@@ -3164,6 +3229,52 @@ impl<'file> LoadedModel<'file> {
                     .map(|(name, _, _)| name.as_str()),
             )
             .collect()
+    }
+
+    /// Pages `bytes` in as expert `expert`'s new weight for layer `layer` --
+    /// a thin forward onto [`crate::expert_slab::ExpertSlab::page_expert`],
+    /// the primitive this method composes (P2 teaching surface: read that
+    /// method's own doc for the aliasing/ownership contract this call
+    /// changes). `layer` is the [`crate::bind::build_expert_slab`] SITE
+    /// index (one slot per `blk.{n}.{ffn_gate,ffn_up,ffn_down}_exps.weight`
+    /// tensor this checkpoint's own forward program bound, in that order),
+    /// not necessarily the checkpoint's transformer layer number when more
+    /// than one projection is routed per layer.
+    ///
+    /// # Errors
+    /// [`InteropError::ExpertSwapDuringStep`] if called while a decode step
+    /// is running; [`InteropError::ExpertSlabIndexOutOfRange`] if `layer` or
+    /// `expert` is out of range for this checkpoint's slab.
+    pub fn page_expert(
+        &self,
+        layer: usize,
+        expert: usize,
+        codec: crate::bind::PackedOwnedKind,
+        bytes: &[u8],
+        out_dim: u32,
+        in_dim: u32,
+    ) -> Result<u64, InteropError> {
+        lock_expert_slab(&self.expert_slab)
+            .page_expert(layer, expert, codec, bytes, out_dim, in_dim)
+    }
+
+    /// Removes expert `expert` of layer `layer`'s currently-bound bytes --
+    /// see [`Self::page_expert`]'s own doc for what `layer` indexes, and
+    /// [`crate::expert_slab::ExpertSlab::evict_expert`] for the primitive
+    /// this composes.
+    ///
+    /// # Errors
+    /// Same as [`Self::page_expert`].
+    pub fn evict_expert(&self, layer: usize, expert: usize) -> Result<(), InteropError> {
+        lock_expert_slab(&self.expert_slab).evict_expert(layer, expert)
+    }
+
+    /// `expert`'s current epoch for `layer`, or `None` if either index is
+    /// out of range or the expert is currently evicted -- see
+    /// [`crate::expert_slab::ExpertSlab::expert_epoch`].
+    #[must_use]
+    pub fn expert_epoch(&self, layer: usize, expert: usize) -> Option<u64> {
+        lock_expert_slab(&self.expert_slab).expert_epoch(layer, expert)
     }
 
     /// The greedy decode loop itself: `max_tokens` steps, each one call
@@ -3750,6 +3861,27 @@ impl<'file> LoadedModel<'file> {
             max_tokens,
             prompt_token_count,
             |_step| {
+                // Marks the whole step -- prefill included -- as in progress
+                // BEFORE `architecture_impl.step_inputs` runs below, so a
+                // residency policy that (incorrectly) calls
+                // `self.page_expert`/`self.evict_expert` from inside its own
+                // `step_inputs` override is rejected with
+                // `InteropError::ExpertSwapDuringStep` rather than mutating
+                // bytes this step's own `expert_sources` snapshot already
+                // borrowed. `_end_step_on_drop` closes the window on every
+                // exit from this closure body, including an early `?`
+                // return -- an explicit `end_step()` call placed only after
+                // `evaluate` would leak `step_in_progress = true` forever on
+                // any earlier error path in this closure.
+                lock_expert_slab(&self.expert_slab).begin_step();
+                let _end_step_on_drop = EndStepOnDrop { slab: &self.expert_slab };
+                // Dropped at the end of this closure, before `_end_step_on_drop`
+                // (reverse declaration order) -- see that type's own doc. The
+                // `begin_step` lock above already released (a temporary,
+                // dropped at the end of its own statement), so re-acquiring
+                // here never deadlocks against it.
+                let expert_slab_guard = lock_expert_slab(&self.expert_slab);
+
                 // ROW 130's own fix, built: every counter this step's
                 // `evaluate_ms` decomposition reads is zeroed HERE, at step
                 // start, and read back after `evaluate_ticks` below is computed
@@ -4037,6 +4169,19 @@ impl<'file> LoadedModel<'file> {
                     return Err(InteropError::MissingStepInput { name });
                 }
 
+                // This step's own [`proxima_tensor::cpu::ExpertSource`]
+                // snapshot -- built AFTER `begin_step` above and read by
+                // `run_reduce_with_quantized_weights` under the SAME weight
+                // `NodeId` [`crate::bind::build_expert_slab`] bound it under,
+                // so a dense checkpoint's empty slab costs one `BTreeMap`
+                // miss per gathered reduce and changes nothing else.
+                let mut expert_entries_scratch: Vec<(
+                    NodeId,
+                    Vec<proxima_tensor::cpu::ExpertEntry<'_>>,
+                )> = Vec::new();
+                let expert_sources =
+                    expert_slab_guard.sources_for_step(&mut expert_entries_scratch);
+
                 #[cfg(feature = "instrument")]
                 let evaluate_started = read_ticks();
                 // `PROXIMA_METAL_OP_PROFILE_STEP` -- diagnostic-only, `instrument`-gated,
@@ -4070,6 +4215,7 @@ impl<'file> LoadedModel<'file> {
                         &named_blocks,
                         &roots,
                         &resident_names,
+                        Some(&expert_sources),
                     )?,
                 };
                 #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
@@ -4079,6 +4225,7 @@ impl<'file> LoadedModel<'file> {
                     &named_blocks,
                     &roots,
                     &resident_names,
+                    Some(&expert_sources),
                 )?;
                 #[cfg(feature = "instrument")]
                 let evaluate_ticks = elapsed_ticks(evaluate_started);
@@ -5004,12 +5151,20 @@ impl<'file> LoadedModel<'file> {
         let resident_names: BTreeSet<&str> = self.resident_names();
 
         let symbols = [ids.len() as u64, 0u64];
+        // A one-shot diagnostic forward, not a decode step -- no
+        // `ExpertSlab::begin_step`/`end_step` pair runs around it, so this
+        // reads whatever is currently paged (this checkpoint's own aliased
+        // stack, absent a caller ever paging one) exactly as
+        // `run_reduce_with_quantized_weights` always has: `None` here is
+        // not "experts disabled", it is "no per-step snapshot applies to a
+        // call outside the decode loop".
         let evaluated = runtime.evaluate(
             &self.program,
             &symbols,
             &named_blocks,
             node_ids,
             &resident_names,
+            None,
         )?;
 
         node_ids
@@ -6812,6 +6967,7 @@ mod memory_fit_gate_tests {
             qwen35_ssm_shape: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range: None,
+            expert_slab: std::sync::Mutex::new(crate::expert_slab::ExpertSlab::new()),
         }
     }
 
