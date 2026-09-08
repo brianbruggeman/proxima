@@ -6,6 +6,7 @@
 //! Run: `cargo run --example inspect_moe_header -- <gguf-path>`
 
 use std::env;
+use std::error::Error;
 use std::fs::File;
 
 use memmap2::Mmap;
@@ -34,12 +35,14 @@ fn print_tensor(parsed: &proxima_gguf::pipe::ParsedGguf, name: &str) {
     }
 }
 
-fn main() {
-    let path = env::args().nth(1).expect("usage: inspect_moe_header <gguf-path>");
-    let file = File::open(&path).expect("open gguf file");
+fn main() -> Result<(), Box<dyn Error>> {
+    let path = env::args()
+        .nth(1)
+        .ok_or("usage: inspect_moe_header <gguf-path>")?;
+    let file = File::open(&path)?;
     // SAFETY: read-only mapping of a file we hold open for the mmap's lifetime.
-    let mmap = unsafe { Mmap::map(&file) }.expect("mmap gguf file");
-    let parsed = parse_complete(&mmap).expect("parse gguf header/directory");
+    let mmap = unsafe { Mmap::map(&file) }?;
+    let parsed = parse_complete(&mmap)?;
 
     println!("general.architecture = {:?}", parsed.metadata_value("general.architecture"));
     for key in [
@@ -73,4 +76,6 @@ fn main() {
     ] {
         print_tensor(&parsed, name);
     }
+
+    Ok(())
 }
