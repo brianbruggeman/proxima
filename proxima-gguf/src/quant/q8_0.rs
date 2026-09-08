@@ -273,6 +273,130 @@ mod tests {
         );
     }
 
+    /// A single dominant outlier against an otherwise-zero block: `amax`
+    /// is set entirely by index 0, so `d = x0/127` and every other level
+    /// should quantize to `0`. Pathological in the sense that a naive
+    /// scale-by-RMS codec would waste most of its dynamic range on this
+    /// shape; `Q8_0`'s per-block `amax` scale is exactly the right
+    /// response.
+    #[test]
+    fn quantize_dequantize_single_outlier_block() {
+        let mut input = vec![0.0f32; QK8_0];
+        input[0] = 100.0;
+        let mut packed = vec![0u8; BLOCK_BYTES];
+        quantize(&input, &mut packed).expect("one block");
+        let mut output = vec![0.0f32; QK8_0];
+        dequantize(&packed, &mut output).expect("one block");
+        let max_error = output
+            .iter()
+            .zip(input.iter())
+            .map(|(got, want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        // bound per Q1: max|dequant(encode(x)) - x| <= scale/2, scale = amax/127
+        let scale = 100.0f32 / 127.0;
+        assert!(
+            max_error <= scale / 2.0 + 1e-4,
+            "max_error={max_error} exceeds scale/2={}",
+            scale / 2.0
+        );
+        assert_eq!(output[1..], input[1..], "non-outlier positions must quantize to exactly zero");
+    }
+
+    /// Alternating-sign block: every other element flips sign at the same
+    /// magnitude, exercising the signed range symmetrically rather than
+    /// one-sided.
+    #[test]
+    fn quantize_dequantize_alternating_sign_block() {
+        let input: Vec<f32> = (0..QK8_0)
+            .map(|index| if index % 2 == 0 { 2.5 } else { -2.5 })
+            .collect();
+        let mut packed = vec![0u8; BLOCK_BYTES];
+        quantize(&input, &mut packed).expect("one block");
+        let mut output = vec![0.0f32; QK8_0];
+        dequantize(&packed, &mut output).expect("one block");
+        // amax == 2.5 exactly, so every level lands at +-127, but `d =
+        // amax/127` itself is NOT exactly representable in f16 -- the
+        // bound is scale/2, same as every other Q8_0 round trip, not
+        // bit-exact.
+        let scale = 2.5f32 / 127.0;
+        let max_error = output
+            .iter()
+            .zip(input.iter())
+            .map(|(got, want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_error <= scale / 2.0 + 1e-4, "max_error={max_error}");
+    }
+
+    /// Encoding the same input twice must yield byte-identical output --
+    /// no hidden nondeterminism (uninitialized scratch, iteration-order
+    /// dependent float sums) in the encoder.
+    #[test]
+    fn quantize_is_deterministic_across_repeated_calls() {
+        let elements = QK8_0 * 3;
+        let input: Vec<f32> = (0..elements)
+            .map(|index| (index as f32 * 0.31).sin() * 7.0)
+            .collect();
+        let mut first = vec![0u8; BLOCK_BYTES * 3];
+        let mut second = vec![0u8; BLOCK_BYTES * 3];
+        quantize(&input, &mut first).expect("three blocks");
+        quantize(&input, &mut second).expect("three blocks");
+        assert_eq!(first, second);
+    }
+
+    /// `encode(dequant(encode(x))) == encode(x)`: once a value has landed
+    /// on the codec's own grid, re-encoding the dequantized result must
+    /// reproduce the exact same bytes -- the grid is idempotent under one
+    /// more round trip, even though `x` itself was not on the grid.
+    #[test]
+    fn quantize_is_idempotent_at_the_codec_grid() {
+        let elements = QK8_0 * 3;
+        let input: Vec<f32> = (0..elements)
+            .map(|index| (index as f32 * 0.17).cos() * 4.0)
+            .collect();
+        let mut once = vec![0u8; BLOCK_BYTES * 3];
+        quantize(&input, &mut once).expect("three blocks");
+        let mut on_grid = vec![0.0f32; elements];
+        dequantize(&once, &mut on_grid).expect("three blocks");
+        let mut twice = vec![0u8; BLOCK_BYTES * 3];
+        quantize(&on_grid, &mut twice).expect("three blocks");
+        assert_eq!(once, twice);
+    }
+
+    /// Real weight data (`token_embd.weight`, dequantized from the
+    /// checkpoint's own `Q4_K` bytes, principle 9), re-encoded through
+    /// `Q8_0`: max-abs error must sit within `scale/2` per block, and the
+    /// measured RMS is logged, not hidden.
+    #[cfg(feature = "std")]
+    #[test]
+    fn quantize_dequantize_real_qwen3_weights_round_trip_error() {
+        let input = crate::quant::real_weights::qwen3_token_embd_f32(QK8_0 * 64);
+        let blocks = input.len() / QK8_0;
+        let mut packed = vec![0u8; BLOCK_BYTES * blocks];
+        quantize(&input, &mut packed).expect("real-weight blocks");
+        let mut output = vec![0.0f32; input.len()];
+        dequantize(&packed, &mut output).expect("real-weight blocks");
+
+        let mut max_error = 0.0f32;
+        let mut sum_sq_error = 0.0f64;
+        for (chunk_index, chunk) in input.chunks(QK8_0).enumerate() {
+            let amax = chunk.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
+            let scale = amax / 127.0;
+            let out_chunk = &output[chunk_index * QK8_0..(chunk_index + 1) * QK8_0];
+            for (got, want) in out_chunk.iter().zip(chunk.iter()) {
+                let diff = (got - want).abs();
+                assert!(
+                    diff <= scale / 2.0 + 1e-4,
+                    "block {chunk_index}: diff={diff} exceeds scale/2={}",
+                    scale / 2.0
+                );
+                max_error = max_error.max(diff);
+                sum_sq_error += f64::from(diff) * f64::from(diff);
+            }
+        }
+        let rms_error = (sum_sq_error / input.len() as f64).sqrt();
+        debug!(max_error, rms_error, "quant.q8_0 real-qwen3-weights round trip");
+    }
+
     #[test]
     fn dequantize_rejects_non_block_multiple_length() {
         let data = vec![0u8; BLOCK_BYTES - 1];

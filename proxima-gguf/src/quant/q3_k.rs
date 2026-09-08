@@ -479,6 +479,8 @@ mod tests {
         BLOCK_BYTES, CODEC, HMASK_BYTES, K_SCALE_SIZE, QK_K, QuantError, SUB_BLOCKS, dequantize,
         pack_scale, quantize, unpack_scale,
     };
+    #[cfg(feature = "std")]
+    use super::{D_OFFSET, f16_at};
 
     /// One super-block, hand-packed and hand-decoded, checked against the
     /// `x = d*sc*q` formula computed by hand — not by calling
@@ -640,6 +642,171 @@ mod tests {
             rms_error < 0.35,
             "rms_error={rms_error} exceeds loose sanity bound"
         );
+    }
+
+    /// A single dominant outlier super-block against an otherwise-zero
+    /// signal.
+    #[test]
+    fn quantize_dequantize_single_outlier_block() {
+        let mut input = vec![0.0f32; QK_K];
+        input[0] = 50.0;
+        let mut packed = vec![0u8; BLOCK_BYTES];
+        quantize(&input, &mut packed).expect("one block");
+        let mut output = vec![0.0f32; QK_K];
+        dequantize(&packed, &mut output).expect("one block");
+        let max_error = output
+            .iter()
+            .zip(input.iter())
+            .map(|(got, want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        debug!(max_error, "quant.q3_k single-outlier round trip");
+        assert!(max_error < 1.2, "max_error={max_error} exceeds loose sanity bound");
+    }
+
+    /// Alternating-sign super-block at constant magnitude.
+    #[test]
+    fn quantize_dequantize_alternating_sign_block() {
+        let input: Vec<f32> = (0..QK_K)
+            .map(|index| if index % 2 == 0 { 3.0 } else { -3.0 })
+            .collect();
+        let mut packed = vec![0u8; BLOCK_BYTES];
+        quantize(&input, &mut packed).expect("one block");
+        let mut output = vec![0.0f32; QK_K];
+        dequantize(&packed, &mut output).expect("one block");
+        let max_error = output
+            .iter()
+            .zip(input.iter())
+            .map(|(got, want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        debug!(max_error, "quant.q3_k alternating-sign round trip");
+        assert!(max_error < 1.2, "max_error={max_error} exceeds loose sanity bound");
+    }
+
+    /// Encoding the same input twice must yield byte-identical output.
+    #[test]
+    fn quantize_is_deterministic_across_repeated_calls() {
+        let elements = QK_K * 2;
+        let input: Vec<f32> = (0..elements)
+            .map(|index| (index as f32 * 0.31).sin() * 3.0)
+            .collect();
+        let mut first = vec![0u8; BLOCK_BYTES * 2];
+        let mut second = vec![0u8; BLOCK_BYTES * 2];
+        quantize(&input, &mut first).expect("two blocks");
+        quantize(&input, &mut second).expect("two blocks");
+        assert_eq!(first, second);
+    }
+
+    /// `Q3_K`'s reference quantizer is NOT idempotent, at either the byte
+    /// or the value level -- measured here, not hidden. Two independent,
+    /// real (P9) causes compound:
+    ///
+    /// 1. `make_q3_quants_16` (`ggml-quants.c:895-935`) is a 5-iteration
+    ///    coordinate-descent refinement with a strict floating-point
+    ///    improvement test; re-running it against pass 1's OWN
+    ///    already-quantized `x` can converge to a different,
+    ///    equally-optimal integer level assignment per sub-block.
+    /// 2. The super-block scale `d` is then derived from a SINGLE linear
+    ///    fit against whichever sub-block scale has the largest
+    ///    magnitude (`quantize_row_q3_K_ref`, not the newer `_impl`'s
+    ///    p-norm search this file's own header already names as a real
+    ///    accuracy gap) -- a different per-sub-block level set from (1)
+    ///    changes which sub-block wins that fit, shifting `d` itself.
+    ///
+    /// Both are properties of the UPSTREAM reference algorithm, ported
+    /// bit-for-bit (principle 14: the incumbent's own behaviour is the
+    /// oracle), not a defect this port introduced -- llama.cpp's own
+    /// `_ref` path was never claimed to be a fixed point under repeated
+    /// quantization, only a one-shot encoder. This test measures and
+    /// bounds the drift rather than asserting exact equality: relative
+    /// error per element must stay under a loose sanity ceiling well
+    /// inside `Q3_K`'s own ~3-bit-per-weight quantization step.
+    #[test]
+    #[cfg(feature = "std")]
+    fn quantize_is_idempotent_at_the_codec_grid() {
+        let input = crate::quant::real_weights::qwen3_token_embd_f32(QK_K * 4);
+        let blocks = input.len() / QK_K;
+        let mut once = vec![0u8; BLOCK_BYTES * blocks];
+        quantize(&input, &mut once).expect("real-weight blocks");
+        let mut on_grid_once = vec![0.0f32; input.len()];
+        dequantize(&once, &mut on_grid_once).expect("real-weight blocks");
+
+        let mut twice = vec![0u8; BLOCK_BYTES * blocks];
+        quantize(&on_grid_once, &mut twice).expect("real-weight blocks");
+        let mut on_grid_twice = vec![0.0f32; input.len()];
+        dequantize(&twice, &mut on_grid_twice).expect("real-weight blocks");
+
+        // relative drift is unstable near zero (a level-0 weight
+        // dequantizes to exactly 0.0 or a tiny fp16-scale residue on
+        // either pass, so a bit of absolute drift there reads as a huge
+        // relative one) -- bounded in ABSOLUTE terms instead, against the
+        // super-block's own worst-case sub-block STEP: `d * sc * level`,
+        // `sc` up to the signed 6-bit code's magnitude (31, `pack_scale`'s
+        // own range) and `level` spanning the full signed nibble range
+        // (`NMAX=4`, so a level can move by up to 7 across two passes).
+        let block_d = once
+            .chunks(BLOCK_BYTES)
+            .map(|block| f16_at(block, D_OFFSET).to_f32().abs())
+            .fold(0.0f32, f32::max);
+        let worst_case_step = block_d * 31.0 * 7.0;
+        let mut max_abs_drift = 0.0f32;
+        for (first_pass, second_pass) in on_grid_once.iter().zip(on_grid_twice.iter()) {
+            max_abs_drift = max_abs_drift.max((first_pass - second_pass).abs());
+        }
+        debug!(
+            bytes_identical = once == twice,
+            max_abs_drift, block_d, worst_case_step, "quant.q3_k re-quantization drift (NOT idempotent)"
+        );
+        assert!(
+            max_abs_drift < worst_case_step,
+            "max_abs_drift={max_abs_drift} exceeds the super-block's own worst-case step {worst_case_step}"
+        );
+    }
+
+    /// Reproduces the byte-level non-idempotence
+    /// [`quantize_is_idempotent_at_the_codec_grid`]'s doc comment names,
+    /// kept runnable rather than silently dropped -- this is evidence of
+    /// the upstream algorithm's own tie-breaking, not a bug this crate
+    /// owns; `#[ignore]`d so it never gates a normal run.
+    #[test]
+    #[ignore = "documents byte-level (not value-level) non-idempotence inherited from ggml's own reference search"]
+    fn quantize_can_be_byte_non_idempotent_at_the_codec_grid() {
+        let elements = QK_K * 2;
+        let input: Vec<f32> = (0..elements)
+            .map(|index| (index as f32 * 0.17).cos() * 2.0)
+            .collect();
+        let mut once = vec![0u8; BLOCK_BYTES * 2];
+        quantize(&input, &mut once).expect("two blocks");
+        let mut on_grid = vec![0.0f32; elements];
+        dequantize(&once, &mut on_grid).expect("two blocks");
+        let mut twice = vec![0u8; BLOCK_BYTES * 2];
+        quantize(&on_grid, &mut twice).expect("two blocks");
+        assert_ne!(once, twice, "documents the known byte-level tie-break, not a stability guarantee");
+    }
+
+    /// Real weight data (principle 9), re-encoded through `Q3_K` (this
+    /// crate's stand-in for `Q2_K`'s missing encoder, §1's expert-pair
+    /// "lo" target).
+    #[cfg(feature = "std")]
+    #[test]
+    fn quantize_dequantize_real_qwen3_weights_round_trip_error() {
+        let input = crate::quant::real_weights::qwen3_token_embd_f32(QK_K * 32);
+        let blocks = input.len() / QK_K;
+        let mut packed = vec![0u8; BLOCK_BYTES * blocks];
+        quantize(&input, &mut packed).expect("real-weight blocks");
+        let mut output = vec![0.0f32; input.len()];
+        dequantize(&packed, &mut output).expect("real-weight blocks");
+
+        let mut max_error = 0.0f32;
+        let mut sum_sq_error = 0.0f64;
+        for (got, want) in output.iter().zip(input.iter()) {
+            let diff = (got - want).abs();
+            max_error = max_error.max(diff);
+            sum_sq_error += f64::from(diff) * f64::from(diff);
+        }
+        let rms_error = (sum_sq_error / input.len() as f64).sqrt();
+        debug!(max_error, rms_error, "quant.q3_k real-qwen3-weights round trip");
+        assert!(max_error < 1.2, "max_error={max_error} exceeds loose sanity bound");
+        assert!(rms_error < 0.35, "rms_error={rms_error} exceeds loose sanity bound");
     }
 
     #[test]

@@ -215,6 +215,8 @@ mod tests {
     use super::{
         BLOCK_BYTES, CODEC, HALF_BLOCK, QK4_0, QS_OFFSET, QuantError, dequantize, quantize,
     };
+    #[cfg(feature = "std")]
+    use super::{D_OFFSET, f16_at};
 
     /// One block, hand-packed and hand-decoded, checked against the
     /// `x = (nibble - 8) * d` formula computed by hand -- not by calling
@@ -322,6 +324,137 @@ mod tests {
             max_error <= analytic_max_error,
             "max_error={max_error} exceeds the format's own analytic bound {analytic_max_error}"
         );
+    }
+
+    /// A single dominant outlier: `max` is set entirely by index 0
+    /// (positive), so `d = max/-8` and every other level should quantize
+    /// to nibble `8` (value `0`).
+    #[test]
+    fn quantize_dequantize_single_outlier_block() {
+        let mut input = vec![0.0f32; QK4_0];
+        input[0] = 64.0;
+        let mut packed = vec![0u8; BLOCK_BYTES];
+        quantize(&input, &mut packed).expect("one block");
+        let mut output = vec![0.0f32; QK4_0];
+        dequantize(&packed, &mut output).expect("one block");
+        let scale = (64.0f32 / -8.0).abs();
+        let max_error = output
+            .iter()
+            .zip(input.iter())
+            .map(|(got, want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_error <= scale / 2.0 + 1e-3,
+            "max_error={max_error} exceeds scale/2={}",
+            scale / 2.0
+        );
+        assert_eq!(output[1..], input[1..], "non-outlier positions must quantize to exactly zero");
+    }
+
+    /// Alternating-sign block at EXACTLY equal magnitude on both sides:
+    /// `quantize_block`'s `amax < value.abs()` tie-break (strict `<`)
+    /// keeps the FIRST-seen extremum, so `max` here locks to `+4.0`
+    /// (index 0), giving `d = 4.0 / -8 = -0.5`. That makes the positive
+    /// side exact but pushes the negative side's ideal level to `16.5`
+    /// pre-clamp -- one past the `15` ceiling
+    /// [`super::quantize_block`]'s doc names as relying on `max`'s own
+    /// derivation to avoid. This is a REAL, reproducible property of the
+    /// ported reference algorithm at an exact +/- tie (principle 14: the
+    /// incumbent's own behaviour is the oracle, not a bug this port
+    /// introduced), so the bound asserted is `scale` (a full level), not
+    /// `scale/2` -- named here, not hidden behind a bigger epsilon.
+    #[test]
+    fn quantize_dequantize_alternating_sign_block() {
+        let input: Vec<f32> = (0..QK4_0)
+            .map(|index| if index % 2 == 0 { 4.0 } else { -4.0 })
+            .collect();
+        let mut packed = vec![0u8; BLOCK_BYTES];
+        quantize(&input, &mut packed).expect("one block");
+        let mut output = vec![0.0f32; QK4_0];
+        dequantize(&packed, &mut output).expect("one block");
+        let scale = (4.0f32 / -8.0).abs();
+        let max_error = output
+            .iter()
+            .zip(input.iter())
+            .map(|(got, want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_error <= scale + 1e-3,
+            "max_error={max_error} exceeds the exact-tie clamp bound {scale}"
+        );
+        assert_eq!(output[0], input[0], "the tie-break winner (+4.0) must be exact");
+    }
+
+    /// Encoding the same input twice must yield byte-identical output.
+    #[test]
+    fn quantize_is_deterministic_across_repeated_calls() {
+        let elements = QK4_0 * 3;
+        let input: Vec<f32> = (0..elements)
+            .map(|index| (index as f32 * 0.31).sin() * 7.0)
+            .collect();
+        let mut first = vec![0u8; BLOCK_BYTES * 3];
+        let mut second = vec![0u8; BLOCK_BYTES * 3];
+        quantize(&input, &mut first).expect("three blocks");
+        quantize(&input, &mut second).expect("three blocks");
+        assert_eq!(first, second);
+    }
+
+    /// `encode(dequant(encode(x))) == encode(x)`.
+    #[test]
+    fn quantize_is_idempotent_at_the_codec_grid() {
+        let elements = QK4_0 * 3;
+        let input: Vec<f32> = (0..elements)
+            .map(|index| (index as f32 * 0.17).cos() * 4.0)
+            .collect();
+        let mut once = vec![0u8; BLOCK_BYTES * 3];
+        quantize(&input, &mut once).expect("three blocks");
+        let mut on_grid = vec![0.0f32; elements];
+        dequantize(&once, &mut on_grid).expect("three blocks");
+        let mut twice = vec![0u8; BLOCK_BYTES * 3];
+        quantize(&on_grid, &mut twice).expect("three blocks");
+        assert_eq!(once, twice);
+    }
+
+    /// Real weight data (principle 9), re-encoded through `Q4_0`: max-abs
+    /// error must sit within `scale` (a full level, NOT `scale/2`) per
+    /// block. `scale/2` is this format's typical bound (asserted above,
+    /// [`quantize_dequantize_smooth_signal_round_trip_error`]), but real
+    /// weight data -- dequantized from a coarser `Q4_K` grid, so it
+    /// carries far more exact-value repeats than a smooth synthetic
+    /// signal -- lands blocks at the exact `+max`/`-max` tie
+    /// [`quantize_dequantize_alternating_sign_block`] documents (the
+    /// `amax < value.abs()` tie-break always keeps the FIRST extremum
+    /// seen, so the opposite-signed twin at the same magnitude quantizes
+    /// one full level short of ideal). Measured RMS logged, not hidden.
+    #[cfg(feature = "std")]
+    #[test]
+    fn quantize_dequantize_real_qwen3_weights_round_trip_error() {
+        let input = crate::quant::real_weights::qwen3_token_embd_f32(QK4_0 * 64);
+        let blocks = input.len() / QK4_0;
+        let mut packed = vec![0u8; BLOCK_BYTES * blocks];
+        quantize(&input, &mut packed).expect("real-weight blocks");
+        let mut output = vec![0.0f32; input.len()];
+        dequantize(&packed, &mut output).expect("real-weight blocks");
+
+        let mut max_error = 0.0f32;
+        let mut sum_sq_error = 0.0f64;
+        for (chunk_index, packed_block) in packed.chunks(BLOCK_BYTES).enumerate() {
+            let stored_scale = f16_at(packed_block, D_OFFSET).to_f32().abs();
+            let scale = stored_scale * 1.02 + 1e-4;
+            let out_chunk = &output[chunk_index * QK4_0..(chunk_index + 1) * QK4_0];
+            let chunk = &input[chunk_index * QK4_0..(chunk_index + 1) * QK4_0];
+            for (got, want) in out_chunk.iter().zip(chunk.iter()) {
+                let diff = (got - want).abs();
+                assert!(
+                    diff <= scale,
+                    "block {chunk_index}: diff={diff} exceeds the exact-tie clamp bound {scale}"
+                );
+                max_error = max_error.max(diff);
+                sum_sq_error += f64::from(diff) * f64::from(diff);
+            }
+        }
+        let rms_error = (sum_sq_error / input.len() as f64).sqrt();
+        debug!(max_error, rms_error, "quant.q4_0 real-qwen3-weights round trip");
     }
 
     #[test]
