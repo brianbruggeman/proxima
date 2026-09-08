@@ -90,7 +90,7 @@ impl Default for GgufParser {
     }
 }
 
-/// The same `&mut self` `feed`/`poll` contract [`Self::feed`]/[`Self::poll`]
+/// The same `&mut self` `feed`/`poll` contract `Self::feed`/`Self::poll`
 /// already establish (this module's own doc: `GgufParser` imitated
 /// `h1_connection::Connection`'s shape before this trait existed to name
 /// it), now expressed against the shared

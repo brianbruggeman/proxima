@@ -220,7 +220,7 @@ fn hf_bind_dense<'file>(
 /// `q_even`/`q_odd`, indexed `"2*i"`/`"2*i+1"`) consumes -- the same
 /// per-head row permutation `llama.cpp`'s own `convert_hf_to_gguf.py`
 /// applies (its `permute()`) before writing `blk.N.attn_q.weight`/
-/// `blk.N.attn_k.weight` into a GGUF file, which is why [`crate::bind`]'s
+/// `blk.N.attn_k.weight` into a GGUF file, which is why `crate::bind`'s
 /// GGUF path has never needed this: a GGUF checkpoint's bytes already
 /// carry it.
 ///
@@ -395,7 +395,7 @@ fn hf_bind_matmul_weight<'file>(
     Ok(())
 }
 
-/// Every dense-checkpoint weight name [`crate::bind::bind_all_weights`]'s
+/// Every dense-checkpoint weight name `crate::bind::bind_all_weights`'s
 /// GGUF loop binds, HF's own naming instead -- the standard Llama/Mistral/
 /// Qwen `transformers` layout (`model.layers.{layer}.*`), the convention
 /// every dense checkpoint on HuggingFace this crate has been checked against
@@ -459,9 +459,9 @@ pub mod names {
 /// strings [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
 /// builds its `Op::Input` leaves with (`spec.rs`'s own `blk.{layer}.*`/
 /// `token_embd.weight`/`output_norm.weight`/`output.weight` literals), never
-/// [`names`]'s HF-convention strings. [`crate::generate::LoadedModel::call`]
+/// [`names`]'s HF-convention strings. `LoadedModel`'s `Pipe::call` impl
 /// matches every bound weight against the compiled program purely by name
-/// (see [`hf_bind_dense`]'s doc), so every [`BoundWeights`] entry this module
+/// (see `hf_bind_dense`'s doc), so every [`BoundWeights`] entry this module
 /// produces MUST be stored under one of these, regardless of what the
 /// on-disk tensor was called.
 pub mod node_names {

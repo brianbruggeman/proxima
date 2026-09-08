@@ -284,7 +284,7 @@ pub struct ModelArchitecture {
     /// cannot represent "8 for these layers, 0 for those" and silently
     /// picking one value would be architecturally wrong, not just imprecise.
     pub kv_heads: u32,
-    /// The real per-head projection width -- [`head_dim_from_metadata`]'s own
+    /// The real per-head projection width -- `head_dim_from_metadata`'s own
     /// doc walks the three-way priority
     /// (`attention.key_length`/`rope.dimension_count`/derived quotient) this
     /// field is read through, and why a real checkpoint (Qwen3) needs the
@@ -319,7 +319,7 @@ pub struct ModelArchitecture {
     pub rope_freq_base: f32,
     /// `{architecture}.attention.layer_norm_rms_epsilon` (RMSNorm's epsilon,
     /// added under the square root before the reciprocal) --
-    /// [`RMS_EPSILON_DEFAULT`] (llama.cpp's own default for a llama/mistral
+    /// `RMS_EPSILON_DEFAULT` (llama.cpp's own default for a llama/mistral
     /// checkpoint, matching openchat-3.5's own declared value) when the key
     /// is absent. [`crate::qwen35::Qwen35Architecture::rms_epsilon`]/
     /// [`crate::lfm2::Lfm2Architecture::rms_epsilon`] read the same metadata
@@ -541,7 +541,7 @@ pub fn metadata_str<'parsed>(
         .ok_or_else(|| InteropError::MissingMetadataKey { key: key.into() })
 }
 
-/// [`metadata_str`] without the required-key error -- [`LoadedModel::model_name`]'s
+/// [`metadata_str`] without the required-key error -- [`crate::generate::LoadedModel::model_name`]'s
 /// own source: `general.name` is display-only (a live "what's running"
 /// indicator's label), never a bind precondition the way `metadata_str`'s
 /// other callers' keys are, so a checkpoint that omits it loads exactly the
@@ -574,7 +574,7 @@ pub(crate) fn metadata_u32_optional(parsed: &ParsedGguf, key: &str) -> u32 {
     metadata_u32_optional_or(parsed, key, 0)
 }
 
-/// Same shape as [`metadata_u32_optional`], but `default` (a caller-derived
+/// Same shape as `metadata_u32_optional`, but `default` (a caller-derived
 /// fallback, e.g. `embedding / query_heads`) rather than a fixed `0` when
 /// `key` is absent -- for a key whose absence still has a principled
 /// derived value, unlike a mixture-of-experts-only key where `0` genuinely
@@ -651,7 +651,7 @@ fn uniform_u32_array(key: &str, values: impl Iterator<Item = u32>) -> Result<u32
     }
 }
 
-/// Same absent-is-data shape as [`metadata_u32_optional`], but for a
+/// Same absent-is-data shape as `metadata_u32_optional`, but for a
 /// float-valued key -- `default` rather than an error when `key` is
 /// missing. Matches both [`MetadataValue::F32`] and [`MetadataValue::F64`]
 /// rather than assuming one wire type: llama.cpp's own GGUF writer emits

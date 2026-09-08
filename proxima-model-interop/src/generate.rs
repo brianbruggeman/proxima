@@ -1768,9 +1768,9 @@ enum LayerCacheState {
 }
 
 /// A cached prefix: the token ids [`LoadedModel::prefill_prefix`] ran one
-/// forward pass over, and the per-layer [`LayerCacheState`] that pass left
+/// forward pass over, and the per-layer `LayerCacheState` that pass left
 /// behind -- the SAME `(ids, layer_caches, cached_len)` triple
-/// [`LoadedModel::run_decode_loop_observed_seeded`] already threads through
+/// `run_decode_loop_observed_seeded` already threads through
 /// its own two-range decode loop as local bindings on every call, kept
 /// alive across calls instead of dropped at function return. This is not a
 /// new cache shape: composing it back in
@@ -1782,7 +1782,7 @@ enum LayerCacheState {
 /// Plain host `Vec<f32>` buffers throughout (`LayerCache`'s own field
 /// list) -- the two-range decode path never registers a named,
 /// device-resident buffer for the KV cache the way
-/// [`LoadedModel::resident_names`]'s STATIC weights do (only re-uploads it
+/// `LoadedModel::resident_names`'s STATIC weights do (only re-uploads it
 /// as an ordinary named block every step, `run_decode_loop_observed_seeded`'s
 /// own `named_blocks.extend(kv_pad_scratch...)` call). Releasing this state
 /// is therefore exactly Rust's own default `Drop` for a `Vec` -- there is
@@ -2566,7 +2566,7 @@ impl<'file> Pipe for LoadedModel<'file> {
 
 /// One decode step surfaced to a caller AS it happens, instead of only
 /// after [`LoadedModel::generate_streaming`] returns -- the payload
-/// [`decode_until_stop_or_budget`] hands to its `on_token` callback every
+/// `decode_until_stop_or_budget` hands to its `on_token` callback every
 /// step, teaching a caller (a CLI's "loading / thinking / answering"
 /// indicator) exactly what that loop already knows at that point and
 /// nothing it has to re-derive.
@@ -2574,7 +2574,7 @@ impl<'file> Pipe for LoadedModel<'file> {
 pub struct TokenEvent<'piece> {
     pub token_id: u32,
     /// This token's own decoded text, continuing on from whatever
-    /// [`decode_until_stop_or_budget`] has already handed back for earlier
+    /// `decode_until_stop_or_budget` has already handed back for earlier
     /// tokens -- concatenating every `text_piece` across a whole decode
     /// reproduces [`proxima_tokenizer::decode`]'s own output on the same
     /// ids exactly (`decode_streamed_piece`'s own doc: incomplete
@@ -2617,7 +2617,7 @@ pub enum Phase {
     Token,
 }
 
-/// A caller's per-token decision, read back by [`decode_until_stop_or_budget`]
+/// A caller's per-token decision, read back by `decode_until_stop_or_budget`
 /// after every [`TokenEvent`]. `Stop` is the same early exit this loop
 /// already gives the model's own end-of-sequence id, just requested by the
 /// caller instead -- a chat template's own `<|im_end|>`, or a think-block
@@ -2850,7 +2850,7 @@ impl<'file> LoadedModel<'file> {
 
     /// Runs one forward pass over `prompt`'s own tokens and returns the
     /// [`PrefixState`] it leaves behind, WITHOUT decoding anything past it
-    /// -- [`Self::run_decode_loop_observed_seeded`] with `seed: None` and
+    /// -- `Self::run_decode_loop_observed_seeded` with `seed: None` and
     /// `max_tokens: 1`: step 0 of that loop always forwards the whole
     /// `next_ids` range against `cached_len == 0` before ever sampling, so
     /// asking for exactly one step is asking for exactly the prefill this
@@ -2889,7 +2889,7 @@ impl<'file> LoadedModel<'file> {
         Ok(prefix_state)
     }
 
-    /// Resumes decoding from `prefix` -- [`Self::run_decode_loop_observed_seeded`]
+    /// Resumes decoding from `prefix` -- `Self::run_decode_loop_observed_seeded`
     /// with `seed: Some(prefix.clone())`, `prompt` now the SUFFIX text only,
     /// so this call's own two-range forward starts from `prefix`'s cached
     /// `cached_len` rows instead of `0`, and prefills ONLY the suffix's own
@@ -3071,8 +3071,8 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// [`Self::generate_with_serving_config`], plus a `TokenEvent` for
-    /// every step [`decode_until_stop_or_budget`] already produces --
-    /// [`Self::run_decode_loop_observed`]'s own loop, unchanged, given a
+    /// every step `decode_until_stop_or_budget` already produces --
+    /// `Self::run_decode_loop_observed`'s own loop, unchanged, given a
     /// real `on_token` instead of `run_decode_loop`'s `&mut |_| Continue`.
     /// There is one decode loop in this crate; this and
     /// [`Self::generate_with_serving_config`] are the same call with
@@ -4396,7 +4396,7 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// [`Self::forward_node_values`] with the backend left open --
-    /// `gpu_layers` reaches [`BackendRuntime::new`]/[`select_backend`] the
+    /// `gpu_layers` reaches `BackendRuntime::new`/`select_backend` the
     /// same way [`Self::generate_with_serving_config`]'s own
     /// `serving_config.gpu_layers` already does, so this one-shot forward
     /// can be pinned to CPU (`0`) or Metal ([`crate::serving::GPU_LAYERS_ALL`],

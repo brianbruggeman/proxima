@@ -260,7 +260,7 @@ pub struct ServingConfig<'model> {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub math_mode: MathMode,
     /// Not an upstream llama-server flag -- `proxima_tensor::NumericPolicy`,
-    /// the richer permission set [`MathMode`] only narrows
+    /// the richer permission set `MathMode` only narrows
     /// (`omega::metal::numeric_policy_as_metal_math_mode`'s own doc).
     /// `generate.rs`'s `BackendRuntime` reads this once per call and passes
     /// it INTO `plan`/`plan_named` at construction -- the policy is fixed
@@ -275,8 +275,8 @@ pub struct ServingConfig<'model> {
     /// exists so that behavior is visible and overridable at the app edge,
     /// not only as an internal default nothing names. Present
     /// unconditionally (unlike `math_mode`/`dispatch_type` below): unlike
-    /// [`MathMode`], [`NumericPolicy`] is not Metal-specific -- it is
-    /// [`crate::bind`]'s own bit-changing-rewrite gate too, and a
+    /// `MathMode`, [`NumericPolicy`] is not Metal-specific -- it is
+    /// `crate::bind`'s own bit-changing-rewrite gate too, and a
     /// non-Metal build still has an `apply_serving_config` walk that should
     /// see it.
     pub numeric_policy: NumericPolicy,
