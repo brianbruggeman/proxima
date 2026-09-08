@@ -226,7 +226,7 @@ pub(crate) fn aligned_f32_view(bytes: &[u8]) -> Option<&[f32]> {
     })
 }
 
-pub(crate) fn find_tensor<'a>(
+pub fn find_tensor<'a>(
     parsed: &'a ParsedGguf,
     name: &str,
 ) -> Result<&'a TensorInfo, InteropError> {
@@ -512,7 +512,7 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
 /// their own architectures, whose real checkpoints declare `1e-6` instead.
 const RMS_EPSILON_DEFAULT: f32 = 1e-5;
 
-pub(crate) fn metadata_str<'parsed>(
+pub fn metadata_str<'parsed>(
     parsed: &'parsed ParsedGguf,
     key: &str,
 ) -> Result<&'parsed str, InteropError> {
@@ -527,14 +527,14 @@ pub(crate) fn metadata_str<'parsed>(
 /// indicator's label), never a bind precondition the way `metadata_str`'s
 /// other callers' keys are, so a checkpoint that omits it loads exactly the
 /// same as one that carries it.
-pub(crate) fn metadata_str_opt<'parsed>(
+pub fn metadata_str_opt<'parsed>(
     parsed: &'parsed ParsedGguf,
     key: &str,
 ) -> Option<&'parsed str> {
     parsed.metadata_value(key).and_then(MetadataValue::as_str)
 }
 
-pub(crate) fn metadata_u32(parsed: &ParsedGguf, key: &str) -> Result<u32, InteropError> {
+pub fn metadata_u32(parsed: &ParsedGguf, key: &str) -> Result<u32, InteropError> {
     parsed
         .metadata_value(key)
         .and_then(MetadataValue::as_u32)
@@ -555,7 +555,7 @@ pub(crate) fn metadata_u32_optional(parsed: &ParsedGguf, key: &str) -> u32 {
 /// `key` is absent -- for a key whose absence still has a principled
 /// derived value, unlike a mixture-of-experts-only key where `0` genuinely
 /// means "not present."
-pub(crate) fn metadata_u32_optional_or(parsed: &ParsedGguf, key: &str, default: u32) -> u32 {
+pub fn metadata_u32_optional_or(parsed: &ParsedGguf, key: &str, default: u32) -> u32 {
     parsed
         .metadata_value(key)
         .and_then(MetadataValue::as_u32)
@@ -635,7 +635,7 @@ fn uniform_u32_array(key: &str, values: impl Iterator<Item = u32>) -> Result<u32
 /// both float widths and nothing in the format's own spec forbids a
 /// writer choosing `F64`, so this reads whichever the checkpoint actually
 /// declares.
-pub(crate) fn metadata_f32_optional(parsed: &ParsedGguf, key: &str, default: f32) -> f32 {
+pub fn metadata_f32_optional(parsed: &ParsedGguf, key: &str, default: f32) -> f32 {
     match parsed.metadata_value(key) {
         Some(MetadataValue::F32(value)) => *value,
         Some(MetadataValue::F64(value)) => *value as f32,
@@ -643,7 +643,7 @@ pub(crate) fn metadata_f32_optional(parsed: &ParsedGguf, key: &str, default: f32
     }
 }
 
-pub(crate) fn vocab_from_token_embedding(
+pub fn vocab_from_token_embedding(
     parsed: &ParsedGguf,
     embedding: u32,
 ) -> Result<u32, InteropError> {
@@ -677,7 +677,7 @@ pub(crate) fn vocab_from_token_embedding(
 /// takes. [`bind_dense_as`]/[`bind_matmul_weight_as`] consult it before
 /// [`gguf_tensor_as_packed_block`] runs.
 #[cfg(feature = "std")]
-pub(crate) struct BoundWeights<'file> {
+pub struct BoundWeights<'file> {
     pub(crate) resident_bytes: usize,
     pub(crate) owned: Vec<(alloc::string::String, Vec<f32>)>,
     pub(crate) packed: Vec<(
@@ -686,6 +686,28 @@ pub(crate) struct BoundWeights<'file> {
     )>,
     pub(crate) packed_owned: Vec<(alloc::string::String, Vec<u8>, PackedOwnedKind)>,
     pub(crate) precision: &'file [crate::serving::WeightPrecisionRule<'file>],
+}
+
+#[cfg(feature = "std")]
+impl<'file> BoundWeights<'file> {
+    /// Starting point every `bind_dense`/`bind_matmul_weight` call above
+    /// mutates in place -- the same struct-literal shape this module's own
+    /// architecture arms build inline, promoted to a constructor so a
+    /// foreign `Architecture::bind` implementation (this toolkit's whole
+    /// reason for going `pub`) has a way to obtain one: the struct's own
+    /// fields stay `pub(crate)` because they are bind-in-progress
+    /// bookkeeping, not a public data shape a caller should read field by
+    /// field.
+    #[must_use]
+    pub fn new(weight_precision: &'file [crate::serving::WeightPrecisionRule<'file>]) -> Self {
+        Self {
+            resident_bytes: 0,
+            owned: Vec::new(),
+            packed: Vec::new(),
+            packed_owned: Vec::new(),
+            precision: weight_precision,
+        }
+    }
 }
 
 /// Which [`proxima_tensor::cpu::QuantizedBlock`] byte-borrowing variant to
@@ -803,7 +825,7 @@ impl PackedOwnedKind {
 /// this crate does not execute is a caller-visible load failure, not a
 /// process abort.
 #[cfg(feature = "std")]
-pub(crate) fn bind_dense<'file>(
+pub fn bind_dense<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     name: alloc::string::String,
@@ -824,7 +846,7 @@ pub(crate) fn bind_dense<'file>(
 ///
 /// See [`bind_dense`].
 #[cfg(feature = "std")]
-pub(crate) fn bind_dense_as<'file>(
+pub fn bind_dense_as<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     source_name: &str,
@@ -895,7 +917,7 @@ pub(crate) fn bind_dense_as<'file>(
 /// `GgmlType` neither the packed nor the owned decode path can handle --
 /// see [`bind_dense`].
 #[cfg(feature = "std")]
-pub(crate) fn bind_matmul_weight<'file>(
+pub fn bind_matmul_weight<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     name: alloc::string::String,
@@ -926,7 +948,7 @@ pub(crate) fn bind_matmul_weight<'file>(
 ///
 /// See [`bind_matmul_weight`].
 #[cfg(feature = "std")]
-pub(crate) fn bind_matmul_weight_as<'file>(
+pub fn bind_matmul_weight_as<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     source_name: &str,
