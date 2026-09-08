@@ -52,6 +52,18 @@ fn main() {
     ] {
         print_metadata_u32(&parsed, key);
     }
+    println!(
+        "qwen3moe.expert_weights_norm = {:?}",
+        parsed.metadata_value("qwen3moe.expert_weights_norm")
+    );
+    println!(
+        "qwen3moe.expert_gating_func = {:?}",
+        parsed.metadata_value("qwen3moe.expert_gating_func")
+    );
+    println!(
+        "qwen3moe.expert_weights_scale = {:?}",
+        parsed.metadata_value("qwen3moe.expert_weights_scale")
+    );
 
     for name in [
         "blk.0.ffn_gate_exps.weight",
