@@ -2484,7 +2484,40 @@ static EXPERT_OBSERVER: OnceLock<&'static dyn ExpertObserver> = OnceLock::new();
 /// not last-write-wins, so a second registration is a caller bug made
 /// loud rather than a silent observer swap mid-run.
 pub fn set_expert_observer(observer: &'static dyn ExpertObserver) -> Result<(), ObserverAlreadySet> {
-    EXPERT_OBSERVER.set(observer).map_err(|_| ObserverAlreadySet)
+    let result = EXPERT_OBSERVER.set(observer).map_err(|_| ObserverAlreadySet);
+    // proxima-debugger: a two-binary-instance contradiction (one caller's
+    // `on_expert_routed` firing thousands of times, another's staying at
+    // zero on the same call site) is otherwise unfalsifiable from inside a
+    // single process -- this and `notify_expert_routed`'s matching line are
+    // the only way to prove, from a live run, whether both call sites agree
+    // on the SAME `EXPERT_OBSERVER` static and the SAME `&'static dyn`
+    // fat-pointer halves. `data_ptr`/`vtable_ptr` are `usize`, not
+    // `*const ()` -- `ScalarValue` has no pointer variant, and formatting a
+    // raw pointer via `?` here would be a `Debug` string, not a typed field.
+    let (data_ptr, vtable_ptr) = dyn_pointer_halves(observer);
+    proxima_telemetry::debug!(
+        static_address = (core::ptr::addr_of!(EXPERT_OBSERVER) as usize) as u64,
+        data_ptr,
+        vtable_ptr,
+        "expert observer registered"
+    );
+    result
+}
+
+/// Splits a `&'static dyn ExpertObserver` fat pointer into its data and
+/// vtable halves as plain `u64`s, for [`set_expert_observer`]/
+/// [`notify_expert_routed`]'s own diagnostic `debug!` lines -- the only
+/// question those two call sites need answered when a caller reports
+/// `on_expert_routed` never firing: do both sides see the identical
+/// pointer, or does something between registration and the routing call
+/// site hold a second, different `EXPERT_OBSERVER`.
+fn dyn_pointer_halves(observer: &'static dyn ExpertObserver) -> (u64, u64) {
+    let raw: *const dyn ExpertObserver = observer;
+    // SAFETY: reads the two-word fat-pointer representation as raw bits for
+    // logging only -- never dereferenced, never reconstructed into a
+    // pointer, so no provenance or alignment requirement applies.
+    let halves: [usize; 2] = unsafe { core::mem::transmute(raw) };
+    (halves[0] as u64, halves[1] as u64)
 }
 
 /// [`crate::cpu::run_reduce_quantized`]'s own routing-decision call site:
@@ -2493,7 +2526,36 @@ pub fn set_expert_observer(observer: &'static dyn ExpertObserver) -> Result<(), 
 /// load after first access) per gathered position, not a branch into
 /// missing-observer handling.
 pub(crate) fn notify_expert_routed(layer: usize, expert: usize, token_position: usize) {
-    if let Some(observer) = EXPERT_OBSERVER.get() {
+    // proxima-debugger: same-shaped `debug!` as `set_expert_observer`'s,
+    // throttled to once per 10_000 calls -- this is the routing hot path
+    // (`crate::cpu::run_reduce_quantized`'s per-position loop), so an
+    // unconditional emit here would perturb the very thing under
+    // diagnosis. `NOTIFY_EXPERT_ROUTED_CALLS` is the raw call counter this
+    // throttle reads; comparing it against a registered observer's OWN
+    // "calls I actually received" counter answers whether this function
+    // body ever ran at all versus ran but the observer never saw it.
+    let raw_calls = NOTIFY_EXPERT_ROUTED_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    let registered = EXPERT_OBSERVER.get();
+    if raw_calls % 10_000 == 1 {
+        let (data_ptr, vtable_ptr) = registered.map_or((0, 0), |observer| dyn_pointer_halves(*observer));
+        proxima_telemetry::debug!(
+            static_address = (core::ptr::addr_of!(EXPERT_OBSERVER) as usize) as u64,
+            raw_calls,
+            registered = registered.is_some(),
+            data_ptr,
+            vtable_ptr,
+            "expert routed notification"
+        );
+    }
+    if let Some(observer) = registered {
         observer.on_expert_routed(layer, expert, token_position);
     }
 }
+
+/// Raw call count into [`notify_expert_routed`], independent of whether an
+/// [`ExpertObserver`] is registered -- the one number that, compared
+/// against a registered observer's own received-call counter, tells a
+/// caller whether this function ran at all (this stays zero) or ran and
+/// the observer still saw nothing (this is nonzero, the observer's own
+/// counter is zero).
+static NOTIFY_EXPERT_ROUTED_CALLS: AtomicU64 = AtomicU64::new(0);
