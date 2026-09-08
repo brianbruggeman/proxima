@@ -39,6 +39,7 @@ use proxima_gguf::quant::{bf16, f16, q4_0};
 use proxima_gguf::restack::{discover_experts, plan_stack, restack_into};
 use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::types::GgmlType;
+use proxima_tensor::op::Op;
 
 use crate::error::InteropError;
 #[cfg(feature = "std")]
@@ -1952,6 +1953,109 @@ pub(crate) fn bind_all_weights<'file>(
         )?;
     }
     Ok(state)
+}
+
+/// [`QuantizedBlock`](proxima_tensor::cpu::QuantizedBlock)'s byte-carrying
+/// variants paired with the [`PackedOwnedKind`] tag
+/// [`crate::expert_slab::ExpertSlab::bind_layer_stack`] needs -- the same
+/// per-variant match [`bind_matmul_weight_private_copy`] already runs,
+/// generalized to every codec [`PackedOwnedKind`] names rather than just the
+/// four that function's own private-copy knob cares about. `None` for
+/// `Float32`/`Q2K`/anything else [`PackedOwnedKind`] has no tag for -- a
+/// dense-`F32` or restacked-owned MoE weight never reaches
+/// [`build_expert_slab`] at all (see that function's own doc for why).
+fn quantized_block_as_owned_bytes(
+    block: proxima_tensor::cpu::QuantizedBlock<'_>,
+) -> Option<(&[u8], PackedOwnedKind)> {
+    match block {
+        proxima_tensor::cpu::QuantizedBlock::Q4K(bytes) => Some((bytes, PackedOwnedKind::Q4K)),
+        proxima_tensor::cpu::QuantizedBlock::Q5K(bytes) => Some((bytes, PackedOwnedKind::Q5K)),
+        proxima_tensor::cpu::QuantizedBlock::Q6K(bytes) => Some((bytes, PackedOwnedKind::Q6K)),
+        proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes) => Some((bytes, PackedOwnedKind::Q8_0)),
+        proxima_tensor::cpu::QuantizedBlock::Q3K(bytes) => Some((bytes, PackedOwnedKind::Q3K)),
+        proxima_tensor::cpu::QuantizedBlock::Q4_0(bytes) => Some((bytes, PackedOwnedKind::Q4_0)),
+        proxima_tensor::cpu::QuantizedBlock::Float16(bytes) => {
+            Some((bytes, PackedOwnedKind::Float16))
+        }
+        proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes) => {
+            Some((bytes, PackedOwnedKind::BFloat16))
+        }
+        _ => None,
+    }
+}
+
+/// Builds this checkpoint's [`crate::expert_slab::ExpertSlab`] straight off
+/// `weights.packed` and `program`'s own [`Op::Input`] nodes -- the
+/// zero-copy-native-stacked-tensor case [`bind_moe_stacked_experts`]'s own
+/// doc names (`blk.{layer}.{ffn_gate,ffn_up,ffn_down}_exps.weight`, one
+/// on-disk range covering every expert). A restacked
+/// ([`BoundWeights::packed_owned`]) or dequantized
+/// ([`BoundWeights::owned`]) MoE weight -- [`bind_moe_expert_weights`]'s
+/// per-expert-tensor fallback arms -- has no `'file`-lifetime byte slice to
+/// alias at all, so that layer's slot is simply left unbound: it evaluates
+/// exactly as it does today (`sources_for_step` omits it, `run_reduce_quantized`
+/// reads `weights.packed_owned`/`.owned` directly, unaffected by this slab),
+/// it is just not yet PAGEABLE. Widening to the owned-copy case is future
+/// work, not a correctness gap -- `expert_slab::tests` and this crate's own
+/// `moe_architecture_cpu_forward_prefill_and_decode` prove the aliased path
+/// this function DOES build is bit-identical to reading `weights.packed`
+/// directly.
+///
+/// Empty (every layer unbound) for a dense checkpoint
+/// (`architecture.expert_count == 0`) -- [`crate::expert_slab::ExpertSlab::sources_for_step`]
+/// then returns an empty table and the decode loop's evaluation falls
+/// through to the plain contiguous-stack path unchanged.
+#[cfg(feature = "std")]
+pub(crate) fn build_expert_slab<'file>(
+    architecture: &ModelArchitecture,
+    program: &[Op],
+    weights: &BoundWeights<'file>,
+) -> crate::expert_slab::ExpertSlab<'file> {
+    let mut slab = crate::expert_slab::ExpertSlab::new();
+    if architecture.expert_count == 0 {
+        return slab;
+    }
+    let block_nodes = proxima_tensor::block_node_ids(program);
+    let mut site = 0usize;
+    for layer in 0..architecture.block_count {
+        for (projection, out_dim, in_dim) in [
+            ("ffn_gate", architecture.feed_forward, architecture.embedding),
+            ("ffn_up", architecture.feed_forward, architecture.embedding),
+            ("ffn_down", architecture.embedding, architecture.feed_forward),
+        ] {
+            let name = alloc::format!("blk.{layer}.{projection}_exps.weight");
+            let Some((bytes, codec)) = weights
+                .packed
+                .iter()
+                .find(|(candidate, _)| *candidate == name)
+                .and_then(|(_, block)| quantized_block_as_owned_bytes(*block))
+            else {
+                continue;
+            };
+            let Some(weight_node) = block_nodes
+                .iter()
+                .copied()
+                .find(|node| program[node.0 as usize].name() == Some(name.as_str()))
+            else {
+                continue;
+            };
+            if slab
+                .bind_layer_stack(
+                    site,
+                    weight_node,
+                    codec,
+                    bytes,
+                    architecture.expert_count as usize,
+                    out_dim,
+                    in_dim,
+                )
+                .is_ok()
+            {
+                site += 1;
+            }
+        }
+    }
+    slab
 }
 
 /// Row-major transpose from GGUF's native flat layout (`[out, in]`, `out`
