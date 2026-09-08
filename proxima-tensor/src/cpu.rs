@@ -3266,7 +3266,7 @@ pub enum QuantizedBlock<'a> {
     /// [`proxima_gguf::quant::q2_k`] for the on-disk layout this borrows
     /// unchanged. No `dot_fn_for` entry (no shared int8-wide-fold path,
     /// same reasoning as [`Self::Q3K`]) -- this codec's only CPU path is
-    /// the scalar dequantize-then-fold [`dot_q2k_f32`].
+    /// the scalar dequantize-then-fold `dot_q2k_f32`.
     Q2K(&'a [u8]),
     /// Raw packed `Q6_K` bytes -- 256 elements, 16 sub-blocks of 16, one
     /// signed 8-bit scale per sub-block and no `dmin` term; see
@@ -7928,10 +7928,10 @@ fn record_expert_selection(node: NodeId, expert: u32) {
         .record();
 }
 
-/// Drains [`EXPERT_SELECTION_COUNTS`] and returns its `top_n` entries by
+/// Drains `EXPERT_SELECTION_COUNTS` and returns its `top_n` entries by
 /// raw `count`, highest first, each as `(node, expert, count, ema)` -- the
 /// same drain-and-reset contract
-/// [`proxima_telemetry::metric::Counter::snapshot_and_reset`] gives a
+/// `proxima_telemetry::metric::Counter::snapshot_and_reset` gives a
 /// single scalar counter, generalized to this table's `(node, expert)` key:
 /// a later decode step's counts start from zero, never accumulated across
 /// the whole run, so a caller reads one step's own routing popularity, not

@@ -64,7 +64,7 @@ impl AxisTerm {
 /// independent fact: the axis's true iteration extent, for when the
 /// operand's own on-disk width at this position is wider than that (a
 /// genuine prefix read). The two used to be conflated:
-/// [`crate::shape::unify_iteration_space`] treated a single `coeff == 1`,
+/// `shape::unify_iteration_space` treated a single `coeff == 1`,
 /// `offset == 0` term as *both* "read this element" and "this operand's own
 /// width at this axis defines how many iterations there are", which only
 /// holds when the operand is read in full. A caller reading a genuine
