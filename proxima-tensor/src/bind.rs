@@ -4227,7 +4227,24 @@ mod tests {
     /// landing removed or reshaped. `--nocapture` to see the list; the
     /// assertion below is the mechanical guard that the count does not
     /// silently drift once this is landed as a real (non-throwaway) test.
+    ///
+    /// Gated on `reduce-epilogue-fusion` (the feature `bind()` actually
+    /// consults before folding a post-reduce tail into its `Reduce`'s
+    /// `epilogue_body` -- neither feature is in this crate's own `default`
+    /// set, see `Cargo.toml`) AND `cached-attention-streaming` (needed only
+    /// to keep this build free of the pre-existing, unrelated
+    /// `count_fused_epilogues` dead-code trap that fires when
+    /// `reduce-epilogue-fusion` is compiled in alone -- that function has no
+    /// caller outside the `cached-attention-streaming`-gated test below it).
+    /// Ungated, this test asserted the FUSED count (28) against whatever
+    /// `bind()` produces under the ambient feature set of the invoking
+    /// `cargo`/`nextest` command -- silently unfused (37 ops, not even the
+    /// pre-fusion baseline of 34, because `edbf2d90`'s slot-discovery fix now
+    /// also folds shapes the old literal-slot admission never recognized)
+    /// any time `reduce-epilogue-fusion` was not separately requested, which
+    /// is every default invocation this crate's own gate script runs.
     #[test]
+    #[cfg(all(feature = "reduce-epilogue-fusion", feature = "cached-attention-streaming"))]
     fn row_364_per_layer_bound_op_list() {
         let (program, logits, roots, _duplicate_head_scratch) =
             crate::spec::mistral_single_range_cached_forward_program(
