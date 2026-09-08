@@ -88,7 +88,7 @@ fn bind_matmul_weight_as_self_shaped<'file>(
 
 /// One layer's real tensor shape, derived from
 /// `{architecture}.full_attention_interval` rather than assumed uniform --
-/// [`crate::lfm2::LayerKind`]'s counterpart for a checkpoint whose hybrid
+/// [`proxima_tensor::spec::LayerKind`]'s counterpart for a checkpoint whose hybrid
 /// marker is a scalar interval instead of a per-layer metadata array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Qwen35LayerKind {
@@ -432,7 +432,7 @@ pub fn bind_qwen35_weights<'file>(
 ///
 /// # Errors
 ///
-/// Whatever [`qwen35_architecture_from_metadata`]/[`bind_qwen35_weights`]
+/// Whatever `qwen35_architecture_from_metadata`/`bind_qwen35_weights`
 /// can fail with.
 pub fn bind_qwen35_checkpoint(
     parsed: &ParsedGguf,
@@ -569,7 +569,7 @@ pub fn qwen35_forward_program(
 /// hybrid-checkpoint arm, and the worked example that trait's own doc
 /// points a foreign architecture at. Named distinctly from
 /// [`Qwen35Architecture`] (the per-checkpoint metadata this arm derives
-/// inside [`Architecture::bind`]) because the two are different kinds of
+/// inside [`crate::architecture::Architecture::bind`]) because the two are different kinds of
 /// value: `Qwen35Arch` is a stateless, `'static` marker one `bind` call
 /// derives fresh metadata against every load; `Qwen35Architecture` is that
 /// derived, per-checkpoint data.

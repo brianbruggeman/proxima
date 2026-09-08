@@ -374,8 +374,8 @@ fn score_prompt(
 /// sides against the SAME [`LoadedModel`] is the degenerate control this
 /// module's own tests use (`exact_match_rate: 1.0`, every KL term `0.0`
 /// exactly, since both sides then compute the identical forward). `math_mode`
-/// is [`score_prompt`]'s own parameter of the same name, one level up: the
-/// caller picks the [`omega::MathMode`] this whole report measures under
+/// is `score_prompt`'s own parameter of the same name, one level up: the
+/// caller picks the `omega::MathMode` this whole report measures under
 /// (ROW 356) instead of the harness silently defaulting to
 /// `ServingConfig::default`'s `Relaxed` regardless of what was asked for.
 ///

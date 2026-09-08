@@ -29,7 +29,7 @@ use crate::bind::{BoundWeights, ModelArchitecture, metadata_str};
 use crate::error::InteropError;
 
 /// Every weight tensor bound plus the compiled forward program, in the one
-/// shape [`crate::generate::LoadedModel::load_inner`]'s qwen35 and dense
+/// shape `crate::generate::LoadedModel::load_inner`'s qwen35 and dense
 /// arms each assembled by hand before this trait existed
 /// (`generate.rs:1122-1276` on the pre-seam code): `logits_root` is the
 /// single terminal node every decode step reads
@@ -76,7 +76,7 @@ pub use crate::qwen35::Qwen35SsmShape;
 pub struct StepState {
     pub ssm_shape: Qwen35SsmShape,
     pub attn_head_dim: u32,
-    /// [`crate::qwen35::qwen35_ssm_state_bytes`]'s own resident-bytes
+    /// `crate::qwen35::qwen35_ssm_state_bytes`'s own resident-bytes
     /// total across every layer -- computed here, once, by the same
     /// architecture that derived `ssm_shape`, rather than recomputed by
     /// `load_inner` for a shape it did not derive.
