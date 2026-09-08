@@ -8348,6 +8348,16 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 });
             }
             record_expert_selection(resolved.node, expert_index as u32);
+            // The same routing decision `record_expert_selection` just
+            // recorded into the drain-and-poll table, pushed live to any
+            // registered `ExpertObserver` instead -- see that trait's own
+            // doc for why a residency policy needs the push, not the poll.
+            #[cfg(feature = "instrument")]
+            instrument::notify_expert_routed(
+                resolved.node.0 as usize,
+                expert_index as usize,
+                position,
+            );
             let start = expert_index as usize * per_expert_bytes;
             weights
                 .get(start..start + per_expert_bytes)
@@ -28294,6 +28304,107 @@ mod tests {
                 actual_row, expected,
                 "token {token} routed to expert {expert}: gathered result does not bit-match that \
                  expert's own standalone matmul call"
+            );
+        }
+    }
+
+    /// [`crate::instrument::ExpertObserver`]'s own end-to-end proof: the
+    /// SAME gathered-MoE fixture
+    /// [`evaluate_quantized_gathered_moe_weight_matches_the_routed_experts_own_matmul`]
+    /// uses (three tokens, three distinct experts, `route_data = [2, 0,
+    /// 1]`) evaluated once, then every call the registered observer
+    /// received checked against that known routing exactly -- one call per
+    /// token (this fixture's gather is a single top-1 read per position,
+    /// so calls-per-token equals `expert_used_count == 1` here), the
+    /// expert index bit-identical to `route_data[token]`, and the layer
+    /// value (the gathered reduce's own [`NodeId`]) identical across every
+    /// call, since this program has exactly one MoE layer.
+    ///
+    /// `set_expert_observer` sets a process-global [`OnceLock`]
+    /// (`crate::instrument::EXPERT_OBSERVER`) that can only be set once per
+    /// process -- safe here because `nextest` (this crate's own test
+    /// runner, `AGENTS.md`) runs every `#[test]` in its own process, and no
+    /// other test in this file registers an observer, so this is the only
+    /// caller of `set_expert_observer` the process ever sees.
+    #[cfg(feature = "instrument")]
+    #[test]
+    fn expert_observer_hook_receives_one_call_per_token_matching_the_real_route() {
+        use crate::instrument::{ExpertObserver, set_expert_observer};
+
+        struct CountingObserver {
+            calls: Mutex<Vec<(usize, usize, usize)>>,
+        }
+
+        impl ExpertObserver for CountingObserver {
+            fn on_expert_routed(&self, layer: usize, expert: usize, token_position: usize) {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((layer, expert, token_position));
+            }
+        }
+
+        static OBSERVER: CountingObserver = CountingObserver {
+            calls: Mutex::new(Vec::new()),
+        };
+
+        set_expert_observer(&OBSERVER).expect("the only registration this process makes");
+
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let n_experts: u32 = 3;
+        let rows: u32 = 4;
+        let blocks_per_row = 1;
+        let k = QK_K as u32 * blocks_per_row as u32;
+        let seq: u32 = 3;
+        let route_data = [2.0f32, 0.0, 1.0];
+        let expected_experts = [2usize, 0, 1];
+        let expert_scales = [1.0f32, 5.0, 20.0];
+
+        let mut stacked_weight: Vec<u8> = Vec::new();
+        for (expert, &scale) in expert_scales.iter().enumerate() {
+            let weight_f32: Vec<f32> = random_vec(401 + expert as u64, rows as usize * k as usize)
+                .into_iter()
+                .map(|value| (value * 4.0 - 2.0) * scale)
+                .collect();
+            let mut blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+            {
+                quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+            }
+            stacked_weight.extend_from_slice(&blocks);
+        }
+
+        let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
+        let activation: Vec<f32> = random_vec(311, seq as usize * k as usize);
+        let quantized_blocks = [
+            QuantizedBlock::Q4K(&stacked_weight),
+            QuantizedBlock::Float32(&route_data),
+            QuantizedBlock::Float32(&activation),
+        ];
+        evaluate_quantized(&program, &[], &quantized_blocks, &[sum])
+            .expect("gathered quantized moe matmul evaluates end to end");
+
+        let calls = OBSERVER.calls.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(
+            calls.len(),
+            seq as usize,
+            "one observer call per token: this gather is a single top-1 read per position, \
+             so calls-per-token equals expert_used_count == 1"
+        );
+        let observed_layer = calls[0].0;
+        for (position, &(layer, expert, token_position)) in calls.iter().enumerate() {
+            assert_eq!(layer, observed_layer, "one MoE layer in this program, one NodeId");
+            assert!(
+                (expert as u32) < n_experts,
+                "expert {expert} is out of range for {n_experts} experts"
+            );
+            assert_eq!(token_position, position, "calls arrive in position order");
+            assert_eq!(
+                expert, expected_experts[position],
+                "position {position} must route to the same expert route_data names"
             );
         }
     }
