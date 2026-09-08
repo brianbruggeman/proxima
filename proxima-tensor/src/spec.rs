@@ -752,7 +752,12 @@ fn symbolic_leaf(program: &mut Vec<Op>, dtype: DType, name: &str) -> NodeId {
     input_leaf(program, dtype, alloc::vec![Extent::Symbolic(0)], name)
 }
 
-fn input_leaf(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>, name: &str) -> NodeId {
+/// Appends a bound [`Op::Input`] leaf, the primitive every forward-program
+/// builder threads weights and activations through — see
+/// [`qwen35_forward_program`] for the worked example of composing leaves
+/// like this one into a full program.
+#[must_use]
+pub fn input_leaf(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>, name: &str) -> NodeId {
     op::append(
         program,
         Op::Input {
@@ -782,8 +787,11 @@ fn scalar_constant(program: &mut Vec<Op>, value: f32) -> NodeId {
 
 /// `table[ids[s], d]`, the exact pattern `shape.rs`'s
 /// `embedding_lookup_program` unit test documents: `ids` selects `table`'s
-/// vocab axis, `d` passes through as a plain projection.
-fn embedding_lookup(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId {
+/// vocab axis, `d` passes through as a plain projection. Every forward
+/// program opens with this gather -- see [`qwen35_forward_program`] for the
+/// worked example.
+#[must_use]
+pub fn embedding_lookup(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId {
     let gathered_map = IndexMap::Computed {
         indices: ids,
         index_map: map::projection(2, &[0]),
@@ -1558,8 +1566,13 @@ pub enum ExpertGatingFunc {
 /// the "plausible output, wrong routing" failure mode metadata-absent
 /// checkpoints (Mixtral, `expert_bias: None`) cannot exhibit since they
 /// never reach this branch.
+///
+/// The routed feed-forward block [`lfm2_forward_program_with_experts`]
+/// and [`mistral_cached_forward_program_with_experts`] both call per
+/// layer; see [`qwen35_forward_program`] for this crate's own worked
+/// example of a full per-layer builder chain (a dense, non-MoE FFN there).
 #[allow(clippy::too_many_arguments)]
-fn append_moe_ffn(
+pub fn append_moe_ffn(
     program: &mut Vec<Op>,
     x: NodeId,
     gate_inp: NodeId,
@@ -3310,13 +3323,14 @@ fn append_mistral_cached_layer(
 ///
 /// Returns `(mixed, inject)`, `mixed` shaped `[tokens, embedding]`,
 /// `inject` shaped `[tokens, hc]` (`Some` iff `w_inject` was `Some`).
-// No `qwen4exp_forward_program` call site lands in this crate (that
-// assembly is model-specific and relocates to its own consuming crate,
-// per this slice's own scope narrowing) -- this builder is exercised today
-// only by `hyper_connection_tests`'s own f64-reference test below, which
-// dead-code analysis does not count as a production call site.
-#[allow(dead_code, clippy::too_many_arguments)]
-pub(crate) fn append_hyper_connection_mix(
+///
+/// No `qwen4exp_forward_program` call site lands in this crate (that
+/// assembly is model-specific and lives in its own consuming crate); this
+/// builder is public so that crate can compose one. See
+/// [`qwen35_forward_program`] for this crate's own worked example of
+/// wiring per-layer builders like this one into a full program.
+#[allow(clippy::too_many_arguments)]
+pub fn append_hyper_connection_mix(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -3375,11 +3389,13 @@ pub(crate) fn append_hyper_connection_mix(
 /// feeds `output` directly).
 ///
 /// Returns the updated `[tokens, hc, embedding]` residual.
-// Same rationale as `append_hyper_connection_mix`'s own `allow`: no
-// production call site in this crate yet, exercised by
-// `hyper_connection_tests::combine_matches_f64_reference` below.
-#[allow(dead_code, clippy::too_many_arguments)]
-pub(crate) fn append_hyper_connection_combine(
+///
+/// Same rationale as [`append_hyper_connection_mix`]'s own doc: no
+/// production call site in this crate, public so a foreign architecture
+/// crate can compose one. See [`qwen35_forward_program`] for this crate's
+/// own worked example of a full per-layer builder chain.
+#[allow(clippy::too_many_arguments)]
+pub fn append_hyper_connection_combine(
     program: &mut Vec<Op>,
     residual: NodeId,
     block_out: NodeId,
@@ -3716,8 +3732,12 @@ mod hyper_connection_tests {
 ///    (`attn_output = attn_output * torch.sigmoid(gate)`,
 ///    `:325-328`; `qwen35.cpp:322-328` runs the identical
 ///    `ggml_mul(cur, ggml_sigmoid(gate))` before `wo`).
+///
+/// The full-attention layer [`qwen35_forward_program`] calls once per
+/// `full_attention_interval`'th layer -- see it there for the worked
+/// example of wiring this builder's cache inputs and outputs.
 #[allow(clippy::too_many_arguments)]
-fn append_qwen35_dense_attention_layer(
+pub fn append_qwen35_dense_attention_layer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -6519,21 +6539,25 @@ fn sigmoid(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<N
 /// rather than a duplicated function, since every other line of the mixer
 /// (fused QKVZ, causal conv, delta-rule recurrence) is identical between the
 /// two checkpoints.
+/// [`append_qwen35_ssm_mixer`]'s output-gate selector -- see
+/// [`qwen35_forward_program`] for the worked example passing
+/// [`GdnOutputGate::Silu`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GdnOutputGate {
+pub enum GdnOutputGate {
     /// `qwen35_forward_program`'s own GDN layers (`qwen35.cpp:243-250`).
     Silu,
     /// qwen4exp's GDN layers (reference: PR 27742 line 2895-2897) -- no
     /// production call site in this crate (that forward-program assembly is
-    /// model-specific and relocates to its own consuming crate); exercised
+    /// model-specific and lives in its own consuming crate); exercised
     /// today by `qwen35_ssm_mixer_sigmoid_gate_moves_the_output_away_from_silu`.
-    #[allow(dead_code)]
     Sigmoid,
 }
 
-/// Returns `(x_next, qkv_mixed, state_out)`.
+/// The GDN (gated delta-net) mixer [`qwen35_forward_program`] calls once
+/// per non-attention layer -- see it there for the worked example of
+/// wiring this builder's inputs. Returns `(x_next, qkv_mixed, state_out)`.
 #[allow(clippy::too_many_arguments)]
-fn append_qwen35_ssm_mixer(
+pub fn append_qwen35_ssm_mixer(
     program: &mut Vec<Op>,
     x: NodeId,
     inv_dim: NodeId,
@@ -8776,6 +8800,302 @@ pub fn qwen35_forward_program(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// Proves the per-layer builders this module exports as `pub` are
+    /// actually SUFFICIENT to build a forward program from outside this
+    /// crate -- composes `embedding_lookup` -> [`append_hyper_connection_mix`]
+    /// -> [`append_qwen35_ssm_mixer`] (`GdnOutputGate::Sigmoid`, the
+    /// qwen4exp gate) -> [`append_hyper_connection_combine`] -> a final
+    /// output mixer (`w_inject: None`, mirroring the doc's own
+    /// "the final hyper-connection mixer carries [output_norm]") -> the
+    /// same `rmsnorm` + multiply + reduce lm-head chain
+    /// [`qwen35_forward_program`] ends every program with. Every dimension
+    /// is the smallest non-degenerate size that keeps every builder's own
+    /// einsum maps distinct (`embedding = 1` matches
+    /// `build_ssm_mixer_test_program`'s own convention below); the
+    /// assertion is finiteness and shape, not a numeric reference, since
+    /// this test's job is proving the public surface COMPOSES, not
+    /// re-proving any one builder's own arithmetic (each builder already
+    /// has its own f64-reference test for that).
+    #[test]
+    fn public_builders_compose_a_one_layer_forward_program() {
+        let tokens = 2usize;
+        let vocab = 3u32;
+        let embedding = 1u32;
+        let hc = 2u32;
+        let low_rank = 1u32;
+
+        let mut program = Vec::new();
+
+        let ids = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Symbolic(0)], "ids");
+        let table = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
+            "token_embd.weight",
+        );
+        let embedded = embedding_lookup(&mut program, table, ids);
+
+        let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+        // `eps` carries its own `s` (token) axis throughout this module's
+        // rmsnorm-family ops (`rmsnorm`'s own `(eps, "s->s")`,
+        // `append_hyper_connection_mix`'s `(eps, "s->sh")`) -- a per-token
+        // leaf, never a rank-0 constant, matching every other builder's own
+        // test fixture (`assert_mix_matches_reference`'s own `eps_data`).
+        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let inv_hc = scalar_constant(&mut program, 1.0 / hc as f32);
+        let one = scalar_constant(&mut program, 1.0);
+        let two = scalar_constant(&mut program, 2.0);
+
+        // Broadcast the `[tokens, embedding]` embedding lookup into the
+        // `[tokens, hc, embedding]` hyper-connection residual every stream
+        // starts identical at layer 0. Neither `embedded` (`si`, no `h`)
+        // nor a rank-0 scalar owns the `h` axis, so shape inference cannot
+        // size it from either alone -- `hc_ones`, a real `[hc]`-shaped
+        // donor, is the same all-ones-donor idiom `group_ones`/`key_head_ones`
+        // already use to constrain a read-side axis no other operand names.
+        let hc_ones = op::append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(hc)],
+                value: 1.0,
+            },
+        );
+        let residual = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(embedded, "si->shi"), (hc_ones, "h->shi")],
+        )
+        .expect("broadcast into hc streams lowers");
+
+        let w_norm = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(hc), Extent::Static(embedding)], "w_norm");
+        let w_down = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(hc), Extent::Static(embedding), Extent::Static(low_rank)],
+            "w_down",
+        );
+        let w_up = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(low_rank), Extent::Static(hc), Extent::Static(embedding)],
+            "w_up",
+        );
+        let w_inject = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(hc), Extent::Static(embedding), Extent::Static(hc)],
+            "w_inject",
+        );
+
+        let (mixed, inject) = append_hyper_connection_mix(&mut program, residual, inv_dim, eps, inv_hc, one, w_norm, w_down, w_up, Some(w_inject))
+            .expect("hyper-connection mix lowers");
+        let inject = inject.expect("w_inject was Some, so inject must be Some");
+
+        let key_dim = 1u32;
+        let value_dim = 2u32;
+        let kv_heads = 1u32;
+        let group = 2u32;
+        let l_cache = 2u32;
+        let qkv_dim = 2 * key_dim + value_dim;
+
+        let head_eps = op::append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+                value: 1e-6,
+            },
+        );
+        let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0);
+        let inv_head_v_dim = scalar_constant(&mut program, 1.0);
+        let attn_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding)], "attn_norm_weight");
+        let wqkv = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding), Extent::Static(qkv_dim)], "wqkv");
+        let wqkv_gate = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding), Extent::Static(value_dim)], "wqkv_gate");
+        let conv_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(qkv_dim), Extent::Static(l_cache)], "conv_weight");
+        let conv_history_in = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(l_cache - 1), Extent::Static(qkv_dim)],
+            "conv_history_in",
+        );
+        let ssm_beta = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads * group)], "ssm_beta");
+        let ssm_alpha = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads * group)], "ssm_alpha");
+        let ssm_dt_bias = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(kv_heads * group)], "ssm_dt_bias");
+        let ssm_a = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(kv_heads * group)], "ssm_a");
+        let ssm_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding)], "ssm_norm_weight");
+        let ssm_out = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(value_dim), Extent::Static(embedding)], "ssm_out");
+        let state_in = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(1),
+                Extent::Static(1),
+                Extent::Static(kv_heads),
+                Extent::Static(group)
+            ],
+            "state_in",
+        );
+
+        let (block_out, _qkv_mixed, _state_out) = append_qwen35_ssm_mixer(
+            &mut program,
+            mixed,
+            inv_dim,
+            eps,
+            head_eps,
+            one,
+            inv_sqrt_key_dim,
+            inv_head_v_dim,
+            attn_norm_weight,
+            wqkv,
+            wqkv_gate,
+            conv_weight,
+            conv_history_in,
+            ssm_beta,
+            ssm_alpha,
+            ssm_dt_bias,
+            ssm_a,
+            ssm_norm_weight,
+            ssm_out,
+            state_in,
+            key_dim,
+            value_dim,
+            kv_heads,
+            group,
+            l_cache,
+            GdnOutputGate::Sigmoid,
+        )
+        .expect("qwen4exp's own output gate lowers through the shared ssm mixer builder");
+
+        let residual = append_hyper_connection_combine(&mut program, residual, block_out, inject, inv_hc, one, two)
+            .expect("hyper-connection combine lowers");
+
+        let final_w_norm = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(hc), Extent::Static(embedding)], "final_w_norm");
+        let final_w_down = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(hc), Extent::Static(embedding), Extent::Static(low_rank)],
+            "final_w_down",
+        );
+        let final_w_up = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(low_rank), Extent::Static(hc), Extent::Static(embedding)],
+            "final_w_up",
+        );
+        let (final_mixed, no_inject) = append_hyper_connection_mix(&mut program, residual, inv_dim, eps, inv_hc, one, final_w_norm, final_w_down, final_w_up, None)
+            .expect("final output mixer lowers");
+        assert!(no_inject.is_none(), "the final output mixer must pass w_inject: None");
+
+        // The same rmsnorm + multiply + reduce chain `qwen35_forward_program`
+        // ends every program with.
+        let output_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding)], "output_norm.weight");
+        let normed_final = rmsnorm(&mut program, final_mixed, output_norm_weight, inv_dim, eps).expect("final rmsnorm lowers");
+        let lm_head_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding), Extent::Static(vocab)], "output.weight");
+        let logits_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed_final, "sd->sdv"), (lm_head_weight, "dv->sdv")],
+        )
+        .expect("lm_head product lowers");
+        let logits = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            logits_product,
+            "sdv->sdv",
+            "sv->sdv",
+        )
+        .expect("lm_head reduce lowers");
+
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut filled_input = |len: usize| -> Vec<f32> {
+            (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    ((state >> 11) as f64 / (1u64 << 53) as f64) as f32 - 0.5
+                })
+                .collect()
+        };
+
+        // `evaluate_named` binds every input as an `&[f32]` regardless of
+        // the `Op::Input::dtype` it was declared with -- `ids`'s own
+        // `DType::Int32` only documents intent, since the gather this
+        // module's `embedding_lookup` builds reads its index operand
+        // through the same f32 buffer as every other input (the real
+        // forward-program tests above bind their own `ids` this same way,
+        // as `ids_f32`).
+        let ids_data: Vec<f32> = (0..tokens as i32).map(|token| (token % vocab as i32) as f32).collect();
+        let eps_data = alloc::vec![1e-6f32; tokens];
+        let table_data = filled_input(vocab as usize * embedding as usize);
+        let w_norm_data = filled_input(hc as usize * embedding as usize);
+        let w_down_data = filled_input(hc as usize * embedding as usize * low_rank as usize);
+        let w_up_data = filled_input(low_rank as usize * hc as usize * embedding as usize);
+        let w_inject_data = filled_input(hc as usize * embedding as usize * hc as usize);
+        let attn_norm_data = filled_input(embedding as usize);
+        let wqkv_data = filled_input(embedding as usize * qkv_dim as usize);
+        let wqkv_gate_data = filled_input(embedding as usize * value_dim as usize);
+        let conv_weight_data = filled_input(qkv_dim as usize * l_cache as usize);
+        let conv_history_data = filled_input((l_cache as usize - 1) * qkv_dim as usize);
+        let ssm_beta_data = filled_input(embedding as usize * (kv_heads * group) as usize);
+        let ssm_alpha_data = filled_input(embedding as usize * (kv_heads * group) as usize);
+        let ssm_dt_bias_data = filled_input((kv_heads * group) as usize);
+        let ssm_a_data = filled_input((kv_heads * group) as usize);
+        let ssm_norm_data = filled_input(embedding as usize);
+        let ssm_out_data = filled_input(value_dim as usize * embedding as usize);
+        let state_in_data = filled_input(kv_heads as usize * group as usize);
+        let final_w_norm_data = filled_input(hc as usize * embedding as usize);
+        let final_w_down_data = filled_input(hc as usize * embedding as usize * low_rank as usize);
+        let final_w_up_data = filled_input(low_rank as usize * hc as usize * embedding as usize);
+        let output_norm_data = filled_input(embedding as usize);
+        let lm_head_data = filled_input(embedding as usize * vocab as usize);
+
+        let named: Vec<(&str, &[f32])> = alloc::vec![
+            ("ids", ids_data.as_slice()),
+            ("eps", eps_data.as_slice()),
+            ("token_embd.weight", table_data.as_slice()),
+            ("w_norm", w_norm_data.as_slice()),
+            ("w_down", w_down_data.as_slice()),
+            ("w_up", w_up_data.as_slice()),
+            ("w_inject", w_inject_data.as_slice()),
+            ("attn_norm_weight", attn_norm_data.as_slice()),
+            ("wqkv", wqkv_data.as_slice()),
+            ("wqkv_gate", wqkv_gate_data.as_slice()),
+            ("conv_weight", conv_weight_data.as_slice()),
+            ("conv_history_in", conv_history_data.as_slice()),
+            ("ssm_beta", ssm_beta_data.as_slice()),
+            ("ssm_alpha", ssm_alpha_data.as_slice()),
+            ("ssm_dt_bias", ssm_dt_bias_data.as_slice()),
+            ("ssm_a", ssm_a_data.as_slice()),
+            ("ssm_norm_weight", ssm_norm_data.as_slice()),
+            ("ssm_out", ssm_out_data.as_slice()),
+            ("state_in", state_in_data.as_slice()),
+            ("final_w_norm", final_w_norm_data.as_slice()),
+            ("final_w_down", final_w_down_data.as_slice()),
+            ("final_w_up", final_w_up_data.as_slice()),
+            ("output_norm.weight", output_norm_data.as_slice()),
+            ("output.weight", lm_head_data.as_slice()),
+        ];
+
+        let evaluated = crate::cpu::evaluate_named(&program, &[tokens as u64], &named, &[logits]).expect("the composed program evaluates on cpu");
+        let (logits_values, logits_shape) = evaluated.get(logits).expect("logits output present");
+
+        assert_eq!(
+            logits_shape,
+            [tokens as u64, vocab as u64],
+            "logits must be [tokens, vocab] -- the same shape qwen35_forward_program's own lm_head produces"
+        );
+        assert!(
+            logits_values.iter().all(|value| value.is_finite()),
+            "every logit must be finite: {logits_values:?}"
+        );
+    }
 
     /// [`ForwardRoots::hidden`] must be the pre-`lm_head` activation the
     /// vocab-projection multiply actually reads -- proved by walking the
