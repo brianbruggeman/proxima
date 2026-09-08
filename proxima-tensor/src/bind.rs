@@ -4262,6 +4262,51 @@ mod tests {
             .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })));
     }
 
+    /// [`cached_attention_rewrite_accepts_the_omega_nonempty_cache_fixture`]'s
+    /// GQA-plus-QK-norm counterpart -- the real Qwen3-1.7B shape's two
+    /// distinguishing features (`query_heads != kv_heads`, split-half RoPE
+    /// plus per-head `q_norm`/`k_norm`) neither of which that fixture
+    /// exercises (it is Mistral-shaped: GQA but no QK-norm). Asserting the
+    /// engagement COUNT here, not a log line reading a runtime counter, is
+    /// the point: `proxima_tensor::instrument::path_totals().
+    /// op_kind_cached_attention` (`instrument.rs:1515`) increments only
+    /// from `cpu::run_node_into`'s `CachedAttention` arm
+    /// (`proxima-tensor/src/cpu.rs:5210-5215`) -- `omega::metal`'s own
+    /// `BoundOpKind::CachedAttention` dispatch (`omega/src/metal.rs:4206`
+    /// onward, the actual production Metal execution path
+    /// `generate.rs`'s metal-feature `BackendRuntime::evaluate` calls) never
+    /// touches that counter. On a Metal build that counter reads 0 on every
+    /// step regardless of whether the fusion engaged -- it is silent on the
+    /// one backend real decode runs on, not evidence the matcher rejected
+    /// the shape. This bind-time count is backend-agnostic and is the
+    /// correct place to assert engagement.
+    #[test]
+    #[cfg(feature = "cached-attention-streaming")]
+    fn cached_attention_rewrite_accepts_the_qwen3_gqa_qk_norm_fixture() {
+        let (program, logits, cache_roots) =
+            crate::spec::qwen3_cached_forward_program(64, 64, 128, 4, 2, 16, 2)
+                .expect("qwen3 gqa+qk_norm fixture builds");
+        let mut outputs = alloc::vec![logits];
+        for (even, odd, value) in cache_roots {
+            outputs.extend_from_slice(&[even, odd, value]);
+        }
+        let shapes = crate::shape::infer(&program, &[1, 5])
+            .expect("qwen3 gqa+qk_norm fixture infers");
+        let rewritten = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("qwen3 gqa+qk_norm fixture binds");
+
+        assert_eq!(
+            rewritten
+                .iter()
+                .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+                .count(),
+            2,
+            "each GQA+QK-norm layer must receive its own fused step -- \
+             the matcher accepts this shape; a regression here is a real \
+             matcher rejection, not a dead runtime counter"
+        );
+    }
+
     /// The real openchat-3.5/Mistral-7B shape (`vocab=32_002`,
     /// `hidden=4096`, `ffn=14336`, `32` query heads, `8` KV heads,
     /// `head_dim=128`, `32` layers) bound at one new token against a
