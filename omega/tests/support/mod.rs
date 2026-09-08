@@ -22,6 +22,7 @@
 
 use proxima_tensor::spec::{
     DuplicateHeadPosition, mistral_cached_forward_program, mistral_single_range_cached_forward_program,
+    qwen3_cached_forward_program,
 };
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NodeId, NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};
@@ -129,6 +130,73 @@ pub fn real_forward_fixture_with_cached_len(cached_len: u64) -> RealForwardFixtu
             // own shapes, never this scalar) stayed correct -- exactly the
             // silent CPU/Metal divergence `fused_cached_attention_root_
             // agrees_between_cpu_and_metal` exists to catch.
+            vec![cached_len as f32]
+        } else {
+            random_vec(position as u64 + 1, count)
+        };
+        named.push((name, data));
+    }
+
+    (program, symbols, roots, named)
+}
+
+/// [`real_forward_fixture_with_cached_len`]'s GQA-plus-QK-norm counterpart:
+/// the real Qwen3-1.7B shape's two distinguishing features (`query_heads !=
+/// kv_heads`, already present in the Mistral fixture; split-half RoPE plus
+/// per-head `q_norm`/`k_norm`, which that fixture does NOT exercise) --
+/// built from [`qwen3_cached_forward_program`] instead of
+/// [`mistral_cached_forward_program`], same 2-layer/64-wide/GQA=2 shape.
+/// `new_count` (symbol 0, hardcoded to `1` in the Mistral fixture) is a
+/// caller parameter here so a query_rows > 1 (multi-row prefill/resume)
+/// step can be reproduced against the same cache, not only single-token
+/// decode.
+pub fn qwen3_gqa_qk_norm_forward_fixture(new_count: u64, cached_len: u64) -> RealForwardFixture {
+    const VOCAB: u32 = 64;
+    const EMBEDDING: u32 = 64;
+    const FEED_FORWARD: u32 = 128;
+    const QUERY_HEADS: u32 = 4;
+    const KV_HEADS: u32 = 2;
+    const HEAD_DIM: u32 = 16;
+    const LAYERS: u32 = 2;
+
+    let (program, logits_root, cache_roots) = qwen3_cached_forward_program(
+        VOCAB,
+        EMBEDDING,
+        FEED_FORWARD,
+        QUERY_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+        LAYERS,
+    )
+    .expect("the qwen3 gqa+qk_norm forward program builds");
+
+    let mut roots = vec![logits_root];
+    for (even, odd, value) in &cache_roots {
+        roots.push(*even);
+        roots.push(*odd);
+        roots.push(*value);
+    }
+
+    let symbols = vec![new_count, cached_len];
+    let shapes = infer(&program, &symbols).expect("the qwen3 gqa+qk_norm forward infers");
+
+    let mut named: Vec<(String, Vec<f32>)> = Vec::new();
+    for (position, op) in program.iter().enumerate() {
+        let Op::Input { name, .. } = op else { continue };
+        let node = NodeId(position as u32);
+        let count: usize = shapes
+            .of(node)
+            .iter()
+            .map(|extent| *extent as usize)
+            .product();
+        let name = name
+            .clone()
+            .expect("every block input in this program is named");
+        let data = if name == "ids" {
+            vec![3.0f32; count]
+        } else if name == "eps" {
+            vec![1e-5f32; count]
+        } else if name == "cached_len" {
             vec![cached_len as f32]
         } else {
             random_vec(position as u64 + 1, count)
