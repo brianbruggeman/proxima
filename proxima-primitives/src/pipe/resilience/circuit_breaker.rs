@@ -25,7 +25,7 @@ pub enum CircuitState {
 /// Lock-free shared circuit breaker with the same state transitions as
 /// [`CircuitBreaker`].
 ///
-/// This is a stateful gate, not a [`Pipe`]: callers invoke `allow`,
+/// This is a stateful gate, not a [`crate::pipe::primitives::Pipe`]: callers invoke `allow`,
 /// [`on_success`](Self::on_success), and [`on_failure`](Self::on_failure)
 /// around the pipe or operation they protect. All transitions use one atomic
 /// packed state word; the opened timestamp is published before a transition
