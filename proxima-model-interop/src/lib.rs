@@ -37,7 +37,15 @@ mod hf_config;
 mod lfm2;
 #[cfg(feature = "std")]
 mod loader;
-#[cfg(feature = "std")]
+// no `feature = "std"` gate: the module is pure alloc/core arithmetic
+// (its own doc), but every consumer -- `generate.rs`'s
+// `checkpoint_weight_bytes` field and its metal-gated `apply_memory_fit_gate`
+// -- is metal-only, so a plain `--features std` build with no metal has no
+// call site at all and every pub item reads as dead code under
+// `warnings = "deny"`. `cfg(test)` keeps the module (and its own unit
+// tests, which exercise every item directly) compiled under every feature
+// set nextest runs.
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 mod memory_fit;
 #[cfg(feature = "std")]
 mod qwen35;
