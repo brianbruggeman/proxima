@@ -3310,6 +3310,7 @@ fn append_qwen35_dense_attention_layer(
     sin_new: NodeId,
     group_ones: NodeId,
     is_future: NodeId,
+    cached_len: NodeId,
     group: u32,
     rotary_dim: u32,
     attn_head_dim: u32,
@@ -3492,6 +3493,46 @@ fn append_qwen35_dense_attention_layer(
         DType::Float32,
         ScalarOp::Multiply,
         &[(score_cached, "stug->stug"), (inv_sqrt_attn_head_dim, "->stug")],
+    )?;
+    // `k_first_cache`/`k_second_cache`/`k_pass_cache`/`v_cache` are bound to
+    // the CALLER's own bucketed `kv_extent`, not the real `cached_len`
+    // (`Qwen35DenseAttentionPadScratch::fill`'s own doc) -- rows
+    // `[cached_len, bound_extent)` are zero-padding, not history. Unlike the
+    // `Attention` arm, which excludes that padding via the fused
+    // `BoundOpKind::CachedAttention` op's own `cached_key_rows` runtime
+    // bound, this graph has no such fusion, so the padding is masked here
+    // exactly the way [`causal_mask_merged`] masks its own merged range:
+    // `key_index >= cached_len` is invalid, scored `-inf` before either
+    // softmax pass sees it.
+    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+    let cached_key_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Symbolic(1),
+        },
+    );
+    let cached_len_exclusive_bound = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(cached_len, "->"), (ones, "->")],
+    )?;
+    let is_cached_padding = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(cached_key_index, "t->t"), (cached_len_exclusive_bound, "->t")],
+    )?;
+    let score_cached_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[
+            (is_cached_padding, "t->stug"),
+            (neg_infinity, "->stug"),
+            (score_cached_scaled, "stug->stug"),
+        ],
     )?;
 
     let score_new_first_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first_grouped, "sugi->swugi"), (rotated_k_new_first, "wui->swugi")])?;
@@ -7788,12 +7829,12 @@ pub fn qwen35_forward_program(
     // Same rank-0 leaf [`mistral_cached_forward_program_with_experts`] adds
     // right after its own `causal_mask` call, and for the same reason: named
     // "cached_len" so `bind::cached_attention_candidates`'s `find_named_input`
-    // picks it up by NAME (not by threading a `NodeId` through
-    // `append_qwen35_dense_attention_layer`'s already-long parameter list) and
-    // carries the live cached length in as the fused `CachedAttention` op's
-    // ninth runtime operand -- one leaf here covers every dense-attention
-    // layer in this program, since the lookup walks the whole program vector.
-    let _cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    // picks it up by NAME on the `Attention` arm's fused `CachedAttention`
+    // op. The `DenseAttention` arm has no equivalent fusion, so this same
+    // node is ALSO threaded directly into every
+    // [`append_qwen35_dense_attention_layer`] call below to mask its own
+    // padded cached range (that function's own doc).
+    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
 
     let mut layer_roots: Vec<Qwen35LayerRoots> = Vec::with_capacity(block_count as usize);
 
@@ -8026,6 +8067,7 @@ pub fn qwen35_forward_program(
                 sin_new,
                 group_ones,
                 is_future,
+                cached_len,
                 group,
                 head_dim,
                 attn_head_dim,
@@ -15222,6 +15264,7 @@ value = 1.0
             },
         );
         let (is_future, _neg_infinity) = causal_mask(&mut program).expect("causal mask lowers");
+        let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
 
         let attn_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "attn_norm_weight");
         let ffn_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "ffn_norm_weight");
@@ -15252,6 +15295,7 @@ value = 1.0
             sin_new,
             group_ones,
             is_future,
+            cached_len,
             1,
             2,
             4,
@@ -15290,6 +15334,7 @@ value = 1.0
         let w_up_data = [1.0f32];
         let w_down_data = [1.0f32];
         let empty: [f32; 0] = [];
+        let cached_len_data = [0.0f32];
 
         let evaluated = crate::cpu::evaluate_named(
             &program,
@@ -15299,6 +15344,7 @@ value = 1.0
                 ("eps", &eps_data),
                 ("cos", &cos_data),
                 ("sin", &sin_data),
+                ("cached_len", &cached_len_data),
                 ("attn_norm_weight", &attn_norm_data),
                 ("ffn_norm_weight", &ffn_norm_data),
                 ("q_norm_weight", &q_norm_data),
