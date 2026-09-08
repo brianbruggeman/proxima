@@ -4206,7 +4206,7 @@ impl<'file> LoadedModel<'file> {
             self.weights.owned.len()
                 + self.weights.packed.len()
                 + self.weights.packed_owned.len()
-                + 3
+                + 4
                 + block_count * 3,
         );
         named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
@@ -4222,6 +4222,15 @@ impl<'file> LoadedModel<'file> {
         named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
         named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
         named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
+        // `mistral_cached_forward_program_with_experts`'s own `cached_len`
+        // `Op::Input` (ROW 404/405's runtime bound the fused Metal
+        // `CachedAttention` kernel reads) is present on every program this
+        // method evaluates, fresh-KV or not -- this is always a one-shot
+        // forward from an empty cache (this method's own doc), so `0.0` is
+        // the only correct value, the same fact `empty_cache` above already
+        // encodes for the KV-cache blocks themselves.
+        let cached_len_scalar = [0.0f32];
+        named_blocks.push(("cached_len", QuantizedBlock::Float32(&cached_len_scalar)));
         for (k_even_name, k_odd_name, v_name) in &kv_cache_names {
             named_blocks.extend(empty_cache.named_blocks(k_even_name, k_odd_name, v_name));
         }
