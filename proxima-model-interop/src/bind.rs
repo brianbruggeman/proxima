@@ -5177,6 +5177,144 @@ mod real_openchat_file {
         );
     }
 
+    /// Bisect diagnostic (fix/qwen3moe-forward): CPU-route counterpart to
+    /// [`runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`],
+    /// through the fully PUBLIC [`Pipe::call`] path instead of the
+    /// `pub(crate)` `run_decode_loop` -- [`LoadedModel::generate`]'s own
+    /// body always builds its [`crate::serving::ServingConfig`] via
+    /// `supported_serving_config(0, ..)`, i.e. `gpu_layers: 0`/`Engine::Cpu`,
+    /// so this call never touches a GPU backend regardless of build
+    /// features. Prints the full generated id list (not just a count) so a
+    /// caller can diff CPU vs Metal ids directly, not just their lengths.
+    #[test]
+    #[ignore = "depends on a host-local checkpoint outside this repo (PROXIMA_OPENCHAT_GGUF, architecture-agnostic despite the env var name)"]
+    fn bisects_the_cpu_route_greedy_decode_and_prints_generated_ids() {
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local checkpoint fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local checkpoint fixture");
+        prefault_if_requested(file_bytes);
+
+        let model = LoadedModel::load(&parsed, file_bytes)
+            .expect("load real checkpoint through the public path");
+        let prompt = decode_loop_prompt();
+        let max_tokens = decode_loop_max_tokens();
+
+        let decode_start = std::time::Instant::now();
+        let generated = block_on(model.call((prompt.clone(), max_tokens)))
+            .expect("generate through the public cpu Pipe path");
+        let total_elapsed = decode_start.elapsed();
+
+        let ids_string = generated
+            .0
+            .iter()
+            .map(u32::to_string)
+            .collect::<alloc::vec::Vec<_>>()
+            .join(" ");
+        std::println!(
+            "cpu_decode_summary prompt={prompt:?} tokens_generated={} stopped_by_eos={} \
+             total_wall_clock_ms={:.3} ids=[{ids_string}] generated_text={:?}",
+            generated.0.len(),
+            generated.2,
+            total_elapsed.as_secs_f64() * 1000.0,
+            generated.1
+        );
+        assert!(
+            !generated.1.is_empty(),
+            "degenerate control: cpu decode loop produced no text"
+        );
+    }
+
+    /// Bisect diagnostic (fix/qwen3moe-forward): Metal-route counterpart to
+    /// [`bisects_the_cpu_route_greedy_decode_and_prints_generated_ids`],
+    /// through the same `run_decode_loop` shape
+    /// [`runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`]
+    /// exercises, but with no openchat-shaped plan-cache assertions (a
+    /// 128-expert MoE checkpoint's own hit/miss pattern is exactly the
+    /// unknown this bisect exists to observe, not a precondition to assert
+    /// on) and the full generated id list printed for a direct CPU/Metal
+    /// diff.
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "depends on a host-local checkpoint outside this repo, and a real Metal device"]
+    fn bisects_the_metal_route_greedy_decode_and_prints_generated_ids() {
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
+
+        #[cfg(feature = "instrument")]
+        let telemetry_recorder = install_stdout_telemetry();
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local checkpoint fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local checkpoint fixture");
+        prefault_if_requested(file_bytes);
+        mlock_if_requested(file_bytes);
+        touch_output_weight_if_requested(&parsed, file_bytes);
+
+        let model = LoadedModel::load(&parsed, file_bytes)
+            .expect("load real checkpoint through the public path");
+        let prompt = decode_loop_prompt();
+        let max_tokens = decode_loop_max_tokens();
+
+        #[cfg(target_os = "macos")]
+        let math_mode = math_mode_from_env();
+        #[cfg(target_os = "macos")]
+        let dispatch_type = dispatch_type_from_env();
+        let serving_config = ServingConfig {
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: crate::serving::GPU_LAYERS_ALL,
+            reasoning_budget: 0,
+            #[cfg(target_os = "macos")]
+            math_mode,
+            #[cfg(target_os = "macos")]
+            dispatch_type,
+            ..ServingConfig::default()
+        };
+
+        let mut runtime = crate::generate::BackendRuntime::new(&serving_config);
+        let decode_start = std::time::Instant::now();
+        let generated = model
+            .run_decode_loop(&prompt, max_tokens, &serving_config, &mut runtime)
+            .expect("generate through the metal backend");
+        let total_elapsed = decode_start.elapsed();
+
+        #[cfg(feature = "instrument")]
+        let flushed = telemetry_recorder.drain_and_total();
+        #[cfg(feature = "instrument")]
+        std::println!("telemetry_ring flushed={flushed}");
+
+        let ids_string = generated
+            .0
+            .iter()
+            .map(u32::to_string)
+            .collect::<alloc::vec::Vec<_>>()
+            .join(" ");
+        std::println!(
+            "metal_decode_summary prompt={prompt:?} tokens_generated={} stopped_by_eos={} \
+             total_wall_clock_ms={:.3} plan_hits={} plan_misses={} ids=[{ids_string}] generated_text={:?}",
+            generated.0.len(),
+            generated.2,
+            total_elapsed.as_secs_f64() * 1000.0,
+            runtime.plan_hits,
+            runtime.plan_misses,
+            generated.1
+        );
+        assert!(
+            !generated.1.is_empty(),
+            "degenerate control: metal decode loop produced no text"
+        );
+    }
+
     /// Diagnostic-only: drives the same real cached decode loop as
     /// [`runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`],
     /// but sets `PROXIMA_METAL_OP_PROFILE_STEP=3` so `run_decode_loop`'s own
