@@ -724,7 +724,9 @@ pub struct LoadedModel<'file> {
     /// [`Self::generate_with_serving_config`]'s own load-time memory-fit
     /// gate (`crate::memory_fit`) needs these byte counts long after
     /// `load_inner`'s local `parsed`/`file_bytes` bindings have gone out of
-    /// scope.
+    /// scope. `cfg`-gated with [`Self::apply_memory_fit_gate`], its only
+    /// reader.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes,
     vocab: Vocab,
     program: Vec<Op>,
@@ -1044,6 +1046,7 @@ impl<'file> LoadedModel<'file> {
         // long after `parsed` has gone out of scope -- computed once, here,
         // before any weight is bound, shared by both the qwen35 and dense
         // branches below.
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         let (dense_weight_bytes, expert_weight_bytes, table_weight_bytes) =
             crate::bind::tensor_bytes_by_class(parsed);
         // `general.architecture` read directly, before `architecture_from_metadata`
@@ -1083,6 +1086,7 @@ impl<'file> LoadedModel<'file> {
             return Ok(Self {
                 weights,
                 architecture,
+                #[cfg(all(feature = "metal", target_os = "macos"))]
                 checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                     dense_bytes: dense_weight_bytes,
                     expert_bytes: expert_weight_bytes,
@@ -1180,6 +1184,7 @@ impl<'file> LoadedModel<'file> {
         Ok(Self {
             weights,
             architecture,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: dense_weight_bytes,
                 expert_bytes: expert_weight_bytes,
@@ -1264,6 +1269,7 @@ impl<'file> LoadedModel<'file> {
             // byte counts as dense here rather than guessing a split;
             // `expert_bytes`/`table_bytes` stay `0` until a real HF MoE
             // checkpoint proves what its own expert-tensor names look like.
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: file_bytes.len() as u64,
                 expert_bytes: 0,
@@ -1316,6 +1322,7 @@ fn qwen35_ssm_shape(architecture: &crate::qwen35::Qwen35Architecture) -> Qwen35S
 /// this as the SSM class of [`crate::memory_fit::WeightClassBytes`] -- `0`
 /// for every non-qwen35 checkpoint, which never builds a
 /// [`Qwen35SsmShape`] at all.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn qwen35_ssm_state_bytes(shape: Qwen35SsmShape, block_count: u32) -> u64 {
     let per_layer_elements = (shape.conv_rows * shape.qkv_dim + shape.state_len) as u64;
     per_layer_elements * core::mem::size_of::<f32>() as u64 * u64::from(block_count)
@@ -2498,10 +2505,14 @@ impl<'file> LoadedModel<'file> {
         &self,
         prompt: &str,
         max_tokens: usize,
-        mut serving_config: ServingConfig,
+        serving_config: ServingConfig,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        self.apply_memory_fit_gate(&mut serving_config)?;
+        let serving_config = {
+            let mut serving_config = serving_config;
+            self.apply_memory_fit_gate(&mut serving_config)?;
+            serving_config
+        };
         let mut runtime = BackendRuntime::new(&serving_config);
         self.run_decode_loop(prompt, max_tokens, &serving_config, &mut runtime)
     }

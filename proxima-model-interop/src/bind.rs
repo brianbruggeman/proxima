@@ -414,6 +414,10 @@ pub(crate) fn checkpoint_has_qk_norm(parsed: &ParsedGguf) -> bool {
 /// than failing the whole classification: this is a load-time SAFETY-NET
 /// budget, not an exactness-critical accounting, and the tensor's own
 /// dimensions get a real, typed rejection later at bind time regardless.
+// `generate.rs`'s `load_inner` is this function's only caller, itself only
+// reachable from the metal-gated load-time memory-fit gate -- a plain
+// `--features std` build with no metal has no call site at all.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 #[must_use]
 pub(crate) fn tensor_bytes_by_class(parsed: &ParsedGguf) -> (u64, u64, u64) {
     let mut dense_bytes = 0u64;
