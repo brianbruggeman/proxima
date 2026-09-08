@@ -454,6 +454,30 @@ pub fn checkpoint_bytes_moe(
     expert_count: u32,
     expert_used_count: u32,
 ) -> Vec<u8> {
+    checkpoint_bytes_moe_inner(weight_codec, expert_count, expert_used_count, false)
+}
+
+/// [`checkpoint_bytes_moe`] with a REAL (`random_vec`-seeded, non-zero)
+/// `output.weight` instead of that function's all-zero one -- needed by any
+/// test that must observe a routed expert's own bytes actually reaching the
+/// final logits (a zero output row makes every logit `0.0` regardless of
+/// which expert ran, [`push_output_projection`]'s own doc).
+#[allow(dead_code, reason = "only external_expert_paging.rs's own real-output test uses this")]
+#[must_use]
+pub fn checkpoint_bytes_moe_with_real_output(
+    weight_codec: GgmlType,
+    expert_count: u32,
+    expert_used_count: u32,
+) -> Vec<u8> {
+    checkpoint_bytes_moe_inner(weight_codec, expert_count, expert_used_count, true)
+}
+
+fn checkpoint_bytes_moe_inner(
+    weight_codec: GgmlType,
+    expert_count: u32,
+    expert_used_count: u32,
+    real_output_projection: bool,
+) -> Vec<u8> {
     let embedding = EMBEDDING;
     let feed_forward = FEED_FORWARD;
     let kv_dim = KV_HEADS * HEAD_DIM;
@@ -565,7 +589,19 @@ pub fn checkpoint_bytes_moe(
         next_seed(),
         embedding,
     );
-    push_output_projection(&mut buffers, &mut specs, weight_codec, embedding, vocab);
+    if real_output_projection {
+        push_matmul_weight(
+            &mut buffers,
+            &mut specs,
+            weight_codec,
+            String::from("output.weight"),
+            next_seed(),
+            embedding,
+            vocab,
+        );
+    } else {
+        push_output_projection(&mut buffers, &mut specs, weight_codec, embedding, vocab);
+    }
 
     let tensors: Vec<TensorPayload<'_>> = specs
         .iter()
