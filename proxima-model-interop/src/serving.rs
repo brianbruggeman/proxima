@@ -905,6 +905,7 @@ mod tests {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
             exact_activations: true,
+            weight_precision: &[],
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);

@@ -4752,6 +4752,7 @@ mod memory_fit_gate_tests {
                 owned: Vec::new(),
                 packed: Vec::new(),
                 packed_owned: Vec::new(),
+                precision: &[],
             },
             architecture: tiny_architecture(),
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
