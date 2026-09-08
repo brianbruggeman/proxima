@@ -4148,6 +4148,189 @@ mod real_qwen3moe_file {
             state.owned.len(),
         );
     }
+
+    /// The proof [`bind_moe_stacked_experts`]'s own doc claims but never
+    /// actually ran against the real checkpoint: the synthetic sibling
+    /// (`packed_expert_gather_matches_the_dequantized_reference`) only ever
+    /// covers `IN_DIM == q4_k::QK_K` (256, one block per row) -- the real
+    /// 30B-A3B's own row width is `embedding = 2048`, eight blocks per row,
+    /// the untested regime a per-row multi-block addressing bug would only
+    /// show up in. Slices `expert_index * per_expert_bytes` out of the SAME
+    /// bytes [`bind_moe_expert_weights`] bound (never a hand re-read), runs
+    /// them through the real production kernel
+    /// ([`proxima_tensor::cpu::matmul_q4k_f32`]/`matmul_q6k_f32`), and checks
+    /// against an independent per-row `dequantize` + dot product of that
+    /// same slab.
+    #[test]
+    #[ignore = "depends on a host-local qwen3moe 30B-A3B gguf checkout outside this repo"]
+    fn real_qwen3moe_30b_layer_zero_packed_expert_gather_matches_the_dequantized_reference() {
+        use proxima_gguf::quant::{q4_k, q6_k};
+        use proxima_tensor::cpu::{matmul_q4k_f32, matmul_q6k_f32};
+
+        let model_path = crate::test_support::qwen3moe_30b_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3MOE_GGUF"));
+        let path = std::path::Path::new(&model_path);
+
+        struct MappedGguf {
+            base: *mut core::ffi::c_void,
+            len: usize,
+            _file: std::fs::File,
+        }
+
+        impl MappedGguf {
+            fn open(path: &std::path::Path) -> std::io::Result<Self> {
+                use std::os::fd::AsFd;
+                let file = std::fs::File::open(path)?;
+                let len = usize::try_from(file.metadata()?.len())
+                    .expect("fixture file length fits in usize");
+                // SAFETY: `len` matches the just-opened file's own length;
+                // `file` is kept alive in `_file` for as long as `base` is
+                // used, and the mapping is read-only/private so no writer
+                // can observe or race it.
+                let base = unsafe {
+                    rustix::mm::mmap(
+                        core::ptr::null_mut(),
+                        len,
+                        rustix::mm::ProtFlags::READ,
+                        rustix::mm::MapFlags::PRIVATE,
+                        file.as_fd(),
+                        0,
+                    )
+                }
+                .expect("mmap host-local qwen3moe 30b gguf fixture");
+                Ok(Self {
+                    base,
+                    len,
+                    _file: file,
+                })
+            }
+
+            fn as_slice(&self) -> &[u8] {
+                // SAFETY: `base` points at `len` bytes mapped for `self`'s
+                // whole lifetime; this borrows `self` immutably, so nothing
+                // can unmap the region while the returned slice is alive.
+                unsafe { core::slice::from_raw_parts(self.base.cast::<u8>(), self.len) }
+            }
+        }
+
+        impl Drop for MappedGguf {
+            fn drop(&mut self) {
+                // SAFETY: `base`/`len` are exactly what `open`'s `mmap`
+                // call returned; nothing else unmaps this region.
+                let _ = unsafe { rustix::mm::munmap(self.base, self.len) };
+            }
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local qwen3moe 30b gguf fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local qwen3moe 30b gguf fixture");
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("derive architecture from the real qwen3moe 30b checkpoint's own metadata");
+
+        // deterministic, non-degenerate activation -- an LCG the same shape
+        // as this module's own synthetic `expert_values` fixture, real
+        // token content is irrelevant to the mechanism under test (does the
+        // packed gather's byte addressing agree with an independent
+        // dequantize of the identical bytes).
+        fn probe_activation(len: usize) -> alloc::vec::Vec<f32> {
+            (0..len)
+                .map(|index| {
+                    ((index as u32).wrapping_mul(2_654_435_761).wrapping_add(7) % 1000) as f32
+                        / 1000.0
+                        - 0.5
+                })
+                .collect()
+        }
+
+        let embedding = architecture.embedding as usize;
+        let feed_forward = architecture.feed_forward as usize;
+        let expert_index = 3usize;
+
+        for (projection, out_dim, in_dim, is_q6k) in [
+            ("ffn_gate", feed_forward, embedding, false),
+            ("ffn_up", feed_forward, embedding, false),
+            ("ffn_down", embedding, feed_forward, true),
+        ] {
+            let mut state = BoundWeights {
+                resident_bytes: file_bytes.len(),
+                owned: Vec::new(),
+                packed: Vec::new(),
+                packed_owned: Vec::new(),
+                precision: &[],
+            };
+            bind_moe_expert_weights(
+                &parsed,
+                file_bytes,
+                0,
+                projection,
+                architecture.expert_count,
+                out_dim,
+                in_dim,
+                &mut state,
+            )
+            .unwrap_or_else(|error| panic!("layer 0's {projection} must bind, got {error:?}"));
+            let (_, block) = &state.packed[0];
+            let per_expert_bytes = match block {
+                proxima_tensor::cpu::QuantizedBlock::Q4K(bytes) => {
+                    bytes.len() / architecture.expert_count as usize
+                }
+                proxima_tensor::cpu::QuantizedBlock::Q6K(bytes) => {
+                    bytes.len() / architecture.expert_count as usize
+                }
+                other => panic!("layer 0's {projection} must bind packed Q4_K/Q6_K, got {other:?}"),
+            };
+            let expert_bytes = match block {
+                proxima_tensor::cpu::QuantizedBlock::Q4K(bytes) => {
+                    &bytes[expert_index * per_expert_bytes..(expert_index + 1) * per_expert_bytes]
+                }
+                proxima_tensor::cpu::QuantizedBlock::Q6K(bytes) => {
+                    &bytes[expert_index * per_expert_bytes..(expert_index + 1) * per_expert_bytes]
+                }
+                _ => unreachable!("matched above"),
+            };
+
+            let activation = probe_activation(in_dim);
+            let gathered = if is_q6k {
+                matmul_q6k_f32(expert_bytes, out_dim, &activation)
+            } else {
+                matmul_q4k_f32(expert_bytes, out_dim, &activation)
+            }
+            .unwrap_or_else(|error| panic!("{projection} packed matmul must evaluate, got {error:?}"));
+
+            let mut dequantized = alloc::vec![0.0f32; out_dim * in_dim];
+            if is_q6k {
+                q6_k::dequantize(expert_bytes, &mut dequantized)
+            } else {
+                q4_k::dequantize(expert_bytes, &mut dequantized)
+            }
+            .unwrap_or_else(|error| panic!("{projection} independent dequantize failed, got {error:?}"));
+            let reference: alloc::vec::Vec<f32> = dequantized
+                .chunks(in_dim)
+                .map(|row| row.iter().zip(&activation).map(|(w, a)| w * a).sum())
+                .collect();
+
+            std::println!(
+                "qwen3moe_30b {projection} expert={expert_index} gathered[0..8]={:?}",
+                &gathered[..8.min(gathered.len())]
+            );
+            std::println!(
+                "qwen3moe_30b {projection} expert={expert_index} reference[0..8]={:?}",
+                &reference[..8.min(reference.len())]
+            );
+            let max_diff = gathered
+                .iter()
+                .zip(&reference)
+                .map(|(found, wanted)| (found - wanted).abs())
+                .fold(0.0f32, f32::max);
+            std::println!("qwen3moe_30b {projection} expert={expert_index} max_diff={max_diff}");
+            assert!(
+                max_diff < 1e-3,
+                "{projection}: real qwen3moe layer 0 expert {expert_index}'s packed gather must \
+                 match an independent dequantize of the identical bytes, got max_diff={max_diff}"
+            );
+        }
+    }
 }
 
 // -- Real-data proof: bind a real Q4_K weight row out of a host-local
