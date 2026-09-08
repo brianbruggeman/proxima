@@ -389,7 +389,7 @@ fn main() {
 /// (`scratchpad/pr27742.diff`, cited per item), never invented -- only the
 /// magnitudes (layer/expert/head counts) are shrunk to keep this fixture
 /// writable in well under a second, per the S1 slice brief.
-mod qwen4exp {
+pub(crate) mod qwen4exp {
     use proxima_gguf::types::GgmlType;
     use proxima_gguf::value::{MetadataArray, MetadataValue};
     use proxima_gguf::writer::{GgufModel, TensorPayload};
