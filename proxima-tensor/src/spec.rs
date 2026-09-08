@@ -2487,6 +2487,25 @@ pub fn mistral_forward_program(
 /// nothing more.
 pub type CachedLayerRoots = (NodeId, NodeId, NodeId);
 
+/// [`mistral_cached_forward_program_with_experts`]'s two named roots:
+/// `logits` (the vocab-projection reduce, this program's terminal node) and
+/// `hidden` (`normed_final` -- the LAST-norm activation `logits` is
+/// projected FROM, one layer earlier in the graph). Before this type
+/// existed, a caller that needed `hidden` (an embedding pooling the final
+/// hidden state rather than decoding a token) had no way to reach it except
+/// `NodeId(logits.0 - 3)` -- arithmetic over [`op::append`]'s id-is-index
+/// invariant that silently breaks the moment a refactor inserts or removes
+/// one node between `hidden` and `logits`. A plain two-field struct instead
+/// of widening this builder's return arity again: every existing caller
+/// that only wants `logits` destructures `ForwardRoots { logits, .. }` (one
+/// pattern, no behavior change); `proxima-model-interop`'s
+/// `LoadedModel::embed` is the one caller that reads `hidden` too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForwardRoots {
+    pub logits: NodeId,
+    pub hidden: NodeId,
+}
+
 /// [`mistral_single_range_cached_forward_program`]'s own return shape:
 /// the lowered program, its `logits` root, one [`CachedLayerRoots`] per
 /// layer, and ROW 326/328's [`DuplicateHeadPosition`] scratch output
@@ -7222,6 +7241,7 @@ pub fn mistral_cached_forward_program(
         false,
         false,
     )
+    .map(|(program, roots, cache_roots)| (program, roots.logits, cache_roots))
 }
 
 /// [`mistral_cached_forward_program`]'s Qwen3 dense-attention counterpart:
@@ -7257,6 +7277,7 @@ pub fn qwen3_cached_forward_program(
         false,
         false,
     )
+    .map(|(program, roots, cache_roots)| (program, roots.logits, cache_roots))
 }
 
 /// [`mistral_cached_forward_program`]'s mixture-of-experts-capable
@@ -7302,7 +7323,7 @@ pub fn mistral_cached_forward_program_with_experts(
     qk_norm: bool,
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
-) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>), TensorError> {
+) -> Result<(Vec<Op>, ForwardRoots, Vec<CachedLayerRoots>), TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
 
@@ -7683,7 +7704,14 @@ pub fn mistral_cached_forward_program_with_experts(
         "sv->sdv",
     )?;
 
-    Ok((program, logits, cache_roots))
+    Ok((
+        program,
+        ForwardRoots {
+            logits,
+            hidden: normed_final,
+        },
+        cache_roots,
+    ))
 }
 
 /// Per-layer roots [`qwen35_forward_program`]'s own caller threads back in
@@ -8320,6 +8348,50 @@ pub fn qwen35_forward_program(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// [`ForwardRoots::hidden`] must be the pre-`lm_head` activation the
+    /// vocab-projection multiply actually reads -- proved by walking the
+    /// graph FROM `logits` backward (`logits`'s own `Reduce::operand` is
+    /// the `logits_product` elementwise; that node's own operand set must
+    /// contain `hidden`) rather than assuming any fixed distance between
+    /// the two `NodeId`s. This is the structural guarantee
+    /// `LoadedModel::embed` (`proxima-model-interop`) depends on: if a
+    /// future refactor of this builder ever produced a `hidden` that is
+    /// NOT actually upstream of `lm_head`'s multiply, this test fails
+    /// before any real-checkpoint embedding test would even hint at it.
+    #[test]
+    fn forward_roots_hidden_is_an_operand_of_the_lm_head_product() {
+        let (program, roots, _cache_roots) = mistral_cached_forward_program_with_experts(
+            32_002, 4096, 14336, 32, 8, 128, 2, 0, 0, false, false, false,
+        )
+        .expect("the dense cached forward pass lowers to a program");
+
+        let Op::Reduce(logits_reduce) = &program[roots.logits.0 as usize] else {
+            panic!("ForwardRoots::logits must name an Op::Reduce (the vocab-projection sum)");
+        };
+        let logits_product = logits_reduce.operand;
+
+        let Op::Elementwise {
+            operands: product_operands,
+            ..
+        } = &program[logits_product.0 as usize]
+        else {
+            panic!("logits's own Reduce::operand must name an Op::Elementwise (the multiply)");
+        };
+
+        assert!(
+            product_operands
+                .iter()
+                .any(|(operand, _map)| *operand == roots.hidden),
+            "ForwardRoots::hidden ({:?}) must be one of the lm_head product's own operands \
+             ({:?}), or LoadedModel::embed would pool the wrong tensor",
+            roots.hidden,
+            product_operands
+                .iter()
+                .map(|(operand, _)| *operand)
+                .collect::<alloc::vec::Vec<_>>(),
+        );
+    }
 
     const MATMUL_TOML: &str = r#"
 [[node]]
@@ -14044,11 +14116,12 @@ value = 1.0
             .filter(|op| matches!(&op.kind, crate::bind::BoundOpKind::Reduce { .. }))
             .count();
 
-        let (paired_program, paired_logits, paired_roots) =
+        let (paired_program, paired_roots_bundle, paired_roots) =
             mistral_cached_forward_program_with_experts(
                 32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, true, false,
             )
             .expect("the paired cached forward pass lowers to a program");
+        let paired_logits = paired_roots_bundle.logits;
         let mut paired_outputs = alloc::vec![paired_logits];
         for (even, odd, value) in &paired_roots {
             paired_outputs.extend_from_slice(&[*even, *odd, *value]);
@@ -14190,11 +14263,12 @@ value = 1.0
             .filter(|op| matches!(&op.kind, crate::bind::BoundOpKind::Reduce { .. }))
             .count();
 
-        let (fused_program, fused_logits, fused_roots) =
+        let (fused_program, fused_roots_bundle, fused_roots) =
             mistral_cached_forward_program_with_experts(
                 32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, false, true,
             )
             .expect("the fused-qkv cached forward pass lowers to a program");
+        let fused_logits = fused_roots_bundle.logits;
         let mut fused_outputs = alloc::vec![fused_logits];
         for (even, odd, value) in &fused_roots {
             fused_outputs.extend_from_slice(&[*even, *odd, *value]);
