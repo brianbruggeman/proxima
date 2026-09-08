@@ -419,4 +419,20 @@ pub enum InteropError {
         declared: &'static str,
         bound: &'static str,
     },
+
+    /// [`crate::expert_slab::ExpertSlab::page_expert`]/`evict_expert` was
+    /// called while a decode step was in progress -- the slab's own borrow
+    /// contract (`ExpertSlab`'s doc: an `ExpertSource` snapshot is valid for
+    /// exactly one step) forbids mutating an expert's bytes while a running
+    /// step may still be reading them through that snapshot. Callable again
+    /// once the step that produced the error has returned.
+    #[error("cannot page or evict expert {expert} of layer {layer}: a decode step is in progress")]
+    ExpertSwapDuringStep { layer: usize, expert: usize },
+
+    /// [`crate::expert_slab::ExpertSlab::page_expert`] was asked to page an
+    /// `(layer, expert)` pair the slab was never built with -- the slab's
+    /// shape is fixed at construction from the checkpoint's own layer/expert
+    /// count, never grown at runtime.
+    #[error("expert {expert} of layer {layer} is out of range for this checkpoint's expert slab")]
+    ExpertSlabIndexOutOfRange { layer: usize, expert: usize },
 }
