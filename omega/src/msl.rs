@@ -1273,8 +1273,7 @@ pub fn emit(
     // caller that lacks the merge dispatch this binding shape requires --
     // `crate::metal::encode_op`'s own doc names that gap and the guard it
     // takes on its `resolved: None` (no plan-resolved merge sibling) path.
-    let is_split_cached_attention = cached_attention_context_length(&resolved.kind)
-        .is_some_and(|context_length| cached_attention_merge_needed(context_length, numeric_policy));
+    let is_split_cached_attention = cached_attention_merge_needed(&resolved.kind, numeric_policy);
     Ok(Kernel {
         source,
         entry,
@@ -1467,8 +1466,7 @@ pub(crate) fn kernel_dispatch_shape(
 ) -> Result<(Vec<Binding>, GridSpec), EmitError> {
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
-    let is_split_cached_attention = cached_attention_context_length(&resolved.kind)
-        .is_some_and(|context_length| cached_attention_merge_needed(context_length, numeric_policy));
+    let is_split_cached_attention = cached_attention_merge_needed(&resolved.kind, numeric_policy);
     Ok((
         if is_split_cached_attention {
             split_bindings_with_scratch(resolved)
@@ -2478,7 +2476,7 @@ fn grid_threads(
             let (chunks, splits) = if single_range_dynamic {
                 (
                     crate::sized::ATTENTION_CONTEXT_CHUNK_CAP,
-                    if cached_attention_merge_needed(context_length, numeric_policy) {
+                    if cached_attention_merge_needed(&resolved.kind, numeric_policy) {
                         crate::sized::ATTENTION_SPLIT_MAX
                     } else {
                         1
@@ -3310,7 +3308,46 @@ pub(crate) fn splits_for(context_length: u64, policy: NumericPolicy) -> u64 {
 /// then slice the live key range by with no second dispatch to merge the
 /// slices back -- an out-of-bounds-shaped undercount, not merely a missed
 /// optimization.
-pub(crate) fn cached_attention_merge_needed(context_length: u64, policy: NumericPolicy) -> bool {
+///
+/// Takes `kind` (not a bare `context_length: u64`) because `ContextSplitMerge`
+/// is implemented ONLY inside [`render_cached_attention`]'s `single_range_
+/// dynamic` branch (`cached_key_rows == 0`, the nine-operand fused kind):
+/// that branch alone writes the `(max, sum, weighted)` scratch layout
+/// [`render_cached_attention_merge`] reads back. The `two_range_cached_bound`
+/// branch (nine operands, `cached_key_rows != 0`, `render_cached_attention`'s
+/// own two-range `context_chunks <= 1` / `> 1` arms) ALWAYS writes the
+/// complete, correctly-normalized attention output straight to `out[]` in one
+/// pass, regardless of `context_length` -- it has no split/merge protocol at
+/// all. A bare `context_length: u64` signature let three of this function's
+/// four call sites (`emit`, `kernel_dispatch_shape`,
+/// `emit_cached_attention_merge`) answer `true` for the two-range kind once
+/// `cached_key_rows + new_key_rows >= ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE`
+/// (measured: `cached_len=200`/`700`, `NumericPolicy::llama_relaxed()`,
+/// `qwen3_gqa_qk_norm_forward_fixture` -- max_diff 12.6 / 10.4 against the CPU
+/// oracle) -- `emit`/`kernel_dispatch_shape` then swapped the op's bindings to
+/// `split_bindings_with_scratch` (treating `out` as a raw per-split scratch
+/// table it was never written as) and `emit_cached_attention_merge` dispatched
+/// a companion merge kernel that reinterpreted the already-correct, already-
+/// normalized `out[]` bytes as `(max, sum, weighted[head_dim])` triples and
+/// overwrote them with garbage. `single_range_dynamic` here reproduces the
+/// SAME discriminator [`render_cached_attention`] (`:3414`) and `grid_threads`
+/// (`:2477`) already compute correctly, so all four call sites now agree by
+/// construction instead of by convention.
+pub(crate) fn cached_attention_merge_needed(kind: &BoundOpKind, policy: NumericPolicy) -> bool {
+    let BoundOpKind::CachedAttention {
+        operands,
+        cached_key_rows,
+        new_key_rows,
+        ..
+    } = kind
+    else {
+        return false;
+    };
+    let single_range_dynamic = operands.len() == 9 && *cached_key_rows == 0;
+    if !single_range_dynamic {
+        return false;
+    }
+    let context_length = cached_key_rows + new_key_rows;
     splits_for(context_length, policy) > 1
         && context_length >= crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE
 }
@@ -3337,21 +3374,6 @@ pub(crate) fn cached_attention_per_query_head_grid(dynamic_cached_len: bool, con
     dynamic_cached_len && context_length < crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE
 }
 
-/// `cached_key_rows + new_key_rows` for a `CachedAttention` kind, `None` for
-/// every other kind -- the single compiled-capacity input [`splits_for`]
-/// (via [`cached_attention_merge_needed`]) needs, extracted once so `emit`,
-/// `kernel_dispatch_shape`, and `emit_cached_attention_merge` derive it from
-/// the SAME match rather than three copies that could drift.
-fn cached_attention_context_length(kind: &BoundOpKind) -> Option<u64> {
-    match kind {
-        BoundOpKind::CachedAttention {
-            cached_key_rows,
-            new_key_rows,
-            ..
-        } => Some(cached_key_rows + new_key_rows),
-        _ => None,
-    }
-}
 
 /// `BoundOpKind::CachedAttention`'s Metal kernel: online (running max/sum,
 /// register-resident weighted-value accumulator) softmax attention over a
@@ -3575,7 +3597,7 @@ fn render_cached_attention(
     // `query_row` past the real row count and reads/writes out of bounds.
     // Computed once here so the decode and `final_store`'s scratch-vs-direct
     // branch below can never disagree on which case this compiled kernel is.
-    let merge_needed = cached_attention_merge_needed(*cached_key_rows + *new_key_rows, numeric_policy);
+    let merge_needed = cached_attention_merge_needed(&resolved.kind, numeric_policy);
     // ROW 385: below the split-at-scale knee, `query_groups` moves out of
     // this threadgroup's own width (`tiled_gemm_threadgroup_width`'s own
     // `CachedAttention` arm) and into a threadgroup-COUNT factor instead, so
@@ -3816,10 +3838,7 @@ pub(crate) fn emit_cached_attention_merge(
     resolved: &BoundOp,
     numeric_policy: NumericPolicy,
 ) -> Result<Option<Kernel>, EmitError> {
-    let Some(context_length) = cached_attention_context_length(&resolved.kind) else {
-        return Ok(None);
-    };
-    if !cached_attention_merge_needed(context_length, numeric_policy) {
+    if !cached_attention_merge_needed(&resolved.kind, numeric_policy) {
         return Ok(None);
     }
     validate(resolved)?;
