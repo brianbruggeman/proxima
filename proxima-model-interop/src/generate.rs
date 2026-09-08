@@ -734,6 +734,12 @@ pub struct LoadedModel<'file> {
     vocab: Vocab,
     program: Vec<Op>,
     logits_root: NodeId,
+    /// `proxima_tensor::spec::ForwardRoots::hidden` off the dense load path
+    /// (`Self::load`/`Self::load_from_safetensors`, both wrapping
+    /// `mistral_cached_forward_program_with_experts`) -- `None` on the
+    /// qwen35 hybrid path (`crate::qwen35::qwen35_forward_program` returns
+    /// a bare `logits` root with no named hidden-state counterpart yet).
+    hidden_root: Option<NodeId>,
     /// `general.name` off the checkpoint's own metadata ([`Self::load`]/
     /// [`Self::load_with_paired_gate_up_reduce`]/[`Self::load_with_fused_qkv_reduce`]),
     /// `None` for [`Self::load_from_safetensors`] (HF's `config.json` has no
@@ -1004,6 +1010,20 @@ impl<'file> LoadedModel<'file> {
         self.model_name.as_deref()
     }
 
+    /// This checkpoint's pre-`lm_head` hidden-state root
+    /// (`proxima_tensor::spec::ForwardRoots::hidden`), when the load path
+    /// named one -- `None` on the qwen35 hybrid path
+    /// (`crate::qwen35::qwen35_forward_program` carries no named
+    /// hidden-state root yet). A caller composes this with
+    /// [`Self::forward_node_values`] to read that tensor's row out
+    /// directly; proxima names the node, it does not decide how a caller
+    /// pools it (last-token, mean, or otherwise is the caller's own
+    /// policy).
+    #[must_use]
+    pub fn hidden_root(&self) -> Option<NodeId> {
+        self.hidden_root
+    }
+
     /// This checkpoint's own transformer block count
     /// (`{architecture}.block_count`, [`ModelArchitecture::block_count`]).
     #[must_use]
@@ -1160,6 +1180,7 @@ impl<'file> LoadedModel<'file> {
                 vocab,
                 program,
                 logits_root,
+                hidden_root: None,
                 layer_roots,
                 model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
                 checkpoint_bytes: file_bytes.len(),
@@ -1198,7 +1219,7 @@ impl<'file> LoadedModel<'file> {
         // always compiled for a checkpoint that carries no
         // `attn_q_norm.weight` tensor.
         let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
-        let (program, logits_root, cache_roots) = mistral_cached_forward_program_with_experts(
+        let (program, forward_roots, cache_roots) = mistral_cached_forward_program_with_experts(
             architecture.vocab,
             architecture.embedding,
             architecture.feed_forward,
@@ -1212,6 +1233,7 @@ impl<'file> LoadedModel<'file> {
             paired_gate_up_reduce,
             fused_qkv_reduce,
         )?;
+        let logits_root = forward_roots.logits;
         // `mistral_single_range_cached_forward_program`'s own `w_gate`/`w_up`/
         // `wq`/`wk`/`wv` leaves (`build_single_range_program`) do not know
         // about `paired_gate_up_reduce`/`fused_qkv_reduce` yet --
@@ -1262,6 +1284,7 @@ impl<'file> LoadedModel<'file> {
             vocab,
             program,
             logits_root,
+            hidden_root: Some(forward_roots.hidden),
             layer_roots: cache_roots
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
@@ -1314,7 +1337,7 @@ impl<'file> LoadedModel<'file> {
         // `attn_q_norm.weight`, and no HF/safetensors checkpoint this crate
         // binds today needs QK-norm -- see [`Self::load`]'s own `qk_norm` for
         // the GGUF path that does.
-        let (program, logits_root, cache_roots) = mistral_cached_forward_program_with_experts(
+        let (program, forward_roots, cache_roots) = mistral_cached_forward_program_with_experts(
             architecture.vocab,
             architecture.embedding,
             architecture.feed_forward,
@@ -1328,6 +1351,7 @@ impl<'file> LoadedModel<'file> {
             false,
             false,
         )?;
+        let logits_root = forward_roots.logits;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let single_range = build_single_range_program(&architecture, false)?;
         Ok(Self {
@@ -1349,6 +1373,7 @@ impl<'file> LoadedModel<'file> {
             vocab,
             program,
             logits_root,
+            hidden_root: Some(forward_roots.hidden),
             layer_roots: cache_roots
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
@@ -6039,6 +6064,7 @@ mod memory_fit_gate_tests {
             vocab: tiny_vocab(),
             program: Vec::new(),
             logits_root: proxima_tensor::op::NodeId(0),
+            hidden_root: None,
             layer_roots: Vec::new(),
             qwen35_ssm_shape: None,
             qwen35_attn_head_dim: None,
