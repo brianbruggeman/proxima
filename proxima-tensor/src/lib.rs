@@ -193,6 +193,8 @@ pub mod convert;
 #[cfg(feature = "std")]
 pub mod cpu;
 pub mod dtype;
+#[cfg(feature = "std")]
+pub mod similarity;
 // `error::TensorError` names `op::NodeId` on nearly every variant, so it is
 // pulled into the same gate as `op` even though most of its own variants
 // (post `config`-scoping above) carry no alloc-only data themselves — the
@@ -254,6 +256,8 @@ pub use cpu::{
 pub use dtype::DType;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use error::TensorError;
+#[cfg(feature = "std")]
+pub use similarity::cosine_top_k;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use live::annotate;
 #[cfg(any(feature = "std", feature = "alloc"))]
