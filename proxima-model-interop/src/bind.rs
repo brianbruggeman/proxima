@@ -3033,10 +3033,16 @@ mod tests {
         {
             let block_max = block.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
             // `quantize_block`'s own formula: `d = amax / 127`, each level
-            // rounds to the nearest multiple of `d`, so the worst-case
-            // per-element rounding error is half that step; `+ f32::EPSILON`
-            // covers the block scale's own `f16` storage rounding.
-            let bound = (block_max / 127.0) / 2.0 + f32::EPSILON;
+            // rounds to the nearest multiple of `d`, so the base per-element
+            // rounding error is half that step. The block scale itself is
+            // stored as `f16` (half ULP relative error `2^-11`), and that
+            // error is scaled by the largest representable level (127), so
+            // the two terms combine as `d * (0.5 + 127 * 2^-11)`, not `d/2`
+            // alone -- omitting the second term is what made this bound too
+            // tight to hold for every block.
+            let delta = block_max / 127.0;
+            let scale_storage_error = 127.0 * delta * 2f32.powi(-11);
+            let bound = delta * 0.5 + scale_storage_error + f32::EPSILON;
             let start = block_index * q8_0::QK8_0;
             for offset in 0..q8_0::QK8_0 {
                 let difference =
