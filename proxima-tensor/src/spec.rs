@@ -6569,7 +6569,7 @@ pub fn append_qwen35_ssm_mixer(
     one: NodeId,
     inv_sqrt_key_dim: NodeId,
     inv_head_v_dim: NodeId,
-    attn_norm_weight: NodeId,
+    attn_norm_weight: Option<NodeId>,
     wqkv: NodeId,
     wqkv_gate: NodeId,
     conv_weight: NodeId,
@@ -6592,7 +6592,10 @@ pub fn append_qwen35_ssm_mixer(
     let num_v_heads = kv_heads * group;
     let head_v_dim = value_dim / num_v_heads;
 
-    let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
+    let normed = match attn_norm_weight {
+        Some(weight) => rmsnorm(program, x, weight, inv_dim, eps)?,
+        None => x,
+    };
 
     let qkv_product = elementwise(
         program,
@@ -8654,7 +8657,7 @@ pub fn qwen35_forward_program(
                 one,
                 inv_sqrt_key_dim,
                 inv_head_v_dim,
-                attn_norm_weight,
+                Some(attn_norm_weight),
                 wqkv,
                 wqkv_gate,
                 conv_weight,
@@ -8951,7 +8954,7 @@ mod tests {
             one,
             inv_sqrt_key_dim,
             inv_head_v_dim,
-            attn_norm_weight,
+            Some(attn_norm_weight),
             wqkv,
             wqkv_gate,
             conv_weight,
@@ -15967,7 +15970,7 @@ value = 1.0
             one,
             inv_sqrt_key_dim,
             inv_head_v_dim,
-            attn_norm_weight,
+            Some(attn_norm_weight),
             wqkv,
             wqkv_gate,
             conv_weight,
