@@ -1227,7 +1227,7 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
         // allocation on this call's own path.
         if let Some(reduce_nodes) = arena.epilogue_fuse_fire_at.get(&position) {
             for reduce_node in reduce_nodes.clone() {
-                let Some(&(consumer_index, _, kind, hoist_axis)) =
+                let Some(&(consumer_index, _, kind, hoist_axis, epilogue_slots)) =
                     arena.epilogue_fuse_plan.get(&reduce_node)
                 else {
                     continue;
@@ -1242,10 +1242,9 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
                     .unwrap_or(&[]);
                 let fuse_started = std::time::Instant::now();
                 apply_epilogue_fused_monomorphic(
-                    kind,
+                    EpilogueFuseKernel { kind, hoist_axis, slots: epilogue_slots },
                     &arena.resolved[consumer_index],
                     reduce_node,
-                    hoist_axis,
                     reduce_values,
                     &arena.buffers,
                     &mut output,
@@ -1275,6 +1274,12 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
                     &arena.resolved[cluster.tail_index],
                     cluster.x_node,
                     cluster.row_axis,
+                    LayerNormTailSlots {
+                        reciprocal_n: cluster.tail_reciprocal_n_slot,
+                        epsilon: cluster.tail_epsilon_slot,
+                        gamma: cluster.tail_gamma_slot,
+                        beta: cluster.tail_beta_slot,
+                    },
                     &arena.buffers,
                     &mut output,
                 );
@@ -1793,15 +1798,85 @@ fn matches_binary_or_eliminated(
     }
 }
 
-/// `Maximum(reduce_plus_bias, Operand(2))` — the `max(reduce + bias, 0)`
-/// shape every `Clip`-carrying kind opens with, structural over which arg
-/// feeds `Maximum` rather than a fixed step index.
-fn matches_clip_head(body: &ComposedBody, arg: StepArg) -> bool {
-    matches!(
-        binary_edge(body, arg),
-        Some((ScalarOp::Maximum, reduce_plus_bias, StepArg::Operand(2)))
-            if matches_binary_or_eliminated(body, reduce_plus_bias, ScalarOp::Add, 0, 1)
-    )
+/// `Maximum(reduce + bias, zero)` — the `max(reduce + bias, 0)` shape every
+/// `Clip`-carrying kind opens with, structural over which arg feeds
+/// `Maximum` AND over which operand slot each of `bias`/`zero` landed at.
+///
+/// `push_canonical_step`'s own commutative canonicalization
+/// (`bind.rs:1882-1932`) sorts a 2-operand `Add`/`Maximum` pair by
+/// `step_arg_sort_key`, and `compose_body`'s leaf presort
+/// (`bind.rs:1959-1961`) sorts the SOURCE `(NodeId, IndexMap)` pairs by
+/// `NodeId` before that -- together these guarantee canonical STEP shape
+/// but never promise `bias` lands at operand slot 1 or `zero` at slot 2 (the
+/// literal indices this function required before ROW NNN). The only anchor
+/// this function can trust is `reduce_slot`, independently established by
+/// [`is_post_reduce_epilogue`] before `match_epilogue` is ever called --
+/// every other operand's SLOT is discovered here, never assumed. Returns
+/// `(bias_slot, zero_slot)`.
+fn matches_clip_head(body: &ComposedBody, arg: StepArg, reduce_slot: usize) -> Option<(usize, usize)> {
+    let (op, left, right) = binary_edge(body, arg)?;
+    if op != ScalarOp::Maximum {
+        return None;
+    }
+    let (head, zero_slot) = split_step_operand(left, right)?;
+    let bias_slot = resolve_other_operand(body, head, ScalarOp::Add, reduce_slot)?;
+    Some((bias_slot, zero_slot))
+}
+
+/// Splits a canonical binary edge's two args into "the recursed side" (a
+/// [`StepArg::Step`]) and "the leaf operand slot" (a [`StepArg::Operand`]),
+/// regardless of which side `push_canonical_step`'s sort put first --
+/// tries both orders rather than assuming Step-before-Operand, so this
+/// stays correct even if the canonicalization rule ever changes.
+fn split_step_operand(left: StepArg, right: StepArg) -> Option<(StepArg, usize)> {
+    match (left, right) {
+        (step @ StepArg::Step(_), StepArg::Operand(operand)) => Some((step, operand as usize)),
+        (StepArg::Operand(operand), step @ StepArg::Step(_)) => Some((step, operand as usize)),
+        _ => None,
+    }
+}
+
+/// `arg` is `expected_op(known, other)` in either operand order, OR (when
+/// `push_canonical_step` eliminated the whole step because `known`'s
+/// sibling was `expected_op`'s own identity element) `arg` IS `known`
+/// directly -- the same "authored or eliminated" duality
+/// [`matches_binary_or_eliminated`] documents, generalized to discover
+/// `other`'s slot instead of checking it against a literal. Returns `None`
+/// (never a guess) when the eliminated survivor is `known` itself: the
+/// role's own operand no longer exists in the composed body, so a caller
+/// depending on reading it (every current kernel arm does) cannot safely
+/// fuse this shape -- structurally unreachable under
+/// `NumericPolicy::bit_exact` today, since `identity_element_signed_zero_nan`
+/// never fires there, but handled as a rejection rather than an assumption.
+fn resolve_other_operand(
+    body: &ComposedBody,
+    arg: StepArg,
+    expected_op: ScalarOp,
+    known_slot: usize,
+) -> Option<usize> {
+    let known = StepArg::Operand(u16::try_from(known_slot).ok()?);
+    if arg == known {
+        return None;
+    }
+    let (op, left, right) = binary_edge(body, arg)?;
+    if op != expected_op {
+        return None;
+    }
+    if left == known {
+        operand_index(right)
+    } else if right == known {
+        operand_index(left)
+    } else {
+        None
+    }
+}
+
+/// `arg` as a plain leaf operand slot, or `None` when it is a [`StepArg::Step`].
+fn operand_index(arg: StepArg) -> Option<usize> {
+    match arg {
+        StepArg::Operand(index) => Some(index as usize),
+        StepArg::Step(_) => None,
+    }
 }
 
 /// `((relu_result - mean) / sqrt(var + eps)) * gamma + beta` — the norm tail
@@ -1856,45 +1931,136 @@ fn matches_norm_tail(
 /// (`push_canonical_step`, `bind.rs`) in the same bind call; same signature
 /// as the `detect_epilogue_kind` this replaces, so `epilogue_fuse_plan`'s
 /// call sites are unchanged.
-fn match_epilogue(body: &ComposedBody) -> Option<EpilogueKind> {
+/// Recognizes one of the four [`EpilogueKind`]s and, for `Clip`/`Norm` (the
+/// two kinds this crate currently fuses through a landed law test),
+/// discovers the `(bias_slot, zero_slot)` `Clip`'s own kernel arm needs
+/// rather than assuming a literal position -- `zero_slot` is `None` for
+/// `Norm` (no relu clamp). `ClipNorm`/`LayerNorm`'s tail operands
+/// (`mean`/`variance`/`epsilon`/`gamma`/`beta`) still assume the
+/// pre-canonicalization literal slots this row did not touch -- see ROW
+/// NNN's residual note; neither kind has a landed rewrite-law test today.
+/// Discovered non-reduce operand slots a kernel arm needs to read, keyed by
+/// which [`EpilogueKind`] found them -- `ClipNorm` carries none today (ROW
+/// NNN's residual: its kernel arm still reads the pre-canonicalization
+/// literal slots `apply_epilogue_fused_monomorphic` always used).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EpilogueSlots {
+    Clip {
+        bias: usize,
+        zero: usize,
+    },
+    LayerNorm {
+        primary: usize,
+        /// `None` when `reduce * (1/N)` folded away because `1/N == 1.0`
+        /// exactly (`hidden == 1`) -- `eliminate_identity_multiply` always
+        /// fires for this (bit-exact under every `NumericPolicy`, unlike
+        /// the `Add`/`Maximum` identity folds), so the kernel substitutes
+        /// the literal `1.0` rather than reading a slot that does not exist.
+        reciprocal_n: Option<usize>,
+        epsilon: usize,
+        gamma: usize,
+        beta: usize,
+    },
+    Other,
+}
+
+fn match_epilogue(
+    body: &ComposedBody,
+    reduce_slot: usize,
+    primary_slot: Option<usize>,
+) -> Option<(EpilogueKind, EpilogueSlots)> {
     let last_index = u16::try_from(body.steps.len().checked_sub(1)?).ok()?;
     let result = StepArg::Step(last_index);
 
-    if matches_clip_head(body, result) {
-        return Some(EpilogueKind::Clip);
+    if let Some((bias, zero)) = matches_clip_head(body, result, reduce_slot) {
+        return Some((EpilogueKind::Clip, EpilogueSlots::Clip { bias, zero }));
     }
 
     if let Some(reduce_head) = matches_norm_tail(body, result, 3, 4, 5, 6, 7)
-        && matches_clip_head(body, reduce_head)
+        && matches_clip_head(body, reduce_head, reduce_slot).is_some()
     {
-        return Some(EpilogueKind::ClipNorm);
+        return Some((EpilogueKind::ClipNorm, EpilogueSlots::Other));
     }
 
     if let Some(reduce_head) = matches_norm_tail(body, result, 2, 3, 4, 5, 6)
-        && matches_binary_or_eliminated(body, reduce_head, ScalarOp::Add, 0, 1)
+        && resolve_other_operand(body, reduce_head, ScalarOp::Add, reduce_slot).is_some()
     {
-        return Some(EpilogueKind::Norm);
+        return Some((EpilogueKind::Norm, EpilogueSlots::Other));
     }
 
-    let (ScalarOp::Add, scaled, StepArg::Operand(5)) = binary_edge(body, result)? else {
+    // `LayerNorm`: `((primary) / sqrt(reduce * reciprocal_n + epsilon)) *
+    // gamma + beta`. `primary_slot` is already discovered by
+    // `is_post_reduce_epilogue_broadcast_reduce` before `match_epilogue` is
+    // ever called (the raw `BoundOp` operand array, unaffected by
+    // `compose_body`'s commutative reordering); every other slot here is
+    // discovered against that anchor and against `reduce_slot`, never
+    // assumed literal -- `compose_body`'s leaf presort places `gamma`,
+    // `epsilon`, `reduce`/`reciprocal_n` at whatever slot their relative
+    // `NodeId` earns them, whichever kind's chain they belong to.
+    let primary_slot = primary_slot?;
+    let (op, left, right) = binary_edge(body, result)?;
+    if op != ScalarOp::Add {
         return None;
-    };
-    let (ScalarOp::Multiply, normalized, StepArg::Operand(4)) = binary_edge(body, scaled)? else {
-        return None;
-    };
-    let (ScalarOp::Divide, StepArg::Operand(0), std) = binary_edge(body, normalized)? else {
-        return None;
-    };
-    let (ScalarOp::SquareRoot, var_eps) = unary_edge(body, std)? else {
-        return None;
-    };
-    let (ScalarOp::Add, var_arg, StepArg::Operand(3)) = binary_edge(body, var_eps)? else {
-        return None;
-    };
-    if matches_binary_or_eliminated(body, var_arg, ScalarOp::Multiply, 1, 2) {
-        return Some(EpilogueKind::LayerNorm);
     }
-    None
+    let (scaled, beta) = split_step_operand(left, right)?;
+
+    let (op, left, right) = binary_edge(body, scaled)?;
+    if op != ScalarOp::Multiply {
+        return None;
+    }
+    let (normalized, gamma) = split_step_operand(left, right)?;
+
+    let (op, left, right) = binary_edge(body, normalized)?;
+    if op != ScalarOp::Divide {
+        return None;
+    }
+    // `Divide` is never canonical-reordered (not in `ScalarOp::is_associative`),
+    // so its authored (numerator, denominator) order survives intact.
+    if left != StepArg::Operand(u16::try_from(primary_slot).ok()?) {
+        return None;
+    }
+    let std = right;
+
+    let (op, var_eps) = unary_edge(body, std)?;
+    if op != ScalarOp::SquareRoot {
+        return None;
+    }
+
+    let (op, left, right) = binary_edge(body, var_eps)?;
+    if op != ScalarOp::Add {
+        return None;
+    }
+    // `var_arg` (the `reduce * reciprocal_n` sub-expression) is a `Step` in
+    // the ordinary case, but a bare `Operand(reduce_slot)` when `hidden==1`
+    // makes `reciprocal_n == 1.0` exactly and `push_canonical_step`'s
+    // ALWAYS-ON `Multiply`-by-one fold (`identity_element_bitexact`, unlike
+    // the policy-gated `Add`/`Maximum` folds) eliminates the multiply --
+    // `split_step_operand` cannot disambiguate that case (both sides are
+    // then plain `Operand`s), so the reduce anchor is checked FIRST.
+    let reduce_operand = StepArg::Operand(u16::try_from(reduce_slot).ok()?);
+    let (var_arg, epsilon) = if left == reduce_operand || matches!(left, StepArg::Step(_)) {
+        (left, operand_index(right)?)
+    } else if right == reduce_operand || matches!(right, StepArg::Step(_)) {
+        (right, operand_index(left)?)
+    } else {
+        return None;
+    };
+
+    let reciprocal_n = if var_arg == reduce_operand {
+        None
+    } else {
+        Some(resolve_other_operand(body, var_arg, ScalarOp::Multiply, reduce_slot)?)
+    };
+    Some((
+        EpilogueKind::LayerNorm,
+        EpilogueSlots::LayerNorm {
+            primary: primary_slot,
+            reciprocal_n,
+            epsilon,
+            gamma,
+            beta,
+        },
+    ))
 }
 
 /// Is `layout` the reduce operand's own contiguous row-major addressing of
@@ -1994,7 +2160,7 @@ fn epilogue_fuse_plan(
     node_count: usize,
     effective_outputs: &[NodeId],
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
-) -> BTreeMap<NodeId, (usize, usize, EpilogueKind, Option<usize>)> {
+) -> SingleHopEpiloguePlan {
     if !EPILOGUE_FUSE_ENABLED.load(EpilogueFuseOrdering::Relaxed) {
         return BTreeMap::new();
     }
@@ -2038,7 +2204,7 @@ fn epilogue_fuse_plan(
         } else {
             continue;
         };
-        let Some(kind) = match_epilogue(body) else {
+        let Some((kind, epilogue_slots)) = match_epilogue(body, reduce_slot, primary_slot) else {
             continue;
         };
         // the monomorphized kernels below encode a FIXED operand wiring per
@@ -2046,15 +2212,17 @@ fn epilogue_fuse_plan(
         // that structurally matches admission but wires operands into
         // different slots is real, just not a shape this row builds a
         // kernel for, so it falls back to unfused rather than risk
-        // misreading the wrong slot.
+        // misreading the wrong slot. `Clip`/`Norm`/`LayerNorm` verify this
+        // dynamically inside `match_epilogue` itself (`reduce_slot`/
+        // `primary_slot` are the anchors `matches_clip_head`/
+        // `resolve_other_operand`/the `Divide` check matched against), so
+        // this check is a tautology for them; `ClipNorm` still assumes the
+        // pre-canonicalization literal slot (ROW NNN's residual).
         let expected_reduce_slot = match kind {
-            EpilogueKind::Clip | EpilogueKind::ClipNorm | EpilogueKind::Norm => 0,
-            EpilogueKind::LayerNorm => 1,
+            EpilogueKind::Clip | EpilogueKind::Norm | EpilogueKind::LayerNorm => reduce_slot,
+            EpilogueKind::ClipNorm => 0,
         };
         if reduce_slot != expected_reduce_slot {
-            continue;
-        }
-        if kind == EpilogueKind::LayerNorm && primary_slot != Some(0) {
             continue;
         }
         let reduce_node = operands[reduce_slot].0;
@@ -2105,15 +2273,22 @@ fn epilogue_fuse_plan(
             let Some(row_axis) = computed.extents.len().checked_sub(2) else {
                 continue;
             };
-            let Some(primary) = primary_slot.and_then(|slot| operands.get(slot)) else {
+            let EpilogueSlots::LayerNorm {
+                primary: primary_slot_index,
+                reciprocal_n: reciprocal_n_slot,
+                epsilon: epsilon_slot,
+                gamma: gamma_slot,
+                beta: beta_slot,
+            } = epilogue_slots
+            else {
                 continue;
             };
-            let Some((reciprocal_n, epsilon, gamma, beta)) = (match operands.get(2..6) {
-                Some([reciprocal_n, epsilon, gamma, beta]) => {
-                    Some((reciprocal_n, epsilon, gamma, beta))
-                }
-                _ => None,
-            }) else {
+            let (Some(primary), Some(epsilon), Some(gamma), Some(beta)) = (
+                operands.get(primary_slot_index),
+                operands.get(epsilon_slot),
+                operands.get(gamma_slot),
+                operands.get(beta_slot),
+            ) else {
                 continue;
             };
             if !epilogue_reduce_operand_matches_leading_axes(
@@ -2125,8 +2300,16 @@ fn epilogue_fuse_plan(
             if !epilogue_is_contiguous_row_major(&primary.1, &computed.extents) {
                 continue;
             }
-            let scalar_slots_ok = epilogue_is_scalar_broadcast(&reciprocal_n.1)
-                && epilogue_is_scalar_broadcast(&epsilon.1);
+            // `reciprocal_n_slot` is `None` at `hidden == 1` (the multiply
+            // folded away, `EpilogueSlots::LayerNorm`'s own doc) -- nothing
+            // to validate structurally in that case since the kernel
+            // substitutes the literal `1.0` rather than reading a slot.
+            let reciprocal_n_ok = reciprocal_n_slot.is_none_or(|slot| {
+                operands
+                    .get(slot)
+                    .is_some_and(|(_, layout, _)| epilogue_is_scalar_broadcast(layout))
+            });
+            let scalar_slots_ok = reciprocal_n_ok && epilogue_is_scalar_broadcast(&epsilon.1);
             let affine_slots_ok = epilogue_broadcast_operand_matches_last_axis(&gamma.1)
                 && epilogue_broadcast_operand_matches_last_axis(&beta.1);
             if !scalar_slots_ok || !affine_slots_ok {
@@ -2171,7 +2354,7 @@ fn epilogue_fuse_plan(
             consumers = consumer_counts.get(&reduce_node).copied().unwrap_or(0),
             "epilogue fuse admitted -- reduce node folded into consumer's epilogue"
         );
-        plan.insert(reduce_node, (index, fire_position, kind, hoist_axis));
+        plan.insert(reduce_node, (index, fire_position, kind, hoist_axis, epilogue_slots));
     }
     plan
 }
@@ -2290,15 +2473,25 @@ pub fn epilogue_fuse_reset() {
 /// `coordinate` is a fixed `[u64; MAX_INLINE_RANK]` array, and every hoisted
 /// scalar is a plain `f32` local — closing ROW 183's own named residual (that
 /// row's interpreter allocated 3 small `Vec`s per fusion hit).
-fn apply_epilogue_fused_monomorphic<B: Deref<Target = [f32]>>(
+/// The three fields [`epilogue_fuse_plan`] discovers together for one
+/// admitted node -- bundled so [`apply_epilogue_fused_monomorphic`] stays
+/// under clippy's argument-count gate rather than taking each separately.
+#[derive(Debug, Clone, Copy)]
+struct EpilogueFuseKernel {
     kind: EpilogueKind,
+    hoist_axis: Option<usize>,
+    slots: EpilogueSlots,
+}
+
+fn apply_epilogue_fused_monomorphic<B: Deref<Target = [f32]>>(
+    kernel: EpilogueFuseKernel,
     consumer: &BoundOp,
     reduce_node: NodeId,
-    hoist_axis: Option<usize>,
     reduce_values: &[f32],
     buffers: &[Option<B>],
     output: &mut [f32],
 ) {
+    let EpilogueFuseKernel { kind, hoist_axis, slots: epilogue_slots } = kernel;
     let BoundOpKind::Elementwise { operands, .. } = &consumer.kind else {
         return;
     };
@@ -2358,8 +2551,17 @@ fn apply_epilogue_fused_monomorphic<B: Deref<Target = [f32]>>(
         for column in 0..at {
             match kind {
                 EpilogueKind::Clip => {
-                    let bias = read(1, column);
-                    let zero = read(2, 0);
+                    // `epilogue_fuse_plan` only ever inserts a `Clip` plan
+                    // entry alongside the `EpilogueSlots::Clip` variant
+                    // `match_epilogue` discovered for it (`cpu.rs`'s
+                    // `plan.insert` call), so `(1, 2)` is a never-taken
+                    // defensive fallback, not a real default.
+                    let (bias_slot, zero_slot) = match epilogue_slots {
+                        EpilogueSlots::Clip { bias, zero } => (bias, zero),
+                        EpilogueSlots::LayerNorm { .. } | EpilogueSlots::Other => (1, 2),
+                    };
+                    let bias = read(bias_slot, column);
+                    let zero = read(zero_slot, 0);
                     for _ in 0..after {
                         let value = reduce_values[reduce_index];
                         reduce_index += 1;
@@ -2405,6 +2607,24 @@ fn apply_epilogue_fused_monomorphic<B: Deref<Target = [f32]>>(
                     }
                 }
                 EpilogueKind::LayerNorm => {
+                    // `epilogue_fuse_plan` only ever inserts a `LayerNorm`
+                    // plan entry alongside the `EpilogueSlots::LayerNorm`
+                    // `match_epilogue` discovered for it; the fallback here
+                    // is a never-taken defensive default, matching `Clip`'s
+                    // own `unwrap_or` shape above.
+                    let (primary_slot, reciprocal_n_slot, epsilon_slot, gamma_slot, beta_slot) =
+                        match epilogue_slots {
+                            EpilogueSlots::LayerNorm {
+                                primary,
+                                reciprocal_n,
+                                epsilon,
+                                gamma,
+                                beta,
+                            } => (primary, reciprocal_n, epsilon, gamma, beta),
+                            EpilogueSlots::Clip { .. } | EpilogueSlots::Other => {
+                                (0, Some(2), 3, 4, 5)
+                            }
+                        };
                     // `reduce_values` here holds the variance-sum reduce's
                     // OWN materialized buffer -- shape `(before, at)`
                     // (hidden already dropped by the reduce), addressed
@@ -2413,10 +2633,15 @@ fn apply_epilogue_fused_monomorphic<B: Deref<Target = [f32]>>(
                     // elements; this reduce needs exactly one read per
                     // `(outer, column)` row, reused across every `after`
                     // position in that row).
-                    let primary_node = operands[0].0;
+                    let primary_node = operands[primary_slot].0;
                     let primary = buffers[primary_node.0 as usize].as_deref().unwrap_or(&[]);
-                    let reciprocal_n = read(2, 0);
-                    let epsilon = read(3, 0);
+                    // `reciprocal_n_slot` is `None` only when `hidden == 1`
+                    // folded `reduce * (1/N)` to the bare reduce operand
+                    // (`1/N == 1.0` exactly) -- `EpilogueSlots::LayerNorm`'s
+                    // own doc. The literal `1.0` is the correct substitute,
+                    // not a guess: it is the exact value that eliminated.
+                    let reciprocal_n = reciprocal_n_slot.map_or(1.0, |slot| read(slot, 0));
+                    let epsilon = read(epsilon_slot, 0);
                     let row_index = (outer as usize)
                         .saturating_mul(at as usize)
                         .saturating_add(column as usize);
@@ -2425,8 +2650,8 @@ fn apply_epilogue_fused_monomorphic<B: Deref<Target = [f32]>>(
                     let denominator = (variance + epsilon).sqrt();
                     for inner in 0..after {
                         let centered = primary.get(out_index).copied().unwrap_or(0.0);
-                        let gamma = read_inner(4, inner);
-                        let beta = read_inner(5, inner);
+                        let gamma = read_inner(gamma_slot, inner);
+                        let beta = read_inner(beta_slot, inner);
                         let normalized = centered / denominator;
                         output[out_index] = normalized * gamma + beta;
                         out_index += 1;
@@ -2544,6 +2769,14 @@ struct LayerNormClusterPlan {
     x_node: NodeId,
     row_axis: usize,
     fire_position: usize,
+    /// The tail's own `(reciprocal_n, epsilon, gamma, beta)` operand slots,
+    /// discovered by `match_epilogue`'s `EpilogueSlots::LayerNorm` rather
+    /// than assumed literal -- `compose_body`'s commutative canonicalization
+    /// does not guarantee these land at any fixed position (ROW NNN).
+    tail_reciprocal_n_slot: usize,
+    tail_epsilon_slot: usize,
+    tail_gamma_slot: usize,
+    tail_beta_slot: usize,
 }
 
 /// `docs/discipline.md` ROW 204: widens ROW 190/191's single-hop `LayerNorm`
@@ -2561,7 +2794,7 @@ struct LayerNormClusterPlan {
 fn layer_norm_cluster_plan(
     resolved: &[BoundOp],
     effective_outputs: &[NodeId],
-    single_hop: &BTreeMap<NodeId, (usize, usize, EpilogueKind, Option<usize>)>,
+    single_hop: &SingleHopEpiloguePlan,
 ) -> BTreeMap<NodeId, LayerNormClusterPlan> {
     if single_hop.is_empty() {
         return BTreeMap::new();
@@ -2580,7 +2813,7 @@ fn layer_norm_cluster_plan(
     let sole_consumer = |node: NodeId| consumer_counts.get(&node).copied().unwrap_or(0) == 1;
 
     let mut clusters = BTreeMap::new();
-    for (&r2_node, &(tail_index, _fire_position, kind, hoist_axis)) in single_hop {
+    for (&r2_node, &(tail_index, _fire_position, kind, hoist_axis, epilogue_slots)) in single_hop {
         if kind != EpilogueKind::LayerNorm {
             continue;
         }
@@ -2604,7 +2837,23 @@ fn layer_norm_cluster_plan(
         else {
             continue;
         };
-        let Some((e2_node, ..)) = tail_operands.first() else {
+        // `e2` (`centered = x - mean`) is the tail's own PRIMARY operand --
+        // `epilogue_fuse_plan`'s `match_epilogue` already discovered its
+        // slot dynamically (`EpilogueSlots::LayerNorm::primary`), since
+        // `compose_body`'s commutative canonicalization does not guarantee
+        // it lands at slot 0 (`tail_operands.first()`'s own prior
+        // assumption -- ROW NNN's fix).
+        let EpilogueSlots::LayerNorm {
+            primary,
+            reciprocal_n: tail_reciprocal_n_slot,
+            epsilon: tail_epsilon_slot,
+            gamma: tail_gamma_slot,
+            beta: tail_beta_slot,
+        } = epilogue_slots
+        else {
+            continue;
+        };
+        let Some((e2_node, ..)) = tail_operands.get(primary) else {
             continue;
         };
         let e2_node = *e2_node;
@@ -2681,14 +2930,29 @@ fn layer_norm_cluster_plan(
         if !is_centered_body {
             continue;
         }
-        let [
-            (x_node, x_layout, x_gather),
-            (r1_node, r1_layout_in_e2, r1_gather),
-            (reciprocal_n_node, reciprocal_n_layout, reciprocal_n_gather),
-        ] = e2_operands.as_slice()
-        else {
+        let [(x_node, x_layout, x_gather), first, second] = e2_operands.as_slice() else {
             continue;
         };
+        // `mean = R1 * reciprocal_n` is a `Multiply` -- `compose_body`'s own
+        // commutative canonicalization (`bind.rs`'s leaf presort) sorts
+        // this pair's SOURCE `(NodeId, IndexMap)` by `NodeId` before slot
+        // assignment, and `reciprocal_n` (a `Constant` authored early in
+        // program order) routinely carries a SMALLER `NodeId` than `R1` (a
+        // `Reduce` whose own operand chain is authored after it) -- e.g.
+        // this row's own `layer_norm_cluster_program` fixture assigns
+        // `reciprocal_n=NodeId(3)`, `r1=NodeId(5)`, landing `reciprocal_n`
+        // at operand slot 1 and `r1` at slot 2, the REVERSE of what a fixed
+        // `[r1, reciprocal_n]` positional destructure assumed. Discovered
+        // structurally here instead (`r1` is the leading-axes-broadcast
+        // reduce operand, `reciprocal_n` is the true scalar), never
+        // assumed by slot -- `continue` when neither or both operands are
+        // scalar rather than guessing which is which.
+        let ((r1_node, r1_layout_in_e2, r1_gather), (reciprocal_n_node, reciprocal_n_layout, reciprocal_n_gather)) =
+            match (epilogue_is_scalar_broadcast(&first.1), epilogue_is_scalar_broadcast(&second.1)) {
+                (false, true) => (first, second),
+                (true, false) => (second, first),
+                _ => continue,
+            };
         if x_gather.is_some() || r1_gather.is_some() || reciprocal_n_gather.is_some() {
             continue;
         }
@@ -2715,7 +2979,16 @@ fn layer_norm_cluster_plan(
         let Some(&reciprocal_n_index) = node_position.get(reciprocal_n_node) else {
             continue;
         };
-        let Some(&tail_reciprocal_n_index) = node_position.get(&tail_operands[2].0) else {
+        // `None` means `hidden == 1` folded the tail's own `reduce *
+        // reciprocal_n` to the bare reduce operand (`EpilogueSlots::LayerNorm`'s
+        // own doc) -- the documented confluence gap between this law's
+        // structural admission and law 3's identity elimination
+        // (`rewrite_law_equivalence.rs`'s own `law2` doc), not a shape this
+        // cluster fusion fires for.
+        let Some(tail_reciprocal_n_slot) = tail_reciprocal_n_slot else {
+            continue;
+        };
+        let Some(&tail_reciprocal_n_index) = node_position.get(&tail_operands[tail_reciprocal_n_slot].0) else {
             continue;
         };
         let (
@@ -2783,10 +3056,10 @@ fn layer_norm_cluster_plan(
         let fire_position = [
             ready_position(*x_node),
             ready_position(*reciprocal_n_node),
-            ready_position(tail_operands[2].0),
-            ready_position(tail_operands[3].0),
-            ready_position(tail_operands[4].0),
-            ready_position(tail_operands[5].0),
+            ready_position(tail_operands[tail_reciprocal_n_slot].0),
+            ready_position(tail_operands[tail_epsilon_slot].0),
+            ready_position(tail_operands[tail_gamma_slot].0),
+            ready_position(tail_operands[tail_beta_slot].0),
         ]
         .into_iter()
         .max()
@@ -2824,6 +3097,10 @@ fn layer_norm_cluster_plan(
                 x_node: *x_node,
                 row_axis,
                 fire_position,
+                tail_reciprocal_n_slot,
+                tail_epsilon_slot,
+                tail_gamma_slot,
+                tail_beta_slot,
             },
         );
     }
@@ -2913,7 +3190,12 @@ struct RewriteFire {
 /// `resolved` index, fire position, kind, hoist axis). Named here only to
 /// keep [`run_rewrite_worklist`]'s signature legible -- the shape itself is
 /// [`epilogue_fuse_plan`]'s, unchanged.
-type SingleHopEpiloguePlan = BTreeMap<NodeId, (usize, usize, EpilogueKind, Option<usize>)>;
+/// `(consumer_index, fire_position, kind, hoist_axis, epilogue_slots)` --
+/// `epilogue_slots` is [`match_epilogue`]'s own discovered operand-role
+/// mapping, against the actual composed-body operand numbering rather than
+/// a pre-canonicalization literal.
+type SingleHopEpiloguePlan =
+    BTreeMap<NodeId, (usize, usize, EpilogueKind, Option<usize>, EpilogueSlots)>;
 
 fn run_rewrite_worklist(
     resolved: &[BoundOp],
@@ -3017,10 +3299,23 @@ pub fn rewrite_engine_reset() {
 /// own doc bans), then writes the normalize+affine step reusing
 /// [`EpilogueKind::LayerNorm`]'s own arithmetic. Writes ONLY `tail`'s own
 /// buffer -- `x` is read, never mutated.
+/// The tail's own `(reciprocal_n, epsilon, gamma, beta)` operand slots
+/// [`layer_norm_cluster_plan`] discovered -- bundled so
+/// [`apply_layer_norm_cluster_fused`] stays under clippy's argument-count
+/// gate rather than taking each separately.
+#[derive(Debug, Clone, Copy)]
+struct LayerNormTailSlots {
+    reciprocal_n: usize,
+    epsilon: usize,
+    gamma: usize,
+    beta: usize,
+}
+
 fn apply_layer_norm_cluster_fused<B: Deref<Target = [f32]>>(
     tail: &BoundOp,
     x_node: NodeId,
     row_axis: usize,
+    tail_slots: LayerNormTailSlots,
     buffers: &[Option<B>],
     output: &mut [f32],
 ) {
@@ -3056,8 +3351,8 @@ fn apply_layer_norm_cluster_fused<B: Deref<Target = [f32]>>(
     };
     let read_scalar = |slot: usize| -> f32 { read_inner(slot, 0) };
 
-    let reciprocal_n = read_scalar(2);
-    let epsilon = read_scalar(3);
+    let reciprocal_n = read_scalar(tail_slots.reciprocal_n);
+    let epsilon = read_scalar(tail_slots.epsilon);
     let hidden_usize = hidden as usize;
     let mut row_index = 0usize;
     let mut out_index = 0usize;
@@ -3070,8 +3365,8 @@ fn apply_layer_norm_cluster_fused<B: Deref<Target = [f32]>>(
             let (mean, denominator) = fsm.finish();
             for inner in 0..hidden {
                 let value = row.get(inner as usize).copied().unwrap_or(0.0);
-                let gamma = read_inner(4, inner);
-                let beta = read_inner(5, inner);
+                let gamma = read_inner(tail_slots.gamma, inner);
+                let beta = read_inner(tail_slots.beta, inner);
                 let normalized = (value - mean) / denominator;
                 output[out_index] = normalized * gamma + beta;
                 out_index += 1;
@@ -4397,7 +4692,7 @@ fn evaluate_quantized_with_scratch_impl(
         // position, always >= `fire_position` by construction).
         if let Some(reduce_nodes) = epilogue_fuse_fire_at.get(&position) {
             for reduce_node in reduce_nodes {
-                let Some(&(consumer_index, _, kind, hoist_axis)) =
+                let Some(&(consumer_index, _, kind, hoist_axis, epilogue_slots)) =
                     epilogue_fuse_plan.get(reduce_node)
                 else {
                     continue;
@@ -4407,10 +4702,9 @@ fn evaluate_quantized_with_scratch_impl(
                 let mut fused_output = take_or_allocate(free_buffers, node_output_len(consumer));
                 let fuse_started = std::time::Instant::now();
                 apply_epilogue_fused_monomorphic(
-                    kind,
+                    EpilogueFuseKernel { kind, hoist_axis, slots: epilogue_slots },
                     consumer,
                     *reduce_node,
-                    hoist_axis,
                     reduce_values,
                     &buffers,
                     &mut fused_output,
@@ -4443,6 +4737,12 @@ fn evaluate_quantized_with_scratch_impl(
                     tail,
                     cluster.x_node,
                     cluster.row_axis,
+                    LayerNormTailSlots {
+                        reciprocal_n: cluster.tail_reciprocal_n_slot,
+                        epsilon: cluster.tail_epsilon_slot,
+                        gamma: cluster.tail_gamma_slot,
+                        beta: cluster.tail_beta_slot,
+                    },
                     &buffers,
                     &mut fused_output,
                 );
@@ -20599,6 +20899,7 @@ mod tests {
 
     use crate::test_support::Lcg;
 
+
     /// `b = a * scale; c = b + bias; d = c * c` -- the same shape
     /// `bind::tests::elementwise_chain_program` builds (private to that
     /// module's own test scope), inlined here rather than reused across the
@@ -20705,7 +21006,12 @@ mod tests {
     /// `max(reduce + bias, 0)` — [`EpilogueKind::Clip`]'s own shape, walking
     /// [`match_epilogue`] the authored (never eliminated) way, per P17: a
     /// worked example over a hand-built [`ComposedBody`], not a fixture that
-    /// happens to hit the pattern.
+    /// happens to hit the pattern. `reduce_slot=0` is the anchor
+    /// [`matches_clip_head`] discovers `bias`/`zero` against; this fixture's
+    /// authored order happens to already have them at 1/2, so the
+    /// discovered slots equal the old hardcoded literals here -- ROW NNN's
+    /// `diagnostic_clip_epilogue_engages_when_reduce_is_not_operand_zero`
+    /// below is the case where they do not.
     #[test]
     fn match_epilogue_recognizes_clip_authored() {
         let body = ComposedBody {
@@ -20720,26 +21026,33 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(match_epilogue(&body), Some(EpilogueKind::Clip));
+        assert_eq!(
+            match_epilogue(&body, 0, None),
+            Some((EpilogueKind::Clip, EpilogueSlots::Clip { bias: 1, zero: 2 }))
+        );
     }
 
     /// The same `Clip` value with the `+ bias` step already eliminated
     /// because `bias == 0` (`push_canonical_step`'s own identity fold) —
     /// `Maximum` reads `Operand(0)` (the reduce) directly instead of a
-    /// `Step`. `detect_epilogue_kind` (main) would reject this: it always
-    /// expected exactly 2 steps with `steps[0]` a literal `Add`. This one
-    /// step is exactly what `push_canonical_step` mints when bias folds
-    /// away, so recognizing it here is the confluence guarantee, not a
-    /// synthetic shape.
+    /// `Step`. Unreachable under `NumericPolicy::bit_exact` (the only
+    /// policy any current caller binds with): `identity_element_signed_zero_nan`
+    /// only fires once a caller grants `IdentityEliminationSignedZero`,
+    /// which `bit_exact` never does (`bind.rs`'s own doc). ROW NNN's
+    /// slot-discovery fix (`matches_clip_head`/`resolve_other_operand`)
+    /// rejects this shape rather than guess a bias slot that no longer
+    /// exists in the composed body -- a safe fall-back to the unfused path,
+    /// not a silent wrong-value risk, so `match_epilogue` now returns
+    /// `None` here instead of `Some(Clip)`.
     #[test]
-    fn match_epilogue_recognizes_clip_after_bias_identity_elimination() {
+    fn match_epilogue_rejects_clip_after_bias_identity_elimination() {
         let body = ComposedBody {
             steps: vec![BodyStep {
                 op: ScalarOp::Maximum,
                 args: vec![StepArg::Operand(0), StepArg::Operand(2)],
             }],
         };
-        assert_eq!(match_epilogue(&body), Some(EpilogueKind::Clip));
+        assert_eq!(match_epilogue(&body, 0, None), None);
     }
 
     fn clip_norm_body() -> ComposedBody {
@@ -20785,7 +21098,10 @@ mod tests {
     /// authored in full, per P17's worked-example requirement.
     #[test]
     fn match_epilogue_recognizes_clip_norm_authored() {
-        assert_eq!(match_epilogue(&clip_norm_body()), Some(EpilogueKind::ClipNorm));
+        assert_eq!(
+            match_epilogue(&clip_norm_body(), 0, None),
+            Some((EpilogueKind::ClipNorm, EpilogueSlots::Other))
+        );
     }
 
     fn norm_body() -> ComposedBody {
@@ -20827,16 +21143,21 @@ mod tests {
     /// — authored in full.
     #[test]
     fn match_epilogue_recognizes_norm_authored() {
-        assert_eq!(match_epilogue(&norm_body()), Some(EpilogueKind::Norm));
+        assert_eq!(
+            match_epilogue(&norm_body(), 0, None),
+            Some((EpilogueKind::Norm, EpilogueSlots::Other))
+        );
     }
 
     /// `Norm` with the leading `reduce + bias` step already eliminated
     /// (`bias == 0`) — `Subtract` reads `Operand(0)` (the raw reduce)
-    /// directly instead of a `Step`, one step shorter than `norm_body`'s own
-    /// 7. `detect_epilogue_kind` (main) hard-coded `steps.len() == 7`; a
-    /// still-valid `Norm` one step shorter than that never matched.
+    /// directly instead of a `Step`. Unreachable under
+    /// `NumericPolicy::bit_exact` (see
+    /// `match_epilogue_rejects_clip_after_bias_identity_elimination`'s own
+    /// doc for why); `resolve_other_operand` rejects it structurally now
+    /// rather than reporting a bias slot that does not exist.
     #[test]
-    fn match_epilogue_recognizes_norm_after_bias_identity_elimination() {
+    fn match_epilogue_rejects_norm_after_bias_identity_elimination() {
         let body = ComposedBody {
             steps: vec![
                 BodyStep {
@@ -20865,7 +21186,7 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(match_epilogue(&body), Some(EpilogueKind::Norm));
+        assert_eq!(match_epilogue(&body, 0, None), None);
     }
 
     fn layer_norm_body() -> ComposedBody {
@@ -20903,7 +21224,19 @@ mod tests {
     /// full — BERT-style `LayerNormalization`'s own unrolled tail.
     #[test]
     fn match_epilogue_recognizes_layer_norm_authored() {
-        assert_eq!(match_epilogue(&layer_norm_body()), Some(EpilogueKind::LayerNorm));
+        assert_eq!(
+            match_epilogue(&layer_norm_body(), 1, Some(0)),
+            Some((
+                EpilogueKind::LayerNorm,
+                EpilogueSlots::LayerNorm {
+                    primary: 0,
+                    reciprocal_n: Some(2),
+                    epsilon: 3,
+                    gamma: 4,
+                    beta: 5,
+                }
+            ))
+        );
     }
 
     /// The `docs/discipline.md`/`cpu.rs:2570-2626` "hidden=1 confluence
@@ -20942,7 +21275,19 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(match_epilogue(&body), Some(EpilogueKind::LayerNorm));
+        assert_eq!(
+            match_epilogue(&body, 1, Some(0)),
+            Some((
+                EpilogueKind::LayerNorm,
+                EpilogueSlots::LayerNorm {
+                    primary: 0,
+                    reciprocal_n: None,
+                    epsilon: 3,
+                    gamma: 4,
+                    beta: 5,
+                }
+            ))
+        );
     }
 
     /// A shape none of the four kinds is (`Subtract` at the top, not
@@ -20956,7 +21301,39 @@ mod tests {
                 args: vec![StepArg::Operand(0), StepArg::Operand(1)],
             }],
         };
-        assert_eq!(match_epilogue(&body), None);
+        assert_eq!(match_epilogue(&body, 0, None), None);
+    }
+
+    /// The real regression this row fixes: `reduce` at operand slot 2 (NOT
+    /// 0), `bias` at slot 1, `zero` at slot 0 -- the exact permutation
+    /// `bind::compose_body`'s commutative canonicalization produces for
+    /// `clip_epilogue_program`-shaped chains (`bind.rs`'s leaf presort
+    /// sorts `(NodeId, IndexMap)` pairs before slot assignment, and a
+    /// `Constant`/`Input` upstream of the reduce in program order gets a
+    /// smaller `NodeId` than the reduce itself). Before ROW NNN,
+    /// `matches_clip_head`'s hardcoded `Operand(2)`/`Add(0,1)` literals
+    /// rejected this shape outright (`hits == 0` for every shape
+    /// `law1_clip_epilogue_fused_matches_unfused_bit_identical` tried,
+    /// since this permutation is a property of the PROGRAM STRUCTURE, not
+    /// the `m`/`k`/`n` shape values).
+    #[test]
+    fn match_epilogue_recognizes_clip_when_reduce_is_not_operand_zero() {
+        let body = ComposedBody {
+            steps: vec![
+                BodyStep {
+                    op: ScalarOp::Add,
+                    args: vec![StepArg::Operand(1), StepArg::Operand(2)],
+                },
+                BodyStep {
+                    op: ScalarOp::Maximum,
+                    args: vec![StepArg::Step(0), StepArg::Operand(0)],
+                },
+            ],
+        };
+        assert_eq!(
+            match_epilogue(&body, 2, None),
+            Some((EpilogueKind::Clip, EpilogueSlots::Clip { bias: 1, zero: 0 }))
+        );
     }
 
     /// `push_canonical_step` canonicalizes a commutative op's operand order
