@@ -7204,5 +7204,89 @@ mod memory_fit_gate_tests {
                  PROXIMA_METAL_OP_PROFILE_STEP=0 must have matched prefill's own step 0"
             );
         }
+
+        /// Times prefill-to-first-token for the same ~850-950-token prompt
+        /// [`prefill_step_zero_op_profile`] above uses (`PREFIX.repeat(5)`),
+        /// 3 runs against a fresh [`BackendRuntime`] each time so no run
+        /// benefits from another run's warm dispatch-plan cache.
+        /// `max_tokens: 1` isolates prefill's own step-0 evaluation
+        /// ([`prefill_evaluations_per_prompt_token`] above: ONE
+        /// `runtime.evaluate` call regardless of prompt length) from any
+        /// decode-step cost, so the timed interval IS time-to-first-token,
+        /// not time-to-eighth-token. A second, untimed `max_tokens: 8` pass
+        /// prints the full greedy id sequence so two builds of this SAME
+        /// test -- one per feature set (`metal,instrument` vs
+        /// `metal,instrument,metal-tiled-gemm`) -- can be diffed
+        /// byte-for-byte: per ROW 105/107/109/113's own "does not earn the
+        /// production default until ... the full stack wins with it on"
+        /// framing, a tiled-gemm speedup that changes the greedy decode is
+        /// not a win, it is a correctness regression.
+        #[test]
+        #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
+        fn prefill_ttft_850() {
+            let model_path = crate::test_support::qwen3_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen3 gguf fixture");
+            let model = open_model(&mapped);
+            let serving_config = greedy_serving_config();
+            let prompt = PREFIX.repeat(5);
+
+            let mut ttft_ms: Vec<f64> = Vec::new();
+            let mut prompt_token_count = 0usize;
+            for _run in 0..3 {
+                let mut runtime = BackendRuntime::new(&serving_config);
+                let start = std::time::Instant::now();
+                let (_generated_ids, _text, _stopped_by_eos, prefix_state) = model
+                    .run_decode_loop_observed_seeded(
+                        &prompt,
+                        1,
+                        &serving_config,
+                        &mut runtime,
+                        None,
+                        &mut LogitsSink::Discard,
+                        &mut |_event| Control::Continue,
+                        None,
+                        true,
+                    )
+                    .expect("prefill an ~850-token prompt for one timed TTFT run");
+                let elapsed = start.elapsed();
+                prompt_token_count = prefix_state.len();
+                ttft_ms.push(elapsed.as_secs_f64() * 1000.0);
+            }
+            ttft_ms.sort_by(|left, right| left.partial_cmp(right).expect("ttft_ms never NaN"));
+            let min_ms = ttft_ms[0];
+            let med_ms = ttft_ms[1];
+            let max_ms = ttft_ms[2];
+            let tokens_per_sec_at_median =
+                prompt_token_count as f64 / (med_ms / 1000.0);
+            std::println!(
+                "prefill_ttft_850 prompt_token_count={prompt_token_count} \
+                 ttft_ms_min={min_ms:.1} ttft_ms_med={med_ms:.1} ttft_ms_max={max_ms:.1} \
+                 tokens_per_sec_at_median={tokens_per_sec_at_median:.1}"
+            );
+            assert!(
+                prompt_token_count > 700,
+                "fixture prompt must tokenize past 700 rows to land in the same \
+                 ~850-token regime this brief measured TTFT on (got \
+                 {prompt_token_count})"
+            );
+
+            let mut identity_runtime = BackendRuntime::new(&serving_config);
+            let (generated_ids, _text, _stopped_by_eos, _final_prefix) = model
+                .run_decode_loop_observed_seeded(
+                    &prompt,
+                    8,
+                    &serving_config,
+                    &mut identity_runtime,
+                    None,
+                    &mut LogitsSink::Discard,
+                    &mut |_event| Control::Continue,
+                    None,
+                    true,
+                )
+                .expect("greedy-decode 8 tokens for cross-feature-set identity comparison");
+            std::println!("prefill_ttft_850 greedy_eight_token_ids={generated_ids:?}");
+        }
     }
 }
