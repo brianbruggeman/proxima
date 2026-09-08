@@ -19,7 +19,7 @@
 //! Two-tier by design (principle 3): the alloc tier routes through a
 //! growable `BTreeMap` keyed by [`ConnectionIdBytes`] that scales with the
 //! live connection count; the bare `no_std + no_alloc` tier uses a fixed-cap
-//! `heapless::FnvIndexMap`. See [`DcidTable`].
+//! `heapless::FnvIndexMap`. See `DcidTable` (private).
 
 use arrayvec::ArrayVec;
 #[cfg(not(feature = "quic-alloc"))]

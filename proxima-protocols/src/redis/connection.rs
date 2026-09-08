@@ -189,7 +189,7 @@ impl Connection {
 
     /// Advance past a parsed frame's bytes (the `consumed` a
     /// [`Advanced::Command`] carried). Compacts the buffer once the
-    /// consumed prefix grows past [`COMPACT_THRESHOLD_BYTES`], or clears it
+    /// consumed prefix grows past `COMPACT_THRESHOLD_BYTES`, or clears it
     /// outright once every buffered byte is consumed, so a long-lived
     /// pipelined connection's buffer stays bounded.
     pub fn consume(&mut self, amount: usize) {
@@ -205,7 +205,7 @@ impl Connection {
 
     /// Pure mode-gate predicate: does the current [`ConnMode`] admit
     /// `verb`? `Command` mode admits everything; `Subscriber` mode admits
-    /// only [`SUBSCRIBER_SAFE_VERBS`].
+    /// only `SUBSCRIBER_SAFE_VERBS`.
     #[must_use]
     pub fn admits(&self, verb: &[u8]) -> bool {
         match self.mode {

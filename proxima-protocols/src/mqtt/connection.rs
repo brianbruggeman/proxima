@@ -149,7 +149,7 @@ impl Connection {
 
     /// Advance past a parsed packet's bytes (the `consumed` a
     /// [`Advanced::Command`] carried). Compacts the buffer once the
-    /// consumed prefix grows past [`COMPACT_THRESHOLD_BYTES`], or clears it
+    /// consumed prefix grows past `COMPACT_THRESHOLD_BYTES`, or clears it
     /// outright once every buffered byte is consumed.
     pub fn consume(&mut self, amount: usize) {
         self.cursor += amount;

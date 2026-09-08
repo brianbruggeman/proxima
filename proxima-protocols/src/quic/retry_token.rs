@@ -97,7 +97,7 @@ impl From<AeadError> for IssueError {
     }
 }
 
-/// Errors from [`RetryTokenVerifier::verify`].
+/// Errors from [`RetryTokenIssuer::verify`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VerifyError {

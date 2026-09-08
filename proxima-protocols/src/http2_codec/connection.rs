@@ -30,7 +30,7 @@
 //!
 //! Frame parsing lives in [`super::frame`]; stream + flow-control
 //! state in [`super::stream_table`] and [`super::stream`]; HPACK in
-//! [`super::hpack`]. This module wires them together and owns the
+//! [`hpack`](crate::hpack). This module wires them together and owns the
 //! handshake choreography.
 
 use alloc::collections::VecDeque;
@@ -955,7 +955,7 @@ impl Connection {
         self.emit_headers(stream_id, headers, end_stream)
     }
 
-    /// (Client) queue a REQUEST head — the mirror of [`send_response_head`].
+    /// (Client) queue a REQUEST head — the mirror of [`send_response_head`](Self::send_response_head).
     /// Opens a locally-initiated stream (allocate `stream_id` via
     /// [`next_local_stream_id`](Self::next_local_stream_id)), then encodes the
     /// HEADERS. The list must start with the request pseudo-headers (`:method`,

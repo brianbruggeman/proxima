@@ -3,14 +3,14 @@
 //! `proxima_primitives::pipe::part::PartSource` — no new parsing, no codec rewrite. See
 //! `docs/proxima-pipe/part-source-sink-design.md` step 1.
 //!
-//! [`decode_into`] calls `sink.field(name, value)` once per decoded field,
+//! [`decode_into`](crate::http3_codec::qpack::decoder::decode_into) calls `sink.field(name, value)` once per decoded field,
 //! with `name`/`value` borrowed from `input` (raw literal), the RFC 9204
 //! static table (`'static`), or the caller's `scratch` buffer (Huffman
 //! output — REUSED, overwritten, per field). That last case means a
 //! `PartSource` wanting to yield fields one at a time, AFTER the decode
 //! call that produced them, cannot simply hold onto `decode_into`'s
 //! per-call borrows — the Huffman ones would dangle by the next field.
-//! [`HeaderBlockPartSource`] therefore copies every field's name+value
+//! [`HeaderBlockPartSource`](crate::http3_codec::qpack::part_source::HeaderBlockPartSource) therefore copies every field's name+value
 //! bytes ONCE, at construction, into its own fixed inline arena (0 heap
 //! allocations — the arena is a `[u8; N]` on the struct, sized by
 //! `proxima-h3-proto.toml`'s `qpack.part_source_arena_len`), and `next()`
@@ -27,21 +27,27 @@
 //! growth, payload `Vec`).
 //!
 //! `:method` and `:path` pseudo-headers are routed to their own
-//! [`Part::Method`] / [`Part::Path`] slots; every other field (including
-//! other pseudo-headers such as `:status`) becomes a [`Part::Header`].
+//! [`Part::Method`](proxima_primitives::pipe::part::Part::Method) /
+//! [`Part::Path`](proxima_primitives::pipe::part::Part::Path) slots;
+//! every other field (including other pseudo-headers such as `:status`)
+//! becomes a [`Part::Header`](proxima_primitives::pipe::part::Part::Header).
 //! `next()` yields, in order: `Method` (if present), `Path` (if present),
-//! each `Header` in decode order, then exactly one [`Part::End`].
+//! each `Header` in decode order, then exactly one
+//! [`Part::End`](proxima_primitives::pipe::part::Part::End).
 
 //! # Two sources, one engine
 //!
-//! [`HeaderBlockPartSource`] (above) decodes EAGERLY at construction and
+//! [`HeaderBlockPartSource`](crate::http3_codec::qpack::part_source::HeaderBlockPartSource)
+//! (above) decodes EAGERLY at construction and
 //! copies every field into its own inline arena — fully owned, queueable
 //! by value, tier-3. That ownership costs a fixed-size struct move per
 //! queue hop (measured as the C2 throughput regression — see
-//! `docs/proxima-pipe/discipline.md` C3). [`FieldSectionSource`] is the
+//! `docs/proxima-pipe/discipline.md` C3).
+//! [`FieldSectionSource`](crate::http3_codec::qpack::part_source::FieldSectionSource) is the
 //! lazy sibling: it BORROWS the encoded block + a caller scratch and
-//! decodes one field per [`PartSource::next`] call via
-//! [`FieldSectionCursor`] — nothing is copied for static-table or raw
+//! decodes one field per
+//! [`PartSource::next`](proxima_primitives::pipe::part::PartSource::next) call via
+//! [`FieldSectionCursor`](crate::http3_codec::qpack::decoder::FieldSectionCursor) — nothing is copied for static-table or raw
 //! fields (they borrow the table / the block), Huffman fields decode
 //! into the caller's scratch (one copy, inherent — Huffman output must
 //! materialize somewhere). Use `HeaderBlockPartSource` when the source

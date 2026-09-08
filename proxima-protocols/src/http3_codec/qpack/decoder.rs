@@ -620,7 +620,7 @@ impl FieldSink for VecFieldSink<'_> {
 /// Thin alloc-tier wrapper over [`decode_into`] (P1 RISC reuse — one
 /// decode engine, two surfaces): drives it with a fixed-size internal
 /// scratch (`crate::sized::PROXIMA_PROTOCOLS_HTTP3_CODEC_QPACK_DECODE_BOUNDED_SCRATCH_LEN`
-/// bytes, per-crate build-time tunable) and a [`VecFieldSink`] that
+/// bytes, per-crate build-time tunable) and a `VecFieldSink` (private) that
 /// copies each borrowed field into an owned [`DecodedField`]. Use
 /// [`decode_into`] directly when the caller can supply pre-allocated
 /// storage instead (the tier-3 / 0-alloc path).

@@ -16,8 +16,8 @@
 //! and the connection window. WINDOW_UPDATE on stream 0 increments
 //! the connection window. The connection window's defaults and bounds
 //! match per-stream:
-//! [`DEFAULT_INITIAL_WINDOW_SIZE`](super::stream::DEFAULT_INITIAL_WINDOW_SIZE),
-//! [`MAX_WINDOW_SIZE`](super::stream::MAX_WINDOW_SIZE).
+//! [`DEFAULT_INITIAL_WINDOW_SIZE`],
+//! [`MAX_WINDOW_SIZE`].
 
 use alloc::collections::BTreeMap;
 
@@ -170,7 +170,7 @@ impl StreamTable {
     }
 
     /// Register a new LOCALLY-initiated stream (the CLIENT role) — the mirror of
-    /// [`accept_client_stream`]. The client opens odd, monotonically-increasing
+    /// [`accept_client_stream`](Self::accept_client_stream). The client opens odd, monotonically-increasing
     /// ids (RFC §5.1.1); this inserts the `Idle` stream so a subsequent
     /// `SendHeaders` can advance it. Same id validation, opposite initiator.
     pub fn open_local_stream(&mut self, id: u32) -> Result<&mut Stream, TableError> {

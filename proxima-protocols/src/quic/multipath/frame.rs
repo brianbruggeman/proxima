@@ -103,7 +103,7 @@ pub enum MultipathFrame<'a> {
     },
     /// §4.1 — per-path generalization of RFC 9000 ACK / ACK_ECN.
     /// `ranges` is the borrowed slice of (largest, ack_delay,
-    /// range_count, first_range, ack_ranges, [ecn_counts]) bytes —
+    /// range_count, first_range, ack_ranges, `ecn_counts`) bytes —
     /// the same on-wire form as an RFC 9000 ACK frame following the
     /// type byte. Parser keeps it as a borrowed slice so the
     /// per-path AckScheduler can re-parse with its own range-set.

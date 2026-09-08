@@ -137,7 +137,7 @@ pub enum Header<'a> {
         dcid: &'a [u8],
         scid: &'a [u8],
         /// Raw 4-byte-per-version slice. Caller iterates via
-        /// [`VersionNegotiation::supported_versions`].
+        /// `VersionNegotiation::supported_versions_raw`.
         supported_versions_raw: &'a [u8],
     },
     Short {

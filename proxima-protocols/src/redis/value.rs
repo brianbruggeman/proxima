@@ -1,7 +1,7 @@
 //! Owned, `'static` RESP value — the typed protocol-out that rides a
 //! `proxima_primitives::pipe::body::Carry` across the async boundary.
 //!
-//! [`Frame`](super::Frame) borrows from the parse buffer (zero-copy hot path);
+//! [`Frame`] borrows from the parse buffer (zero-copy hot path);
 //! a `Carry` requires `Send + Sync + 'static`, so the driver lowers the
 //! borrowed frame to this owned mirror with [`RespValue::from_frame`] exactly
 //! once, at the ownership boundary. Protocol-out is NOT pinned to protocol-in:
@@ -42,7 +42,7 @@ pub enum RespValue {
 impl RespValue {
     /// Own a borrowed [`Frame`]. Recurses through aggregates; the three nil
     /// shapes (`Null`, `NullBlob`, `NullArray`) collapse to [`RespValue::Null`],
-    /// and an `Attribute` (out-of-band metadata) is surfaced as a [`Map`] so the
+    /// and an `Attribute` (out-of-band metadata) is surfaced as a [`RespValue::Map`] so the
     /// caller can still read it.
     #[must_use]
     pub fn from_frame(frame: &Frame<'_>) -> Self {

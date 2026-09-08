@@ -1,13 +1,16 @@
-//! Client-side HTTP/1.1 head codec — the inverse of [`h1`] +
-//! [`h1_response`]. Encodes a REQUEST head (the client writes) and
-//! parses a RESPONSE head (the client reads), delegating the parse to
-//! `httparse::Response` exactly as [`h1::parse_head`] delegates to
+//! Client-side HTTP/1.1 head codec — the inverse of
+//! [`h1`](crate::http1_codec::h1) +
+//! [`h1_response`](crate::http1_codec::h1_response). Encodes a REQUEST
+//! head (the client writes) and parses a RESPONSE head (the client
+//! reads), delegating the parse to `httparse::Response` exactly as
+//! [`h1::parse_head`](crate::http1_codec::h1::parse_head) delegates to
 //! `httparse::Request`.
 //!
 //! Body framing for responses is decoded by reusing
-//! [`h1_body::BodyDecoder`]; [`framing_from_response`] picks the
-//! framing from a parsed [`ResponseHead`]'s Content-Length /
-//! Transfer-Encoding headers per RFC 7230 §3.3.
+//! [`h1_body::BodyDecoder`](crate::http1_codec::h1_body::BodyDecoder);
+//! [`framing_from_response`] picks the framing from a parsed
+//! [`ResponseHead`]'s Content-Length / Transfer-Encoding headers per
+//! RFC 7230 §3.3.
 
 use alloc::vec::Vec;
 
@@ -18,7 +21,7 @@ const MAX_HEADERS: usize = 100;
 
 /// Serialize a request head: `METHOD PATH HTTP/1.1\r\nName: value\r\n...\r\n\r\n`.
 ///
-/// Mirrors [`h1_response::write_response_head`] in style — appends into
+/// Mirrors [`h1_response::write_response_head`](crate::http1_codec::h1_response::write_response_head) in style — appends into
 /// the caller's `out` buffer, no allocation of its own. Headers are
 /// written in the order given so the caller controls precedence
 /// (Host, Content-Length, Connection, etc.).
@@ -41,7 +44,7 @@ where
 }
 
 /// Typed response head, borrowing into the input buffer the parser was
-/// called with. Symmetric to [`h1::RequestHead`] for the response
+/// called with. Symmetric to [`h1::RequestHead`](crate::http1_codec::h1::RequestHead) for the response
 /// direction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseHead<'a> {
@@ -104,7 +107,7 @@ fn version_from_httparse(version: Option<u8>) -> Result<HttpVersion, ParseError>
 /// Parse a response head from `buffer`. Returns `Partial` if the head
 /// is incomplete, or `Complete` with a borrowed [`ResponseHead`] and
 /// the body byte-offset. Wraps `httparse::Response::parse` exactly like
-/// [`h1::parse_head`] wraps `httparse::Request`.
+/// [`h1::parse_head`](crate::http1_codec::h1::parse_head) wraps `httparse::Request`.
 pub fn parse_response_head(buffer: &[u8]) -> Result<ResponseStatus<'_>, ParseError> {
     parse_response_head_with_limits(buffer, ParserLimits::default())
 }

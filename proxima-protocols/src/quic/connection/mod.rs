@@ -22,7 +22,7 @@
 //!   Initial / Handshake / 1-RTT epochs (composes C2 header codec, C3 frame
 //!   codec, C5–C7 crypto, C10 packet protection);
 //! - [`Connection::open_stream`], [`Connection::send_application`],
-//!   [`Connection::reset_stream`], [`Connection::stop_sending`] for streams
+//!   `Connection::reset_stream`, `Connection::stop_sending` for streams
 //!   (C12); DATAGRAM send/recv (RFC 9221, C25);
 //! - [`Connection::initiate_key_update`], [`Connection::initiate_path_challenge`]
 //!   (RFC 9001 §6 / RFC 9000 §9, C21 + C23);

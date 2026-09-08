@@ -19,7 +19,7 @@
 //! ```
 //!
 //! The scope for now is **Initial-packet** protection only (uses the
-//! AES-128-GCM keys derived by C5 [`initial_keys::derive`]). The same
+//! AES-128-GCM keys derived by C5 [`initial_keys::derive`](crate::quic::crypto::initial_keys::derive)). The same
 //! compose pattern extends trivially to Handshake / 1-RTT packets once
 //! the TLS handshake (C11) starts producing those keys.
 //!

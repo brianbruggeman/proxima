@@ -947,7 +947,7 @@ impl ConnectionState {
     }
 }
 
-/// Owned copy of [`crate::quic::frame::ConnectionCloseFrame`] suitable for
+/// Owned copy of [`Frame::ConnectionClose`] suitable for
 /// stashing on [`ClosingState`].
 ///
 /// We carry the wire-format type byte (`0x1c` transport-level close

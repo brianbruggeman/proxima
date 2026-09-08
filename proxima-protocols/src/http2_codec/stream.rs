@@ -28,7 +28,7 @@
 //!
 //! Per RFC 7540 §5.2: each stream has independent **send** and **recv**
 //! windows tracked alongside connection-level windows (handled by
-//! [`super::flow_control`]). DATA frames consume sender window; the
+//! `flow_control`). DATA frames consume sender window; the
 //! receiver replenishes via `WINDOW_UPDATE`. Windows are signed `i64`
 //! internally so a `SETTINGS_INITIAL_WINDOW_SIZE` delta that
 //! retroactively shifts open streams' send-windows can legally drive

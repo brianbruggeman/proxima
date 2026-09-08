@@ -1,18 +1,19 @@
 //! [`MemcachedCodec`] — the TCP-direction `proxima_codec::FrameCodec` +
 //! `codec_pipe::OwnFrame`/`Incomplete` impl memcached needs to plug into
 //! `proxima_listen::any::FramedAny`, the generic stateless `AnyProtocol`
-//! driver. Reuses [`super::parse_command`] (decode) and
-//! [`super::reply::encode_reply`] / [`super::codec_trait::encode_command`]
+//! driver. Reuses [`super::parse_command`](crate::memcached::parse_command) (decode) and
+//! [`super::reply::encode_reply`](crate::memcached::reply::encode_reply) /
+//! `codec_trait::encode_command`
 //! (encode) UNCHANGED — no wire logic is rewritten here, only wrapped in
 //! the trait shapes `FramedAny` composes against.
 //!
 //! memcached's wire is genuinely asymmetric: a REQUEST is a [`Command`],
-//! a REPLY is a [`super::Reply`] — two unrelated shapes, unlike RESP's
+//! a REPLY is a [`super::Reply`](crate::memcached::reply::Reply) — two unrelated shapes, unlike RESP's
 //! single recursive `Frame` (`crate::redis::codec_trait`'s docs) or a
 //! symmetric echo protocol. [`proxima_codec::FrameCodec::Frame`] is
 //! nonetheless ONE associated type shared by `parse_frame` (decode) and
 //! `encode_frame` (encode) — [`MemcachedFrame`] resolves that by being a
-//! sum over both directions. The one real cost: [`MemcachedCodec::own_frame`]
+//! sum over both directions. The one real cost: `MemcachedCodec::own_frame`
 //! becomes a partial function over that sum (a `Reply` frame it can never
 //! actually receive, since `parse_frame` never produces one) — see its
 //! own doc.

@@ -2,7 +2,7 @@
 //!
 //! C15 lands the [`CongestionController`] trait + the
 //! [`NewReno`] reference implementation. [`Cubic`] (RFC 9438) is
-//! C16; [`Bbr2`] (draft-ietf-ccwg-bbr) is C17. All implementations
+//! C16; `Bbr2` (draft-ietf-ccwg-bbr) is C17. All implementations
 //! plug into the trait.
 //!
 //! # Tier
