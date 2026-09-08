@@ -3025,7 +3025,12 @@ mod tests {
         q8_0::dequantize(recoded_bytes, &mut recoded_dequant)
             .expect("dequantizes the recoded q8_0 bytes");
 
-        for (block_index, block) in original_dequant.chunks_exact(q8_0::QK8_0).enumerate() {
+        for (block_index, block) in original_dequant
+            .as_chunks::<{ q8_0::QK8_0 }>()
+            .0
+            .iter()
+            .enumerate()
+        {
             let block_max = block.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
             // `quantize_block`'s own formula: `d = amax / 127`, each level
             // rounds to the nearest multiple of `d`, so the worst-case
