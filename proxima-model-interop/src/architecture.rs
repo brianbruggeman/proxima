@@ -19,6 +19,7 @@
 //! module existed (`proxima-tensor/src/spec.rs`'s own module doc: program
 //! assembly is "a plain `Vec<Op>`", no arena to gate).
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
@@ -28,6 +29,66 @@ use proxima_tensor::spec::Qwen35LayerRoots;
 
 use crate::bind::{BoundWeights, ModelArchitecture, metadata_str};
 use crate::error::InteropError;
+
+/// Names for every `Extent::Symbolic` slot the decode loop itself binds
+/// before it evaluates a step -- `crate::generate::LoadedModel`'s own
+/// `symbols = [new_count as u64, kv_bound_extent as u64]` array, positions
+/// fixed by convention and, until now, nowhere spelled out by name. A
+/// foreign architecture's [`Architecture::step_inputs`] declares its
+/// own leaf's symbolic extent starting at [`symbols::FIRST_FREE`]; naming
+/// [`symbols::NEW_COUNT`]/[`symbols::KV_BOUND`] as reserved is what lets
+/// [`bind_symbols`] reject a foreign slot that collides with one of these
+/// instead of silently overwriting it.
+pub mod symbols {
+    /// `next_ids.len()` this step -- the whole prompt on the prefill step,
+    /// one token every step after.
+    pub const NEW_COUNT: u16 = 0;
+    /// `kv_extent`'s bucketed cache capacity for this step
+    /// (`crate::generate`'s own `kv_bound_extent`) -- NOT the rows a
+    /// foreign architecture's own per-step leaf carries; see the defect
+    /// this module's doc links back to.
+    pub const KV_BOUND: u16 = 1;
+    /// The first slot number free for a foreign
+    /// [`super::Architecture::step_inputs`] override to claim.
+    pub const FIRST_FREE: u16 = 2;
+}
+
+/// Assembles the `symbols` slice [`proxima_tensor::infer`] and every
+/// evaluator resolve a `proxima_tensor::op::Extent::Symbolic` extent
+/// against, binding the decode loop's own [`symbols::NEW_COUNT`]/
+/// [`symbols::KV_BOUND`] slots plus whatever slot each `step_inputs` entry
+/// names via [`StepInput::symbol`]. Composes no pipe: this is plain
+/// data assembly ahead of a pipe stage (`BackendRuntime::evaluate`), not a
+/// step in the pipe itself.
+///
+/// # Errors
+///
+/// [`InteropError::ReservedSymbolSlot`] when a `step_input` names
+/// [`symbols::NEW_COUNT`] or [`symbols::KV_BOUND`].
+pub fn bind_symbols(
+    new_count: usize,
+    kv_bound_extent: usize,
+    step_inputs: &[StepInput],
+) -> Result<Vec<u64>, InteropError> {
+    let mut highest = symbols::FIRST_FREE.saturating_sub(1) as usize;
+    for step_input in step_inputs {
+        if let Some((slot, _)) = step_input.symbol {
+            if slot == symbols::NEW_COUNT || slot == symbols::KV_BOUND {
+                return Err(InteropError::ReservedSymbolSlot { slot });
+            }
+            highest = highest.max(slot as usize);
+        }
+    }
+    let mut bound = vec![0u64; highest + 1];
+    bound[symbols::NEW_COUNT as usize] = new_count as u64;
+    bound[symbols::KV_BOUND as usize] = kv_bound_extent as u64;
+    for step_input in step_inputs {
+        if let Some((slot, extent)) = step_input.symbol {
+            bound[slot as usize] = extent as u64;
+        }
+    }
+    Ok(bound)
+}
 
 /// Every weight tensor bound plus the compiled forward program, in the one
 /// shape `crate::generate::LoadedModel::load_inner`'s qwen35 and dense
@@ -193,6 +254,15 @@ pub struct StepInputContext<'ids> {
 pub struct StepInput {
     pub name: &'static str,
     pub values: Vec<f32>,
+    /// This leaf's own `Extent::Symbolic` slot and the extent to bind it
+    /// to, when the forward program declares [`Self::name`] with a
+    /// symbolic (not `Static`) shape -- `(slot, values.len())` for a
+    /// leaf shaped `[Extent::Symbolic(slot)]`. `None` for a leaf whose
+    /// shape is entirely `Static` (nothing to bind). Read by
+    /// [`bind_symbols`], never by the runtime directly. Slot MUST be
+    /// `>= symbols::FIRST_FREE`; [`bind_symbols`] returns
+    /// [`InteropError::ReservedSymbolSlot`] otherwise.
+    pub symbol: Option<(u16, usize)>,
 }
 
 impl StepInput {

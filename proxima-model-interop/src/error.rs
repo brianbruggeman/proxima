@@ -391,4 +391,14 @@ pub enum InteropError {
     /// all.
     #[error("forward program leaf {name:?} is left unbound; no builtin block and no architecture step_inputs supplied it")]
     MissingStepInput { name: String },
+
+    /// [`crate::architecture::Architecture::step_inputs`] returned a
+    /// [`crate::architecture::StepInput`] whose `symbol` names a slot the
+    /// decode loop itself already binds
+    /// (`crate::architecture::symbols::NEW_COUNT`/`crate::architecture::symbols::KV_BOUND`)
+    /// -- a foreign architecture's own slot must start at
+    /// [`crate::architecture::symbols::FIRST_FREE`], never overwrite a
+    /// builtin one out from under the loop.
+    #[error("architecture step_inputs named reserved symbol slot {slot}; foreign slots start at FIRST_FREE")]
+    ReservedSymbolSlot { slot: u16 },
 }

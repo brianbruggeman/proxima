@@ -131,7 +131,7 @@ use proxima_tensor::TensorError;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_forward_program};
 
-use crate::architecture::{Architecture, StepInput, StepInputContext};
+use crate::architecture::{Architecture, StepInput, StepInputContext, bind_symbols};
 use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
 use crate::error::InteropError;
 use crate::hf_bind::bind_all_weights_from_safetensors;
@@ -3651,7 +3651,7 @@ impl<'file> LoadedModel<'file> {
                 #[cfg(feature = "instrument")]
                 let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
 
-                let symbols = [new_count as u64, kv_bound_extent as u64];
+                let symbols = bind_symbols(new_count, kv_bound_extent, &step_input_scratch)?;
                 let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.layer_roots.len() * 3);
                 roots.push(self.logits_root);
                 for roots_for_layer in &self.layer_roots {
