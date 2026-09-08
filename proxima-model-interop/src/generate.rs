@@ -6721,5 +6721,66 @@ mod memory_fit_gate_tests {
                  model's own resident device-allocation count at all"
             );
         }
+
+        /// Proves the prefill mechanism with a COUNT, not a read of the
+        /// source (guiding-principle 18): `run_decode_loop_observed_seeded`
+        /// with `max_tokens: 1` runs the `decode_until_stop_or_budget`
+        /// `for step in 0..1` loop exactly once, and that single step's own
+        /// closure calls `BackendRuntime::evaluate` exactly once regardless
+        /// of how many rows `next_ids` carries -- `plan_hits`/`plan_misses`
+        /// (`BackendRuntime`'s own doc: every `evaluate` call is exactly one
+        /// hit or one miss, never both, never neither) sum to the number of
+        /// `evaluate` calls this call made. If prefill were one evaluation
+        /// PER PROMPT TOKEN, this sum would equal the prompt's own token
+        /// count; measured here at a prompt tokenizing to well past 200
+        /// rows, it is `1` -- the whole prompt already lands in ONE
+        /// `[seq_len, embedding]` program evaluation, not one per token.
+        #[test]
+        #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
+        fn prefill_evaluations_per_prompt_token() {
+            let model_path = crate::test_support::qwen3_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen3 gguf fixture");
+            let model = open_model(&mapped);
+            let serving_config = greedy_serving_config();
+            let prompt = alloc::format!("{PREFIX}{SUFFIX_A} {SUFFIX_B}");
+
+            let mut runtime = BackendRuntime::new(&serving_config);
+            let (_generated_ids, _text, _stopped_by_eos, prefix_state) = model
+                .run_decode_loop_observed_seeded(
+                    &prompt,
+                    1,
+                    &serving_config,
+                    &mut runtime,
+                    None,
+                    &mut LogitsSink::Discard,
+                    &mut |_event| Control::Continue,
+                    None,
+                    true,
+                )
+                .expect("prefill a real multi-hundred-token prompt");
+
+            let prompt_token_count = prefix_state.len();
+            let program_evaluations = runtime.plan_hits + runtime.plan_misses;
+            std::println!(
+                "prefill_evaluations_per_prompt_token prompt_token_count={prompt_token_count} \
+                 program_evaluations={program_evaluations}"
+            );
+            assert!(
+                prompt_token_count > 200,
+                "fixture prompt must tokenize past 200 rows to distinguish \"one \
+                 evaluation total\" from \"one evaluation per token\" (got \
+                 {prompt_token_count})"
+            );
+            assert_eq!(
+                program_evaluations, 1,
+                "prefill already runs the whole prompt through ONE program \
+                 evaluation (new_count == prompt_token_count on step 0, \
+                 generate.rs's own `run_decode_loop_observed_seeded` closure) -- \
+                 a count of {prompt_token_count} here would mean prefill was \
+                 actually one evaluation per prompt token"
+            );
+        }
     }
 }
