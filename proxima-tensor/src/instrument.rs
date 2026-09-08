@@ -2419,3 +2419,66 @@ pub fn reset_evaluate_quantized_phase() {
     let _ = EVALUATE_QUANTIZED_FINISH_TICKS.snapshot_and_reset();
     EVALUATE_QUANTIZED_PEAK_LIVE_BYTES.store(0, Ordering::Relaxed);
 }
+
+/// A live, per-event counterpart to [`crate::cpu::snapshot_expert_selection_top_n`]'s
+/// own drain-and-poll table: that table answers "which experts were hot
+/// over the last drain window", polled by a caller; this trait answers
+/// "which expert did THIS token, THIS layer just route to", pushed to a
+/// caller the moment [`crate::cpu::run_reduce_quantized`]'s gathered-weight
+/// loop resolves `expert_index` -- the shape a residency FSM (deciding
+/// whether to keep or evict an expert's weights BEFORE the next token,
+/// not after a drain interval) needs and a poll cannot give it. Composes
+/// with nothing else in this module: every other item here is a
+/// [`proxima_telemetry::metric::Counter`] (an accumulator with no per-event
+/// identity), and this is a routing EVENT, so it is a trait a caller
+/// implements, not a counter a caller reads.
+pub trait ExpertObserver: Sync {
+    /// `layer` is the gathered reduce op's own [`NodeId`] value, cast to
+    /// `usize` -- the same "compiled program's `NodeId` is a stable
+    /// per-layer identity" fact [`crate::cpu::record_expert_selection`]'s
+    /// own doc already relies on, since this crate's evaluator never
+    /// decodes an architecture's layer numbering. `expert` is the resolved
+    /// `expert_index` a real routed token selected; `token_position` is
+    /// this call's own position within the batch this evaluation covers
+    /// (`0` for a single-token decode step, `0..sequence_len` during
+    /// prefill).
+    fn on_expert_routed(&self, layer: usize, expert: usize, token_position: usize);
+}
+
+/// [`set_expert_observer`] already having a registrant -- a caller may
+/// register at most one, mirroring the fact that a program has exactly one
+/// residency policy live at a time, not several racing to decide the same
+/// eviction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("an expert observer is already registered")]
+pub struct ObserverAlreadySet;
+
+/// The one registered [`ExpertObserver`], set at most once. `&'static dyn`
+/// (never `Box`): the registering crate owns its own `static` value (the
+/// same shape `proxima-model-interop`'s `ArchitectureRegistry` uses for an
+/// open, unbounded set of foreign observers -- guiding-principles §20's
+/// legitimate dynamic-dispatch exception), and `OnceLock` is this module's
+/// own established set-once pattern (`ARENA_PER_NODE_TICKS`, above).
+static EXPERT_OBSERVER: OnceLock<&'static dyn ExpertObserver> = OnceLock::new();
+
+/// Registers `observer` as the process's one [`ExpertObserver`].
+///
+/// # Errors
+///
+/// [`ObserverAlreadySet`] if a caller already registered one -- set-once,
+/// not last-write-wins, so a second registration is a caller bug made
+/// loud rather than a silent observer swap mid-run.
+pub fn set_expert_observer(observer: &'static dyn ExpertObserver) -> Result<(), ObserverAlreadySet> {
+    EXPERT_OBSERVER.set(observer).map_err(|_| ObserverAlreadySet)
+}
+
+/// [`crate::cpu::run_reduce_quantized`]'s own routing-decision call site:
+/// a no-op when no [`ExpertObserver`] is registered, so a program that
+/// never calls [`set_expert_observer`] pays one `OnceLock::get` (a relaxed
+/// load after first access) per gathered position, not a branch into
+/// missing-observer handling.
+pub(crate) fn notify_expert_routed(layer: usize, expert: usize, token_position: usize) {
+    if let Some(observer) = EXPERT_OBSERVER.get() {
+        observer.on_expert_routed(layer, expert, token_position);
+    }
+}
