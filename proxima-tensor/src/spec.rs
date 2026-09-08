@@ -2529,6 +2529,13 @@ pub struct ForwardRoots {
 /// -- see the function's own doc).
 type SingleRangeForwardProgram = (Vec<Op>, NodeId, Vec<CachedLayerRoots>, Option<NodeId>);
 
+/// [`mistral_cached_forward_program_with_experts_and_layer_taps`]'s own
+/// return shape: the lowered program, its [`ForwardRoots`], one
+/// [`CachedLayerRoots`] per layer, and one residual [`NodeId`] per layer
+/// (that function's own doc on what the last element is for).
+type MistralMoeForwardProgramWithLayerTaps =
+    (Vec<Op>, ForwardRoots, Vec<CachedLayerRoots>, Vec<NodeId>);
+
 /// Where, if anywhere, the ROW 326/328 diagnostic duplicate `output.weight`
 /// reduce is emitted relative to the real head -- ROW 328 turns ROW 326's
 /// original bool into this 3-way position to test whether the ~1.8ms head
@@ -7929,6 +7936,49 @@ pub fn mistral_cached_forward_program_with_experts(
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
 ) -> Result<(Vec<Op>, ForwardRoots, Vec<CachedLayerRoots>), TensorError> {
+    let (program, roots, cache_roots, _layer_residuals) =
+        mistral_cached_forward_program_with_experts_and_layer_taps(
+            vocab,
+            embedding,
+            feed_forward,
+            query_heads,
+            kv_heads,
+            head_dim,
+            block_count,
+            expert_count,
+            expert_used_count,
+            qk_norm,
+            paired_gate_up_reduce,
+            fused_qkv_reduce,
+        )?;
+    Ok((program, roots, cache_roots))
+}
+
+/// [`mistral_cached_forward_program_with_experts`]'s full implementation,
+/// additionally returning one [`NodeId`] per layer -- the residual
+/// (`x_next`, the post-MoE-add activation) each block hands the next layer,
+/// in layer order, `block_count` entries. A caller bisecting a CPU-vs-Metal
+/// divergence requests these as extra program outputs (48 x [seq, embedding]
+/// floats for a 48-layer checkpoint, trivially small) to find the first
+/// layer whose output disagrees, without materializing every intermediate
+/// node in the graph as an output (the CPU evaluator keeps every requested
+/// output's full lifetime alive, so requesting ALL nodes is the >130 GB
+/// failure mode this narrower request set avoids).
+#[allow(clippy::too_many_arguments)]
+pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    block_count: u32,
+    expert_count: u32,
+    expert_used_count: u32,
+    qk_norm: bool,
+    paired_gate_up_reduce: bool,
+    fused_qkv_reduce: bool,
+) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
 
@@ -8028,6 +8078,7 @@ pub fn mistral_cached_forward_program_with_experts(
     let _cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
 
     let mut cache_roots: Vec<CachedLayerRoots> = Vec::with_capacity(block_count as usize);
+    let mut layer_residuals: Vec<NodeId> = Vec::with_capacity(block_count as usize);
 
     for layer in 0..block_count {
         let attn_norm_weight = input_leaf(
@@ -8294,6 +8345,7 @@ pub fn mistral_cached_forward_program_with_experts(
         };
         x = x_next;
         cache_roots.push(layer_roots);
+        layer_residuals.push(x_next);
     }
 
     let output_norm_weight = input_leaf(
@@ -8333,6 +8385,7 @@ pub fn mistral_cached_forward_program_with_experts(
             hidden: normed_final,
         },
         cache_roots,
+        layer_residuals,
     ))
 }
 
@@ -9296,6 +9349,45 @@ mod tests {
             "a Qwen3-MoE-shaped forward program (expert_count > 0) must grow when qk_norm \
              flips on -- an unchanged length means the MoE layer builder is still dropping \
              attn_q_norm/attn_k_norm on the floor"
+        );
+    }
+
+    /// [`mistral_cached_forward_program_with_experts_and_layer_taps`] must
+    /// build the byte-identical program to its thin-wrapper sibling
+    /// (`mistral_cached_forward_program_with_experts`'s own doc on that
+    /// relationship) and return exactly one residual tap per layer, in
+    /// layer order -- the invariant a caller bisecting CPU-vs-Metal
+    /// divergence across a 48-layer checkpoint depends on to index
+    /// `layer_residuals[layer]` directly.
+    #[test]
+    fn layer_taps_variant_matches_the_plain_program_and_returns_one_tap_per_layer() {
+        let (plain_program, plain_roots, plain_cache_roots) =
+            mistral_cached_forward_program_with_experts(
+                32_000, 256, 128, 4, 2, 64, 3, 4, 1, true, false, false,
+            )
+            .expect("plain moe program lowers");
+        let (taps_program, taps_roots, taps_cache_roots, layer_residuals) =
+            mistral_cached_forward_program_with_experts_and_layer_taps(
+                32_000, 256, 128, 4, 2, 64, 3, 4, 1, true, false, false,
+            )
+            .expect("taps moe program lowers");
+
+        assert_eq!(
+            plain_program, taps_program,
+            "the taps variant must build the identical graph -- it only returns extra \
+             NodeIds into the same program, never a structurally different one"
+        );
+        assert_eq!(plain_roots, taps_roots);
+        assert_eq!(plain_cache_roots, taps_cache_roots);
+        assert_eq!(
+            layer_residuals.len(),
+            3,
+            "one residual NodeId per layer (block_count=3)"
+        );
+        assert!(
+            layer_residuals.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "residual taps must appear in strictly increasing program order across layers: \
+             {layer_residuals:?}"
         );
     }
 

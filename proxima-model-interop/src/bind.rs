@@ -5364,6 +5364,160 @@ mod real_openchat_file {
         );
     }
 
+    /// Bisect diagnostic (fix/qwen3moe-forward): requests
+    /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts_and_layer_taps`]'s
+    /// per-layer residual taps as EXTRA outputs on both the CPU route and
+    /// the Metal route for a single 5-token prefill step, and prints each
+    /// layer's max relative diff. A BOUNDED output request (`block_count`
+    /// x `[5, embedding]` floats -- 48 x 5 x 2048 for this checkpoint,
+    /// trivially small), never "every node in the program": that shape
+    /// measured >130 GB and OOM'd (`generate.rs`'s own
+    /// `PROXIMA_METAL_COMPARE_CPU` path, commit 0c6a9d99's own doc) because
+    /// the CPU evaluator keeps every REQUESTED output's buffer alive for
+    /// the whole call.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    #[ignore = "depends on a host-local checkpoint outside this repo (PROXIMA_OPENCHAT_GGUF) and a real Metal device"]
+    fn bisects_per_layer_residual_taps_cpu_vs_metal_on_one_prefill_step() {
+        let model_path = crate::test_support::openchat_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_OPENCHAT_GGUF"));
+        let path = std::path::Path::new(&model_path);
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local checkpoint fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local checkpoint fixture");
+        let architecture =
+            architecture_from_metadata(&parsed).expect("derive architecture from real metadata");
+        let weights = bind_all_weights(&parsed, file_bytes, &architecture, false, false, &[])
+            .expect("bind real checkpoint weights");
+        let qk_norm = crate::bind::checkpoint_has_qk_norm(&parsed);
+
+        use proxima_tensor::spec::mistral_cached_forward_program_with_experts_and_layer_taps;
+        let (program, roots, _cache_roots, layer_residuals) =
+            mistral_cached_forward_program_with_experts_and_layer_taps(
+                architecture.vocab,
+                architecture.embedding,
+                architecture.feed_forward,
+                architecture.query_heads,
+                architecture.kv_heads,
+                architecture.head_dim,
+                architecture.block_count,
+                architecture.expert_count,
+                architecture.expert_used_count,
+                qk_norm,
+                false,
+                false,
+            )
+            .expect("moe forward program with layer taps lowers");
+
+        let prompt = default_prompt();
+        let ids: Vec<u32> = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+            .and_then(|vocab| proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, true, false))
+            .expect("build vocab and encode prompt")
+            .into_iter()
+            .take(5)
+            .collect();
+        assert_eq!(ids.len(), 5, "this bisect's own design: a 5-token prefill");
+
+        let inputs = build_cached_position_inputs(
+            &ids,
+            0,
+            architecture.head_dim,
+            architecture.rope_freq_base,
+            architecture.rms_epsilon,
+        );
+
+        let kv_cache_names: Vec<(
+            alloc::string::String,
+            alloc::string::String,
+            alloc::string::String,
+        )> = (0..architecture.block_count as usize)
+            .map(|layer| {
+                (
+                    alloc::format!("kv_cache.{layer}.k_even"),
+                    alloc::format!("kv_cache.{layer}.k_odd"),
+                    alloc::format!("kv_cache.{layer}.v"),
+                )
+            })
+            .collect();
+        let layer_caches: Vec<LayerCache> = (0..architecture.block_count as usize)
+            .map(|_| LayerCache::new(GgmlType::F32))
+            .collect();
+
+        let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
+            weights.owned.len()
+                + weights.packed.len()
+                + 4
+                + architecture.block_count as usize * 3,
+        );
+        named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
+        for (name, data) in &weights.owned {
+            named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
+        }
+        for (name, block) in &weights.packed {
+            named_blocks.push((name.as_str(), *block));
+        }
+        named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
+        named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
+        named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
+        let cached_len = alloc::vec![0.0f32];
+        named_blocks.push(("cached_len", QuantizedBlock::Float32(cached_len.as_slice())));
+        for (layer, (k_even_name, k_odd_name, v_name)) in kv_cache_names.iter().enumerate() {
+            named_blocks.extend(layer_caches[layer].named_blocks(
+                k_even_name,
+                k_odd_name,
+                v_name,
+            ));
+        }
+
+        let symbols = [ids.len() as u64, 0u64];
+        let mut outputs: Vec<op::NodeId> = Vec::with_capacity(1 + layer_residuals.len());
+        outputs.push(roots.logits);
+        outputs.extend(layer_residuals.iter().copied());
+
+        let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+        let mut validated_weight_nodes: Option<alloc::collections::BTreeSet<op::NodeId>> = None;
+        let cpu_evaluated = evaluate_quantized_named_with_scratch(
+            &program,
+            &symbols,
+            &named_blocks,
+            &outputs,
+            &mut free_buffers,
+            &mut validated_weight_nodes,
+        )
+        .expect("cpu route evaluates the requested taps");
+
+        use omega::backend::{Engine, execute_plan_named, plan_named};
+        let mut metal_plan = plan_named(
+            Engine::Gpu,
+            None,
+            &program,
+            &symbols,
+            &named_blocks,
+            &outputs,
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("metal plan builds for the bounded output set");
+        let metal_evaluated = execute_plan_named(&mut metal_plan, &named_blocks)
+            .expect("metal route evaluates the requested taps");
+
+        std::println!("layer max_rel_diff");
+        for (layer, &node) in layer_residuals.iter().enumerate() {
+            let (cpu_data, _) = cpu_evaluated.get(node).expect("cpu produced this tap");
+            let (metal_data, _) = metal_evaluated.get(node).expect("metal produced this tap");
+            let max_rel_diff = cpu_data.iter().zip(metal_data.iter()).fold(
+                0.0f32,
+                |worst, (&cpu_value, &metal_value)| {
+                    let diff = (cpu_value - metal_value).abs();
+                    let denom = cpu_value.abs().max(1e-6);
+                    worst.max(diff / denom)
+                },
+            );
+            std::println!("{layer} {max_rel_diff:.6}");
+        }
+    }
+
     /// Diagnostic-only: drives the same real cached decode loop as
     /// [`runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`],
     /// but sets `PROXIMA_METAL_OP_PROFILE_STEP=3` so `run_decode_loop`'s own
