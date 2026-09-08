@@ -3,7 +3,8 @@
 //!
 //! These live below the `config` feature (no `bon`/`conflaguration`) so the
 //! spigot terminal ([`crate::pipe::lazy::LazyFanOut`]) is available to any `std`
-//! consumer. The config surface ([`crate::pipe::config::SinkConfig`]) is the
+//! consumer. The config surface (`crate::pipe::config::SinkConfig`,
+//! `pipe-config`-feature-gated) is the
 //! fluent/serde wrapper that lowers to [`SinkSpec`].
 
 use crate::{BinFormat, Format, JsonFormat};
