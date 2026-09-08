@@ -6387,6 +6387,11 @@ mod memory_fit_gate_tests {
         use core::ffi::c_void;
         use std::os::fd::AsFd;
 
+        #[cfg(all(feature = "metal", feature = "instrument"))]
+        use proxima_telemetry::export::Exporter;
+        #[cfg(all(feature = "metal", feature = "instrument"))]
+        use proxima_telemetry::recorder::Recorder;
+
         use super::super::{
             BackendRuntime, Control, LoadedModel, LogitsSink, Phase, PrefixState,
             supported_serving_config,
@@ -6780,6 +6785,143 @@ mod memory_fit_gate_tests {
                  generate.rs's own `run_decode_loop_observed_seeded` closure) -- \
                  a count of {prompt_token_count} here would mean prefill was \
                  actually one evaluation per prompt token"
+            );
+        }
+
+        /// [`install_stdout_telemetry`]'s handle. Mirrors `bind.rs`'s own
+        /// `TelemetryProbe` (this crate's test modules each carry their own
+        /// copy of this fixture rather than sharing one, the same
+        /// convention `MappedGguf` already follows across this file and
+        /// `bind.rs`): a background pump drains the log ring every 5ms so a
+        /// real decode step's several-hundred per-op events never overflow
+        /// it before this test's own final drain runs, while
+        /// `drained_total` survives whichever side (pump or caller) drains
+        /// any given batch.
+        #[cfg(all(feature = "metal", feature = "instrument"))]
+        struct TelemetryProbe {
+            recorder: std::sync::Arc<Recorder>,
+            drained_total: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[cfg(all(feature = "metal", feature = "instrument"))]
+        impl TelemetryProbe {
+            fn drain_and_total(&self) -> usize {
+                let final_pass = self.recorder.drain();
+                self.drained_total
+                    .fetch_add(final_pass, std::sync::atomic::Ordering::Relaxed)
+                    + final_pass
+            }
+        }
+
+        /// `generate.rs`'s `instrument`-gated `op_profile*` events are
+        /// `info!` calls -- no-ops with no recorder installed. Installs a
+        /// console recorder at `debug` so a `--nocapture` run of
+        /// [`prefill_step_zero_op_profile`] shows every `op_profile_top`/
+        /// `op_profile_bucket` line this test's own deliverable is.
+        #[cfg(all(feature = "metal", feature = "instrument"))]
+        fn install_stdout_telemetry() -> TelemetryProbe {
+            proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse(
+                "debug",
+            ));
+            let recorder = Recorder::builder()
+                .export(Exporter::std())
+                .expect("console exporter installs for an instrument-gated test")
+                .install()
+                .expect("stdout telemetry recorder installs for an instrument-gated test");
+            let drained_total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let pump_recorder = std::sync::Arc::clone(&recorder);
+            let pump_total = std::sync::Arc::clone(&drained_total);
+            std::thread::Builder::new()
+                .name("prefill-op-profile-telemetry-drain".to_string())
+                .spawn(move || {
+                    loop {
+                        let drained = pump_recorder.drain();
+                        pump_total.fetch_add(drained, std::sync::atomic::Ordering::Relaxed);
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                })
+                .expect("spawn the test-only telemetry drain thread");
+            TelemetryProbe {
+                recorder,
+                drained_total,
+            }
+        }
+
+        /// ROW 411's own open residual: the single `runtime.evaluate` call a
+        /// prefill step runs (`program_evaluations=1`, proved by
+        /// [`prefill_evaluations_per_prompt_token`] above) costs
+        /// 59ms/token wall-clock on an 850-token prompt -- this test walks
+        /// INSIDE that one call. Setting `PROXIMA_METAL_OP_PROFILE_STEP=0`
+        /// swaps prefill's own step (`_step == 0`, `generate.rs:3585-3599`)
+        /// from the production batched `runtime.evaluate` to
+        /// `evaluate_op_timed`, which commits ONE command buffer PER
+        /// `BoundOp` and reports each op's own GPU-only time
+        /// (`report_op_timings`, this file's top-of-file doc). Not a
+        /// pass/fail-on-numbers test -- the printed `op_profile_top`/
+        /// `op_profile_bucket`/`op_profile_codec`/`op_profile_variant`
+        /// lines ARE the deliverable, exactly like `bind.rs`'s
+        /// `profiles_one_real_decode_step_by_per_op_gpu_time`.
+        #[cfg(all(feature = "metal", feature = "instrument"))]
+        #[test]
+        #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
+        fn prefill_step_zero_op_profile() {
+            let model_path = crate::test_support::qwen3_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen3 gguf fixture");
+            let model = open_model(&mapped);
+            let serving_config = greedy_serving_config();
+
+            // five repeats of PREFIX (183 tokens each per
+            // `prefill_evaluations_per_prompt_token`) lands well past the
+            // ~850-token prompt the brief measured 50.3s TTFT on.
+            let prompt = PREFIX.repeat(5);
+
+            let telemetry_recorder = install_stdout_telemetry();
+
+            // SAFETY: this test only runs via an explicit `--ignored`
+            // invocation under nextest's one-process-per-test model, the
+            // same convention `bind.rs`'s own
+            // `profiles_one_real_decode_step_by_per_op_gpu_time` already
+            // relies on for this exact env var.
+            unsafe {
+                std::env::set_var("PROXIMA_METAL_OP_PROFILE_STEP", "0");
+            }
+            let mut runtime = BackendRuntime::new(&serving_config);
+            let (_generated_ids, _text, _stopped_by_eos, prefix_state) = model
+                .run_decode_loop_observed_seeded(
+                    &prompt,
+                    1,
+                    &serving_config,
+                    &mut runtime,
+                    None,
+                    &mut LogitsSink::Discard,
+                    &mut |_event| Control::Continue,
+                    None,
+                    true,
+                )
+                .expect("prefill an ~850-token prompt with step 0's op-profile branch armed");
+            // SAFETY: same justification as the `set_var` above.
+            unsafe {
+                std::env::remove_var("PROXIMA_METAL_OP_PROFILE_STEP");
+            }
+
+            let prompt_token_count = prefix_state.len();
+            let flushed = telemetry_recorder.drain_and_total();
+            std::println!(
+                "prefill_step_zero_op_profile prompt_token_count={prompt_token_count} \
+                 telemetry_records_flushed={flushed}"
+            );
+            assert!(
+                prompt_token_count > 700,
+                "fixture prompt must tokenize past 700 rows to land in the same \
+                 ~850-token regime the brief measured 50.3s TTFT on (got \
+                 {prompt_token_count})"
+            );
+            assert!(
+                flushed > 0,
+                "the op-profile step emitted no op_profile telemetry -- \
+                 PROXIMA_METAL_OP_PROFILE_STEP=0 must have matched prefill's own step 0"
             );
         }
     }
