@@ -769,9 +769,14 @@ fn execute_plan_named_wgpu(
 pub fn execute_plan_named_metal_op_timed(
     plan: &Plan,
     named: &[(&str, QuantizedBlock<'_>)],
+    cpu_reference: Option<&std::collections::BTreeMap<NodeId, Vec<f32>>>,
 ) -> Result<(Evaluated, Vec<metal::OpGpuTiming>), BackendError> {
     match plan {
-        Plan::Metal(metal_plan) => Ok(metal::execute_plan_named_op_timed(metal_plan, named)?),
+        Plan::Metal(metal_plan) => Ok(metal::execute_plan_named_op_timed(
+            metal_plan,
+            named,
+            cpu_reference,
+        )?),
         #[cfg(feature = "cpu")]
         Plan::Cpu(_) => Err(BackendError::NotImplemented { backend: "cpu" }),
         #[cfg(feature = "wgpu-backend")]

@@ -357,12 +357,14 @@ fn run_cell(label: &str, seq: u32, dim: u32, fused: bool) {
     // carries. Dividing by `INSTANCES` reports GPU time per rmsnorm chain,
     // the unit the bare-cell table below is keyed on.
     let (_evaluated, warm_timings) =
-        omega::metal::execute_plan_named_op_timed(&plan, &named_blocks).expect("warm-up gpu-timed run");
+        omega::metal::execute_plan_named_op_timed(&plan, &named_blocks, None)
+            .expect("warm-up gpu-timed run");
     drop(warm_timings);
     let mut gpu_samples_us = Vec::with_capacity(REPEATS);
     for _ in 0..REPEATS {
         let (_evaluated, timings) =
-            omega::metal::execute_plan_named_op_timed(&plan, &named_blocks).expect("gpu-timed run");
+            omega::metal::execute_plan_named_op_timed(&plan, &named_blocks, None)
+                .expect("gpu-timed run");
         let total_gpu_ns: u64 = timings.iter().map(|timing| timing.gpu_ns).sum();
         gpu_samples_us.push(total_gpu_ns as f64 / INSTANCES as f64 / 1e3);
     }

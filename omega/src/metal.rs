@@ -402,6 +402,20 @@ pub enum MetalError {
     #[cfg(feature = "instrument")]
     #[error("nan_check: op node={node} kind={kind} produced a non-finite output")]
     NonFiniteOpOutput { node: NodeId, kind: String },
+    /// `PROXIMA_METAL_COMPARE_CPU`'s own stop condition -- [`compare_op_output_to_cpu`]
+    /// found this op's own Metal output disagrees with the same node's CPU
+    /// reference value beyond the 1e-2 relative-diff floor, so
+    /// [`execute_op_timed`] stops the step at the FIRST divergent node
+    /// rather than running every remaining op past a value already known
+    /// wrong. Diagnostic-only, same `instrument`-gated reachability as
+    /// [`check_op_output_finite`].
+    #[cfg(feature = "instrument")]
+    #[error("cpu_compare: op node={node} kind={kind} max_rel_diff={max_rel_diff} exceeds 1e-2")]
+    CpuMetalDivergence {
+        node: NodeId,
+        kind: String,
+        max_rel_diff: f32,
+    },
     #[error("plan bound under {bound:?}, caller requested {requested:?} -- rebuild via plan()/plan_named()")]
     NumericPolicyMismatch {
         bound: NumericPolicy,
@@ -2598,6 +2612,65 @@ fn check_op_output_finite(
     Ok(true)
 }
 
+/// `PROXIMA_METAL_COMPARE_CPU`-gated per-node parity probe, called from
+/// [`execute_op_timed`] alongside [`check_op_output_finite`] -- reads this
+/// op's own Metal output back through [`read_back`] and diffs it against
+/// `cpu_reference`'s entry for the SAME [`NodeId`], computed once up front by
+/// evaluating the identical program/symbols/blocks on the CPU route for
+/// every non-`Op::Input` node (`proxima-model-interop/src/generate.rs`'s
+/// `evaluate_op_timed`, the one call site that builds `cpu_reference` and
+/// has `program`/`symbols`/`named` all in scope to do it).
+///
+/// Relative diff per element uses a `1e-6` floor on the denominator so a
+/// near-zero CPU reference value cannot inflate a genuinely tiny absolute
+/// gap into a huge ratio. Returns the max relative diff across every element
+/// (`None` when this node has no CPU reference entry -- weights and other
+/// `Op::Input` nodes are never in `cpu_reference` by construction). The
+/// caller stops the step at the first node whose max relative diff exceeds
+/// `1e-2`, printing every field this diagnostic's own report needs: node,
+/// kind, shape, and the first 8 values on both sides.
+#[cfg(feature = "instrument")]
+fn compare_op_output_to_cpu(
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    prepared: &Prepared,
+    program: &[Op],
+    node: NodeId,
+    kind: &str,
+    cpu_reference: &BTreeMap<NodeId, alloc::vec::Vec<f32>>,
+) -> Result<Option<f32>, MetalError> {
+    let Some(cpu_values) = cpu_reference.get(&node) else {
+        return Ok(None);
+    };
+    let Some((buffer, offset)) = device_buffers.get(&node) else {
+        return Ok(None);
+    };
+    let shape = prepared.shapes.of(node).to_vec();
+    let dtype = gpu_dtype(program, &prepared.index_nodes, node);
+    let metal_values = read_back(buffer, *offset, element_count(&shape), node, dtype)?;
+    let max_rel_diff = metal_values
+        .iter()
+        .zip(cpu_values.iter())
+        .map(|(metal_value, cpu_value)| {
+            (metal_value - cpu_value).abs() / cpu_value.abs().max(1e-6)
+        })
+        .fold(0.0_f32, f32::max);
+    if max_rel_diff > 1e-2 {
+        let metal_first: alloc::vec::Vec<f32> = metal_values.iter().copied().take(8).collect();
+        let cpu_first: alloc::vec::Vec<f32> = cpu_values.iter().copied().take(8).collect();
+        let kind_owned = kind.to_string();
+        debug!(
+            node = node.0,
+            kind = %kind_owned,
+            shape = ?shape,
+            metal_first = ?metal_first,
+            cpu_first = ?cpu_first,
+            max_rel_diff = max_rel_diff as f64,
+            "cpu_compare: divergent op output found"
+        );
+    }
+    Ok(Some(max_rel_diff))
+}
+
 /// Shared per-op timing dispatch: [`execute_plan_op_timed`] and
 /// [`execute_plan_with_placements_op_timed`] both need to encode ONE
 /// `BoundOp` on its own command buffer, commit, wait, and read back
@@ -2628,6 +2701,7 @@ fn execute_op_timed(
     always_live: &BTreeSet<NodeId>,
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
+    cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
 ) -> Result<OpGpuTiming, MetalError> {
     // this operand's own TENSOR bytes, not the shared buffer's `length()` --
     // see `operand_tensor_bytes`'s own doc: a checkpoint-mapping-offset bind
@@ -2711,6 +2785,23 @@ fn execute_op_timed(
             kind: kind.to_string(),
         });
     }
+    if let Some(cpu_reference) = cpu_reference
+        && let Some(max_rel_diff) = compare_op_output_to_cpu(
+            device_buffers,
+            prepared,
+            program,
+            bound.node,
+            kind,
+            cpu_reference,
+        )?
+        && max_rel_diff > 1e-2
+    {
+        return Err(MetalError::CpuMetalDivergence {
+            node: bound.node,
+            kind: kind.to_string(),
+            max_rel_diff,
+        });
+    }
     for retired in &prepared.retires[position] {
         if always_live.contains(retired) {
             continue;
@@ -2753,6 +2844,7 @@ fn execute_op_timed(
 pub fn execute_plan_op_timed(
     plan: &Plan,
     blocks: &[QuantizedBlock<'_>],
+    cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
@@ -2818,6 +2910,7 @@ pub fn execute_plan_op_timed(
             &no_placements,
             plan.math_mode,
             plan.numeric_policy,
+            cpu_reference,
         )?;
         timings.push(timing);
     }
@@ -2835,9 +2928,10 @@ pub fn execute_plan_op_timed(
 pub fn execute_plan_named_op_timed(
     plan: &Plan,
     named: &[(&str, QuantizedBlock<'_>)],
+    cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
     let blocks = resolve_named_blocks(&plan.program, named)?;
-    execute_plan_op_timed(plan, &blocks)
+    execute_plan_op_timed(plan, &blocks, cpu_reference)
 }
 
 /// [`execute_plan_with_placements`]'s op-timed twin -- the default decode
@@ -2953,6 +3047,7 @@ pub fn execute_plan_with_placements_op_timed(
             &always_live,
             plan.math_mode,
             plan.numeric_policy,
+            None,
         )?;
         timings.push(timing);
     }

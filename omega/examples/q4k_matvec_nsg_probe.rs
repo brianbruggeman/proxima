@@ -265,8 +265,8 @@ fn run() {
 
             use proxima_tensor::instrument::ticks_to_nanos;
 
-            let (_, timings) =
-                omega::metal::execute_plan_op_timed(&plan, &blocks).expect("op-timed executes");
+            let (_, timings) = omega::metal::execute_plan_op_timed(&plan, &blocks, None)
+                .expect("op-timed executes");
             let mut kind_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
             for timing in &timings {
                 *kind_counts.entry(timing.kind).or_insert(0) += 1;

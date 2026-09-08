@@ -2515,7 +2515,52 @@ impl BackendRuntime {
                 Ok(plan)
             },
         )?;
-        Ok(execute_plan_named_metal_op_timed(plan, named)?)
+        // `PROXIMA_METAL_COMPARE_CPU` -- diagnostic-only, `instrument`-gated,
+        // default-off: unset in every production run, so `cpu_reference`
+        // stays `None` and `execute_plan_named_metal_op_timed` below runs
+        // byte-for-byte the pre-existing path. When set, evaluates the SAME
+        // `program`/`symbols`/`named` on the CPU route for every non-`Input`
+        // node (weights are `Op::Input`, never a root here) so
+        // `execute_op_timed`'s own `compare_op_output_to_cpu` hook
+        // (`omega/src/metal.rs`) can diff each Metal op's output against its
+        // CPU counterpart as the step runs, in program order, and stop at
+        // the first node whose relative diff exceeds its own threshold.
+        let cpu_reference: Option<alloc::collections::BTreeMap<NodeId, Vec<f32>>> =
+            if std::env::var_os("PROXIMA_METAL_COMPARE_CPU").is_some() {
+                let all_computed_nodes: Vec<NodeId> = program
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, op)| !matches!(op, Op::Input { .. }))
+                    .map(|(index, _)| NodeId(index as u32))
+                    .collect();
+                let mut cpu_plan = plan_named(
+                    Engine::Cpu,
+                    None,
+                    program,
+                    symbols,
+                    named,
+                    &all_computed_nodes,
+                    self.numeric_policy,
+                )?;
+                let cpu_evaluated = execute_plan_named(&mut cpu_plan, named)?;
+                Some(
+                    all_computed_nodes
+                        .iter()
+                        .filter_map(|node| {
+                            cpu_evaluated
+                                .get(*node)
+                                .map(|(data, _)| (*node, data.to_vec()))
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            };
+        Ok(execute_plan_named_metal_op_timed(
+            plan,
+            named,
+            cpu_reference.as_ref(),
+        )?)
     }
 }
 
