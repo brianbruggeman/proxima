@@ -210,7 +210,7 @@ fn main() {
     let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false)
         .expect("tokenize prompt");
 
-    let (full_program, _logits_root) = lfm2_forward_program_with_experts(
+    let (full_program, _logits_root, _moe_sites) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,

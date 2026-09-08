@@ -62,7 +62,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
         return NodeId(2);
     }
     let shallow_kinds = &architecture.layer_kinds[..depth as usize];
-    let (shallow, _) = lfm2_forward_program_with_experts(
+    let (shallow, _, _) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -81,7 +81,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
 
     let mut deep_kinds = shallow_kinds.to_vec();
     deep_kinds.push(architecture.layer_kinds[(depth - 1) as usize]);
-    let (deep, _) = lfm2_forward_program_with_experts(
+    let (deep, _, _) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -272,7 +272,7 @@ fn main() {
     let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false)
         .expect("tokenize prompt");
 
-    let (full_program, _logits_root) = lfm2_forward_program_with_experts(
+    let (full_program, _logits_root, _moe_sites) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,

@@ -616,7 +616,7 @@ pub fn run_lfm2_prefill(
     max_new_tokens: usize,
 ) -> Result<(Vec<u32>, String), InteropError> {
     let weights = bind_lfm2_weights(parsed, file_bytes, architecture)?;
-    let (program, logits_root) = lfm2_forward_program_with_experts(
+    let (program, logits_root, _moe_sites) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -727,7 +727,7 @@ pub fn lfm2_forward_values(
     extra_node_ids: &[NodeId],
 ) -> Result<(Vec<f32>, Vec<Vec<f32>>), InteropError> {
     let weights = bind_lfm2_weights(parsed, file_bytes, architecture)?;
-    let (program, logits_root) = lfm2_forward_program_with_experts(
+    let (program, logits_root, _moe_sites) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,

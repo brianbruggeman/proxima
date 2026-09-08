@@ -54,7 +54,7 @@ impl Architecture for DenseArch {
         // inline call.
         let weights = bind_all_weights(parsed, file_bytes, &architecture, false, false, &[])?;
         let qk_norm = checkpoint_has_qk_norm(parsed);
-        let (program, roots, cache_roots) = mistral_cached_forward_program_with_experts(
+        let (program, roots, cache_roots, moe_sites) = mistral_cached_forward_program_with_experts(
             architecture.vocab,
             architecture.embedding,
             architecture.feed_forward,
@@ -75,6 +75,7 @@ impl Architecture for DenseArch {
             logits_root: roots.logits,
             hidden_root: Some(roots.hidden),
             layer_roots: cache_roots.into_iter().map(Qwen35LayerRoots::Attention).collect(),
+            moe_sites,
         })
     }
 }
