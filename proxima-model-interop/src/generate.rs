@@ -65,7 +65,8 @@ use proxima_tensor::cpu::{
     evaluate_quantized_named_exact_with_scratch, evaluate_quantized_named_with_scratch,
 };
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
-use proxima_tensor::op::{NodeId, Op};
+use proxima_tensor::DType;
+use proxima_tensor::op::{NodeId, Op, ScalarOp};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::CachedLayerRoots;
 use proxima_tensor::spec::{Qwen35LayerRoots, mistral_cached_forward_program_with_experts};
@@ -181,6 +182,47 @@ fn report_encoder_split(step: usize, encoder_split_ns: (u64, u64), gpu_exec_ns: 
         gpu_exec_ms = ms(gpu_exec_ns),
         "encoder_split: row 329 two-encoder gpu attribution inside the decode buffer"
     );
+}
+
+/// `PROXIMA_METAL_COMPARE_CPU`'s own node-selection filter (`evaluate_op_timed`
+/// above): `true` when `node` is a fused quantized matmul's `Multiply`
+/// elementwise -- weight times activation, feeding a `Reduce::Add` -- the
+/// SAME shape [`proxima_tensor::cpu`]'s `is_quantized_matmul_operand`
+/// exempts from `reject_non_float32`, checked here from the elementwise
+/// node's own side rather than the weight's. Neither engine's `bind::bind`
+/// ever gives this node a standalone buffer unless it is itself a
+/// requested output: the real Metal `plan` this diagnostic runs alongside
+/// requests only `outputs` (a handful of `roots`), so `device_buffers`
+/// never holds an entry for it and `compare_op_output_to_cpu` can never
+/// diff it. Requesting it anyway on the CPU side only forces
+/// `materialize_quantized_weight_output` to dequantize the whole weight
+/// matrix to an owned `Vec<f32>` for a comparison that can never happen --
+/// see `evaluate_op_timed`'s own doc for the measured cost this excludes.
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+fn is_quantized_matmul_multiply(program: &[Op], node: NodeId) -> bool {
+    let Op::Elementwise {
+        body: ScalarOp::Multiply,
+        operands,
+        ..
+    } = &program[node.0 as usize]
+    else {
+        return false;
+    };
+    if operands.len() != 2 {
+        return false;
+    }
+    let has_quantized_weight_operand = operands.iter().any(|(source, _)| {
+        matches!(
+            &program[source.0 as usize],
+            Op::Input { dtype, .. } if *dtype != DType::Float32
+        )
+    });
+    if !has_quantized_weight_operand {
+        return false;
+    }
+    program
+        .iter()
+        .any(|other| matches!(other, Op::Reduce(fold) if fold.operand == node && fold.body == ScalarOp::Add))
 }
 
 /// Prints the per-op GPU attribution `run_decode_loop`'s
@@ -2525,14 +2567,55 @@ impl BackendRuntime {
         // (`omega/src/metal.rs`) can diff each Metal op's output against its
         // CPU counterpart as the step runs, in program order, and stop at
         // the first node whose relative diff exceeds its own threshold.
+        //
+        // `is_quantized_matmul_multiply` excludes a node shape that can
+        // NEVER be compared regardless of cost: a fused quantized matmul's
+        // own `Multiply` elementwise (weight x activation, feeding a
+        // `Reduce::Add`) is never given its own device buffer by EITHER
+        // engine's `bind::bind` unless it is itself a requested output --
+        // the real Metal `plan` built just above requests only `outputs`
+        // (`roots`, a handful of nodes), so `device_buffers` never holds an
+        // entry for one of these and `compare_op_output_to_cpu` can never
+        // diff it. Requesting it here anyway forces `plan_named_cpu`'s
+        // `bind::bind` to defuse it and dequantize the weight -- wasted
+        // work for a comparison that can never happen -- so excluding it is
+        // correct regardless of the OOM below.
+        //
+        // NOT YET FOUND: measured (`/usr/bin/time -l`,
+        // `moe-metal-cmp2-logs/step3_run.log` /
+        // `step3_run_fixed.log`) 139 GB and 138 GB peak memory footprint,
+        // respectively, on the real 30B qwen3moe blob at
+        // `PROXIMA_METAL_OP_PROFILE_STEP=3` with this exclusion in place --
+        // i.e. excluding this node shape did NOT move the footprint outside
+        // noise, so the fused-multiply dequant is NOT the OOM's dominant
+        // cost. The process dies before printing a single `cpu_compare`
+        // line at any node, which given `debug!` below fires BEFORE
+        // `execute_plan_named` even starts suggests the dominant cost is
+        // inside `execute_plan_named_cpu`/`evaluate_quantized_with_scratch_impl`
+        // itself (candidate: `node_retirement`'s retire policy keeping every
+        // one of this program's thousands of per-layer/per-expert
+        // intermediate activation buffers alive for the whole call, not
+        // only quantized weights, because `effective_outputs` names nearly
+        // every node in the program). Narrowed, not proven -- the next
+        // instrumentation is a live byte-counter inside
+        // `evaluate_quantized_with_scratch_impl`'s per-node loop
+        // (`proxima-tensor/src/cpu.rs`), not another node-shape guess.
         let cpu_reference: Option<alloc::collections::BTreeMap<NodeId, Vec<f32>>> =
             if std::env::var_os("PROXIMA_METAL_COMPARE_CPU").is_some() {
                 let all_computed_nodes: Vec<NodeId> = program
                     .iter()
                     .enumerate()
-                    .filter(|(_, op)| !matches!(op, Op::Input { .. }))
+                    .filter(|(index, op)| {
+                        !matches!(op, Op::Input { .. })
+                            && !is_quantized_matmul_multiply(program, NodeId(*index as u32))
+                    })
                     .map(|(index, _)| NodeId(index as u32))
                     .collect();
+                debug!(
+                    program_len = program.len() as u64,
+                    requested_outputs = all_computed_nodes.len() as u64,
+                    "cpu_compare: about to build cpu reference plan"
+                );
                 let mut cpu_plan = plan_named(
                     Engine::Cpu,
                     None,
