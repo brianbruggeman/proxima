@@ -1400,6 +1400,7 @@ impl LogitsSink<'_> {
 /// to carry (contrast `bind.rs`'s own `real_openchat_file::LayerCache`,
 /// which still probes the rejected `Q8_0` path directly against the
 /// tensor seam that gate exists to keep unreachable here).
+#[derive(Clone)]
 struct LayerCache {
     k_even: Vec<f32>,
     k_odd: Vec<f32>,
@@ -1535,6 +1536,7 @@ impl KvPadShape {
 /// `rotary_dim..attn_head_dim` remainder) alongside the rotated
 /// `k_first`/`k_second` halves [`LayerCache`]'s `k_even`/`k_odd` already
 /// name for the plain single-section-RoPE checkpoints.
+#[derive(Clone)]
 struct Qwen35DenseAttentionCache {
     k_first: Vec<f32>,
     k_second: Vec<f32>,
@@ -1674,6 +1676,7 @@ impl Qwen35DenseAttentionPadScratch {
 /// history; `state` is the gated DeltaNet recurrent state, fully replaced
 /// every step (never appended to) because the mixer already folds every
 /// past position into it.
+#[derive(Clone)]
 struct SsmLayerCache {
     conv_history: Vec<f32>,
     state: Vec<f32>,
@@ -1721,10 +1724,56 @@ impl SsmLayerCache {
 /// -- an attention layer's cache append/readback shape genuinely differs
 /// from an ssm layer's, the same reason [`Qwen35LayerRoots`] itself is an
 /// enum rather than a fixed-shape tuple.
+#[derive(Clone)]
 enum LayerCacheState {
     Attention(LayerCache),
     DenseAttention(Qwen35DenseAttentionCache),
     Ssm(SsmLayerCache),
+}
+
+/// A cached prefix: the token ids [`LoadedModel::prefill_prefix`] ran one
+/// forward pass over, and the per-layer [`LayerCacheState`] that pass left
+/// behind -- the SAME `(ids, layer_caches, cached_len)` triple
+/// [`LoadedModel::run_decode_loop_observed_seeded`] already threads through
+/// its own two-range decode loop as local bindings on every call, kept
+/// alive across calls instead of dropped at function return. This is not a
+/// new cache shape: composing it back in
+/// ([`LoadedModel::generate_from_prefix`]) is exactly step 0 of
+/// [`LoadedModel::generate_with_serving_config`]'s own loop, given a
+/// nonzero `cached_len` and a suffix-only `next_ids` to start from rather
+/// than the whole prompt at `cached_len == 0`.
+///
+/// Plain host `Vec<f32>` buffers throughout (`LayerCache`'s own field
+/// list) -- the two-range decode path never registers a named,
+/// device-resident buffer for the KV cache the way
+/// [`LoadedModel::resident_names`]'s STATIC weights do (only re-uploads it
+/// as an ordinary named block every step, `run_decode_loop_observed_seeded`'s
+/// own `named_blocks.extend(kv_pad_scratch...)` call). Releasing this state
+/// is therefore exactly Rust's own default `Drop` for a `Vec` -- there is
+/// no device identity to unregister the way [`LoadedModel`]'s own `Drop`
+/// must, so this type carries none.
+pub struct PrefixState {
+    ids: Vec<u32>,
+    layer_caches: Vec<LayerCacheState>,
+    cached_len: usize,
+}
+
+impl PrefixState {
+    /// The number of prompt/generated tokens this state's own KV cache
+    /// covers -- [`LoadedModel::generate_from_prefix`]'s own resume point.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cached_len
+    }
+
+    /// `true` for a prefix that cached zero tokens -- never actually
+    /// produced by [`LoadedModel::prefill_prefix`] against a non-empty
+    /// prompt, but a real state a caller could still reach by prefilling
+    /// an empty string.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cached_len == 0
+    }
 }
 
 /// This call's own [`Op::Input`] names for one layer's cache, matching
@@ -2763,6 +2812,99 @@ impl<'file> LoadedModel<'file> {
         self.run_decode_loop(prompt, max_tokens, &serving_config, &mut runtime)
     }
 
+    /// Runs one forward pass over `prompt`'s own tokens and returns the
+    /// [`PrefixState`] it leaves behind, WITHOUT decoding anything past it
+    /// -- [`Self::run_decode_loop_observed_seeded`] with `seed: None` and
+    /// `max_tokens: 1`: step 0 of that loop always forwards the whole
+    /// `next_ids` range against `cached_len == 0` before ever sampling, so
+    /// asking for exactly one step is asking for exactly the prefill this
+    /// primitive needs and nothing past it. The one token step 0 happens to
+    /// sample (this loop's own next-token prediction) is discarded -- it is
+    /// never forward-passed itself, so it is not part of the cache
+    /// [`PrefixState`] reports; a caller after real generated text wants
+    /// [`Self::generate_from_prefix`], not this method's own return.
+    ///
+    /// The returned [`PrefixState`] is independent of `self` and of this
+    /// call's own `runtime` -- reusable across as many
+    /// [`Self::generate_from_prefix`] calls as the caller likes, against
+    /// this SAME `LoadedModel`, without re-running this forward pass.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::generate_with_serving_config`].
+    pub fn prefill_prefix(
+        &self,
+        prompt: &str,
+        serving_config: &ServingConfig,
+    ) -> Result<PrefixState, InteropError> {
+        let mut runtime = BackendRuntime::new(serving_config);
+        let (_generated_ids, _text, _stopped_by_eos, prefix_state) = self
+            .run_decode_loop_observed_seeded(
+                prompt,
+                1,
+                serving_config,
+                &mut runtime,
+                None,
+                &mut LogitsSink::Discard,
+                &mut |_event| Control::Continue,
+                None,
+                true,
+            )?;
+        Ok(prefix_state)
+    }
+
+    /// Resumes decoding from `prefix` -- [`Self::run_decode_loop_observed_seeded`]
+    /// with `seed: Some(prefix.clone())`, `prompt` now the SUFFIX text only,
+    /// so this call's own two-range forward starts from `prefix`'s cached
+    /// `cached_len` rows instead of `0`, and prefills ONLY the suffix's own
+    /// tokens as the new range -- the multi-row prefill
+    /// [`Self::prefill_prefix`] already ran for `prefix`'s own tokens is
+    /// never repeated. `prefix` is cloned, never consumed: a second call
+    /// against a different suffix, or a second `LoadedModel` call entirely,
+    /// sees `prefix` exactly as this call received it.
+    ///
+    /// `suffix` is tokenized with neither BOS nor EOS added -- it continues
+    /// the sequence `prefix` already opened, so the tokenizer must see it as
+    /// a continuation, not a fresh prompt. If the two texts' own token
+    /// boundary does not fall on a token the tokenizer would also choose
+    /// when encoding `prefix_text + suffix_text` as one string (a
+    /// unigram/BPE tokenizer can merge a trailing/leading fragment across a
+    /// naive substring split), the caller owns splitting the prompt on a
+    /// boundary the tokenizer already treats as a hard break -- a newline is
+    /// the reliable one for this crate's own vocabularies.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::generate_with_serving_config`].
+    pub fn generate_from_prefix(
+        &self,
+        prefix: &PrefixState,
+        suffix: &str,
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        let mut runtime = BackendRuntime::new(serving_config);
+        let seed = PrefixState {
+            ids: prefix.ids.clone(),
+            layer_caches: prefix.layer_caches.clone(),
+            cached_len: prefix.cached_len,
+        };
+        let (generated_ids, text, stopped_by_eos, _final_state) = self
+            .run_decode_loop_observed_seeded(
+                suffix,
+                max_tokens,
+                serving_config,
+                &mut runtime,
+                None,
+                &mut LogitsSink::Discard,
+                on_token,
+                Some(seed),
+                true,
+            )?;
+        Ok((generated_ids, text, stopped_by_eos))
+    }
+
     /// The first auto-tune step (`crate::memory_fit`'s own module doc):
     /// derives this checkpoint's device-memory budget from its own shape at
     /// `serving_config.context_length`, probes the host's own device facts
@@ -2959,12 +3101,74 @@ impl<'file> LoadedModel<'file> {
         logits_sink: &mut LogitsSink,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        let ids = proxima_tokenizer::encode_with_bos_eos(
-            prompt,
-            &self.vocab,
-            wants_bos(&self.vocab),
-            self.vocab.add_eos_token().unwrap_or(false),
-        )?;
+        let (generated_ids, text, stopped_by_eos, _prefix_state) = self
+            .run_decode_loop_observed_seeded(
+                prompt,
+                max_tokens,
+                serving_config,
+                runtime,
+                token_override,
+                logits_sink,
+                on_token,
+                None,
+                false,
+            )?;
+        Ok((generated_ids, text, stopped_by_eos))
+    }
+
+    /// [`Self::run_decode_loop_observed`]'s own body, plus a `seed`: `None`
+    /// reproduces that method exactly (fresh [`LayerCacheState`] per layer,
+    /// `cached_len` starting at 0, `prompt` tokenized WITH this vocab's own
+    /// BOS/EOS policy); `Some(state)` resumes from a [`PrefixState`] a prior
+    /// call returned instead -- `prompt` is then the SUFFIX text only,
+    /// tokenized with NEITHER BOS nor EOS added (continuing the same
+    /// sequence [`PrefixState::ids`] already opened), `layer_caches` starts
+    /// from `state`'s own per-layer cache instead of [`LayerCache::new`],
+    /// and `cached_len` starts from `state.cached_len` instead of `0`. The
+    /// two-range decode loop below is BYTE-FOR-BYTE unchanged either way --
+    /// this is the same primitive [`Self::generate_with_serving_config`]'s
+    /// first step already runs (a multi-row forward over `next_ids` against
+    /// `cached_len` rows of history), just given a nonzero `cached_len` and
+    /// a non-full-prompt `next_ids` to start from -- so [`PrefixState`]
+    /// itself is exactly the `(ids, layer_caches, cached_len)` triple this
+    /// loop already threads through every step, exposed across calls rather
+    /// than dropped at this function's own return.
+    ///
+    /// Always returns the FINAL [`PrefixState`] this call's own decoding
+    /// left the cache in, alongside the usual generated-token triple --
+    /// [`Self::run_decode_loop_observed`] discards it (nothing needs cross-
+    /// call reuse there), [`Self::prefill_prefix`] is the one caller that
+    /// keeps it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_decode_loop_observed_seeded(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+        token_override: Option<&[u32]>,
+        logits_sink: &mut LogitsSink,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
+        seed: Option<PrefixState>,
+        force_two_range: bool,
+    ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
+        // Read unconditionally: the ONLY reader lives behind
+        // `#[cfg(all(feature = "metal-output-placement", target_os =
+        // "macos"))]` below, so a build without that cfg combination never
+        // reads this parameter otherwise, and would warn on it as unused.
+        let _ = force_two_range;
+        let ids = if seed.is_some() {
+            proxima_tokenizer::encode_with_bos_eos(prompt, &self.vocab, false, false)?
+        } else {
+            proxima_tokenizer::encode_with_bos_eos(
+                prompt,
+                &self.vocab,
+                wants_bos(&self.vocab),
+                self.vocab.add_eos_token().unwrap_or(false),
+            )?
+        };
+        let seed_cached_len = seed.as_ref().map_or(0, PrefixState::len);
+        let seed_ids: Vec<u32> = seed.as_ref().map_or_else(Vec::new, |state| state.ids.clone());
         // The repetition-penalty filter's own window: prompt tokens included,
         // matching upstream (`tools/main/main.cpp:725` feeds prompt tokens
         // through the same `common_sampler_accept` generated tokens use), grown
@@ -2974,7 +3178,11 @@ impl<'file> LoadedModel<'file> {
         // deterministic-by-seed pipe, drawn from progressively rather than
         // reseeded per token, mirroring upstream's own one-`std::mt19937`-per-
         // sampler-chain lifetime (`proxima_tokenizer::sample`'s own doc).
-        let mut token_history: Vec<u32> = ids.clone();
+        let mut token_history: Vec<u32> = {
+            let mut history = seed_ids.clone();
+            history.extend_from_slice(&ids);
+            history
+        };
         let repeat_window = serving_config.repeat_last_n.max(0) as usize;
         let sample_config = SamplingConfig {
             temperature: serving_config.temperature,
@@ -2990,16 +3198,25 @@ impl<'file> LoadedModel<'file> {
         // Persistent device-resident KV: only reachable when this build was
         // compiled with `metal-output-placement`, this checkpoint built a
         // single-range program (`LoadedModel::single_range`'s own doc --
-        // `None` for any mixture-of-experts or qwen35 checkpoint), AND this
+        // `None` for any mixture-of-experts or qwen35 checkpoint), this
         // call's own `ServingConfig` selected the Metal backend
-        // (`runtime.is_metal()`). CPU decode, any MoE checkpoint, and the
-        // qwen35 hybrid path always fall through to the two-range
-        // `layer_roots` path below, byte-for-byte unchanged.
+        // (`runtime.is_metal()`), AND the caller did not ask to force the
+        // two-range path (`force_two_range`). [`Self::prefill_prefix`]/
+        // [`Self::generate_from_prefix`] always set `force_two_range: true`
+        // -- the placed-kv path's own [`SingleRangeProgram`] never leaves a
+        // host-side [`LayerCacheState`] to report as a [`PrefixState`], so
+        // it is not eligible for either primitive regardless of whether
+        // this checkpoint would otherwise take it. Every other caller
+        // (ordinary `generate`/`generate_streaming`, `seed: None`) is
+        // unaffected: CPU decode, any MoE checkpoint, and the qwen35 hybrid
+        // path always fall through to the two-range `layer_roots` path
+        // below, byte-for-byte unchanged.
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        if runtime.is_metal()
+        if !force_two_range
+            && runtime.is_metal()
             && let Some(single_range) = &self.single_range
         {
-            return self.run_decode_loop_placed_kv(
+            let (generated_ids, text, stopped_by_eos) = self.run_decode_loop_placed_kv(
                 single_range,
                 ids.clone(),
                 token_history.clone(),
@@ -3012,7 +3229,17 @@ impl<'file> LoadedModel<'file> {
                 token_override,
                 logits_sink,
                 on_token,
-            );
+            )?;
+            // No host-side `LayerCacheState` exists on this path -- the
+            // KV cache never left the device (`SingleRangeProgram`'s own
+            // doc) -- so there is nothing real to report here. Callers
+            // that need a real [`PrefixState`] set `force_two_range: true`
+            // and never reach this branch at all.
+            return Ok((generated_ids, text, stopped_by_eos, PrefixState {
+                ids: Vec::new(),
+                layer_caches: Vec::new(),
+                cached_len: 0,
+            }));
         }
 
         let cache_names: Vec<LayerCacheNames> = self
@@ -3037,23 +3264,26 @@ impl<'file> LoadedModel<'file> {
                 },
             })
             .collect();
-        let mut layer_caches: Vec<LayerCacheState> = self
-            .layer_roots
-            .iter()
-            .map(|roots| match roots {
-                Qwen35LayerRoots::Attention(_) => LayerCacheState::Attention(LayerCache::new()),
-                Qwen35LayerRoots::DenseAttention(_) => {
-                    LayerCacheState::DenseAttention(Qwen35DenseAttentionCache::new())
-                }
-                Qwen35LayerRoots::Ssm { .. } => LayerCacheState::Ssm(SsmLayerCache::new(
-                    self.qwen35_ssm_shape.unwrap_or(Qwen35SsmShape {
-                        qkv_dim: 0,
-                        conv_rows: 0,
-                        state_len: 0,
-                    }),
-                )),
-            })
-            .collect();
+        let mut layer_caches: Vec<LayerCacheState> = match seed {
+            Some(state) => state.layer_caches,
+            None => self
+                .layer_roots
+                .iter()
+                .map(|roots| match roots {
+                    Qwen35LayerRoots::Attention(_) => LayerCacheState::Attention(LayerCache::new()),
+                    Qwen35LayerRoots::DenseAttention(_) => {
+                        LayerCacheState::DenseAttention(Qwen35DenseAttentionCache::new())
+                    }
+                    Qwen35LayerRoots::Ssm { .. } => LayerCacheState::Ssm(SsmLayerCache::new(
+                        self.qwen35_ssm_shape.unwrap_or(Qwen35SsmShape {
+                            qkv_dim: 0,
+                            conv_rows: 0,
+                            state_len: 0,
+                        }),
+                    )),
+                })
+                .collect(),
+        };
         // One [`KvPadScratch`] per layer, reused across every step of this
         // call -- only ever filled for a [`LayerCacheState::Attention`]
         // layer (the only cache shape `mistral_cached_forward_program_with_experts`
@@ -3089,8 +3319,8 @@ impl<'file> LoadedModel<'file> {
         let resident_names: BTreeSet<&str> = self.resident_names();
 
         let prompt_token_count = ids.len();
-        let mut cached_len = 0usize;
-        let mut next_ids = ids;
+        let mut cached_len = seed_cached_len;
+        let mut next_ids = ids.clone();
         let vocab_size = self.architecture.vocab as usize;
 
         let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
@@ -3585,7 +3815,27 @@ impl<'file> LoadedModel<'file> {
         )?;
 
         let text = proxima_tokenizer::decode(&generated_ids, &self.vocab)?;
-        Ok((generated_ids, text, stopped_by_eos))
+        // Exactly the tokens `cached_len` now covers: `seed_ids ++ ids`
+        // (this call's own new range) plus however many of its OWN
+        // generated tokens have themselves been forward-passed since --
+        // every generated token except the last is (the last is only
+        // just-sampled, never yet fed back through `evaluate`). Derived
+        // from `cached_len` itself rather than re-counting loop iterations,
+        // so it is correct on every exit path `decode_until_stop_or_budget`
+        // has (`max_tokens` exhaustion, model EOS, `Control::Stop` from
+        // either phase) without special-casing any of them.
+        let mut final_ids = seed_ids;
+        final_ids.extend_from_slice(&ids);
+        let forwarded_generated = cached_len
+            .saturating_sub(final_ids.len())
+            .min(generated_ids.len());
+        final_ids.extend_from_slice(&generated_ids[..forwarded_generated]);
+        let final_state = PrefixState {
+            ids: final_ids,
+            layer_caches,
+            cached_len,
+        };
+        Ok((generated_ids, text, stopped_by_eos, final_state))
     }
 
     /// [`Self::run_decode_loop`]'s persistent-device-resident-KV arm:
