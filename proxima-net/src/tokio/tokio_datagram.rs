@@ -1,6 +1,6 @@
 //! Tokio-backed [`DatagramFactory`]/[`DatagramSocket`] — the UDP sibling of
 //! `TokioAcceptorFactory`, and tokio's counterpart to
-//! [`super::super::prime::PrimeDatagramFactory`]/`PrimeDatagram`. Closes the
+//! `crate::prime::PrimeDatagramFactory`/`PrimeDatagram` (`prime`-feature-gated). Closes the
 //! runtime-capability asymmetry where `DatagramFactory` had exactly one
 //! implementation (prime): a tokio-backed `RuntimeSelection` previously
 //! carried `datagram_factory: None`, so any h3/QUIC or
