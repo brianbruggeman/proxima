@@ -14,6 +14,9 @@
 //! [`SafetensorsError::UnsupportedDtype`] rather than guessing a lossy
 //! substitute.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use proxima_tensor::DType;
 
 use crate::error::SafetensorsError;
@@ -71,6 +74,114 @@ pub fn dtype_to_wire(dtype: DType) -> Option<&'static str> {
         DType::Float32 => Some("F32"),
         DType::Float64 => Some("F64"),
         DType::Int128 | DType::UInt128 => None,
+    }
+}
+
+/// Decodes one `F8_E4M3` (OCP E4M3FN: 1 sign, 4 exponent bias-7, 3
+/// mantissa, no infinities, `S.1111.111` reserved for NaN) byte to `f32`.
+/// `DType` has no fixed-width counterpart for this format (see the module
+/// doc), so this bypasses `DType` entirely and decodes straight from the
+/// raw byte — the same reason [`f8_block_dequant`] takes raw bytes rather
+/// than a `DType`-typed buffer.
+#[must_use]
+pub fn f8_e4m3_to_f32(byte: u8) -> f32 {
+    let sign = if byte & 0x80 == 0 { 1.0_f32 } else { -1.0_f32 };
+    let exponent = (byte >> 3) & 0x0F;
+    let mantissa = byte & 0x07;
+
+    if exponent == 0x0F && mantissa == 0x07 {
+        return f32::NAN;
+    }
+    if exponent == 0 {
+        // subnormal: 2^(1-bias) * (mantissa / 8)
+        return sign * libm_ldexp(f32::from(mantissa) / 8.0, -6);
+    }
+    // normal: 2^(exponent-bias) * (1 + mantissa/8)
+    let significand = 1.0 + f32::from(mantissa) / 8.0;
+    sign * libm_ldexp(significand, i32::from(exponent) - 7)
+}
+
+/// `f32 * 2^exponent` without pulling in `libm`/`std::f32::exp2` — `no_std`
+/// safe, exact for the small integer exponents E4M3 ever produces
+/// (`-6..=8`).
+fn libm_ldexp(value: f32, exponent: i32) -> f32 {
+    if exponent >= 0 {
+        value * f32::from_bits(((127 + exponent) as u32) << 23)
+    } else {
+        value / f32::from_bits(((127 - exponent) as u32) << 23)
+    }
+}
+
+/// Dequantizes a block-wise-scaled `F8_E4M3` tensor to `f32`.
+///
+/// `bytes` is the raw row-major `F8_E4M3` buffer for a tensor of shape
+/// `shape` (last two dims are `[rows, cols]`; anything higher-rank is
+/// flattened into leading blocks of `rows x cols`, matching how the
+/// official FP8 checkpoint's `weight` / `weight_scale_inv` pair is laid
+/// out — DeepSeek-style block FP8, `weight_block_size: [128, 128]` per
+/// `config.json`). `scales` is `weight_scale_inv`'s own row-major buffer
+/// over the `ceil(rows/block) x ceil(cols/block)` scale grid: one `f32`
+/// scale per `block x block` tile, applied as `value = raw_f32 *
+/// scale[row / block, col / block]`.
+///
+/// # Errors
+///
+/// [`SafetensorsError::TensorDataLengthMismatch`] if `bytes.len()` doesn't
+/// match `shape`'s element count, or if `scales.len()` doesn't match the
+/// expected scale-grid size.
+pub fn f8_block_dequant(
+    bytes: &[u8],
+    scales: &[f32],
+    shape: &[u64],
+    block: usize,
+) -> Result<Vec<f32>, SafetensorsError> {
+    let element_count: u64 = shape.iter().product();
+    if bytes.len() as u64 != element_count {
+        return Err(SafetensorsError::TensorDataLengthMismatch {
+            tensor: "f8_block_dequant".into(),
+            expected: element_count,
+            found: bytes.len() as u64,
+        });
+    }
+    let (rows, cols) = trailing_two_dims(shape);
+    let scale_cols = cols.div_ceil(block);
+    let scale_rows = rows.div_ceil(block);
+    let expected_scales = (scale_rows * scale_cols) as u64;
+    if scales.len() as u64 != expected_scales {
+        return Err(SafetensorsError::TensorDataLengthMismatch {
+            tensor: "f8_block_dequant.weight_scale_inv".into(),
+            expected: expected_scales,
+            found: scales.len() as u64,
+        });
+    }
+
+    let matrix_size = rows * cols;
+    let matrix_count = bytes.len().checked_div(matrix_size).unwrap_or(0);
+    let mut out = vec![0.0_f32; bytes.len()];
+    for matrix in 0..matrix_count {
+        let base = matrix * matrix_size;
+        for row in 0..rows {
+            let scale_row = row / block;
+            for col in 0..cols {
+                let scale_col = col / block;
+                let scale = scales[scale_row * scale_cols + scale_col];
+                let index = base + row * cols + col;
+                out[index] = f8_e4m3_to_f32(bytes[index]) * scale;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The last two dimensions of `shape`, treating a 0-D or 1-D shape as a
+/// single row (`rows = 1`, `cols = product of shape`) — the block grid is
+/// only ever meaningful over a matrix, and every FP8 weight tensor in the
+/// official checkpoint is rank >= 2.
+fn trailing_two_dims(shape: &[u64]) -> (usize, usize) {
+    match shape.len() {
+        0 => (1, 1),
+        1 => (1, shape[0] as usize),
+        rank => (shape[rank - 2] as usize, shape[rank - 1] as usize),
     }
 }
 
@@ -151,5 +262,91 @@ mod tests {
         #[case] dtype: DType,
     ) {
         assert_eq!(dtype_to_wire(dtype), None);
+    }
+
+    /// Hand-computed E4M3 values, byte laid out `S EEEE MMM`: `0x00` is
+    /// positive zero; `0x38` = `0_0111_000` -- exponent field `0111` (bias
+    /// 7, so `2^0`), mantissa `000` -> `1.0`; `0x40` = `0_1000_000` bumps
+    /// the exponent field to `1000` (`2^1`) -> `2.0`; `0x7E` =
+    /// `0_1111_110` is the maximum normal, exponent `1111` (`2^8`),
+    /// mantissa `110` -> `256 * 1.75 = 448.0`; `0xB8` is `-1.0` (sign bit
+    /// set on `0x38`).
+    #[proxima::test]
+    #[case::positive_zero(0x00, 0.0)]
+    #[case::one(0x38, 1.0)]
+    #[case::two(0x40, 2.0)]
+    #[case::max_normal(0x7E, 448.0)]
+    #[case::negative_one(0xB8, -1.0)]
+    async fn f8_e4m3_decodes_hand_computed_values(#[case] byte: u8, #[case] expected: f32) {
+        assert_eq!(f8_e4m3_to_f32(byte), expected);
+    }
+
+    #[proxima::test]
+    async fn f8_e4m3_reserved_bit_pattern_is_nan() {
+        assert!(f8_e4m3_to_f32(0x7F).is_nan());
+        assert!(f8_e4m3_to_f32(0xFF).is_nan());
+    }
+
+    #[proxima::test]
+    async fn f8_e4m3_subnormal_decodes_below_the_smallest_normal() {
+        // exponent field 0, mantissa 1: 2^-6 * (1/8) = 2^-9.
+        let value = f8_e4m3_to_f32(0x01);
+        assert!((value - 2.0_f32.powi(-9)).abs() < 1e-9);
+    }
+
+    /// A 4x4 tensor split into four 2x2 blocks (`block = 2`), each block
+    /// carrying its own scale. Every element in a block is `0x38` (raw
+    /// `1.0`), so the dequantized value is exactly that block's scale --
+    /// hand-computed, not derived from the function under test.
+    #[proxima::test]
+    async fn f8_block_dequant_applies_per_block_scale() {
+        let bytes = [0x38_u8; 16];
+        let shape = [4_u64, 4];
+        let scales = [1.0_f32, 2.0, 3.0, 4.0];
+
+        let dequantized = f8_block_dequant(&bytes, &scales, &shape, 2).expect("valid shapes");
+
+        let expected_block = |row: usize, col: usize| -> f32 {
+            match (row / 2, col / 2) {
+                (0, 0) => 1.0,
+                (0, 1) => 2.0,
+                (1, 0) => 3.0,
+                (1, 1) => 4.0,
+                _ => unreachable!("only four 2x2 blocks in a 4x4 tensor"),
+            }
+        };
+        for row in 0..4 {
+            for col in 0..4 {
+                assert_eq!(
+                    dequantized[row * 4 + col],
+                    expected_block(row, col),
+                    "row {row} col {col}"
+                );
+            }
+        }
+    }
+
+    #[proxima::test]
+    async fn f8_block_dequant_rejects_byte_shape_mismatch() {
+        let bytes = [0x38_u8; 15];
+        let shape = [4_u64, 4];
+        let scales = [1.0_f32; 4];
+        let outcome = f8_block_dequant(&bytes, &scales, &shape, 2);
+        assert!(matches!(
+            outcome,
+            Err(SafetensorsError::TensorDataLengthMismatch { .. })
+        ));
+    }
+
+    #[proxima::test]
+    async fn f8_block_dequant_rejects_scale_grid_mismatch() {
+        let bytes = [0x38_u8; 16];
+        let shape = [4_u64, 4];
+        let scales = [1.0_f32; 3];
+        let outcome = f8_block_dequant(&bytes, &scales, &shape, 2);
+        assert!(matches!(
+            outcome,
+            Err(SafetensorsError::TensorDataLengthMismatch { .. })
+        ));
     }
 }
