@@ -70,6 +70,8 @@ use crate::numeric::{NumericPolicy, NumericRewrite, admit};
 #[cfg(feature = "instrument")]
 use crate::instrument;
 use crate::live;
+#[cfg(feature = "instrument")]
+use proxima_telemetry::debug;
 #[cfg(feature = "cached-attention-streaming")]
 use crate::map;
 use crate::map::{AxisIndex, AxisTerm, IndexMap, IndexPattern};
@@ -875,6 +877,14 @@ impl BoundOpBuilder {
                             *operand_node,
                             instrument::FuseSite::ElementwiseOperand,
                             outcome,
+                        );
+                        debug!(
+                            node = operand_node.0,
+                            kind = "elementwise_operand_fuse",
+                            decision = if fuses { "fused" } else { "materialized" },
+                            into = node.0,
+                            still_live = still_live,
+                            "single-consumer elementwise composition decision -- still_live is gated by the requested output set"
                         );
                     }
                     if !fuses {
@@ -2206,11 +2216,21 @@ fn consumed_by_resolved_nodes(resolved: &[BoundOp]) -> BTreeSet<NodeId> {
 #[must_use]
 pub fn dead_resolved_nodes(resolved: &[BoundOp], effective_outputs: &[NodeId]) -> BTreeSet<NodeId> {
     let consumed = consumed_by_resolved_nodes(resolved);
-    resolved
+    let dead: BTreeSet<NodeId> = resolved
         .iter()
         .map(|computed| computed.node)
         .filter(|node| !consumed.contains(node) && !effective_outputs.contains(node))
-        .collect()
+        .collect();
+    #[cfg(feature = "instrument")]
+    for node in &dead {
+        debug!(
+            node = node.0,
+            kind = "dead_resolved_node",
+            decision = "dead",
+            "resolved node has zero consumers and is not a requested output"
+        );
+    }
+    dead
 }
 
 /// Drops every [`dead_resolved_nodes`] entry from `resolved` — the one
@@ -2612,6 +2632,18 @@ fn cached_attention_candidates(
             .copied()
             .collect::<BTreeSet<_>>();
         if dependencies.iter().any(|node| effective_outputs.contains(node)) {
+            #[cfg(feature = "instrument")]
+            for node in &dependencies {
+                if effective_outputs.contains(node) {
+                    debug!(
+                        node = node.0,
+                        kind = "cached_attention_absorption",
+                        decision = "rejected_requested_output",
+                        into = output.0,
+                        "attention mask dependency not absorbed -- it is a requested output"
+                    );
+                }
+            }
             continue;
         }
         let absorbed = removable_attention_dependencies(program, &dependencies, output);
@@ -2882,6 +2914,18 @@ fn cached_attention_single_range_candidates(
             .filter(|node| *node != cached_len_node)
             .collect::<BTreeSet<_>>();
         if dependencies.iter().any(|node| effective_outputs.contains(node)) {
+            #[cfg(feature = "instrument")]
+            for node in &dependencies {
+                if effective_outputs.contains(node) {
+                    debug!(
+                        node = node.0,
+                        kind = "cached_attention_absorption",
+                        decision = "rejected_requested_output",
+                        into = output.0,
+                        "attention mask dependency not absorbed -- it is a requested output"
+                    );
+                }
+            }
             continue;
         }
         let absorbed = removable_attention_dependencies(program, &dependencies, output);
@@ -3777,6 +3821,14 @@ pub fn node_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<Node
     let mut retires = vec![Vec::new(); resolved.len()];
     for (node, position) in last_use {
         if !outputs.contains(&node) {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = node.0,
+                kind = "node_retirement",
+                decision = "retired",
+                into = resolved[position].node.0,
+                "node retired -- last consumer read it at this resolved position"
+            );
             retires[position].push(node);
         }
     }

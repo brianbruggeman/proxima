@@ -168,6 +168,8 @@ use proxima_primitives::pipe::Pipe;
 use proxima_primitives::pipe::fan_in::Quorum;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::counter;
+#[cfg(feature = "instrument")]
+use proxima_telemetry::debug;
 
 type MatmulCohort = ThreadCohort<TensorError>;
 type MatmulSession<'a> = CohortSession<'a, TensorError>;
@@ -503,6 +505,134 @@ pub fn evaluate_named(
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
     evaluate_named_via_arena(program, symbols, named, outputs)
+}
+
+/// One output-set-dependent decision the planner made while building
+/// `resolved` from `program` -- never evaluation state, only what
+/// [`bind::bind`], [`dead_resolved_nodes`], [`node_retirement`],
+/// [`epilogue_fuse_plan`] and [`layer_norm_cluster_plan`] decided given the
+/// requested output set. `into` names the [`BoundOp`] the decision folded
+/// `node` into, or the resolved position it retired against; `consumers`
+/// is the fused-form consumer count at the moment of the decision, where
+/// known (`0` where the underlying pass does not track it, e.g. `dead`/`retired`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanDecision {
+    pub node: NodeId,
+    pub kind: &'static str,
+    pub decision: &'static str,
+    pub into: Option<NodeId>,
+    pub consumers: u32,
+}
+
+/// Same admission pipeline [`evaluate_named`] runs -- [`shape::infer`],
+/// [`bind::bind`], [`dead_resolved_nodes`], [`node_retirement`], and the
+/// epilogue/layer-norm rewrite worklist -- but returns every decision those
+/// passes made instead of allocating buffers and interpreting `resolved`.
+/// `named` is accepted only for signature parity with [`evaluate_named`]:
+/// every decision here depends on `program`/`symbols`/`outputs` alone, never
+/// on tensor bytes, so a caller comparing two output sets on the identical
+/// program can call this twice and diff the two `Vec<PlanDecision>` directly
+/// -- built for a downstream consumer whose own test harness cannot easily
+/// enable this crate's `instrument` feature to read the equivalent `debug!`
+/// events [`epilogue_fuse_plan`]/[`layer_norm_cluster_plan`]/
+/// [`dead_resolved_nodes`]/[`node_retirement`] already emit at the identical
+/// decision points.
+///
+/// # Errors
+/// The same errors [`evaluate_named`] raises during planning: shape
+/// inference failure, a non-`Float32` node, or an out-of-range output.
+pub fn plan_trace_named(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, &[f32])],
+    outputs: &[NodeId],
+) -> Result<Vec<PlanDecision>, TensorError> {
+    let _ = named;
+    let shapes = shape::infer(program, symbols)?;
+    reject_non_float32(program, &BTreeSet::new())?;
+    let root = program
+        .len()
+        .checked_sub(1)
+        .map(|last| NodeId(last as u32))
+        .ok_or(TensorError::Empty)?;
+    for output in outputs {
+        if output.0 as usize >= program.len() {
+            return Err(TensorError::UnknownOutput(*output));
+        }
+    }
+    let effective_outputs: Vec<NodeId> = if outputs.is_empty() {
+        vec![root]
+    } else {
+        outputs.to_vec()
+    };
+    reject_non_float32_outputs(program, &BTreeSet::new(), &effective_outputs)?;
+
+    let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
+    let mut decisions = Vec::new();
+
+    let bound_nodes: BTreeSet<NodeId> = resolved.iter().map(|computed| computed.node).collect();
+    for index in 0..program.len() {
+        let node = NodeId(index as u32);
+        if bound_nodes.contains(&node) {
+            continue;
+        }
+        let into = resolved
+            .iter()
+            .find(|computed| computed.operands().iter().any(|(operand, ..)| *operand == node))
+            .map(|computed| computed.node);
+        decisions.push(PlanDecision {
+            node,
+            kind: "raw_op",
+            decision: "absorbed",
+            into,
+            consumers: 0,
+        });
+    }
+
+    for node in dead_resolved_nodes(&resolved, &effective_outputs) {
+        decisions.push(PlanDecision {
+            node,
+            kind: "resolved_node",
+            decision: "dead",
+            into: None,
+            consumers: 0,
+        });
+    }
+
+    for (position, retired_here) in node_retirement(&resolved, &effective_outputs).iter().enumerate() {
+        for &node in retired_here {
+            decisions.push(PlanDecision {
+                node,
+                kind: "resolved_node",
+                decision: "retired",
+                into: resolved.get(position).map(|computed| computed.node),
+                consumers: 0,
+            });
+        }
+    }
+
+    let (epilogue_fuse, layer_norm_cluster, _fires) =
+        run_rewrite_worklist(&resolved, program.len(), &effective_outputs, &BTreeMap::new());
+    for (&reduce_node, &(index, ..)) in &epilogue_fuse {
+        decisions.push(PlanDecision {
+            node: reduce_node,
+            kind: "epilogue_fuse",
+            decision: "fused",
+            into: resolved.get(index).map(|computed| computed.node),
+            consumers: 1,
+        });
+    }
+    for (&r2_node, cluster) in &layer_norm_cluster {
+        decisions.push(PlanDecision {
+            node: r2_node,
+            kind: "layer_norm_cluster",
+            decision: "fused",
+            into: resolved.get(cluster.tail_index).map(|computed| computed.node),
+            consumers: 1,
+        });
+    }
+
+    Ok(decisions)
 }
 
 /// Same contract as [`evaluate`], plus one capability a caller cannot get
@@ -1932,6 +2062,14 @@ fn epilogue_fuse_plan(
             continue;
         }
         if effective_outputs.contains(&reduce_node) {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = reduce_node.0,
+                kind = "epilogue_fuse",
+                decision = "rejected_requested_output",
+                consumers = consumer_counts.get(&reduce_node).copied().unwrap_or(0),
+                "epilogue fuse admission rejected -- reduce node is a requested output"
+            );
             continue;
         }
         let Some(&producer_position) = node_position.get(&reduce_node) else {
@@ -2024,6 +2162,15 @@ fn epilogue_fuse_plan(
         if fire_position >= index {
             continue;
         }
+        #[cfg(feature = "instrument")]
+        debug!(
+            node = reduce_node.0,
+            kind = "epilogue_fuse",
+            decision = "fused",
+            into = computed.node.0,
+            consumers = consumer_counts.get(&reduce_node).copied().unwrap_or(0),
+            "epilogue fuse admitted -- reduce node folded into consumer's epilogue"
+        );
         plan.insert(reduce_node, (index, fire_position, kind, hoist_axis));
     }
     plan
@@ -2439,6 +2586,14 @@ fn layer_norm_cluster_plan(
         }
         let Some(row_axis) = hoist_axis else { continue };
         if effective_outputs.contains(&r2_node) {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = r2_node.0,
+                kind = "layer_norm_cluster",
+                decision = "rejected_requested_output",
+                consumers = consumer_counts.get(&r2_node).copied().unwrap_or(0),
+                "layer norm cluster admission rejected -- r2 node is a requested output"
+            );
             continue;
         }
         let tail = &resolved[tail_index];
@@ -2651,6 +2806,16 @@ fn layer_norm_cluster_plan(
             continue;
         }
 
+        #[cfg(feature = "instrument")]
+        debug!(
+            node = r2_node.0,
+            kind = "layer_norm_cluster",
+            decision = "fused",
+            into = tail.node.0,
+            consumers = consumer_counts.get(&r2_node).copied().unwrap_or(0),
+            x_node = x_node.0,
+            "layer norm cluster admitted -- r2/e2/r1 folded into the layer norm tail"
+        );
         clusters.insert(
             r2_node,
             LayerNormClusterPlan {
@@ -20086,6 +20251,85 @@ mod tests {
     use std::time::Instant;
 
     use crate::test_support::Lcg;
+
+    /// `b = a * scale; c = b + bias; d = c * c` -- the same shape
+    /// `bind::tests::elementwise_chain_program` builds (private to that
+    /// module's own test scope), inlined here rather than reused across the
+    /// module boundary since this is `plan_trace_named`'s only consumer.
+    fn elementwise_chain_program() -> (Vec<Op>, NodeId, NodeId) {
+        use crate::op::{Extent, append};
+
+        let mut program = Vec::new();
+        let a = append(
+            &mut program,
+            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: None },
+        );
+        let scale = append(
+            &mut program,
+            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: None },
+        );
+        let bias = append(
+            &mut program,
+            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: None },
+        );
+        let identity = || crate::map::IndexMap::Affine(crate::map::projection(1, &[0]));
+        let b = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![(a, identity()), (scale, identity())],
+                name: None,
+            },
+        );
+        let c = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: vec![(b, identity()), (bias, identity())],
+                name: None,
+            },
+        );
+        let d = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![(c, identity()), (c, identity())],
+                name: None,
+            },
+        );
+        (program, b, d)
+    }
+
+    /// This is the exact shape `bind::tests::an_elementwise_intermediate_requested_as_an_output_prevents_fusion`
+    /// proves at the `resolved` level -- `plan_trace_named` must report the
+    /// SAME output-set-dependent flip as a `PlanDecision`, since a caller
+    /// diffing two `plan_trace_named` calls on the SAME program with
+    /// different output sets needs exactly this kind of node to show up as
+    /// a difference.
+    #[test]
+    fn plan_trace_named_reports_fusion_flip_when_an_intermediate_becomes_an_output() {
+        let (program, b, d) = elementwise_chain_program();
+
+        let fused_only = plan_trace_named(&program, &[], &[], &[d]).expect("plans with one output");
+        let with_intermediate_output =
+            plan_trace_named(&program, &[], &[], &[b, d]).expect("plans with two outputs");
+
+        assert!(
+            fused_only
+                .iter()
+                .any(|decision| decision.node == b && decision.decision == "absorbed"),
+            "b must be absorbed into d's composed body when only d is requested: {fused_only:?}"
+        );
+        assert!(
+            !with_intermediate_output
+                .iter()
+                .any(|decision| decision.node == b && decision.decision == "absorbed"),
+            "b must NOT be absorbed once it is itself a requested output: {with_intermediate_output:?}"
+        );
+    }
 
     /// A placed output (`caller_owned` in `omega::metal::finish`) reports
     /// `is_placed() == true` and `get() == None` -- distinct from a node
