@@ -3272,6 +3272,406 @@ fn append_mistral_cached_layer(
     Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new)))
 }
 
+/// Hyper-connections replace a single residual stream with `hc` parallel
+/// copies (`x`, shape `[tokens, hc, embedding]`, letters `s,h,i`) and mix
+/// them down to one stream a token mixer or FFN can consume -- reference:
+/// PR 27742 line 2705-2751, `build_hc_mix`. Built entirely from
+/// [`elementwise`]/[`reduce`]/[`silu`]/[`sigmoid`], the same primitives
+/// every other builder in this module composes -- no new [`Op`] variant
+/// (`flash-next-plan.md` §3's own "hyper-connections" row: "fully
+/// expressible IN the existing `Op` vocabulary").
+///
+/// Steps, each named after its `build_hc_mix` counterpart:
+/// 1. Grouped RMSNorm (reference line 2717-2722): `x` normalized over the
+///    embedding axis `i` *per stream* `h`, then scaled by `w_norm`
+///    (`[hc, embedding]`, one gamma per `(stream, channel)` pair -- the
+///    checkpoint's own flat `[hc_dim]` gamma reshaped, never a single
+///    shared-across-streams gamma the way [`rmsnorm_per_head`]'s `gamma`
+///    is shared across heads).
+/// 2. Low-rank gate (reference line 2724-2729): `xn` down-projected
+///    (`w_down`, `[hc, embedding, low_rank]`) to `[tokens, low_rank]`,
+///    scaled by `1/hc`, `silu`'d, up-projected (`w_up`,
+///    `[low_rank, hc, embedding]`) back to `[tokens, hc, embedding]`, then
+///    `sigmoid`'d into a gate multiplied against `xn`.
+/// 3. Mean-collapse (reference line 2732-2743): the gated `[tokens, hc,
+///    embedding]` stream summed over `h` and scaled by `1/hc`.
+/// 4. Optional inject (reference line 2745-2748): `w_inject`
+///    (`[hc, embedding, hc]`) projects `xn` to a `[tokens, hc]` scatter
+///    weight [`append_hyper_connection_combine`] consumes -- `None` for the
+///    final output mixer (reference line 2860-2862: "there is no
+///    output_norm: the final hyper-connection mixer carries it"), `Some`
+///    for every per-layer attn/ffn hyper-connection module (reference line
+///    2816-2821, 2843-2848).
+///
+/// `inv_dim` is `1/embedding` (the RMSNorm mean, [`rmsnorm`]'s own
+/// parameter); `inv_hc` is `1/hc`, reused for the low-rank gate's scale,
+/// the mean-collapse scale, and (when `w_inject` is `Some`) the inject
+/// scale the caller's own [`append_hyper_connection_combine`] finishes.
+///
+/// Returns `(mixed, inject)`, `mixed` shaped `[tokens, embedding]`,
+/// `inject` shaped `[tokens, hc]` (`Some` iff `w_inject` was `Some`).
+// No `qwen4exp_forward_program` call site lands in this crate (that
+// assembly is model-specific and relocates to its own consuming crate,
+// per this slice's own scope narrowing) -- this builder is exercised today
+// only by `hyper_connection_tests`'s own f64-reference test below, which
+// dead-code analysis does not count as a production call site.
+#[allow(dead_code, clippy::too_many_arguments)]
+pub(crate) fn append_hyper_connection_mix(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    inv_hc: NodeId,
+    one: NodeId,
+    w_norm: NodeId,
+    w_down: NodeId,
+    w_up: NodeId,
+    w_inject: Option<NodeId>,
+) -> Result<(NodeId, Option<NodeId>), TensorError> {
+    let squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, "shi->shi"), (x, "shi->shi")])?;
+    let sum_squares = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, squared, "shi->shi", "sh->shi")?;
+    let mean_square = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(sum_squares, "sh->sh"), (inv_dim, "->sh")])?;
+    let mean_square_eps = elementwise(program, DType::Float32, ScalarOp::Add, &[(mean_square, "sh->sh"), (eps, "s->sh")])?;
+    let rms = elementwise(program, DType::Float32, ScalarOp::SquareRoot, &[(mean_square_eps, "sh->sh")])?;
+    let inv_rms = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(rms, "sh->sh")])?;
+    let normed = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, "shi->shi"), (inv_rms, "sh->shi")])?;
+    let xn = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "shi->shi"), (w_norm, "hi->shi")])?;
+
+    let down_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(xn, "shi->shir"), (w_down, "hir->shir")])?;
+    let down_sum_i = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, down_product, "shir->shir", "shr->shir")?;
+    let lo = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, down_sum_i, "shr->shr", "sr->shr")?;
+    let lo_scaled = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(lo, "sr->sr"), (inv_hc, "->sr")])?;
+    let lo_silu = silu(program, lo_scaled, one, "sr->sr")?;
+
+    let up_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(lo_silu, "sr->srhi"), (w_up, "rhi->srhi")])?;
+    let up_sum_r = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, up_product, "srhi->srhi", "shi->srhi")?;
+    let gate = sigmoid(program, up_sum_r, one, "shi->shi")?;
+
+    let gated = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(xn, "shi->shi"), (gate, "shi->shi")])?;
+    let mixed_sum = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gated, "shi->shi", "si->shi")?;
+    let mixed = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(mixed_sum, "si->si"), (inv_hc, "->si")])?;
+
+    let inject = match w_inject {
+        Some(w_inject) => {
+            let inject_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(xn, "shi->shio"), (w_inject, "hio->shio")])?;
+            let inject_sum_i = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, inject_product, "shio->shio", "sho->shio")?;
+            let inject_flat = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, inject_sum_i, "sho->sho", "so->sho")?;
+            Some(inject_flat)
+        }
+        None => None,
+    };
+
+    Ok((mixed, inject))
+}
+
+/// The residual side of a hyper-connection module -- reference: PR 27742
+/// line 2753-2773, `build_hc_combine`: `2*sigmoid(inject/hc)` centres the
+/// per-stream scatter weight on `1`, so a zero injection degenerates to a
+/// plain residual add, then `block_out` (`[tokens, embedding]`) broadcasts
+/// across every stream, scaled by that weight, and adds into `residual`
+/// (`[tokens, hc, embedding]`). Pairs with
+/// [`append_hyper_connection_mix`]'s `Some(w_inject)` arm; the final output
+/// mixer has no combine call (reference line 2860-2869: the mixed stream
+/// feeds `output` directly).
+///
+/// Returns the updated `[tokens, hc, embedding]` residual.
+// Same rationale as `append_hyper_connection_mix`'s own `allow`: no
+// production call site in this crate yet, exercised by
+// `hyper_connection_tests::combine_matches_f64_reference` below.
+#[allow(dead_code, clippy::too_many_arguments)]
+pub(crate) fn append_hyper_connection_combine(
+    program: &mut Vec<Op>,
+    residual: NodeId,
+    block_out: NodeId,
+    inject: NodeId,
+    inv_hc: NodeId,
+    one: NodeId,
+    two: NodeId,
+) -> Result<NodeId, TensorError> {
+    let inject_scaled = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(inject, "sh->sh"), (inv_hc, "->sh")])?;
+    let inject_sigmoid = sigmoid(program, inject_scaled, one, "sh->sh")?;
+    let weight = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(inject_sigmoid, "sh->sh"), (two, "->sh")])?;
+
+    let broadcast_out = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(block_out, "si->shi"), (weight, "sh->shi")])?;
+    elementwise(program, DType::Float32, ScalarOp::Add, &[(residual, "shi->shi"), (broadcast_out, "shi->shi")])
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod hyper_connection_tests {
+    use super::*;
+
+    /// Deterministic xorshift64, not a real RNG -- reproducible "random"
+    /// f32 inputs without a `rand` dependency in this crate's test code.
+    fn next_f32(state: &mut u64) -> f32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        (((*state >> 11) as f64 / (1u64 << 53) as f64) as f32 - 0.5) * 2.0
+    }
+
+    fn filled(state: &mut u64, len: usize) -> Vec<f32> {
+        (0..len).map(|_| next_f32(state)).collect()
+    }
+
+    fn sigmoid_f64(x: f64) -> f64 {
+        1.0 / (1.0 + (-x).exp())
+    }
+
+    fn silu_f64(x: f64) -> f64 {
+        x * sigmoid_f64(x)
+    }
+
+    /// f64 loop from PR 27742 line 2705-2751's own equations, independent
+    /// of every builder above -- the oracle
+    /// [`append_hyper_connection_mix`]'s test compares against.
+    #[allow(clippy::too_many_arguments)]
+    fn hc_mix_f64_reference(
+        tokens: usize,
+        hc: usize,
+        embedding: usize,
+        low_rank: usize,
+        x: &[f32],
+        w_norm: &[f32],
+        w_down: &[f32],
+        w_up: &[f32],
+        w_inject: Option<&[f32]>,
+        eps: f64,
+    ) -> (Vec<f64>, Option<Vec<f64>>) {
+        let at_x = |s: usize, h: usize, i: usize| f64::from(x[(s * hc + h) * embedding + i]);
+        let at_w_norm = |h: usize, i: usize| f64::from(w_norm[h * embedding + i]);
+        let at_w_down = |h: usize, i: usize, r: usize| f64::from(w_down[(h * embedding + i) * low_rank + r]);
+        let at_w_up = |r: usize, h: usize, i: usize| f64::from(w_up[(r * hc + h) * embedding + i]);
+
+        let mut xn = alloc::vec![0.0f64; tokens * hc * embedding];
+        for s in 0..tokens {
+            for h in 0..hc {
+                let sum_sq: f64 = (0..embedding).map(|i| at_x(s, h, i).powi(2)).sum();
+                let inv_rms = 1.0 / ((sum_sq / embedding as f64) + eps).sqrt();
+                for i in 0..embedding {
+                    xn[(s * hc + h) * embedding + i] = at_x(s, h, i) * inv_rms * at_w_norm(h, i);
+                }
+            }
+        }
+        let at_xn = |s: usize, h: usize, i: usize| xn[(s * hc + h) * embedding + i];
+
+        let mut mixed = alloc::vec![0.0f64; tokens * embedding];
+        for s in 0..tokens {
+            let lo: Vec<f64> = (0..low_rank)
+                .map(|r| {
+                    let raw: f64 = (0..hc)
+                        .flat_map(|h| (0..embedding).map(move |i| (h, i)))
+                        .map(|(h, i)| at_xn(s, h, i) * at_w_down(h, i, r))
+                        .sum();
+                    silu_f64(raw / hc as f64)
+                })
+                .collect();
+            for h in 0..hc {
+                for i in 0..embedding {
+                    let up: f64 = (0..low_rank).map(|r| lo[r] * at_w_up(r, h, i)).sum();
+                    mixed[s * embedding + i] += at_xn(s, h, i) * sigmoid_f64(up);
+                }
+            }
+            for i in 0..embedding {
+                mixed[s * embedding + i] /= hc as f64;
+            }
+        }
+
+        let inject = w_inject.map(|w_inject| {
+            let at_w_inject = |h: usize, i: usize, o: usize| f64::from(w_inject[(h * embedding + i) * hc + o]);
+            let mut inject = alloc::vec![0.0f64; tokens * hc];
+            for s in 0..tokens {
+                for o in 0..hc {
+                    inject[s * hc + o] = (0..hc)
+                        .flat_map(|h| (0..embedding).map(move |i| (h, i)))
+                        .map(|(h, i)| at_xn(s, h, i) * at_w_inject(h, i, o))
+                        .sum();
+                }
+            }
+            inject
+        });
+
+        (mixed, inject)
+    }
+
+    fn hc_combine_f64_reference(
+        tokens: usize,
+        hc: usize,
+        embedding: usize,
+        residual: &[f32],
+        block_out: &[f32],
+        inject: &[f64],
+    ) -> Vec<f64> {
+        let mut result = alloc::vec![0.0f64; tokens * hc * embedding];
+        for s in 0..tokens {
+            for h in 0..hc {
+                let weight = 2.0 * sigmoid_f64(inject[s * hc + h] / hc as f64);
+                for i in 0..embedding {
+                    let residual_value = f64::from(residual[(s * hc + h) * embedding + i]);
+                    let block_out_value = f64::from(block_out[s * embedding + i]);
+                    result[(s * hc + h) * embedding + i] = residual_value + block_out_value * weight;
+                }
+            }
+        }
+        result
+    }
+
+    /// Builds a program exercising just [`append_hyper_connection_mix`] at
+    /// `(tokens, hc, embedding, low_rank)`, evaluates it on random f32
+    /// inputs, and asserts every output element matches
+    /// [`hc_mix_f64_reference`]'s independent f64 loop within `1e-5`.
+    fn assert_mix_matches_reference(tokens: usize, hc: usize, embedding: usize, low_rank: usize, with_inject: bool, seed: u64) {
+        let mut state = seed;
+        let x_data = filled(&mut state, tokens * hc * embedding);
+        let w_norm_data = filled(&mut state, hc * embedding);
+        let w_down_data = filled(&mut state, hc * embedding * low_rank);
+        let w_up_data = filled(&mut state, low_rank * hc * embedding);
+        let w_inject_data = with_inject.then(|| filled(&mut state, hc * embedding * hc));
+        let eps_data = alloc::vec![1e-6f32; tokens];
+
+        let mut program = Vec::new();
+        let x = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(hc as u32), Extent::Static(embedding as u32)], "x");
+        let w_norm = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(hc as u32), Extent::Static(embedding as u32)], "w_norm");
+        let w_down = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(hc as u32), Extent::Static(embedding as u32), Extent::Static(low_rank as u32)],
+            "w_down",
+        );
+        let w_up = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(low_rank as u32), Extent::Static(hc as u32), Extent::Static(embedding as u32)],
+            "w_up",
+        );
+        let w_inject = with_inject.then(|| {
+            input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(hc as u32), Extent::Static(embedding as u32), Extent::Static(hc as u32)],
+                "w_inject",
+            )
+        });
+        let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let inv_hc = scalar_constant(&mut program, 1.0 / hc as f32);
+        let one = scalar_constant(&mut program, 1.0);
+
+        let (mixed, inject) =
+            append_hyper_connection_mix(&mut program, x, inv_dim, eps, inv_hc, one, w_norm, w_down, w_up, w_inject).expect("hyper-connection mix lowers");
+
+        let mut named: Vec<(&str, &[f32])> = alloc::vec![
+            ("x", x_data.as_slice()),
+            ("w_norm", w_norm_data.as_slice()),
+            ("w_down", w_down_data.as_slice()),
+            ("w_up", w_up_data.as_slice()),
+            ("eps", eps_data.as_slice()),
+        ];
+        if let Some(w_inject_data) = w_inject_data.as_deref() {
+            named.push(("w_inject", w_inject_data));
+        }
+        let mut outputs = alloc::vec![mixed];
+        if let Some(inject) = inject {
+            outputs.push(inject);
+        }
+
+        let evaluated =
+            crate::cpu::evaluate_named(&program, &[tokens as u64], &named, &outputs).expect("hyper-connection mix evaluates");
+
+        let (mixed_values, _) = evaluated.get(mixed).expect("mixed output present");
+        let (expected_mixed, expected_inject) = hc_mix_f64_reference(
+            tokens,
+            hc,
+            embedding,
+            low_rank,
+            &x_data,
+            &w_norm_data,
+            &w_down_data,
+            &w_up_data,
+            w_inject_data.as_deref(),
+            1e-6,
+        );
+        let max_abs_diff_mixed = mixed_values
+            .iter()
+            .zip(expected_mixed.iter())
+            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
+            .fold(0.0f64, f64::max);
+        assert!(max_abs_diff_mixed <= 1e-5, "mixed max-abs diff {max_abs_diff_mixed} exceeds 1e-5");
+
+        if let Some(inject_node) = inject {
+            let (inject_values, _) = evaluated.get(inject_node).expect("inject output present");
+            let expected_inject = expected_inject.expect("reference computed inject when w_inject was Some");
+            let max_abs_diff_inject = inject_values
+                .iter()
+                .zip(expected_inject.iter())
+                .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
+                .fold(0.0f64, f64::max);
+            assert!(max_abs_diff_inject <= 1e-5, "inject max-abs diff {max_abs_diff_inject} exceeds 1e-5");
+        }
+    }
+
+    #[test]
+    fn mix_matches_f64_reference_at_hc_2() {
+        assert_mix_matches_reference(3, 2, 4, 3, true, 0x517c_c1b7_2722_0a95);
+    }
+
+    #[test]
+    fn mix_matches_f64_reference_at_hc_4() {
+        assert_mix_matches_reference(2, 4, 3, 2, true, 0x9e37_79b9_7f4a_7c15);
+    }
+
+    /// The final output mixer's own shape (reference: PR 27742 line
+    /// 2860-2862): `w_inject = None`, no scatter weight computed.
+    #[test]
+    fn mix_matches_f64_reference_for_the_final_mixer_form() {
+        assert_mix_matches_reference(2, 2, 3, 2, false, 0xd1b5_4a32_d192_ed03);
+    }
+
+    #[test]
+    fn combine_matches_f64_reference() {
+        let tokens = 3usize;
+        let hc = 2usize;
+        let embedding = 4usize;
+        let mut state = 0xbf58_476d_1ce4_e5b9u64;
+        let residual_data = filled(&mut state, tokens * hc * embedding);
+        let block_out_data = filled(&mut state, tokens * embedding);
+        let inject_data = filled(&mut state, tokens * hc);
+
+        let mut program = Vec::new();
+        let residual = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(hc as u32), Extent::Static(embedding as u32)],
+            "residual",
+        );
+        let block_out = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(embedding as u32)], "block_out");
+        let inject = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(hc as u32)], "inject");
+        let inv_hc = scalar_constant(&mut program, 1.0 / hc as f32);
+        let one = scalar_constant(&mut program, 1.0);
+        let two = scalar_constant(&mut program, 2.0);
+
+        let combined = append_hyper_connection_combine(&mut program, residual, block_out, inject, inv_hc, one, two)
+            .expect("hyper-connection combine lowers");
+
+        let named: Vec<(&str, &[f32])> = alloc::vec![
+            ("residual", residual_data.as_slice()),
+            ("block_out", block_out_data.as_slice()),
+            ("inject", inject_data.as_slice()),
+        ];
+        let evaluated = crate::cpu::evaluate_named(&program, &[tokens as u64], &named, &[combined]).expect("combine evaluates");
+        let (combined_values, _) = evaluated.get(combined).expect("combined output present");
+
+        let inject_f64: Vec<f64> = inject_data.iter().map(|value| f64::from(*value)).collect();
+        let expected = hc_combine_f64_reference(tokens, hc, embedding, &residual_data, &block_out_data, &inject_f64);
+        let max_abs_diff = combined_values
+            .iter()
+            .zip(expected.iter())
+            .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
+            .fold(0.0f64, f64::max);
+        assert!(max_abs_diff <= 1e-5, "combine max-abs diff {max_abs_diff} exceeds 1e-5");
+    }
+}
+
 /// [`append_mistral_cached_layer`]'s Qwen3.5 dense-attention counterpart --
 /// same cached-attention/online-softmax shape, three real differences from
 /// the oracle (`modeling_qwen3_next.py`'s `Qwen3NextAttention.forward`,
@@ -6110,6 +6510,27 @@ fn sigmoid(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<N
 /// their KV cache outside the graph -- shift-and-trim lives on the host, not
 /// in the graph.
 ///
+/// Which nonlinearity gates [`append_qwen35_ssm_mixer`]'s output norm --
+/// `rmsnorm(delta_out) * activation(z)` (reference: PR 27742 line 2896-2899,
+/// `build_norm_gated`, whose own comment names this "the one numerical
+/// difference from Qwen3.5's GDN: sigmoid output gate, not silu"). Qwen3.5's
+/// own checkpoint keeps [`GdnOutputGate::Silu`]; qwen4exp's GDN layers pass
+/// [`GdnOutputGate::Sigmoid`] -- a layer-kind flag on the shared builder
+/// rather than a duplicated function, since every other line of the mixer
+/// (fused QKVZ, causal conv, delta-rule recurrence) is identical between the
+/// two checkpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GdnOutputGate {
+    /// `qwen35_forward_program`'s own GDN layers (`qwen35.cpp:243-250`).
+    Silu,
+    /// qwen4exp's GDN layers (reference: PR 27742 line 2895-2897) -- no
+    /// production call site in this crate (that forward-program assembly is
+    /// model-specific and relocates to its own consuming crate); exercised
+    /// today by `qwen35_ssm_mixer_sigmoid_gate_moves_the_output_away_from_silu`.
+    #[allow(dead_code)]
+    Sigmoid,
+}
+
 /// Returns `(x_next, qkv_mixed, state_out)`.
 #[allow(clippy::too_many_arguments)]
 fn append_qwen35_ssm_mixer(
@@ -6138,6 +6559,7 @@ fn append_qwen35_ssm_mixer(
     kv_heads: u32,
     group: u32,
     l_cache: u32,
+    output_gate: GdnOutputGate,
 ) -> Result<(NodeId, NodeId, NodeId), TensorError> {
     let head_k_dim = key_dim / kv_heads;
     let num_v_heads = kv_heads * group;
@@ -6176,7 +6598,10 @@ fn append_qwen35_ssm_mixer(
         "siz->siz",
         "sz->siz",
     )?;
-    let z_silu = silu(program, z, one, "sz->sz")?;
+    let z_gated = match output_gate {
+        GdnOutputGate::Silu => silu(program, z, one, "sz->sz")?,
+        GdnOutputGate::Sigmoid => sigmoid(program, z, one, "sz->sz")?,
+    };
 
     let beta_product = elementwise(
         program,
@@ -6350,7 +6775,7 @@ fn append_qwen35_ssm_mixer(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(z_silu, v_split_map.as_str()), (value_head_ones, "ugj->sugj")],
+        &[(z_gated, v_split_map.as_str()), (value_head_ones, "ugj->sugj")],
     )?;
 
     // squeeze the size-1 decode-step `s` axis away -- `append_qwen35_delta_net_step`
@@ -6370,7 +6795,9 @@ fn append_qwen35_ssm_mixer(
 
     // gated RMSNorm over the per-head value axis `j`, `head_eps`/`inv_head_v_dim`
     // matched to the surviving `u,g` head space -- `build_norm_gated`
-    // (`qwen35.cpp:243-250`): `rmsnorm(out, weight) * silu(z)`.
+    // (`qwen35.cpp:243-250`): `rmsnorm(out, weight) * output_gate(z)`,
+    // `output_gate` per [`GdnOutputGate`] (silu for qwen35, sigmoid for
+    // qwen4exp, reference: PR 27742 line 2896-2899).
     let squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(delta_out, "jug->jug"), (delta_out, "jug->jug")])?;
     let sum_squares = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, squared, "jug->jug", "ug->jug")?;
     let mean_square = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(sum_squares, "ug->ug"), (inv_head_v_dim, "->ug")])?;
@@ -8217,6 +8644,7 @@ pub fn qwen35_forward_program(
                 ssm_n_group,
                 ssm_group,
                 ssm_d_conv,
+                GdnOutputGate::Silu,
             )?;
 
             // Unlike `append_mistral_cached_layer` (bundles FFN internally),
@@ -15118,7 +15546,7 @@ value = 1.0
     /// mean-square to `delta_out^2`, so `normed_out = sign(delta_out)`
     /// exactly, the same width-1-l2norm-is-sign identity
     /// [`append_qwen35_conv_branch`]'s own test already exploits.
-    fn build_ssm_mixer_test_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
+    fn build_ssm_mixer_test_program(output_gate: GdnOutputGate) -> (Vec<Op>, NodeId, NodeId, NodeId) {
         let mut program = Vec::new();
         let key_dim = 1u32;
         let value_dim = 2u32;
@@ -15233,6 +15661,7 @@ value = 1.0
             kv_heads,
             group,
             l_cache,
+            output_gate,
         )
         .expect("ssm mixer lowers");
 
@@ -15578,7 +16007,7 @@ value = 1.0
     /// -4.98530547`, `mixer_out = x + cur = -3.98530547`.
     #[proxima::test]
     async fn qwen35_ssm_mixer_matches_a_hand_computed_decode_step() {
-        let (program, mixer_out, qkv_mixed, state_out) = build_ssm_mixer_test_program();
+        let (program, mixer_out, qkv_mixed, state_out) = build_ssm_mixer_test_program(GdnOutputGate::Silu);
 
         let x_data = [1.0f32];
         let eps_data = [0.0f32];
@@ -15642,6 +16071,65 @@ value = 1.0
         );
     }
 
+    /// Same inputs as the hand-computed decode step above, but with
+    /// [`GdnOutputGate::Sigmoid`] instead of [`GdnOutputGate::Silu`] --
+    /// qwen4exp's own gate (reference: PR 27742 line 2895-2897). Proves the
+    /// flag actually changes the lowered program's output (not silently
+    /// ignored): `sigmoid(z) != silu(z)` for this test's own `z = [1, 2]`,
+    /// so `mixer_out` must move away from the Silu path's own hand-computed
+    /// `-3.985_305_5`.
+    #[proxima::test]
+    async fn qwen35_ssm_mixer_sigmoid_gate_moves_the_output_away_from_silu() {
+        let (program, mixer_out, _, _) = build_ssm_mixer_test_program(GdnOutputGate::Sigmoid);
+
+        let x_data = [1.0f32];
+        let eps_data = [0.0f32];
+        let head_eps_data = [0.0f32, 0.0];
+        let attn_norm_weight_data = [1.0f32];
+        let wqkv_data = [0.0f32, 0.0, 0.0, 0.0];
+        let wqkv_gate_data = [1.0f32, 2.0];
+        let conv_weight_data = [1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let conv_history_in_data = [3.0f32, -2.0, 1.0, 2.0];
+        let ssm_beta_data = [0.0f32, 0.0];
+        let ssm_alpha_data = [0.0f32, 0.0];
+        let ssm_dt_bias_data = [0.0f32, 0.0];
+        let ssm_a_data = [0.0f32, 0.0];
+        let ssm_norm_weight_data = [2.0f32];
+        let ssm_out_data = [1.0f32, 1.0];
+        let state_in_data = [0.0f32, 0.0];
+
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[1],
+            &[
+                ("x", &x_data),
+                ("eps", &eps_data),
+                ("head_eps", &head_eps_data),
+                ("attn_norm_weight", &attn_norm_weight_data),
+                ("wqkv", &wqkv_data),
+                ("wqkv_gate", &wqkv_gate_data),
+                ("conv_weight", &conv_weight_data),
+                ("conv_history_in", &conv_history_in_data),
+                ("ssm_beta", &ssm_beta_data),
+                ("ssm_alpha", &ssm_alpha_data),
+                ("ssm_dt_bias", &ssm_dt_bias_data),
+                ("ssm_a", &ssm_a_data),
+                ("ssm_norm_weight", &ssm_norm_weight_data),
+                ("ssm_out", &ssm_out_data),
+                ("state_in", &state_in_data),
+            ],
+            &[mixer_out],
+        )
+        .expect("ssm mixer evaluates");
+
+        let (mixer_out_values, _) = evaluated.get(mixer_out).expect("mixer_out present");
+        assert!(
+            (mixer_out_values[0] - (-3.985_305_5)).abs() > 1e-3,
+            "sigmoid gate must move mixer_out away from the silu path's own -3.985305_5, got {}",
+            mixer_out_values[0]
+        );
+    }
+
     /// Proof the mixer reference above can fail: perturbing the conv
     /// history's `v0` channel (`1.0 -> -3.0`, a sign flip -- see the data
     /// comment below for why a same-sign perturbation alone cannot move this
@@ -15652,7 +16140,7 @@ value = 1.0
     /// never silently absorbed.
     #[proxima::test]
     async fn qwen35_ssm_mixer_hand_computed_check_actually_detects_a_wrong_history_value() {
-        let (program, mixer_out, _, _) = build_ssm_mixer_test_program();
+        let (program, mixer_out, _, _) = build_ssm_mixer_test_program(GdnOutputGate::Silu);
 
         let x_data = [1.0f32];
         let eps_data = [0.0f32];
