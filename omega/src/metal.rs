@@ -394,6 +394,14 @@ pub enum MetalError {
     /// (see [`Plan::numeric_policy`]'s own doc), so a rebind is not
     /// implementable in place -- the caller's only correct response is a
     /// fresh [`plan`]/[`plan_named`] call with `requested`.
+    /// `PROXIMA_METAL_NAN_CHECK`'s own stop condition -- [`check_op_output_finite`]
+    /// found this op's own output buffer holds a NaN/Inf, so
+    /// [`execute_op_timed`] stops the step here rather than running every
+    /// remaining op past a value already known bad. Diagnostic-only, same
+    /// `instrument`-gated reachability as [`check_op_output_finite`] itself.
+    #[cfg(feature = "instrument")]
+    #[error("nan_check: op node={node} kind={kind} produced a non-finite output")]
+    NonFiniteOpOutput { node: NodeId, kind: String },
     #[error("plan bound under {bound:?}, caller requested {requested:?} -- rebuild via plan()/plan_named()")]
     NumericPolicyMismatch {
         bound: NumericPolicy,
@@ -2533,6 +2541,63 @@ pub struct OpGpuTiming {
     pub packed_row_block_rejection: Option<String>,
 }
 
+/// `PROXIMA_METAL_NAN_CHECK`-gated NaN probe for exactly ONE op's own output
+/// buffer, called from [`execute_op_timed`] right after `waitUntilCompleted`
+/// and before that op's operands are retired -- the diagnostic this crate's
+/// own `PROXIMA_METAL_OP_PROFILE_STEP` path lacked to bisect the 30B
+/// qwen3moe Metal decode's all-zero logits down to the exact op that first
+/// produced NaN data, rather than the whole step.
+///
+/// Checks `is_nan()`, deliberately NOT `!is_finite()` (which would also
+/// catch `-inf`): `causal_mask` (`proxima-tensor/src/spec.rs`) bakes a
+/// literal `f32::NEG_INFINITY` into the program as a `constant` op, fed
+/// through a `Select` into every masked attention score BEFORE softmax --
+/// the SAME literal a correct CPU decode also evaluates and zeroes out, so
+/// a `-inf` reaching a masked score, or even an unmasked reduce that legally
+/// saturates, is not evidence of anything. This codebase never constructs an
+/// intentional `f32::NAN` scalar (grepped: zero production call sites), so a
+/// NaN appearing on ANY node's output has no legitimate source and is
+/// unambiguous evidence of the defect this diagnostic exists to find.
+///
+/// Reads the buffer back through [`read_back`] (the same narrow-to-f32 path
+/// [`finish`] uses for every other output), which is why this is reachable
+/// only behind `instrument`: it pays a device round trip per op, same cost
+/// class [`execute_op_timed`]'s own doc already accepts for GPU-time
+/// attribution. Returns `true` the first time this op's own output holds a
+/// NaN, letting the caller stop the step at the FIRST offending op instead
+/// of running every remaining op past a value already known bad.
+#[cfg(feature = "instrument")]
+fn check_op_output_finite(
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    prepared: &Prepared,
+    program: &[Op],
+    node: NodeId,
+    kind: &str,
+) -> Result<bool, MetalError> {
+    let Some((buffer, offset)) = device_buffers.get(&node) else {
+        return Ok(false);
+    };
+    let shape = prepared.shapes.of(node).to_vec();
+    let dtype = gpu_dtype(program, &prepared.index_nodes, node);
+    let data = read_back(buffer, *offset, element_count(&shape), node, dtype)?;
+    let nan_count = data.iter().filter(|value| value.is_nan()).count();
+    if nan_count == 0 {
+        return Ok(false);
+    }
+    let first_values: alloc::vec::Vec<f32> = data.iter().copied().take(8).collect();
+    let kind_owned = kind.to_string();
+    debug!(
+        node = node.0,
+        kind = %kind_owned,
+        shape = ?shape,
+        first_values = ?first_values,
+        nan_count = nan_count as u64,
+        total_count = data.len() as u64,
+        "nan_check: first nan op output found"
+    );
+    Ok(true)
+}
+
 /// Shared per-op timing dispatch: [`execute_plan_op_timed`] and
 /// [`execute_plan_with_placements_op_timed`] both need to encode ONE
 /// `BoundOp` on its own command buffer, commit, wait, and read back
@@ -2637,6 +2702,14 @@ fn execute_op_timed(
         ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
     if let Some((fault_buffer, gathers)) = fault {
         check_gather_fault(bound, &fault_buffer, gathers)?;
+    }
+    if std::env::var_os("PROXIMA_METAL_NAN_CHECK").is_some()
+        && check_op_output_finite(device_buffers, prepared, program, bound.node, kind)?
+    {
+        return Err(MetalError::NonFiniteOpOutput {
+            node: bound.node,
+            kind: kind.to_string(),
+        });
     }
     for retired in &prepared.retires[position] {
         if always_live.contains(retired) {
