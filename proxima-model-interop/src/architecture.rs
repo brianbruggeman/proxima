@@ -116,6 +116,14 @@ pub struct BoundProgram<'file> {
     /// leaves it `None`. See [`crate::generate::LoadedModel::hidden_root`].
     pub hidden_root: Option<NodeId>,
     pub layer_roots: Vec<Qwen35LayerRoots>,
+    /// One [`proxima_tensor::spec::MoeSite`] per MoE layer this
+    /// architecture's forward-program builder produced -- empty on a dense
+    /// checkpoint. `crate::generate`'s decode loop reads this to know which
+    /// extra nodes to request as step outputs when an
+    /// [`proxima_tensor::instrument::ExpertObserver`] is registered; see
+    /// that module's own doc for why the loop, not this kernel-building
+    /// step, decides whether to evaluate them.
+    pub moe_sites: proxima_tensor::spec::MoeSites,
 }
 
 /// [`crate::qwen35::Qwen35SsmShape`]'s own fixed sizes -- see that type's
@@ -429,6 +437,7 @@ mod tests {
                 logits_root: NodeId(0),
                 hidden_root: None,
                 layer_roots: Vec::new(),
+                moe_sites: proxima_tensor::spec::MoeSites::default(),
             })
         }
     }

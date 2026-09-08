@@ -810,6 +810,12 @@ pub struct LoadedModel<'file> {
     /// of [`Qwen35LayerRoots::Attention`]/[`Qwen35LayerRoots::Ssm`] on the
     /// qwen35 path (`crate::qwen35::qwen35_forward_program`'s own return).
     layer_roots: Vec<Qwen35LayerRoots>,
+    /// One [`proxima_tensor::spec::MoeSite`] per MoE layer this
+    /// checkpoint's forward-program builder produced -- empty on a dense
+    /// checkpoint. [`Self::run_decode_loop_observed`] reads this to know
+    /// which extra nodes to request as step outputs when a
+    /// [`proxima_tensor::instrument::ExpertObserver`] is registered.
+    moe_sites: proxima_tensor::spec::MoeSites,
     /// [`Some`] only for a qwen35-architecture checkpoint -- the SSM cache
     /// shapes [`SsmLayerCache::new`] needs (`Self::run_decode_loop`'s own
     /// per-layer state-space cache), derived once at load time rather than
@@ -1269,6 +1275,7 @@ impl<'file> LoadedModel<'file> {
                 logits_root: bound.logits_root,
                 hidden_root: bound.hidden_root,
                 layer_roots: bound.layer_roots,
+                moe_sites: bound.moe_sites,
                 model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
                 checkpoint_bytes: file_bytes.len(),
                 qwen35_ssm_shape: step_state.as_ref().map(|state| state.ssm_shape),
@@ -1303,7 +1310,7 @@ impl<'file> LoadedModel<'file> {
         // always compiled for a checkpoint that carries no
         // `attn_q_norm.weight` tensor.
         let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
-        let (program, forward_roots, cache_roots) = mistral_cached_forward_program_with_experts(
+        let (program, forward_roots, cache_roots, moe_sites) = mistral_cached_forward_program_with_experts(
             architecture.vocab,
             architecture.embedding,
             architecture.feed_forward,
@@ -1374,6 +1381,7 @@ impl<'file> LoadedModel<'file> {
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
                 .collect(),
+            moe_sites,
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
             checkpoint_bytes: file_bytes.len(),
             qwen35_ssm_shape: None,
@@ -1422,7 +1430,7 @@ impl<'file> LoadedModel<'file> {
         // `attn_q_norm.weight`, and no HF/safetensors checkpoint this crate
         // binds today needs QK-norm -- see [`Self::load`]'s own `qk_norm` for
         // the GGUF path that does.
-        let (program, forward_roots, cache_roots) = mistral_cached_forward_program_with_experts(
+        let (program, forward_roots, cache_roots, moe_sites) = mistral_cached_forward_program_with_experts(
             architecture.vocab,
             architecture.embedding,
             architecture.feed_forward,
@@ -1464,6 +1472,7 @@ impl<'file> LoadedModel<'file> {
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
                 .collect(),
+            moe_sites,
             // safetensors carries no `general.name`-equivalent key this
             // crate reads (`Self::model_name`'s own doc).
             model_name: None,
@@ -3844,6 +3853,19 @@ impl<'file> LoadedModel<'file> {
                         }
                     }
                 }
+                // Only requested when a routing observer is actually
+                // registered (`instrument::expert_observer`'s own doc): the
+                // CPU evaluator keeps every requested output's full lifetime
+                // alive, so a program with no observer never pays to hold
+                // these nodes live.
+                let observe_routing = proxima_tensor::instrument::expert_observer().is_some()
+                    && !self.moe_sites.0.is_empty();
+                if observe_routing {
+                    for site in &self.moe_sites.0 {
+                        roots.extend(site.selected.iter().copied());
+                        roots.extend(site.weights.iter().copied());
+                    }
+                }
 
                 if let Some(name) = missing_program_input(&self.program, &named_blocks) {
                     return Err(InteropError::MissingStepInput { name });
@@ -3896,6 +3918,52 @@ impl<'file> LoadedModel<'file> {
                 let evaluate_ticks = elapsed_ticks(evaluate_started);
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 let metal_stage = metal_stage_totals();
+
+                // One `ExpertRouting` event per layer per new position --
+                // `proxima_tensor::instrument::ExpertObserver`'s own doc on
+                // why this is the decode loop's job, not the kernel's:
+                // `evaluated.get` reads back exactly the extra outputs
+                // `observe_routing` requested above, never the kernel's own
+                // per-position gather.
+                if observe_routing {
+                    for site in &self.moe_sites.0 {
+                        let weight_total_node =
+                            site.weights.last().copied().unwrap_or(self.logits_root);
+                        let Some((weight_total, _)) = evaluated.get(weight_total_node) else {
+                            continue;
+                        };
+                        for local in 0..new_count {
+                            let experts: Vec<u32> = site
+                                .selected
+                                .iter()
+                                .filter_map(|node| evaluated.get(*node))
+                                .filter_map(|(values, _)| values.get(local).copied())
+                                .map(|value| value as u32)
+                                .collect();
+                            let Some(&total) = weight_total.get(local) else {
+                                continue;
+                            };
+                            let weights: Vec<f32> = site
+                                .weights
+                                .iter()
+                                .take(site.weights.len().saturating_sub(1))
+                                .filter_map(|node| evaluated.get(*node))
+                                .filter_map(|(values, _)| values.get(local).copied())
+                                .map(|value| value / total)
+                                .collect();
+                            if experts.len() != weights.len() {
+                                continue;
+                            }
+                            let event = proxima_tensor::instrument::ExpertRouting {
+                                layer: site.layer,
+                                position: (cached_len + local) as u64,
+                                experts: &experts,
+                                weights: &weights,
+                            };
+                            proxima_tensor::instrument::notify_expert_routed(&event);
+                        }
+                    }
+                }
 
                 // KV-cache DEVICE -> HOST readback + host append: unlike the
                 // upload above, `evaluated.get(*even)` etc. is this step's own
@@ -6573,6 +6641,7 @@ mod memory_fit_gate_tests {
             logits_root: proxima_tensor::op::NodeId(0),
             hidden_root: None,
             layer_roots: Vec::new(),
+            moe_sites: proxima_tensor::spec::MoeSites::default(),
             qwen35_ssm_shape: None,
             qwen35_attn_head_dim: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

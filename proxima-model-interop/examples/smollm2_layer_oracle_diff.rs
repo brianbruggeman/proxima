@@ -63,7 +63,7 @@ fn layer_boundary_node_id(
         // an edge this diagnostic has no reason to depend on).
         return proxima_tensor::op::NodeId(2);
     }
-    let (shallow, _, _) = mistral_cached_forward_program_with_experts(
+    let (shallow, _, _, _) = mistral_cached_forward_program_with_experts(
         vocab,
         embedding,
         feed_forward,
@@ -78,7 +78,7 @@ fn layer_boundary_node_id(
         false,
     )
     .expect("build shallow throwaway program");
-    let (deep, _, _) = mistral_cached_forward_program_with_experts(
+    let (deep, _, _, _) = mistral_cached_forward_program_with_experts(
         vocab,
         embedding,
         feed_forward,

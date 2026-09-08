@@ -634,6 +634,7 @@ impl crate::architecture::Architecture for Qwen35Arch {
             logits_root,
             hidden_root: None,
             layer_roots,
+            moe_sites: proxima_tensor::spec::MoeSites::default(),
         })
     }
 

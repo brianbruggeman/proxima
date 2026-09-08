@@ -5210,12 +5210,12 @@ mod real_openchat_file {
 
         #[cfg(feature = "instrument")]
         impl proxima_tensor::instrument::ExpertObserver for RouteCountingObserver {
-            fn on_expert_routed(&self, layer: usize, _expert: usize, token_position: usize) {
+            fn on_expert_routed(&self, event: &proxima_tensor::instrument::ExpertRouting<'_>) {
                 self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.distinct_layer_positions
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert((layer, token_position));
+                    .insert((event.layer as usize, event.position as usize));
             }
         }
 
@@ -5396,7 +5396,7 @@ mod real_openchat_file {
         let qk_norm = crate::bind::checkpoint_has_qk_norm(&parsed);
 
         use proxima_tensor::spec::mistral_cached_forward_program_with_experts_and_layer_taps;
-        let (program, roots, _cache_roots, layer_residuals) =
+        let (program, roots, _cache_roots, layer_residuals, _moe_sites) =
             mistral_cached_forward_program_with_experts_and_layer_taps(
                 architecture.vocab,
                 architecture.embedding,
