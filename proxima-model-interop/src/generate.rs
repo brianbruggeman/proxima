@@ -1910,6 +1910,62 @@ enum LayerCacheNames {
     },
 }
 
+/// Which of the three per-layer cache shapes a layer's `Op::Input` leaves
+/// actually declare, at `layer` -- [`LayerCacheNames`]/[`LayerCacheState`]
+/// are now built FROM this, not from [`Qwen35LayerRoots`]'s own
+/// discriminant. A foreign [`crate::architecture::Architecture::bind`] can
+/// tag that enum inconsistently with the ops it actually emitted (copy a
+/// [`Qwen35DenseAttentionRoots`] tuple into the wrong variant, drop the
+/// `k_pass` leaf); the program's own declared leaf names cannot lie about
+/// what the decode loop must feed, so they are the single source of truth
+/// this type is derived from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclaredCacheKind {
+    Attention,
+    DenseAttention,
+    Ssm,
+}
+
+impl DeclaredCacheKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Attention => "kv_cache.{layer}.{k_even,k_odd,v}",
+            Self::DenseAttention => "kv_cache.{layer}.{k_first,k_second,k_pass,v}",
+            Self::Ssm => "ssm_cache.{layer}.{conv_history,state}",
+        }
+    }
+}
+
+/// Probes `program_input_names` (every `Op::Input` name this call's own
+/// program declares, collected once) for `layer`'s cache leaves -- checks
+/// the widest/most specific shape (`DenseAttention`'s 4-wide `k_first`)
+/// before the narrower ones so a layer that happens to declare both would
+/// still resolve unambiguously. `None` when `layer` declares no recognized
+/// cache leaf at all (a non-cached layer, or a name this function's own
+/// three prefixes do not cover).
+fn declared_cache_kind(program_input_names: &BTreeSet<&str>, layer: usize) -> Option<DeclaredCacheKind> {
+    if program_input_names.contains(alloc::format!("kv_cache.{layer}.k_first").as_str()) {
+        Some(DeclaredCacheKind::DenseAttention)
+    } else if program_input_names.contains(alloc::format!("kv_cache.{layer}.k_even").as_str()) {
+        Some(DeclaredCacheKind::Attention)
+    } else if program_input_names.contains(alloc::format!("ssm_cache.{layer}.conv_history").as_str()) {
+        Some(DeclaredCacheKind::Ssm)
+    } else {
+        None
+    }
+}
+
+/// [`Qwen35LayerRoots`]'s own discriminant, read back as a
+/// [`DeclaredCacheKind`] so it can be compared against
+/// [`declared_cache_kind`]'s program-derived answer for the same layer.
+fn bound_cache_kind(roots: &Qwen35LayerRoots) -> DeclaredCacheKind {
+    match roots {
+        Qwen35LayerRoots::Attention(_) => DeclaredCacheKind::Attention,
+        Qwen35LayerRoots::DenseAttention(_) => DeclaredCacheKind::DenseAttention,
+        Qwen35LayerRoots::Ssm { .. } => DeclaredCacheKind::Ssm,
+    }
+}
+
 /// Every per-call input the cached forward program needs beyond the model
 /// weights and the growing key/value cache: `ids_f32`/RoPE `cos`/`sin` for
 /// only the `new` positions this call introduces, at their true absolute
@@ -3440,23 +3496,50 @@ impl<'file> LoadedModel<'file> {
             }));
         }
 
-        let cache_names: Vec<LayerCacheNames> = self
-            .layer_roots
+        // The program's own declared `Op::Input` leaves are the single
+        // source of truth for which cache shape each layer needs fed --
+        // never `self.layer_roots[layer]`'s own discriminant, which a
+        // foreign `Architecture::bind` assembles by hand and can tag
+        // inconsistently with the ops it actually emitted (see
+        // `DeclaredCacheKind`'s own doc). Read once, here: `self.program`
+        // never changes for the lifetime of this call.
+        let program_input_names: BTreeSet<&str> = self
+            .program
+            .iter()
+            .filter_map(|op| match op {
+                Op::Input { name: Some(name), .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut layer_cache_kinds: Vec<DeclaredCacheKind> = Vec::with_capacity(self.layer_roots.len());
+        for (layer, roots) in self.layer_roots.iter().enumerate() {
+            let bound = bound_cache_kind(roots);
+            let declared = declared_cache_kind(&program_input_names, layer).unwrap_or(bound);
+            if declared != bound {
+                return Err(InteropError::LayerCacheKindMismatch {
+                    layer,
+                    declared: declared.label(),
+                    bound: bound.label(),
+                });
+            }
+            layer_cache_kinds.push(declared);
+        }
+        let cache_names: Vec<LayerCacheNames> = layer_cache_kinds
             .iter()
             .enumerate()
-            .map(|(layer, roots)| match roots {
-                Qwen35LayerRoots::Attention(_) => LayerCacheNames::Attention {
+            .map(|(layer, kind)| match kind {
+                DeclaredCacheKind::Attention => LayerCacheNames::Attention {
                     k_even: alloc::format!("kv_cache.{layer}.k_even"),
                     k_odd: alloc::format!("kv_cache.{layer}.k_odd"),
                     v: alloc::format!("kv_cache.{layer}.v"),
                 },
-                Qwen35LayerRoots::DenseAttention(_) => LayerCacheNames::DenseAttention {
+                DeclaredCacheKind::DenseAttention => LayerCacheNames::DenseAttention {
                     k_first: alloc::format!("kv_cache.{layer}.k_first"),
                     k_second: alloc::format!("kv_cache.{layer}.k_second"),
                     k_pass: alloc::format!("kv_cache.{layer}.k_pass"),
                     v: alloc::format!("kv_cache.{layer}.v"),
                 },
-                Qwen35LayerRoots::Ssm { .. } => LayerCacheNames::Ssm {
+                DeclaredCacheKind::Ssm => LayerCacheNames::Ssm {
                     conv_history: alloc::format!("ssm_cache.{layer}.conv_history"),
                     state: alloc::format!("ssm_cache.{layer}.state"),
                 },
@@ -3464,15 +3547,14 @@ impl<'file> LoadedModel<'file> {
             .collect();
         let mut layer_caches: Vec<LayerCacheState> = match seed {
             Some(state) => state.layer_caches,
-            None => self
-                .layer_roots
+            None => layer_cache_kinds
                 .iter()
-                .map(|roots| match roots {
-                    Qwen35LayerRoots::Attention(_) => LayerCacheState::Attention(LayerCache::new()),
-                    Qwen35LayerRoots::DenseAttention(_) => {
+                .map(|kind| match kind {
+                    DeclaredCacheKind::Attention => LayerCacheState::Attention(LayerCache::new()),
+                    DeclaredCacheKind::DenseAttention => {
                         LayerCacheState::DenseAttention(Qwen35DenseAttentionCache::new())
                     }
-                    Qwen35LayerRoots::Ssm { .. } => LayerCacheState::Ssm(SsmLayerCache::new(
+                    DeclaredCacheKind::Ssm => LayerCacheState::Ssm(SsmLayerCache::new(
                         self.qwen35_ssm_shape.unwrap_or(Qwen35SsmShape {
                             qkv_dim: 0,
                             conv_rows: 0,
