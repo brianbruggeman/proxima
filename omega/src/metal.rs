@@ -335,7 +335,7 @@ pub enum MetalError {
     /// now a typed error a caller can act on rather than a stderr line
     /// beside a silently returned `Ok`. `cap_bytes` is
     /// `ARENA_TRANSIENT_CAP * max(query_rows, 1)` (see
-    /// [`plan_query_rows`]'s own doc for why the cap scales this way, not a
+    /// `plan_query_rows`'s own doc for why the cap scales this way, not a
     /// fixed decode-shaped constant): a prefill's transient outputs grow
     /// linearly with its own row count, so a per-call budget that ignores
     /// row count rejects a prefill that fits the device just as readily as
@@ -370,7 +370,7 @@ pub enum MetalError {
     /// only ever shows up as "removed nothing").
     #[error("kind filter {filter:?} matched zero dispatches in this plan")]
     KindFilterMatchesNothing { filter: String },
-    /// [`upload_resident_copy`]'s own contract, made typed rather than
+    /// `upload_resident_copy`'s own contract, made typed rather than
     /// silently violated: [`Plan::mark_resident`]'s doc says a resident
     /// NAME's host buffer is "bound once at load and never mutated again",
     /// so a legitimate caller only ever offers the same host pointer and
@@ -472,7 +472,7 @@ pub struct SystemMemoryFacts {
 }
 
 /// Reads [`SystemMemoryFacts`] off this thread's Metal device
-/// ([`device_and_queue`], the same lazily-created device/queue pair every
+/// (`device_and_queue`, the same lazily-created device/queue pair every
 /// other driver call in this module shares) and the host's `sysctlbyname`,
 /// and emits them as one structured `system_facts` telemetry event. Callers
 /// building a load-time fit budget (`proxima-model-interop`'s own gate) call
@@ -871,7 +871,7 @@ impl Plan {
     /// fixed for this plan's whole life -- see [`Self::numeric_policy`]'s
     /// own doc for why there is no setter for it). `math_mode` may only
     /// request what `numeric_policy` already grants
-    /// ([`metal_math_mode_as_numeric_policy`]); requesting `Fast` on a plan
+    /// (`metal_math_mode_as_numeric_policy`); requesting `Fast` on a plan
     /// bound under `bit_exact()` is a caller error, not a silent widening,
     /// so this returns [`MetalError::NumericPolicyMismatch`] instead of
     /// mutating `numeric_policy` the way this setter used to.
@@ -1014,7 +1014,7 @@ impl Plan {
         }
     }
 
-    /// The plan-cache key [`resolve_steps`] computes for each program
+    /// The plan-cache key `resolve_steps` computes for each program
     /// position (`omega::msl::kernel_cache_key`'s own doc: the shared
     /// structural + compile-option identity of that position's resolved
     /// `BoundOp`, this plan's own [`MathMode`] included) -- exposed so a
@@ -4988,8 +4988,8 @@ fn nserror_description(error: &NSError) -> String {
 /// reassociation are permitted, `nan_assumptions`/`signed_zero`/
 /// `approx_functions` are withheld because Relaxed's own contract
 /// explicitly preserves NaN/inf/zero behavior. See
-/// [`numeric_policy_as_metal_math_mode`] and
-/// [`metal_math_mode_as_numeric_policy`] for the full projection both
+/// `numeric_policy_as_metal_math_mode` and
+/// `metal_math_mode_as_numeric_policy` for the full projection both
 /// directions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MathMode {
@@ -5096,13 +5096,13 @@ const fn metal_math_mode_as_numeric_policy(mode: MathMode) -> NumericPolicy {
 /// two values [`objc2_metal::MTLDispatchType`] exposes to a compute encoder.
 /// A [`Plan`] carries one of these ([`Plan::set_dispatch_type`]); it decides
 /// which encoder [`execute_plan_with_placements`] opens and whether its loop
-/// runs [`HazardTracker`] at all.
+/// runs `HazardTracker` at all.
 ///
 /// ROW 311 (`proxima-tensor/docs/discipline.md`): llama.cpp encodes its whole
 /// token on a serial compute encoder with zero explicit barriers.
 /// `Concurrent` (this type's default) lets independent dispatches overlap
 /// instead of draining the pipeline between every op, at the cost of the 323
-/// per-token [`MTLBarrierScope::Buffers`] barriers [`HazardTracker`] inserts
+/// per-token [`MTLBarrierScope::Buffers`] barriers `HazardTracker` inserts
 /// to keep that overlap correct; `Serial` orders every dispatch for free and
 /// emits none. See ROW 312 for the measured wall-clock comparison between
 /// the two on the decode program.
@@ -5112,7 +5112,7 @@ pub enum DispatchType {
     /// encoding shape, and the same guarantee an unmodified
     /// `computeCommandEncoder()` gives. No barrier is ever needed.
     Serial,
-    /// Independent dispatches may overlap; [`HazardTracker`] inserts a
+    /// Independent dispatches may overlap; `HazardTracker` inserts a
     /// [`MTLBarrierScope::Buffers`] barrier wherever a RAW/WAW/WAR hazard
     /// would otherwise let two overlapping dispatches race.
     #[default]
@@ -5611,10 +5611,11 @@ pub static COPYING_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_bl
 /// Bytes bound through a real host->device copy this call
 /// (`upload_block_copy`, or `upload_resident_copy` on a cache MISS only) --
 /// fired at the point the bytes actually move, never before the lookup that
-/// can avoid moving them. [`upload_resident_copy`]'s own cache HIT does not
+/// can avoid moving them. `upload_resident_copy`'s own cache HIT does not
 /// increment this counter (no bytes moved, the same buffer is reused), so
 /// `BLOCK_COPIED_BYTES + BLOCK_NOCOPY_BOUND_BYTES + BLOCK_OFFSET_BOUND_BYTES`
-/// sums to `BLOCK_OFFERED_BYTES` minus whatever a resident-copy cache hit
+/// sums to `BLOCK_OFFERED_BYTES` (feature-gated behind `instrument`) minus
+/// whatever a resident-copy cache hit
 /// served for free that step. See the module doc's "Host buffer upload"
 /// section for why most weight bytes never reach this counter -- only a
 /// misaligned, non-resident block (the KV cache, which is deliberately never
@@ -5622,11 +5623,11 @@ pub static COPYING_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_bl
 pub static BLOCK_COPIED_BYTES: Counter = Counter::new("omega.metal.block_copied_bytes");
 /// Bytes bound zero-copy, either `upload_block_no_copy` (cached, resident)
 /// or `upload_block_no_copy_uncached` (uncached) — the other terminal-path
-/// byte split of [`BLOCK_OFFERED_BYTES`].
+/// byte split of `BLOCK_OFFERED_BYTES` (feature-gated behind `instrument`).
 pub static BLOCK_NOCOPY_BOUND_BYTES: Counter = Counter::new("omega.metal.block_nocopy_bound_bytes");
 /// Bytes bound at an offset into the single whole-checkpoint no-copy buffer
 /// (`checkpoint_mapping_offset`) — the third terminal-path byte split of
-/// [`BLOCK_OFFERED_BYTES`], and the one that carries the bulk of a real
+/// `BLOCK_OFFERED_BYTES` (feature-gated behind `instrument`), and the one that carries the bulk of a real
 /// model's weight bytes once `register_checkpoint_mapping` is in effect.
 pub static BLOCK_OFFSET_BOUND_BYTES: Counter = Counter::new("omega.metal.block_offset_bound_bytes");
 
@@ -5822,7 +5823,7 @@ pub fn register_checkpoint_mapping(bytes: &[u8]) {
 
 /// Unregisters the checkpoint mapping [`register_checkpoint_mapping`]
 /// installed for `bytes`, evicting its whole-mapping no-copy buffer from
-/// [`NOCOPY_BUFFERS`] -- but ONLY when `bytes` is still the currently
+/// `NOCOPY_BUFFERS` -- but ONLY when `bytes` is still the currently
 /// registered mapping. [`register_checkpoint_mapping`] already evicts a
 /// PRIOR mapping's entry the moment a new one is registered (see that
 /// function's own doc), so a dropped model racing behind a second model's
@@ -6051,8 +6052,8 @@ fn resident_name_lookup(
 }
 
 /// Counts a fresh [`Plan`]'s per-node fast path resolving a resident block
-/// straight from the process-global caches ([`NOCOPY_BUFFERS`],
-/// [`RESIDENT_BUFFERS`], the checkpoint mapping) instead of taking the
+/// straight from the process-global caches (`NOCOPY_BUFFERS`,
+/// `RESIDENT_BUFFERS`, the checkpoint mapping) instead of taking the
 /// upload path -- the direct witness that a KV-bucket-boundary reshape does
 /// not re-walk the checkpoint's weight blocks through
 /// `upload_block`/`upload_packed_bytes` just to re-derive a buffer those
@@ -6273,7 +6274,7 @@ pub static RESIDENT_BUFFER_UPLOADS: Counter =
 pub static RESIDENT_BUFFER_REUSES: Counter =
     Counter::new("omega.metal.upload_block.resident_reuse");
 
-/// Entries [`RESIDENT_BUFFERS`] holds right now -- the direct witness that
+/// Entries `RESIDENT_BUFFERS` holds right now -- the direct witness that
 /// residency reuse tracks the caller's declared NAME set, not the address
 /// space: this stays exactly the plan's resident-name count across repeated
 /// `execute_plan` calls for the same names, regardless of how many times the
@@ -6327,8 +6328,8 @@ fn upload_resident_copy(
 }
 
 /// Evicts every buffer a checkpoint's own resident weight names cached in
-/// [`NOCOPY_BUFFERS`]/[`RESIDENT_BUFFERS`] -- the drop-time counterpart to
-/// [`upload_block_no_copy`]/[`upload_resident_copy`]'s insert. Removing by
+/// `NOCOPY_BUFFERS`/`RESIDENT_BUFFERS` -- the drop-time counterpart to
+/// `upload_block_no_copy`/`upload_resident_copy`'s insert. Removing by
 /// NAME, never a blanket clear, is what lets a second, unrelated model
 /// loaded on this same thread keep its own entries live after the first
 /// model drops -- see `LoadedModel`'s own `Drop` impl in

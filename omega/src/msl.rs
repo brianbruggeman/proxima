@@ -114,10 +114,10 @@ pub enum Binding {
     /// see `push_gather_fetch`'s doc for how the check is emitted.
     Fault,
     /// `CachedAttention`'s cross-threadgroup key-split scratch — present
-    /// only when [`cached_attention_merge_needed`] admits
+    /// only when `cached_attention_merge_needed` admits
     /// [`NumericRewrite::ContextSplitMerge`]. The split kernel WRITES it
     /// (this binding replaces `Binding::Output` in that kernel's own
-    /// [`bindings`] list, since the split no longer writes the op's real
+    /// `bindings` list, since the split no longer writes the op's real
     /// output directly); the merge kernel READS it. Not `NodeId`-keyed —
     /// unlike every other binding, this buffer has no program node of its
     /// own, so the identity a hazard tracker needs comes from

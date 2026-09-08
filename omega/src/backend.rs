@@ -648,8 +648,8 @@ fn plan_named_cpu_exact(
 /// [`plan_named`]'s exact-CPU-activation counterpart: identical for every
 /// `Engine::Gpu` driver (Metal's own kernels are already exact -- see
 /// `proxima_tensor::cpu::evaluate_quantized_exact`'s own doc), and routes
-/// `Engine::Cpu` through [`plan_named_cpu_exact`] instead of
-/// [`plan_named_cpu`]. The seam a cross-backend parity harness
+/// `Engine::Cpu` through `plan_named_cpu_exact` instead of
+/// `plan_named_cpu`. The seam a cross-backend parity harness
 /// (`proxima-model-interop`'s quality harness) uses to build a CPU
 /// reference that carries the SAME zero activation-quantization error
 /// Metal's kernels do, instead of the `q{4,5,6}k-int8-dot` fast path's own
