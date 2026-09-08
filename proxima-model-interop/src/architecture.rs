@@ -155,7 +155,27 @@ pub struct ArchitectureRegistry {
     default: Option<&'static dyn Architecture>,
 }
 
+impl Default for ArchitectureRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ArchitectureRegistry {
+    /// An empty table with no default -- [`Self::resolve`] returns
+    /// [`InteropError::UnknownArchitecture`] for any checkpoint whose
+    /// `general.architecture` does not match a name a caller has
+    /// [`Self::register`]ed. The strict counterpart to [`Self::with_builtin`]:
+    /// a caller that wants "reject anything not explicitly registered"
+    /// rather than "fall back to dense" starts here instead.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            default: None,
+        }
+    }
+
     /// Registers this crate's own two architectures --
     /// `qwen35::QWEN35` by exact name, `dense::DENSE` as both a named
     /// entry and the registry's fallback (see [`Self::resolve`]'s doc for
@@ -321,10 +341,7 @@ mod tests {
 
     #[test]
     fn resolve_on_an_unregistered_name_with_no_default_returns_the_typed_error() {
-        let registry = ArchitectureRegistry {
-            entries: Vec::new(),
-            default: None,
-        };
+        let registry = ArchitectureRegistry::new();
         let (parsed, _file_bytes) = gguf_with_architecture("totally-unknown-checkpoint-family");
 
         match registry.resolve(&parsed) {
