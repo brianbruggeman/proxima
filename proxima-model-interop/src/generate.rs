@@ -65,8 +65,11 @@ use proxima_tensor::cpu::{
     evaluate_quantized_named_exact_with_scratch, evaluate_quantized_named_with_scratch,
 };
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use proxima_tensor::DType;
-use proxima_tensor::op::{NodeId, Op, ScalarOp};
+use proxima_tensor::op::{NodeId, Op};
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+use proxima_tensor::op::ScalarOp;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::CachedLayerRoots;
 use proxima_tensor::spec::{Qwen35LayerRoots, mistral_cached_forward_program_with_experts};
