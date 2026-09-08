@@ -243,7 +243,11 @@ fn hf_bind_dense<'file>(
 /// is zero, so no permutation convention can matter) and diverges starting
 /// at position 1 already inside layer 0 -- exactly the position dependence
 /// this permutation, and only this permutation, explains.
-fn permute_rope_rows(flat: &[f32], head_count: usize, head_dim: usize, in_dim: usize) -> Vec<f32> {
+/// Reorders interleaved RoPE pairs `(x[i], x[head_dim/2 + i])` into
+/// adjacent-channel pairs `(x[2*i], x[2*i+1])`, the convention this crate's
+/// own RoPE rotation expects; see the module doc above for the derivation.
+#[must_use]
+pub fn permute_rope_rows(flat: &[f32], head_count: usize, head_dim: usize, in_dim: usize) -> Vec<f32> {
     let half = head_dim / 2;
     let mut permuted = alloc::vec![0.0f32; flat.len()];
     for head in 0..head_count {
@@ -361,45 +365,58 @@ fn hf_bind_matmul_weight<'file>(
 /// GGUF loop binds, HF's own naming instead -- the standard Llama/Mistral/
 /// Qwen `transformers` layout (`model.layers.{layer}.*`), the convention
 /// every dense checkpoint on HuggingFace this crate has been checked against
-/// uses.
-mod names {
+/// uses, as opposed to GGUF's `blk.{n}.*` convention (see
+/// [`node_names`]).
+pub mod names {
     use alloc::format;
     use alloc::string::String;
 
-    pub(super) fn embed_tokens() -> String {
+    #[must_use]
+    pub fn embed_tokens() -> String {
         "model.embed_tokens.weight".into()
     }
-    pub(super) fn input_layernorm(layer: u32) -> String {
+    #[must_use]
+    pub fn input_layernorm(layer: u32) -> String {
         format!("model.layers.{layer}.input_layernorm.weight")
     }
-    pub(super) fn post_attention_layernorm(layer: u32) -> String {
+    #[must_use]
+    pub fn post_attention_layernorm(layer: u32) -> String {
         format!("model.layers.{layer}.post_attention_layernorm.weight")
     }
-    pub(super) fn q_proj(layer: u32) -> String {
+    #[must_use]
+    pub fn q_proj(layer: u32) -> String {
         format!("model.layers.{layer}.self_attn.q_proj.weight")
     }
-    pub(super) fn k_proj(layer: u32) -> String {
+    #[must_use]
+    pub fn k_proj(layer: u32) -> String {
         format!("model.layers.{layer}.self_attn.k_proj.weight")
     }
-    pub(super) fn v_proj(layer: u32) -> String {
+    #[must_use]
+    pub fn v_proj(layer: u32) -> String {
         format!("model.layers.{layer}.self_attn.v_proj.weight")
     }
-    pub(super) fn o_proj(layer: u32) -> String {
+    #[must_use]
+    pub fn o_proj(layer: u32) -> String {
         format!("model.layers.{layer}.self_attn.o_proj.weight")
     }
-    pub(super) fn gate_proj(layer: u32) -> String {
+    #[must_use]
+    pub fn gate_proj(layer: u32) -> String {
         format!("model.layers.{layer}.mlp.gate_proj.weight")
     }
-    pub(super) fn up_proj(layer: u32) -> String {
+    #[must_use]
+    pub fn up_proj(layer: u32) -> String {
         format!("model.layers.{layer}.mlp.up_proj.weight")
     }
-    pub(super) fn down_proj(layer: u32) -> String {
+    #[must_use]
+    pub fn down_proj(layer: u32) -> String {
         format!("model.layers.{layer}.mlp.down_proj.weight")
     }
-    pub(super) fn final_norm() -> String {
+    #[must_use]
+    pub fn final_norm() -> String {
         "model.norm.weight".into()
     }
-    pub(super) fn lm_head() -> String {
+    #[must_use]
+    pub fn lm_head() -> String {
         "lm_head.weight".into()
     }
 }
@@ -413,44 +430,56 @@ mod names {
 /// (see [`hf_bind_dense`]'s doc), so every [`BoundWeights`] entry this module
 /// produces MUST be stored under one of these, regardless of what the
 /// on-disk tensor was called.
-mod node_names {
+pub mod node_names {
     use alloc::format;
     use alloc::string::String;
 
-    pub(super) fn token_embd() -> String {
+    #[must_use]
+    pub fn token_embd() -> String {
         "token_embd.weight".into()
     }
-    pub(super) fn attn_norm(layer: u32) -> String {
+    #[must_use]
+    pub fn attn_norm(layer: u32) -> String {
         format!("blk.{layer}.attn_norm.weight")
     }
-    pub(super) fn ffn_norm(layer: u32) -> String {
+    #[must_use]
+    pub fn ffn_norm(layer: u32) -> String {
         format!("blk.{layer}.ffn_norm.weight")
     }
-    pub(super) fn attn_q(layer: u32) -> String {
+    #[must_use]
+    pub fn attn_q(layer: u32) -> String {
         format!("blk.{layer}.attn_q.weight")
     }
-    pub(super) fn attn_k(layer: u32) -> String {
+    #[must_use]
+    pub fn attn_k(layer: u32) -> String {
         format!("blk.{layer}.attn_k.weight")
     }
-    pub(super) fn attn_v(layer: u32) -> String {
+    #[must_use]
+    pub fn attn_v(layer: u32) -> String {
         format!("blk.{layer}.attn_v.weight")
     }
-    pub(super) fn attn_output(layer: u32) -> String {
+    #[must_use]
+    pub fn attn_output(layer: u32) -> String {
         format!("blk.{layer}.attn_output.weight")
     }
-    pub(super) fn ffn_gate(layer: u32) -> String {
+    #[must_use]
+    pub fn ffn_gate(layer: u32) -> String {
         format!("blk.{layer}.ffn_gate.weight")
     }
-    pub(super) fn ffn_up(layer: u32) -> String {
+    #[must_use]
+    pub fn ffn_up(layer: u32) -> String {
         format!("blk.{layer}.ffn_up.weight")
     }
-    pub(super) fn ffn_down(layer: u32) -> String {
+    #[must_use]
+    pub fn ffn_down(layer: u32) -> String {
         format!("blk.{layer}.ffn_down.weight")
     }
-    pub(super) fn output_norm() -> String {
+    #[must_use]
+    pub fn output_norm() -> String {
         "output_norm.weight".into()
     }
-    pub(super) fn output_weight() -> String {
+    #[must_use]
+    pub fn output_weight() -> String {
         "output.weight".into()
     }
 }
