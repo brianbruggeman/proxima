@@ -1,0 +1,32 @@
+name: doc-strict
+
+# scripts/doc-strict-gate.sh re-proves, on every commit, that main went clean
+# under `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` on
+# 2026-09-08 (d759627, ~250 intra-doc link fixes across 12 crates). Repo-wide,
+# not affected-gated: a link broken by crate A referencing crate B can pass
+# every per-crate gate and still break the workspace-wide doc build, so this
+# runs unconditionally, same shape as algebra-lint.yml.
+#
+# Default features only: `--all-features` is impossible across this
+# workspace because prime's `runtime-prime-inbox-alloc` and
+# `runtime-prime-inbox-const` features are mutually exclusive by design.
+
+on:
+  push:
+    branches: [main, "verify/*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  doc-strict:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: run doc-strict-gate
+        run: bash scripts/doc-strict-gate.sh
