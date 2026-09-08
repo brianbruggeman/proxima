@@ -7691,6 +7691,22 @@ fn encode_op(
     if matches!(bound.kind, BoundOpKind::CachedAttention { .. }) {
         record_op_kind(OpKind::CachedAttention);
     }
+    // `gather_count(bound) > 0` on an `Elementwise`/`Reduce` op is exactly
+    // `spec::gathered_expert_product`'s shape once bound (a `Computed`
+    // gather map on one operand feeding the multiply-then-reduce chain
+    // `append_moe_ffn` builds) -- `embedding_lookup`'s own gather is a bare
+    // `Elementwise` with no following reduce, so this also fires there, but
+    // no test asserts this counter on that path; it exists so a MoE
+    // fixture's Metal run can prove the gather engaged instead of silently
+    // taking a non-gathering fallback ("default-on ≠ reachable").
+    #[cfg(feature = "instrument")]
+    if matches!(
+        bound.kind,
+        BoundOpKind::Elementwise { .. } | BoundOpKind::Reduce { .. }
+    ) && gather_count(bound) > 0
+    {
+        record_op_kind(OpKind::GatheredExpert);
+    }
     // `resolved` is `Some` only from `execute_plan_with_placements`, once
     // `resolve_steps` has run: this whole block -- `kernel_cache_key`'s
     // `String`, `kernel_dispatch_shape`'s `Vec<Binding>`, and

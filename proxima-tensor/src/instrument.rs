@@ -1495,6 +1495,16 @@ pub static OP_KIND_REDUCE: Counter = Counter::new("proxima_tensor.op_kind.reduce
 pub static OP_KIND_SCAN: Counter = Counter::new("proxima_tensor.op_kind.scan");
 pub static OP_KIND_CACHED_ATTENTION: Counter =
     Counter::new("proxima_tensor.op_kind.cached_attention");
+/// Set only from `omega::metal::encode_op` when a bound op's operand set
+/// carries an `IndexMap::Computed` gather feeding a reduce/elementwise --
+/// the MoE `gathered_expert_product` shape (`spec.rs:1466`). CPU's own
+/// `run_node_into` never sets this counter (it has no separate dispatch arm
+/// for a gathering reduce -- see `record_expert_selection` for the CPU
+/// oracle's own gather-position tracking); this exists solely so a Metal
+/// run can prove it took the gather-aware kernel rather than silently
+/// falling back to CPU for the whole op ("default-on ≠ reachable").
+pub static OP_KIND_GATHERED_EXPERT: Counter =
+    Counter::new("proxima_tensor.op_kind.gathered_expert");
 
 /// Which `run_node_into` arm this bound op's `BoundOpKind`/`Keep` resolved
 /// to — set once per call from the match already driving dispatch, never
@@ -1505,6 +1515,7 @@ pub enum OpKind {
     Reduce,
     Scan,
     CachedAttention,
+    GatheredExpert,
 }
 
 pub fn record_op_kind(kind: OpKind) {
@@ -1513,6 +1524,7 @@ pub fn record_op_kind(kind: OpKind) {
         OpKind::Reduce => counter!(OP_KIND_REDUCE, 1),
         OpKind::Scan => counter!(OP_KIND_SCAN, 1),
         OpKind::CachedAttention => counter!(OP_KIND_CACHED_ATTENTION, 1),
+        OpKind::GatheredExpert => counter!(OP_KIND_GATHERED_EXPERT, 1),
     }
 }
 
@@ -1537,6 +1549,7 @@ pub struct PathTotals {
     pub op_kind_reduce: u64,
     pub op_kind_scan: u64,
     pub op_kind_cached_attention: u64,
+    pub op_kind_gathered_expert: u64,
     pub dispatch_parallel: u64,
     pub dispatch_sequential_below_threshold: u64,
     pub dispatch_sequential_split_unavailable: u64,
@@ -1549,6 +1562,7 @@ pub fn path_totals() -> PathTotals {
         op_kind_reduce: OP_KIND_REDUCE.get(),
         op_kind_scan: OP_KIND_SCAN.get(),
         op_kind_cached_attention: OP_KIND_CACHED_ATTENTION.get(),
+        op_kind_gathered_expert: OP_KIND_GATHERED_EXPERT.get(),
         dispatch_parallel: PARALLEL_NODES.get(),
         dispatch_sequential_below_threshold: DISPATCH_SEQUENTIAL_BELOW_THRESHOLD.get(),
         dispatch_sequential_split_unavailable: DISPATCH_SEQUENTIAL_SPLIT_UNAVAILABLE.get(),
@@ -1562,6 +1576,7 @@ pub fn reset_path() {
     let _ = OP_KIND_REDUCE.snapshot_and_reset();
     let _ = OP_KIND_SCAN.snapshot_and_reset();
     let _ = OP_KIND_CACHED_ATTENTION.snapshot_and_reset();
+    let _ = OP_KIND_GATHERED_EXPERT.snapshot_and_reset();
     let _ = DISPATCH_SEQUENTIAL_BELOW_THRESHOLD.snapshot_and_reset();
     let _ = DISPATCH_SEQUENTIAL_SPLIT_UNAVAILABLE.snapshot_and_reset();
 }
