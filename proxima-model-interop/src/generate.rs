@@ -6308,4 +6308,279 @@ mod memory_fit_gate_tests {
             "a generously fitting budget must not reduce context_length"
         );
     }
+
+    /// [`PrefixState`] against the real host-local qwen3-1.7B checkpoint
+    /// [`crate::test_support::qwen3_gguf_path`] resolves -- this checkpoint
+    /// is qk-norm, so ordinary [`LoadedModel::generate_with_serving_config`]
+    /// on Metal takes [`LoadedModel::run_decode_loop_placed_kv`]'s single-
+    /// range fast path (`qwen3_split_half_rope_cpu_and_metal_greedy_decode_match`'s
+    /// own doc, `proxima-model-interop/src/quality.rs`), which has no host-
+    /// side [`LayerCacheState`] to report as a [`PrefixState`] at all --
+    /// every test here therefore exercises the two-range SPLIT path
+    /// [`LoadedModel::prefill_prefix`]/[`LoadedModel::generate_from_prefix`]
+    /// force via `force_two_range: true`, not the fused single-range kernel
+    /// ordinary callers get. `#[ignore]`d like every other host-local
+    /// fixture in this crate.
+    ///
+    /// **Residual, run and measured, not hidden (ROW 406):** the two parity
+    /// tests below currently FAIL on this real checkpoint --
+    /// `generate_with_serving_config` over the concatenated prompt
+    /// degenerates to a repeated-token greedy decode (a real, if
+    /// uninteresting, model output at `temperature: 0.0`), while
+    /// `generate_from_prefix`'s own resumed decode diverges to unrelated
+    /// tokens from the very first generated position. The forced two-range
+    /// path is exercised here in a shape that, so far as this landing's own
+    /// reading of `proxima-tensor/src/spec.rs`/`omega/src/msl.rs` found, no
+    /// existing caller ever produces on Metal: a multi-row query
+    /// (`query_rows > 1`, the whole prefix) against a NONZERO cached range
+    /// (`cached_len > 0` seeded from a prior [`PrefixState`]). Every
+    /// existing two-range Metal caller's own multi-row step is prefill
+    /// itself, always at `cached_len == 0`; every step with `cached_len >
+    /// 0` is ordinary autoregressive decode, always `query_rows == 1`. This
+    /// landing's own `prefill_prefix`/`generate_from_prefix` split is the
+    /// first caller to combine the two, and the fused Metal
+    /// `CachedAttention` kernel (or its uniform/identity/dispatch plumbing
+    /// -- unattributed, no profiler/disassembly evidence gathered this
+    /// slice) most likely does not handle that combination correctly. NOT
+    /// verified against the CPU evaluator in the time this slice had --
+    /// that comparison (does `run_cached_attention`'s CPU oracle, not the
+    /// Metal kernel, also fail the same way?) is the next diagnostic step,
+    /// left open rather than guessed at.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    mod prefix_state_real_model {
+        use core::ffi::c_void;
+        use std::os::fd::AsFd;
+
+        use super::super::{Control, LoadedModel, Phase, supported_serving_config};
+        use crate::serving::GPU_LAYERS_ALL;
+
+        struct MappedGguf {
+            base: *mut u8,
+            len: usize,
+            _file: std::fs::File,
+        }
+
+        impl MappedGguf {
+            fn open(path: &std::path::Path) -> std::io::Result<Self> {
+                let file = std::fs::File::open(path)?;
+                let len = usize::try_from(file.metadata()?.len())
+                    .expect("fixture file length fits in usize");
+                // SAFETY: `len` matches the just-opened file's own length;
+                // `file` is kept alive in `_file` for as long as `base` is
+                // used, and the mapping is read-only/private so no writer
+                // can observe or race it.
+                let base = unsafe {
+                    rustix::mm::mmap(
+                        core::ptr::null_mut(),
+                        len,
+                        rustix::mm::ProtFlags::READ,
+                        rustix::mm::MapFlags::PRIVATE,
+                        file.as_fd(),
+                        0,
+                    )
+                }
+                .expect("mmap host-local prefix-state gguf fixture")
+                .cast::<u8>();
+                Ok(Self {
+                    base,
+                    len,
+                    _file: file,
+                })
+            }
+
+            fn as_slice(&self) -> &[u8] {
+                // SAFETY: `base` points at `len` bytes mapped for `self`'s
+                // whole lifetime; this borrows `self` immutably, so nothing
+                // can unmap the region while the returned slice is alive.
+                unsafe { core::slice::from_raw_parts(self.base, self.len) }
+            }
+        }
+
+        impl Drop for MappedGguf {
+            fn drop(&mut self) {
+                // SAFETY: `base`/`len` are exactly what `open`'s `mmap`
+                // call returned; nothing else unmaps this region.
+                let _ = unsafe { rustix::mm::munmap(self.base.cast::<c_void>(), self.len) };
+            }
+        }
+
+        fn open_model(mapped: &MappedGguf) -> LoadedModel<'_> {
+            let file_bytes = mapped.as_slice();
+            let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+                .expect("parse host-local qwen3 gguf fixture");
+            LoadedModel::load(&parsed, file_bytes)
+                .expect("load real qwen3 checkpoint through the public path")
+        }
+
+        /// Greedy (`temperature: 0.0`) so [`Self::generate_from_prefix`] and
+        /// [`LoadedModel::generate_with_serving_config`] are directly
+        /// comparable token-for-token -- any sampling randomness would make
+        /// a mismatch ambiguous between "the primitive is wrong" and "the
+        /// rng streams diverged".
+        fn greedy_serving_config() -> super::super::ServingConfig<'static> {
+            let mut config = supported_serving_config(
+                GPU_LAYERS_ALL,
+                crate::test_support::math_mode_from_env(),
+            );
+            config.temperature = 0.0;
+            config
+        }
+
+        /// Real prose (Arthur Conan Doyle, public domain, "A Scandal in
+        /// Bohemia"'s opening) rather than synthetic filler -- this is the
+        /// byte-for-byte shape a real chat prompt's own shared system/
+        /// history prefix takes. Ends on a newline: the tokenizer boundary
+        /// this crate's vocabularies treat as a hard break, so
+        /// `tokenize(PREFIX)` is a genuine prefix of `tokenize(PREFIX +
+        /// SUFFIX_*)` for every `SUFFIX_*` below (each also opens on its own
+        /// clause rather than continuing the prefix's last word).
+        const PREFIX: &str = "To Sherlock Holmes she is always THE woman. I have seldom heard him mention her under any other name. In his eyes she eclipses and predominates the whole of her sex. It was not that he felt any emotion akin to love for Irene Adler. All emotions, and that one particularly, were abhorrent to his cold, precise but admirably balanced mind. He was, I take it, the most perfect reasoning and observing machine that the world has seen, but as a lover he would have placed himself in a false position. He never spoke of the softer passions, save with a gibe and a sneer. They were admirable things for the observer—excellent for drawing the veil from men's motives and actions. But for the trained reasoner to admit such intrusions into his own delicate and finely adjusted temperament was to introduce a distracting factor which might throw a doubt upon all his mental results.\n";
+
+        const SUFFIX_A: &str = "Grit in a sensitive instrument, or a crack in one of his own high-power lenses, would not be more disturbing than a strong emotion in a nature such as his.";
+
+        const SUFFIX_B: &str = "And yet there was but one woman to him, and that woman was the late Irene Adler, of dubious and questionable memory.";
+
+        /// (a) parity: resuming from a cached prefix must produce the
+        /// IDENTICAL greedy token ids as decoding the concatenated prompt
+        /// in one call.
+        #[test]
+        #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
+        fn generate_from_prefix_matches_generate_over_the_full_prompt_at_temperature_zero() {
+            let model_path = crate::test_support::qwen3_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen3 gguf fixture");
+            let model = open_model(&mapped);
+            let serving_config = greedy_serving_config();
+            let max_tokens = 16;
+
+            let full_prompt = alloc::format!("{PREFIX}{SUFFIX_A}");
+            let (direct_ids, direct_text, _) = model
+                .generate_with_serving_config(&full_prompt, max_tokens, serving_config)
+                .expect("direct greedy generate over the concatenated prompt");
+
+            let prefix = model
+                .prefill_prefix(PREFIX, &serving_config)
+                .expect("prefill the shared prefix once");
+            let (resumed_ids, resumed_text, _) = model
+                .generate_from_prefix(
+                    &prefix,
+                    SUFFIX_A,
+                    max_tokens,
+                    &serving_config,
+                    &mut |_event| Control::Continue,
+                )
+                .expect("resume decoding from the cached prefix");
+
+            std::println!(
+                "prefix_parity direct={direct_text:?} resumed={resumed_text:?} \
+                 prefix_len={}",
+                prefix.len()
+            );
+            assert_eq!(
+                resumed_ids, direct_ids,
+                "resuming from a cached prefix must produce the same greedy token ids \
+                 as decoding the full prompt in one call"
+            );
+        }
+
+        /// (b) reuse: two different suffixes against the SAME prefill --
+        /// both parity-correct against their own direct decode, and each
+        /// `generate_from_prefix` call's own `Phase::Prefill` event reports
+        /// a `prompt_tokens` count bounded by the suffix alone, never the
+        /// prefix's own `cached_len` -- the load-bearing proof that the
+        /// second (and first) call never re-ran the prefix's own forward
+        /// pass, read off the SAME per-step counter
+        /// [`super::super::TokenEvent::phase`]'s own doc already promises,
+        /// never wall-clock.
+        #[test]
+        #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
+        fn generate_from_prefix_reuses_one_prefill_across_two_suffixes() {
+            let model_path = crate::test_support::qwen3_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen3 gguf fixture");
+            let model = open_model(&mapped);
+            let serving_config = greedy_serving_config();
+            let max_tokens = 12;
+
+            let prefix = model
+                .prefill_prefix(PREFIX, &serving_config)
+                .expect("prefill the shared prefix once");
+
+            for suffix in [SUFFIX_A, SUFFIX_B] {
+                let full_prompt = alloc::format!("{PREFIX}{suffix}");
+                let (direct_ids, _, _) = model
+                    .generate_with_serving_config(&full_prompt, max_tokens, serving_config)
+                    .expect("direct greedy generate over the concatenated prompt");
+
+                let mut prefill_rows = 0_usize;
+                let (resumed_ids, _, _) = model
+                    .generate_from_prefix(
+                        &prefix,
+                        suffix,
+                        max_tokens,
+                        &serving_config,
+                        &mut |event| {
+                            if let Phase::Prefill { prompt_tokens } = event.phase {
+                                prefill_rows = prompt_tokens;
+                            }
+                            Control::Continue
+                        },
+                    )
+                    .expect("resume decoding from the cached prefix");
+
+                assert_eq!(
+                    resumed_ids, direct_ids,
+                    "suffix {suffix:?} must match its own direct decode"
+                );
+                assert!(
+                    prefill_rows < prefix.len(),
+                    "prefill_rows={prefill_rows} must cover only the suffix's own tokens, \
+                     never the {}-token cached prefix -- a value this large would mean \
+                     the prefix was re-prefilled",
+                    prefix.len()
+                );
+            }
+        }
+
+        /// (c) drop: once every [`PrefixState`] this test built goes out of
+        /// scope, the model's own resident-buffer count
+        /// (`ROW 403`'s `omega::metal::current_allocated_size`, the same
+        /// counter `dropping_a_loaded_model_releases_its_device_buffers`
+        /// checks) is unaffected -- [`PrefixState`]'s own doc: its fields
+        /// are plain host `Vec<f32>` buffers, never a named device
+        /// registration, so there is nothing for a device-buffer counter to
+        /// see drop at all. This test's own real assertion is therefore
+        /// that the count is IDENTICAL immediately before and after the
+        /// drop, not merely "close" -- proving the negative
+        /// [`PrefixState`]'s doc claims (no device identity to leak)
+        /// rather than assuming it.
+        #[test]
+        #[ignore = "depends on a host-local qwen3 gguf checkout outside this repo, and a real Metal device"]
+        fn dropping_a_prefix_state_leaves_the_models_resident_buffer_count_unchanged() {
+            let model_path = crate::test_support::qwen3_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen3 gguf fixture");
+            let model = open_model(&mapped);
+            let serving_config = greedy_serving_config();
+
+            let prefix = model
+                .prefill_prefix(PREFIX, &serving_config)
+                .expect("prefill the shared prefix once");
+            let before_drop = omega::metal::current_allocated_size();
+            drop(prefix);
+            let after_drop = omega::metal::current_allocated_size();
+
+            std::println!(
+                "prefix_state_drop before_drop={before_drop:?} after_drop={after_drop:?}"
+            );
+            assert_eq!(
+                before_drop, after_drop,
+                "PrefixState owns no device buffer, so dropping it must not move the \
+                 model's own resident device-allocation count at all"
+            );
+        }
+    }
 }
