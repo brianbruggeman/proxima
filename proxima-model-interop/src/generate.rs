@@ -3857,9 +3857,17 @@ impl<'file> LoadedModel<'file> {
                 // registered (`instrument::expert_observer`'s own doc): the
                 // CPU evaluator keeps every requested output's full lifetime
                 // alive, so a program with no observer never pays to hold
-                // these nodes live.
+                // these nodes live. `proxima_tensor::instrument` itself is
+                // `instrument`-feature-gated (`proxima-tensor/src/lib.rs`),
+                // so a build with `std` but not `instrument` never observes
+                // routing at all -- `observe_routing` is a compile-time
+                // `false` there, not a call into a module that does not
+                // exist.
+                #[cfg(feature = "instrument")]
                 let observe_routing = proxima_tensor::instrument::expert_observer().is_some()
                     && !self.moe_sites.0.is_empty();
+                #[cfg(not(feature = "instrument"))]
+                let observe_routing = false;
                 if observe_routing {
                     for site in &self.moe_sites.0 {
                         roots.extend(site.selected.iter().copied());
@@ -3925,6 +3933,7 @@ impl<'file> LoadedModel<'file> {
                 // `evaluated.get` reads back exactly the extra outputs
                 // `observe_routing` requested above, never the kernel's own
                 // per-position gather.
+                #[cfg(feature = "instrument")]
                 if observe_routing {
                     for site in &self.moe_sites.0 {
                         let weight_total_node =
