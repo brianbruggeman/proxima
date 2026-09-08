@@ -757,6 +757,16 @@ pub struct LoadedModel<'file> {
     /// recomputed every decode step. `None` on the dense path, which never
     /// has an [`Qwen35LayerRoots::Ssm`] entry to size.
     qwen35_ssm_shape: Option<Qwen35SsmShape>,
+    /// [`Some`] only for a qwen35-architecture checkpoint --
+    /// `{architecture}.attention.key_length` (`crate::qwen35::Qwen35Architecture::attn_head_dim`'s
+    /// own doc on why this is not derivable from [`ModelArchitecture::head_dim`],
+    /// the PARTIAL-rotary width). [`Self::run_decode_loop_observed`]'s
+    /// two-range loop needs it to size a [`Qwen35DenseAttentionCache`]'s own
+    /// `k_pass`/`v` row widths when padding a `DenseAttention` layer's cache
+    /// out to a `kv_extent` bucket boundary, the same reason
+    /// [`Self::run_decode_loop_observed`] already carries `qwen35_ssm_shape`
+    /// as a separate field rather than re-deriving it from `layer_roots`.
+    qwen35_attn_head_dim: Option<u32>,
     /// The single-range, device-resident-KV counterpart of `program`/
     /// `logits_root`/`layer_roots` above -- `None` unless this build was
     /// compiled with `metal-output-placement` AND this checkpoint took the
@@ -1154,6 +1164,7 @@ impl<'file> LoadedModel<'file> {
                 model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
                 checkpoint_bytes: file_bytes.len(),
                 qwen35_ssm_shape: Some(ssm_shape),
+                qwen35_attn_head_dim: Some(qwen_architecture.attn_head_dim),
                 // The single-range program is dense-Mistral-only
                 // (`SingleRangeProgram`'s own field doc); qwen35's hybrid
                 // attention+state-space layers are never that shape.
@@ -1258,6 +1269,7 @@ impl<'file> LoadedModel<'file> {
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
             checkpoint_bytes: file_bytes.len(),
             qwen35_ssm_shape: None,
+            qwen35_attn_head_dim: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
             checkpoint_mapping: file_bytes,
@@ -1346,6 +1358,7 @@ impl<'file> LoadedModel<'file> {
             model_name: None,
             checkpoint_bytes: file_bytes.len(),
             qwen35_ssm_shape: None,
+            qwen35_attn_head_dim: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
             checkpoint_mapping: file_bytes,
@@ -1579,6 +1592,87 @@ impl Qwen35DenseAttentionCache {
         self.k_pass.extend_from_slice(pass);
         self.v.extend_from_slice(value);
     }
+}
+
+/// [`KvPadShape`]'s counterpart for a [`Qwen35DenseAttentionCache`] --
+/// `k_first`/`k_second` share [`KvPadShape::even_odd_len`]'s row width
+/// (both are `pairs`-wide, the same rotary half [`spec::append_qwen35_dense_attention_layer`]'s
+/// `k_first_cache`/`k_second_cache` leaves declare), but `k_pass`/`v` are
+/// `attn_head_dim`-based, not `head_dim`-based, so they need their own
+/// widths rather than reusing [`KvPadShape::v_len`].
+struct Qwen35DenseAttentionPadShape {
+    bound_extent: usize,
+    kv_heads: usize,
+    pairs: usize,
+    pass_dim: usize,
+    attn_head_dim: usize,
+}
+
+impl Qwen35DenseAttentionPadShape {
+    fn even_odd_len(&self) -> usize {
+        self.bound_extent * self.kv_heads * self.pairs
+    }
+
+    fn pass_len(&self) -> usize {
+        self.bound_extent * self.kv_heads * self.pass_dim
+    }
+
+    fn v_len(&self) -> usize {
+        self.bound_extent * self.kv_heads * self.attn_head_dim
+    }
+}
+
+/// [`KvPadScratch`]'s counterpart for a [`Qwen35LayerRoots::DenseAttention`]
+/// layer -- the same defect [`KvPadScratch`]'s own doc names
+/// (`cached_len` growing 1:1 with the step index defeats
+/// `proxima_tensor::bind::cached_attention_candidates`'s plan-key
+/// bucketing unless the bound buffer this layer feeds the backend is padded
+/// out to the SAME `kv_extent` boundary the `Attention` arm already pads
+/// to) applies here identically: `qwen35_forward_program`'s dense-attention
+/// layers declare `k_first_cache`/`k_second_cache`/`k_pass_cache`/`v_cache`
+/// on the identical `Extent::Symbolic(1)` slot the `Attention` arm's
+/// `kv_cache.{layer}.*` leaves use, so a bucketed `symbols[1]` value only
+/// works when EVERY layer's bound buffer -- dense-attention included --
+/// is actually that many rows long, zero-padded past the real
+/// `cached_len`.
+struct Qwen35DenseAttentionPadScratch {
+    k_first: Vec<f32>,
+    k_second: Vec<f32>,
+    k_pass: Vec<f32>,
+    v: Vec<f32>,
+}
+
+impl Qwen35DenseAttentionPadScratch {
+    fn new() -> Self {
+        Self {
+            k_first: Vec::new(),
+            k_second: Vec::new(),
+            k_pass: Vec::new(),
+            v: Vec::new(),
+        }
+    }
+
+    fn fill(&mut self, source: &Qwen35DenseAttentionCache, shape: &Qwen35DenseAttentionPadShape) {
+        let even_odd_len = shape.even_odd_len();
+        let pass_len = shape.pass_len();
+        let v_len = shape.v_len();
+        if self.k_first.len() < even_odd_len {
+            self.k_first.resize(even_odd_len, 0.0);
+        }
+        if self.k_second.len() < even_odd_len {
+            self.k_second.resize(even_odd_len, 0.0);
+        }
+        if self.k_pass.len() < pass_len {
+            self.k_pass.resize(pass_len, 0.0);
+        }
+        if self.v.len() < v_len {
+            self.v.resize(v_len, 0.0);
+        }
+        self.k_first[..source.k_first.len()].copy_from_slice(&source.k_first);
+        self.k_second[..source.k_second.len()].copy_from_slice(&source.k_second);
+        self.k_pass[..source.k_pass.len()].copy_from_slice(&source.k_pass);
+        self.v[..source.v.len()].copy_from_slice(&source.v);
+    }
 
     fn named_blocks<'cache>(
         &'cache self,
@@ -1586,18 +1680,22 @@ impl Qwen35DenseAttentionCache {
         k_second_name: &'cache str,
         k_pass_name: &'cache str,
         v_name: &'cache str,
+        shape: &Qwen35DenseAttentionPadShape,
     ) -> [(&'cache str, QuantizedBlock<'cache>); 4] {
         [
             (
                 k_first_name,
-                QuantizedBlock::Float32(self.k_first.as_slice()),
+                QuantizedBlock::Float32(&self.k_first[..shape.even_odd_len()]),
             ),
             (
                 k_second_name,
-                QuantizedBlock::Float32(self.k_second.as_slice()),
+                QuantizedBlock::Float32(&self.k_second[..shape.even_odd_len()]),
             ),
-            (k_pass_name, QuantizedBlock::Float32(self.k_pass.as_slice())),
-            (v_name, QuantizedBlock::Float32(self.v.as_slice())),
+            (
+                k_pass_name,
+                QuantizedBlock::Float32(&self.k_pass[..shape.pass_len()]),
+            ),
+            (v_name, QuantizedBlock::Float32(&self.v[..shape.v_len()])),
         ]
     }
 }
@@ -2997,9 +3095,21 @@ impl<'file> LoadedModel<'file> {
         // every `DenseAttention`/`Ssm` layer a qwen35 checkpoint carries.
         let mut kv_pad_scratch: Vec<KvPadScratch> =
             self.layer_roots.iter().map(|_| KvPadScratch::new()).collect();
+        // [`Qwen35DenseAttentionPadScratch`]'s own doc: the `Attention` arm's
+        // padding above is not enough on its own -- a `DenseAttention` layer
+        // shares the identical `Extent::Symbolic(1)` slot, so it needs the
+        // same treatment or a bucketed `symbols[1]` reads past a shorter,
+        // unpadded buffer on every qwen35 checkpoint.
+        let mut qwen35_dense_pad_scratch: Vec<Qwen35DenseAttentionPadScratch> = self
+            .layer_roots
+            .iter()
+            .map(|_| Qwen35DenseAttentionPadScratch::new())
+            .collect();
         let kv_heads = self.architecture.kv_heads as usize;
         let head_dim = self.architecture.head_dim as usize;
         let pairs = head_dim / 2;
+        let attn_head_dim = self.qwen35_attn_head_dim.unwrap_or(0) as usize;
+        let pass_dim = attn_head_dim.saturating_sub(head_dim);
 
         // The caller's own knowledge of which named blocks are STATIC --
         // bound once in `LoadedModel::load` and never mutated again -- fixed
@@ -3099,6 +3209,16 @@ impl<'file> LoadedModel<'file> {
                     pairs,
                     head_dim,
                 };
+                // Same `kv_bound_extent`, same [`Extent::Symbolic(1)`] slot
+                // (`Qwen35DenseAttentionPadScratch`'s own doc) -- a
+                // `DenseAttention` layer's row widths, not `Attention`'s.
+                let qwen35_dense_pad_shape = Qwen35DenseAttentionPadShape {
+                    bound_extent: kv_bound_extent,
+                    kv_heads,
+                    pairs,
+                    pass_dim,
+                    attn_head_dim,
+                };
 
                 // KV-cache HOST -> DEVICE traffic: every named block below is the
                 // FULL accumulated history (`LayerCache::append` only grows these,
@@ -3138,8 +3258,14 @@ impl<'file> LoadedModel<'file> {
                 // layer's scratch second, keeps the two borrow kinds in
                 // disjoint passes instead of interleaved per iteration.
                 for (layer, cache) in layer_caches.iter().enumerate() {
-                    if let LayerCacheState::Attention(cache) = cache {
-                        kv_pad_scratch[layer].fill(cache, &kv_pad_shape);
+                    match cache {
+                        LayerCacheState::Attention(cache) => {
+                            kv_pad_scratch[layer].fill(cache, &kv_pad_shape);
+                        }
+                        LayerCacheState::DenseAttention(cache) => {
+                            qwen35_dense_pad_scratch[layer].fill(cache, &qwen35_dense_pad_shape);
+                        }
+                        LayerCacheState::Ssm(_) => {}
                     }
                 }
                 for (layer, names) in cache_names.iter().enumerate() {
@@ -3159,9 +3285,15 @@ impl<'file> LoadedModel<'file> {
                                 k_pass,
                                 v,
                             },
-                            LayerCacheState::DenseAttention(cache),
+                            LayerCacheState::DenseAttention(_),
                         ) => {
-                            named_blocks.extend(cache.named_blocks(k_first, k_second, k_pass, v));
+                            named_blocks.extend(qwen35_dense_pad_scratch[layer].named_blocks(
+                                k_first,
+                                k_second,
+                                k_pass,
+                                v,
+                                &qwen35_dense_pad_shape,
+                            ));
                         }
                         (
                             LayerCacheNames::Ssm {
@@ -4732,6 +4864,268 @@ mod tests {
         );
     }
 
+    /// [`two_range_plan_cache_buckets_cached_len_without_changing_generated_tokens`]'s
+    /// counterpart for a qwen35 [`Qwen35LayerRoots::DenseAttention`] layer --
+    /// this crate's fake-fixture fallback for that same claim, not the full
+    /// 4-layer hybrid checkpoint `feat/synthetic-qwen38-fixture`'s own
+    /// `examples/synth_qwen35_gguf.rs` builds (~918 MiB, out of this slice's
+    /// time budget): one synthetic, `full_attention_interval: 1` layer (so
+    /// every layer is [`crate::qwen35::Qwen35LayerKind::Attention`], no
+    /// state-space mixer to also fixture), just wide enough
+    /// (`query_heads = kv_heads = 1`, `attention.key_length = 4`,
+    /// `rope.dimension_count = 2`, so `pass_dim = 2` is exercised alongside
+    /// the rotated halves) to drive `qwen35_forward_program`'s
+    /// `DenseAttention` cache path through
+    /// [`Qwen35DenseAttentionPadScratch`] the same way the MoE test above
+    /// drives `mistral_cached_forward_program_with_experts`'s `Attention`
+    /// path through [`KvPadScratch`]. Asserts `plan_hits`/`plan_misses`
+    /// only, per this card's own fake-fixture allowance -- no
+    /// `OUTPUT_BUFFER_ALLOCATIONS`/CPU-vs-Metal comparison, since those need
+    /// the real hybrid checkpoint's own numerics to be meaningful.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn qwen35_dense_attention_two_range_plan_cache_buckets_cached_len() {
+        fn f32_bytes(values: &[f32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        }
+
+        let vocab_size = 257u64;
+        let embedding = 4u64;
+        let feed_forward = 4u64;
+        let query_heads = 1u64;
+        let kv_heads = 1u64;
+        let rotary_dim = 2u64;
+        let attn_head_dim = 4u64;
+
+        let mut tokens: Vec<String> = (0..=255u8)
+            .map(|byte| alloc::format!("<0x{byte:02X}>"))
+            .collect();
+        tokens.push(String::from("<eos-marker>"));
+
+        let token_embd = f32_bytes(&vec![0.05f32; (embedding * vocab_size) as usize]);
+        let norm_weight = f32_bytes(&vec![1.0f32; embedding as usize]);
+        let head_norm_weight = f32_bytes(&vec![1.0f32; attn_head_dim as usize]);
+        let q_weight = f32_bytes(&vec![0.05f32; (embedding * query_heads * attn_head_dim * 2) as usize]);
+        let kv_weight = f32_bytes(&vec![0.05f32; (embedding * kv_heads * attn_head_dim) as usize]);
+        let output_weight = f32_bytes(&vec![0.05f32; (query_heads * attn_head_dim * embedding) as usize]);
+        let ffn_gate_up = f32_bytes(&vec![0.05f32; (embedding * feed_forward) as usize]);
+        let ffn_down = f32_bytes(&vec![0.05f32; (feed_forward * embedding) as usize]);
+        let output_table = f32_bytes(&vec![0.05f32; (embedding * vocab_size) as usize]);
+
+        let model = GgufModel {
+            version: 3,
+            metadata: vec![
+                (
+                    "general.architecture".to_string(),
+                    Value::String("qwen35".to_string()),
+                ),
+                (
+                    "qwen35.embedding_length".to_string(),
+                    Value::U32(embedding as u32),
+                ),
+                (
+                    "qwen35.feed_forward_length".to_string(),
+                    Value::U32(feed_forward as u32),
+                ),
+                (
+                    "qwen35.attention.head_count".to_string(),
+                    Value::U32(query_heads as u32),
+                ),
+                (
+                    "qwen35.attention.head_count_kv".to_string(),
+                    Value::U32(kv_heads as u32),
+                ),
+                ("qwen35.block_count".to_string(), Value::U32(1)),
+                (
+                    "qwen35.rope.dimension_count".to_string(),
+                    Value::U32(rotary_dim as u32),
+                ),
+                (
+                    "qwen35.attention.key_length".to_string(),
+                    Value::U32(attn_head_dim as u32),
+                ),
+                (
+                    "qwen35.full_attention_interval".to_string(),
+                    Value::U32(1),
+                ),
+                ("qwen35.ssm.conv_kernel".to_string(), Value::U32(2)),
+                ("qwen35.ssm.state_size".to_string(), Value::U32(1)),
+                ("qwen35.ssm.group_count".to_string(), Value::U32(1)),
+                ("qwen35.ssm.time_step_rank".to_string(), Value::U32(1)),
+                ("qwen35.ssm.inner_size".to_string(), Value::U32(1)),
+                (
+                    "tokenizer.ggml.model".to_string(),
+                    Value::String("gpt2".to_string()),
+                ),
+                (
+                    "tokenizer.ggml.tokens".to_string(),
+                    Value::Array(MetadataArray::String(tokens)),
+                ),
+                (
+                    "tokenizer.ggml.merges".to_string(),
+                    Value::Array(MetadataArray::String(Vec::new())),
+                ),
+            ],
+            tensors: vec![
+                TensorPayload {
+                    name: "token_embd.weight".to_string(),
+                    dims: dims(&[embedding, vocab_size]),
+                    ggml_type: WireType::F32,
+                    data: &token_embd,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_norm.weight".to_string(),
+                    dims: dims(&[embedding]),
+                    ggml_type: WireType::F32,
+                    data: &norm_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.post_attention_norm.weight".to_string(),
+                    dims: dims(&[embedding]),
+                    ggml_type: WireType::F32,
+                    data: &norm_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_q.weight".to_string(),
+                    dims: dims(&[embedding, query_heads * attn_head_dim * 2]),
+                    ggml_type: WireType::F32,
+                    data: &q_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_k.weight".to_string(),
+                    dims: dims(&[embedding, kv_heads * attn_head_dim]),
+                    ggml_type: WireType::F32,
+                    data: &kv_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_v.weight".to_string(),
+                    dims: dims(&[embedding, kv_heads * attn_head_dim]),
+                    ggml_type: WireType::F32,
+                    data: &kv_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_output.weight".to_string(),
+                    dims: dims(&[query_heads * attn_head_dim, embedding]),
+                    ggml_type: WireType::F32,
+                    data: &output_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_q_norm.weight".to_string(),
+                    dims: dims(&[attn_head_dim]),
+                    ggml_type: WireType::F32,
+                    data: &head_norm_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_k_norm.weight".to_string(),
+                    dims: dims(&[attn_head_dim]),
+                    ggml_type: WireType::F32,
+                    data: &head_norm_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.ffn_gate.weight".to_string(),
+                    dims: dims(&[embedding, feed_forward]),
+                    ggml_type: WireType::F32,
+                    data: &ffn_gate_up,
+                },
+                TensorPayload {
+                    name: "blk.0.ffn_up.weight".to_string(),
+                    dims: dims(&[embedding, feed_forward]),
+                    ggml_type: WireType::F32,
+                    data: &ffn_gate_up,
+                },
+                TensorPayload {
+                    name: "blk.0.ffn_down.weight".to_string(),
+                    dims: dims(&[feed_forward, embedding]),
+                    ggml_type: WireType::F32,
+                    data: &ffn_down,
+                },
+                TensorPayload {
+                    name: "output_norm.weight".to_string(),
+                    dims: dims(&[embedding]),
+                    ggml_type: WireType::F32,
+                    data: &norm_weight,
+                },
+                TensorPayload {
+                    name: "output.weight".to_string(),
+                    dims: dims(&[embedding, vocab_size]),
+                    ggml_type: WireType::F32,
+                    data: &output_table,
+                },
+            ],
+        };
+
+        let file_bytes =
+            write_complete(&model).expect("writes a minimal one-layer qwen35 gguf fixture");
+        let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
+            .expect("parses the minimal one-layer qwen35 gguf fixture");
+        let loaded = LoadedModel::load(&parsed, &file_bytes)
+            .expect("loads the minimal one-layer qwen35 checkpoint through the public path");
+
+        let base_config = ServingConfig {
+            kv_cache_key_quant: WireType::F32,
+            kv_cache_value_quant: WireType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: GPU_LAYERS_ALL,
+            reasoning_budget: 0,
+            ..ServingConfig::default()
+        };
+        let max_tokens = 8usize;
+
+        let unbucketed_config = ServingConfig {
+            kv_bucket_tokens: 1,
+            ..base_config
+        };
+        let mut unbucketed_runtime = BackendRuntime::new(&unbucketed_config);
+        let unbucketed = loaded
+            .run_decode_loop("A", max_tokens, &unbucketed_config, &mut unbucketed_runtime)
+            .expect("runs the unbucketed qwen35 dense-attention decode loop");
+
+        let bucketed_config = ServingConfig {
+            kv_bucket_tokens: 32,
+            ..base_config
+        };
+        let mut bucketed_runtime = BackendRuntime::new(&bucketed_config);
+        let bucketed = loaded
+            .run_decode_loop("A", max_tokens, &bucketed_config, &mut bucketed_runtime)
+            .expect("runs the bucketed qwen35 dense-attention decode loop");
+
+        assert_eq!(
+            unbucketed.0.len(),
+            max_tokens,
+            "no eos id was declared, so both runs must exhaust the full token budget"
+        );
+        assert_eq!(
+            unbucketed_runtime.plan_misses, max_tokens,
+            "kv_bucket_tokens=1 reproduces the pre-fix shape on the DenseAttention arm: \
+             cached_len is strictly increasing, so every step is a fresh miss"
+        );
+        assert_eq!(
+            unbucketed_runtime.plan_hits, 0,
+            "an unbucketed extent never repeats within one decode call"
+        );
+        assert!(
+            bucketed_runtime.plan_hits > 0,
+            "a bucketed extent that never hits on the DenseAttention arm is the null \
+             result, not a pass"
+        );
+        assert!(
+            bucketed_runtime.plan_misses < unbucketed_runtime.plan_misses,
+            "kv_bucket_tokens=32 must reduce plan_misses below the unbucketed baseline \
+             on the DenseAttention arm, or bucketing bought nothing on this fixture"
+        );
+        assert_eq!(
+            bucketed.0, unbucketed.0,
+            "the DenseAttention arm's padded cache must make a bucket's own \
+             zero-padding invisible to softmax -- rounding cached_len up must never \
+             change which token is emitted"
+        );
+    }
+
     /// Degenerate control: if the eos comparison were broken (e.g. always
     /// `false`), this test's scripted eos-first source would run the full
     /// budget instead of stopping on step 1 -- confirming the two tests
@@ -5355,6 +5749,7 @@ mod memory_fit_gate_tests {
             logits_root: proxima_tensor::op::NodeId(0),
             layer_roots: Vec::new(),
             qwen35_ssm_shape: None,
+            qwen35_attn_head_dim: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range: None,
         }
