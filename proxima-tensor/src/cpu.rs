@@ -981,7 +981,7 @@ pub fn build_static_arena_with_constants(
             node: computed.node,
             reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
         })?;
-        run_node_into(computed, &buffers, None, None, false, &mut output)?;
+        run_node_into(computed, &buffers, None, None, None, false, &mut output)?;
         buffers[node_index] = Some(output);
     }
 
@@ -1196,7 +1196,7 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
             // `packed_width_panels` is always empty there.
             match arena.packed_width_panels.get(&node) {
                 Some(packed) => run_reduce(computed, &arena.buffers, &mut output, Some(packed))?,
-                None => run_node_into(computed, &arena.buffers, None, None, false, &mut output)?,
+                None => run_node_into(computed, &arena.buffers, None, None, None, false, &mut output)?,
             }
             #[cfg(feature = "epilogue-profile-probe")]
             epilogue_profile_record(
@@ -3240,7 +3240,7 @@ pub fn evaluate_named_with_arena_masked(
             node: computed.node,
             reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
         })?;
-        run_node_into(computed, &arena.buffers, None, None, false, &mut output)?;
+        run_node_into(computed, &arena.buffers, None, None, None, false, &mut output)?;
         arena.buffers[node_index] = Some(output);
     }
 
@@ -3566,7 +3566,13 @@ impl<'a> ExpertSource<'a> {
     /// expected_in]` for this gathered reduce -- [`TensorError::ExpertSourceShapeMismatch`],
     /// naming `node` and `expert` for the caller, never a silent
     /// wrong-shape dot product.
-    fn entry(
+    ///
+    /// Public (not just `run_reduce_quantized`'s own internal use) so a
+    /// residency policy building an [`ExpertSource`] -- `proxima-model-interop`'s
+    /// `ExpertSlab` among them -- can assert what a snapshot resolves
+    /// without a full evaluation.
+    #[must_use = "an unused resolved expert entry is a no-op"]
+    pub fn entry(
         &self,
         node: NodeId,
         index: usize,
@@ -3914,6 +3920,7 @@ pub fn evaluate_quantized_with_scratch(
         free_buffers,
         validated_weight_nodes,
         false,
+        None,
     )
 }
 
@@ -3935,9 +3942,70 @@ pub fn evaluate_quantized_exact_with_scratch(
         free_buffers,
         validated_weight_nodes,
         true,
+        None,
     )
 }
 
+/// [`evaluate_quantized_with_scratch`] plus one capability neither it nor
+/// [`evaluate_quantized_exact_with_scratch`] carries: a caller (the model's
+/// own decode loop, via `proxima-model-interop`'s `ExpertSlab`) hands a
+/// per-step `expert_sources` table -- weight `NodeId` to that node's own
+/// [`ExpertSource`] snapshot -- and every gathered MoE reduce in `program`
+/// resolves through it instead of through the plain contiguous-stack read.
+/// `expert_sources: None` is exactly [`evaluate_quantized_with_scratch`];
+/// this function exists so that caller never needs a second copy of the
+/// setup/loop/finish body above it to get the extra argument through.
+pub fn evaluate_quantized_with_scratch_and_experts(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+    validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+) -> Result<Evaluated, TensorError> {
+    evaluate_quantized_with_scratch_impl(
+        program,
+        symbols,
+        blocks,
+        outputs,
+        free_buffers,
+        validated_weight_nodes,
+        false,
+        expert_sources,
+    )
+}
+
+/// [`evaluate_quantized_with_scratch_and_experts`]'s exact-activation
+/// counterpart, exactly as [`evaluate_quantized_exact_with_scratch`] is to
+/// [`evaluate_quantized_with_scratch`].
+pub fn evaluate_quantized_exact_with_scratch_and_experts(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+    validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+) -> Result<Evaluated, TensorError> {
+    evaluate_quantized_with_scratch_impl(
+        program,
+        symbols,
+        blocks,
+        outputs,
+        free_buffers,
+        validated_weight_nodes,
+        true,
+        expert_sources,
+    )
+}
+
+// `expert_sources` is this slice's own addition, pushing this shared body
+// one argument past clippy's default threshold; every one of its five
+// public callers already threads its own six/seven positional arguments
+// straight through, so a params struct here would cost more call-site
+// churn than the eighth argument costs a reader.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_quantized_with_scratch_impl(
     program: &[Op],
     symbols: &[u64],
@@ -3946,6 +4014,7 @@ fn evaluate_quantized_with_scratch_impl(
     free_buffers: &mut Vec<Vec<f32>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     exact_activations: bool,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, TensorError> {
     // brackets the portion of evaluate_quantized that is neither the
     // per-node loop below nor run_node_into itself -- shape::infer,
@@ -4247,6 +4316,7 @@ fn evaluate_quantized_with_scratch_impl(
                     position,
                     &mut buffers,
                     &quantized_weights,
+                    expert_sources,
                     session_ref,
                     free_buffers,
                     &retires,
@@ -4286,6 +4356,7 @@ fn evaluate_quantized_with_scratch_impl(
                 computed,
                 &buffers,
                 Some(&quantized_weights),
+                expert_sources,
                 session.as_ref(),
                 exact_activations,
                 &mut output,
@@ -4584,6 +4655,55 @@ pub fn evaluate_quantized_named_exact_with_scratch<'block>(
     )
 }
 
+/// [`evaluate_quantized_named_with_scratch`] plus
+/// [`evaluate_quantized_with_scratch_and_experts`]'s `expert_sources` -- the
+/// entry point `proxima-model-interop`'s decode loop calls once it has a
+/// `LoadedModel`-owned `ExpertSlab` to snapshot for the step.
+pub fn evaluate_quantized_named_with_scratch_and_experts<'block>(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'block>)],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+    validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+) -> Result<Evaluated, TensorError> {
+    let blocks = resolve_named_blocks(program, named)?;
+    evaluate_quantized_with_scratch_and_experts(
+        program,
+        symbols,
+        &blocks,
+        outputs,
+        free_buffers,
+        validated_weight_nodes,
+        expert_sources,
+    )
+}
+
+/// [`evaluate_quantized_named_with_scratch_and_experts`]'s exact-activation
+/// counterpart, exactly as [`evaluate_quantized_named_exact_with_scratch`]
+/// is to [`evaluate_quantized_named_with_scratch`].
+pub fn evaluate_quantized_named_exact_with_scratch_and_experts<'block>(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'block>)],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+    validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+) -> Result<Evaluated, TensorError> {
+    let blocks = resolve_named_blocks(program, named)?;
+    evaluate_quantized_exact_with_scratch_and_experts(
+        program,
+        symbols,
+        &blocks,
+        outputs,
+        free_buffers,
+        validated_weight_nodes,
+        expert_sources,
+    )
+}
+
 /// Shared body for [`evaluate`] and [`evaluate_with_scratch`] — the only
 /// difference between the two public entry points is whether `free_buffers`
 /// arrives pre-seeded and is read back by the caller afterward, so that
@@ -4635,7 +4755,7 @@ fn evaluate_pooled(
         let mut output = take_or_allocate(free_buffers, node_output_len(computed));
         #[cfg(feature = "instrument")]
         drop(alloc_site_guard);
-        run_node_into(computed, &buffers, None, None, false, &mut output)?;
+        run_node_into(computed, &buffers, None, None, None, false, &mut output)?;
         #[cfg(feature = "instrument")]
         record_bound_op_operand_access(computed, &buffers);
         buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
@@ -4951,7 +5071,7 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
             }
             #[cfg(feature = "instrument")]
             let sequential_start = instrument::read_ticks();
-            run_node_into(resolved, buffers, None, None, false, &mut output)?;
+            run_node_into(resolved, buffers, None, None, None, false, &mut output)?;
             #[cfg(feature = "instrument")]
             counter!(
                 instrument::SERIAL_SEQUENTIAL_COMPUTE_TICKS,
@@ -5034,7 +5154,7 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
 
     if chunks.len() < 2 {
         return match (chunks.first(), slices.into_iter().next()) {
-            (Some(chunk), Some(slice)) => run_node_into(chunk, buffers, None, None, false, slice),
+            (Some(chunk), Some(slice)) => run_node_into(chunk, buffers, None, None, None, false, slice),
             _ => Ok(()),
         };
     }
@@ -5216,7 +5336,7 @@ fn claim_and_run<B: Deref<Target = [f32]> + Sync>(
         let chunk_start = instrument::read_ticks();
         #[cfg(feature = "instrument")]
         let cpu_start = instrument::thread_cpu_nanos();
-        let outcome = run_node_into(chunk, chunk_buffers, None, None, false, chunk_output);
+        let outcome = run_node_into(chunk, chunk_buffers, None, None, None, false, chunk_output);
         #[cfg(feature = "instrument")]
         {
             let chunk_ticks = instrument::elapsed_ticks(chunk_start);
@@ -5555,7 +5675,7 @@ fn initial_value(init: ReduceInit) -> Option<f32> {
 #[cfg(test)]
 fn run_node(resolved: &BoundOp, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, TensorError> {
     let mut output = vec![0.0f32; node_output_len(resolved)];
-    run_node_into(resolved, buffers, None, None, false, &mut output)?;
+    run_node_into(resolved, buffers, None, None, None, false, &mut output)?;
     Ok(output)
 }
 
@@ -5568,6 +5688,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
     quantized_weights: Option<&BTreeMap<NodeId, QuantizedBlock>>,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     session: Option<&MatmulSession<'_>>,
     exact_activations: bool,
     output: &mut [f32],
@@ -5615,6 +5736,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
                     resolved,
                     buffers,
                     quantized_weights,
+                    expert_sources,
                     session,
                     exact_activations,
                     output,
@@ -6137,7 +6259,7 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
             let mut output = vec![0.0f32; node_output_len(resolved)];
             {
                 let buffers = self.buffers.borrow();
-                run_node_into(resolved, *buffers, None, None, false, &mut output)?;
+                run_node_into(resolved, *buffers, None, None, None, false, &mut output)?;
                 #[cfg(feature = "instrument")]
                 record_bound_op_operand_access(resolved, *buffers);
             }
@@ -7969,6 +8091,7 @@ fn run_staged_batch(
     run_start: usize,
     buffers: &mut [Option<Cow<'_, [f32]>>],
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     session: &MatmulSession<'_>,
     free_buffers: &mut Vec<Vec<f32>>,
     retires: &[Vec<NodeId>],
@@ -8035,7 +8158,15 @@ fn run_staged_batch(
                     // `run_staged_batch` is only ever entered from the
                     // `!exact_activations` staged-batch arm above, so this
                     // sub-call always wants the int8 path.
-                    run_node_into(computed, buffers_ref, Some(quantized_weights), None, false, output)
+                    run_node_into(
+                        computed,
+                        buffers_ref,
+                        Some(quantized_weights),
+                        expert_sources,
+                        None,
+                        false,
+                        output,
+                    )
                 }
             }
         },
@@ -8895,6 +9026,7 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     session: Option<&MatmulSession<'_>>,
     exact_activations: bool,
     output: &mut [f32],
@@ -8908,18 +9040,19 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
                     node: weight_node,
                     reason: "quantized weight node has no bound byte buffer",
                 })?;
+        // `expert_sources` is keyed by the SAME weight node `quantized_weights`
+        // uses -- a caller wiring a per-step `ExpertSource` snapshot (see
+        // `ExpertSlab`/`page_expert` in `proxima-model-interop`) hands it here
+        // under the gathered weight's own `NodeId`, and every other node in
+        // this evaluation (nothing to gather, or no snapshot at all) reads
+        // `None` exactly as it did before this slice existed.
+        let expert_source = expert_sources.and_then(|sources| sources.get(&weight_node).copied());
         return run_reduce_quantized(
             resolved,
             buffers,
             weight_block,
             weight_node,
-            // No caller threads a per-step `ExpertSource` snapshot through
-            // `evaluate_quantized`'s own `quantized_weights` map yet -- this
-            // slice builds the indirection and proves it at
-            // `run_reduce_quantized`'s own boundary; wiring a snapshot
-            // through the executor's step setup is a follow-on, not this
-            // change's scope.
-            None,
+            expert_source,
             session,
             exact_activations,
             output,
@@ -21556,7 +21689,7 @@ mod tests {
             },
         };
         let mut output = vec![0.0; 2];
-        run_node_into(&resolved, &buffers, None, None, false, &mut output)
+        run_node_into(&resolved, &buffers, None, None, None, false, &mut output)
             .expect("cached attention bound step runs");
         let cached_weight = 1.0f32.exp() / (1.0f32.exp() + 1.0);
         assert!((output[0] - (2.0 * cached_weight + 4.0 * (1.0 - cached_weight))).abs() < 1e-6);
@@ -25467,7 +25600,7 @@ mod tests {
         let mut remaining = split_output.as_mut_slice();
         for chunk in &chunks {
             let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-            run_node_into(chunk, &buffers, None, None, false, this_chunk).expect("chunk runs");
+            run_node_into(chunk, &buffers, None, None, None, false, this_chunk).expect("chunk runs");
             remaining = rest;
         }
 
@@ -25497,7 +25630,7 @@ mod tests {
         let mut remaining = split_output.as_mut_slice();
         for chunk in &chunks {
             let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-            run_node_into(chunk, &buffers, None, None, false, this_chunk).expect("chunk runs");
+            run_node_into(chunk, &buffers, None, None, None, false, this_chunk).expect("chunk runs");
             remaining = rest;
         }
 
