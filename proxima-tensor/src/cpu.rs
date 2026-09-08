@@ -7775,6 +7775,144 @@ fn run_reduce_scatter<B: Deref<Target = [f32]>>(
     Ok(())
 }
 
+/// [`ExpertSelectionEntry::record`]'s smoothing factor -- a plain constant,
+/// not build-time-configurable: this slice's job is emitting the two raw
+/// inputs a per-node precision-allocation rule needs (DynaExq, arXiv
+/// 2511.15015's "budget-feasible top-n by EMA hotness"), not tuning or
+/// implementing that rule, so there is no consumer yet to size this
+/// against.
+const EXPERT_SELECTION_EMA_ALPHA: f64 = 0.1;
+
+/// One `(node, expert)` key's selection history: `count` since the last
+/// [`snapshot_expert_selection_top_n`] drain, and `ema` -- updated toward
+/// `1.0` by [`EXPERT_SELECTION_EMA_ALPHA`] on every selection
+/// ([`ExpertSelectionEntry::record`]'s own doc). Both fields are the raw
+/// inputs a per-node precision-allocation rule needs; this module emits
+/// them and implements neither the rule nor its threshold.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ExpertSelectionEntry {
+    count: u64,
+    ema: f64,
+}
+
+impl ExpertSelectionEntry {
+    const ZERO: Self = Self { count: 0, ema: 0.0 };
+
+    /// One selection event: increments `count`, and moves `ema` toward
+    /// `1.0` by the standard exponential-moving-average recurrence `ema +=
+    /// alpha * (target - ema)` with `target = 1.0` (a selection just
+    /// happened) -- a rarely-selected expert's `ema` stays near `0.0`
+    /// (mostly non-events between rare `record` calls would pull it back
+    /// down were this method also called for a "not selected" observation,
+    /// which it is not: see this struct's own doc for what a fuller
+    /// per-step hotness signal would still need).
+    fn record(&mut self) {
+        self.count += 1;
+        self.ema += EXPERT_SELECTION_EMA_ALPHA * (1.0 - self.ema);
+    }
+}
+
+/// Per-(gathered-reduce-node, expert) selection history for
+/// [`run_reduce_quantized`]'s own `expert_index` resolution below -- the
+/// popularity input a per-node precision policy (choosing which experts to
+/// bind at a lower precision, e.g. `proxima-model-interop`'s own
+/// `ServingConfig::weight_precision`) would consume.
+///
+/// Keyed by the gathered reduce op's own [`NodeId`] rather than a decoded
+/// "layer number": [`run_reduce_quantized`] is architecture-agnostic and
+/// never learns which layer it evaluates, but every mixture-of-experts
+/// forward program this crate builds emits exactly one gathered reduce node
+/// per layer (`spec.rs`'s own `gathered_expert_product`), so a compiled
+/// program's own `NodeId` is already a stable per-layer identity a caller
+/// holding that program can map back to a layer number -- no second
+/// index-to-layer table needed here.
+///
+/// `Mutex`-guarded `BTreeMap`, the same recovered-on-poison shape
+/// [`ARENA_CACHE`]/[`lock_arena_cache`] already establish in this file, not
+/// a lock-free flat array: `expert_count` is a per-checkpoint runtime value
+/// with no `sized.rs` build-time constant to size an array from, so an
+/// unbounded sparse `(node, expert)` key is the honest shape -- and
+/// recording happens once per gathered position per round
+/// (`expert_used_count` rounds x sequence length), an order of magnitude
+/// below the per-mac hot loop the `MATMUL_Q4K_MACS` counters instrument, so
+/// the lock is held for a `BTreeMap` insert, not inside the matmul kernel
+/// itself.
+static EXPERT_SELECTION_COUNTS: Mutex<BTreeMap<(u32, u32), ExpertSelectionEntry>> =
+    Mutex::new(BTreeMap::new());
+
+/// [`EXPERT_SELECTION_COUNTS`]'s own lock, recovered rather than propagated
+/// on poisoning -- [`lock_arena_cache`]'s own established pattern in this
+/// file: a panic while another caller held the lock leaves counts in
+/// whatever state that caller's own increment reached, never a torn entry
+/// (every mutation under this lock is one `BTreeMap` insert-or-increment),
+/// so recovering and continuing is safe.
+fn lock_expert_selection_counts() -> MutexGuard<'static, BTreeMap<(u32, u32), ExpertSelectionEntry>>
+{
+    EXPERT_SELECTION_COUNTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Records one expert selection: `node` is the gathered reduce's own
+/// [`NodeId`] ([`run_reduce_quantized`]'s `weight_node`/`resolved.node`),
+/// `expert` the resolved `expert_index` a real routed token selected.
+fn record_expert_selection(node: NodeId, expert: u32) {
+    let mut counts = lock_expert_selection_counts();
+    counts
+        .entry((node.0, expert))
+        .or_insert(ExpertSelectionEntry::ZERO)
+        .record();
+}
+
+/// Drains [`EXPERT_SELECTION_COUNTS`] and returns its `top_n` entries by
+/// raw `count`, highest first, each as `(node, expert, count, ema)` -- the
+/// same drain-and-reset contract
+/// [`proxima_telemetry::metric::Counter::snapshot_and_reset`] gives a
+/// single scalar counter, generalized to this table's `(node, expert)` key:
+/// a later decode step's counts start from zero, never accumulated across
+/// the whole run, so a caller reads one step's own routing popularity, not
+/// a running total that never resets. `ema` rides alongside `count` on every
+/// entry -- both are DynaExq-style allocation-rule inputs, not two separate
+/// queries.
+#[must_use]
+pub fn snapshot_expert_selection_top_n(top_n: usize) -> Vec<(NodeId, u32, u64, f64)> {
+    let mut counts = lock_expert_selection_counts();
+    let mut entries: Vec<(NodeId, u32, u64, f64)> = core::mem::take(&mut *counts)
+        .into_iter()
+        .map(|((node, expert), entry)| (NodeId(node), expert, entry.count, entry.ema))
+        .collect();
+    entries.sort_unstable_by(|left, right| right.2.cmp(&left.2));
+    entries.truncate(top_n);
+    entries
+}
+
+/// `crate::cpu`'s own `expert_selection` structured event: `node`/`expert`/
+/// `count`/`ema` for each of [`snapshot_expert_selection_top_n`]'s top-8
+/// entries, one event per call -- a caller's decode loop calls this once
+/// per step, the same "once per step, not once per token" granularity
+/// `proxima-model-interop`'s own `report_op_timings`-style diagnostics
+/// already use for other per-step summaries. Compiled out entirely when the
+/// `instrument` feature is off, matching every other diagnostic event in
+/// this crate.
+///
+/// Not yet wired into `evaluate_quantized_with_scratch`'s own per-decode-step
+/// call boundary -- that function's `Ok(...)` return sits deep inside a
+/// multi-thousand-line body this slice did not attempt to blind-edit
+/// without a compiler to check the result against; a caller (or a future
+/// slice) calls this explicitly once per step in the meantime.
+#[cfg(feature = "instrument")]
+pub fn emit_expert_selection_event() {
+    for (node, expert, count, ema) in snapshot_expert_selection_top_n(8) {
+        proxima_telemetry::info!(
+            node = node.0,
+            expert,
+            count,
+            ema,
+            "expert_selection: top-8 (node, expert) selection counts and ema-hotness this step"
+        );
+    }
+}
+
 /// [`run_reduce`]'s quantized-weight branch: `resolved` is the fused
 /// `Reduce(Elementwise(Multiply))` matmul shape, `weight_node` one of its two
 /// operands, packed `Q4_K` bytes rather than a bound `f32` buffer. The other
@@ -8163,6 +8301,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                     extent: gather.extent,
                 });
             }
+            record_expert_selection(resolved.node, expert_index as u32);
             let start = expert_index as usize * per_expert_bytes;
             weights
                 .get(start..start + per_expert_bytes)
@@ -28111,6 +28250,105 @@ mod tests {
                  expert's own standalone matmul call"
             );
         }
+    }
+
+    /// Hand-computes the exact `ema` [`ExpertSelectionEntry::record`]'s own
+    /// recurrence produces after `selections` calls, starting from `0.0` --
+    /// same formula, same floating-point operation order, so this is a
+    /// bit-exact oracle, not a tolerance check.
+    fn expected_ema(selections: u32) -> f64 {
+        let mut ema = 0.0f64;
+        for _ in 0..selections {
+            ema += EXPERT_SELECTION_EMA_ALPHA * (1.0 - ema);
+        }
+        ema
+    }
+
+    /// [`record_expert_selection`]/[`snapshot_expert_selection_top_n`]'s own
+    /// fixture: a hand-computed 4-expert routing where only 2 experts are
+    /// ever actually selected (expert 1 three times, expert 3 once, experts
+    /// 0 and 2 never) -- exactly the "4-expert, 2-used" shape this task's
+    /// own doc asks for. Uses out-of-band synthetic `NodeId`s
+    /// (`EXPERT_SELECTION_TEST_NODE`/`+1`) rather than routing real tensors
+    /// through [`evaluate_quantized`]: [`EXPERT_SELECTION_COUNTS`] is one
+    /// process-wide table every test in this file's binary shares
+    /// (`nextest`/`cargo test` run this module's tests concurrently by
+    /// default), so filtering [`snapshot_expert_selection_top_n`]'s drained
+    /// result down to these two never-otherwise-used node ids is what makes
+    /// this test race-safe against
+    /// [`evaluate_quantized_gathered_moe_weight_matches_the_routed_experts_own_matmul`]
+    /// (real program, low `NodeId`s) recording into the SAME table on
+    /// another thread at the same time.
+    #[test]
+    fn expert_selection_counts_match_hand_computed_four_expert_two_used_routing() {
+        const EXPERT_SELECTION_TEST_NODE: NodeId = NodeId(0xE_5000);
+        const OTHER_TEST_NODE: NodeId = NodeId(0xE_5001);
+
+        // Layer A: 5 tokens route [1, 3, 1, 1, 3] across 4 experts (0..=3) --
+        // expert 1 selected 3 times, expert 3 selected 2 times, experts 0
+        // and 2 never selected.
+        for expert in [1u32, 3, 1, 1, 3] {
+            record_expert_selection(EXPERT_SELECTION_TEST_NODE, expert);
+        }
+        // Layer B (a different node): a single token routes to expert 2,
+        // proving the table keys on (node, expert), not expert alone --
+        // if it collapsed the node axis, this would corrupt layer A's own
+        // expert-1/expert-3 counts.
+        record_expert_selection(OTHER_TEST_NODE, 2);
+
+        let snapshot = snapshot_expert_selection_top_n(100);
+        let mut layer_a: Vec<(u32, u64, f64)> = snapshot
+            .iter()
+            .filter(|(node, _, _, _)| *node == EXPERT_SELECTION_TEST_NODE)
+            .map(|(_, expert, count, ema)| (*expert, *count, *ema))
+            .collect();
+        layer_a.sort_unstable_by_key(|(expert, _, _)| *expert);
+        assert_eq!(
+            layer_a,
+            alloc::vec![
+                (1u32, 3u64, expected_ema(3)),
+                (3u32, 2u64, expected_ema(2)),
+            ],
+            "expert 1 must show 3 selections and expert 3 must show 2, experts 0/2 never selected, \
+             and each ema must match the same recurrence at that selection count"
+        );
+
+        let layer_b: Vec<(u32, u64, f64)> = snapshot
+            .iter()
+            .filter(|(node, _, _, _)| *node == OTHER_TEST_NODE)
+            .map(|(_, expert, count, ema)| (*expert, *count, *ema))
+            .collect();
+        assert_eq!(
+            layer_b,
+            alloc::vec![(2u32, 1u64, expected_ema(1))],
+            "a different node's own single selection must not merge into layer A's counts"
+        );
+    }
+
+    /// [`snapshot_expert_selection_top_n`]'s own drain contract: a second
+    /// call right after the first sees none of the first call's entries --
+    /// the same "a later step starts from zero" guarantee
+    /// [`proxima_telemetry::metric::Counter::snapshot_and_reset`] gives a
+    /// scalar counter.
+    #[test]
+    fn expert_selection_snapshot_drains_the_table() {
+        const DRAIN_TEST_NODE: NodeId = NodeId(0xE_5002);
+        record_expert_selection(DRAIN_TEST_NODE, 0);
+        let first = snapshot_expert_selection_top_n(100);
+        assert!(
+            first.iter().any(|(node, expert, count, ema)| {
+                *node == DRAIN_TEST_NODE
+                    && *expert == 0
+                    && *count == 1
+                    && *ema == expected_ema(1)
+            }),
+            "the recorded selection must appear in the first snapshot with its own ema"
+        );
+        let second = snapshot_expert_selection_top_n(100);
+        assert!(
+            !second.iter().any(|(node, _, _, _)| *node == DRAIN_TEST_NODE),
+            "a drained entry must not reappear in the very next snapshot"
+        );
     }
 
     /// `evaluate_quantized`'s `live_now` running count treats every operand
