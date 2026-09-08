@@ -813,8 +813,9 @@ pub struct LoadedModel<'file> {
     /// One [`proxima_tensor::spec::MoeSite`] per MoE layer this
     /// checkpoint's forward-program builder produced -- empty on a dense
     /// checkpoint. [`Self::run_decode_loop_observed`] reads this to know
-    /// which extra nodes to request as step outputs when a
-    /// [`proxima_tensor::instrument::ExpertObserver`] is registered.
+    /// which extra nodes to request as step outputs when a routing observer
+    /// (`proxima_tensor::instrument::ExpertObserver`, `instrument`-gated)
+    /// is registered.
     moe_sites: proxima_tensor::spec::MoeSites,
     /// [`Some`] only for a qwen35-architecture checkpoint -- the SSM cache
     /// shapes [`SsmLayerCache::new`] needs (`Self::run_decode_loop`'s own
