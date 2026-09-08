@@ -24,7 +24,7 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::op::{NodeId, Op};
 
 use crate::bind::{
-    BoundWeights, bind_dense, bind_matmul_weight, bind_matmul_weight_as, find_tensor,
+    BoundWeights, bind_dense, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as, find_tensor,
     metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or,
     vocab_from_token_embedding,
 };
@@ -365,13 +365,7 @@ pub fn bind_qwen35_weights<'file>(
                     format!("blk.{layer}.ssm_beta.weight"),
                     &mut state,
                 )?;
-                for suffix in [
-                    "ssm_a",
-                    "ssm_conv1d.weight",
-                    "ssm_dt.bias",
-                    "ssm_norm.weight",
-                    "ssm_out.weight",
-                ] {
+                for suffix in ["ssm_a", "ssm_conv1d.weight", "ssm_norm.weight", "ssm_out.weight"] {
                     bind_dense(
                         parsed,
                         file_bytes,
@@ -379,6 +373,26 @@ pub fn bind_qwen35_weights<'file>(
                         &mut state,
                     )?;
                 }
+                // On disk (ROW: real `qwen3.6:35b-a3b` blob, `general.architecture
+                // = qwen35moe`, confirmed via `strings` on the raw GGUF bytes) this
+                // tensor is named `ssm_dt`, with NO `.bias` suffix --
+                // `pr27742.diff`'s own `tn(LLM_TENSOR_SSM_DT, "bias", il)` call does
+                // not produce the literal `.bias` suffix its argument suggests, and
+                // this crate's earlier `bind_dense(.., "ssm_dt.bias", ..)` transcribed
+                // that C++ call literally instead of reading the file it produces.
+                // `qwen35_forward_program`'s own `Op::Input` leaf (`spec.rs:8681`)
+                // is still named `blk.{layer}.ssm_dt.bias` (unaffected by this
+                // fix -- it addresses only which on-disk tensor to bind FROM), so
+                // this is `bind_matmul_weight_as_self_shaped`'s source-name-vs-
+                // target-name split above, applied to `bind_dense` instead of
+                // `bind_matmul_weight`.
+                bind_dense_as(
+                    parsed,
+                    file_bytes,
+                    &format!("blk.{layer}.ssm_dt"),
+                    format!("blk.{layer}.ssm_dt.bias"),
+                    &mut state,
+                )?;
             }
         }
 

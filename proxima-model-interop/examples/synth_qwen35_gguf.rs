@@ -235,7 +235,7 @@ pub(crate) fn layer_tensors(layer: u32, is_attention: bool, seed: u64) -> Vec<Te
             seed + 24,
         ));
         tensors.push(vector_tensor(&format!("blk.{layer}.ssm_conv1d.weight"), qkv_dim * SSM_CONV_KERNEL, seed + 25));
-        tensors.push(vector_tensor(&format!("blk.{layer}.ssm_dt.bias"), SSM_TIME_STEP_RANK, seed + 26));
+        tensors.push(vector_tensor(&format!("blk.{layer}.ssm_dt"), SSM_TIME_STEP_RANK, seed + 26));
         tensors.push(vector_tensor(&format!("blk.{layer}.ssm_a"), SSM_TIME_STEP_RANK, seed + 27));
         tensors.push(vector_tensor(&format!("blk.{layer}.ssm_norm.weight"), head_v_dim, seed + 28));
     }
