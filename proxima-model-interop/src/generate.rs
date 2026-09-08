@@ -5126,6 +5126,289 @@ mod tests {
         );
     }
 
+    /// [`qwen35_dense_attention_two_range_plan_cache_buckets_cached_len`]'s
+    /// own fixture, driven through the raw-logit payload behind that test's
+    /// argmax-only token-id comparison: that comparison alone cannot rule
+    /// out a real but non-argmax-flipping corruption from
+    /// [`Qwen35DenseAttentionPadScratch`]'s zero-padding on this fixture's
+    /// tiny, uniform (`0.05` everywhere) weights, where two distinct logit
+    /// vectors can still share an argmax. Runs the SAME 8-step greedy decode
+    /// twice with [`LoadedModel::run_decode_loop_observed`]'s own
+    /// `LogitsSink::Collect` hook, once with `kv_bucket_tokens: 1`
+    /// (`kv_extent`'s own doc: `div_ceil(1)` is the identity, so `cached_len`
+    /// is never rounded up and this arm pads NOTHING) and once with
+    /// `kv_bucket_tokens: 32` (`ServingConfig::default`'s own value, so the
+    /// early steps round a `cached_len` as small as `1` up to `32`, the
+    /// widest possible padding this fixture can exercise). Compares the
+    /// FINAL step's last-row logits bit-for-bit rather than only the
+    /// emitted token ids -- `proxima_tensor::bind::cached_attention_
+    /// candidates`'s own doc on the fused op's runtime bound is the
+    /// numerics claim this equality is standing in for on the
+    /// `DenseAttention` arm, which has no such fusion and instead relies on
+    /// [`append_qwen35_dense_attention_layer`]'s own `cached_len` mask.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn qwen35_dense_attention_padding_is_invisible_to_softmax() {
+        fn f32_bytes(values: &[f32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        }
+
+        let vocab_size = 257u64;
+        let embedding = 4u64;
+        let feed_forward = 4u64;
+        let query_heads = 1u64;
+        let kv_heads = 1u64;
+        let rotary_dim = 2u64;
+        let attn_head_dim = 4u64;
+
+        let mut tokens: Vec<String> = (0..=255u8)
+            .map(|byte| alloc::format!("<0x{byte:02X}>"))
+            .collect();
+        tokens.push(String::from("<eos-marker>"));
+
+        let token_embd = f32_bytes(&vec![0.05f32; (embedding * vocab_size) as usize]);
+        let norm_weight = f32_bytes(&vec![1.0f32; embedding as usize]);
+        let head_norm_weight = f32_bytes(&vec![1.0f32; attn_head_dim as usize]);
+        let q_weight = f32_bytes(&vec![0.05f32; (embedding * query_heads * attn_head_dim * 2) as usize]);
+        let kv_weight = f32_bytes(&vec![0.05f32; (embedding * kv_heads * attn_head_dim) as usize]);
+        let output_weight = f32_bytes(&vec![0.05f32; (query_heads * attn_head_dim * embedding) as usize]);
+        let ffn_gate_up = f32_bytes(&vec![0.05f32; (embedding * feed_forward) as usize]);
+        let ffn_down = f32_bytes(&vec![0.05f32; (feed_forward * embedding) as usize]);
+        let output_table = f32_bytes(&vec![0.05f32; (embedding * vocab_size) as usize]);
+
+        let model = GgufModel {
+            version: 3,
+            metadata: vec![
+                (
+                    "general.architecture".to_string(),
+                    Value::String("qwen35".to_string()),
+                ),
+                (
+                    "qwen35.embedding_length".to_string(),
+                    Value::U32(embedding as u32),
+                ),
+                (
+                    "qwen35.feed_forward_length".to_string(),
+                    Value::U32(feed_forward as u32),
+                ),
+                (
+                    "qwen35.attention.head_count".to_string(),
+                    Value::U32(query_heads as u32),
+                ),
+                (
+                    "qwen35.attention.head_count_kv".to_string(),
+                    Value::U32(kv_heads as u32),
+                ),
+                ("qwen35.block_count".to_string(), Value::U32(1)),
+                (
+                    "qwen35.rope.dimension_count".to_string(),
+                    Value::U32(rotary_dim as u32),
+                ),
+                (
+                    "qwen35.attention.key_length".to_string(),
+                    Value::U32(attn_head_dim as u32),
+                ),
+                (
+                    "qwen35.full_attention_interval".to_string(),
+                    Value::U32(1),
+                ),
+                ("qwen35.ssm.conv_kernel".to_string(), Value::U32(2)),
+                ("qwen35.ssm.state_size".to_string(), Value::U32(1)),
+                ("qwen35.ssm.group_count".to_string(), Value::U32(1)),
+                ("qwen35.ssm.time_step_rank".to_string(), Value::U32(1)),
+                ("qwen35.ssm.inner_size".to_string(), Value::U32(1)),
+                (
+                    "tokenizer.ggml.model".to_string(),
+                    Value::String("gpt2".to_string()),
+                ),
+                (
+                    "tokenizer.ggml.tokens".to_string(),
+                    Value::Array(MetadataArray::String(tokens)),
+                ),
+                (
+                    "tokenizer.ggml.merges".to_string(),
+                    Value::Array(MetadataArray::String(Vec::new())),
+                ),
+            ],
+            tensors: vec![
+                TensorPayload {
+                    name: "token_embd.weight".to_string(),
+                    dims: dims(&[embedding, vocab_size]),
+                    ggml_type: WireType::F32,
+                    data: &token_embd,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_norm.weight".to_string(),
+                    dims: dims(&[embedding]),
+                    ggml_type: WireType::F32,
+                    data: &norm_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.post_attention_norm.weight".to_string(),
+                    dims: dims(&[embedding]),
+                    ggml_type: WireType::F32,
+                    data: &norm_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_q.weight".to_string(),
+                    dims: dims(&[embedding, query_heads * attn_head_dim * 2]),
+                    ggml_type: WireType::F32,
+                    data: &q_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_k.weight".to_string(),
+                    dims: dims(&[embedding, kv_heads * attn_head_dim]),
+                    ggml_type: WireType::F32,
+                    data: &kv_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_v.weight".to_string(),
+                    dims: dims(&[embedding, kv_heads * attn_head_dim]),
+                    ggml_type: WireType::F32,
+                    data: &kv_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_output.weight".to_string(),
+                    dims: dims(&[query_heads * attn_head_dim, embedding]),
+                    ggml_type: WireType::F32,
+                    data: &output_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_q_norm.weight".to_string(),
+                    dims: dims(&[attn_head_dim]),
+                    ggml_type: WireType::F32,
+                    data: &head_norm_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.attn_k_norm.weight".to_string(),
+                    dims: dims(&[attn_head_dim]),
+                    ggml_type: WireType::F32,
+                    data: &head_norm_weight,
+                },
+                TensorPayload {
+                    name: "blk.0.ffn_gate.weight".to_string(),
+                    dims: dims(&[embedding, feed_forward]),
+                    ggml_type: WireType::F32,
+                    data: &ffn_gate_up,
+                },
+                TensorPayload {
+                    name: "blk.0.ffn_up.weight".to_string(),
+                    dims: dims(&[embedding, feed_forward]),
+                    ggml_type: WireType::F32,
+                    data: &ffn_gate_up,
+                },
+                TensorPayload {
+                    name: "blk.0.ffn_down.weight".to_string(),
+                    dims: dims(&[feed_forward, embedding]),
+                    ggml_type: WireType::F32,
+                    data: &ffn_down,
+                },
+                TensorPayload {
+                    name: "output_norm.weight".to_string(),
+                    dims: dims(&[embedding]),
+                    ggml_type: WireType::F32,
+                    data: &norm_weight,
+                },
+                TensorPayload {
+                    name: "output.weight".to_string(),
+                    dims: dims(&[embedding, vocab_size]),
+                    ggml_type: WireType::F32,
+                    data: &output_table,
+                },
+            ],
+        };
+
+        let file_bytes =
+            write_complete(&model).expect("writes a minimal one-layer qwen35 gguf fixture");
+        let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
+            .expect("parses the minimal one-layer qwen35 gguf fixture");
+        let loaded = LoadedModel::load(&parsed, &file_bytes)
+            .expect("loads the minimal one-layer qwen35 checkpoint through the public path");
+
+        let base_config = ServingConfig {
+            kv_cache_key_quant: WireType::F32,
+            kv_cache_value_quant: WireType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: GPU_LAYERS_ALL,
+            reasoning_budget: 0,
+            ..ServingConfig::default()
+        };
+        let max_tokens = 8usize;
+
+        let unpadded_config = ServingConfig {
+            kv_bucket_tokens: 1,
+            ..base_config
+        };
+        let mut unpadded_runtime = BackendRuntime::new(&unpadded_config);
+        let mut unpadded_logits: Vec<Vec<f32>> = Vec::new();
+        let unpadded = loaded
+            .run_decode_loop_observed(
+                "A",
+                max_tokens,
+                &unpadded_config,
+                &mut unpadded_runtime,
+                None,
+                &mut super::LogitsSink::Collect(&mut unpadded_logits),
+                &mut |_event| Control::Continue,
+            )
+            .expect("runs the unpadded (kv_bucket_tokens=1) qwen35 dense-attention decode loop");
+
+        let padded_config = ServingConfig {
+            kv_bucket_tokens: 32,
+            ..base_config
+        };
+        let mut padded_runtime = BackendRuntime::new(&padded_config);
+        let mut padded_logits: Vec<Vec<f32>> = Vec::new();
+        let padded = loaded
+            .run_decode_loop_observed(
+                "A",
+                max_tokens,
+                &padded_config,
+                &mut padded_runtime,
+                None,
+                &mut super::LogitsSink::Collect(&mut padded_logits),
+                &mut |_event| Control::Continue,
+            )
+            .expect("runs the padded (kv_bucket_tokens=32) qwen35 dense-attention decode loop");
+
+        assert_eq!(
+            unpadded.0, padded.0,
+            "the DenseAttention arm's padded cache must make a bucket's own \
+             zero-padding invisible to softmax -- rounding cached_len up must never \
+             change which token is emitted"
+        );
+
+        let unpadded_last = unpadded_logits
+            .last()
+            .expect("the unpadded decode loop must observe at least one logits row");
+        let padded_last = padded_logits
+            .last()
+            .expect("the padded decode loop must observe at least one logits row");
+
+        let max_abs_diff = unpadded_last
+            .iter()
+            .zip(padded_last.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0f32, f32::max);
+
+        std::println!(
+            "qwen35_dense_attention_padding max_abs_diff={max_abs_diff} \
+             unpadded={unpadded_last:?} padded={padded_last:?}"
+        );
+        assert!(
+            max_abs_diff == 0.0,
+            "kv_bucket_tokens=32's own zero-padded cached rows must be invisible to the \
+             DenseAttention arm's softmax, the same guarantee the Attention arm's fused \
+             CachedAttention op already provides -- max_abs_diff={max_abs_diff} between \
+             unpadded (bucket=1) and padded (bucket=32) last-row logits proves it is not"
+        );
+    }
+
     /// Degenerate control: if the eos comparison were broken (e.g. always
     /// `false`), this test's scripted eos-first source would run the full
     /// budget instead of stopping on step 1 -- confirming the two tests
