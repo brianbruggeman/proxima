@@ -401,4 +401,22 @@ pub enum InteropError {
     /// builtin one out from under the loop.
     #[error("architecture step_inputs named reserved symbol slot {slot}; foreign slots start at FIRST_FREE")]
     ReservedSymbolSlot { slot: u16 },
+
+    /// `layer`'s [`crate::architecture::BoundProgram::layer_roots`] entry
+    /// names a cache shape (`bound`) that disagrees with what the compiled
+    /// program actually declares as `Op::Input` leaves for that layer
+    /// (`declared`) -- an [`crate::architecture::Architecture::bind`] that
+    /// tagged the wrong [`proxima_tensor::spec::Qwen35LayerRoots`] variant
+    /// for a layer it built correctly otherwise. Caught once, at decode-loop
+    /// setup, instead of surfacing later as a confusing
+    /// [`Self::MissingStepInput`] on a leaf the decode loop never even
+    /// tried to feed under the bound (wrong) shape.
+    #[error(
+        "layer {layer} cache shape mismatch: program declares {declared} inputs, layer_roots bound {bound}"
+    )]
+    LayerCacheKindMismatch {
+        layer: usize,
+        declared: &'static str,
+        bound: &'static str,
+    },
 }
