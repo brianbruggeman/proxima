@@ -4744,6 +4744,8 @@ mod memory_fit_gate_tests {
                 table_bytes: 0,
                 ssm_state_bytes: 0,
             },
+            model_name: None,
+            checkpoint_bytes: dense_weight_bytes as usize,
             vocab: tiny_vocab(),
             program: Vec::new(),
             logits_root: proxima_tensor::op::NodeId(0),
