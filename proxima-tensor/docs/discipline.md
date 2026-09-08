@@ -28015,3 +28015,91 @@ Regression: `moe_architecture_cpu_forward_prefill_and_decode` (`capability_matri
 | --- | --- | --- | --- | --- |
 | 2026-09-08 | `fix(tensor): fused epilogues equal the unfused chain at degenerate shapes` + `fix(tensor): layer-norm cluster discovers operand slots instead of assuming them` -- law1/law2 admission now engages at every shape, discovery-based instead of literal-slot-based | law1/law2: 0 hits -> real `bit_exact`/`rtol` engagement at every shape tried, incl. the proptest-minimal and a non-degenerate diagnostic shape | law1: 64 proptest cases green; law2: 48 proptest cases green; whole-crate 586/586 (1 pre-existing unrelated failure excluded) | solo, this worktree only |
 | 2026-09-08 | `feat(model-interop): the decode loop evaluates through the model's expert slab` / `test(model-interop): an expert paged between steps changes the decode from that step on` | ROW 415's own residual closed: `LoadedModel` now owns the slab and the CPU decode loop routes through it | 140 tests, 1 run each, exact assertions; workspace `check --all-targets` 1 run, EXIT 0 | solo, quiet during gate |
+
+## ROW 418 -- `metal-tiled-gemm` gets its first real numbers on Qwen3-1.7B at 850+ tokens, and they are not a perf number at all: the feature panics before decode step 0 finishes
+
+**Card.** Same brief as ROW 412/414, now actually run: build both release test binaries (`std,metal,instrument` and `std,metal,instrument,metal-tiled-gemm`), run `prefill_ttft_850` on both (min/med/max ms, tokens/s, host loadout beside each), run `prefill_step_zero_op_profile` on both (top-12 ops by GPU ms, total), and assert the `greedy_eight_token_ids` are identical across feature sets.
+
+**What landed: both binaries built, both real-model tests run under the held lock, and the tiled-gemm arm never gets to a comparable number.** Build: `cargo test --release -j 2 -p proxima-model-interop --lib --no-run --features std,metal,instrument` -- EXIT 0, 3m45s cold, `target/release/deps/proxima_model_interop-136130fe33dd666a`. `cargo test --release -j 2 -p proxima-model-interop --lib --no-run --features std,metal,instrument,metal-tiled-gemm` -- EXIT 0, 47.75s incremental, `target/release/deps/proxima_model_interop-f00edec901ae2893`. Lock protocol: `memory_pressure` read 92% free (no 20-try sleep needed), `mkdir` on `box-tokens/model.lock` succeeded on the first attempt (0 retries), held across both timed real-model runs, released cleanly by this row's own `mkdir` owner.
+
+**`prefill_ttft_850` -- `std,metal,instrument` (default, build profile release, this worktree's own binary), loadout: solo during the run (lock held, no other `mkdir` contenders observed), `carg`+`o`-matching process count 5 (sibling worktree builds, none touching this test binary or GPU), `target/release/deps`-matching process count 0, `memory_pressure` 92% free immediately before lock acquisition:**
+
+| metric | value |
+| --- | --- |
+| prompt_token_count | 915 |
+| ttft_ms (min / med / max, 3 runs) | 44176.2 / 50864.3 / 52618.1 |
+| CoV across the 3 samples | 7.4% -- above the 5% floor; the range above is the honest report, not the median alone |
+| tokens/s at median | 18.0 |
+| greedy_eight_token_ids | `[1249, 60626, 39301, 1340, 374, 2677, 3168, 5220]` |
+
+**`prefill_ttft_850` -- `std,metal,instrument,metal-tiled-gemm`, same loadout, same held lock:**
+
+```
+thread '...prefill_ttft_850' panicked at proxima-model-interop/src/generate.rs:7643:22:
+prefill an ~850-token prompt for one timed TTFT run: Backend(Metal(Emit(EpilogueNotSupported {
+  node: NodeId(107), reason: "the tiled simdgroup_matrix GEMM kernel has no epilogue tail yet" })))
+test result: FAILED. 0 passed; 1 failed; finished in 0.45s
+```
+
+No `ttft_ms`, no `tokens_per_sec`, no `greedy_eight_token_ids` for this feature set -- the panic fires inside the FIRST timed run, before any of the 3 iterations' `Instant::now()` interval completes.
+
+**`prefill_step_zero_op_profile` -- `std,metal,instrument` (default), top-12 ops by GPU time (`gpu_ns` from the raw `op_profile_top` events, `prompt_token_count=915`, `telemetry_records_flushed=5172`):**
+
+| rank | kind | weight | codec | operand_bytes | gpu_ms |
+| --- | --- | --- | --- | --- | --- |
+| 1 | reduce-cooperative | output.weight | Q6K | 262,748,160 | 14666.4 |
+| 2 | reduce-cooperative | blk.0.ffn_down.weight | Q6K | 32,808,960 | 473.2 |
+| 3 | reduce-cooperative | blk.8.ffn_down.weight | Q6K | 32,808,960 | 473.1 |
+| 4 | reduce-cooperative | blk.5.ffn_down.weight | Q6K | 32,808,960 | 473.1 |
+| 5 | reduce-cooperative | blk.1.ffn_down.weight | Q6K | 32,808,960 | 473.0 |
+| 6 | reduce-cooperative | blk.14.ffn_down.weight | Q6K | 32,808,960 | 473.0 |
+| 7 | reduce-cooperative | blk.24.ffn_down.weight | Q6K | 32,808,960 | 473.0 |
+| 8 | reduce-cooperative | blk.26.ffn_down.weight | Q6K | 32,808,960 | 473.0 |
+| 9 | reduce-cooperative | blk.11.ffn_down.weight | Q6K | 32,808,960 | 473.0 |
+| 10 | reduce-cooperative | blk.23.ffn_down.weight | Q6K | 32,808,960 | 473.0 |
+| 11 | reduce-cooperative | blk.2.ffn_down.weight | Q6K | 32,808,960 | 473.0 |
+| 12 | reduce-cooperative | blk.25.ffn_down.weight | Q6K | 32,808,960 | 473.0 |
+
+`op_profile_bucket` totals (all 226 ops, step 0 only): `cached_attention` 423.6ms (28 ops), `constant` 0.03ms (3 ops), `elementwise` 93.3ms (169 ops), `iota` 0.02ms (2 ops), `reduce-cooperative` 24657.1ms (156 ops), `reduce-packed-row-blocked` 18645.0ms (154 ops). **Total GPU-only time across all buckets: 43819.1ms** (43.8s) -- the single `output.weight` reduce (rank 1 above, the final LM head projection over the full 915-row prefill) alone is 14.7s of that, 33% of total GPU time in one op; the other 15 of the top-16 `reduce-cooperative` ops are `ffn_down` projections at ~473ms each, and `reduce-packed-row-blocked` (the row-blocked Q4_K incumbent path `metal-tiled-gemm` is meant to replace) accounts for 18645.0ms across 154 ops (~121.1ms/op mean).
+
+**`prefill_step_zero_op_profile` -- `std,metal,instrument,metal-tiled-gemm`:** same panic, same node, same reason as the `prefill_ttft_850` failure above (`EpilogueNotSupported { node: NodeId(107), reason: "the tiled simdgroup_matrix GEMM kernel has no epilogue tail yet" }`), 0.81s in. No op-profile table exists for this feature set -- the op-timed evaluation path this test arms (`PROXIMA_METAL_OP_PROFILE_STEP=0`) never gets past emitting node 107's program before the same epilogue-tail gap the plain-evaluate path hits stops it.
+
+**Cross-feature-set `greedy_eight_token_ids` identity: cannot be checked.** The identity assertion this brief asked for compares two token-id lists; `metal-tiled-gemm` produced zero ids on this checkpoint/shape -- both its `prefill_ttft_850` and its `prefill_step_zero_op_profile` panic on `EpilogueNotSupported` before `run_decode_loop_observed_seeded` returns anything. The default feature set's own 8 ids are `[1249, 60626, 39301, 1340, 374, 2677, 3168, 5220]`, unpaired.
+
+**`metal-tiled-gemm` default-off reasons, quoted from ROW 412 (`docs/discipline.md:27832`), which itself carries ROW 105/107/109/113's own history:** *"`docs/discipline.md` ROW 105/107/109/113 already carry its own measured history on a DIFFERENT shape/checkpoint: ROW 107 first measured it 4.27x SLOWER than the row-blocked incumbent; ROW 109's geometry redesign closed that to 1.63x slower (still a loss); ROW 113's staging-loop fix flipped it to a measured 1.47-1.5x WIN over row-blocked. It remains default-off per ROW 105's own framing ('does not earn the production default until an e2e bench shows the full stack wins with it on') -- no e2e bench across the whole qwen3-1.7B prefill has been run."*
+
+**What the data now shows, no verdict adjective.** ROW 107/109/113's 4.27x-slower -> 1.63x-slower -> 1.47-1.5x-faster history was measured on openchat-7B Q4_K_S at M=31 (per ROW 412/389's own citation); on Qwen3-1.7B Q4_K_M at 915 tokens, `metal-tiled-gemm` does not reach a comparable number at all -- both real-model tests exercising it panic on `Backend(Metal(Emit(EpilogueNotSupported { node: NodeId(107), reason: "the tiled simdgroup_matrix GEMM kernel has no epilogue tail yet" })))` before any GPU time or token id is produced, where the default `std,metal,instrument` build completes the same 915-token prefill at 44176.2-52618.1ms (CoV 7.4%, 3 runs) with 14666.4ms of that in one `output.weight reduce-cooperative` op alone. Per the compare-bench diagnosis categories (skill `disciplined-component`), this is category 3, a capability gap -- `msl.rs:4022-4028`'s `tiled_gemm_block` path rejects any node whose reduce epilogue is not the identity (`reduce_epilogue_is_identity` false), and this checkpoint's own `output.weight` and `ffn_down` reduces route through a non-identity epilogue at this shape -- not category 1 (wiring drift) or category 2 (a shared-library ceiling both arms inherit): `metal-tiled-gemm`'s own kernel, not the row-blocked incumbent it competes with, is the side missing the code path.
+
+**Residual, named not hidden.** (1) ROW 105/107/109/113's own measured wins/losses on openchat-7B Q4_K_S remain unconfirmed AND undisturbed on Qwen3-1.7B -- this row does not extend or contradict that history, it names a DIFFERENT gap (an epilogue-support gap, not a throughput gap) that fires before the throughput question is even reachable on this checkpoint. (2) The e2e bench ROW 105's own framing requires before the feature earns default-on ("no e2e bench across the whole qwen3-1.7B prefill has been run") is now further from reachable than before this row believed: even an isolated op-level timing cannot be taken on this checkpoint's `output.weight`/`ffn_down` nodes without first landing an epilogue tail for the tiled-gemm kernel (`msl.rs:4022-4028`'s own reject), which is unscoped, unmeasured, and not started here. (3) No fix candidate for the epilogue gap is proposed or attempted this row -- purely a measurement row, per the brief.
+
+**Gates.** No production source changed this row (docs-only); ROW 417's own `cargo clippy`/`cargo nextest`/`cargo check --workspace --all-targets` gates on `proxima-tensor`/`proxima-model-interop` are unaffected and not re-run. The two release test binaries above are the only build gates this row exercises, both EXIT 0.
+
+**Re-prove command (holds on any host, model.lock protocol applies):**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main >= this row
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test --release -j 2 -p proxima-model-interop --lib --no-run --features std,metal,instrument
+BIN_DEFAULT=$(find target/release/deps -name 'proxima_model_interop-*' -type f -perm +111)
+PROXIMA_QWEN3_GGUF=~/.ollama/models/blobs/sha256-3d0b790534fe4b79525fc3692950408dca41171676ed7e21db57af5c65ef6ab6 \
+  "$BIN_DEFAULT" generate::memory_fit_gate_tests::prefix_state_real_model::prefill_ttft_850 \
+  --exact --ignored --nocapture
+PROXIMA_QWEN3_GGUF=... "$BIN_DEFAULT" \
+  generate::memory_fit_gate_tests::prefix_state_real_model::prefill_step_zero_op_profile \
+  --exact --ignored --nocapture
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test --release -j 2 -p proxima-model-interop --lib --no-run \
+  --features std,metal,instrument,metal-tiled-gemm
+BIN_TILED=$(find target/release/deps -name 'proxima_model_interop-*' -type f -perm +111 -newer "$BIN_DEFAULT")
+PROXIMA_QWEN3_GGUF=... "$BIN_TILED" \
+  generate::memory_fit_gate_tests::prefix_state_real_model::prefill_ttft_850 \
+  --exact --ignored --nocapture
+# expect: FAILED, EpilogueNotSupported { node: NodeId(107), .. } -- same as this row
+```
+
+**Axes (principle 8).** Numeric -- none new (no source changed). Structural -- none new. **Sans-IO opt-sweep:** N/A -- measurement-only row, no new production component.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-08 | `docs(tensor): ROW 418 prefill ttft and step-0 op profile at 850 tokens, default vs tiled gemm` -- both real-model tests actually run under the held lock for the first time across ROW 412/414/418 | default: 44.2-52.6ms TTFT range measured; `metal-tiled-gemm`: EpilogueNotSupported panic, capability gap not a perf number, 0 tokens/s comparable | TTFT: 3 runs, CoV 7.4% (reported as range); op-profile: 1 run per feature set (op-timed mode is diagnostic, not repeated) | solo during both timed runs, lock held 0 retries, `memory_pressure` 92% free, `carg`+`o` process count 5 (sibling builds), `target/release/deps` process count 0 |
