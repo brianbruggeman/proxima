@@ -1038,7 +1038,31 @@ impl<'file> LoadedModel<'file> {
     /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
     /// can fail with.
     pub fn load(parsed: &ParsedGguf, file_bytes: &'file [u8]) -> Result<Self, InteropError> {
-        Self::load_inner(parsed, file_bytes, false, false)
+        Self::load_with_registry(
+            parsed,
+            file_bytes,
+            &crate::architecture::ArchitectureRegistry::with_builtin(),
+        )
+    }
+
+    /// [`Self::load`] with the [`crate::architecture::ArchitectureRegistry`]
+    /// caller-supplied rather than fixed to
+    /// [`crate::architecture::ArchitectureRegistry::with_builtin`] --
+    /// the seam a foreign `Architecture` (registered against its own
+    /// registry, never against this crate's) loads a checkpoint through,
+    /// the same way [`crate::architecture::ArchitectureRegistry::resolve`]'s
+    /// own doc describes. [`Self::load`] is this call with the builtin
+    /// table, unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::load`].
+    pub fn load_with_registry(
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        registry: &crate::architecture::ArchitectureRegistry,
+    ) -> Result<Self, InteropError> {
+        Self::load_inner(parsed, file_bytes, false, false, registry)
     }
 
     /// [`Self::load`] with the paired gate/up reduce
@@ -1061,7 +1085,13 @@ impl<'file> LoadedModel<'file> {
         file_bytes: &'file [u8],
         paired_gate_up_reduce: bool,
     ) -> Result<Self, InteropError> {
-        Self::load_inner(parsed, file_bytes, paired_gate_up_reduce, false)
+        Self::load_inner(
+            parsed,
+            file_bytes,
+            paired_gate_up_reduce,
+            false,
+            &crate::architecture::ArchitectureRegistry::with_builtin(),
+        )
     }
 
     /// [`Self::load`] with the fused Q/K/V reduce
@@ -1086,7 +1116,13 @@ impl<'file> LoadedModel<'file> {
         file_bytes: &'file [u8],
         fused_qkv_reduce: bool,
     ) -> Result<Self, InteropError> {
-        Self::load_inner(parsed, file_bytes, false, fused_qkv_reduce)
+        Self::load_inner(
+            parsed,
+            file_bytes,
+            false,
+            fused_qkv_reduce,
+            &crate::architecture::ArchitectureRegistry::with_builtin(),
+        )
     }
 
     fn load_inner(
@@ -1094,6 +1130,7 @@ impl<'file> LoadedModel<'file> {
         file_bytes: &'file [u8],
         paired_gate_up_reduce: bool,
         fused_qkv_reduce: bool,
+        registry: &crate::architecture::ArchitectureRegistry,
     ) -> Result<Self, InteropError> {
         // registers `file_bytes` -- the checkpoint's own mmap, page-aligned
         // at its base by construction -- as the single mapping every packed
@@ -1125,7 +1162,6 @@ impl<'file> LoadedModel<'file> {
         // the narrow inline path below.
         let general_architecture = crate::bind::metadata_str(parsed, "general.architecture")?;
         if general_architecture == "qwen35" || (!paired_gate_up_reduce && !fused_qkv_reduce) {
-            let registry = crate::architecture::ArchitectureRegistry::with_builtin();
             let resolved = registry.resolve(parsed)?;
             let bound = resolved.bind(parsed, file_bytes)?;
             let step_state = resolved.step_state(parsed)?;
