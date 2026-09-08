@@ -107,7 +107,7 @@ enum Command {
     },
     /// Hot-swap a running pipe to a new spec. Convenience alias
     /// for `proxima daemon apply <name> --spec <path>` — same wire
-    /// (POST /pipes/<name>/apply over HTTP/1.1 on the daemon UDS).
+    /// (POST /pipes/`<name>`/apply over HTTP/1.1 on the daemon UDS).
     /// In-flight requests on the old impl complete; new requests hit
     /// the new impl.
     Apply {
