@@ -33,6 +33,8 @@ mod dense;
 mod dtype;
 mod error;
 #[cfg(feature = "std")]
+pub mod expert_slab;
+#[cfg(feature = "std")]
 mod generate;
 #[cfg(feature = "std")]
 mod hf_bind;
@@ -82,6 +84,8 @@ pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
 #[cfg(feature = "std")]
 pub use generate::{Control, LoadedModel, Phase, PrefixState, TokenEvent};
+#[cfg(feature = "std")]
+pub use expert_slab::ExpertSlab;
 pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};
 #[cfg(feature = "std")]
 pub use lfm2::{
