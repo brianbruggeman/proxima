@@ -6601,9 +6601,39 @@ pub enum GdnOutputGate {
     Sigmoid,
 }
 
+/// [`append_qwen35_ssm_mixer_with_taps`]'s own return shape: every
+/// intermediate a caller needs to bisect the mixer's tail against an
+/// independent reference, in the order the builder computes them
+/// (`spec.rs:6608-6928`). `qkv_mixed` is the fused `wqkv` projection
+/// (Q/K/V still concatenated, pre-conv); `state_out` is the delta-net
+/// recurrence's carried state; `delta_out` is the delta-net read-out
+/// (`jug` layout, pre-norm); `z` is the raw output-gate projection
+/// BEFORE [`GdnOutputGate`]'s silu/sigmoid split, so a caller can apply
+/// either nonlinearity independently of which one this program's own
+/// `output_gate` argument baked in; `gated_rmsnorm_out` is the per-head
+/// RMSNorm output after its own `ssm_norm_weight` scale (before the `z`
+/// gate multiplies in); `gated_value` is that result after the `z` gate
+/// multiplies in (still per-head, pre-projection); `ssm_out_result` is
+/// the `ssm_out` projection's reduce, before the residual add that
+/// produces `mixer_out`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SsmMixerTaps {
+    pub qkv_mixed: NodeId,
+    pub state_out: NodeId,
+    pub delta_out: NodeId,
+    pub z: NodeId,
+    pub gated_rmsnorm_out: NodeId,
+    pub gated_value: NodeId,
+    pub ssm_out_result: NodeId,
+}
+
 /// The GDN (gated delta-net) mixer [`qwen35_forward_program`] calls once
 /// per non-attention layer -- see it there for the worked example of
 /// wiring this builder's inputs. Returns `(x_next, qkv_mixed, state_out)`.
+/// Thin wrapper over [`append_qwen35_ssm_mixer_with_taps`] for callers that
+/// only need the three roots this signature already returned before taps
+/// existed -- byte-identical program, since this only reshapes the return
+/// value the shared builder already computed.
 #[allow(clippy::too_many_arguments)]
 pub fn append_qwen35_ssm_mixer(
     program: &mut Vec<Op>,
@@ -6633,6 +6663,70 @@ pub fn append_qwen35_ssm_mixer(
     l_cache: u32,
     output_gate: GdnOutputGate,
 ) -> Result<(NodeId, NodeId, NodeId), TensorError> {
+    let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps(
+        program,
+        x,
+        inv_dim,
+        eps,
+        head_eps,
+        one,
+        inv_sqrt_key_dim,
+        inv_head_v_dim,
+        attn_norm_weight,
+        wqkv,
+        wqkv_gate,
+        conv_weight,
+        conv_history_in,
+        ssm_beta,
+        ssm_alpha,
+        ssm_dt_bias,
+        ssm_a,
+        ssm_norm_weight,
+        ssm_out,
+        state_in,
+        key_dim,
+        value_dim,
+        kv_heads,
+        group,
+        l_cache,
+        output_gate,
+    )?;
+    Ok((mixer_out, taps.qkv_mixed, taps.state_out))
+}
+
+/// [`append_qwen35_ssm_mixer`]'s full implementation, returning every
+/// [`SsmMixerTaps`] intermediate alongside `mixer_out` for a caller that
+/// needs to bisect the tail (per-head gated RMSNorm, output gate, `ssm_out`
+/// projection) against an independent reference.
+#[allow(clippy::too_many_arguments)]
+pub fn append_qwen35_ssm_mixer_with_taps(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    head_eps: NodeId,
+    one: NodeId,
+    inv_sqrt_key_dim: NodeId,
+    inv_head_v_dim: NodeId,
+    attn_norm_weight: Option<NodeId>,
+    wqkv: NodeId,
+    wqkv_gate: NodeId,
+    conv_weight: NodeId,
+    conv_history_in: NodeId,
+    ssm_beta: NodeId,
+    ssm_alpha: NodeId,
+    ssm_dt_bias: NodeId,
+    ssm_a: NodeId,
+    ssm_norm_weight: NodeId,
+    ssm_out: NodeId,
+    state_in: NodeId,
+    key_dim: u32,
+    value_dim: u32,
+    kv_heads: u32,
+    group: u32,
+    l_cache: u32,
+    output_gate: GdnOutputGate,
+) -> Result<(NodeId, SsmMixerTaps), TensorError> {
     let head_k_dim = key_dim / kv_heads;
     let num_v_heads = kv_heads * group;
     let head_v_dim = value_dim / num_v_heads;
@@ -6924,7 +7018,16 @@ pub fn append_qwen35_ssm_mixer(
 
     let mixer_out = elementwise(program, DType::Float32, ScalarOp::Add, &[(x, "sd->sd"), (cur, "d->sd")])?;
 
-    Ok((mixer_out, qkv_mixed, state_out))
+    let taps = SsmMixerTaps {
+        qkv_mixed,
+        state_out,
+        delta_out,
+        z,
+        gated_rmsnorm_out: normed_out_gamma,
+        gated_value: gated_out,
+        ssm_out_result: cur,
+    };
+    Ok((mixer_out, taps))
 }
 
 /// [`append_mistral_layer`]'s attention sub-block in isolation (RoPE + GQA +
