@@ -4529,6 +4529,7 @@ dependencies = [
  "arrayvec",
  "fastrand",
  "half",
+ "memmap2",
  "omega",
  "prime",
  "proxima",
