@@ -3582,6 +3582,31 @@ mod moe_memory_shape {
             .expect("writes a well-formed synthetic native-stacked moe checkpoint")
     }
 
+    /// The real qwen3moe 30B-A3B on-disk convention: a native single
+    /// stacked `_exps.weight` tensor, `Q4_K`-quantized rather than `F32` --
+    /// [`checkpoint_with_native_stacked_f32_experts`]'s own fixture shape,
+    /// codec swapped, each expert's `[OUT_DIM, IN_DIM]` slab encoded with
+    /// the real [`q4_k::quantize`] encoder so the bytes are exactly what a
+    /// real quantized checkpoint's own exporter would have written.
+    fn checkpoint_with_native_stacked_q4_k_experts() -> alloc::vec::Vec<u8> {
+        let mut bytes: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        for expert in 0..EXPERT_COUNT {
+            bytes.extend(quantize_q4_k(&expert_values(expert)));
+        }
+        let model = GgufModel {
+            version: 3,
+            metadata: alloc::vec::Vec::new(),
+            tensors: vec![TensorPayload {
+                name: String::from("blk.0.ffn_gate_exps.weight"),
+                dims: dims(&[IN_DIM as u64, OUT_DIM as u64, u64::from(EXPERT_COUNT)]),
+                ggml_type: WireType::Q4_K,
+                data: &bytes,
+            }],
+        };
+        write_complete(&model)
+            .expect("writes a well-formed synthetic native-stacked q4_k moe checkpoint")
+    }
+
     /// The real Mixtral-8x7B on-disk convention (`restack.rs`'s own module
     /// doc): `n_experts` independent `Q4_K` tensors, one per
     /// `blk.0.ffn_gate.{expert}.weight`, no native stack tensor at all.
@@ -3727,6 +3752,113 @@ mod moe_memory_shape {
                 packed_owned_bytes_total(&state),
                 packed_floor_bytes(),
                 "the restacked buffer's own byte length must equal exactly the packed floor, not the dequantized ceiling"
+            );
+        }
+    }
+
+    /// The fix this session lands: a native single-stacked `_exps.weight`
+    /// tensor quantized `Q4_K` (qwen3moe 30B-A3B's own on-disk convention)
+    /// must bind zero-copy packed, the same as the `native_stacked_f32`
+    /// case above -- before this fix, [`bind_moe_stacked_experts`]'s
+    /// `Ok(_) | Err(_)` arm caught every non-`F32` packed decode too and
+    /// dequantized-then-transposed it to owned `f32`
+    /// (`owned_bytes_total` would have been `EXPERT_COUNT * OUT_DIM *
+    /// IN_DIM * 4` bytes here, not `0`).
+    #[proxima::test]
+    async fn native_q4_k_stack_binds_packed_not_dequantized() {
+        let file_bytes = checkpoint_with_native_stacked_q4_k_experts();
+        let parsed = proxima_gguf::parse_complete(&file_bytes)
+            .expect("parses synthetic native-stacked q4_k moe checkpoint");
+        let mut state = empty_state(&file_bytes);
+
+        bind_moe_expert_weights(
+            &parsed,
+            &file_bytes,
+            0,
+            "ffn_gate",
+            EXPERT_COUNT,
+            OUT_DIM,
+            IN_DIM,
+            &mut state,
+        )
+        .expect("binds the native q4_k-stacked experts");
+
+        assert_eq!(
+            state.packed.len(),
+            1,
+            "one zero-copy packed entry for the whole native q4_k stack"
+        );
+        assert!(
+            state.packed_owned.is_empty(),
+            "a native stacked tensor has one contiguous byte range -- nothing to restack"
+        );
+        assert_eq!(
+            owned_bytes_total(&state),
+            0,
+            "a native q4_k stack must stay packed, allocating no dequantized f32 bytes"
+        );
+    }
+
+    /// The mechanism proof [`bind_moe_stacked_experts`]'s own doc names:
+    /// slicing `expert_index * per_expert_bytes` out of the SAME packed
+    /// buffer the real binder produced, then running it through the real
+    /// production kernel ([`proxima_tensor::cpu::matmul_q4k_f32`], never a
+    /// hand-rolled duplicate), must equal a plain f32 matvec against that
+    /// same slab's own dequantized bytes ([`q4_k::dequantize`]) -- proving
+    /// the gather's byte-offset addressing and the packed kernel agree with
+    /// the dequantized ground truth, independent of the quantization error
+    /// `Q4_K` itself introduces relative to the original source data (both
+    /// sides read the identical already-quantized bytes).
+    #[proxima::test]
+    async fn packed_expert_gather_matches_the_dequantized_reference() {
+        let file_bytes = checkpoint_with_native_stacked_q4_k_experts();
+        let parsed = proxima_gguf::parse_complete(&file_bytes)
+            .expect("parses synthetic native-stacked q4_k moe checkpoint");
+        let mut state = empty_state(&file_bytes);
+        bind_moe_expert_weights(
+            &parsed,
+            &file_bytes,
+            0,
+            "ffn_gate",
+            EXPERT_COUNT,
+            OUT_DIM,
+            IN_DIM,
+            &mut state,
+        )
+        .expect("binds the native q4_k-stacked experts");
+
+        let (_, block) = &state.packed[0];
+        let proxima_tensor::cpu::QuantizedBlock::Q4K(packed_bytes) = block else {
+            panic!("native q4_k stack must bind as QuantizedBlock::Q4K, got {block:?}");
+        };
+
+        let per_expert_bytes = packed_floor_bytes() / EXPERT_COUNT as usize;
+        let expert_index = 1usize;
+        let expert_slice =
+            &packed_bytes[expert_index * per_expert_bytes..(expert_index + 1) * per_expert_bytes];
+
+        let activation: alloc::vec::Vec<f32> = expert_values(999)
+            .into_iter()
+            .take(IN_DIM)
+            .collect();
+        let gathered = proxima_tensor::cpu::matmul_q4k_f32(expert_slice, OUT_DIM, &activation)
+            .expect("packed q4_k matmul evaluates over the gathered expert slice");
+
+        let mut dequantized = alloc::vec![0.0f32; OUT_DIM * IN_DIM];
+        q4_k::dequantize(expert_slice, &mut dequantized)
+            .expect("the same gathered slice dequantizes on its own");
+        let reference: alloc::vec::Vec<f32> = dequantized
+            .as_chunks::<IN_DIM>()
+            .0
+            .iter()
+            .map(|row| row.iter().zip(&activation).map(|(w, a)| w * a).sum())
+            .collect();
+
+        assert_eq!(gathered.len(), reference.len());
+        for (row, (&found, &expected)) in gathered.iter().zip(&reference).enumerate() {
+            assert!(
+                (found - expected).abs() < 1e-5,
+                "row {row}: gathered packed matvec {found} vs dequantized reference {expected}"
             );
         }
     }
