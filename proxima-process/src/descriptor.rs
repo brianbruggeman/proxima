@@ -107,7 +107,7 @@ impl From<c_int> for Stdio {
 
 #[cfg(feature = "std")]
 impl From<std::os::fd::OwnedFd> for Stdio {
-    /// Mirrors [`std::process::Stdio: From<OwnedFd>`]. Ownership
+    /// Mirrors `std::process::Stdio`'s `From<OwnedFd>` impl. Ownership
     /// of the fd transfers in — we extract the raw fd via
     /// `into_raw_fd()` and the caller is on the hook for closing
     /// it after spawn (typically by retaining the original
@@ -120,7 +120,7 @@ impl From<std::os::fd::OwnedFd> for Stdio {
 
 #[cfg(feature = "std")]
 impl From<std::fs::File> for Stdio {
-    /// Mirrors [`std::process::Stdio: From<File>`]. The file's
+    /// Mirrors `std::process::Stdio`'s `From<File>` impl. The file's
     /// underlying fd becomes the child's stdio. Ownership
     /// transfers — the File is consumed; its fd lives until
     /// explicit close (or process exit).

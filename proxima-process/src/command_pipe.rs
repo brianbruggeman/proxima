@@ -105,7 +105,7 @@ impl<ChainState> CommandPipeBuilder<Unset, ChainState> {
 }
 
 impl<CommandState> CommandPipeBuilder<CommandState, Unset> {
-    /// Supply the dispatch chain. Any [`Pipe`] mapping
+    /// Supply the dispatch chain. Any [`Pipe`](proxima_primitives::pipe::Pipe) mapping
     /// [`ChildRequest`] → [`ChildResponse`] works; e.g.
     /// [`super::grounds::Empty`], [`super::grounds::Deny`], or
     /// a [`super::operators::AndThen`] composition.
@@ -125,7 +125,7 @@ impl<CommandState> CommandPipeBuilder<CommandState, Unset> {
 
 impl<CommandState, ChainState> CommandPipeBuilder<CommandState, ChainState> {
     /// Opt the spawned child into the libc-interpose shim. When
-    /// set, [`Pipe::call`] adds the platform-correct preload env
+    /// set, [`Pipe::call`](proxima_primitives::pipe::Pipe::call) adds the platform-correct preload env
     /// var (`DYLD_INSERT_LIBRARIES` on macOS, `LD_PRELOAD` on
     /// Linux) pointing at [`libc_shim::PATH`] to the child's env
     /// list. Default off; only the children of pipes built with

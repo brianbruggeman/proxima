@@ -20,7 +20,7 @@
 //! - per-slot [`Stdio`] wiring:
 //!   - [`Stdio::Inherit`] — child inherits parent's fd at that index
 //!   - [`Stdio::Null`] — open `/dev/null` in the child, dup2 onto the slot
-//!   - [`Stdio::Fd(n)`] — child dup2s `n` onto the slot (caller retains
+//!   - [`Stdio::Fd`]`(n)` — child dup2s `n` onto the slot (caller retains
 //!     ownership of `n`)
 //!   - [`Stdio::Piped`] — `pipe(2)` allocated in the parent before fork;
 //!     child dup2s its end, parent keeps the other in [`Child`]

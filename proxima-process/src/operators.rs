@@ -7,7 +7,7 @@
 //!   traits propagate as the intersection — least-permissive wins,
 //!   already proven once in the leaf crate).
 //! - [`dispatch_match`] — async path-prefix routing for
-//!   [`ChildRequest`]. Builds a routing table from
+//!   [`ChildRequest`](super::protocol::ChildRequest). Builds a routing table from
 //!   `(&str, &dyn SendDynPipe<ChildRequest, ChildResponse>)`
 //!   pairs and dispatches by longest-prefix-first match. The
 //!   `match_operator!` macro for exhaustive enum-variant dispatch is
@@ -23,7 +23,7 @@ pub use proxima_primitives::pipe::AndThen;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::alloc_tier::SendDynPipe;
 
-/// Hand-written Match dispatch over [`ChildRequest`] by path
+/// Hand-written Match dispatch over [`ChildRequest`](super::protocol::ChildRequest) by path
 /// prefix. Walks `routes` in order; the first whose path matches the
 /// request handles it. If nothing matches, dispatches to `fallback`.
 ///

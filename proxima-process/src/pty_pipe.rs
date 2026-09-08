@@ -10,11 +10,11 @@
 //!
 //! # Composition
 //!
-//! 1. [`open_pty`](super::pty::open_pty) — `libc::openpty` via nix.
+//! 1. [`open_pty`] — `libc::openpty` via nix.
 //! 2. The descriptor's `input`/`output`/`error` slots are forced to
-//!    [`Stdio::Fd(slave_raw)`](super::command::Stdio::Fd) and
+//!    [`Stdio::Fd`]`(slave_raw)` and
 //!    `controlling_tty = true`.
-//! 3. [`spawn_and_dispatch`] — fork+exec with the dispatch chain
+//! 3. [`spawn_and_dispatch`](super::dispatched::spawn_and_dispatch) — fork+exec with the dispatch chain
 //!    wired to `extra_fd[7]` + `PROXIMA_DISPATCH_FD` in the child
 //!    env. dup2s slave onto child fds 0/1/2, `setsid()`,
 //!    `ioctl(TIOCSCTTY)`.
@@ -24,7 +24,7 @@
 //!    `TIOCSWINSZ`'s the master fd on change. The kernel PTY then
 //!    delivers SIGWINCH to the child's controlling-tty session
 //!    automatically.
-//! 6. Wrap the master in [`FdPairPipe`](super::fd_pipe::FdPairPipe)
+//! 6. Wrap the master in [`FdPairPipe`]
 //!    for the byte shuttle. The response body owns BOTH the
 //!    size-follower cancel handle AND the [`DispatchedChild`]; when
 //!    the body finishes or is dropped, the follower exits cleanly
@@ -44,7 +44,7 @@
 //! EVFILT_SIGNAL (macOS) requires installing a signal disposition.
 //! Both pull us into `unsafe` (extern statics, sigaction handlers,
 //! global signal state). A 200 ms polling loop using
-//! [`current_terminal_size`](super::pty::current_terminal_size) +
+//! [`current_terminal_size`] +
 //! `nix::poll` for cancellation timing is entirely safe, has no
 //! process-wide side effects, and the 200 ms latency on resize is
 //! invisible to a human user.
@@ -192,7 +192,7 @@ impl<CommandState, ChainState> PtyCommandPipeBuilder<CommandState, Unset, ChainS
 }
 
 impl<CommandState, SizeState> PtyCommandPipeBuilder<CommandState, SizeState, Unset> {
-    /// Supply the dispatch chain. Any [`Pipe`] mapping
+    /// Supply the dispatch chain. Any [`Pipe`](proxima_primitives::pipe::Pipe) mapping
     /// [`ChildRequest`] → [`ChildResponse`] works; e.g.
     /// [`super::grounds::Empty`], [`super::grounds::Deny`], or
     /// a [`super::operators::AndThen`] composition.

@@ -3,7 +3,7 @@
 //!
 //! These are the **boundary** grounds: where the byte-stream layer
 //! (proxima_primitives::pipe `Body`, the IPC fd traffic) meets the typed
-//! dispatch layer ([`Pipe`]). A complete dispatch chain looks
+//! dispatch layer ([`Pipe`](proxima_primitives::pipe::Pipe)). A complete dispatch chain looks
 //! like:
 //!
 //! ```text

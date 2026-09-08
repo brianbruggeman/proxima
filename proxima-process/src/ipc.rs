@@ -100,7 +100,7 @@ pub fn write_frame<W: Write, T: Serialize>(writer: &mut W, value: &T) -> io::Res
 /// EOF (the child closed the dispatch fd) or on I/O / decode error.
 ///
 /// `dispatch_fn` is a fallible synchronous closure. To dispatch
-/// against an async [`super::Pipe`] chain, wrap with
+/// against an async [`Pipe`](proxima_primitives::pipe::Pipe) chain, wrap with
 /// `futures::executor::block_on` inside the closure.
 ///
 /// # Errors

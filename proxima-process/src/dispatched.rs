@@ -3,7 +3,7 @@
 //!
 //! This is the C8d wiring: it composes [`super::spawn`],
 //! [`super::ipc::run_dispatch_loop`], and any
-//! [`Pipe`]-shaped dispatcher into one synchronous entry
+//! [`Pipe`](proxima_primitives::pipe::Pipe)-shaped dispatcher into one synchronous entry
 //! point. The child is spawned with:
 //!
 //! - `extra_fd[7]` wired to the child end of a unix socketpair.
