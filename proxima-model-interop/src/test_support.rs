@@ -65,6 +65,21 @@ pub(crate) fn qwen3_gguf_path() -> String {
     })
 }
 
+/// `PROXIMA_QWEN3MOE_GGUF` read the same way [`qwen3_gguf_path`] reads
+/// `PROXIMA_QWEN3_GGUF`: unset keeps `real_qwen3moe_file` pointed at this
+/// host-local Qwen3-30B-A3B `Q4_K`/`Q6_K` checkpoint -- the real 30B-A3B
+/// mixture-of-experts checkpoint `InteropError::MoeExpertShapeMismatch` was
+/// first root-caused against (`qwen3moe.feed_forward_length=6144` vs.
+/// `qwen3moe.expert_feed_forward_length=768`; `blk.0.ffn_gate_exps.weight`
+/// GGUF `dims=[2048, 768, 128]`).
+pub(crate) fn qwen3moe_30b_gguf_path() -> String {
+    std::env::var("PROXIMA_QWEN3MOE_GGUF").unwrap_or_else(|_| {
+        "/Users/brianbruggeman/.ollama/models/blobs/\
+         sha256-58574f2e94b99fb9e4391408b57e5aeaaaec10f6384e9a699fc2cb43a5c8eabf"
+            .to_string()
+    })
+}
+
 /// Fails the calling `#[ignore]`d fixture test loudly, naming `env_var`
 /// (when the caller resolves `path` through one) and `path` itself, when
 /// the host-local checkpoint the test needs is absent -- an `#[ignore]`d

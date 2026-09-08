@@ -2706,6 +2706,70 @@ mod tests {
         );
     }
 
+    /// Root cause of `InteropError::MoeExpertShapeMismatch` on the real
+    /// qwen3moe 30B-A3B checkpoint (`~/.ollama/models/blobs/sha256-58574f2e..`):
+    /// its header declares `qwen3moe.feed_forward_length=6144` (a legacy /
+    /// unused dense value) alongside a *separate*
+    /// `qwen3moe.expert_feed_forward_length=768`, the real per-expert
+    /// projection width `blk.0.ffn_gate_exps.weight`'s own on-disk element
+    /// count (`201_326_592 = 128 * 768 * 2048`) agrees with. Before this
+    /// fix, `architecture_from_metadata` read only `feed_forward_length`
+    /// unconditionally, so `bind_moe_expert_weights` called
+    /// `transpose_expert_stack` with `out_dim=6144` instead of `768` --
+    /// `expected = 128 * 6144 * 2048 = 1_610_612_736`, 8x the tensor's real
+    /// element count, since `6144 / 768 == 8`. This fixture reproduces both
+    /// keys at that exact ratio and asserts `feed_forward` reads the
+    /// expert-specific key, not the dense one, once `expert_count != 0` --
+    /// `architecture_from_hf_config` (`hf_config.rs`) already makes this
+    /// same substitution for the HF-config/safetensors path.
+    #[test]
+    fn architecture_from_metadata_reads_expert_feed_forward_length_when_present() {
+        use proxima_gguf::value::MetadataValue as Value;
+
+        let embed_bytes = vec![0u8; 8 * 3 * 4]; // [embedding=8, vocab=3] f32
+        let model = GgufModel {
+            version: 3,
+            metadata: vec![
+                (
+                    "general.architecture".to_string(),
+                    Value::String("qwen3moe".to_string()),
+                ),
+                ("qwen3moe.embedding_length".to_string(), Value::U32(8)),
+                ("qwen3moe.feed_forward_length".to_string(), Value::U32(64)),
+                (
+                    "qwen3moe.expert_feed_forward_length".to_string(),
+                    Value::U32(8),
+                ),
+                ("qwen3moe.attention.head_count".to_string(), Value::U32(2)),
+                (
+                    "qwen3moe.attention.head_count_kv".to_string(),
+                    Value::U32(1),
+                ),
+                ("qwen3moe.block_count".to_string(), Value::U32(4)),
+                ("qwen3moe.rope.dimension_count".to_string(), Value::U32(4)),
+                ("qwen3moe.expert_count".to_string(), Value::U32(128)),
+                ("qwen3moe.expert_used_count".to_string(), Value::U32(8)),
+            ],
+            tensors: vec![TensorPayload {
+                name: "token_embd.weight".to_string(),
+                dims: dims(&[8, 3]),
+                ggml_type: WireType::F32,
+                data: &embed_bytes,
+            }],
+        };
+        let file_bytes = write_complete(&model).expect("writes gguf with qwen3moe-shaped metadata");
+        let parsed = proxima_gguf::parse_complete(&file_bytes)
+            .expect("parses gguf with qwen3moe-shaped metadata");
+
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("derive architecture from real qwen3moe-shaped metadata keys");
+        assert_eq!(
+            architecture.feed_forward, 8,
+            "an expert checkpoint's feed_forward must read expert_feed_forward_length (8), not \
+             the dense feed_forward_length (64), once expert_count is nonzero"
+        );
+    }
+
     /// A checkpoint absent `{architecture}.rope.dimension_count` entirely
     /// (confirmed real on LFM2.5-8B-A1B, `bind.rs`'s own doc on
     /// [`ModelArchitecture::head_dim`]) must derive `head_dim` as
@@ -3684,6 +3748,207 @@ mod moe_memory_shape {
              experts * rows * cols * 4 ({} bytes)",
             packed_floor_bytes(),
             dequantized_owned_ceiling_bytes()
+        );
+    }
+
+    /// Root-caused against the real qwen3moe 30B-A3B checkpoint: its
+    /// `blk.0.ffn_gate_exps.weight` reports GGUF `dims=[2048, 768, 128]`
+    /// (dims are innermost-first, so `[in_dim, out_dim, expert_count]`) --
+    /// a flat on-disk buffer laid out expert-slowest, then `out_dim` rows of
+    /// `in_dim` contiguous values each, exactly the `[expert_count, out_dim,
+    /// in_dim]` shape [`transpose_expert_stack`]'s own doc names. This test
+    /// proves that addressing directly with a small, fully-known 2-expert
+    /// stack (`in_dim=4`, `out_dim=6`) rather than trusting the real
+    /// checkpoint's own scale to exercise it: expert 1's on-disk first row
+    /// (`out_dim` index 0, the 4 values `[100, 101, 102, 103]`) must land,
+    /// post-transpose, at `in_dim` index `0..4` and `out_dim` index `0`
+    /// inside expert 1's own slab -- never scrambled into expert 0's slab or
+    /// into a different row, which is exactly the failure mode a plain
+    /// global (non-per-expert) transpose would produce.
+    #[test]
+    fn transpose_expert_stack_keeps_each_experts_slab_addressing_separate() {
+        const TEST_EXPERT_COUNT: usize = 2;
+        const TEST_OUT_DIM: usize = 6;
+        const TEST_IN_DIM: usize = 4;
+
+        // expert 0's on-disk [out_dim, in_dim] slab: rows 0..24; expert 1's:
+        // rows 100..124, offset well clear of expert 0's range so a
+        // cross-expert addressing bug reads an obviously wrong value rather
+        // than one that could coincidentally still look plausible.
+        let mut flat = alloc::vec::Vec::with_capacity(TEST_EXPERT_COUNT * TEST_OUT_DIM * TEST_IN_DIM);
+        for row in 0..(TEST_OUT_DIM * TEST_IN_DIM) {
+            flat.push(row as f32);
+        }
+        for row in 0..(TEST_OUT_DIM * TEST_IN_DIM) {
+            flat.push(100.0 + row as f32);
+        }
+
+        let transposed = transpose_expert_stack(
+            &flat,
+            "blk.0.ffn_gate_exps.weight",
+            TEST_EXPERT_COUNT,
+            TEST_OUT_DIM,
+            TEST_IN_DIM,
+        )
+        .expect("2 * 6 * 4 flat elements agree with expert_count * out_dim * in_dim");
+
+        let per_expert = TEST_OUT_DIM * TEST_IN_DIM;
+        let expert_one = &transposed[per_expert..2 * per_expert];
+        // expert 1's slab is now [in_dim, out_dim]; out_dim index 0 across
+        // every in_dim index is exactly its on-disk first row, unscrambled.
+        let expert_one_out_zero_column: alloc::vec::Vec<f32> = (0..TEST_IN_DIM)
+            .map(|in_index| expert_one[in_index * TEST_OUT_DIM])
+            .collect();
+        assert_eq!(
+            expert_one_out_zero_column,
+            alloc::vec![100.0, 101.0, 102.0, 103.0],
+            "expert 1's on-disk first row must reappear at expert 1's own slab offset in the \
+             transposed [expert, in, out] buffer, not at expert 0's offset or scrambled by a \
+             global (non-per-expert) transpose"
+        );
+    }
+}
+
+/// The real qwen3moe 30B-A3B checkpoint `InteropError::MoeExpertShapeMismatch`
+/// was root-caused against. Own `MappedGguf` copy, same shape and same
+/// non-sharing justification as `real_mixtral_file::MappedGguf`'s own doc
+/// (private to its module, no shared home for a two-line mmap wrapper three
+/// fixture-specific test modules all happen to want).
+#[cfg(all(test, feature = "std"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod real_qwen3moe_file {
+    use super::*;
+
+    /// The real qwen3moe 30B-A3B checkpoint this bug was root-caused
+    /// against: layer 0's `ffn_gate_exps`/`ffn_up_exps`/`ffn_down_exps` used
+    /// to raise [`InteropError::MoeExpertShapeMismatch`] because
+    /// `architecture_from_metadata` read the dense `feed_forward_length`
+    /// (6144) instead of `expert_feed_forward_length` (768) once
+    /// `expert_count != 0`. Binds only layer 0's own three expert-family
+    /// tensors through the exact same [`architecture_from_metadata`] +
+    /// `bind_moe_expert_weights` call shape `bind_all_weights`'s own MoE
+    /// loop uses -- cheap enough (one layer, not all 48) to run without the
+    /// model-load memory ceiling a full `LoadedModel::load` would need.
+    #[test]
+    #[ignore = "depends on a host-local qwen3moe 30B-A3B gguf checkout outside this repo"]
+    fn real_qwen3moe_30b_layer_zero_expert_stacks_bind_without_shape_mismatch() {
+        let model_path = crate::test_support::qwen3moe_30b_gguf_path();
+        crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN3MOE_GGUF"));
+        let path = std::path::Path::new(&model_path);
+
+        struct MappedGguf {
+            base: *mut core::ffi::c_void,
+            len: usize,
+            _file: std::fs::File,
+        }
+
+        impl MappedGguf {
+            fn open(path: &std::path::Path) -> std::io::Result<Self> {
+                use std::os::fd::AsFd;
+                let file = std::fs::File::open(path)?;
+                let len = usize::try_from(file.metadata()?.len())
+                    .expect("fixture file length fits in usize");
+                // SAFETY: `len` matches the just-opened file's own length;
+                // `file` is kept alive in `_file` for as long as `base` is
+                // used, and the mapping is read-only/private so no writer
+                // can observe or race it.
+                let base = unsafe {
+                    rustix::mm::mmap(
+                        core::ptr::null_mut(),
+                        len,
+                        rustix::mm::ProtFlags::READ,
+                        rustix::mm::MapFlags::PRIVATE,
+                        file.as_fd(),
+                        0,
+                    )
+                }
+                .expect("mmap host-local qwen3moe 30b gguf fixture");
+                Ok(Self {
+                    base,
+                    len,
+                    _file: file,
+                })
+            }
+
+            fn as_slice(&self) -> &[u8] {
+                // SAFETY: `base` points at `len` bytes mapped for `self`'s
+                // whole lifetime; this borrows `self` immutably, so nothing
+                // can unmap the region while the returned slice is alive.
+                unsafe { core::slice::from_raw_parts(self.base.cast::<u8>(), self.len) }
+            }
+        }
+
+        impl Drop for MappedGguf {
+            fn drop(&mut self) {
+                // SAFETY: `base`/`len` are exactly what `open`'s `mmap`
+                // call returned; nothing else unmaps this region.
+                let _ = unsafe { rustix::mm::munmap(self.base, self.len) };
+            }
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local qwen3moe 30b gguf fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local qwen3moe 30b gguf fixture");
+
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("derive architecture from the real qwen3moe 30b checkpoint's own metadata");
+        std::println!(
+            "qwen3moe_30b architecture expert_count={} expert_used_count={} feed_forward={} embedding={}",
+            architecture.expert_count,
+            architecture.expert_used_count,
+            architecture.feed_forward,
+            architecture.embedding,
+        );
+        assert_eq!(
+            architecture.feed_forward, 768,
+            "the real checkpoint's own expert_feed_forward_length key, not its unrelated \
+             feed_forward_length=6144"
+        );
+
+        let mut state = BoundWeights {
+            resident_bytes: file_bytes.len(),
+            owned: Vec::new(),
+            packed: Vec::new(),
+            packed_owned: Vec::new(),
+            precision: &[],
+        };
+        for (projection, out_dim, in_dim) in [
+            (
+                "ffn_gate",
+                architecture.feed_forward as usize,
+                architecture.embedding as usize,
+            ),
+            (
+                "ffn_up",
+                architecture.feed_forward as usize,
+                architecture.embedding as usize,
+            ),
+            (
+                "ffn_down",
+                architecture.embedding as usize,
+                architecture.feed_forward as usize,
+            ),
+        ] {
+            bind_moe_expert_weights(
+                &parsed,
+                file_bytes,
+                0,
+                projection,
+                architecture.expert_count,
+                out_dim,
+                in_dim,
+                &mut state,
+            )
+            .unwrap_or_else(|error| {
+                panic!("layer 0's {projection} expert stack must bind, got {error:?}")
+            });
+        }
+        std::println!(
+            "qwen3moe_30b layer0 bind ok packed={} packed_owned={} owned={}",
+            state.packed.len(),
+            state.packed_owned.len(),
+            state.owned.len(),
         );
     }
 }

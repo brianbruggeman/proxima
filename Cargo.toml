@@ -1979,6 +1979,13 @@ path = "examples/gguf_generate.rs"
 name = "stream_generate"
 path = "examples/stream_generate.rs"
 
+# header-only qwen3moe hparam + _exps tensor dump for root-causing
+# InteropError::MoeExpertShapeMismatch at bind; mmaps the file and only
+# reads the directory region parse_complete walks, never the tensor payload.
+[[example]]
+name = "inspect_moe_header"
+path = "examples/inspect_moe_header.rs"
+
 # the `units` binary bundles 15 test modules into one link target (see
 # tests/units.rs); 3 of them (scenario_smoke, settings_to_app,
 # thread_local_composition) use #[proxima::test], which only exists behind
