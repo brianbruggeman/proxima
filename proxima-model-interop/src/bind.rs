@@ -77,6 +77,18 @@ pub fn gguf_tensor_as_f32(
         GgmlType::Q3_K => dequantize(data, element_count, q3_k::dequantize),
         GgmlType::Q6_K => dequantize(data, element_count, q6_k::dequantize),
         GgmlType::Q8_0 => dequantize(data, element_count, q8_0::dequantize),
+        // The quantize pipe's `Bf16` preset (`crate::quantize`) writes real
+        // GGUF tensors at these two types -- unreachable from a real
+        // llama.cpp-produced checkpoint (this module's own doc, "no GGUF
+        // checkpoint this crate has evaluated stores F16/Bf16 weights"),
+        // but a genuinely valid GGUF byte layout this reader must not
+        // reject just because no prior fixture happened to exercise it.
+        GgmlType::F16 => {
+            dequantize(data, element_count, proxima_gguf::quant::f16::dequantize)
+        }
+        GgmlType::Bf16 => {
+            dequantize(data, element_count, proxima_gguf::quant::bf16::dequantize)
+        }
         other => Err(InteropError::UnrepresentableGgmlType {
             tensor: tensor.name.clone(),
             ggml_type: other,
