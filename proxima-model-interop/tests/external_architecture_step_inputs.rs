@@ -27,7 +27,7 @@ use proxima_gguf::{
 };
 use proxima_model_interop::{
     Architecture, ArchitectureRegistry, BoundProgram, DenseArch, InteropError, LoadedModel,
-    StepInput, StepInputContext,
+    StepInput, StepInputContext, symbols,
 };
 use proxima_primitives::pipe::Pipe;
 use proxima_tensor::spec::{elementwise, embedding_lookup, input_leaf};
@@ -239,7 +239,7 @@ impl Architecture for StepInputArch {
         let rows = input_leaf(
             &mut bound.program,
             DType::Int32,
-            vec![Extent::Symbolic(0)],
+            vec![Extent::Symbolic(symbols::FIRST_FREE)],
             "aux_rows",
         );
         let gathered = embedding_lookup(&mut bound.program, table, rows);
@@ -273,6 +273,7 @@ impl Architecture for StepInputArch {
         }
         out.push(StepInput {
             name: "aux_rows",
+            symbol: Some((symbols::FIRST_FREE, rows.len())),
             values: rows,
         });
 
@@ -292,6 +293,7 @@ impl Architecture for StepInputArch {
             .collect();
         out.push(StepInput {
             name: "aux_table",
+            symbol: None,
             values: table_values,
         });
     }
@@ -389,7 +391,7 @@ impl Architecture for NoStepInputArch {
         let rows = input_leaf(
             &mut bound.program,
             DType::Int32,
-            vec![Extent::Symbolic(0)],
+            vec![Extent::Symbolic(symbols::FIRST_FREE)],
             "aux_rows",
         );
         let gathered = embedding_lookup(&mut bound.program, table, rows);
@@ -407,6 +409,73 @@ impl Architecture for NoStepInputArch {
 }
 
 static NO_STEP_INPUT: NoStepInputArch = NoStepInputArch;
+
+/// Sad path: an [`Architecture::step_inputs`] that names a RESERVED symbol
+/// slot ([`symbols::KV_BOUND`]) instead of its own -- the decode loop must
+/// reject this before it ever evaluates, with
+/// [`InteropError::ReservedSymbolSlot`] naming the exact slot, rather than
+/// silently overwriting `kv_bound_extent` and resolving `aux_rows`'
+/// gather axis against the KV bucket capacity (the defect this whole test
+/// module exists to catch, restated as a bind-time input instead of a
+/// program author's mistake).
+struct ReservedSlotArch;
+
+impl Architecture for ReservedSlotArch {
+    fn name(&self) -> &'static str {
+        "acme-reserved-slot"
+    }
+
+    fn bind<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+    ) -> Result<BoundProgram<'file>, InteropError> {
+        let mut bound = DenseArch.bind(parsed, file_bytes)?;
+        let rows = input_leaf(
+            &mut bound.program,
+            DType::Int32,
+            vec![Extent::Symbolic(symbols::KV_BOUND)],
+            "aux_rows",
+        );
+        let _ = rows;
+        Ok(bound)
+    }
+
+    fn step_inputs(&self, context: &StepInputContext<'_>, out: &mut Vec<StepInput>) {
+        let rows: Vec<f32> = (0..context.new_count).map(|_| 0.0).collect();
+        out.push(StepInput {
+            name: "aux_rows",
+            symbol: Some((symbols::KV_BOUND, rows.len())),
+            values: rows,
+        });
+    }
+}
+
+static RESERVED_SLOT: ReservedSlotArch = ReservedSlotArch;
+
+#[proxima::test]
+async fn a_step_input_naming_a_reserved_symbol_slot_is_rejected() {
+    let name = "acme-reserved-slot";
+    let file_bytes = checkpoint_bytes(name);
+    let parsed = parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let mut registry = ArchitectureRegistry::with_builtin();
+    registry.register(&RESERVED_SLOT);
+
+    let model = LoadedModel::load_with_registry(&parsed, &file_bytes, &registry)
+        .expect("loads: bind itself never reads aux_rows");
+
+    match Pipe::call(&model, ("a".to_string(), 1)).await {
+        Err(InteropError::ReservedSymbolSlot { slot }) => {
+            assert_eq!(
+                slot,
+                symbols::KV_BOUND,
+                "must name the exact reserved slot the architecture collided with"
+            );
+        }
+        Ok(_) => panic!("expected ReservedSymbolSlot: aux_rows named the builtin kv_bound slot"),
+        Err(other) => panic!("expected ReservedSymbolSlot, got {other}"),
+    }
+}
 
 #[proxima::test]
 async fn a_program_leaf_with_no_step_inputs_override_reports_missing_step_input() {
