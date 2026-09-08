@@ -119,9 +119,11 @@ pub struct BoundProgram<'file> {
     /// One [`proxima_tensor::spec::MoeSite`] per MoE layer this
     /// architecture's forward-program builder produced -- empty on a dense
     /// checkpoint. `crate::generate`'s decode loop reads this to know which
-    /// extra nodes to request as step outputs when an
-    /// [`proxima_tensor::instrument::ExpertObserver`] is registered; see
-    /// that module's own doc for why the loop, not this kernel-building
+    /// extra nodes to request as step outputs when a routing observer
+    /// (`proxima_tensor::instrument::ExpertObserver`, `instrument`-gated,
+    /// hence not a doc link here -- it does not exist under a
+    /// non-`instrument` build this crate still documents) is registered;
+    /// see that module's own doc for why the loop, not this kernel-building
     /// step, decides whether to evaluate them.
     pub moe_sites: proxima_tensor::spec::MoeSites,
 }
