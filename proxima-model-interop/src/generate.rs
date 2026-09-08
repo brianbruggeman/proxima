@@ -966,26 +966,7 @@ fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize) -> usize 
         .min(capacity)
 }
 
-/// [`SsmLayerCache`]'s own fixed sizes, all derived from
-/// [`crate::qwen35::Qwen35Architecture`]'s ssm hyperparameters at load time
-/// -- `qwen35.cpp:57-60`'s same derivation
-/// `crate::qwen35::bind_qwen35_attn_qkv_split`'s own doc already walks
-/// through for the fused `attn_qkv.weight` split.
-#[derive(Debug, Clone, Copy)]
-struct Qwen35SsmShape {
-    /// `2 * ssm_key_dim + ssm_d_inner` -- one `qkv_mixed` row's width,
-    /// matching `proxima_tensor::spec::qwen35_forward_program`'s own
-    /// `ssm_cache.{layer}.conv_history` leaf shape's second axis.
-    qkv_dim: usize,
-    /// `ssm_d_conv - 1` -- the rolling conv-history window's fixed row
-    /// count [`append_qwen35_ssm_mixer`]'s doc names (the causal conv1d
-    /// kernel's own left-context width).
-    conv_rows: usize,
-    /// `ssm_d_state * head_v_dim * ssm_n_group * ssm_group` -- the gated
-    /// DeltaNet recurrent state's flat element count, matching
-    /// `qwen35_forward_program`'s own `ssm_cache.{layer}.state` leaf shape.
-    state_len: usize,
-}
+use crate::qwen35::Qwen35SsmShape;
 
 impl<'file> LoadedModel<'file> {
     /// `true` when [`Self::load`] built a device-resident, single-range
@@ -1130,67 +1111,60 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let (dense_weight_bytes, expert_weight_bytes, table_weight_bytes) =
             crate::bind::tensor_bytes_by_class(parsed);
-        // `general.architecture` read directly, before `architecture_from_metadata`
-        // (which assumes the dense per-layer shape every other checkpoint this
-        // crate binds has) -- qwen35's hybrid attention+state-space layers
-        // (`crate::qwen35`'s own module doc) are not that shape, so this
-        // checkpoint gets its own bind + forward-program seam instead of being
-        // handed to the dense path, which would either fail bind on an SSM
-        // layer's tensors or, worse, silently misbind them as dense attention.
-        if crate::bind::metadata_str(parsed, "general.architecture")? == "qwen35" {
-            let qwen_architecture = crate::qwen35::qwen35_architecture_from_metadata(parsed)?;
-            let weights =
-                crate::qwen35::bind_qwen35_weights(parsed, file_bytes, &qwen_architecture)?;
+        // The common case resolves the checkpoint's own `general.architecture`
+        // against the registered `Architecture` table and lets that impl's
+        // own `bind` do everything `load_inner`'s qwen35/dense arms used to
+        // assemble by hand -- see `crate::architecture`'s own module doc
+        // for why this seam exists. `paired_gate_up_reduce`/`fused_qkv_reduce`
+        // are per-call diagnostic knobs `Architecture::bind`'s fixed
+        // signature does not carry (`crate::dense::DenseArch`'s own doc on
+        // why), and (documented on both flag-carrying constructors) have
+        // "no effect on a qwen35 checkpoint" -- so a qwen35 checkpoint
+        // always takes this registry path regardless of either flag, and
+        // only a non-qwen35 checkpoint with a flag set falls through to
+        // the narrow inline path below.
+        let general_architecture = crate::bind::metadata_str(parsed, "general.architecture")?;
+        if general_architecture == "qwen35" || (!paired_gate_up_reduce && !fused_qkv_reduce) {
+            let registry = crate::architecture::ArchitectureRegistry::with_builtin();
+            let resolved = registry.resolve(parsed)?;
+            let bound = resolved.bind(parsed, file_bytes)?;
+            let step_state = resolved.step_state(parsed)?;
             let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
-            let (program, logits_root, layer_roots) =
-                crate::qwen35::qwen35_forward_program(&qwen_architecture)?;
-            let ssm_shape = qwen35_ssm_shape(&qwen_architecture);
-            let architecture = ModelArchitecture {
-                vocab: qwen_architecture.vocab,
-                embedding: qwen_architecture.embedding,
-                feed_forward: qwen_architecture.feed_forward,
-                query_heads: qwen_architecture.query_heads,
-                kv_heads: qwen_architecture.kv_heads,
-                head_dim: qwen_architecture.head_dim,
-                block_count: qwen_architecture.block_count,
-                // Qwen3.5 never routes FFN through experts
-                // (`crate::qwen35::qwen35_forward_program`'s own doc,
-                // `qwen35.cpp:471`), so this checkpoint reads the same
-                // `expert_count == 0` dense-FFN branch every other checkpoint
-                // without a `{architecture}.expert_count` key does.
-                expert_count: 0,
-                expert_used_count: 0,
-                rope_freq_base: qwen_architecture.rope_freq_base,
-                rms_epsilon: qwen_architecture.rms_epsilon,
-                tied_embeddings: false,
+            // The single-range program is dense-Mistral-only
+            // (`SingleRangeProgram`'s own field doc): never built for
+            // qwen35's hybrid attention+state-space layers, and
+            // `build_single_range_program` itself already turns away any
+            // mixture-of-experts checkpoint.
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            let single_range = if resolved.name() == "qwen35" {
+                None
+            } else {
+                let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
+                build_single_range_program(&bound.architecture, qk_norm)?
             };
             return Ok(Self {
-                weights,
-                architecture,
+                weights: bound.weights,
+                architecture: bound.architecture,
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                     dense_bytes: dense_weight_bytes,
                     expert_bytes: expert_weight_bytes,
                     table_bytes: table_weight_bytes,
-                    ssm_state_bytes: qwen35_ssm_state_bytes(
-                        ssm_shape,
-                        qwen_architecture.block_count,
-                    ),
+                    ssm_state_bytes: step_state
+                        .as_ref()
+                        .map_or(0, |state| state.ssm_state_bytes),
                 },
                 vocab,
-                program,
-                logits_root,
-                hidden_root: None,
-                layer_roots,
+                program: bound.program,
+                logits_root: bound.logits_root,
+                hidden_root: bound.hidden_root,
+                layer_roots: bound.layer_roots,
                 model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
                 checkpoint_bytes: file_bytes.len(),
-                qwen35_ssm_shape: Some(ssm_shape),
-                qwen35_attn_head_dim: Some(qwen_architecture.attn_head_dim),
-                // The single-range program is dense-Mistral-only
-                // (`SingleRangeProgram`'s own field doc); qwen35's hybrid
-                // attention+state-space layers are never that shape.
+                qwen35_ssm_shape: step_state.as_ref().map(|state| state.ssm_shape),
+                qwen35_attn_head_dim: step_state.as_ref().map(|state| state.attn_head_dim),
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                single_range: None,
+                single_range,
                 checkpoint_mapping: file_bytes,
             });
         }
@@ -1391,39 +1365,6 @@ impl<'file> LoadedModel<'file> {
     }
 }
 
-/// [`Qwen35SsmShape`]'s own derivation off a real checkpoint's ssm
-/// hyperparameters -- `qwen35.cpp:57-60`'s same arithmetic
-/// `crate::qwen35::Qwen35Architecture::ssm_key_dim`/`ssm_value_dim` already
-/// use for the fused `attn_qkv.weight` row split, plus `head_v_dim =
-/// ssm_inner_size / ssm_time_step_rank` and `ssm_group = ssm_time_step_rank
-/// / ssm_group_count` (`proxima_tensor::spec::qwen35_forward_program`'s own
-/// `head_v_dim`/`ssm_group` locals).
-fn qwen35_ssm_shape(architecture: &crate::qwen35::Qwen35Architecture) -> Qwen35SsmShape {
-    let ssm_key_dim = architecture.ssm_state_size * architecture.ssm_group_count;
-    let head_v_dim = architecture.ssm_inner_size / architecture.ssm_time_step_rank;
-    let ssm_group = architecture.ssm_time_step_rank / architecture.ssm_group_count;
-    Qwen35SsmShape {
-        qkv_dim: (2 * ssm_key_dim + architecture.ssm_inner_size) as usize,
-        conv_rows: (architecture.ssm_conv_kernel.saturating_sub(1)) as usize,
-        state_len: (architecture.ssm_state_size
-            * head_v_dim
-            * architecture.ssm_group_count
-            * ssm_group) as usize,
-    }
-}
-
-/// [`Qwen35SsmShape`]'s own resident bytes across every layer -- one
-/// [`SsmLayerCache::new`]'s worth (`conv_rows * qkv_dim` conv-history
-/// elements plus `state_len` state elements, both `f32`) times
-/// `block_count` layers. `crate::memory_fit`'s own load-time gate reads
-/// this as the SSM class of [`crate::memory_fit::WeightClassBytes`] -- `0`
-/// for every non-qwen35 checkpoint, which never builds a
-/// [`Qwen35SsmShape`] at all.
-#[cfg(all(feature = "metal", target_os = "macos"))]
-fn qwen35_ssm_state_bytes(shape: Qwen35SsmShape, block_count: u32) -> u64 {
-    let per_layer_elements = (shape.conv_rows * shape.qkv_dim + shape.state_len) as u64;
-    per_layer_elements * core::mem::size_of::<f32>() as u64 * u64::from(block_count)
-}
 
 pub(crate) enum LogitsSink<'sink> {
     Discard,

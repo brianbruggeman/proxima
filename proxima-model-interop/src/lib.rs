@@ -24,8 +24,12 @@
 
 extern crate alloc;
 
+#[cfg(feature = "std")]
+mod architecture;
 mod bind;
 pub mod capability;
+#[cfg(feature = "std")]
+mod dense;
 mod dtype;
 mod error;
 #[cfg(feature = "std")]
@@ -57,8 +61,18 @@ mod test_support;
 mod transform;
 
 #[cfg(feature = "std")]
+pub use architecture::{Architecture, ArchitectureRegistry, BoundProgram, StepState};
+#[cfg(feature = "std")]
 pub use bind::gguf_tensor_as_packed_block;
 pub use bind::{ModelArchitecture, architecture_from_metadata, gguf_tensor_as_f32};
+#[cfg(feature = "std")]
+pub use bind::{
+    BoundWeights, bind_dense, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as,
+    find_tensor, metadata_f32_optional, metadata_str, metadata_str_opt, metadata_u32,
+    metadata_u32_optional_or, vocab_from_token_embedding,
+};
+#[cfg(feature = "std")]
+pub use dense::DenseArch;
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
 #[cfg(feature = "std")]
@@ -71,7 +85,9 @@ pub use lfm2::{
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
 #[cfg(feature = "std")]
-pub use qwen35::{Qwen35Architecture, Qwen35LayerKind, bind_qwen35_checkpoint};
+pub use qwen35::{
+    Qwen35Architecture, Qwen35Arch, Qwen35LayerKind, Qwen35SsmShape, bind_qwen35_checkpoint,
+};
 #[cfg(feature = "std")]
 pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, quality_report};
 #[cfg(all(feature = "std", feature = "instrument"))]
