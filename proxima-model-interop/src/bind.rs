@@ -34,7 +34,7 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::QuantError;
 use proxima_gguf::quant::{q3_k, q4_k, q5_k, q6_k, q8_0};
 #[cfg(feature = "std")]
-use proxima_gguf::quant::{bf16, f16, q4_0};
+use proxima_gguf::quant::{bf16, f16, q2_k, q4_0};
 #[cfg(feature = "std")]
 use proxima_gguf::restack::{discover_experts, plan_stack, restack_into};
 use proxima_gguf::tensor::TensorInfo;
@@ -798,6 +798,15 @@ pub enum PackedOwnedKind {
     Q4_0,
     Float16,
     BFloat16,
+    /// Added for [`crate::expert_slab::encode_expert_copy`]: a residency
+    /// policy downgrading a resident MoE expert needs a codec smaller than
+    /// this checkpoint's own on-disk quantization, and `Q2_K` is the
+    /// smallest [`proxima_gguf::quant`] ships an encoder for. Not reachable
+    /// from [`Self::from_ggml_type`]'s checkpoint-load direction until a
+    /// caller actually needs `recode_tensor`'s `weight_precision` knob to
+    /// target `Q2_K` too -- today it is only ever constructed by
+    /// [`crate::expert_slab::encode_expert_copy`]'s own caller.
+    Q2K,
 }
 
 #[cfg(feature = "std")]
@@ -818,6 +827,7 @@ impl PackedOwnedKind {
             PackedOwnedKind::Q4_0 => proxima_tensor::cpu::QuantizedBlock::Q4_0(bytes),
             PackedOwnedKind::Float16 => proxima_tensor::cpu::QuantizedBlock::Float16(bytes),
             PackedOwnedKind::BFloat16 => proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes),
+            PackedOwnedKind::Q2K => proxima_tensor::cpu::QuantizedBlock::Q2K(bytes),
         }
     }
 
@@ -827,8 +837,13 @@ impl PackedOwnedKind {
     /// `run_reduce_quantized`'s gather rejects a `Float32` weight block
     /// outright, `proxima_tensor::cpu::run_reduce_quantized`'s own
     /// `shape_error` arm for that variant; and every `GgmlType` with no
-    /// [`proxima_gguf::quant`] encoder at all -- `Q2_K`, the `Iq*` family,
-    /// `Q4_1`/`Q5_1`/`Q8_1`, the integer/`F64`/`Tq*` types).
+    /// [`proxima_gguf::quant`] encoder at all -- the `Iq*` family,
+    /// `Q4_1`/`Q5_1`/`Q8_1`, the integer/`F64`/`Tq*` types. `Q2_K` DOES have
+    /// an encoder now -- [`Self::Q2K`] exists -- but no checkpoint-load
+    /// caller has needed `Q2_K` as a `weight_precision` recode TARGET yet,
+    /// so this direction stays unwired until one does; construct
+    /// [`Self::Q2K`] directly, the way [`crate::expert_slab::encode_expert_copy`]'s
+    /// caller does).
     fn from_ggml_type(ggml_type: GgmlType) -> Option<Self> {
         match ggml_type {
             GgmlType::Q4_K => Some(PackedOwnedKind::Q4K),
@@ -861,7 +876,36 @@ impl PackedOwnedKind {
             PackedOwnedKind::Q4_0 => "q4_0",
             PackedOwnedKind::Float16 => "f16",
             PackedOwnedKind::BFloat16 => "bf16",
+            PackedOwnedKind::Q2K => "q2_k",
         }
+    }
+
+    /// The on-disk [`GgmlType`] this tag packs bytes as -- the reverse of
+    /// [`Self::from_ggml_type`], needed by [`Self::byte_len_for`] to look
+    /// up a codec's block layout without re-typing
+    /// [`GgmlType::block_layout`]'s numbers a second time here.
+    fn to_ggml_type(self) -> GgmlType {
+        match self {
+            PackedOwnedKind::Q4K => GgmlType::Q4_K,
+            PackedOwnedKind::Q5K => GgmlType::Q5_K,
+            PackedOwnedKind::Q6K => GgmlType::Q6_K,
+            PackedOwnedKind::Q8_0 => GgmlType::Q8_0,
+            PackedOwnedKind::Q3K => GgmlType::Q3_K,
+            PackedOwnedKind::Q4_0 => GgmlType::Q4_0,
+            PackedOwnedKind::Float16 => GgmlType::F16,
+            PackedOwnedKind::BFloat16 => GgmlType::Bf16,
+            PackedOwnedKind::Q2K => GgmlType::Q2_K,
+        }
+    }
+
+    /// Packed byte length for `element_count` elements of this codec --
+    /// `element_count / block_elements * block_bytes`, the same arithmetic
+    /// [`recode_tensor`] already does inline for its own `layout` lookup.
+    /// [`crate::expert_slab::encode_expert_copy`] uses this to size the
+    /// encode buffer before calling [`quantize_to_kind`].
+    pub(crate) fn byte_len_for(self, element_count: usize) -> usize {
+        let layout = self.to_ggml_type().block_layout();
+        (element_count as u64 / layout.block_elements * layout.block_bytes) as usize
     }
 }
 
@@ -1195,7 +1239,7 @@ fn emit_weight_recoded(
 /// no-encoder case [`PackedOwnedKind::from_ggml_type`] already filtered,
 /// instead of this function re-deciding it with an unreachable arm.
 #[cfg(feature = "std")]
-fn quantize_to_kind(
+pub(crate) fn quantize_to_kind(
     kind: PackedOwnedKind,
     decoded: &[f32],
     output: &mut [u8],
@@ -1209,6 +1253,7 @@ fn quantize_to_kind(
         PackedOwnedKind::Q4_0 => q4_0::quantize(decoded, output),
         PackedOwnedKind::Float16 => f16::quantize(decoded, output),
         PackedOwnedKind::BFloat16 => bf16::quantize(decoded, output),
+        PackedOwnedKind::Q2K => q2_k::quantize(decoded, output),
     }
 }
 

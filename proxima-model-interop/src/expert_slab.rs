@@ -23,13 +23,43 @@
 
 use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use proxima_tensor::NodeId;
 use proxima_tensor::cpu::{ExpertEntry, ExpertSource};
 
-use crate::bind::PackedOwnedKind;
+use crate::bind::{PackedOwnedKind, quantize_to_kind};
 use crate::error::InteropError;
+
+/// Encodes `rows` (one MoE expert's dequantized `[out_dim, in_dim]` `f32`
+/// weights) into `codec`'s packed byte representation, one row block at a
+/// time inside [`quantize_to_kind`]'s own encoder -- no whole-model buffer
+/// beyond this single expert's own `f32` rows. A residency policy composes
+/// this with [`ExpertSlab::page_expert`]: dequantize the expert's current
+/// bytes (`proxima_gguf::quant`'s per-codec `dequantize`/`dequantize_block`),
+/// optionally mutate them, re-encode here into a smaller/different codec
+/// (`Q2_K` is the smallest [`PackedOwnedKind`] this crate's encoders
+/// support), then hand the result to [`ExpertSlab::page_expert`] -- the
+/// same [`PackedOwnedKind`] tag both calls share is what lets
+/// [`ExpertCopy::entry`] read the paged bytes back as the right
+/// [`proxima_tensor::cpu::QuantizedBlock`] variant.
+///
+/// # Errors
+/// [`InteropError::Quant`] if `rows.len()` does not equal `out_dim as usize
+/// * in_dim as usize`, or is not a whole multiple of `codec`'s own block
+/// width -- [`quantize_to_kind`]'s underlying encoder rejects both.
+pub fn encode_expert_copy(
+    rows: &[f32],
+    out_dim: u32,
+    in_dim: u32,
+    codec: PackedOwnedKind,
+) -> Result<Vec<u8>, InteropError> {
+    let element_count = out_dim as usize * in_dim as usize;
+    let mut encoded = vec![0u8; codec.byte_len_for(element_count)];
+    quantize_to_kind(codec, rows, &mut encoded)?;
+    Ok(encoded)
+}
 
 /// One expert's own weight bytes for one gathered-reduce projection --
 /// either ALIASING the checkpoint's own loaded bytes (every
