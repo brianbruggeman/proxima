@@ -29654,6 +29654,403 @@ mod tests {
         }
     }
 
+    /// A deeper chain than the sibling test above: TWO distinct leaf
+    /// inputs (`attended`, `gate_raw`) feed a composed sigmoid gate
+    /// (`Reciprocal(Add(Exponential(Negate(gate_raw)), 1))`) that is then
+    /// multiplied against `attended` itself before the quantized
+    /// `Multiply(weight, gated)` a reduce fuses -- the real checkpoint's
+    /// `sigmoid_attn_gate` / `gated_attended` shape (`spec.rs:4390-4397`),
+    /// with a flat (single-letter) contraction axis rather than `wo`'s own
+    /// multi-axis packed row. RED-first probe: this shape alone, data
+    /// shows, does NOT reproduce the real checkpoint's discrepancy --
+    /// `fused` and `materialized` come back bit-identical and both within
+    /// quantization noise of the sigmoid-gated f64 reference, so a
+    /// two-distinct-leaf composed gate over a FLAT contraction axis is not
+    /// where `wo`'s own error comes from. Kept as a permanent regression
+    /// guard for the shape it does cover; the multi-axis packed-contraction
+    /// sibling below carries the shape that actually reproduces it.
+    #[test]
+    fn evaluate_quantized_applies_the_full_composed_gate_not_just_its_first_leaf() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let rows: u32 = 3;
+        let k = QK_K as u32;
+
+        let attended: Vec<f32> = random_vec(37, k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let gate_raw: Vec<f32> = random_vec(41, k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let weight_f32: Vec<f32> = random_vec(43, rows as usize * k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+
+        let block_bytes = BLOCK_BYTES;
+        let mut weight_blocks = vec![0u8; rows as usize * block_bytes];
+        for (row_f32, row_blocks) in weight_f32
+            .chunks_exact(k as usize)
+            .zip(weight_blocks.chunks_exact_mut(block_bytes))
+        {
+            quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+        }
+
+        let mut program = Vec::new();
+        let weight = block(&mut program, DType::UInt8, &[Extent::Static(rows), Extent::Static(k)]);
+        let attended_node = f32_block(&mut program, &[Extent::Static(k), Extent::Static(1)]);
+        let gate_node = f32_block(&mut program, &[Extent::Static(k), Extent::Static(1)]);
+        let one = crate::spec::scalar_constant(&mut program, 1.0);
+        let negated_gate = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: alloc::vec![(gate_node, IndexMap::Affine(map::projection(2, &[0, 1])))],
+                name: None,
+            },
+        );
+        let exp_neg_gate = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Exponential,
+                operands: alloc::vec![(negated_gate, IndexMap::Affine(map::projection(2, &[0, 1])))],
+                name: None,
+            },
+        );
+        let one_plus_exp_gate = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![
+                    (exp_neg_gate, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (one, IndexMap::Affine(map::projection(2, &[]))),
+                ],
+                name: None,
+            },
+        );
+        let sigmoid_gate = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Reciprocal,
+                operands: alloc::vec![(one_plus_exp_gate, IndexMap::Affine(map::projection(2, &[0, 1])))],
+                name: None,
+            },
+        );
+        let gated = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (attended_node, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (sigmoid_gate, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (gated, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("quantized_matmul_with_composed_gate".into()),
+            }),
+        );
+
+        let blocks = [
+            QuantizedBlock::Q4K(&weight_blocks),
+            QuantizedBlock::Float32(&attended),
+            QuantizedBlock::Float32(&gate_raw),
+        ];
+
+        let fused = evaluate_quantized(&program, &[], &blocks, &[sum])
+            .expect("fused quantized matmul evaluates")
+            .root()
+            .to_vec();
+
+        let materialized_result = evaluate_quantized(&program, &[], &blocks, &[gated, sum])
+            .expect("materialized quantized matmul evaluates");
+        let materialized = materialized_result
+            .get(sum)
+            .expect("the reduce output was requested")
+            .0
+            .to_vec();
+
+        let expected: Vec<f32> = weight_f32
+            .chunks_exact(k as usize)
+            .map(|row| {
+                row.iter()
+                    .zip(attended.iter())
+                    .zip(gate_raw.iter())
+                    .map(|((&weight_value, &attended_value), &gate_value)| {
+                        let sigmoid = 1.0_f64 / (1.0_f64 + f64::from(-gate_value).exp());
+                        f64::from(weight_value) * (f64::from(attended_value) * sigmoid)
+                    })
+                    .sum::<f64>() as f32
+            })
+            .collect();
+
+        eprintln!("fused={fused:?} materialized={materialized:?} expected={expected:?}");
+
+        for (&got, &want) in materialized.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() / want.abs() < 0.02,
+                "materialized path must match the sigmoid-gated reference: got={got} want={want}"
+            );
+        }
+        assert_eq!(
+            fused, materialized,
+            "fusing a two-distinct-leaf composed gate over a flat contraction axis into the \
+             reduce must not change the result versus forcing the gate to materialize first"
+        );
+        for (&got, &want) in fused.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() / want.abs() < 0.02,
+                "the fused path must also match the sigmoid-gated reference: got={got} want={want}"
+            );
+        }
+    }
+
+    /// The shape that actually reproduces the real checkpoint's `wo`
+    /// discrepancy: the same two-distinct-leaf composed sigmoid gate as
+    /// the sibling test above, now multiplied against a weight whose
+    /// packed row is a THREE-letter affine contraction (`u`, `g`, `d`) --
+    /// `wo_flat`'s own map string, `spec.rs:9024-9028`, mirrored here at
+    /// `kv_heads=2, group=2, head_dim=64` (`u*g*d = 256 = QK_K`, one clean
+    /// `Q4_K` super-block per output row) and `embedding=3`. Neither
+    /// ingredient alone reproduces it: the sibling test above (composed
+    /// gate, flat contraction) is bit-exact; `correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_multi_axis_contraction_group`
+    /// in `bind.rs` (multi-axis contraction, no composed gate) proved the
+    /// stride algebra alone is right. Both together are what
+    /// `run_reduce_quantized`'s `activation_row = &activation[...]`
+    /// (`cpu.rs:9271`) cannot express: it reads ONE flat leaf's buffer
+    /// verbatim, under a layout computed for the FUSED reduce's own
+    /// iteration space, and never re-applies `resolved`'s composed steps
+    /// (the sigmoid gate) at all.
+    #[test]
+    fn evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contraction() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, quantize};
+
+        const KV_HEADS: u64 = 2;
+        const GROUP: u64 = 2;
+        const HEAD_DIM: u64 = 64;
+        const EMBED: u64 = 3;
+        const IN_DIM: u64 = KV_HEADS * GROUP * HEAD_DIM;
+        assert_eq!(IN_DIM as usize, proxima_gguf::quant::q4_k::QK_K, "one clean super-block per output row");
+
+        let attended: Vec<f32> = random_vec(47, IN_DIM as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let gate_raw: Vec<f32> = random_vec(53, IN_DIM as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let weight_f32: Vec<f32> = random_vec(59, EMBED as usize * IN_DIM as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+
+        let in_dim = IN_DIM as usize;
+        let blocks_per_row = in_dim / proxima_gguf::quant::q4_k::QK_K;
+        let row_bytes = blocks_per_row * BLOCK_BYTES;
+        let mut weight_blocks = vec![0u8; EMBED as usize * row_bytes];
+        for (row_f32, row_blocks) in weight_f32
+            .chunks_exact(in_dim)
+            .zip(weight_blocks.chunks_exact_mut(row_bytes))
+        {
+            quantize(row_f32, row_blocks).expect("row length is a whole number of QK_K super-blocks");
+        }
+
+        let mut program = Vec::new();
+        // physical weight shape [EMBED, IN_DIM] (`quantize`'s own natural
+        // row-major layout); iteration axes here are (u=0, g=1, d=2, e=3).
+        let weight = block(
+            &mut program,
+            DType::UInt8,
+            &[Extent::Static(EMBED as u32), Extent::Static(IN_DIM as u32)],
+        );
+        let attended_node = f32_block(
+            &mut program,
+            &[
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(GROUP as u32),
+                Extent::Static(HEAD_DIM as u32),
+            ],
+        );
+        let gate_node = f32_block(
+            &mut program,
+            &[
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(GROUP as u32),
+                Extent::Static(HEAD_DIM as u32),
+            ],
+        );
+        let one = crate::spec::scalar_constant(&mut program, 1.0);
+        let negated_gate = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: alloc::vec![(gate_node, IndexMap::Affine(map::projection(3, &[0, 1, 2])))],
+                name: None,
+            },
+        );
+        let exp_neg_gate = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Exponential,
+                operands: alloc::vec![(negated_gate, IndexMap::Affine(map::projection(3, &[0, 1, 2])))],
+                name: None,
+            },
+        );
+        let one_plus_exp_gate = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![
+                    (exp_neg_gate, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                    (one, IndexMap::Affine(map::projection(3, &[]))),
+                ],
+                name: None,
+            },
+        );
+        let sigmoid_gate = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Reciprocal,
+                operands: alloc::vec![(one_plus_exp_gate, IndexMap::Affine(map::projection(3, &[0, 1, 2])))],
+                name: None,
+            },
+        );
+        let gated = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (attended_node, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                    (sigmoid_gate, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                ],
+                name: None,
+            },
+        );
+        // iteration space (u=0, g=1, d=2, e=3): weight's packed row axis is
+        // `(group*head_dim)*u + head_dim*g + d`, exactly `wo_flat`'s own
+        // map string with the real dims swapped for these tiny ones; its
+        // second physical axis is the plain output letter `e`. `gated`
+        // reads (u, g, d), broadcasting over `e`.
+        let row_terms = [
+            AxisTerm::scaled(0, i32::try_from(GROUP * HEAD_DIM).expect("fits i32")),
+            AxisTerm::scaled(1, i32::try_from(HEAD_DIM).expect("fits i32")),
+            AxisTerm::scaled(2, 1),
+        ];
+        let weight_map = IndexMap::Affine(map::affine(
+            4,
+            &[(&[AxisTerm::scaled(3, 1)], 0), (&row_terms, 0)],
+        ));
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (weight, weight_map),
+                    (gated, IndexMap::Affine(map::projection(4, &[0, 1, 2]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+                out_map: IndexMap::Affine(map::projection(4, &[3])),
+                keep: Keep::Reduce,
+                name: Some("quantized_matmul_with_composed_gate_multi_axis_contraction".into()),
+            }),
+        );
+
+        let blocks = [
+            QuantizedBlock::Q4K(&weight_blocks),
+            QuantizedBlock::Float32(&attended),
+            QuantizedBlock::Float32(&gate_raw),
+        ];
+
+        let fused = evaluate_quantized(&program, &[], &blocks, &[sum])
+            .expect("fused quantized matmul evaluates")
+            .root()
+            .to_vec();
+
+        let materialized_result = evaluate_quantized(&program, &[], &blocks, &[gated, sum])
+            .expect("materialized quantized matmul evaluates");
+        let materialized = materialized_result
+            .get(sum)
+            .expect("the reduce output was requested")
+            .0
+            .to_vec();
+
+        let expected: Vec<f32> = weight_f32
+            .chunks_exact(in_dim)
+            .map(|row| {
+                row.iter()
+                    .zip(attended.iter())
+                    .zip(gate_raw.iter())
+                    .map(|((&weight_value, &attended_value), &gate_value)| {
+                        let sigmoid = 1.0_f64 / (1.0_f64 + f64::from(-gate_value).exp());
+                        f64::from(weight_value) * (f64::from(attended_value) * sigmoid)
+                    })
+                    .sum::<f64>() as f32
+            })
+            .collect();
+
+        eprintln!("fused={fused:?} materialized={materialized:?} expected={expected:?}");
+
+        for (&got, &want) in materialized.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() / want.abs() < 0.02,
+                "materialized path must match the sigmoid-gated reference: got={got} want={want}"
+            );
+        }
+        for (&got, &want) in fused.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() / want.abs() < 0.02,
+                "the fused path must also match the sigmoid-gated reference over a multi-axis \
+                 packed contraction: got={got} want={want}"
+            );
+        }
+    }
+
     /// [`evaluate_quantized_exact`] run end to end on the same program as
     /// [`evaluate_quantized_matmul_matches_dequantize_then_f32_evaluate`]
     /// above, held to a tighter absolute float-noise-floor bound instead of
