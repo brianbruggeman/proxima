@@ -3829,8 +3829,7 @@ pub fn append_qwen35_dense_attention_only(
     attn_norm_weight: NodeId,
     q_norm_weight: NodeId,
     k_norm_weight: NodeId,
-    wq: NodeId,
-    w_gate_q: NodeId,
+    wq_gate: NodeId,
     wk: NodeId,
     wv: NodeId,
     wo: NodeId,
@@ -3858,8 +3857,7 @@ pub fn append_qwen35_dense_attention_only(
         attn_norm_weight,
         q_norm_weight,
         k_norm_weight,
-        wq,
-        w_gate_q,
+        wq_gate,
         wk,
         wv,
         wo,
@@ -3882,27 +3880,35 @@ pub fn append_qwen35_dense_attention_only(
 /// variable that happened to hold it.
 ///
 /// **Split convention for `q_split`/`gate_split`:** this function receives
-/// `wq`/`w_gate_q` ALREADY split -- the fused on-disk `blk.N.attn_q.weight`
-/// (`2 * query_heads * attn_head_dim` wide) is sliced by the caller via
-/// [`per_head_channel_slice`] (`spec.rs:8750-8765`) using the PER-HEAD
-/// INTERLEAVE convention: each head's own contiguous `2*attn_head_dim`
-/// block splits into `[0, attn_head_dim)` (`wq`) and
-/// `[attn_head_dim, 2*attn_head_dim)` (`w_gate_q`). This matches HF Qwen3.5
-/// (`modeling_qwen3_next.py:267-268,295-298`,
+/// `wq_gate` ALREADY reshaped to expose a head axis (the fused on-disk
+/// `blk.N.attn_q.weight`, `2 * query_heads * attn_head_dim` wide, reshaped
+/// by the caller to `[embedding, heads, 2*attn_head_dim]` via the same
+/// multiply-by-broadcast-ones view [`append_qwen35_dense_attention_only`]'s
+/// caller already uses for `wk`/`wv` -- never a per-head WEIGHT-level slice:
+/// splitting a packed quantized weight per head before the real contraction
+/// runs breaks `cpu::is_quantized_matmul_operand`'s recognizer,
+/// which then derives the packed row length from the wrong axis
+/// (`per_head_channel_slice`'s own former call site here, `spec.rs`
+/// `qwen35moe_layer3_gated_attention_position0_matches_tapped_reference`
+/// RED before this fix). This function itself does the ONE real
+/// `qg_raw = x_normed @ wq_gate` contraction, then narrows to `q`/`gate` per
+/// head via [`per_head_channel_range`] on that (dense float32) activation,
+/// using the PER-HEAD INTERLEAVE convention: each head's own contiguous
+/// `2*attn_head_dim` block splits into `[0, attn_head_dim)` (`q_split`) and
+/// `[attn_head_dim, 2*attn_head_dim)` (`gate_split`). This matches HF
+/// Qwen3.5 (`modeling_qwen3_next.py:267-268,295-298`,
 /// `torch.chunk(query_states.view(..., heads, 2*head_dim), 2, dim=-1)` --
 /// chunking the LAST axis of a view whose second-to-last axis is `heads` is
-/// per-head, not a global halves split across the whole flat width). There
-/// is consequently no single fused "`qg_proj`" node inside this function's
-/// own scope to tap -- the split happens one call frame up, on the WEIGHT,
-/// before either matmul runs; `q_split`/`gate_split` below are that split's
-/// two projection outputs (`q_raw`/`gate_raw`), which are exactly the
-/// columns a fused-then-chunked projection would have produced, since
-/// matmul distributes over disjoint output columns.
+/// per-head, not a global halves split across the whole flat width), and is
+/// mathematically identical to a fused-then-chunked projection since matmul
+/// distributes over disjoint output columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Qwen35DenseAttentionTaps {
-    /// `q_raw`: `x_normed @ wq`, per-head, pre-qk-norm.
+    /// `q_raw`: `x_normed @ wq_gate`, narrowed to `[0, attn_head_dim)` per
+    /// head, pre-qk-norm.
     pub q_split: NodeId,
-    /// `gate_raw`: `x_normed @ w_gate_q`, per-head, pre-sigmoid.
+    /// `gate_raw`: `x_normed @ wq_gate`, narrowed to
+    /// `[attn_head_dim, 2*attn_head_dim)` per head, pre-sigmoid.
     pub gate_split: NodeId,
     /// `q` after per-head RMSNorm (`q_norm_weight`), full `attn_head_dim` width.
     pub q_normed: NodeId,
@@ -3965,8 +3971,7 @@ pub fn append_qwen35_dense_attention_only_with_taps(
     attn_norm_weight: NodeId,
     q_norm_weight: NodeId,
     k_norm_weight: NodeId,
-    wq: NodeId,
-    w_gate_q: NodeId,
+    wq_gate: NodeId,
     wk: NodeId,
     wv: NodeId,
     wo: NodeId,
@@ -3980,37 +3985,38 @@ pub fn append_qwen35_dense_attention_only_with_taps(
 
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
-    let q_product = elementwise(
+    // Single full-width `q_proj` reduce against the packed `wq_gate` leaf --
+    // `is_quantized_matmul_operand`'s recognizer (`cpu.rs`) only fires
+    // correctly when a quantized weight feeds a Multiply directly into an
+    // Add-reduce; splitting `wq_gate` PER HEAD first (the old
+    // `per_head_channel_slice`-on-the-weight approach) inserted an extra
+    // select-then-reduce between the packed leaf and this contraction, which
+    // that recognizer folds into the SAME "quantized matmul" shape and then
+    // derives `rows`/`k` from the wrong axis pair (`run_reduce_quantized`
+    // treats the reduced flat `heads*2*attn_head_dim` axis as the
+    // contraction width instead of `embedding`), corrupting every row byte
+    // offset. Splitting the ACTIVATION output below instead keeps the
+    // packed leaf's only consumer a genuine one-elementwise-then-reduce
+    // matmul, then narrows q/gate per head with the same
+    // [`per_head_channel_range`] technique `q_pass`/`k_pass` already use on
+    // dense float32 activations just below.
+    let qg_product = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(normed, "si->shdi"), (wq, "ihd->shdi")],
+        &[(normed, "si->shci"), (wq_gate, "ihc->shci")],
     )?;
-    let q_raw = reduce(
+    let qg_raw = reduce(
         program,
         DType::Float32,
         ScalarOp::Add,
         ReduceInit::Zero,
-        q_product,
-        "shdi->shdi",
-        "shd->shdi",
+        qg_product,
+        "shci->shci",
+        "shc->shci",
     )?;
-
-    let gate_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed, "si->shdi"), (w_gate_q, "ihd->shdi")],
-    )?;
-    let gate_raw = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        gate_product,
-        "shdi->shdi",
-        "shd->shdi",
-    )?;
+    let q_raw = per_head_channel_range(program, qg_raw, "h", attn_head_dim * 2, 0, attn_head_dim)?;
+    let gate_raw = per_head_channel_range(program, qg_raw, "h", attn_head_dim * 2, attn_head_dim, attn_head_dim)?;
 
     let k_product = elementwise(
         program,
@@ -4454,8 +4460,7 @@ pub fn append_qwen35_dense_attention_layer(
     ffn_norm_weight: NodeId,
     q_norm_weight: NodeId,
     k_norm_weight: NodeId,
-    wq: NodeId,
-    w_gate_q: NodeId,
+    wq_gate: NodeId,
     wk: NodeId,
     wv: NodeId,
     wo: NodeId,
@@ -4486,8 +4491,7 @@ pub fn append_qwen35_dense_attention_layer(
         attn_norm_weight,
         q_norm_weight,
         k_norm_weight,
-        wq,
-        w_gate_q,
+        wq_gate,
         wk,
         wv,
         wo,
@@ -8910,21 +8914,33 @@ pub fn qwen35_forward_program(
                 ],
                 &alloc::format!("blk.{layer}.attn_q.weight"),
             );
-            let wq = per_head_channel_slice(
+            // A pure reshape (multiply by a broadcast-ones constant), the
+            // same lossless-reshape donor trick `wk`/`wv` already use below
+            // -- NEVER `per_head_channel_slice` on this packed leaf. That
+            // per-head WEIGHT-level slice inserted a select-then-reduce
+            // between `wq_flat` and the real contraction, which
+            // `is_quantized_matmul_operand`/`run_reduce_quantized` (`cpu.rs`)
+            // then misidentifies as the whole quantized matmul shape and
+            // derives `rows`/`k` from the wrong axis pair -- `q`/`gate` now
+            // split on the ACTIVATION side instead, inside
+            // [`append_qwen35_dense_attention_only_with_taps`], via
+            // [`per_head_channel_range`].
+            let qg_head_ones = op::append(
                 &mut program,
-                wq_flat,
-                query_heads,
-                attn_head_dim * 2,
-                0,
-                attn_head_dim,
-            )?;
-            let w_gate_q = per_head_channel_slice(
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(query_heads), Extent::Static(attn_head_dim * 2)],
+                    value: 1.0,
+                },
+            );
+            let wq_gate = elementwise(
                 &mut program,
-                wq_flat,
-                query_heads,
-                attn_head_dim * 2,
-                attn_head_dim,
-                attn_head_dim,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[
+                    (wq_flat, alloc::format!("i,{}*h+c->ihc", attn_head_dim * 2).as_str()),
+                    (qg_head_ones, "hc->ihc"),
+                ],
             )?;
             let wk_flat = input_leaf(
                 &mut program,
@@ -9106,8 +9122,7 @@ pub fn qwen35_forward_program(
                 ffn_norm_weight,
                 q_norm_weight,
                 k_norm_weight,
-                wq,
-                w_gate_q,
+                wq_gate,
                 wk,
                 wv,
                 wo,
@@ -16956,12 +16971,12 @@ value = 1.0
         let (is_future, _neg_infinity) = causal_mask(&mut program).expect("causal mask lowers");
         let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
 
+        let head8_shape = alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(8)];
         let attn_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "attn_norm_weight");
         let ffn_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "ffn_norm_weight");
         let q_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape.clone(), "q_norm_weight");
         let k_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape, "k_norm_weight");
-        let wq = input_leaf(&mut program, DType::Float32, head4_shape.clone(), "wq");
-        let w_gate_q = input_leaf(&mut program, DType::Float32, head4_shape.clone(), "w_gate_q");
+        let wq_gate = input_leaf(&mut program, DType::Float32, head8_shape, "wq_gate");
         let wk = input_leaf(&mut program, DType::Float32, head4_shape.clone(), "wk");
         let wv = input_leaf(&mut program, DType::Float32, head4_shape.clone(), "wv");
         let wo = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4), Extent::Static(1)], "wo");
@@ -16993,8 +17008,7 @@ value = 1.0
             ffn_norm_weight,
             q_norm_weight,
             k_norm_weight,
-            wq,
-            w_gate_q,
+            wq_gate,
             wk,
             wv,
             wo,
@@ -17016,7 +17030,7 @@ value = 1.0
         let ffn_norm_data = [1.0f32];
         let q_norm_data = [1.0f32, 1.0, 1.0, 1.0];
         let k_norm_data = [1.0f32, 1.0, 1.0, 1.0];
-        let wq_data = [1.0f32, 1.0, 1.0, 1.0];
+        let wq_gate_data = [1.0f32, 1.0, 1.0, 1.0, gate_data[0], gate_data[1], gate_data[2], gate_data[3]];
         let wk_data = [1.0f32, 1.0, 1.0, 1.0];
         let wv_data = [1.0f32, 1.0, 1.0, 1.0];
         let wo_data = [1.0f32, 1.0, 1.0, 1.0];
@@ -17039,8 +17053,7 @@ value = 1.0
                 ("ffn_norm_weight", &ffn_norm_data),
                 ("q_norm_weight", &q_norm_data),
                 ("k_norm_weight", &k_norm_data),
-                ("wq", &wq_data),
-                ("w_gate_q", &gate_data),
+                ("wq_gate", &wq_gate_data),
                 ("wk", &wk_data),
                 ("wv", &wv_data),
                 ("wo", &wo_data),
@@ -17082,11 +17095,12 @@ value = 1.0
         program: &mut Vec<Op>,
     ) -> (
         NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId,
-        NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId,
+        NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId,
     ) {
         let scalar_shape = alloc::vec![Extent::Symbolic(0), Extent::Static(1)];
         let rotary_shape = alloc::vec![Extent::Symbolic(0), Extent::Static(1)];
         let head4_shape = alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4)];
+        let head8_shape = alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(8)];
         let cache4_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(1)];
         let cache_pass_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(2)];
         let cache_v_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(4)];
@@ -17114,8 +17128,7 @@ value = 1.0
         let attn_norm_weight = input_leaf(program, DType::Float32, alloc::vec![Extent::Static(1)], "attn_norm_weight");
         let q_norm_weight = input_leaf(program, DType::Float32, norm_shape.clone(), "q_norm_weight");
         let k_norm_weight = input_leaf(program, DType::Float32, norm_shape, "k_norm_weight");
-        let wq = input_leaf(program, DType::Float32, head4_shape.clone(), "wq");
-        let w_gate_q = input_leaf(program, DType::Float32, head4_shape.clone(), "w_gate_q");
+        let wq_gate = input_leaf(program, DType::Float32, head8_shape, "wq_gate");
         let wk = input_leaf(program, DType::Float32, head4_shape.clone(), "wk");
         let wv = input_leaf(program, DType::Float32, head4_shape, "wv");
         let wo = input_leaf(program, DType::Float32, alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4), Extent::Static(1)], "wo");
@@ -17126,7 +17139,7 @@ value = 1.0
 
         (
             x, inv_dim, eps, ones, inv_sqrt_attn_head_dim, inv_attn_head_dim, cos_new, sin_new, group_ones, is_future,
-            cached_len, attn_norm_weight, q_norm_weight, k_norm_weight, wq, w_gate_q, wk, wv, wo, k_first_cache,
+            cached_len, attn_norm_weight, q_norm_weight, k_norm_weight, wq_gate, wk, wv, wo, k_first_cache,
             k_second_cache, k_pass_cache, v_cache,
         )
     }
@@ -17143,7 +17156,7 @@ value = 1.0
         let mut plain_program = Vec::new();
         let (
             x, inv_dim, eps, ones, inv_sqrt_attn_head_dim, inv_attn_head_dim, cos_new, sin_new, group_ones, is_future,
-            cached_len, attn_norm_weight, q_norm_weight, k_norm_weight, wq, w_gate_q, wk, wv, wo, k_first_cache,
+            cached_len, attn_norm_weight, q_norm_weight, k_norm_weight, wq_gate, wk, wv, wo, k_first_cache,
             k_second_cache, k_pass_cache, v_cache,
         ) = dense_attention_only_test_inputs(&mut plain_program);
         let (plain_residual, plain_roots) = append_qwen35_dense_attention_only(
@@ -17165,8 +17178,7 @@ value = 1.0
             attn_norm_weight,
             q_norm_weight,
             k_norm_weight,
-            wq,
-            w_gate_q,
+            wq_gate,
             wk,
             wv,
             wo,
@@ -17180,7 +17192,7 @@ value = 1.0
         let mut taps_program = Vec::new();
         let (
             x, inv_dim, eps, ones, inv_sqrt_attn_head_dim, inv_attn_head_dim, cos_new, sin_new, group_ones, is_future,
-            cached_len, attn_norm_weight, q_norm_weight, k_norm_weight, wq, w_gate_q, wk, wv, wo, k_first_cache,
+            cached_len, attn_norm_weight, q_norm_weight, k_norm_weight, wq_gate, wk, wv, wo, k_first_cache,
             k_second_cache, k_pass_cache, v_cache,
         ) = dense_attention_only_test_inputs(&mut taps_program);
         let (taps_residual, taps) = append_qwen35_dense_attention_only_with_taps(
@@ -17202,8 +17214,7 @@ value = 1.0
             attn_norm_weight,
             q_norm_weight,
             k_norm_weight,
-            wq,
-            w_gate_q,
+            wq_gate,
             wk,
             wv,
             wo,
