@@ -402,10 +402,10 @@ pub enum InteropError {
     #[error("architecture step_inputs named reserved symbol slot {slot}; foreign slots start at FIRST_FREE")]
     ReservedSymbolSlot { slot: u16 },
 
-    /// `layer`'s [`crate::architecture::BoundProgram::layer_roots`] entry
+    /// `layer`'s `crate::architecture::BoundProgram::layer_roots` entry
     /// names a cache shape (`bound`) that disagrees with what the compiled
     /// program actually declares as `Op::Input` leaves for that layer
-    /// (`declared`) -- an [`crate::architecture::Architecture::bind`] that
+    /// (`declared`) -- an `crate::architecture::Architecture::bind` that
     /// tagged the wrong [`proxima_tensor::spec::Qwen35LayerRoots`] variant
     /// for a layer it built correctly otherwise. Caught once, at decode-loop
     /// setup, instead of surfacing later as a confusing
@@ -420,7 +420,7 @@ pub enum InteropError {
         bound: &'static str,
     },
 
-    /// [`crate::expert_slab::ExpertSlab::page_expert`]/`evict_expert` was
+    /// `crate::expert_slab::ExpertSlab::page_expert`/`evict_expert` was
     /// called while a decode step was in progress -- the slab's own borrow
     /// contract (`ExpertSlab`'s doc: an `ExpertSource` snapshot is valid for
     /// exactly one step) forbids mutating an expert's bytes while a running
@@ -429,7 +429,7 @@ pub enum InteropError {
     #[error("cannot page or evict expert {expert} of layer {layer}: a decode step is in progress")]
     ExpertSwapDuringStep { layer: usize, expert: usize },
 
-    /// [`crate::expert_slab::ExpertSlab::page_expert`] was asked to page an
+    /// `crate::expert_slab::ExpertSlab::page_expert` was asked to page an
     /// `(layer, expert)` pair the slab was never built with -- the slab's
     /// shape is fixed at construction from the checkpoint's own layer/expert
     /// count, never grown at runtime.

@@ -510,7 +510,7 @@ pub fn evaluate_named(
 /// One output-set-dependent decision the planner made while building
 /// `resolved` from `program` -- never evaluation state, only what
 /// [`bind::bind`], [`dead_resolved_nodes`], [`node_retirement`],
-/// [`epilogue_fuse_plan`] and [`layer_norm_cluster_plan`] decided given the
+/// `epilogue_fuse_plan` and `layer_norm_cluster_plan` decided given the
 /// requested output set. `into` names the [`BoundOp`] the decision folded
 /// `node` into, or the resolved position it retired against; `consumers`
 /// is the fused-form consumer count at the moment of the decision, where
@@ -534,7 +534,7 @@ pub struct PlanDecision {
 /// program can call this twice and diff the two `Vec<PlanDecision>` directly
 /// -- built for a downstream consumer whose own test harness cannot easily
 /// enable this crate's `instrument` feature to read the equivalent `debug!`
-/// events [`epilogue_fuse_plan`]/[`layer_norm_cluster_plan`]/
+/// events `epilogue_fuse_plan`/`layer_norm_cluster_plan`/
 /// [`dead_resolved_nodes`]/[`node_retirement`] already emit at the identical
 /// decision points.
 ///
@@ -3799,7 +3799,7 @@ pub enum QuantizedBlock<'a> {
 /// own codec (Q4_K, Q2_K, Q8_0, ... any of them, independently per entry,
 /// so a hi-precision copy and a lo-precision copy of the same layer's
 /// expert can coexist in one [`ExpertSource`]) plus the declared
-/// `[out_dim, in_dim]` shape [`run_reduce_quantized`]'s own program-derived
+/// `[out_dim, in_dim]` shape `run_reduce_quantized`'s own program-derived
 /// `rows`/`k` must agree with before this entry's bytes are ever dotted
 /// against an activation row.
 #[derive(Debug, Clone, Copy)]
@@ -3808,7 +3808,7 @@ pub struct ExpertEntry<'a> {
     pub out_dim: u32,
     pub in_dim: u32,
     /// Captured once, at the start of the evaluation step that borrows this
-    /// entry's [`ExpertSource`] -- not consulted by [`run_reduce_quantized`]
+    /// entry's [`ExpertSource`] -- not consulted by `run_reduce_quantized`
     /// itself (there is nothing yet to compare it against mid-step), and
     /// carried here so a caller snapshotting a table for one step can tell
     /// two entries for the same expert slot apart across steps. The borrow
@@ -3818,7 +3818,7 @@ pub struct ExpertEntry<'a> {
     pub epoch: u64,
 }
 
-/// A per-expert weight table for [`run_reduce_quantized`]'s gathered-reduce
+/// A per-expert weight table for `run_reduce_quantized`'s gathered-reduce
 /// read path, standing in for one contiguous [`QuantizedBlock`] stack
 /// (`proxima-gguf::restack`'s own byte-concatenation contract) when a
 /// caller needs experts whose codec, or whose underlying allocation, differ
@@ -3850,7 +3850,7 @@ impl<'a> ExpertSource<'a> {
     /// Borrows `entries` as-is, one per expert index -- `entries[e]` is
     /// expert `e`'s own weight. No validation here; [`Self::entry`] is
     /// where an out-of-range or wrong-shape expert becomes a typed error,
-    /// at the point [`run_reduce_quantized`] actually needs it.
+    /// at the point `run_reduce_quantized` actually needs it.
     #[must_use]
     pub const fn new(entries: &'a [ExpertEntry<'a>]) -> Self {
         Self { entries }
@@ -3899,7 +3899,7 @@ impl<'a> ExpertSource<'a> {
 /// contract) -- the entries this builds ALIAS `stack`'s own bytes, one
 /// `stack.packed_bytes().len() / expert_count`-wide slice per expert, zero
 /// copy, and bit-identical to reading the stack directly at
-/// `expert_index * per_expert_bytes` the way [`run_reduce_quantized`]'s own
+/// `expert_index * per_expert_bytes` the way `run_reduce_quantized`'s own
 /// non-`ExpertSource` gather branch does today (see this crate's own
 /// `expert_source_matches_stack_gather` test).
 ///

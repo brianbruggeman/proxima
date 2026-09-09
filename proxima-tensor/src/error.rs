@@ -156,7 +156,7 @@ pub enum TensorError {
     )]
     GatherExtentExceedsExactFloat { node: NodeId, extent: u64 },
 
-    /// [`crate::expert_source::ExpertSource`]'s own shape guard: an entry's
+    /// [`crate::cpu::ExpertSource`]'s own shape guard: an entry's
     /// `out_dim`/`in_dim` must agree with the program's own resolved
     /// `rows`/`k` for the gathered reduce it is bound to -- a mismatch means
     /// the entry was swapped in for the wrong expert or the wrong layer,
