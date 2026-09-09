@@ -3802,6 +3802,13 @@ mod hyper_connection_tests {
 /// compose them" contract this module's own
 /// `public_builders_compose_a_one_layer_forward_program` test proves for
 /// [`append_qwen35_ssm_mixer`].
+///
+/// Thin wrapper over [`append_qwen35_dense_attention_only_with_taps`] for
+/// callers that only need the two roots this signature already returned
+/// before taps existed -- byte-identical program, since this only reshapes
+/// the return value the shared builder already computed
+/// (`dense_attention_only_and_with_taps_produce_the_same_program` proves the
+/// two builders emit identical `Vec<Op>` for the dense synth fixture).
 #[allow(clippy::too_many_arguments)]
 pub fn append_qwen35_dense_attention_only(
     program: &mut Vec<Op>,
@@ -3832,6 +3839,142 @@ pub fn append_qwen35_dense_attention_only(
     k_pass_cache: NodeId,
     v_cache: NodeId,
 ) -> Result<(NodeId, Qwen35DenseAttentionRoots), TensorError> {
+    let (residual1, taps) = append_qwen35_dense_attention_only_with_taps(
+        program,
+        x,
+        inv_dim,
+        eps,
+        ones,
+        inv_sqrt_attn_head_dim,
+        inv_attn_head_dim,
+        cos_new,
+        sin_new,
+        group_ones,
+        is_future,
+        cached_len,
+        group,
+        rotary_dim,
+        attn_head_dim,
+        attn_norm_weight,
+        q_norm_weight,
+        k_norm_weight,
+        wq,
+        w_gate_q,
+        wk,
+        wv,
+        wo,
+        k_first_cache,
+        k_second_cache,
+        k_pass_cache,
+        v_cache,
+    )?;
+    Ok((
+        residual1,
+        (taps.rotated_k_new_first, taps.rotated_k_new_second, taps.k_pass, taps.v_new),
+    ))
+}
+
+/// Every intermediate a caller needs to bisect
+/// [`append_qwen35_dense_attention_only`]'s attention block against an
+/// independent reference, in the order the builder computes them
+/// (`spec.rs` just below). Field naming mirrors [`SsmMixerTaps`]'s own
+/// convention -- one field per stage, named after the stage, not the local
+/// variable that happened to hold it.
+///
+/// **Split convention for `q_split`/`gate_split`:** this function receives
+/// `wq`/`w_gate_q` ALREADY split -- the fused on-disk `blk.N.attn_q.weight`
+/// (`2 * query_heads * attn_head_dim` wide) is sliced by the caller via
+/// [`per_head_channel_slice`] (`spec.rs:8750-8765`) using the PER-HEAD
+/// INTERLEAVE convention: each head's own contiguous `2*attn_head_dim`
+/// block splits into `[0, attn_head_dim)` (`wq`) and
+/// `[attn_head_dim, 2*attn_head_dim)` (`w_gate_q`). This matches HF Qwen3.5
+/// (`modeling_qwen3_next.py:267-268,295-298`,
+/// `torch.chunk(query_states.view(..., heads, 2*head_dim), 2, dim=-1)` --
+/// chunking the LAST axis of a view whose second-to-last axis is `heads` is
+/// per-head, not a global halves split across the whole flat width). There
+/// is consequently no single fused "`qg_proj`" node inside this function's
+/// own scope to tap -- the split happens one call frame up, on the WEIGHT,
+/// before either matmul runs; `q_split`/`gate_split` below are that split's
+/// two projection outputs (`q_raw`/`gate_raw`), which are exactly the
+/// columns a fused-then-chunked projection would have produced, since
+/// matmul distributes over disjoint output columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Qwen35DenseAttentionTaps {
+    /// `q_raw`: `x_normed @ wq`, per-head, pre-qk-norm.
+    pub q_split: NodeId,
+    /// `gate_raw`: `x_normed @ w_gate_q`, per-head, pre-sigmoid.
+    pub gate_split: NodeId,
+    /// `q` after per-head RMSNorm (`q_norm_weight`), full `attn_head_dim` width.
+    pub q_normed: NodeId,
+    /// `k` after per-head RMSNorm (`k_norm_weight`), full `attn_head_dim` width.
+    pub k_normed: NodeId,
+    /// first half of the split-half-RoPE-rotated `q` (`rotary_dim/2` wide).
+    pub q_rot_first: NodeId,
+    /// second half of the split-half-RoPE-rotated `q` (`rotary_dim/2` wide).
+    pub q_rot_second: NodeId,
+    /// first half of the split-half-RoPE-rotated new-position `k`.
+    pub k_rot_first: NodeId,
+    /// second half of the split-half-RoPE-rotated new-position `k`.
+    pub k_rot_second: NodeId,
+    /// scaled, causal-masked attention score against the NEW (uncached) key
+    /// -- at position 0 this is the only score that exists.
+    pub score_new: NodeId,
+    /// softmax-weighted sum over `v` (cached + new), pre-gate.
+    pub attended: NodeId,
+    /// `sigmoid(gate_split)`, broadcast from kv-heads to query-heads.
+    pub gate_sigmoid: NodeId,
+    /// `attended * gate_sigmoid`, the value `o_proj`'s matmul consumes.
+    pub gated_attended: NodeId,
+    /// `gated_attended @ wo`, reduced, before the residual add.
+    pub o_proj_out: NodeId,
+    /// new-position rotated-and-passed-through key half, first RoPE half --
+    /// [`Qwen35DenseAttentionRoots`]'s own first element, cached for the
+    /// next call.
+    pub rotated_k_new_first: NodeId,
+    /// [`Qwen35DenseAttentionRoots`]'s own second element.
+    pub rotated_k_new_second: NodeId,
+    /// [`Qwen35DenseAttentionRoots`]'s own third element (untouched pass-through `k`).
+    pub k_pass: NodeId,
+    /// [`Qwen35DenseAttentionRoots`]'s own fourth element (new-position `v`).
+    pub v_new: NodeId,
+}
+
+/// [`append_qwen35_dense_attention_only`]'s full implementation, returning
+/// every [`Qwen35DenseAttentionTaps`] intermediate alongside the residual
+/// output for a caller that needs to bisect the attention block (q/gate
+/// split, qk-norm, rotary, scores, gate, `o_proj`) against an independent
+/// reference -- a downstream `qwen35moe`-shaped consumer's own layer-3
+/// position-0 divergence investigation is exactly that caller.
+#[allow(clippy::too_many_arguments)]
+pub fn append_qwen35_dense_attention_only_with_taps(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    ones: NodeId,
+    inv_sqrt_attn_head_dim: NodeId,
+    inv_attn_head_dim: NodeId,
+    cos_new: NodeId,
+    sin_new: NodeId,
+    group_ones: NodeId,
+    is_future: NodeId,
+    cached_len: NodeId,
+    group: u32,
+    rotary_dim: u32,
+    attn_head_dim: u32,
+    attn_norm_weight: NodeId,
+    q_norm_weight: NodeId,
+    k_norm_weight: NodeId,
+    wq: NodeId,
+    w_gate_q: NodeId,
+    wk: NodeId,
+    wv: NodeId,
+    wo: NodeId,
+    k_first_cache: NodeId,
+    k_second_cache: NodeId,
+    k_pass_cache: NodeId,
+    v_cache: NodeId,
+) -> Result<(NodeId, Qwen35DenseAttentionTaps), TensorError> {
     let pairs = rotary_dim / 2;
     let pass_dim = attn_head_dim - rotary_dim;
 
@@ -4261,7 +4404,27 @@ pub fn append_qwen35_dense_attention_only(
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
 
-    Ok((residual1, (rotated_k_new_first, rotated_k_new_second, k_pass, v_new)))
+    let taps = Qwen35DenseAttentionTaps {
+        q_split: q_raw,
+        gate_split: gate_raw,
+        q_normed: q,
+        k_normed: k,
+        q_rot_first: rotated_q_first,
+        q_rot_second: rotated_q_second,
+        k_rot_first: rotated_k_new_first,
+        k_rot_second: rotated_k_new_second,
+        score_new: score_new_masked,
+        attended,
+        gate_sigmoid: sigmoid_attn_gate,
+        gated_attended,
+        o_proj_out: attn_out,
+        rotated_k_new_first,
+        rotated_k_new_second,
+        k_pass,
+        v_new,
+    };
+
+    Ok((residual1, taps))
 }
 
 /// [`append_qwen35_dense_attention_only`] plus the dense (non-MoE) SwiGLU
@@ -16906,6 +17069,161 @@ value = 1.0
             k_pass_values[0],
             v_new_values[0],
         )
+    }
+
+    /// Builds [`append_qwen35_dense_attention_only`]'s (or its `_with_taps`
+    /// sibling's) own tiny fixture inputs, at the same fixed dims
+    /// [`evaluate_dense_attention_test_program`] hand-computes against
+    /// (`embedding = 1`, `attn_head_dim = 4`, `rotary_dim = 2`,
+    /// `kv_heads = query_heads = 1`), so the same input NodeIds and byte
+    /// values feed both builders under test.
+    #[allow(clippy::type_complexity)]
+    fn dense_attention_only_test_inputs(
+        program: &mut Vec<Op>,
+    ) -> (
+        NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId,
+        NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId,
+    ) {
+        let scalar_shape = alloc::vec![Extent::Symbolic(0), Extent::Static(1)];
+        let rotary_shape = alloc::vec![Extent::Symbolic(0), Extent::Static(1)];
+        let head4_shape = alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4)];
+        let cache4_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(1)];
+        let cache_pass_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(2)];
+        let cache_v_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(4)];
+        let norm_shape = alloc::vec![Extent::Static(4)];
+
+        let x = input_leaf(program, DType::Float32, scalar_shape, "x");
+        let inv_dim = scalar_constant(program, 1.0);
+        let eps = input_leaf(program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "eps");
+        let ones = scalar_constant(program, 1.0);
+        let inv_sqrt_attn_head_dim = scalar_constant(program, 0.5);
+        let inv_attn_head_dim = scalar_constant(program, 0.25);
+        let cos_new = input_leaf(program, DType::Float32, rotary_shape.clone(), "cos");
+        let sin_new = input_leaf(program, DType::Float32, rotary_shape, "sin");
+        let group_ones = op::append(
+            program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(1), Extent::Static(1)],
+                value: 1.0,
+            },
+        );
+        let (is_future, _neg_infinity) = causal_mask(program).expect("causal mask lowers");
+        let cached_len = input_leaf(program, DType::Float32, Vec::new(), "cached_len");
+
+        let attn_norm_weight = input_leaf(program, DType::Float32, alloc::vec![Extent::Static(1)], "attn_norm_weight");
+        let q_norm_weight = input_leaf(program, DType::Float32, norm_shape.clone(), "q_norm_weight");
+        let k_norm_weight = input_leaf(program, DType::Float32, norm_shape, "k_norm_weight");
+        let wq = input_leaf(program, DType::Float32, head4_shape.clone(), "wq");
+        let w_gate_q = input_leaf(program, DType::Float32, head4_shape.clone(), "w_gate_q");
+        let wk = input_leaf(program, DType::Float32, head4_shape.clone(), "wk");
+        let wv = input_leaf(program, DType::Float32, head4_shape, "wv");
+        let wo = input_leaf(program, DType::Float32, alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4), Extent::Static(1)], "wo");
+        let k_first_cache = input_leaf(program, DType::Float32, cache4_shape.clone(), "k_first_cache");
+        let k_second_cache = input_leaf(program, DType::Float32, cache4_shape, "k_second_cache");
+        let k_pass_cache = input_leaf(program, DType::Float32, cache_pass_shape, "k_pass_cache");
+        let v_cache = input_leaf(program, DType::Float32, cache_v_shape, "v_cache");
+
+        (
+            x, inv_dim, eps, ones, inv_sqrt_attn_head_dim, inv_attn_head_dim, cos_new, sin_new, group_ones, is_future,
+            cached_len, attn_norm_weight, q_norm_weight, k_norm_weight, wq, w_gate_q, wk, wv, wo, k_first_cache,
+            k_second_cache, k_pass_cache, v_cache,
+        )
+    }
+
+    /// [`append_qwen35_dense_attention_only_with_taps`] must build the
+    /// byte-identical program to its thin-wrapper sibling
+    /// [`append_qwen35_dense_attention_only`] -- the taps variant only
+    /// returns extra `NodeId`s into the same program, never a structurally
+    /// different one, mirroring
+    /// `layer_taps_variant_matches_the_plain_program_and_returns_one_tap_per_layer`'s
+    /// own invariant for the MoE layer-taps builder.
+    #[test]
+    fn dense_attention_only_and_with_taps_produce_the_same_program() {
+        let mut plain_program = Vec::new();
+        let (
+            x, inv_dim, eps, ones, inv_sqrt_attn_head_dim, inv_attn_head_dim, cos_new, sin_new, group_ones, is_future,
+            cached_len, attn_norm_weight, q_norm_weight, k_norm_weight, wq, w_gate_q, wk, wv, wo, k_first_cache,
+            k_second_cache, k_pass_cache, v_cache,
+        ) = dense_attention_only_test_inputs(&mut plain_program);
+        let (plain_residual, plain_roots) = append_qwen35_dense_attention_only(
+            &mut plain_program,
+            x,
+            inv_dim,
+            eps,
+            ones,
+            inv_sqrt_attn_head_dim,
+            inv_attn_head_dim,
+            cos_new,
+            sin_new,
+            group_ones,
+            is_future,
+            cached_len,
+            1,
+            2,
+            4,
+            attn_norm_weight,
+            q_norm_weight,
+            k_norm_weight,
+            wq,
+            w_gate_q,
+            wk,
+            wv,
+            wo,
+            k_first_cache,
+            k_second_cache,
+            k_pass_cache,
+            v_cache,
+        )
+        .expect("plain dense attention program lowers");
+
+        let mut taps_program = Vec::new();
+        let (
+            x, inv_dim, eps, ones, inv_sqrt_attn_head_dim, inv_attn_head_dim, cos_new, sin_new, group_ones, is_future,
+            cached_len, attn_norm_weight, q_norm_weight, k_norm_weight, wq, w_gate_q, wk, wv, wo, k_first_cache,
+            k_second_cache, k_pass_cache, v_cache,
+        ) = dense_attention_only_test_inputs(&mut taps_program);
+        let (taps_residual, taps) = append_qwen35_dense_attention_only_with_taps(
+            &mut taps_program,
+            x,
+            inv_dim,
+            eps,
+            ones,
+            inv_sqrt_attn_head_dim,
+            inv_attn_head_dim,
+            cos_new,
+            sin_new,
+            group_ones,
+            is_future,
+            cached_len,
+            1,
+            2,
+            4,
+            attn_norm_weight,
+            q_norm_weight,
+            k_norm_weight,
+            wq,
+            w_gate_q,
+            wk,
+            wv,
+            wo,
+            k_first_cache,
+            k_second_cache,
+            k_pass_cache,
+            v_cache,
+        )
+        .expect("taps dense attention program lowers");
+
+        assert_eq!(
+            plain_program, taps_program,
+            "the taps variant must build the identical graph -- it only returns extra \
+             NodeIds into the same program, never a structurally different one"
+        );
+        assert_eq!(plain_residual, taps_residual);
+        assert_eq!(
+            plain_roots,
+            (taps.rotated_k_new_first, taps.rotated_k_new_second, taps.k_pass, taps.v_new)
+        );
     }
 
     /// [`qwen35_forward_program`]'s whole-program wiring, both layer kinds
