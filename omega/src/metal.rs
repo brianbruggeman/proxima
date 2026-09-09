@@ -4208,9 +4208,19 @@ fn promote_output_placed_nodes(resolved: &mut Vec<BoundOp>, effective_outputs: &
         let Some(current_index) = index_of.get(&node).copied() else {
             continue;
         };
+        // `all_read_sources`, not `operands` -- a fused `Reduce`'s
+        // `epilogue_operands` are real, materialized reads this op's own
+        // dispatch needs bound (`crate::msl::bindings`'s own doc says the
+        // same), so a candidate this loop promotes earlier must never land
+        // ahead of an epilogue operand's own producer position, or that
+        // producer's buffer has not been dispatched yet when this op reads
+        // it. `operands()` alone missed exactly that class of dependency:
+        // the MoE top-k combine's per-round softmax weight lives ONLY in
+        // the final reduce's epilogue, so this promotion moved the combine
+        // ahead of its own weight's dispatch and `buffer_for` failed at
+        // execution time with "operand buffer missing".
         let dependency_index = resolved[current_index]
-            .operands()
-            .iter()
+            .all_read_sources()
             .filter_map(|(source, _, gather)| {
                 let mut latest = index_of.get(source).copied();
                 if let Some(lookup) = gather {
