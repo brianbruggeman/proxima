@@ -7089,8 +7089,19 @@ pub fn append_qwen35_ssm_mixer_with_taps(
 
     // output projection: `ssm_out`'s declared `[value_dim, n_embd]` layout
     // decomposed the same read-side way `q_split_map`/`v_split_map` already
-    // decompose a flat checkpoint axis -- never a write-side merge.
-    let out_weight_split_map = alloc::format!("{}*u+{head_v_dim}*g+j,d->ugjd", group * head_v_dim);
+    // decompose a flat checkpoint axis -- never a write-side merge. UNLIKE
+    // `v_split_map`'s own `(u*group+g)*head_v_dim+j` nesting (u outer, g
+    // mid, j inner -- verified correct against real Q4_K bytes through
+    // `gated_value`, within noise), the checkpoint's real `ssm_out.weight`
+    // contraction axis nests `(j*kv_heads+u)*group+g` (j outer, u mid, g
+    // inner) -- proven on real `qwen3.6:35b-a3b` bytes (a model-crate
+    // `qwen35moe_layer0_stage_by_stage_position0_matches_tapped_reference`'s
+    // own `ssm_out_weight_layout_sweep`: this order scores
+    // `scaled_rel_err=1.5e-2`, at the Q4_K noise floor, against every other
+    // (u,g,j)-role permutation scoring `>=1.2`) -- this weight was saved
+    // with a different head/value nesting than the value/`z`/qkv weights,
+    // not the same convention reused.
+    let out_weight_split_map = alloc::format!("{}*j+{group}*u+g,d->ugjd", kv_heads * group);
     let ssm_out_split = elementwise(
         program,
         DType::Float32,
@@ -11239,6 +11250,190 @@ shape = ["seq"]
             }
         }
         transposed
+    }
+
+    /// Isolates [`append_qwen35_ssm_mixer_with_taps`]'s output-projection
+    /// reduce (spec.rs `out_weight_split_map`/`cur_product`/`cur`, the piece
+    /// a downstream model-crate qwen35moe stage-by-stage diagnostic
+    /// (`qwen35moe_layer0_stage_by_stage_position0_matches_tapped_reference`)
+    /// found `ssm_out_result` off by `scaled_rel_err=1.252` on real
+    /// `qwen3.6:35b-a3b` bytes) from the rest of the GDN mixer, at
+    /// NON-degenerate `u=4,g=2,j=32` -- every prior mixer test
+    /// (`build_ssm_mixer_test_program`,
+    /// `public_builders_compose_a_one_layer_forward_program`) used
+    /// `kv_heads=1` or `head_v_dim=1`, so a wrong (u,g,j) nesting order in
+    /// [`append_qwen35_ssm_mixer_with_taps`]'s own map could never show up
+    /// on them. Decides whether a divergence traces to the quantized-matmul
+    /// fold ([`crate::cpu::run_reduce_quantized`]) mishandling this
+    /// 3-letter contraction over a declared 4-D leaf, or to the map string
+    /// computing something other than what it says: `packed` (real Q4_K
+    /// bytes through [`crate::cpu::evaluate_quantized`]) vs `dequantized`
+    /// (the SAME bytes dequantized and transposed into the node's own
+    /// declared axis order, through the ordinary [`crate::cpu::evaluate_named`]
+    /// path) vs `hand_f64` (a from-scratch sum using the exact formula the
+    /// map string encodes). `packed` diverging from `dequantized` beyond
+    /// Q4_K's own quantization noise is the quantized-fold bug; `dequantized`
+    /// diverging from `hand_f64` is the map string not doing what its own
+    /// formula says.
+    #[test]
+    fn ssm_out_projection_reduce_isolated_packed_matches_dequantized_and_hand_computed() {
+        use proxima_gguf::quant::q4_k::QK_K;
+
+        let kv_heads = 4usize;
+        let group = 2usize;
+        let head_v_dim = 32usize;
+        let value_dim = kv_heads * group * head_v_dim;
+        assert_eq!(value_dim, QK_K, "one Q4_K super-block per output row, matching quantize_rows's own convention");
+        let embedding = 3usize;
+
+        let mut program = Vec::new();
+        let gated_out = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(head_v_dim as u32), Extent::Static(kv_heads as u32), Extent::Static(group as u32)],
+            "gated_out",
+        );
+        let ssm_out = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(value_dim as u32), Extent::Static(embedding as u32)],
+            "ssm_out",
+        );
+        let value_head_ones = op::append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(kv_heads as u32), Extent::Static(group as u32), Extent::Static(head_v_dim as u32)],
+                value: 1.0,
+            },
+        );
+
+        // exact copy of append_qwen35_ssm_mixer_with_taps's own
+        // output-projection maps, spec.rs:7093-7117.
+        let out_weight_split_map = alloc::format!("{}*j+{group}*u+g,d->ugjd", kv_heads * group);
+        let ssm_out_split = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(ssm_out, out_weight_split_map.as_str()), (value_head_ones, "ugj->ugjd")],
+        )
+        .expect("ssm_out_split lowers");
+        let cur_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(gated_out, "jug->jugd"), (ssm_out_split, "ugjd->jugd")],
+        )
+        .expect("cur_product lowers");
+        let cur = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            cur_product,
+            "jugd->jugd",
+            "d->jugd",
+        )
+        .expect("cur reduce lowers");
+
+        let gated_data = synth_row(101, head_v_dim * kv_heads * group, 1.0);
+        // native GGUF physical layout: `embedding` rows, each `value_dim`
+        // contiguous contraction elements -- ne0 = value_dim, ne1 = embedding.
+        let weight_native = synth_row(202, embedding * value_dim, 1.0);
+
+        let packed = quantize_rows(&weight_native, embedding, value_dim);
+
+        let packed_evaluated = crate::cpu::evaluate_quantized(
+            &program,
+            &[],
+            &[
+                crate::cpu::QuantizedBlock::Float32(&gated_data),
+                crate::cpu::QuantizedBlock::Q4K(&packed),
+            ],
+            &[cur],
+        )
+        .expect("packed reduce evaluates");
+        let packed_cur = packed_evaluated.get(cur).expect("cur present").0.to_vec();
+
+        // dequantize the SAME packed bytes, then transpose into the node's
+        // own DECLARED axis order (`[value_dim, embedding]`,
+        // last-axis-fastest) -- `transpose_rows`'s own doc: the packed
+        // bytes and a plain f32 binding of the same declared node are two
+        // different, unrelated conventions.
+        let dequantized_native = dequantize_rows(&packed, embedding, value_dim);
+        let dequantized_declared = transpose_rows(&dequantized_native, embedding, value_dim);
+
+        let dequantized_evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[],
+            &[("gated_out", gated_data.as_slice()), ("ssm_out", dequantized_declared.as_slice())],
+            &[cur],
+        )
+        .expect("dequantized reduce evaluates");
+        let (dequantized_cur, _) = dequantized_evaluated.get(cur).expect("cur present");
+
+        // hand-computed f64 sum, the exact formula the map string above
+        // encodes: combined = kv_heads*group*j + group*u + g, weight read
+        // native[e*value_dim + combined] (embedding-major, contraction-minor,
+        // the real GGUF `ssm_out.weight` convention).
+        let mut expected = alloc::vec![0.0f64; embedding];
+        for u in 0..kv_heads {
+            for g in 0..group {
+                for j in 0..head_v_dim {
+                    let jug_index = (j * kv_heads + u) * group + g;
+                    let combined = (j * kv_heads + u) * group + g;
+                    let gated = f64::from(gated_data[jug_index]);
+                    for d in 0..embedding {
+                        expected[d] += gated * f64::from(weight_native[d * value_dim + combined]);
+                    }
+                }
+            }
+        }
+
+        for d in 0..embedding {
+            println!(
+                "d={d} packed={:.6e} dequantized={:.6e} hand_f64={:.6e}",
+                f64::from(packed_cur[d]),
+                f64::from(dequantized_cur[d]),
+                expected[d],
+            );
+        }
+
+        let norm_inf = expected.iter().fold(0.0f64, |acc, value| acc.max(value.abs())).max(1e-12);
+        let packed_vs_dequantized_scaled = packed_cur
+            .iter()
+            .zip(dequantized_cur.iter())
+            .map(|(packed_value, dequantized_value)| (f64::from(*packed_value) - f64::from(*dequantized_value)).abs())
+            .fold(0.0f64, f64::max)
+            / norm_inf;
+        let dequantized_vs_hand_scaled = dequantized_cur
+            .iter()
+            .zip(expected.iter())
+            .map(|(dequantized_value, expected_value)| (f64::from(*dequantized_value) - expected_value).abs())
+            .fold(0.0f64, f64::max)
+            / norm_inf;
+        println!(
+            "packed_vs_dequantized_scaled_rel={packed_vs_dequantized_scaled:.6e} \
+             dequantized_vs_hand_scaled_rel={dequantized_vs_hand_scaled:.6e}"
+        );
+
+        // `< 2e-2`, not `< 1e-5`: this is `f32` accumulation over 256 terms
+        // in a different fold order than the `f64` hand loop, not exactness
+        // -- well clear of the `~1.25` scaled_rel_err a real (u,g,j)-role
+        // mismatch produces (see the fix this test guards,
+        // `ssm_out_weight_layout_sweep` in that same downstream stage-by-stage
+        // diagnostic).
+        assert!(
+            dequantized_vs_hand_scaled < 2e-2,
+            "the spec's own affine map must mechanically implement the formula it encodes, \
+             got scaled_rel_err={dequantized_vs_hand_scaled:.6e}"
+        );
+        assert!(
+            packed_vs_dequantized_scaled < 1e-2,
+            "the packed Q4_K quantized-matmul fold must agree with the same bytes dequantized \
+             and run through the ordinary path within Q4_K quantization noise, \
+             got scaled_rel_err={packed_vs_dequantized_scaled:.6e}"
+        );
     }
 
     /// The crate's own packed-`Q4_K` matmul kernel, whichever one
