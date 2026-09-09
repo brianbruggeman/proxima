@@ -4533,11 +4533,18 @@ impl<'file> LoadedModel<'file> {
                         .ok_or(InteropError::MissingEvaluatedNode {
                             node: self.logits_root,
                         })?;
-                // `logits_root` is now the `lm_head_row`-gathered LAST row
-                // only (`spec.rs`'s own doc on that leaf) -- one row of
-                // `vocab_size`, not `new_count` rows, so this is a length
-                // assertion in slice form rather than a real index
-                // computation.
+                // `logits_root` must be the `lm_head_row`-gathered LAST row
+                // only (`crate::architecture`'s doc on `BoundProgram::logits_root`)
+                // -- exactly one row of `vocab_size`. A foreign `Architecture`
+                // that hands back the full `[new_count, vocab]` buffer is
+                // rejected here rather than silently sampled at row 0.
+                if logits.len() != vocab_size {
+                    return Err(InteropError::LogitsShapeMismatch {
+                        expected_rows: 1,
+                        found_rows: logits.len() / vocab_size,
+                        vocab: vocab_size,
+                    });
+                }
                 let last_position = &logits[..vocab_size];
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 let barriers_step = metal_stage.barriers_emitted;
@@ -5089,11 +5096,18 @@ impl<'file> LoadedModel<'file> {
                         node: single_range.logits_root,
                     },
                 )?;
-                // `logits_root` is now the `lm_head_row`-gathered LAST row
-                // only (`spec.rs`'s own doc on that leaf) -- one row of
-                // `vocab_size`, not `new_count` rows, so this is a length
-                // assertion in slice form rather than a real index
-                // computation.
+                // `logits_root` must be the `lm_head_row`-gathered LAST row
+                // only (`crate::architecture`'s doc on `BoundProgram::logits_root`)
+                // -- exactly one row of `vocab_size`. A foreign `Architecture`
+                // that hands back the full `[new_count, vocab]` buffer is
+                // rejected here rather than silently sampled at row 0.
+                if logits.len() != vocab_size {
+                    return Err(InteropError::LogitsShapeMismatch {
+                        expected_rows: 1,
+                        found_rows: logits.len() / vocab_size,
+                        vocab: vocab_size,
+                    });
+                }
                 let last_position = &logits[..vocab_size];
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 let barriers_step = metal_stage.barriers_emitted;
