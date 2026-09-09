@@ -186,6 +186,16 @@ pub enum TensorError {
     )]
     ExpertStackNotAligned { expert_count: usize, bytes: usize },
 
+    /// [`crate::cpu::expert_entries_from_stack`]'s own empty-payload guard:
+    /// zero packed bytes divides evenly by any nonzero `expert_count` (`0 %
+    /// n == 0`), so [`Self::ExpertStackNotAligned`]'s own check passes and
+    /// `per_expert_bytes` resolves to `0` -- slicing an empty stack into
+    /// `expert_count` zero-width chunks has no expert bytes to alias, so
+    /// this is a typed rejection rather than a chunk width of `0` (which a
+    /// bare `chunks_exact` call would panic on).
+    #[error("expert stack for expert_count {expert_count} carries zero packed bytes")]
+    EmptyExpertPayload { expert_count: usize },
+
     /// A chunk of a threaded nest never completed: the background pool
     /// caught and discarded a worker panic (see
     /// `prime::os::background::worker`'s `catch_unwind`) rather than
