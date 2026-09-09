@@ -631,6 +631,7 @@ impl Architecture for MultiRowLogitsArch {
             hidden_root: None,
             layer_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
+            single_position_step: false,
         })
     }
 }
