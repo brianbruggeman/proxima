@@ -261,20 +261,22 @@ impl Architecture for StepInputArch {
             .expect("test-only mutex, never poisoned")
             .push(context.new_count);
 
-        let mut rows = Vec::with_capacity(context.new_count);
-        for offset in 0..context.new_count {
-            let position = context.new_start + offset;
-            let token_id = context.all_token_ids[position];
-            let row = token_id
-                .wrapping_mul(self.hash_multiplier)
-                .wrapping_add(position as u32)
-                % TABLE_ROWS;
-            rows.push(row as f32);
-        }
+        // `logits_root` (`DenseArch::bind`, which this architecture wraps)
+        // is now always the LAST row only -- `mistral_cached_forward_program_with_experts_and_layer_taps`'s
+        // own `last_row_only: true` default for the dense decode loop, see
+        // that flag's own doc -- so `aux_rows` must supply exactly one
+        // gathered row, matching the last of THIS step's own new
+        // positions, not one per `new_count`.
+        let position = context.new_start + context.new_count - 1;
+        let token_id = context.all_token_ids[position];
+        let row = token_id
+            .wrapping_mul(self.hash_multiplier)
+            .wrapping_add(position as u32)
+            % TABLE_ROWS;
         out.push(StepInput {
             name: "aux_rows",
-            symbol: Some((symbols::FIRST_FREE, rows.len())),
-            values: rows,
+            symbol: Some((symbols::FIRST_FREE, 1)),
+            values: vec![row as f32],
         });
 
         // A one-hot "spike" per row rather than a uniform per-row offset:

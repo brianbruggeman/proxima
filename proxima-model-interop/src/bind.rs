@@ -5560,6 +5560,7 @@ mod real_openchat_file {
                 qk_norm,
                 false,
                 false,
+                false,
             )
             .expect("moe forward program with layer taps lowers");
 

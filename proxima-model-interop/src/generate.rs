@@ -73,7 +73,9 @@ use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::op::ScalarOp;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::CachedLayerRoots;
-use proxima_tensor::spec::{Qwen35LayerRoots, mistral_cached_forward_program_with_experts};
+use proxima_tensor::spec::{
+    Qwen35LayerRoots, mistral_cached_forward_program_with_experts_and_layer_taps,
+};
 use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -1326,20 +1328,22 @@ impl<'file> LoadedModel<'file> {
         // always compiled for a checkpoint that carries no
         // `attn_q_norm.weight` tensor.
         let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
-        let (program, forward_roots, cache_roots, moe_sites) = mistral_cached_forward_program_with_experts(
-            architecture.vocab,
-            architecture.embedding,
-            architecture.feed_forward,
-            architecture.query_heads,
-            architecture.kv_heads,
-            architecture.head_dim,
-            architecture.block_count,
-            architecture.expert_count,
-            architecture.expert_used_count,
-            qk_norm,
-            paired_gate_up_reduce,
-            fused_qkv_reduce,
-        )?;
+        let (program, forward_roots, cache_roots, _layer_residuals, moe_sites) =
+            mistral_cached_forward_program_with_experts_and_layer_taps(
+                architecture.vocab,
+                architecture.embedding,
+                architecture.feed_forward,
+                architecture.query_heads,
+                architecture.kv_heads,
+                architecture.head_dim,
+                architecture.block_count,
+                architecture.expert_count,
+                architecture.expert_used_count,
+                qk_norm,
+                paired_gate_up_reduce,
+                fused_qkv_reduce,
+                true,
+            )?;
         let logits_root = forward_roots.logits;
         // `mistral_single_range_cached_forward_program`'s own `w_gate`/`w_up`/
         // `wq`/`wk`/`wv` leaves (`build_single_range_program`) do not know
@@ -1447,20 +1451,22 @@ impl<'file> LoadedModel<'file> {
         // `attn_q_norm.weight`, and no HF/safetensors checkpoint this crate
         // binds today needs QK-norm -- see [`Self::load`]'s own `qk_norm` for
         // the GGUF path that does.
-        let (program, forward_roots, cache_roots, moe_sites) = mistral_cached_forward_program_with_experts(
-            architecture.vocab,
-            architecture.embedding,
-            architecture.feed_forward,
-            architecture.query_heads,
-            architecture.kv_heads,
-            architecture.head_dim,
-            architecture.block_count,
-            architecture.expert_count,
-            architecture.expert_used_count,
-            false,
-            false,
-            false,
-        )?;
+        let (program, forward_roots, cache_roots, _layer_residuals, moe_sites) =
+            mistral_cached_forward_program_with_experts_and_layer_taps(
+                architecture.vocab,
+                architecture.embedding,
+                architecture.feed_forward,
+                architecture.query_heads,
+                architecture.kv_heads,
+                architecture.head_dim,
+                architecture.block_count,
+                architecture.expert_count,
+                architecture.expert_used_count,
+                false,
+                false,
+                false,
+                true,
+            )?;
         let logits_root = forward_roots.logits;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let single_range = build_single_range_program(&architecture, false)?;
@@ -3945,6 +3951,18 @@ impl<'file> LoadedModel<'file> {
                 // bucketed or not.
                 let cached_len_scalar = [cached_len as f32];
                 named_blocks.push(("cached_len", QuantizedBlock::Float32(&cached_len_scalar)));
+                // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
+                // own `lm_head_row` `Op::Input` -- the last row of THIS
+                // step's `new_count` freshly-computed rows, host-supplied
+                // because the gather it feeds is a data-dependent index
+                // (`spec.rs`'s own doc on that leaf: an in-graph-computed
+                // index is a named `NotLowerable` gap on the typed
+                // evaluator, not a silently-guessed execution path).
+                let lm_head_row_scalar = [(new_count - 1) as f32];
+                named_blocks.push((
+                    "lm_head_row",
+                    QuantizedBlock::Float32(&lm_head_row_scalar),
+                ));
                 // A foreign `Architecture`'s own per-step leaves --
                 // `token_history` already carries exactly `cached_len +
                 // new_count` entries at this point (the same invariant
@@ -4405,7 +4423,12 @@ impl<'file> LoadedModel<'file> {
                         .ok_or(InteropError::MissingEvaluatedNode {
                             node: self.logits_root,
                         })?;
-                let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
+                // `logits_root` is now the `lm_head_row`-gathered LAST row
+                // only (`spec.rs`'s own doc on that leaf) -- one row of
+                // `vocab_size`, not `new_count` rows, so this is a length
+                // assertion in slice form rather than a real index
+                // computation.
+                let last_position = &logits[..vocab_size];
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 let barriers_step = metal_stage.barriers_emitted;
                 #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
@@ -4725,6 +4748,14 @@ impl<'file> LoadedModel<'file> {
                 named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
                 let cached_len_scalar = [cached_len as f32];
                 named_blocks.push(("cached_len", QuantizedBlock::Float32(&cached_len_scalar)));
+                // See the sibling decode loop's own comment on
+                // `lm_head_row` above -- same leaf, same host-supplied
+                // reason, this step's own last new row.
+                let lm_head_row_scalar = [(new_count - 1) as f32];
+                named_blocks.push((
+                    "lm_head_row",
+                    QuantizedBlock::Float32(&lm_head_row_scalar),
+                ));
                 #[cfg(feature = "instrument")]
                 let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
 
@@ -4948,7 +4979,12 @@ impl<'file> LoadedModel<'file> {
                         node: single_range.logits_root,
                     },
                 )?;
-                let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
+                // `logits_root` is now the `lm_head_row`-gathered LAST row
+                // only (`spec.rs`'s own doc on that leaf) -- one row of
+                // `vocab_size`, not `new_count` rows, so this is a length
+                // assertion in slice form rather than a real index
+                // computation.
+                let last_position = &logits[..vocab_size];
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 let barriers_step = metal_stage.barriers_emitted;
                 #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
@@ -5162,6 +5198,18 @@ impl<'file> LoadedModel<'file> {
         // encodes for the KV-cache blocks themselves.
         let cached_len_scalar = [0.0f32];
         named_blocks.push(("cached_len", QuantizedBlock::Float32(&cached_len_scalar)));
+        // Same `lm_head_row` leaf the decode loop feeds -- this one-shot
+        // forward's own `ids` IS the whole prompt, so `ids.len() - 1` is
+        // its last row, matching `Self::forward_logits_on_backend`'s own
+        // "last prompt position" doc. A caller of
+        // `Self::forward_node_values_on_backend` wanting the FULL
+        // per-position logits (not just the last row) has no opt-in path
+        // yet -- residual, not fixed here.
+        let lm_head_row_scalar = [(ids.len() - 1) as f32];
+        named_blocks.push((
+            "lm_head_row",
+            QuantizedBlock::Float32(&lm_head_row_scalar),
+        ));
         for (k_even_name, k_odd_name, v_name) in &kv_cache_names {
             named_blocks.extend(empty_cache.named_blocks(k_even_name, k_odd_name, v_name));
         }
@@ -5224,6 +5272,11 @@ impl<'file> LoadedModel<'file> {
         prompt: &str,
         gpu_layers: i32,
     ) -> Result<Vec<f32>, InteropError> {
+        // `forward_node_values_on_backend` re-tokenizes `prompt` itself;
+        // this binding survives only for the `instrument`-gated debug
+        // event below (`prompt_tokens`) now that the last-row slice no
+        // longer needs a token count to index with.
+        #[cfg(feature = "instrument")]
         let ids = proxima_tokenizer::encode_with_bos_eos(
             prompt,
             &self.vocab,
@@ -5234,8 +5287,11 @@ impl<'file> LoadedModel<'file> {
             self.forward_node_values_on_backend(prompt, &[self.logits_root], gpu_layers)?;
         let logits = values.remove(0);
         let vocab_size = self.architecture.vocab as usize;
-        let new_count = ids.len();
-        let last_position = logits[(new_count - 1) * vocab_size..new_count * vocab_size].to_vec();
+        // `logits_root` is now the `lm_head_row`-gathered LAST row only
+        // (`spec.rs`'s own doc on that leaf, fed `ids.len() - 1` above) --
+        // one row of `vocab_size`, already the "last prompt position"
+        // this method's own doc promises.
+        let last_position = logits[..vocab_size].to_vec();
 
         #[cfg(feature = "instrument")]
         {
