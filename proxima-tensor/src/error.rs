@@ -322,4 +322,15 @@ pub enum TensorError {
         builder: &'static str,
         feature: &'static str,
     },
+
+    /// [`crate::spec::append_qwen35_ssm_mixer_with_taps`]'s own `s` (sequence)
+    /// axis reduces away with `ScalarOp::Add` before the delta-net
+    /// recurrence step -- correct only when `s == 1` (one position per
+    /// evaluation; every decode step and every synthetic test so far). A
+    /// caller whose leading `x` axis is a statically-known `s > 1` (a
+    /// multi-token prefill batched into one evaluation) would otherwise SUM
+    /// across positions silently rather than run the recurrence once per
+    /// position -- raised here instead of producing a wrong program.
+    #[error("{op} sums its sequence axis (s = {s}) instead of stepping through it; only s == 1 is supported per evaluation")]
+    SingleTokenStepOnly { op: &'static str, s: u64 },
 }

@@ -6811,6 +6811,22 @@ pub fn append_qwen35_ssm_mixer_with_taps(
     l_cache: u32,
     output_gate: GdnOutputGate,
 ) -> Result<(NodeId, SsmMixerTaps), TensorError> {
+    // `x`'s leading axis is `s` (sequence position) -- when it is a
+    // statically-known extent (a synthetic caller, never the compiled
+    // qwen35 program itself, whose `s` is `Extent::Symbolic` and only
+    // resolved at bind time; see `proxima-model-interop::bind_symbols`
+    // for that check), reject anything but a single position here rather
+    // than let the reduce below silently sum across positions.
+    if let Op::Input { shape, .. } | Op::Constant { shape, .. } = &program[x.0 as usize]
+        && let Some(Extent::Static(width)) = shape.first()
+        && *width != 1
+    {
+        return Err(TensorError::SingleTokenStepOnly {
+            op: "qwen35_ssm_mixer",
+            s: u64::from(*width),
+        });
+    }
+
     let head_k_dim = key_dim / kv_heads;
     let num_v_heads = kv_heads * group;
     let head_v_dim = value_dim / num_v_heads;
@@ -16289,6 +16305,58 @@ value = 1.0
             "a swapped kv head must move the repeated output away from the hand-computed \
              reference (if this assertion cannot fail, the test above proves nothing)"
         );
+    }
+
+    /// [`append_qwen35_ssm_mixer_with_taps`]'s own `s`-axis guard: a caller
+    /// whose `x` declares a STATIC `s = 2` (a batched multi-token step,
+    /// never what the compiled `qwen35` program itself does -- see
+    /// `proxima-model-interop::bind_symbols` for the symbolic-`s` case,
+    /// checked at bind time instead) must be refused before any op after
+    /// the guard runs, not silently summed across positions by the reduces
+    /// at `spec.rs:7009-7014`. Every non-`x` argument reuses `x` itself: the
+    /// guard is the function's first statement, so nothing downstream of it
+    /// ever reads them.
+    #[proxima::test]
+    async fn qwen35_ssm_mixer_rejects_a_static_multi_position_step() {
+        let mut program = Vec::new();
+        let x = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(2), Extent::Static(1)], "x");
+
+        let result = append_qwen35_ssm_mixer_with_taps(
+            &mut program,
+            x,
+            x,
+            x,
+            x,
+            x,
+            x,
+            x,
+            None,
+            x,
+            x,
+            x,
+            x,
+            x,
+            x,
+            x,
+            x,
+            x,
+            x,
+            x,
+            1,
+            1,
+            1,
+            1,
+            1,
+            GdnOutputGate::Silu,
+        );
+
+        match result {
+            Err(TensorError::SingleTokenStepOnly { op, s }) => {
+                assert_eq!(op, "qwen35_ssm_mixer");
+                assert_eq!(s, 2);
+            }
+            other => panic!("expected SingleTokenStepOnly, got {other:?}"),
+        }
     }
 
     /// Builds one [`append_qwen35_ssm_mixer`] decode step at `kv_heads = 1`,
