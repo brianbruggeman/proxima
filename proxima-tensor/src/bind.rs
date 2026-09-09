@@ -4257,6 +4257,7 @@ mod tests {
                 1,
                 false,
                 crate::spec::DuplicateHeadPosition::None,
+                false,
             )
             .expect("one-layer single-range decode fixture builds");
         let shapes = crate::shape::infer(&program, &[1, 1]).expect("cached decode fixture infers");
@@ -4411,7 +4412,7 @@ mod tests {
     #[cfg(feature = "cached-attention-streaming")]
     fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape() {
         let (program, logits, cache_roots, _) = crate::spec::mistral_single_range_cached_forward_program(
-            32_002, 4096, 14336, 32, 8, 128, 32, false, crate::spec::DuplicateHeadPosition::None,
+            32_002, 4096, 14336, 32, 8, 128, 32, false, crate::spec::DuplicateHeadPosition::None, false,
         )
         .expect("openchat-shaped single-range forward pass lowers to a program");
         let mut outputs = alloc::vec![logits];
@@ -4482,6 +4483,7 @@ mod tests {
                 1,
                 false,
                 crate::spec::DuplicateHeadPosition::None,
+                false,
             )
             .expect("single-range fixture builds");
         let mut outputs = alloc::vec![logits];
@@ -4551,6 +4553,7 @@ mod tests {
                 1,
                 false,
                 crate::spec::DuplicateHeadPosition::None,
+                false,
             )
             .expect("single-range fixture builds");
         let mut outputs = alloc::vec![logits];
@@ -6320,6 +6323,7 @@ mod tests {
                     32,
                     false,
                     crate::spec::DuplicateHeadPosition::None,
+                    false,
                 )
                 .expect("openchat-shaped single-range forward pass lowers to a program");
             let mut outputs = alloc::vec![logits];
@@ -6431,6 +6435,7 @@ mod tests {
                     BLOCK_COUNT,
                     false,
                     crate::spec::DuplicateHeadPosition::None,
+                    false,
                 )
                 .expect("single-range cached forward pass lowers");
             let mut outputs = alloc::vec![logits];

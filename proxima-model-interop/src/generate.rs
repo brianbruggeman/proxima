@@ -1009,6 +1009,7 @@ fn build_single_range_program(
             architecture.block_count,
             qk_norm,
             duplicate_head,
+            true,
         ) {
             Ok(built) => built,
             Err(TensorError::UnsupportedInBuilder { .. }) => return Ok(None),

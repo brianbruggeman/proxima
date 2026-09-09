@@ -4889,11 +4889,22 @@ pub fn append_mistral_single_range_cached_layer(
 // unreachable dead code, same as any other unread node.
 // [`DuplicateHeadPosition::None`] (every production call site) is
 // byte-identical to this function's behavior before the flag existed.
+//
+// `last_row_only` is `mistral_cached_forward_program_with_experts_and_layer_taps`'s
+// own flag, reproduced here: `true` gathers `normed_final` to its last row
+// through a host-supplied `lm_head_row` leaf (that function's own doc has
+// the full mechanism) before the real `output.weight` reduce, so `logits`
+// is `[1, vocab]` instead of `[new_count, vocab]`. `false` (every call site
+// before this flag existed) is byte-identical to this function's prior
+// behavior. The `DuplicateHeadPosition` scratch reduce is unaffected either
+// way -- it exists to measure the FULL-width projection's own cost (ROW
+// 326/328's own doc), so it keeps reading `x`/`normed_final` directly
+// regardless of `last_row_only`.
 #[allow(
     clippy::too_many_arguments,
     reason = "one architecture hyperparameter per positional arg, matching every other \
               forward-program builder in this file (see the other `too_many_arguments` \
-              call sites above); `duplicate_head` is the 8th and last"
+              call sites above); `last_row_only` is the 9th and last"
 )]
 pub fn mistral_single_range_cached_forward_program(
     vocab: u32,
@@ -4905,6 +4916,7 @@ pub fn mistral_single_range_cached_forward_program(
     block_count: u32,
     qk_norm: bool,
     duplicate_head: DuplicateHeadPosition,
+    last_row_only: bool,
 ) -> Result<SingleRangeForwardProgram, TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
@@ -5140,13 +5152,31 @@ pub fn mistral_single_range_cached_forward_program(
     );
     let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
 
+    // Same `lm_head_row` leaf and gather
+    // `mistral_cached_forward_program_with_experts_and_layer_taps`'s own
+    // `last_row_only` arm uses -- see that call site for the full mechanism
+    // doc. Only the REAL head narrows to one row; `duplicate_head_scratch`
+    // below still reads `x`/`normed_final` directly, since it exists to
+    // measure the FULL-width projection's own cost.
+    let normed_last = if last_row_only {
+        let lm_head_row = input_leaf(
+            &mut program,
+            DType::Int32,
+            alloc::vec![Extent::Static(1)],
+            "lm_head_row",
+        );
+        embedding_lookup(&mut program, normed_final, lm_head_row)
+    } else {
+        normed_final
+    };
+
     let lm_head = input_leaf(
         &mut program,
         DType::Float32,
         alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
         "output.weight",
     );
-    let logits = duplicate_head_reduce(&mut program, normed_final, lm_head)?;
+    let logits = duplicate_head_reduce(&mut program, normed_last, lm_head)?;
 
     let duplicate_head_scratch = match duplicate_head {
         DuplicateHeadPosition::None => None,
@@ -12597,6 +12627,7 @@ value = 1.0
                 block_count,
                 false,
                 DuplicateHeadPosition::None,
+                false,
             )
             .expect("the single-range cached forward pass lowers to a program")
             .0
@@ -12642,6 +12673,7 @@ value = 1.0
                 32,
                 false,
                 DuplicateHeadPosition::None,
+                false,
             )
             .expect("the single-range cached forward pass lowers to a program");
         let mut single_range_outputs = alloc::vec![single_range_logits];
@@ -12925,6 +12957,7 @@ value = 1.0
                     BLOCK_COUNT,
                     false,
                     DuplicateHeadPosition::None,
+                    false,
                 )
                 .expect("single-range cached forward pass lowers");
             let cached_len_scalar = alloc::vec![cached_len as f32];
@@ -13237,6 +13270,7 @@ value = 1.0
                     BLOCK_COUNT,
                     true,
                     DuplicateHeadPosition::None,
+                    false,
                 )
                 .expect("single-range qk-norm cached forward pass lowers");
             let cached_len_scalar = alloc::vec![cached_len as f32];
@@ -13508,6 +13542,7 @@ value = 1.0
             BLOCK_COUNT,
             false,
             DuplicateHeadPosition::None,
+            false,
         )
         .expect("single-range cached forward pass lowers");
 
@@ -13658,6 +13693,7 @@ value = 1.0
                 BLOCK_COUNT,
                 false,
                 DuplicateHeadPosition::None,
+                false,
             )
             .expect("single-range cached forward pass lowers");
 
