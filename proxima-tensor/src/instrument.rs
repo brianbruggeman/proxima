@@ -2439,7 +2439,7 @@ pub fn reset_evaluate_quantized_phase() {
 /// own drain-and-poll table: that table answers "which experts were hot
 /// over the last drain window", polled by a caller; this trait answers
 /// "which expert did THIS token, THIS layer just route to", pushed to a
-/// caller the moment [`crate::cpu::run_reduce_quantized`]'s gathered-weight
+/// caller the moment `crate::cpu::run_reduce_quantized`'s gathered-weight
 /// loop resolves `expert_index` -- the shape a residency FSM (deciding
 /// whether to keep or evict an expert's weights BEFORE the next token,
 /// not after a drain interval) needs and a poll cannot give it. Composes

@@ -1548,10 +1548,11 @@ pub struct MoeSite {
 
 /// Every [`MoeSite`] a forward-program builder's [`append_moe_ffn`] calls
 /// produced, in layer order -- empty for a dense (non-MoE) program. The
-/// decode loop ([`crate::instrument::ExpertObserver`]'s consumer) reads
-/// this to know which extra nodes to request as evaluation outputs, rather
-/// than the kernel emitting a routing event per gathered position the way
-/// [`crate::instrument::notify_expert_routed`] used to.
+/// decode loop (`crate::instrument::ExpertObserver`'s consumer, gated behind
+/// this crate's `instrument` feature) reads this to know which extra nodes
+/// to request as evaluation outputs, rather than the kernel emitting a
+/// routing event per gathered position the way
+/// `crate::instrument::notify_expert_routed` used to.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MoeSites(pub Vec<MoeSite>);
 
