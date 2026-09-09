@@ -5222,6 +5222,134 @@ mod tests {
         );
     }
 
+    /// [`correct_packed_matmul_layouts`]/[`native_packed_layout`] on a
+    /// **multi-axis contraction ("in") group** (`u`, `g`, `d`), the exact
+    /// shape `wo` (attention output projection) composes its packed row
+    /// index from in `mistral_layer3_forward_program`'s real checkpoint:
+    /// `attn_head_dim*group*u + attn_head_dim*g + d`, i.e. THREE reduction
+    /// letters folded into one packed-leaf axis, mirrored here at `u=2,
+    /// g=2, d=3`. The sibling test above
+    /// (`..._two_axis_output_group`) only ever proved the OUTPUT side can
+    /// be multi-axis (`wq`/`wk`/`wv`'s own shape, a single-letter `in`);
+    /// this is that same proof for the un-tested complementary case,
+    /// output = a single axis `e`, contraction = three.
+    #[test]
+    fn correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_multi_axis_contraction_group() {
+        const SEQ: u64 = 2;
+        const KV_HEADS: u64 = 2;
+        const GROUP: u64 = 2;
+        const HEAD_DIM: u64 = 3;
+        const EMBED: u64 = 4;
+        const IN_DIM: u64 = KV_HEADS * GROUP * HEAD_DIM;
+
+        let mut program = Vec::new();
+        let weight = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::UInt8,
+                shape: alloc::vec![Extent::Static(IN_DIM as u32), Extent::Static(EMBED as u32)],
+                name: None,
+            },
+        );
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![
+                    Extent::Static(SEQ as u32),
+                    Extent::Static(KV_HEADS as u32),
+                    Extent::Static(GROUP as u32),
+                    Extent::Static(HEAD_DIM as u32)
+                ],
+                name: None,
+            },
+        );
+        // iteration space (s=0, u=1, g=2, d=3, e=4): weight's own row axis
+        // is the composed `(head_dim*group)*u + head_dim*g + d`, exactly
+        // `wo_flat`'s own map string at `spec.rs:9024-9028` with the real
+        // dims swapped for small distinguishable primes; weight's second
+        // axis is the plain output letter `e`. Activation reads (s, u, g,
+        // d), ignoring e (broadcast over the output axis, the `wo`
+        // ones-broadcast idiom's own shape).
+        let row_terms = [
+            AxisTerm::scaled(1, i32::try_from(GROUP * HEAD_DIM).expect("fits i32")),
+            AxisTerm::scaled(2, i32::try_from(HEAD_DIM).expect("fits i32")),
+            AxisTerm::scaled(3, 1),
+        ];
+        let weight_map = IndexMap::Affine(map::affine(
+            5,
+            &[(&row_terms, 0), (&[AxisTerm::scaled(4, 1)], 0)],
+        ));
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (weight, weight_map),
+                    (activation, IndexMap::Affine(map::projection(5, &[0, 1, 2, 3]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: crate::op::ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(5, &[0, 1, 2, 3, 4])),
+                out_map: IndexMap::Affine(map::projection(5, &[0, 4])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let shapes = shape::infer(&program, &[]).expect("multi-axis contraction group infers");
+        let mut built =
+            bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("multi-axis contraction group binds");
+        let packed: BTreeSet<NodeId> = core::iter::once(weight).collect();
+        correct_packed_matmul_layouts(&mut built, &packed);
+
+        let reduce = built
+            .iter()
+            .find(|op| op.node == sum)
+            .expect("reduce emitted");
+        let weight_layout = &reduce
+            .operands()
+            .iter()
+            .find(|(node, _, _)| *node == weight)
+            .expect("weight operand present in the reduce")
+            .1;
+
+        assert_eq!(
+            weight_layout.stride(3),
+            1,
+            "head_dim (d) is the innermost, contiguous packed-row term"
+        );
+        assert_eq!(
+            weight_layout.stride(2),
+            HEAD_DIM as i64,
+            "group (g) steps by one head_dim block"
+        );
+        assert_eq!(
+            weight_layout.stride(1),
+            (HEAD_DIM * GROUP) as i64,
+            "kv_head (u) steps by one whole group*head_dim block"
+        );
+        assert_eq!(
+            weight_layout.stride(4),
+            IN_DIM as i64,
+            "the output axis (e) steps by the whole packed row width"
+        );
+        assert_eq!(
+            weight_layout.stride(0),
+            0,
+            "weight never varies over the sequence batch axis"
+        );
+    }
+
     fn elementwise_op() -> BoundOp {
         let mut program = Vec::new();
         let source = append(

@@ -29512,6 +29512,148 @@ mod tests {
         );
     }
 
+    /// Targeted RED-first probe for the `wo`/attention-output-projection
+    /// shape from the real Qwen3.6 35B-A3B checkpoint (layer 3,
+    /// `qwen35moe_layer3_o_proj_contraction_candidates`): a genuine
+    /// elementwise step (`activation + 1.0`, the same non-eliminable-under-
+    /// `bit_exact` shape as the model's own sigmoid gate's
+    /// `1 + exp(-gate)`) sits BETWEEN the real activation and the
+    /// `Multiply(weight, activation)` a quantized reduce fuses --
+    /// `quantized_matmul_program` above never has an operand between
+    /// activation and product, so it cannot exercise this. The hypothesis
+    /// this was written to test -- that `run_reduce_quantized`'s
+    /// `resolved.operands().find(|node| *node != weight_node)` reads the
+    /// FIRST non-weight flat operand off the fused body and silently picks
+    /// the pre-add `raw` operand instead of the true `real_activation` --
+    /// is REFUTED by this test's own data: `fused` and `materialized` come
+    /// back bit-identical and both land within quantization noise of the
+    /// `+1.0`-inclusive f64 reference, so this single-extra-step shape is
+    /// NOT where the real checkpoint's `wo` discrepancy comes from. Kept as
+    /// a permanent regression guard for the shape it does cover (one
+    /// elementwise step fused ahead of a quantized `Multiply`-then-`Reduce`
+    /// correctly threads the whole composed body, not just its first leaf).
+    #[test]
+    fn evaluate_quantized_threads_a_fused_elementwise_step_ahead_of_the_matmul_multiply() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let rows: u32 = 3;
+        let k = QK_K as u32;
+
+        let raw_activation: Vec<f32> = random_vec(29, k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let weight_f32: Vec<f32> = random_vec(31, rows as usize * k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+
+        let block_bytes = BLOCK_BYTES;
+        let mut weight_blocks = vec![0u8; rows as usize * block_bytes];
+        for (row_f32, row_blocks) in weight_f32
+            .chunks_exact(k as usize)
+            .zip(weight_blocks.chunks_exact_mut(block_bytes))
+        {
+            quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+        }
+
+        let mut program = Vec::new();
+        let weight = block(&mut program, DType::UInt8, &[Extent::Static(rows), Extent::Static(k)]);
+        let raw = f32_block(&mut program, &[Extent::Static(k), Extent::Static(1)]);
+        let one = crate::spec::scalar_constant(&mut program, 1.0);
+        let real_activation = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![
+                    (raw, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (one, IndexMap::Affine(map::projection(2, &[]))),
+                ],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (real_activation, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("quantized_matmul_with_extra_add".into()),
+            }),
+        );
+
+        let blocks = [QuantizedBlock::Q4K(&weight_blocks), QuantizedBlock::Float32(&raw_activation)];
+
+        // fused: `bind` absorbs `real_activation`'s `+1.0` into the
+        // reduce's own body since it has no other consumer -- the shape
+        // `run_reduce_quantized` cannot see through.
+        let fused = evaluate_quantized(&program, &[], &blocks, &[sum])
+            .expect("fused quantized matmul evaluates")
+            .root()
+            .to_vec();
+
+        // materialized: requesting `real_activation` too keeps it `still_live`,
+        // so `bind` cannot fuse it into the reduce -- the reduce now reads a
+        // real, already-added buffer, the same path a plain f32 matmul takes.
+        let materialized_result = evaluate_quantized(&program, &[], &blocks, &[real_activation, sum])
+            .expect("materialized quantized matmul evaluates");
+        let materialized = materialized_result
+            .get(sum)
+            .expect("the reduce output was requested")
+            .0
+            .to_vec();
+
+        let expected: Vec<f32> = weight_f32
+            .chunks_exact(k as usize)
+            .map(|row| {
+                row.iter()
+                    .zip(raw_activation.iter())
+                    .map(|(&weight_value, &activation_value)| {
+                        f64::from(weight_value) * f64::from(activation_value + 1.0)
+                    })
+                    .sum::<f64>() as f32
+            })
+            .collect();
+
+        eprintln!("fused={fused:?} materialized={materialized:?} expected={expected:?}");
+
+        for (&got, &want) in materialized.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() / want.abs() < 0.02,
+                "materialized path must match the +1.0-inclusive reference: got={got} want={want}"
+            );
+        }
+
+        assert_eq!(
+            fused, materialized,
+            "fusing the +1.0 step into the reduce must not change the result the reduce reports \
+             versus forcing that step to materialize first"
+        );
+        for (&got, &want) in fused.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() / want.abs() < 0.02,
+                "the fused path must also match the +1.0-inclusive reference: got={got} want={want}"
+            );
+        }
+    }
+
     /// [`evaluate_quantized_exact`] run end to end on the same program as
     /// [`evaluate_quantized_matmul_matches_dequantize_then_f32_evaluate`]
     /// above, held to a tighter absolute float-noise-floor bound instead of
