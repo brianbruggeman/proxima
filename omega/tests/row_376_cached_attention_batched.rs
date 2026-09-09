@@ -110,6 +110,7 @@ fn build_fixture(context_length: u64) -> Row376Fixture {
         LAYERS,
         false,
         DuplicateHeadPosition::None,
+        false,
     )
     .expect("the real-shape single-range forward program builds");
 
