@@ -30,8 +30,8 @@ use proxima_model_interop::{
     LoadedModel, StepInput, StepInputContext, architecture_from_metadata, bind_dense, symbols,
 };
 use proxima_primitives::pipe::Pipe;
-use proxima_tensor::spec::{elementwise, embedding_lookup, input_leaf, reduce};
-use proxima_tensor::{DType, Extent, ReduceInit, ScalarOp};
+use proxima_tensor::spec::{Qwen35LayerRoots, elementwise, embedding_lookup, input_leaf, reduce};
+use proxima_tensor::{DType, Extent, Op, ReduceInit, ScalarOp};
 use proxima_tokenizer::byte_level::byte_to_char;
 
 #[path = "support/mod.rs"]
@@ -551,6 +551,76 @@ async fn a_program_leaf_with_no_step_inputs_override_reports_missing_step_input(
         }
         Ok(_) => panic!("expected MissingStepInput: neither aux leaf was ever fed"),
         Err(other) => panic!("expected MissingStepInput, got {other}"),
+    }
+}
+
+/// Sad path (the real-world GDN+MoE defect this test module's fix
+/// closes): a foreign [`Architecture::bind`] whose
+/// [`BoundProgram::layer_roots`] tags layer 0 [`Qwen35LayerRoots::Ssm`]
+/// (recurrent state), but whose compiled program declares NEITHER
+/// `ssm_cache.0.conv_history` nor `ssm_cache.0.state` as an `Op::Input`
+/// leaf -- the architecture baked that layer's state as a constant
+/// instead of wiring it through the decode loop. Before the fix,
+/// `declared_cache_kind` returning `None` for this layer was masked by
+/// `.unwrap_or(bound)`, so the decode loop silently ran the layer from
+/// zero state every step and nothing ever failed.
+/// [`InteropError::LayerCacheLeavesMissing`] must reject this at
+/// [`LoadedModel::load_with_registry`], before the first token.
+struct SsmClaimNoLeavesArch;
+
+impl Architecture for SsmClaimNoLeavesArch {
+    fn name(&self) -> &'static str {
+        "acme-ssm-claim-no-leaves"
+    }
+
+    fn bind<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+    ) -> Result<BoundProgram<'file>, InteropError> {
+        let mut bound = DenseArch.bind(parsed, file_bytes)?;
+        // The real defect, reproduced: strip layer 0's kv-cache `Op::Input`
+        // names so the program declares no recognizable cache leaf for it
+        // at all (as if its state had been baked in as a constant), while
+        // `layer_roots` below still calls that layer SSM.
+        for op in &mut bound.program {
+            if let Op::Input { name, .. } = op
+                && name.as_deref().is_some_and(|leaf| leaf.starts_with("kv_cache.0."))
+            {
+                *name = None;
+            }
+        }
+        bound.layer_roots[0] = Qwen35LayerRoots::Ssm {
+            qkv_mixed: bound.logits_root,
+            state_out: bound.logits_root,
+        };
+        Ok(bound)
+    }
+}
+
+static SSM_CLAIM_NO_LEAVES: SsmClaimNoLeavesArch = SsmClaimNoLeavesArch;
+
+#[proxima::test]
+async fn a_layer_bound_ssm_with_no_declared_cache_leaves_fails_at_load() {
+    let name = "acme-ssm-claim-no-leaves";
+    let file_bytes = checkpoint_bytes(name);
+    let parsed = parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let mut registry = ArchitectureRegistry::with_builtin();
+    registry.register(&SSM_CLAIM_NO_LEAVES);
+
+    match LoadedModel::load_with_registry(&parsed, &file_bytes, &registry) {
+        Err(InteropError::LayerCacheLeavesMissing { layer, kind, expected }) => {
+            assert_eq!(layer, 0, "the mismatch was staged on layer 0");
+            assert!(kind.contains("ssm_cache"), "kind must name the bound SSM shape, got {kind:?}");
+            assert!(
+                expected.contains(&"ssm_cache.{layer}.conv_history"),
+                "expected must name the leaf templates the bound shape needs, got {expected:?}"
+            );
+        }
+        Ok(_) => panic!(
+            "expected LayerCacheLeavesMissing: layer 0 is bound SSM but declares no ssm_cache leaf"
+        ),
+        Err(other) => panic!("expected LayerCacheLeavesMissing, got {other}"),
     }
 }
 

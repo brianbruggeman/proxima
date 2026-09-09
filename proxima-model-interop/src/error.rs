@@ -451,6 +451,26 @@ pub enum InteropError {
         bound: &'static str,
     },
 
+    /// `layer`'s `crate::architecture::BoundProgram::layer_roots` entry
+    /// says `kind` (recurrent SSM state or attention KV state), but the
+    /// compiled program declares NONE of `expected` as `Op::Input` leaves
+    /// for that layer -- the architecture baked this layer's state as
+    /// constants instead of feeding it through the decode loop. Unlike
+    /// [`Self::LayerCacheKindMismatch`] (program declares a DIFFERENT
+    /// shape than bound), this is the program declaring NO cache shape at
+    /// all for a layer the architecture itself says is stateful. Left
+    /// uncaught, the decode loop silently runs that layer from zero state
+    /// on every step (`declared_cache_kind`'s own doc): nothing fails, and
+    /// the output degrades with a period equal to the interval between
+    /// stateful layers, which is invisible on short generations. Caught
+    /// once, at decode-loop setup, before the first token.
+    #[error("layer {layer} is bound as {kind} but the program declares none of its cache leaves ({expected:?})")]
+    LayerCacheLeavesMissing {
+        layer: usize,
+        kind: &'static str,
+        expected: &'static [&'static str],
+    },
+
     /// `crate::expert_slab::ExpertSlab::page_expert`/`evict_expert` was
     /// called while a decode step was in progress -- the slab's own borrow
     /// contract (`ExpertSlab`'s doc: an `ExpertSource` snapshot is valid for
