@@ -4182,6 +4182,24 @@ impl<'file> LoadedModel<'file> {
                 let expert_sources =
                     expert_slab_guard.sources_for_step(&mut expert_entries_scratch);
 
+                // `BackendRuntime::evaluate` under the `metal` feature
+                // accepts `expert_sources` and drops it (that impl's own
+                // doc: not yet wired through `omega::backend`'s polymorphic
+                // plan cache), so it cannot honor an evicted expert with no
+                // paged replacement -- it would otherwise silently gather
+                // the checkpoint's original, evicted bytes as if the
+                // eviction never happened. Fail closed here, before that
+                // backend ever runs, instead of after a wrong forward pass.
+                // The non-`metal` `BackendRuntime::evaluate` reads through
+                // `expert_sources` itself (`evaluate_quantized_named_with_scratch_and_experts`),
+                // so an incomplete layer there already surfaces as
+                // `proxima_tensor::TensorError::GatherIndexOutOfRange` from
+                // the gather -- this check would be redundant on that path.
+                #[cfg(feature = "metal")]
+                if let Some(layer) = expert_slab_guard.first_incomplete_layer() {
+                    return Err(InteropError::ExpertRoutingUnsupportedByBackend { layer });
+                }
+
                 #[cfg(feature = "instrument")]
                 let evaluate_started = read_ticks();
                 // `PROXIMA_METAL_OP_PROFILE_STEP` -- diagnostic-only, `instrument`-gated,

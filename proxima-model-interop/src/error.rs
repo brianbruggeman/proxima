@@ -436,6 +436,18 @@ pub enum InteropError {
     #[error("expert {expert} of layer {layer} is out of range for this checkpoint's expert slab")]
     ExpertSlabIndexOutOfRange { layer: usize, expert: usize },
 
+    /// `layer` has at least one evicted expert with no paged replacement
+    /// yet (`crate::expert_slab::ExpertSlab::first_incomplete_layer`), and
+    /// the selected backend does not consult
+    /// [`crate::expert_slab::ExpertSlab`]'s per-step table at all --
+    /// `crate::generate::BackendRuntime`'s `metal`-feature `evaluate`
+    /// accepts `expert_sources` and drops it (its own doc: not yet wired
+    /// through `omega::backend`'s polymorphic plan cache). Surfaced here,
+    /// before that backend ever runs, instead of silently gathering the
+    /// checkpoint's original, evicted bytes as if nothing had changed.
+    #[error("layer {layer} has an evicted expert with no replacement, and this backend cannot honor per-step expert routing")]
+    ExpertRoutingUnsupportedByBackend { layer: usize },
+
     /// A pad-scratch buffer's row width (`expected`, elements) came out
     /// smaller than the growing per-layer cache it was about to copy from
     /// (`found`) -- `crate::generate::Qwen35DenseAttentionPadScratch::fill`
