@@ -4611,8 +4611,13 @@ impl<'file> LoadedModel<'file> {
                 // first attention layer, 3-GDN-to-1-attention interleave) --
                 // paired with the AFTER checksum below to prove whether this
                 // step's cache append actually mutated either layer's state.
+                // `.get` rather than a literal index: a foreign `Architecture`
+                // with an empty `layer_roots` (no cache leaves at all) has an
+                // empty `layer_caches` too, and this diagnostic must degrade
+                // to "nothing to report" rather than index out of bounds.
                 #[cfg(feature = "instrument")]
-                let (layer0_before_len, layer0_before_checksum) = layer_cache_checksum(&layer_caches[0]);
+                let (layer0_before_len, layer0_before_checksum) =
+                    layer_caches.first().map_or((0, 0.0), layer_cache_checksum);
                 #[cfg(feature = "instrument")]
                 let (layer3_before_len, layer3_before_checksum) =
                     layer_caches.get(3).map_or((0, 0.0), layer_cache_checksum);
@@ -4710,7 +4715,8 @@ impl<'file> LoadedModel<'file> {
                 let cached_len_before_step = cached_len;
                 #[cfg(feature = "instrument")]
                 {
-                    let (layer0_after_len, layer0_after_checksum) = layer_cache_checksum(&layer_caches[0]);
+                    let (layer0_after_len, layer0_after_checksum) =
+                        layer_caches.first().map_or((0, 0.0), layer_cache_checksum);
                     let (layer3_after_len, layer3_after_checksum) =
                         layer_caches.get(3).map_or((0, 0.0), layer_cache_checksum);
                     debug!(
