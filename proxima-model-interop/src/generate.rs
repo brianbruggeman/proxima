@@ -1931,6 +1931,32 @@ enum LayerCacheState {
     Ssm(SsmLayerCache),
 }
 
+/// Diagnostic-only (history-carry bisection step 3): `(element_count,
+/// abs_sum)` over every `f32` this layer's cache currently holds -- a cheap
+/// stand-in for a real hash that still catches the two failure shapes this
+/// bisection is looking for: `element_count` frozen step-over-step means the
+/// cache never grew (state leaves fed zeros or the wrong buffer);
+/// `abs_sum` frozen while `element_count` grows means new rows are being
+/// appended but they are all-zero.
+#[cfg(feature = "instrument")]
+fn layer_cache_checksum(cache: &LayerCacheState) -> (usize, f64) {
+    let sum_abs = |values: &[f32]| -> f64 { values.iter().map(|value| f64::from(value.abs())).sum() };
+    match cache {
+        LayerCacheState::Attention(cache) => (
+            cache.k_even.len() + cache.k_odd.len() + cache.v.len(),
+            sum_abs(&cache.k_even) + sum_abs(&cache.k_odd) + sum_abs(&cache.v),
+        ),
+        LayerCacheState::DenseAttention(cache) => (
+            cache.k_first.len() + cache.k_second.len() + cache.k_pass.len() + cache.v.len(),
+            sum_abs(&cache.k_first) + sum_abs(&cache.k_second) + sum_abs(&cache.k_pass) + sum_abs(&cache.v),
+        ),
+        LayerCacheState::Ssm(cache) => (
+            cache.conv_history.len() + cache.state.len(),
+            sum_abs(&cache.conv_history) + sum_abs(&cache.state),
+        ),
+    }
+}
+
 /// A cached prefix: the token ids [`LoadedModel::prefill_prefix`] ran one
 /// forward pass over, and the per-layer `LayerCacheState` that pass left
 /// behind -- the SAME `(ids, layer_caches, cached_len)` triple
@@ -4580,6 +4606,16 @@ impl<'file> LoadedModel<'file> {
                 let layer_cache_append_started = read_ticks();
                 #[cfg(feature = "instrument")]
                 let mut layer_cache_append_elements: u64 = 0;
+                // History-carry bisection step 3 (diag/qwen35moe-history-carry):
+                // before-state for layers 0 (GDN) and 3 (this checkpoint's
+                // first attention layer, 3-GDN-to-1-attention interleave) --
+                // paired with the AFTER checksum below to prove whether this
+                // step's cache append actually mutated either layer's state.
+                #[cfg(feature = "instrument")]
+                let (layer0_before_len, layer0_before_checksum) = layer_cache_checksum(&layer_caches[0]);
+                #[cfg(feature = "instrument")]
+                let (layer3_before_len, layer3_before_checksum) =
+                    layer_caches.get(3).map_or((0, 0.0), layer_cache_checksum);
                 for (layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
                     match (roots_for_layer, &mut layer_caches[layer]) {
                         (
@@ -4672,6 +4708,27 @@ impl<'file> LoadedModel<'file> {
                 let layer_cache_append_ticks = elapsed_ticks(layer_cache_append_started);
                 #[cfg(feature = "instrument")]
                 let cached_len_before_step = cached_len;
+                #[cfg(feature = "instrument")]
+                {
+                    let (layer0_after_len, layer0_after_checksum) = layer_cache_checksum(&layer_caches[0]);
+                    let (layer3_after_len, layer3_after_checksum) =
+                        layer_caches.get(3).map_or((0, 0.0), layer_cache_checksum);
+                    debug!(
+                        step = _step as u64,
+                        batch_index = batch_index as u64,
+                        token_fed = ids_for_step[0],
+                        cached_len_before = cached_len_before_step as u64,
+                        layer0_len_before = layer0_before_len as u64,
+                        layer0_len_after = layer0_after_len as u64,
+                        layer0_checksum_before = layer0_before_checksum,
+                        layer0_checksum_after = layer0_after_checksum,
+                        layer3_len_before = layer3_before_len as u64,
+                        layer3_len_after = layer3_after_len as u64,
+                        layer3_checksum_before = layer3_before_checksum,
+                        layer3_checksum_after = layer3_after_checksum,
+                        "decode_loop_step_trace: layer 0/3 cache state before/after this step's append"
+                    );
+                }
                 cached_len += new_count;
 
                 // Everything below samples a token off THIS batch's logits.
@@ -4727,6 +4784,13 @@ impl<'file> LoadedModel<'file> {
                 token_history.push(token_id);
                 #[cfg(feature = "instrument")]
                 let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
+                #[cfg(feature = "instrument")]
+                debug!(
+                    step = _step as u64,
+                    cached_len_after = (cached_len_before_step + new_count) as u64,
+                    token_sampled = token_id,
+                    "decode_loop_step_trace: sampled token fed forward as next step's next_ids"
+                );
                 next_ids = alloc::vec![token_id];
 
                 #[cfg(feature = "instrument")]
