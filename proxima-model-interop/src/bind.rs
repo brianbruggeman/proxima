@@ -2009,6 +2009,7 @@ pub(crate) fn bind_all_weights<'file>(
 /// `Float32`/`Q2K`/anything else [`PackedOwnedKind`] has no tag for -- a
 /// dense-`F32` or restacked-owned MoE weight never reaches
 /// [`build_expert_slab`] at all (see that function's own doc for why).
+#[cfg(feature = "std")]
 fn quantized_block_as_owned_bytes(
     block: proxima_tensor::cpu::QuantizedBlock<'_>,
 ) -> Option<(&[u8], PackedOwnedKind)> {
