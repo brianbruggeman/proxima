@@ -4140,12 +4140,36 @@ impl<'file> LoadedModel<'file> {
                 // is exact for the integer counts ROW 129 used it for, and NOT
                 // for timings -- ROW 130's own postmortem on why it produced a
                 // sub-bucket larger than its parent and a negative duration).
-                #[cfg(feature = "instrument")]
-                proxima_tensor::instrument::reset_step();
-                #[cfg(feature = "instrument")]
-                let step_started = read_ticks();
+                // ROW 427: a `single_position_step` architecture (qwen35's
+                // GDN mixer -- `TensorError::SingleTokenStepOnly`'s own doc)
+                // refuses any `new_count != 1` bind, so a `new_count > 1`
+                // prefill (the whole prompt fed as one batched `next_ids`)
+                // cannot go through this step's evaluate call at all. Split
+                // it into one length-1 batch per prompt position instead --
+                // every batch below runs through the SAME evaluate + cache-
+                // append body as an ordinary decode step, just with
+                // `cached_len` advancing by one per batch rather than by
+                // `next_ids.len()` in a single call. `step_batches` is a
+                // single `next_ids`-sized batch (byte-identical to the
+                // pre-existing single-call path) for every dense/decode
+                // caller and for a qwen35 step that already carries exactly
+                // one position (ordinary decode, or a one-token prompt).
+                let step_batches: Vec<Vec<u32>> = if self.single_position_step && next_ids.len() > 1
+                {
+                    next_ids.iter().map(|&position_id| alloc::vec![position_id]).collect()
+                } else {
+                    alloc::vec![next_ids.clone()]
+                };
+                let last_batch_index = step_batches.len() - 1;
+                let mut token_id: u32 = 0;
+                for (batch_index, ids_for_step) in step_batches.iter().enumerate() {
+                    let is_last_step_batch = batch_index == last_batch_index;
+                    #[cfg(feature = "instrument")]
+                    proxima_tensor::instrument::reset_step();
+                    #[cfg(feature = "instrument")]
+                    let step_started = read_ticks();
 
-                let new_count = next_ids.len();
+                    let new_count = ids_for_step.len();
                 #[cfg(feature = "instrument")]
                 let apply_serving_config_started = read_ticks();
                 apply_serving_config(serving_config, cached_len + new_count)?;
@@ -4155,7 +4179,7 @@ impl<'file> LoadedModel<'file> {
                 #[cfg(feature = "instrument")]
                 let build_position_inputs_started = read_ticks();
                 let inputs = build_position_inputs(
-                    &next_ids,
+                    ids_for_step,
                     cached_len,
                     self.architecture.head_dim,
                     self.architecture.rope_freq_base,
@@ -4540,6 +4564,20 @@ impl<'file> LoadedModel<'file> {
                 let cached_len_before_step = cached_len;
                 cached_len += new_count;
 
+                // Everything below samples a token off THIS batch's logits.
+                // For a `single_position_step` architecture's expanded
+                // prefill (`step_batches` above), every batch except the
+                // last is a known prompt token, not a sampled one -- only
+                // the cache-append above needs to run for it. Running this
+                // tail on every batch would draw from `rng` once per prompt
+                // position instead of once per generated token, diverging
+                // from the sequential single-position oracle the ROW 427
+                // tests compare against (`RE-VERIFY: rng` in that doc's own
+                // row). Skipping it here is what makes `next_ids`'s LAST
+                // batch's logits the ones `decode_until_stop_or_budget`
+                // actually samples, exactly like a `new_count == 1` decode
+                // step always has.
+                if is_last_step_batch {
                 let (logits, _shape) =
                     evaluated
                         .get(self.logits_root)
@@ -4567,7 +4605,7 @@ impl<'file> LoadedModel<'file> {
 
                 #[cfg(feature = "instrument")]
                 let greedy_pick_started = read_ticks();
-                let token_id = match token_override.and_then(|forced| forced.get(_step)) {
+                token_id = match token_override.and_then(|forced| forced.get(_step)) {
                     Some(&forced_token) => forced_token,
                     None => {
                         let recent_window_start = token_history.len().saturating_sub(repeat_window);
@@ -4675,6 +4713,8 @@ impl<'file> LoadedModel<'file> {
                             phys_footprint_bytes(),
                         );
                     }
+                }
+                }
                 }
 
                 Ok(token_id)
