@@ -3917,7 +3917,10 @@ impl<'a> ExpertSource<'a> {
 ///
 /// # Errors
 /// [`TensorError::ExpertStackNotAligned`] if `stack`'s packed byte length is
-/// not a whole multiple of `expert_count`.
+/// not a whole multiple of `expert_count`; [`TensorError::EmptyExpertPayload`]
+/// if `stack` carries zero packed bytes for a nonzero `expert_count` (`0 % n
+/// == 0` passes the alignment check above, but a `0`-wide chunk has no bytes
+/// to alias, and `chunks_exact` panics if asked for a zero-width chunk).
 #[must_use = "an unused expert table alias is a no-op"]
 pub fn expert_entries_from_stack(
     stack: QuantizedBlock<'_>,
@@ -3932,7 +3935,18 @@ pub fn expert_entries_from_stack(
     if expert_count == 0 || !bytes.len().is_multiple_of(expert_count) {
         return Err(TensorError::ExpertStackNotAligned { expert_count, bytes: bytes.len() });
     }
+    if bytes.is_empty() {
+        return Err(TensorError::EmptyExpertPayload { expert_count });
+    }
     let per_expert_bytes = bytes.len() / expert_count;
+    // Owned `Vec` output, not a lazy borrowed view: `ExpertSource` (this
+    // function's only real consumer) holds `&'a [ExpertEntry<'a>]` -- a
+    // materialized slice, not an iterator or index-computed accessor -- so
+    // the table has to exist somewhere the caller can take `&entries` of.
+    // Called once per evaluation step (see `ExpertSource`'s own doc: "the
+    // executor snapshots this table when the step begins"), not once per
+    // position inside a step, so this is bounded setup-path allocation
+    // (`expert_count` entries), never a hot-path allocation.
     Ok(bytes
         .chunks_exact(per_expert_bytes)
         .map(|chunk| ExpertEntry { block: stack.with_bytes(chunk), out_dim, in_dim, epoch })
@@ -20969,6 +20983,7 @@ mod tests {
     use std::time::Instant;
 
     use crate::test_support::Lcg;
+    use proptest::proptest;
 
 
     /// `b = a * scale; c = b + bias; d = c * c` -- the same shape
@@ -29601,6 +29616,40 @@ mod tests {
             .find(|op| op.node == sum)
             .expect("the gathered reduce node is present in the bound program");
         (bound, buffers, weight_node)
+    }
+
+    /// ITEM 5 (ROW 422): a zero-byte packed stack with a nonzero
+    /// `expert_count` passes [`expert_entries_from_stack`]'s own alignment
+    /// check (`0 % expert_count == 0`), which used to fall straight into
+    /// `bytes.chunks_exact(0)` -- a bare `chunks_exact` panics if the chunk
+    /// width is `0`. This must be a typed [`TensorError::EmptyExpertPayload`]
+    /// instead, never a panic.
+    #[test]
+    fn expert_entries_from_stack_rejects_empty_payload_instead_of_panicking() {
+        let empty_stack = QuantizedBlock::Q4K(&[]);
+        let error = expert_entries_from_stack(empty_stack, 3, 4, 256, 0)
+            .expect_err("an empty packed stack must be a typed rejection, not a panic");
+        assert_eq!(
+            error,
+            TensorError::EmptyExpertPayload { expert_count: 3 },
+            "an empty packed stack must be a typed rejection, not a panic inside chunks_exact"
+        );
+    }
+
+    proptest! {
+        /// ITEM 5 (ROW 422): no `(payload_len, expert_count)` pair drives
+        /// [`expert_entries_from_stack`] into a panic -- every input either
+        /// returns `Ok` (a genuinely block-aligned, nonempty stack) or one
+        /// of its two typed errors (misaligned, or aligned-but-empty).
+        #[test]
+        fn expert_entries_from_stack_never_panics(
+            payload_len in 0usize..=512,
+            expert_count in 0usize..=16,
+        ) {
+            let payload = vec![0u8; payload_len];
+            let stack = QuantizedBlock::Q4K(&payload);
+            let _ = expert_entries_from_stack(stack, expert_count, 1, 1, 0);
+        }
     }
 
     /// [`ExpertSource`]'s zero-copy default: an alias table built by
