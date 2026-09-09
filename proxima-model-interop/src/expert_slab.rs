@@ -236,6 +236,25 @@ impl<'file> ExpertSlab<'file> {
         self.layers.get(layer)?.experts.get(expert)?.as_ref().map(|copy| copy.epoch)
     }
 
+    /// The lowest layer index carrying at least one evicted expert with no
+    /// paged replacement yet, or `None` if every bound layer is fully
+    /// populated. [`Self::sources_for_step`] still returns a valid (shorter)
+    /// table for an incomplete layer -- that is what lets a gather correctly
+    /// reject the missing index with
+    /// `proxima_tensor::TensorError::GatherIndexOutOfRange` on a backend
+    /// that actually reads through the returned [`ExpertSource`]. A backend
+    /// that does not (`crate::generate::BackendRuntime`'s `metal`-feature
+    /// `evaluate` accepts `expert_sources` and drops it -- see its own doc)
+    /// cannot honor that omission at all, and would otherwise silently
+    /// gather the checkpoint's original, evicted bytes instead of failing.
+    /// Such a caller checks this before evaluating and fails closed.
+    #[must_use]
+    pub fn first_incomplete_layer(&self) -> Option<usize> {
+        self.layers
+            .iter()
+            .position(|layer_slab| layer_slab.experts.iter().any(Option::is_none))
+    }
+
     /// Snapshots every bound layer's own [`ExpertSource`], keyed by that
     /// layer's gathered-reduce weight [`NodeId`] -- the table
     /// `run_reduce_with_quantized_weights` resolves through. `entries` is
