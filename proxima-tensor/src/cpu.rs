@@ -2244,13 +2244,25 @@ fn epilogue_fuse_plan(
             continue;
         };
         let producer = &resolved[producer_position];
+        // A producer `bind::bind`'s own `reduce-epilogue-fusion` already gave
+        // a non-identity `epilogue_body` (e.g. a sigmoid/silu gate folded
+        // onto the fold) must be declined here, not just admitted as "plain":
+        // `run_resolved_nodes_in_arena` skips `run_node_into` entirely for
+        // whatever this function marks as a fusion SOURCE and instead reads
+        // its RAW pre-epilogue value inside `apply_epilogue_fused_monomorphic`
+        // -- silently dropping `bind::bind`'s own epilogue with no error, the
+        // exact double-fusion collision this crate's docs/discipline.md
+        // reduce-epilogue-fusion ROW never anticipated a SECOND, independent
+        // epilogue-fusion pass existing at all.
         let is_plain_reduce = matches!(
             &producer.kind,
             BoundOpKind::Reduce {
                 keep: Keep::Reduce,
                 out_scatter: None,
+                epilogue_body,
+                epilogue_operands,
                 ..
-            }
+            } if reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
         );
         if !is_plain_reduce {
             continue;
@@ -12415,11 +12427,25 @@ fn width_tile_pack_candidate(resolved: &BoundOp) -> Option<WidthTilePlan> {
         out_scatter: None,
         output_axes,
         out_layout,
+        epilogue_body,
+        epilogue_operands,
         ..
     } = &resolved.kind
     else {
         return None;
     };
+    // A non-identity epilogue (`bind::bind`'s own `reduce-epilogue-fusion`,
+    // e.g. a sigmoid/silu gate folded onto this fold) has no renderer on the
+    // packed-panel path: `run_resolved_nodes_in_arena` calls `run_reduce`
+    // directly for a packed node, skipping `run_node_into`'s own
+    // `apply_reduce_epilogue` call entirely, which would silently strand the
+    // fold's raw value where the epilogue's result belongs. Same capability
+    // rejection `is_staged_batch_eligible` already gives this shape --
+    // decline here so it falls through to the always-correct `run_node_into`
+    // path instead.
+    if !reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+        return None;
+    }
     let body = resolved.element_body();
     let shape = body_shape(body);
     let ReduceAxisShape {
@@ -21015,6 +21041,128 @@ mod tests {
                 .any(|decision| decision.node == b && decision.decision == "absorbed"),
             "b must NOT be absorbed once it is itself a requested output: {with_intermediate_output:?}"
         );
+    }
+
+    /// `z = reduce(Multiply(x, w))` (a dense dot-product fold, `w` a NAMED
+    /// 2-D input so `build_packed_width_panels` sees it as a packable
+    /// constant, the exact shape a real weight matrix takes) then
+    /// `g = sigmoid(z)` (`Negate`/`Exponential`/`Add`/`Reciprocal`), `z`'s
+    /// ONLY consumer -- the identical GDN output-gate shape row NNN's own
+    /// discipline note reproduces. Requesting `g` alone (small) lets
+    /// `bind::bind`'s `reduce-epilogue-fusion` fold `z`'s sigmoid chain onto
+    /// the reduce itself (`z` is not a requested output, has exactly one
+    /// consumer); requesting `[z, g]` (wide) keeps them separate since a
+    /// requested output must still materialize on its own
+    /// (`reduce_epilogue_candidates`'s own admission rule). Before the fix,
+    /// `width_tile_pack_candidate` admitted the SMALL case's fused node for
+    /// `law 6∘5` width-tile packing without checking its epilogue was
+    /// trivial, and `run_resolved_nodes_in_arena`'s packed branch calls
+    /// `run_reduce` directly -- bypassing `run_node_into`'s own
+    /// `apply_reduce_epilogue` call entirely -- so `g` silently came back as
+    /// raw `z`, never sigmoided.
+    #[cfg(all(feature = "reduce-epilogue-fusion", target_arch = "aarch64"))]
+    fn reduce_with_sigmoid_epilogue_program() -> (Vec<Op>, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let x = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(8), Extent::Static(2)],
+                name: Some("x".to_string()),
+            },
+        );
+        let w = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(2), Extent::Static(16)],
+                name: Some("w".to_string()),
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (x, IndexMap::Affine(map::projection(3, &[0, 1]))),
+                    (w, IndexMap::Affine(map::projection(3, &[1, 2]))),
+                ],
+                name: None,
+            },
+        );
+        let z = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 2])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let identity_2d = || IndexMap::Affine(map::projection(2, &[0, 1]));
+        let negated = append(
+            &mut program,
+            Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Negate, operands: vec![(z, identity_2d())], name: None },
+        );
+        let exponentiated = append(
+            &mut program,
+            Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Exponential, operands: vec![(negated, identity_2d())], name: None },
+        );
+        let one = append(
+            &mut program,
+            Op::Constant { dtype: DType::Float32, shape: vec![Extent::Static(8), Extent::Static(16)], value: 1.0 },
+        );
+        let one_plus = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: vec![(exponentiated, identity_2d()), (one, identity_2d())],
+                name: None,
+            },
+        );
+        let g = append(
+            &mut program,
+            Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Reciprocal, operands: vec![(one_plus, identity_2d())], name: None },
+        );
+        (program, z, g)
+    }
+
+    #[test]
+    #[cfg(all(feature = "reduce-epilogue-fusion", target_arch = "aarch64"))]
+    fn a_reduce_with_a_sigmoid_epilogue_is_not_stranded_by_width_tile_packing() {
+        let (program, z, g) = reduce_with_sigmoid_epilogue_program();
+        let mut lcg = Lcg(0x5eed);
+        let x_data: Vec<f32> = (0..16).map(|_| lcg.next_unit()).collect();
+        let w_data: Vec<f32> = (0..32).map(|_| lcg.next_unit()).collect();
+        let named: Vec<(&str, &[f32])> = vec![("x", &x_data), ("w", &w_data)];
+
+        let small = evaluate_named(&program, &[], &named, &[g]).expect("small (g alone) evaluates");
+        let wide = evaluate_named(&program, &[], &named, &[z, g]).expect("wide (z and g) evaluates");
+
+        let small_g = small.get(g).expect("small g present").0;
+        let wide_z = wide.get(z).expect("wide z present").0;
+        let wide_g = wide.get(g).expect("wide g present").0;
+
+        let manual_sigmoid: Vec<f32> = wide_z.iter().map(|value| 1.0 / (1.0 + (-value).exp())).collect();
+
+        assert_eq!(
+            small_g, wide_g,
+            "requesting g alone (forcing the packed-panel width-tile fast path) must match \
+             requesting [z, g] (the un-packed, epilogue-correct path): small={small_g:?} wide={wide_g:?}"
+        );
+        for (index, (actual, expected)) in small_g.iter().zip(manual_sigmoid.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() <= 1e-6,
+                "g[{index}] = {actual}, expected sigmoid(z[{index}]) = {expected} (z[{index}]={})",
+                wide_z[index]
+            );
+        }
     }
 
     /// A placed output (`caller_owned` in `omega::metal::finish`) reports
