@@ -310,6 +310,31 @@ impl Architecture for NoStepStateHybridArch {
     }
 }
 
+/// Same bind as [`CorrectHybridArch`], but never overrides `step_state` at
+/// all -- the trait's own `Ok(None)` default, exactly what an external
+/// `Architecture` that has never heard of `Qwen35SsmShape` leaves in place.
+/// This is the real defect measured on `qwen3.6:35b-a3b` through an external
+/// `Architecture`: before the fix, `LoadedModel`'s own `qwen35_ssm_shape`
+/// came back `None`, `fresh_layer_caches`'s SSM arm fell back to a
+/// zero-sized `Qwen35SsmShape`, and the layer-0 `ssm_cache.0.conv_history`
+/// leaf the program declares as `[d_conv-1, qkv_dim]` got a zero-element
+/// scratch buffer pushed for it at the very first decode step
+/// (`InputSizeMismatch { expected: <d_conv-1>*<qkv_dim>, found: 0 }`). Now
+/// sized from `LayerPadRowWidths::Ssm`, the program's own declared leaf
+/// shape (`generate.rs`'s `cache_leaf_total_elements`), the `Ssm` sibling of
+/// the `DenseAttention` fix [`NoStepStateHybridArch`] proves above.
+struct NoStepStateAtAllHybridArch;
+
+impl Architecture for NoStepStateAtAllHybridArch {
+    fn name(&self) -> &'static str {
+        "acme-qwen35moe-no-step-state-at-all"
+    }
+
+    fn bind<'file>(&self, parsed: &ParsedGguf, file_bytes: &'file [u8]) -> Result<BoundProgram<'file>, InteropError> {
+        Qwen35Arch.bind(parsed, file_bytes)
+    }
+}
+
 fn registry_with(architecture: &'static dyn Architecture) -> ArchitectureRegistry {
     let mut registry = ArchitectureRegistry::with_builtin();
     registry.register(architecture);
@@ -319,6 +344,7 @@ fn registry_with(architecture: &'static dyn Architecture) -> ArchitectureRegistr
 static CORRECT: CorrectHybridArch = CorrectHybridArch;
 static MISTAGGED: MistaggedHybridArch = MistaggedHybridArch;
 static NO_STEP_STATE: NoStepStateHybridArch = NoStepStateHybridArch;
+static NO_STEP_STATE_AT_ALL: NoStepStateAtAllHybridArch = NoStepStateAtAllHybridArch;
 
 /// The mechanism this file exists to prove: a correctly-bound hybrid
 /// program (one SSM layer, one full-attention layer, registered under a
@@ -388,5 +414,29 @@ async fn a_foreign_architecture_with_no_step_state_override_still_decodes() {
     let (generated_ids, _text, _stopped) = Pipe::call(&model, ("ab".to_string(), 3))
         .await
         .expect("dense-attention pad-scratch is sized from the program's declared cache leaves, not step_state");
+    assert_eq!(generated_ids.len(), 3, "max_tokens=3 produces exactly three token ids");
+}
+
+/// The `Ssm` sibling of [`a_foreign_architecture_with_no_step_state_override_still_decodes`]:
+/// [`NoStepStateAtAllHybridArch`] never overrides `step_state` either, so
+/// the layer-0 SSM cache's initial `conv_history`/`state` windows must come
+/// from the program's own declared `ssm_cache.0.*` `Op::Input` shapes
+/// (`LayerPadRowWidths::Ssm`), not from `Architecture::step_state`'s `None`
+/// default. Before the fix this reproduced
+/// `InputSizeMismatch { expected: <d_conv-1>*<qkv_dim>, found: 0 }` at the
+/// very first decode step (`cached_len == 0`, `new_count == 1`) -- the exact
+/// shape measured on `qwen3.6:35b-a3b` through an external `Architecture`.
+#[proxima::test]
+async fn a_foreign_architecture_with_no_step_state_override_still_decodes_ssm_layer() {
+    let file_bytes = checkpoint_bytes("acme-qwen35moe-no-step-state-at-all");
+    let parsed = parse_complete(&file_bytes).expect("parses the synthetic hybrid checkpoint");
+    let registry = registry_with(&NO_STEP_STATE_AT_ALL);
+
+    let model = LoadedModel::load_with_registry(&parsed, &file_bytes, &registry)
+        .expect("loads a hybrid program through a foreign registry entry with no step_state override at all");
+
+    let (generated_ids, _text, _stopped) = Pipe::call(&model, ("ab".to_string(), 3))
+        .await
+        .expect("ssm cache is sized from the program's declared cache leaves, not step_state");
     assert_eq!(generated_ids.len(), 3, "max_tokens=3 produces exactly three token ids");
 }
