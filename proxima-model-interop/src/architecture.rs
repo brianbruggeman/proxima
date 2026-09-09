@@ -106,6 +106,20 @@ pub struct BoundProgram<'file> {
     pub weights: BoundWeights<'file>,
     pub architecture: ModelArchitecture,
     pub program: Vec<Op>,
+    /// Must evaluate to exactly ONE row of `vocab` logits -- `[1, vocab]`
+    /// or a bare `[vocab]` -- the last new position, never the full
+    /// `[new_count, vocab]` buffer. `crate::qwen35::Qwen35Arch` and
+    /// `crate::dense::DenseArch` both satisfy this by gathering on their
+    /// own `lm_head_row` leaf inside the forward program (see
+    /// `generate.rs`'s decode loop, which feeds that leaf `new_count - 1`
+    /// every step). A foreign [`Architecture`] whose program instead
+    /// leaves `logits_root` at the ungathered `[new_count, vocab]` shape
+    /// is rejected -- at decode time with
+    /// [`crate::error::InteropError::LogitsShapeMismatch`], and at load
+    /// time by [`crate::generate::LoadedModel::load_with_registry`]
+    /// wherever the program's own output shape for this node is statically
+    /// known -- rather than silently sampled at row 0 (position 0's
+    /// logits) instead of the last token.
     pub logits_root: NodeId,
     /// `proxima_tensor::spec::ForwardRoots::hidden` off this architecture's
     /// own forward-program builder, when it names one --

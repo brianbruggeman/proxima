@@ -26,12 +26,12 @@ use proxima_gguf::{
     write_complete,
 };
 use proxima_model_interop::{
-    Architecture, ArchitectureRegistry, BoundProgram, DenseArch, InteropError, LoadedModel,
-    StepInput, StepInputContext, symbols,
+    Architecture, ArchitectureRegistry, BoundProgram, BoundWeights, DenseArch, InteropError,
+    LoadedModel, StepInput, StepInputContext, architecture_from_metadata, bind_dense, symbols,
 };
 use proxima_primitives::pipe::Pipe;
-use proxima_tensor::spec::{elementwise, embedding_lookup, input_leaf};
-use proxima_tensor::{DType, Extent, ScalarOp};
+use proxima_tensor::spec::{elementwise, embedding_lookup, input_leaf, reduce};
+use proxima_tensor::{DType, Extent, ReduceInit, ScalarOp};
 use proxima_tokenizer::byte_level::byte_to_char;
 
 #[path = "support/mod.rs"]
@@ -552,4 +552,167 @@ async fn a_program_leaf_with_no_step_inputs_override_reports_missing_step_input(
         Ok(_) => panic!("expected MissingStepInput: neither aux leaf was ever fed"),
         Err(other) => panic!("expected MissingStepInput, got {other}"),
     }
+}
+
+/// Sad path (the defect 08bf6025 introduced): a foreign [`Architecture`]
+/// whose `logits_root` is left at the un-gathered `[new_count, vocab]`
+/// shape -- no `lm_head_row` gather, unlike every builtin program
+/// (`DenseArch`/`Qwen35Arch`) which always slices to the last row before
+/// this crate's decode loop ever reads `logits_root`
+/// ([`BoundProgram::logits_root`]'s own doc). Before the fix this silently
+/// sampled row 0 (position 0's logits) every step; after the fix the
+/// decode loop rejects it with [`InteropError::LogitsShapeMismatch`]
+/// instead of guessing which row was meant.
+struct MultiRowLogitsArch;
+
+impl Architecture for MultiRowLogitsArch {
+    fn name(&self) -> &'static str {
+        "acme-multi-row-logits"
+    }
+
+    fn bind<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+    ) -> Result<BoundProgram<'file>, InteropError> {
+        let architecture = architecture_from_metadata(parsed)?;
+        let mut weights = BoundWeights::new(&[]);
+        bind_dense(parsed, file_bytes, "token_embd.weight".to_string(), &mut weights)?;
+        bind_dense(parsed, file_bytes, "output.weight".to_string(), &mut weights)?;
+
+        let mut program = Vec::new();
+        let ids = input_leaf(&mut program, DType::Int32, vec![Extent::Symbolic(0)], "ids");
+        let table = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(architecture.vocab),
+                Extent::Static(architecture.embedding),
+            ],
+            "token_embd.weight",
+        );
+        // `hidden` is `[new_count, embedding]` -- every new position, not
+        // sliced to the last one -- so `logits` below stays `[new_count,
+        // vocab]` all the way to `logits_root`, the exact shape a builtin
+        // architecture never hands the decode loop (`last_row_only: true`
+        // on every path this crate ships).
+        let hidden = embedding_lookup(&mut program, table, ids);
+        let lm_head = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(architecture.embedding),
+                Extent::Static(architecture.vocab),
+            ],
+            "output.weight",
+        );
+        let logits_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(hidden, "sd->sdv"), (lm_head, "dv->sdv")],
+        )
+        .expect("hidden [seq, embedding] times output.weight [embedding, vocab] broadcasts");
+        let logits = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            logits_product,
+            "sdv->sdv",
+            "sv->sdv",
+        )?;
+
+        Ok(BoundProgram {
+            weights,
+            architecture,
+            program,
+            logits_root: logits,
+            hidden_root: None,
+            layer_roots: Vec::new(),
+            moe_sites: proxima_tensor::spec::MoeSites::default(),
+        })
+    }
+}
+
+static MULTI_ROW_LOGITS: MultiRowLogitsArch = MultiRowLogitsArch;
+
+/// RED before the fix: this checkpoint's `general.architecture` resolves to
+/// [`MultiRowLogitsArch`], whose `logits_root` evaluates to `[new_count,
+/// vocab]` on the prefill step (`new_count == prompt length > 1`) -- the
+/// pre-fix decode loop indexed `logits[..vocab_size]`, position 0's row,
+/// and silently decoded from it. GREEN after: the same step returns
+/// [`InteropError::LogitsShapeMismatch`] naming the exact row count found.
+#[proxima::test]
+async fn a_multi_row_logits_root_is_rejected_instead_of_silently_sampling_row_zero() {
+    let name = "acme-multi-row-logits";
+    let file_bytes = checkpoint_bytes(name);
+    let parsed = parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let mut registry = ArchitectureRegistry::with_builtin();
+    registry.register(&MULTI_ROW_LOGITS);
+
+    let model = LoadedModel::load_with_registry(&parsed, &file_bytes, &registry)
+        .expect("loads: bind itself never evaluates the program, so the shape defect is silent");
+
+    // "abc" tokenizes to more than one id, so the prefill step's own
+    // `new_count > 1` is what makes `logits_root`'s `[new_count, vocab]`
+    // shape observably wrong instead of accidentally `[1, vocab]`.
+    match Pipe::call(&model, ("abc".to_string(), 1)).await {
+        Err(InteropError::LogitsShapeMismatch {
+            expected_rows,
+            found_rows,
+            vocab,
+        }) => {
+            assert_eq!(expected_rows, 1, "the contract is exactly one row");
+            assert!(
+                found_rows > 1,
+                "found_rows must report the actual multi-row buffer, got {found_rows}"
+            );
+            assert_eq!(vocab, support::VOCAB as usize, "vocab must be this checkpoint's own vocab");
+        }
+        Ok(_) => panic!(
+            "expected LogitsShapeMismatch: logits_root never gathers to the last row, so decode \
+             must not silently sample row 0"
+        ),
+        Err(other) => panic!("expected LogitsShapeMismatch, got {other}"),
+    }
+}
+
+/// Positive control for the test above: a foreign architecture that DOES
+/// gather to one row (wrapping [`DenseArch::bind`], unmodified) decodes
+/// normally through the exact same shape check -- the check rejects a
+/// multi-row buffer, not every foreign architecture.
+struct OneRowLogitsArch;
+
+impl Architecture for OneRowLogitsArch {
+    fn name(&self) -> &'static str {
+        "acme-one-row-logits"
+    }
+
+    fn bind<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+    ) -> Result<BoundProgram<'file>, InteropError> {
+        DenseArch.bind(parsed, file_bytes)
+    }
+}
+
+static ONE_ROW_LOGITS: OneRowLogitsArch = OneRowLogitsArch;
+
+#[proxima::test]
+async fn a_one_row_logits_root_still_decodes_through_the_same_shape_check() {
+    let name = "acme-one-row-logits";
+    let file_bytes = checkpoint_bytes(name);
+    let parsed = parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let mut registry = ArchitectureRegistry::with_builtin();
+    registry.register(&ONE_ROW_LOGITS);
+
+    let model = LoadedModel::load_with_registry(&parsed, &file_bytes, &registry)
+        .expect("loads through the foreign architecture's own bind");
+
+    let (ids, _text, _stopped) = Pipe::call(&model, ("abc".to_string(), 2))
+        .await
+        .expect("a one-row logits_root decodes without LogitsShapeMismatch");
+    assert_eq!(ids.len(), 2, "max_tokens=2 produces exactly two token ids");
 }

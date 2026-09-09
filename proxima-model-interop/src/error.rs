@@ -132,6 +132,22 @@ pub enum InteropError {
     #[error("greedy_pick: logits slice is empty")]
     EmptyLogits,
 
+    /// [`crate::generate::LoadedModel`]'s decode loop read `logits_root` and
+    /// found more than one row of `vocab` -- the `Architecture` contract
+    /// (`crate::architecture`'s doc on `BoundProgram::logits_root`) requires
+    /// exactly one row, the `lm_head_row`-gathered last position; a foreign
+    /// `Architecture` that skips that gather would otherwise be silently
+    /// sampled at row 0 instead of the last token.
+    #[cfg(feature = "std")]
+    #[error(
+        "logits_root evaluated to {found_rows} row(s) of vocab {vocab}, expected exactly {expected_rows}"
+    )]
+    LogitsShapeMismatch {
+        expected_rows: usize,
+        found_rows: usize,
+        vocab: usize,
+    },
+
     /// [`crate::generate::LoadedModel`]'s decode loop asked
     /// [`omega::backend`] to plan or execute a forward step and the backend
     /// itself refused -- an unrecognized/uncompiled backend name, or a

@@ -21,7 +21,9 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_tensor::op::{NodeId, Op};
+use proxima_tensor::op::{Extent, NodeId, Op};
+use proxima_tensor::spec::{embedding_lookup, input_leaf};
+use proxima_tensor::DType;
 
 use crate::bind::{
     BoundWeights, bind_dense, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as, find_tensor,
@@ -558,7 +560,7 @@ pub fn qwen35_ssm_state_bytes(shape: Qwen35SsmShape, block_count: u32) -> u64 {
 pub fn qwen35_forward_program(
     architecture: &Qwen35Architecture,
 ) -> Result<(Vec<Op>, NodeId, Vec<proxima_tensor::spec::Qwen35LayerRoots>), InteropError> {
-    let (program, logits_root, layer_roots) = proxima_tensor::spec::qwen35_forward_program(
+    let (mut program, logits_root, layer_roots) = proxima_tensor::spec::qwen35_forward_program(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -575,6 +577,17 @@ pub fn qwen35_forward_program(
         architecture.ssm_conv_kernel,
         architecture.rms_epsilon,
     )?;
+    // `proxima_tensor::spec::qwen35_forward_program`'s own doc/test: its
+    // `logits` root is always `[tokens, vocab]`, never gathered -- unlike
+    // the dense path's `last_row_only` flag (`crate::dense::DenseArch`'s
+    // own doc), this function has no equivalent knob, so every registry
+    // consumer of `BoundProgram::logits_root` (that field's own doc:
+    // exactly one row) gets it gathered here instead, off the same
+    // host-supplied `lm_head_row` leaf (`crate::generate`'s decode loop
+    // feeds it `new_count - 1` unconditionally, every step, every
+    // architecture) the dense path's own gather already reads.
+    let lm_head_row = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Static(1)], "lm_head_row");
+    let logits_root = embedding_lookup(&mut program, logits_root, lm_head_row);
     Ok((program, logits_root, layer_roots))
 }
 
