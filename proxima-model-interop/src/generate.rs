@@ -820,6 +820,15 @@ pub struct LoadedModel<'file> {
     /// (`proxima_tensor::instrument::ExpertObserver`, `instrument`-gated)
     /// is registered.
     moe_sites: proxima_tensor::spec::MoeSites,
+    /// `crate::architecture::BoundProgram::single_position_step` off this
+    /// checkpoint's own resolved [`crate::Architecture`] (`Self::load`'s
+    /// `resolved.bind(..)` for the registry path; `false` for every other
+    /// load entry point below, all of which wrap
+    /// `mistral_cached_forward_program_with_experts`) -- read by
+    /// [`Self::run_decode_loop_observed_seeded`] to decide whether prefill
+    /// batches its whole prompt into one evaluation or feeds it one
+    /// position at a time.
+    single_position_step: bool,
     /// [`Some`] only for a qwen35-architecture checkpoint -- the SSM cache
     /// shapes [`SsmLayerCache::new`] needs (`Self::run_decode_loop`'s own
     /// per-layer state-space cache), derived once at load time rather than
@@ -1296,6 +1305,7 @@ impl<'file> LoadedModel<'file> {
                 hidden_root: bound.hidden_root,
                 layer_roots: bound.layer_roots,
                 moe_sites: bound.moe_sites,
+                single_position_step: bound.single_position_step,
                 model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
                 checkpoint_bytes: file_bytes.len(),
                 qwen35_ssm_shape: step_state.as_ref().map(|state| state.ssm_shape),
@@ -1405,6 +1415,7 @@ impl<'file> LoadedModel<'file> {
                 .map(Qwen35LayerRoots::Attention)
                 .collect(),
             moe_sites,
+            single_position_step: false,
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
             checkpoint_bytes: file_bytes.len(),
             qwen35_ssm_shape: None,
@@ -1499,6 +1510,7 @@ impl<'file> LoadedModel<'file> {
                 .map(Qwen35LayerRoots::Attention)
                 .collect(),
             moe_sites,
+            single_position_step: false,
             // safetensors carries no `general.name`-equivalent key this
             // crate reads (`Self::model_name`'s own doc).
             model_name: None,
@@ -3519,7 +3531,7 @@ impl<'file> LoadedModel<'file> {
             }
             named_blocks.push(step_input.as_named_block());
         }
-        let symbols = bind_symbols(new_count, kv_bound_extent, step_input_scratch)?;
+        let symbols = bind_symbols(new_count, kv_bound_extent, step_input_scratch, self.single_position_step)?;
 
         push_kv_named_blocks(
             cache_names,
@@ -7176,6 +7188,7 @@ mod memory_fit_gate_tests {
             hidden_root: None,
             layer_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
+            single_position_step: false,
             qwen35_ssm_shape: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range: None,

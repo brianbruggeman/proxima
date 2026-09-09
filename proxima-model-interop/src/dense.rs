@@ -86,6 +86,7 @@ impl Architecture for DenseArch {
             hidden_root: Some(roots.hidden),
             layer_roots: cache_roots.into_iter().map(Qwen35LayerRoots::Attention).collect(),
             moe_sites,
+            single_position_step: false,
         })
     }
 }

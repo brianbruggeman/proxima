@@ -648,6 +648,23 @@ impl crate::architecture::Architecture for Qwen35Arch {
             hidden_root: None,
             layer_roots,
             moe_sites: proxima_tensor::spec::MoeSites::default(),
+            // gated-DeltaNet's `s`-axis reduce sums positions instead of
+            // stepping through them (`BoundProgram::single_position_step`'s
+            // own doc). This SHOULD be `true` -- flipping it is deliberately
+            // deferred to the decode-loop change that makes it safe: today
+            // `run_decode_loop_observed_seeded`'s prefill step always calls
+            // this program once with `new_count == prompt_token_count`, so
+            // setting `true` here without also teaching that loop to feed
+            // one position per evaluation would turn every real qwen35
+            // prompt longer than one token into a hard `bind_symbols` error
+            // instead of the wrong-but-non-fatal output it silently returns
+            // today. Tracked as the next slice, not a punt: the mixer's own
+            // typed refusal (`TensorError::SingleTokenStepOnly`) and this
+            // flag's plumbing through `BoundProgram`/`bind_symbols` are
+            // landed and unit-tested now; flip this to `true` in the same
+            // change that splits prefill into sequential single-token
+            // evaluations.
+            single_position_step: false,
         })
     }
 
