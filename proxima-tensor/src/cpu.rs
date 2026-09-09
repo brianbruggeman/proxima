@@ -195,6 +195,7 @@ use crate::error::TensorError;
 use crate::instrument;
 #[cfg(feature = "instrument")]
 use crate::instrument::{KernelCounters, Path};
+use crate::map::IndexMap;
 use crate::numeric::NumericPolicy;
 use crate::op::{Keep, NodeId, Op, ReduceInit, ScalarOp};
 use crate::shape;
@@ -5878,14 +5879,34 @@ fn referenced_node_ids(program: &[Op]) -> BTreeSet<NodeId> {
 }
 
 /// Whether `node` appears, anywhere in `program`, ONLY as one operand of a
-/// `Multiply` [`Op::Elementwise`] — the OTHER operand `Float32` — that
-/// itself feeds directly into a `Reduce` whose `body` is `Add`: the exact
-/// "quantized weight x f32 activation" matmul shape [`reject_non_float32`]'s
-/// quantized-weight exemption requires. A quantized node used any other way
-/// (paired with a second non-float32 operand, a second elementwise op, a
-/// scan, a reduce with a different combiner) does not qualify: the
-/// exemption is for the one shape [`matmul_q4k_f32`] actually implements,
-/// not a blanket "trust the caller's tag."
+/// `Multiply` [`Op::Elementwise`] — the OTHER operand `Float32` AND tracing
+/// back to a real [`Op::Input`] ([`operand_traces_to_a_real_input`]'s own
+/// check) — that itself feeds directly into a `Reduce` whose `body` is
+/// `Add`: the exact "quantized weight x f32 activation" matmul shape
+/// [`reject_non_float32`]'s quantized-weight exemption requires. A
+/// quantized node used any other way (paired with a second non-float32
+/// operand, a second elementwise op, a scan, a reduce with a different
+/// combiner, or a partner built PURELY from index values with no real data
+/// anywhere in its ancestry) does not qualify: the exemption is for the one
+/// shape [`matmul_q4k_f32`] actually implements, not a blanket "trust the
+/// caller's tag."
+///
+/// The "traces to a real `Input`" clause is this recognizer's actual axis
+/// guard: reducing the packed weight's own OUTPUT axis instead of its
+/// contraction axis — `per_head_channel_slice`'s former call site against a
+/// packed weight (`spec.rs`'s `Qwen35DenseAttentionTaps` doc, ROW 428) — is
+/// NOT distinguishable from a genuine contraction by axis position alone.
+/// This crate's own shipped matmul shapes disagree on which position is
+/// "the" contraction axis (`quantized_matmul_program`'s `[rows, k]` reduces
+/// its LAST axis; a cached-attention-shaped reduce
+/// (`a_reduce_where_activation_and_packed_weight_share_a_kept_output_axis_is_rejected`)
+/// reduces its FIRST) — proven by running both through a first-axis-only and
+/// a last-axis-only version of this check and watching each break a
+/// DIFFERENT, already-shipped legitimate program (ROW 429's own RED data).
+/// What every real activation shares, and `per_head_channel_slice`'s
+/// `Op::Iota`-built one-hot mask never has, is a real [`Op::Input`] somewhere
+/// in its own ancestry — a select-then-reduce whose "activation" is entirely
+/// synthesized from index values is what this rejects instead.
 fn is_quantized_matmul_operand(program: &[Op], node: NodeId) -> bool {
     let mut used_as_matmul_operand = false;
     for (position, expr) in program.iter().enumerate() {
@@ -5894,10 +5915,12 @@ fn is_quantized_matmul_operand(program: &[Op], node: NodeId) -> bool {
                 if !operands.iter().any(|(source, _)| *source == node) {
                     continue;
                 }
-                let other_operand_is_float32 = operands.iter().any(|(source, _)| {
-                    *source != node && program[source.0 as usize].dtype() == DType::Float32
+                let other_operand_is_real_activation = operands.iter().any(|(source, _)| {
+                    *source != node
+                        && program[source.0 as usize].dtype() == DType::Float32
+                        && operand_traces_to_a_real_input(program, *source)
                 });
-                if *body != ScalarOp::Multiply || operands.len() != 2 || !other_operand_is_float32 {
+                if *body != ScalarOp::Multiply || operands.len() != 2 || !other_operand_is_real_activation {
                     return false;
                 }
                 let elementwise_node = NodeId(position as u32);
@@ -5920,6 +5943,45 @@ fn is_quantized_matmul_operand(program: &[Op], node: NodeId) -> bool {
         }
     }
     used_as_matmul_operand
+}
+
+/// Whether `node`'s own definition, or anything upstream of it, is a real
+/// [`Op::Input`] — the fact every genuine activation has (it ultimately
+/// reads external data) and a purely index-derived tensor (an `Op::Iota`
+/// fed through arithmetic and comparisons, never touching real data) never
+/// does. `program`'s references point backwards only
+/// ([`crate::op`]'s own module doc), so this is a plain DFS over strictly
+/// decreasing `NodeId`s and always terminates.
+fn operand_traces_to_a_real_input(program: &[Op], node: NodeId) -> bool {
+    let mut stack = alloc::vec![node];
+    let mut visited: BTreeSet<NodeId> = BTreeSet::new();
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        match &program[current.0 as usize] {
+            Op::Input { .. } => return true,
+            Op::Iota { .. } | Op::Constant { .. } => {}
+            Op::Elementwise { operands, .. } => {
+                for (source, index_map) in operands {
+                    stack.push(*source);
+                    if let IndexMap::Computed { indices, .. } = index_map {
+                        stack.push(*indices);
+                    }
+                }
+            }
+            Op::Reduce(fold) => {
+                stack.push(fold.operand);
+                if let IndexMap::Computed { indices, .. } = &fold.in_map {
+                    stack.push(*indices);
+                }
+                if let IndexMap::Computed { indices, .. } = &fold.out_map {
+                    stack.push(*indices);
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Whether `node` appears, anywhere in `program`, ONLY as the SOLE operand of
@@ -23498,6 +23560,92 @@ mod tests {
         assert!(
             reject_non_float32(&program, &exempt).is_err(),
             "a quantized node reduced directly (no Multiply) is not the matmul shape and must stay rejected"
+        );
+    }
+
+    /// ROW 429's own regression: `per_head_channel_slice`'s former call site
+    /// against a packed weight (`spec.rs`'s `Qwen35DenseAttentionTaps` doc,
+    /// ROW 428) built exactly this shape — a `UInt8` weight `Multiply`-ed
+    /// against a one-hot mask built ENTIRELY from `Op::Iota` and `Equal`
+    /// (no real data anywhere in its ancestry), feeding an `Add`-reduce.
+    /// Before [`operand_traces_to_a_real_input`] existed,
+    /// [`is_quantized_matmul_operand`] recognized this as the ordinary
+    /// matmul shape purely because the mask's OWN dtype was `Float32`, and
+    /// [`run_reduce_quantized`] then read `rows`/`k` off whichever axis the
+    /// select happened to reduce. An axis-position check was tried first and
+    /// discarded: this crate's own shipped matmul shapes disagree on which
+    /// position is "the" contraction axis
+    /// (`quantized_matmul_program`'s `[rows, k]` reduces its LAST axis;
+    /// `a_reduce_where_activation_and_packed_weight_share_a_kept_output_axis_is_rejected`
+    /// reduces its FIRST), so a fixed-position rule broke one or the other
+    /// real shape depending on which position it picked (ROW 429's own
+    /// RED data). The same weight `Multiply`-ed against a REAL `Op::Input`
+    /// activation stays exempted — see
+    /// `reject_non_float32_exempts_a_quantized_weight_in_matmul_position`,
+    /// unchanged and still passing.
+    #[test]
+    fn reject_non_float32_rejects_a_quantized_weight_selected_by_a_synthetic_iota_mask() {
+        let mut program = Vec::new();
+        let weight = block(&mut program, DType::UInt8, &[Extent::Static(4)]);
+        let channel_index = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(4),
+            },
+        );
+        let target = append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: Vec::new(),
+                value: 1.0,
+            },
+        );
+        let mask = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Equal,
+                operands: vec![
+                    (channel_index, IndexMap::Affine(map::projection(1, &[0]))),
+                    (target, IndexMap::Affine(map::projection(1, &[]))),
+                ],
+                name: None,
+            },
+        );
+        let selected = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight, IndexMap::Affine(map::projection(1, &[0]))),
+                    (mask, IndexMap::Affine(map::projection(1, &[0]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: selected,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let mut exempt = BTreeSet::new();
+        exempt.insert(weight);
+        assert!(
+            reject_non_float32(&program, &exempt).is_err(),
+            "a packed weight selected by a mask with no real Input in its ancestry must be \
+             rejected, not silently admitted as the matmul shape"
         );
     }
 
