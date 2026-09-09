@@ -8896,6 +8896,60 @@ pub fn emit_expert_selection_event() {
     }
 }
 
+/// [`run_reduce_quantized`]'s admission contract, checked BEFORE it ever
+/// touches a buffer: the fused reduce's `element_body` must be exactly one
+/// step, `Multiply`, over exactly two physical operands (the packed weight
+/// and one already-materialized activation leaf) -- the ONE shape
+/// [`matmul_q4k_f32`] (and its sibling K-quant/legacy kernels) actually
+/// implements, `activation_row = &activation[...]`, a raw slice read with no
+/// re-application of any composed step. `resolved.operands()` alone cannot
+/// tell a bare `W * a` apart from a fused `W * (x * sigmoid(g))` -- both
+/// still carry exactly the physical buffers their leaves resolved to, and a
+/// naive "first operand that isn't the weight" pick silently returns `x`
+/// instead of `x * sigmoid(g)` for the latter, computing `matmul(W, x)`
+/// where the graph asked for `sum(W * (x * sigmoid(g)))`. Checking
+/// `element_body`'s own step count is what tells the two apart: a bare
+/// product is [`ComposedBody::leaf`]`(Multiply)`, one step, args
+/// `[Operand(_), Operand(_)]`; anything the planner fused beyond that shows
+/// up here as more steps, or a `Step` arg referencing an earlier one, either
+/// of which must reject rather than silently pick a leaf. See
+/// `docs/discipline.md` ROW 431.
+#[allow(dead_code)]
+fn packed_reduce_activation_operand(
+    resolved: &BoundOp,
+    weight_node: NodeId,
+) -> Result<NodeId, TensorError> {
+    let BoundOpKind::Reduce {
+        element_body,
+        operands,
+        ..
+    } = &resolved.kind
+    else {
+        unreachable!("run_reduce_quantized is only called for a Keep::Reduce fold")
+    };
+    let is_bare_weight_activation_product = element_body.steps.len() == 1
+        && element_body.steps[0].op == ScalarOp::Multiply
+        && matches!(
+            element_body.steps[0].args.as_slice(),
+            [StepArg::Operand(_), StepArg::Operand(_)]
+        )
+        && operands.len() == 2;
+    if !is_bare_weight_activation_product {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "packed reduce admits only W\u{b7}a with a materialized a",
+        });
+    }
+    operands
+        .iter()
+        .map(|(node, _, _)| *node)
+        .find(|node| *node != weight_node)
+        .ok_or(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "quantized matmul reduce has no activation operand",
+        })
+}
+
 /// [`run_reduce`]'s quantized-weight branch: `resolved` is the fused
 /// `Reduce(Elementwise(Multiply))` matmul shape, `weight_node` one of its two
 /// operands, packed `Q4_K` bytes rather than a bound `f32` buffer. The other
@@ -8958,15 +9012,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     if output.is_empty() {
         return Ok(());
     }
-    let activation_node = resolved
-        .operands()
-        .iter()
-        .map(|(node, _, _)| *node)
-        .find(|node| *node != weight_node)
-        .ok_or(TensorError::NotLowerable {
-            node: resolved.node,
-            reason: "quantized matmul reduce has no activation operand",
-        })?;
+    let activation_node = packed_reduce_activation_operand(resolved, weight_node)?;
     let activation =
         buffers[activation_node.0 as usize]
             .as_deref()
@@ -21072,6 +21118,238 @@ mod tests {
     use crate::test_support::Lcg;
     use proptest::proptest;
 
+    /// `spec.rs`'s real `wo` shape (`ROW 431`,
+    /// `append_qwen35_dense_attention_only_with_taps`, `spec.rs:4358-4404`
+    /// and `spec.rs:9017-9031`): `gated_attended = attended * sigmoid_gate`
+    /// (a genuine two-leaf composed chain), `wo = wo_flat * o_head_ones`
+    /// (the packed weight's own ones-broadcast reshape, the multi-term
+    /// packed-row contraction), `wo_product = gated_attended * wo`, reduced
+    /// over the packed contraction axes. Built at tiny dims with `seq` left
+    /// free so callers can drive both the `s == 1` (decode) and `s > 1`
+    /// (prefill) shapes through the identical graph.
+    fn wo_shaped_program(seq: u32) -> (Vec<Op>, NodeId) {
+        use crate::op::{Extent, append};
+        let mut program = Vec::new();
+        let (kv_heads, group, head_dim, embedding) = (1u32, 1u32, 2u32, 5u32);
+        let attended = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![
+                    Extent::Static(seq),
+                    Extent::Static(kv_heads),
+                    Extent::Static(group),
+                    Extent::Static(head_dim),
+                ],
+                name: None,
+            },
+        );
+        let sigmoid_gate = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![
+                    Extent::Static(seq),
+                    Extent::Static(kv_heads),
+                    Extent::Static(group),
+                    Extent::Static(head_dim),
+                ],
+                name: None,
+            },
+        );
+        let gated = crate::spec::elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(attended, "sugd->sugd"), (sigmoid_gate, "sugd->sugd")],
+        )
+        .expect("gated elementwise builds");
+        let wo_flat = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![
+                    Extent::Static(kv_heads * group * head_dim),
+                    Extent::Static(embedding),
+                ],
+                name: None,
+            },
+        );
+        let ones = append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: vec![
+                    Extent::Static(kv_heads),
+                    Extent::Static(group),
+                    Extent::Static(head_dim),
+                ],
+                value: 1.0,
+            },
+        );
+        let wo = crate::spec::elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[
+                (wo_flat, alloc::format!("{}*u+{head_dim}*g+d,e->ugde", head_dim * group).as_str()),
+                (ones, "ugd->ugde"),
+            ],
+        )
+        .expect("wo elementwise builds");
+        let wo_product = crate::spec::elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(gated, "sugd->sugde"), (wo, "ugde->sugde")],
+        )
+        .expect("wo_product elementwise builds");
+        let attn_out = crate::spec::reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            wo_product,
+            "sugde->sugde",
+            "se->sugde",
+        )
+        .expect("attn_out reduce builds");
+        (program, attn_out)
+    }
+
+    /// ROW 431 memory boundary: for the `s == 1` (decode) shape, the fused
+    /// reduce reaching `packed_reduce_activation_operand` must carry
+    /// EXACTLY the gated activation (`[u, g, d]`, never the output axis
+    /// `o`/`e`) and the packed weight leaf as its two operands, one
+    /// `Multiply` step -- proving `composed_packed_product_activation`
+    /// materializes the ACTIVATION side, not the `[u, g, d, o]` product ROW
+    /// 430 used to. `quarantine_broadcast_operands` already force-
+    /// materializes `gated_attended` here (its own extent lacks the `o`
+    /// axis) independent of this rule; this test's own contribution is
+    /// proving no OTHER buffer in the bound program carries the `o` axis
+    /// either -- i.e. the product itself was never materialized.
+    #[test]
+    fn packed_reduce_planner_materializes_the_gated_activation_not_the_product_at_decode() {
+        let (program, attn_out) = wo_shaped_program(1);
+        let shapes = shape::infer(&program, &[]).expect("shape inference succeeds");
+        let resolved = bind::bind(&program, &shapes, &[attn_out], NumericPolicy::bit_exact())
+            .expect("bind succeeds");
+        let bound = resolved
+            .iter()
+            .find(|op| op.node == attn_out)
+            .expect("attn_out is present in the bound program");
+        let BoundOpKind::Reduce { element_body, operands, .. } = &bound.kind else {
+            panic!("attn_out must bind to a Reduce");
+        };
+        assert_eq!(
+            element_body.steps,
+            vec![BodyStep { op: ScalarOp::Multiply, args: vec![StepArg::Operand(0), StepArg::Operand(1)] }],
+            "the fused reduce must be a bare two-operand product, never a wider composed body"
+        );
+        assert_eq!(operands.len(), 2, "packed_reduce_activation_operand requires exactly two operands");
+        let pre_reduction_extent: u64 = bound.extents.iter().product();
+        for op in &resolved {
+            if op.node == bound.node {
+                continue;
+            }
+            let own_extent: u64 = op.extents.iter().product();
+            assert_ne!(
+                own_extent, pre_reduction_extent,
+                "node {:?} (extents {:?}) shares the reduce's full [u,g,d,o] pre-reduction extent -- \
+                 the activation-weight PRODUCT must never be materialized standalone, \
+                 only the smaller [u,g,d] activation is",
+                op.node, op.extents
+            );
+        }
+    }
+
+    /// ROW 431 admission contract, RED-before/GREEN-after: a fused reduce
+    /// whose `element_body` composes TWO steps over THREE physical operands
+    /// -- `sum(W * (x * g))`, the shape `sum(W * (x * sigmoid(g)))`
+    /// collapses to structurally once the planner fuses the gate multiply
+    /// straight into the same reduce -- must never reach
+    /// `matmul_q4k_f32`'s buffer read at all. Before this admission check
+    /// existed, `resolved.operands().find(|n| *n != weight_node)` picked
+    /// whichever of `x`/`g` happened to sort first and fed IT verbatim to
+    /// the kernel, silently computing `matmul(W, x)` (or `matmul(W, g)`)
+    /// instead of `matmul(W, x * g)` -- a wrong number with no error at all.
+    /// This test drives that exact composed body straight at
+    /// `run_reduce_quantized`, bypassing `bind::bind` entirely (the planner
+    /// would never emit this shape unfused today, per
+    /// `packed_reduce_planner_materializes_the_gated_activation_not_the_product_at_decode`
+    /// above -- this proves the EXECUTOR's own contract independent of
+    /// whether the planner currently honors it).
+    #[test]
+    fn run_reduce_quantized_rejects_a_composed_body_wider_than_a_bare_weight_activation_product() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let rows = 1u32;
+        let k = QK_K as u32;
+        let weight_f32 = random_vec(701, rows as usize * k as usize);
+        let mut weight_bytes = vec![0u8; rows as usize * BLOCK_BYTES];
+        quantize(&weight_f32, &mut weight_bytes).expect("row length is QK_K by construction");
+
+        let x: Vec<f32> = random_vec(702, k as usize);
+        let g: Vec<f32> = random_vec(703, k as usize);
+        let weight_node = NodeId(0);
+        let x_node = NodeId(1);
+        let g_node = NodeId(2);
+        let flat_layout = || bind::Layout { base: 0, strides: smallvec::smallvec![1] };
+
+        let resolved = BoundOp {
+            node: NodeId(3),
+            dtype: DType::Float32,
+            extents: alloc::vec![rows as u64, k as u64],
+            kind: BoundOpKind::Reduce {
+                element_body: ComposedBody {
+                    steps: alloc::vec![
+                        step(ScalarOp::Multiply, &[StepArg::Operand(1), StepArg::Operand(2)]),
+                        step(ScalarOp::Multiply, &[StepArg::Operand(0), StepArg::Step(0)]),
+                    ],
+                },
+                reduce_op: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                keep: Keep::Reduce,
+                operands: alloc::vec![
+                    (weight_node, flat_layout(), None),
+                    (x_node, flat_layout(), None),
+                    (g_node, flat_layout(), None),
+                ],
+                output_axes: smallvec::smallvec![0],
+                out_layout: flat_layout(),
+                out_scatter: None,
+                epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
+                epilogue_operands: Vec::new(),
+                epilogue_broadcast_axes: smallvec::smallvec![],
+            },
+        };
+        let buffers: Vec<Option<Cow<'_, [f32]>>> = alloc::vec![
+            None,
+            Some(Cow::Borrowed(x.as_slice())),
+            Some(Cow::Borrowed(g.as_slice())),
+        ];
+        let mut output = vec![0.0f32; rows as usize];
+
+        let error = run_reduce_quantized(
+            &resolved,
+            &buffers,
+            QuantizedBlock::Q4K(&weight_bytes),
+            weight_node,
+            None,
+            None,
+            false,
+            &mut output,
+        )
+        .expect_err("a composed body wider than a bare product must be a typed rejection");
+        assert_eq!(
+            error,
+            TensorError::NotLowerable {
+                node: resolved.node,
+                reason: "packed reduce admits only W\u{b7}a with a materialized a",
+            },
+            "the admission contract must name itself, not surface a downstream shape error"
+        );
+    }
 
     /// `b = a * scale; c = b + bias; d = c * c` -- the same shape
     /// `bind::tests::elementwise_chain_program` builds (private to that
