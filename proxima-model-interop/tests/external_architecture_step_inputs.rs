@@ -787,3 +787,114 @@ async fn a_one_row_logits_root_still_decodes_through_the_same_shape_check() {
         .expect("a one-row logits_root decodes without LogitsShapeMismatch");
     assert_eq!(ids.len(), 2, "max_tokens=2 produces exactly two token ids");
 }
+
+/// Sad path (ae3598a5 introduced this one): a foreign [`Architecture`] whose
+/// program has NO cache leaves at all -- a plain stateless embedding-lookup
+/// program, `layer_roots: Vec::new()` -- decodes tokens without ever
+/// appending to a `LayerCacheState`, the simplest legal shape a foreign
+/// [`Architecture::bind`] can hand back
+/// ([`crate::architecture::Architecture::bind`]'s own doc: `layer_roots` may
+/// be empty). `run_decode_loop_observed_seeded`'s own step trace used to
+/// index `layer_caches[0]` unconditionally to report a diagnostic checksum,
+/// which panics the moment `layer_caches` is empty -- this is that
+/// diagnostic's positive control, not a variant of the multi-row-logits
+/// fixture above (this one's `logits_root` gathers to one row correctly).
+struct EmptyLayerRootsArch;
+
+impl Architecture for EmptyLayerRootsArch {
+    fn name(&self) -> &'static str {
+        "acme-empty-layer-roots"
+    }
+
+    fn bind<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+    ) -> Result<BoundProgram<'file>, InteropError> {
+        let architecture = architecture_from_metadata(parsed)?;
+        let mut weights = BoundWeights::new(&[]);
+        bind_dense(parsed, file_bytes, "token_embd.weight".to_string(), &mut weights)?;
+        bind_dense(parsed, file_bytes, "output.weight".to_string(), &mut weights)?;
+
+        let mut program = Vec::new();
+        let ids = input_leaf(&mut program, DType::Int32, vec![Extent::Symbolic(0)], "ids");
+        let table = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(architecture.vocab),
+                Extent::Static(architecture.embedding),
+            ],
+            "token_embd.weight",
+        );
+        let hidden = embedding_lookup(&mut program, table, ids);
+        let lm_head = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(architecture.embedding),
+                Extent::Static(architecture.vocab),
+            ],
+            "output.weight",
+        );
+        let logits_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(hidden, "sd->sdv"), (lm_head, "dv->sdv")],
+        )
+        .expect("hidden [seq, embedding] times output.weight [embedding, vocab] broadcasts");
+        let logits_all_rows = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            logits_product,
+            "sdv->sdv",
+            "sv->sdv",
+        )?;
+        // Gathers to the last row only, the same `lm_head_row`
+        // decode-loop-fed leaf `crate::qwen35`'s own program uses -- unlike
+        // `MultiRowLogitsArch` above, this fixture's `logits_root` is the
+        // correct single-row shape, so nothing about the shape check is
+        // what this test is proving.
+        let lm_head_row = input_leaf(&mut program, DType::Int32, vec![Extent::Static(1)], "lm_head_row");
+        let logits = embedding_lookup(&mut program, logits_all_rows, lm_head_row);
+
+        Ok(BoundProgram {
+            weights,
+            architecture,
+            program,
+            logits_root: logits,
+            hidden_root: None,
+            layer_roots: Vec::new(),
+            moe_sites: proxima_tensor::spec::MoeSites::default(),
+            single_position_step: false,
+        })
+    }
+}
+
+static EMPTY_LAYER_ROOTS: EmptyLayerRootsArch = EmptyLayerRootsArch;
+
+/// RED before the fix: `generate.rs`'s step trace indexed `layer_caches[0]`
+/// unconditionally, so an [`Architecture`] with no cache leaves at all
+/// panicked with `index out of bounds` the first time a step ran, under
+/// `--features std,instrument` (the panic only fires once the gated trace
+/// actually executes). GREEN after: the trace reads `layer_caches.first()`
+/// and reports nothing rather than indexing past the end.
+#[proxima::test]
+async fn a_stateless_architecture_with_no_layer_roots_decodes_without_panicking() {
+    let name = "acme-empty-layer-roots";
+    let file_bytes = checkpoint_bytes(name);
+    let parsed = parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let mut registry = ArchitectureRegistry::with_builtin();
+    registry.register(&EMPTY_LAYER_ROOTS);
+
+    let model = LoadedModel::load_with_registry(&parsed, &file_bytes, &registry)
+        .expect("loads: an empty layer_roots is a legal Architecture::bind shape");
+
+    let (ids, _text, _stopped) = Pipe::call(&model, ("abc".to_string(), 3))
+        .await
+        .expect("a stateless architecture with no cache leaves decodes without panicking");
+    assert_eq!(ids.len(), 3, "max_tokens=3 produces exactly three token ids");
+}
