@@ -829,12 +829,6 @@ pub struct LoadedModel<'file> {
     /// batches its whole prompt into one evaluation or feeds it one
     /// position at a time.
     single_position_step: bool,
-    /// [`Some`] only for a qwen35-architecture checkpoint -- the SSM cache
-    /// shapes [`SsmLayerCache::new`] needs (`Self::run_decode_loop`'s own
-    /// per-layer state-space cache), derived once at load time rather than
-    /// recomputed every decode step. `None` on the dense path, which never
-    /// has an [`Qwen35LayerRoots::Ssm`] entry to size.
-    qwen35_ssm_shape: Option<Qwen35SsmShape>,
     /// The single-range, device-resident-KV counterpart of `program`/
     /// `logits_root`/`layer_roots` above -- `None` unless this build was
     /// compiled with `metal-output-placement` AND this checkpoint took the
@@ -1071,8 +1065,6 @@ fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize) -> usize 
         .min(capacity)
 }
 
-use crate::qwen35::Qwen35SsmShape;
-
 impl<'file> LoadedModel<'file> {
     /// `true` when [`Self::load`] built a device-resident, single-range
     /// program for this checkpoint ([`Self::single_range`]'s own doc) --
@@ -1269,6 +1261,7 @@ impl<'file> LoadedModel<'file> {
         if general_architecture == "qwen35" || (!paired_gate_up_reduce && !fused_qkv_reduce) {
             let resolved = registry.resolve(parsed)?;
             let bound = resolved.bind(parsed, file_bytes)?;
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             let step_state = resolved.step_state(parsed)?;
             let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
             // The single-range program is dense-Mistral-only
@@ -1308,7 +1301,6 @@ impl<'file> LoadedModel<'file> {
                 single_position_step: bound.single_position_step,
                 model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
                 checkpoint_bytes: file_bytes.len(),
-                qwen35_ssm_shape: step_state.as_ref().map(|state| state.ssm_shape),
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 single_range,
                 checkpoint_mapping: file_bytes,
@@ -1419,7 +1411,6 @@ impl<'file> LoadedModel<'file> {
             single_position_step: false,
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
             checkpoint_bytes: file_bytes.len(),
-            qwen35_ssm_shape: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
             checkpoint_mapping: file_bytes,
@@ -1517,7 +1508,6 @@ impl<'file> LoadedModel<'file> {
             // crate reads (`Self::model_name`'s own doc).
             model_name: None,
             checkpoint_bytes: file_bytes.len(),
-            qwen35_ssm_shape: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
             checkpoint_mapping: file_bytes,
@@ -1878,12 +1868,15 @@ impl Qwen35DenseAttentionPadScratch {
 
 /// [`LayerCache`]'s counterpart for a [`Qwen35LayerRoots::Ssm`] layer --
 /// `conv_history` is a fixed-size rolling window (the causal conv1d
-/// kernel's own left context, `Qwen35SsmShape::conv_rows` rows of
-/// `Qwen35SsmShape::qkv_dim` elements each, oldest row dropped as each new
-/// one is appended) rather than [`LayerCache`]'s unbounded grow-forever
-/// history; `state` is the gated DeltaNet recurrent state, fully replaced
-/// every step (never appended to) because the mixer already folds every
-/// past position into it.
+/// kernel's own left context, `conv_history_len` elements total, oldest row
+/// dropped as each new one is appended) rather than [`LayerCache`]'s
+/// unbounded grow-forever history; `state` is the gated DeltaNet recurrent
+/// state, fully replaced every step (never appended to) because the mixer
+/// already folds every past position into it. Both lengths come from
+/// [`LayerPadRowWidths::Ssm`] -- the program's own declared
+/// `ssm_cache.{layer}.conv_history`/`.state` `Op::Input` shapes
+/// ([`cache_leaf_total_elements`]'s own doc on why this, not
+/// [`crate::architecture::Architecture::step_state`], is authoritative).
 #[derive(Clone)]
 struct SsmLayerCache {
     conv_history: Vec<f32>,
@@ -1891,22 +1884,21 @@ struct SsmLayerCache {
 }
 
 impl SsmLayerCache {
-    fn new(shape: Qwen35SsmShape) -> Self {
+    fn new(conv_history_len: usize, state_len: usize) -> Self {
         Self {
-            conv_history: alloc::vec![0.0f32; shape.conv_rows * shape.qkv_dim],
-            state: alloc::vec![0.0f32; shape.state_len],
+            conv_history: alloc::vec![0.0f32; conv_history_len],
+            state: alloc::vec![0.0f32; state_len],
         }
     }
 
     /// `qkv_mixed_new` is this step's own `new_count`-many freshly computed
-    /// `qkv_mixed` rows (`shape.qkv_dim` elements each); `state_new` is the
-    /// mixer's full replacement state. Keeps only `shape.conv_rows`' worth
-    /// of the most recent `qkv_mixed` rows -- older rows fall out of the
-    /// causal conv1d kernel's left context and are never read again.
-    fn advance(&mut self, qkv_mixed_new: &[f32], state_new: &[f32], shape: Qwen35SsmShape) {
+    /// `qkv_mixed` rows; `state_new` is the mixer's full replacement state.
+    /// Keeps only the most recent `conv_history_len` elements -- older rows
+    /// fall out of the causal conv1d kernel's left context and are never
+    /// read again.
+    fn advance(&mut self, qkv_mixed_new: &[f32], state_new: &[f32], conv_history_len: usize) {
         self.conv_history.extend_from_slice(qkv_mixed_new);
-        let keep = shape.conv_rows * shape.qkv_dim;
-        let drop = self.conv_history.len().saturating_sub(keep);
+        let drop = self.conv_history.len().saturating_sub(conv_history_len);
         self.conv_history.drain(0..drop);
         self.state.clear();
         self.state.extend_from_slice(state_new);
@@ -2121,6 +2113,39 @@ fn cache_leaf_row_elements(program: &[Op], name: &str) -> Option<usize> {
     })
 }
 
+/// `name`'s own declared [`Op::Input`] shape, collapsed to its flat total
+/// element count -- unlike [`cache_leaf_row_elements`], every dimension
+/// counts (an SSM cache leaf like `ssm_cache.{layer}.conv_history`,
+/// `[Static(d_conv-1), Static(qkv_dim)]`, has no growing bound-extent slot
+/// the way a KV cache leaf does: it is a fixed-size rolling window from the
+/// first decode step onward, so the leading dim is real window depth, not
+/// something to skip). This is the single source of truth
+/// [`layer_pad_row_widths`]'s own `Ssm` arm sizes
+/// [`SsmLayerCache::new`]/[`SsmLayerCache::advance`] from -- never
+/// [`crate::architecture::Architecture::step_state`]'s `ssm_shape`, whose
+/// default impl a foreign architecture leaves `None` (the real defect this
+/// function replaces, the `Ssm` sibling of [`cache_leaf_row_elements`]'s own
+/// doc on the `DenseAttention` case).
+///
+/// `None` when `name` is not declared at all, or when the program declared
+/// it with any symbolic extent -- [`layer_pad_row_widths`] reads either case
+/// as `0`, caught by the same `fill`-time bounds check every other leaf
+/// shape mismatch is.
+fn cache_leaf_total_elements(program: &[Op], name: &str) -> Option<usize> {
+    let shape = program.iter().find_map(|op| match op {
+        Op::Input {
+            name: Some(leaf_name),
+            shape,
+            ..
+        } if leaf_name == name => Some(shape.as_slice()),
+        _ => None,
+    })?;
+    shape.iter().try_fold(1usize, |product, extent| match extent {
+        Extent::Static(value) => Some(product * (*value as usize)),
+        Extent::Symbolic(_) => None,
+    })
+}
+
 /// [`KvPadShape`]/[`Qwen35DenseAttentionPadShape`]'s own row widths for one
 /// layer, read once (`self.program` never changes for the lifetime of a
 /// decode call) rather than re-derived from architecture scalars every
@@ -2129,7 +2154,12 @@ fn cache_leaf_row_elements(program: &[Op], name: &str) -> Option<usize> {
 enum LayerPadRowWidths {
     Attention { even_odd_row: usize, v_row: usize },
     DenseAttention { even_odd_row: usize, pass_row: usize, v_row: usize },
-    Ssm,
+    /// [`SsmLayerCache::new`]/[`SsmLayerCache::advance`]'s own initial and
+    /// steady-state window sizes -- the flat element count of
+    /// `ssm_cache.{layer}.conv_history`/`.state` as the program itself
+    /// declared them ([`cache_leaf_total_elements`]), never
+    /// [`crate::architecture::Architecture::step_state`]'s `ssm_shape`.
+    Ssm { conv_history_len: usize, state_len: usize },
 }
 
 /// Builds [`LayerPadRowWidths`] for one layer from its own
@@ -2153,7 +2183,10 @@ fn layer_pad_row_widths(program: &[Op], names: &LayerCacheNames) -> LayerPadRowW
             pass_row: cache_leaf_row_elements(program, k_pass).unwrap_or(0),
             v_row: cache_leaf_row_elements(program, v).unwrap_or(0),
         },
-        LayerCacheNames::Ssm { .. } => LayerPadRowWidths::Ssm,
+        LayerCacheNames::Ssm { conv_history, state } => LayerPadRowWidths::Ssm {
+            conv_history_len: cache_leaf_total_elements(program, conv_history).unwrap_or(0),
+            state_len: cache_leaf_total_elements(program, state).unwrap_or(0),
+        },
     }
 }
 
@@ -2213,7 +2246,7 @@ fn push_kv_named_blocks<'call>(
                 };
                 qwen35_dense_pad_scratch[layer].fill(cache, &shape, layer)?;
             }
-            (LayerCacheState::Ssm(_), LayerPadRowWidths::Ssm) => {}
+            (LayerCacheState::Ssm(_), LayerPadRowWidths::Ssm { .. }) => {}
             _ => unreachable!(
                 "layer_row_widths built from the same cache_names as layer_caches, in lockstep"
             ),
@@ -2267,7 +2300,7 @@ fn push_kv_named_blocks<'call>(
                     state,
                 },
                 LayerCacheState::Ssm(cache),
-                LayerPadRowWidths::Ssm,
+                LayerPadRowWidths::Ssm { .. },
             ) => {
                 named_blocks.extend(cache.named_blocks(conv_history, state));
             }
@@ -3475,29 +3508,57 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// A fresh, empty [`LayerCacheState`] per layer, shaped off
-    /// [`Self::declared_layer_cache_names_and_widths`]'s own `cache_names` --
-    /// the decode loop's own prefill-step state (absent a `seed`) and
-    /// [`Self::forward_node_values_on_backend`]'s own always-fresh state
-    /// (every one-shot forward starts from an empty cache, that method's
-    /// own doc), unified so neither caller hand-picks which
-    /// [`LayerCacheState`] variant a layer gets independently of what
+    /// [`Self::declared_layer_cache_names_and_widths`]'s own `cache_names`/
+    /// `layer_row_widths` pair -- the decode loop's own prefill-step state
+    /// (absent a `seed`) and [`Self::forward_node_values_on_backend`]'s own
+    /// always-fresh state (every one-shot forward starts from an empty
+    /// cache, that method's own doc), unified so neither caller hand-picks
+    /// which [`LayerCacheState`] variant a layer gets, or how big it starts,
+    /// independently of what
     /// [`declared_layer_cache_names_and_widths`](Self::declared_layer_cache_names_and_widths)
-    /// already decided.
-    fn fresh_layer_caches(&self, cache_names: &[LayerCacheNames]) -> Vec<LayerCacheState> {
+    /// already decided. `layer_row_widths` (not
+    /// [`crate::architecture::Architecture::step_state`]) is the `Ssm` arm's
+    /// own size source -- see [`cache_leaf_total_elements`]'s own doc for
+    /// why: a foreign `Architecture` that never overrides `step_state`
+    /// (the trait's own `Ok(None)` default) still declares its
+    /// `ssm_cache.{layer}.*` leaves as `Op::Input` ops, so the program
+    /// itself, not a per-architecture hook, is what every layer's initial
+    /// cache is sized from.
+    fn fresh_layer_caches(
+        &self,
+        cache_names: &[LayerCacheNames],
+        layer_row_widths: &[LayerPadRowWidths],
+    ) -> Vec<LayerCacheState> {
         cache_names
             .iter()
-            .map(|names| match names {
-                LayerCacheNames::Attention { .. } => LayerCacheState::Attention(LayerCache::new()),
-                LayerCacheNames::DenseAttention { .. } => {
+            .zip(layer_row_widths)
+            .map(|(names, widths)| match (names, widths) {
+                (LayerCacheNames::Attention { .. }, _) => LayerCacheState::Attention(LayerCache::new()),
+                (LayerCacheNames::DenseAttention { .. }, _) => {
                     LayerCacheState::DenseAttention(Qwen35DenseAttentionCache::new())
                 }
-                LayerCacheNames::Ssm { .. } => LayerCacheState::Ssm(SsmLayerCache::new(
-                    self.qwen35_ssm_shape.unwrap_or(Qwen35SsmShape {
-                        qkv_dim: 0,
-                        conv_rows: 0,
-                        state_len: 0,
-                    }),
-                )),
+                (
+                    LayerCacheNames::Ssm { conv_history, state },
+                    LayerPadRowWidths::Ssm {
+                        conv_history_len,
+                        state_len,
+                    },
+                ) => {
+                    #[cfg(feature = "instrument")]
+                    debug!(
+                        conv_history_name = %conv_history,
+                        state_name = %state,
+                        conv_history_len = *conv_history_len,
+                        state_len = *state_len,
+                        "ssm cache seeded at its program-declared shape"
+                    );
+                    #[cfg(not(feature = "instrument"))]
+                    let _ = (conv_history, state);
+                    LayerCacheState::Ssm(SsmLayerCache::new(*conv_history_len, *state_len))
+                }
+                _ => unreachable!(
+                    "cache_names/layer_row_widths built from the same layer_roots, in lockstep"
+                ),
             })
             .collect()
     }
@@ -4109,7 +4170,7 @@ impl<'file> LoadedModel<'file> {
         let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
         let mut layer_caches: Vec<LayerCacheState> = match seed {
             Some(state) => state.layer_caches,
-            None => self.fresh_layer_caches(&cache_names),
+            None => self.fresh_layer_caches(&cache_names, &layer_row_widths),
         };
         // One [`KvPadScratch`] per layer, reused across every step of this
         // call -- only ever filled for a [`LayerCacheState::Attention`]
@@ -4585,17 +4646,22 @@ impl<'file> LoadedModel<'file> {
                                 layer_cache_append_elements +=
                                     (qkv_mixed_data.len() + state_out_data.len()) as u64;
                             }
-                            // `Self::load`'s own invariant: an `Ssm` entry in
-                            // `layer_roots` exists only when `qwen35_ssm_shape`
-                            // was derived alongside it (both come from the same
-                            // `crate::qwen35::Qwen35Architecture`), so this
-                            // fallback shape is never actually read.
-                            let shape = self.qwen35_ssm_shape.unwrap_or(Qwen35SsmShape {
-                                qkv_dim: 0,
-                                conv_rows: 0,
-                                state_len: 0,
-                            });
-                            cache.advance(qkv_mixed_data, state_out_data, shape);
+                            // `layer_row_widths[layer]`'s own `Ssm` arm --
+                            // the program's own declared
+                            // `ssm_cache.{layer}.conv_history` shape, the
+                            // SAME source [`fresh_layer_caches`] sized this
+                            // cache's initial window from, never
+                            // `Architecture::step_state` (that hook's `None`
+                            // default is exactly the real-world defect this
+                            // read used to reproduce on a foreign
+                            // architecture).
+                            let conv_history_len = match &layer_row_widths[layer] {
+                                LayerPadRowWidths::Ssm { conv_history_len, .. } => *conv_history_len,
+                                _ => unreachable!(
+                                    "layer_row_widths built from the same layer_roots, in lockstep"
+                                ),
+                            };
+                            cache.advance(qkv_mixed_data, state_out_data, conv_history_len);
                         }
                         _ => unreachable!(
                             "layer_roots/layer_caches built from the same layer_roots, in lockstep"
@@ -5389,7 +5455,7 @@ impl<'file> LoadedModel<'file> {
         // ids.len()` -- this is always a one-shot forward from an empty
         // cache over the WHOLE prompt (this method's own doc).
         let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
-        let layer_caches = self.fresh_layer_caches(&cache_names);
+        let layer_caches = self.fresh_layer_caches(&cache_names, &layer_row_widths);
         let mut kv_pad_scratch: Vec<KvPadScratch> =
             self.layer_roots.iter().map(|_| KvPadScratch::new()).collect();
         let mut qwen35_dense_pad_scratch: Vec<Qwen35DenseAttentionPadScratch> = self
@@ -7273,7 +7339,6 @@ mod memory_fit_gate_tests {
             layer_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
             single_position_step: false,
-            qwen35_ssm_shape: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range: None,
             expert_slab: std::sync::Mutex::new(crate::expert_slab::ExpertSlab::new()),
