@@ -8278,6 +8278,17 @@ fn build_matmul_stage_plan<'weights>(
         let extent = resolved.extents[*axis as usize];
         if weight_layout.stride(*axis) != 0 {
             if activation_layout.stride(*axis) != 0 {
+                // proxima-debugger: node35 shared-axis diagnostic, staged
+                // (`build_matmul_stage_plan`) call site.
+                #[cfg(feature = "instrument")]
+                debug!(
+                    reduce_node = resolved.node.0,
+                    weight_node = weight_node.0,
+                    activation_node = activation_node.0,
+                    axis = *axis,
+                    extent,
+                    "build_matmul_stage_plan shared_axis_error: activation and weight both vary along the same output axis"
+                );
                 return Err(shared_axis_error());
             }
             rows_total *= extent;
@@ -8978,6 +8989,20 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         let extent = resolved.extents[*axis as usize];
         if weight_layout.stride(*axis) != 0 {
             if activation_layout.stride(*axis) != 0 {
+                // proxima-debugger: node35 shared-axis diagnostic -- proves
+                // which axis, extent, and operand pair triggered the
+                // conflict before removal per the debugging skill.
+                #[cfg(feature = "instrument")]
+                debug!(
+                    reduce_node = resolved.node.0,
+                    weight_node = weight_node.0,
+                    activation_node = activation_node.0,
+                    axis = *axis,
+                    extent,
+                    weight_gather_present = weight_gather.is_some(),
+                    output_axes_count = output_axes.as_slice().len() as u32,
+                    "run_reduce_quantized shared_axis_error: activation and weight both vary along the same output axis"
+                );
                 return Err(shared_axis_error());
             }
             rows_total *= extent;
