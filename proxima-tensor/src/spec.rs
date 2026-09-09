@@ -8001,6 +8001,7 @@ pub fn mistral_cached_forward_program_with_experts(
             qk_norm,
             paired_gate_up_reduce,
             fused_qkv_reduce,
+            false,
         )?;
     Ok((program, roots, cache_roots, moe_sites))
 }
@@ -8015,6 +8016,19 @@ pub fn mistral_cached_forward_program_with_experts(
 /// node in the graph as an output (the CPU evaluator keeps every requested
 /// output's full lifetime alive, so requesting ALL nodes is the >130 GB
 /// failure mode this narrower request set avoids).
+///
+/// `last_row_only` gates the vocab-projection matmul's own row count:
+/// `true` slices the final-norm activation to its last row before
+/// `output.weight` ever multiplies it (a host-supplied `lm_head_row`
+/// `Op::Input`, gathered through the same [`IndexMap::Computed`] shape
+/// [`embedding_lookup`] already proves correct -- see that leaf's own doc
+/// at the call site below for why it is host-supplied rather than
+/// in-graph-derived), so the matmul computes one row instead of
+/// `new_count`. `false` (every existing caller today) reproduces the prior
+/// per-row-logits program unchanged -- a caller genuinely needing every
+/// new row's own logits (multi-token verification, prefill scoring,
+/// logprobs) opts into that by passing `false`, not by this crate guessing
+/// which one a caller wants.
 #[allow(clippy::too_many_arguments)]
 pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
     vocab: u32,
@@ -8029,6 +8043,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
     qk_norm: bool,
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
+    last_row_only: bool,
 ) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
@@ -8411,6 +8426,43 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
     );
     let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
 
+    // The decode loop only ever samples the LAST row's logits, prefill or
+    // not (`proxima-model-interop::generate`'s own `logits[(new_count - 1)
+    // * vocab_size..]` slice, every call site) -- greedy sampling needs one
+    // row, never the whole prefill. Slicing here, before the vocab-sized
+    // `output.weight` matmul, is what turns a 915-row Q6K reduce into a
+    // 1-row one on an 850+-token prefill (`docs/discipline.md` ROW 418's
+    // own `output.weight` measurement: 14.7s of 43.8s GPU time, 33% of
+    // total, on the FULL 915-row projection). `embedding_lookup` is reused
+    // verbatim, not a new primitive: it is already exactly `table[ids[s],
+    // d]`, the same [`IndexMap::Computed`] gather this needs, just with a
+    // 1-entry `lm_head_row` index instead of a `new_count`-entry `ids`.
+    // `lm_head_row` is host-supplied (`new_count - 1`, same convention as
+    // `cached_len`/`ids` above) rather than derived in-graph from
+    // `Extent::Symbolic(0)`: `cpu.rs`'s own
+    // `evaluate_typed_names_a_computed_gather_index_node_as_not_yet_supported`
+    // test is this crate's own proof that an in-program-computed gather
+    // index (an `Op::Iota`/`Op::Reduce` chain, not a caller-supplied
+    // `Op::Input` block) is a named `NotLowerable` gap on the typed
+    // evaluator, not a silently-guessed execution path -- a host-supplied
+    // leaf is the one gather-index shape this crate's gather machinery
+    // already proves correct end to end (`embedding_lookup`'s own `ids`).
+    // `last_row_only: false` skips this leaf entirely (not merely bypasses
+    // it) so the program a `false` caller gets is byte-for-byte the one
+    // this function has always built -- no new node, no new required
+    // binding, every existing per-position-logits caller unaffected.
+    let normed_last = if last_row_only {
+        let lm_head_row = input_leaf(
+            &mut program,
+            DType::Int32,
+            alloc::vec![Extent::Static(1)],
+            "lm_head_row",
+        );
+        embedding_lookup(&mut program, normed_final, lm_head_row)
+    } else {
+        normed_final
+    };
+
     let lm_head = input_leaf(
         &mut program,
         DType::Float32,
@@ -8421,7 +8473,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
         &mut program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")],
+        &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
     )?;
     let logits = reduce(
         &mut program,
@@ -8437,7 +8489,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
         program,
         ForwardRoots {
             logits,
-            hidden: normed_final,
+            hidden: normed_last,
         },
         cache_roots,
         layer_residuals,
@@ -9424,7 +9476,7 @@ mod tests {
             .expect("plain moe program lowers");
         let (taps_program, taps_roots, taps_cache_roots, layer_residuals, _taps_moe_sites) =
             mistral_cached_forward_program_with_experts_and_layer_taps(
-                32_000, 256, 128, 4, 2, 64, 3, 4, 1, true, false, false,
+                32_000, 256, 128, 4, 2, 64, 3, 4, 1, true, false, false, false,
             )
             .expect("taps moe program lowers");
 

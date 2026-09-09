@@ -22,7 +22,9 @@
 //! for a diagnostic every other architecture would have to ignore.
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_tensor::spec::{Qwen35LayerRoots, mistral_cached_forward_program_with_experts};
+use proxima_tensor::spec::{
+    Qwen35LayerRoots, mistral_cached_forward_program_with_experts_and_layer_taps,
+};
 
 use crate::architecture::{Architecture, BoundProgram};
 use crate::bind::{architecture_from_metadata, bind_all_weights, checkpoint_has_qk_norm};
@@ -54,20 +56,28 @@ impl Architecture for DenseArch {
         // inline call.
         let weights = bind_all_weights(parsed, file_bytes, &architecture, false, false, &[])?;
         let qk_norm = checkpoint_has_qk_norm(parsed);
-        let (program, roots, cache_roots, moe_sites) = mistral_cached_forward_program_with_experts(
-            architecture.vocab,
-            architecture.embedding,
-            architecture.feed_forward,
-            architecture.query_heads,
-            architecture.kv_heads,
-            architecture.head_dim,
-            architecture.block_count,
-            architecture.expert_count,
-            architecture.expert_used_count,
-            qk_norm,
-            false,
-            false,
-        )?;
+        // `last_row_only: true` -- the decode loop
+        // (`crate::generate::LoadedModel`'s own decode step) only ever
+        // samples the LAST row's logits, greedy or not; see
+        // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
+        // own doc on that flag and `proxima-tensor/docs/discipline.md`
+        // ROW 418/421 for the measured cost of computing every row instead.
+        let (program, roots, cache_roots, _layer_residuals, moe_sites) =
+            mistral_cached_forward_program_with_experts_and_layer_taps(
+                architecture.vocab,
+                architecture.embedding,
+                architecture.feed_forward,
+                architecture.query_heads,
+                architecture.kv_heads,
+                architecture.head_dim,
+                architecture.block_count,
+                architecture.expert_count,
+                architecture.expert_used_count,
+                qk_norm,
+                false,
+                false,
+                true,
+            )?;
         Ok(BoundProgram {
             weights,
             architecture,
