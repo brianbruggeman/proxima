@@ -406,7 +406,7 @@ pub enum InteropError {
     /// names a cache shape (`bound`) that disagrees with what the compiled
     /// program actually declares as `Op::Input` leaves for that layer
     /// (`declared`) -- an `crate::architecture::Architecture::bind` that
-    /// tagged the wrong [`proxima_tensor::spec::Qwen35LayerRoots`] variant
+    /// tagged the wrong `proxima_tensor::spec::Qwen35LayerRoots` variant
     /// for a layer it built correctly otherwise. Caught once, at decode-loop
     /// setup, instead of surfacing later as a confusing
     /// [`Self::MissingStepInput`] on a leaf the decode loop never even
@@ -439,7 +439,7 @@ pub enum InteropError {
     /// `layer` has at least one evicted expert with no paged replacement
     /// yet (`crate::expert_slab::ExpertSlab::first_incomplete_layer`), and
     /// the selected backend does not consult
-    /// [`crate::expert_slab::ExpertSlab`]'s per-step table at all --
+    /// `crate::expert_slab::ExpertSlab`'s per-step table at all --
     /// `crate::generate::BackendRuntime`'s `metal`-feature `evaluate`
     /// accepts `expert_sources` and drops it (its own doc: not yet wired
     /// through `omega::backend`'s polymorphic plan cache). Surfaced here,
