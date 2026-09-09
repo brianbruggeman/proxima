@@ -344,19 +344,18 @@ async fn a_foreign_hybrid_architecture_decodes_with_no_missing_step_input() {
 
 /// The failure mode this file's own doc names: a `layer_roots` entry
 /// mistagged relative to what the program actually declares is caught
-/// once, loudly, at decode-loop setup (naming the layer and both the
-/// declared and bound shapes) instead of surfacing as a `MissingStepInput`
-/// on a leaf the decode loop never even tried to feed under the wrong tag.
+/// once, loudly, at [`LoadedModel::load_with_registry`] itself (naming the
+/// layer and both the declared and bound shapes) instead of surfacing as
+/// a `MissingStepInput` on a leaf the decode loop never even tried to feed
+/// under the wrong tag, or as a confusing failure partway through the
+/// first decode step.
 #[proxima::test]
 async fn a_mistagged_layer_roots_entry_is_rejected_before_any_step_runs() {
     let file_bytes = checkpoint_bytes(MISTAGGED_NAME);
     let parsed = parse_complete(&file_bytes).expect("parses the synthetic hybrid checkpoint");
     let registry = registry_with(&MISTAGGED);
 
-    let model = LoadedModel::load_with_registry(&parsed, &file_bytes, &registry)
-        .expect("load itself never inspects layer_roots' own internal consistency");
-
-    match Pipe::call(&model, ("a".to_string(), 1)).await {
+    match LoadedModel::load_with_registry(&parsed, &file_bytes, &registry) {
         Err(InteropError::LayerCacheKindMismatch { declared, bound, .. }) => {
             assert_eq!(declared, "kv_cache.{layer}.{k_first,k_second,k_pass,v}");
             assert_eq!(bound, "kv_cache.{layer}.{k_even,k_odd,v}");

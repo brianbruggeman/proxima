@@ -1285,7 +1285,7 @@ impl<'file> LoadedModel<'file> {
             };
             let expert_slab =
                 crate::bind::build_expert_slab(&bound.architecture, &bound.program, &bound.weights);
-            return Ok(Self {
+            return Self {
                 expert_slab: std::sync::Mutex::new(expert_slab),
                 weights: bound.weights,
                 architecture: bound.architecture,
@@ -1312,7 +1312,8 @@ impl<'file> LoadedModel<'file> {
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 single_range,
                 checkpoint_mapping: file_bytes,
-            });
+            }
+            .validated();
         }
 
         let architecture = architecture_from_metadata(parsed)?;
@@ -1394,7 +1395,7 @@ impl<'file> LoadedModel<'file> {
             build_single_range_program(&architecture, qk_norm)?
         };
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
-        Ok(Self {
+        Self {
             expert_slab: std::sync::Mutex::new(expert_slab),
             weights,
             architecture,
@@ -1422,7 +1423,8 @@ impl<'file> LoadedModel<'file> {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
             checkpoint_mapping: file_bytes,
-        })
+        }
+        .validated()
     }
 
     /// [`Self::load`]'s HF/safetensors counterpart: binds every weight out
@@ -1483,7 +1485,7 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let single_range = build_single_range_program(&architecture, false)?;
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
-        Ok(Self {
+        Self {
             expert_slab: std::sync::Mutex::new(expert_slab),
             weights,
             architecture,
@@ -1519,7 +1521,8 @@ impl<'file> LoadedModel<'file> {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
             checkpoint_mapping: file_bytes,
-        })
+        }
+        .validated()
     }
 }
 
@@ -2025,6 +2028,25 @@ impl DeclaredCacheKind {
             Self::Attention => "kv_cache.{layer}.{k_even,k_odd,v}",
             Self::DenseAttention => "kv_cache.{layer}.{k_first,k_second,k_pass,v}",
             Self::Ssm => "ssm_cache.{layer}.{conv_history,state}",
+        }
+    }
+
+    /// The `Op::Input` leaf-name templates a program must declare for a
+    /// layer bound to this kind -- the exact set
+    /// [`declared_layer_cache_names_and_widths`] fills in `{layer}` from,
+    /// surfaced verbatim in [`InteropError::LayerCacheLeavesMissing`] so
+    /// the error names precisely what the architecture's `bind` failed to
+    /// emit.
+    fn expected_leaf_templates(self) -> &'static [&'static str] {
+        match self {
+            Self::Attention => &["kv_cache.{layer}.k_even", "kv_cache.{layer}.k_odd", "kv_cache.{layer}.v"],
+            Self::DenseAttention => &[
+                "kv_cache.{layer}.k_first",
+                "kv_cache.{layer}.k_second",
+                "kv_cache.{layer}.k_pass",
+                "kv_cache.{layer}.v",
+            ],
+            Self::Ssm => &["ssm_cache.{layer}.conv_history", "ssm_cache.{layer}.state"],
         }
     }
 }
@@ -3378,6 +3400,19 @@ impl<'file> LoadedModel<'file> {
     ///
     /// [`InteropError::LayerCacheKindMismatch`] when a layer's declared
     /// program leaves disagree with `self.layer_roots`' own tag for it.
+    /// `self`, checked against [`Self::declared_layer_cache_names_and_widths`]
+    /// and discarded if that check errors -- every production
+    /// [`Self::load`]/[`Self::load_with_registry`]/[`Self::load_from_safetensors`]
+    /// construction site runs through this before it ever reaches the
+    /// decode loop, so a layer whose `layer_roots` say it is stateful but
+    /// whose program bakes that state as constants fails here, at load,
+    /// instead of silently decoding from zero state
+    /// ([`InteropError::LayerCacheLeavesMissing`]'s own doc).
+    fn validated(self) -> Result<Self, InteropError> {
+        self.declared_layer_cache_names_and_widths()?;
+        Ok(self)
+    }
+
     fn declared_layer_cache_names_and_widths(
         &self,
     ) -> Result<(Vec<LayerCacheNames>, Vec<LayerPadRowWidths>), InteropError> {
@@ -3392,7 +3427,16 @@ impl<'file> LoadedModel<'file> {
         let mut layer_cache_kinds: Vec<DeclaredCacheKind> = Vec::with_capacity(self.layer_roots.len());
         for (layer, roots) in self.layer_roots.iter().enumerate() {
             let bound = bound_cache_kind(roots);
-            let declared = declared_cache_kind(&program_input_names, layer).unwrap_or(bound);
+            let declared = match declared_cache_kind(&program_input_names, layer) {
+                Some(declared) => declared,
+                None => {
+                    return Err(InteropError::LayerCacheLeavesMissing {
+                        layer,
+                        kind: bound.label(),
+                        expected: bound.expected_leaf_templates(),
+                    });
+                }
+            };
             if declared != bound {
                 return Err(InteropError::LayerCacheKindMismatch {
                     layer,
