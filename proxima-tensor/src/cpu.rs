@@ -9318,7 +9318,14 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         {
             let diag_call_ticks = instrument::elapsed_ticks(diag_call_started);
             let diag_call_macs = (rows as u64) * (k as u64);
-            match weight_block {
+            // Matches `dispatch_block` (the codec that actually executed
+            // just above), never `weight_block` (the reduce's declared
+            // codec) -- a mixed-codec `ExpertSource` can dispatch a
+            // different codec per position (see the comment on
+            // `dispatch_block`'s own definition above), and attributing to
+            // `weight_block` would count e.g. a `Q2_K` expert's macs/ticks
+            // as `Q4_K` whenever the stack's OWN declared codec was `Q4_K`.
+            match dispatch_block {
                 QuantizedBlock::Float32(_) => {}
                 QuantizedBlock::Q4K(_) => {
                     counter!(instrument::MATMUL_Q4K_MACS, diag_call_macs);
@@ -29769,6 +29776,113 @@ mod tests {
             actual, expected,
             "routing to a Q2_K-re-encoded entry must match that entry's own codec, not the \
              Q4_K bytes the stack carries at the same offset"
+        );
+    }
+
+    /// ITEM 4 (ROW 422): a mixed-codec `ExpertSource` -- expert 0 native
+    /// `Q4_K`, expert 1 re-encoded `Q2_K` -- routes one token to each. Only
+    /// the `Q4_K` position should ever add to `MATMUL_Q4K_MACS`; the `Q2_K`
+    /// position dispatches through `QuantizedBlock::Q2K`'s own arm, which
+    /// carries no counter at all (see the `match dispatch_block` instrument
+    /// block in `run_reduce_quantized`). Before the fix this counter matched
+    /// on `weight_block` -- the reduce's own declared `Q4_K` codec, fixed for
+    /// the whole call -- so BOTH positions (including the one that actually
+    /// ran a `Q2_K` dot product) added a `Q4_K`-shaped mac count, double the
+    /// true `Q4_K` work and a `Q2_K` call recorded as `Q4_K`.
+    ///
+    /// `MATMUL_Q4K_MACS` is one process-wide atomic counter, so this test
+    /// only holds under `cargo nextest` (one process per test, this crate's
+    /// own default runner) -- under a same-process multi-threaded `cargo
+    /// test` run, a concurrently running Q4_K-matmul test can add to the
+    /// same counter between this test's own reset and read.
+    #[cfg(feature = "instrument")]
+    #[test]
+    fn expert_source_instrumentation_attributes_to_the_dispatched_codec() {
+        use proxima_gguf::quant::q2_k;
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let n_experts: u32 = 2;
+        let rows: u32 = 4;
+        let k = QK_K as u32;
+        let seq: u32 = 2;
+        // Token 0 routes to expert 0 (stays `Q4_K`); token 1 routes to
+        // expert 1 (re-encoded `Q2_K` below).
+        let route_data = [0.0f32, 1.0];
+        let expert_scales = [1.0f32, 5.0];
+
+        let mut expert_f32: Vec<Vec<f32>> = Vec::new();
+        let mut expert_blocks: Vec<Vec<u8>> = Vec::new();
+        for (expert, &scale) in expert_scales.iter().enumerate() {
+            let weight_f32: Vec<f32> = random_vec(501 + expert as u64, rows as usize * k as usize)
+                .into_iter()
+                .map(|value| (value * 4.0 - 2.0) * scale)
+                .collect();
+            let block_bytes = BLOCK_BYTES;
+            let mut blocks = vec![0u8; rows as usize * block_bytes];
+            for (row_f32, row_blocks) in
+                weight_f32.chunks_exact(k as usize).zip(blocks.chunks_exact_mut(block_bytes))
+            {
+                quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+            }
+            expert_blocks.push(blocks);
+            expert_f32.push(weight_f32);
+        }
+        let stacked_weight: Vec<u8> = expert_blocks.iter().flatten().copied().collect();
+
+        let q2k_block_bytes = q2_k::BLOCK_BYTES;
+        let mut expert1_q2k = vec![0u8; rows as usize * q2k_block_bytes];
+        for (row_f32, row_blocks) in expert_f32[1]
+            .chunks_exact(k as usize)
+            .zip(expert1_q2k.chunks_exact_mut(q2k_block_bytes))
+        {
+            q2_k::quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+        }
+
+        let activation: Vec<f32> = random_vec(511, seq as usize * k as usize)
+            .into_iter()
+            .map(|value| value * 2.0 - 1.0)
+            .collect();
+
+        let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
+        let weight_block = QuantizedBlock::Q4K(&stacked_weight);
+        let mut entries =
+            expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
+                .expect("a block-aligned contiguous stack slices evenly");
+        entries[1] = ExpertEntry {
+            block: QuantizedBlock::Q2K(&expert1_q2k),
+            out_dim: rows,
+            in_dim: k,
+            epoch: 1,
+        };
+        let source = ExpertSource::new(&entries);
+
+        let (resolved, buffers, weight_node) = resolve_gathered_reduce_for_expert_source_test(
+            &program,
+            sum,
+            &route_data,
+            &activation,
+        );
+        let mut actual = vec![0.0f32; seq as usize * rows as usize];
+        instrument::reset_matmul_dispatch();
+        run_reduce_quantized(
+            &resolved,
+            &buffers,
+            weight_block,
+            weight_node,
+            Some(source),
+            None,
+            false,
+            &mut actual,
+        )
+        .expect("mixed-codec ExpertSource evaluates");
+
+        let totals = instrument::matmul_dispatch_totals();
+        let one_call_macs = u64::from(rows) * u64::from(k);
+        assert_eq!(
+            totals.q4k_macs, one_call_macs,
+            "exactly one position (the expert-0 Q4_K entry) executed a Q4_K dot product -- \
+             counting the Q2_K-dispatched position (expert 1) against MATMUL_Q4K_MACS means \
+             instrumentation attributed the wrong entry's codec"
         );
     }
 
