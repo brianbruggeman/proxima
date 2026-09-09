@@ -64,12 +64,19 @@ pub mod symbols {
 /// # Errors
 ///
 /// [`InteropError::ReservedSymbolSlot`] when a `step_input` names
-/// [`symbols::NEW_COUNT`] or [`symbols::KV_BOUND`].
+/// [`symbols::NEW_COUNT`] or [`symbols::KV_BOUND`]; [`InteropError::MultiPositionStepUnsupported`]
+/// when `single_position_step` is set and `new_count != 1` -- see
+/// [`BoundProgram::single_position_step`]'s own doc for which architectures
+/// set it and why.
 pub fn bind_symbols(
     new_count: usize,
     kv_bound_extent: usize,
     step_inputs: &[StepInput],
+    single_position_step: bool,
 ) -> Result<Vec<u64>, InteropError> {
+    if single_position_step && new_count != 1 {
+        return Err(InteropError::MultiPositionStepUnsupported { new_count });
+    }
     let mut highest = symbols::FIRST_FREE.saturating_sub(1) as usize;
     for step_input in step_inputs {
         if let Some((slot, _)) = step_input.symbol {
@@ -140,6 +147,20 @@ pub struct BoundProgram<'file> {
     /// see that module's own doc for why the loop, not this kernel-building
     /// step, decides whether to evaluate them.
     pub moe_sites: proxima_tensor::spec::MoeSites,
+    /// `true` when this architecture's forward program is only correct one
+    /// position per evaluation -- `crate::qwen35::Qwen35Arch`'s own
+    /// gated-DeltaNet mixer (`proxima_tensor::spec::append_qwen35_ssm_mixer`),
+    /// whose `s`-axis reduce sums across positions rather than stepping
+    /// through them (see `proxima_tensor::error::TensorError::SingleTokenStepOnly`'s
+    /// own doc for the mechanism, and [`bind_symbols`] for where this flag
+    /// is enforced). `false` for a uniform per-layer-attention architecture
+    /// (`crate::dense::DenseArch` and any foreign one), which batches an
+    /// arbitrary `new_count` of positions into one evaluation the way
+    /// `mistral_cached_forward_program_with_experts` always has. A chunked
+    /// causal scan would let a `true` architecture batch its own prefill
+    /// too; until one exists, `bind_symbols` refuses `new_count > 1` here
+    /// rather than silently returning a wrong forward pass.
+    pub single_position_step: bool,
 }
 
 /// [`crate::qwen35::Qwen35SsmShape`]'s own fixed sizes -- see that type's
@@ -454,6 +475,7 @@ mod tests {
                 hidden_root: None,
                 layer_roots: Vec::new(),
                 moe_sites: proxima_tensor::spec::MoeSites::default(),
+                single_position_step: false,
             })
         }
     }
@@ -479,6 +501,29 @@ mod tests {
         let parsed =
             proxima_gguf::parse_complete(leaked).expect("parses a minimal gguf");
         (parsed, file_bytes)
+    }
+
+    #[test]
+    fn bind_symbols_rejects_new_count_above_one_when_single_position_step_is_set() {
+        match bind_symbols(2, 8, &[], true) {
+            Err(InteropError::MultiPositionStepUnsupported { new_count }) => {
+                assert_eq!(new_count, 2);
+            }
+            other => panic!("expected MultiPositionStepUnsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bind_symbols_allows_new_count_one_when_single_position_step_is_set() {
+        let bound = bind_symbols(1, 8, &[], true).expect("new_count == 1 is always allowed");
+        assert_eq!(bound[symbols::NEW_COUNT as usize], 1);
+        assert_eq!(bound[symbols::KV_BOUND as usize], 8);
+    }
+
+    #[test]
+    fn bind_symbols_allows_new_count_above_one_when_single_position_step_is_unset() {
+        let bound = bind_symbols(4, 8, &[], false).expect("batched prefill is unaffected by the flag when it is false");
+        assert_eq!(bound[symbols::NEW_COUNT as usize], 4);
     }
 
     #[test]

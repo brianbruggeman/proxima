@@ -418,6 +418,21 @@ pub enum InteropError {
     #[error("architecture step_inputs named reserved symbol slot {slot}; foreign slots start at FIRST_FREE")]
     ReservedSymbolSlot { slot: u16 },
 
+    /// `crate::architecture::BoundProgram::single_position_step` is set
+    /// (today: only `crate::qwen35::Qwen35Arch`'s own gated-DeltaNet mixer,
+    /// whose `s`-axis reduce sums across positions instead of stepping
+    /// through them -- `proxima_tensor::error::TensorError::SingleTokenStepOnly`'s
+    /// own doc) but this call bound `new_count` (`crate::symbols::NEW_COUNT`)
+    /// to more than one position -- a batched multi-token prefill, which
+    /// this architecture's program would evaluate wrong rather than raise
+    /// on its own, since `s` is `Extent::Symbolic` there and only resolved
+    /// here, at bind time. The decode loop must feed this architecture one
+    /// position per evaluation instead (prefill becomes `new_count`
+    /// sequential evaluations of `new_count == 1`, the same path decode
+    /// already takes).
+    #[error("architecture declares single_position_step but new_count = {new_count}; feed one position per evaluation")]
+    MultiPositionStepUnsupported { new_count: usize },
+
     /// `layer`'s `crate::architecture::BoundProgram::layer_roots` entry
     /// names a cache shape (`bound`) that disagrees with what the compiled
     /// program actually declares as `Op::Input` leaves for that layer
