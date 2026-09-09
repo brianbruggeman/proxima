@@ -950,19 +950,29 @@ impl BoundOpBuilder {
                 let still_live = !retires.contains(&reduce.operand);
                 let non_identity = !is_identity_projection(&reduce.in_map);
                 let not_held = !self.held.borrow().contains_key(&reduce.operand);
-                let composed_packed_product =
-                    !still_live && !non_identity && !not_held && is_composed_packed_product(&self.held, reduce.operand);
-                let fuses = !still_live && !non_identity && !not_held && !composed_packed_product;
-                #[cfg(feature = "instrument")]
-                if composed_packed_product {
+                let fuses = !still_live && !non_identity && !not_held;
+                if fuses
+                    && let Some(activation_node) =
+                        composed_packed_product_activation(&self.held, reduce.operand)
+                {
+                    // ROW 431 (`docs/discipline.md`): materialize ONLY the
+                    // composed activation side of `Multiply(packed, a)` so
+                    // `W * a` and this reduction stay fused --
+                    // `run_reduce_quantized`'s admission contract
+                    // (`packed_reduce_activation_operand`, `cpu.rs`) requires
+                    // a bare two-operand product, and this is what makes
+                    // that shape true without ever materializing the
+                    // output-width product ROW 430 used to (superseded).
+                    #[cfg(feature = "instrument")]
                     debug!(
                         node = reduce.operand.0,
+                        activation = activation_node.0,
                         reduce = node.0,
-                        "reduce fusion declines a packed-weight product whose OTHER operand is \
-                         still a composed elementwise chain -- run_reduce_quantized reads one \
-                         flat activation buffer verbatim and never re-applies composed steps, so \
-                         this materializes the product instead (docs/discipline.md ROW 430)"
+                        "reduce fusion materializes the composed activation operand of a \
+                         packed-weight product so W * a and the reduction stay fused \
+                         (docs/discipline.md ROW 431, supersedes ROW 430)"
                     );
+                    self.materialize_if_held(activation_node, shapes, &mut emitted)?;
                 }
                 #[cfg(feature = "instrument")]
                 {
@@ -1357,42 +1367,43 @@ fn pure_projection_axes(pattern: &IndexPattern) -> SmallVec<[u16; MAX_INLINE_RAN
         .collect()
 }
 
-/// ROW 430 (`docs/discipline.md`): whether `node`'s held body is
-/// `Multiply(packed, composed)` -- one operand's own map carrying a
-/// genuine multi-term axis (the multi-letter packed-row contraction `wo`'s
-/// own reshape idiom, `spec.rs:9017-9031`, uses -- a single-letter packed
-/// weight like `wq`/`wk`/`wv` never has one) while the OTHER operand is
-/// STILL a held, unmaterialized elementwise chain rather than a plain leaf.
-/// This is exactly the shape `run_reduce_quantized`'s
-/// `activation_row = &activation[...]` (`cpu.rs`) cannot express: it reads
-/// ONE flat buffer verbatim under a layout computed for the fused reduce's
-/// own iteration space, never re-applying any composed steps at all -- safe
-/// only when the non-packed side is already a single materialized buffer.
-/// Declining to fuse here trades one extra materialized buffer per call for
-/// correctness; teaching `run_reduce_quantized` to thread the full composed
-/// body through its activation read is the follow-up this row names.
-fn is_composed_packed_product(held: &RefCell<BTreeMap<NodeId, HeldElementwise>>, node: NodeId) -> bool {
-    let Some((body, operands)) = held
+/// ROW 431 (`docs/discipline.md`, supersedes ROW 430): whether `node`'s
+/// held body is `Multiply(packed, composed)` -- one operand's own map
+/// carrying a genuine multi-term axis (the multi-letter packed-row
+/// contraction `wo`'s own reshape idiom, `spec.rs:9017-9031`, uses -- a
+/// single-letter packed weight like `wq`/`wk`/`wv` never has one) while the
+/// OTHER operand is STILL a held, unmaterialized elementwise chain rather
+/// than a plain leaf. Returns that other (activation) node so the caller can
+/// force just IT to materialize -- this is exactly the shape
+/// `run_reduce_quantized`'s admission contract
+/// (`packed_reduce_activation_operand`, `cpu.rs`) requires: a bare
+/// two-operand product, weight times ONE already-materialized activation
+/// buffer. ROW 430 instead declined to fuse the whole product here, which
+/// materialized the OUTPUT-width `[u, g, d, o]` buffer; forcing only the
+/// activation side (`[u, g, d]`) keeps `W * a` and the reduction fused and
+/// never introduces the output axis into an intermediate buffer at all.
+fn composed_packed_product_activation(
+    held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    node: NodeId,
+) -> Option<NodeId> {
+    let (body, operands) = held
         .borrow()
         .get(&node)
-        .map(|entry| (entry.body, entry.operands.clone()))
-    else {
-        return false;
-    };
+        .map(|entry| (entry.body, entry.operands.clone()))?;
     if body != ScalarOp::Multiply {
-        return false;
+        return None;
     }
     let [(first_node, first_map), (second_node, second_map)] = operands.as_slice() else {
-        return false;
+        return None;
     };
     let is_packed = |map: &IndexMap| map.affine().axes.iter().any(|axis| axis.terms.len() > 1);
     let first_packed = is_packed(first_map);
     let second_packed = is_packed(second_map);
     if first_packed == second_packed {
-        return false;
+        return None;
     }
     let other_node = if first_packed { *second_node } else { *first_node };
-    held.borrow().contains_key(&other_node)
+    held.borrow().contains_key(&other_node).then_some(other_node)
 }
 
 /// A fusion can compose through: every axis a plain, unshifted projection.
