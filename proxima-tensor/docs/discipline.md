@@ -28201,7 +28201,7 @@ PROXIMA_QWEN3_GGUF=... "$BIN_TILED" \
 | 2026-09-08 | `fix(tensor): a reduce's non-identity epilogue is no longer stranded by width-tile packing` | `width_tile_pack_candidate` admitted a `Keep::Reduce` fold carrying `bind::bind`'s own `reduce-epilogue-fusion` epilogue (e.g. a sigmoid gate) without checking it was identity; `run_resolved_nodes_in_arena`'s packed-panel branch calls `run_reduce` directly, skipping `run_node_into`'s `apply_reduce_epilogue` -- the epilogue silently never ran, stranding the raw fold value where the gated value belonged | in-crate repro (`cpu::tests::a_reduce_with_a_sigmoid_epilogue_is_not_stranded_by_width_tile_packing`) RED before / GREEN after; a downstream model-interop caller's GDN output-gate bisection test: `block_out_layer0[13]` -2.5920205 (wrong) -> 0.0008603735 (matches the f64 reference, 0.0008603288) with NO extra output-set tap needed; whole-crate 592/592 after the ROW 420/421 rebase | solo, this worktree only |
 | 2026-09-08 | `perf(model-interop): prefill evaluates the lm head for the last row only` | UNMEASURED this row -- see ROW 423 below | -- | -- |
 
-## ROW 423 -- prefill's vocab-projection matmul now computes one row, not `new_count`, and the number ROW 418 measured (`output.weight` at 14.7s of 43.8s GPU, 33% of an 850+-token prefill) is UNMEASURED for this fix pending an uncontended box
+## ROW 423 -- prefill's vocab-projection matmul now computes one row, not `new_count`, and the number ROW 418 measured (`output.weight` at 14.7s of 43.8s GPU, 33% of an 850+-token prefill) is measured for this fix -- see `### Measured` below
 
 **Card.** `mistral_cached_forward_program_with_experts_and_layer_taps` (`proxima-tensor/src/spec.rs`) gained a `last_row_only: bool` parameter: `true` gathers `normed_final` down to its last row (a host-supplied `lm_head_row` `Op::Input`, the same `IndexMap::Computed` gather shape `embedding_lookup` already proves correct, chosen over an in-graph-derived index because `cpu.rs`'s own `evaluate_typed_names_a_computed_gather_index_node_as_not_yet_supported` test proves an in-program-computed gather index a named `NotLowerable` gap on the typed evaluator) before the `output.weight` matmul ever runs, so that matmul computes 1 row instead of `new_count`. `false` (the plain `mistral_cached_forward_program_with_experts` wrapper, every caller not touched this row) reproduces the prior per-row-logits program byte-for-byte -- no new node, no new required binding. Every production caller of the layer-taps variant (`DenseArch::bind` in `dense.rs`, both `LoadedModel` decode-loop program builders and the one-shot `forward_node_values_on_backend` builder in `generate.rs`) now passes `true` and supplies `lm_head_row = new_count - 1` (or `ids.len() - 1` for the one-shot prompt-only path) as a per-step host block, and every logits reader was narrowed from `logits[(new_count-1)*vocab..new_count*vocab]` to `logits[..vocab]` to match the now-single-row `logits_root`. The test-only `StepInputArch` fixture (`external_architecture_step_inputs.rs`) was updated to supply one `aux_rows` gathered row (the step's last position) instead of one per `new_count`, matching the new default.
 
@@ -28221,6 +28221,28 @@ PROXIMA_QWEN3_GGUF=... "$BIN_DEFAULT" \
   --exact --ignored --nocapture
 ```
 Expected ids for the 8-token greedy decode, unchanged by this row's slice (the last row IS what greedy sampling already read): `[1249, 60626, 39301, 1340, 374, 2677, 3168, 5220]`. Expected direction of the `output.weight` op-profile line: ROW 418 measured it at 14.7s of 43.8s GPU time (33%) computing 915 rows; this row's own change makes that same matmul compute 1 row, so the re-proof should show `output.weight`'s own `gpu_ns` collapse toward the per-row cost of the OTHER matmuls at this shape, not a specific predicted number -- this is a DERIVED expectation from reading the row-count change, not a measured one, and must not be quoted as a result until the command above actually runs.
+
+### Measured
+
+Measured 2026-09-08 20:46 at `0fc37d86` by ROW 418's own prefill harness (command block above, unaltered). Loadout CONTENDED: 16% free memory, 11 sibling cargo/nextest/llama processes, model lock held for all runs.
+
+`prefill_ttft_850`, 915-token prompt, 3 process runs x 3 iterations each, greedy ids identical to ROW 418 in every run (`[1249, 60626, 39301, 1340, 374, 2677, 3168, 5220]`):
+
+| run | ttft min (ms) | med | max | tok/s @ med |
+|---|---|---|---|---|
+| 1 | 36507.0 | 37863.9 | 40375.6 | 24.2 |
+| 2 | 31214.0 | 37340.0 | 37603.5 | 24.5 |
+| 3 | 33995.0 | 36568.5 | 36898.0 | 25.0 |
+| all 9 samples | 31214.0 | 36898.0 | 40375.6 | CoV 7.07% |
+| ROW 418 (before, solo box) | 44176.2 | 50864.3 | 52618.1 | CoV 7.4% |
+
+Median TTFT 50864 -> 36898 ms (-27.5%); max 52618 -> 40376 ms (-23.3%).
+
+`prefill_step_zero_op_profile` (915 tokens, 5684 telemetry records): `output.weight` op_count=1 gpu_ms=1.029 operand_bytes=255260672 (ROW 418: 14666.4 ms) -- no longer in the top 12, which are now all `blk.*.ffn_down.weight` reduce-cooperative at 473.9-511.8 ms each. Buckets: cached_attention 455.4 ms (28 ops), elementwise 98.3 ms (170), reduce-cooperative 10359.5 ms (155), reduce-packed-row-blocked 19041.5 ms (155), constant/iota negligible; total GPU 29954.8 ms vs 43819.1 ms (-31.6%), matching the removed `output.weight` op within op-count drift (reduce-cooperative 156->155, row-blocked 154->155).
+
+Re-prove: ROW 418's command block above, unaltered.
+
+Next lever (ROW 418 ranking): the Q6K `ffn_down` reduce-cooperative at M=915 (28 x ~490 ms = 13.7 s of the remaining 30 s).
 
 **Axes (principle 8).** Numeric -- none new (`last_row_only` is a `bool`, no new tunable magnitude). Structural -- one new parameter on an existing function plus one new host-supplied `Op::Input` leaf (`lm_head_row`) reusing the existing `embedding_lookup` gather; no new type. **Sans-IO opt-sweep (principle 11):** N/A by classification -- graph-construction-time row-count reduction, not a wire codec.
 
