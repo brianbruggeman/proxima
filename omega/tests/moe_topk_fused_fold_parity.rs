@@ -5,34 +5,25 @@
 //! decode-time bug: the real 30B model emits token 0 every step on Metal
 //! while CPU decodes coherently.
 //!
-//! SMALLEST FAILING SHAPE (measured, not the 128/8 the real checkpoint
-//! uses): `expert_count=8, top_k=2, seq=1` already fails, at the SAME
-//! `omega::metal::buffer_for` error the 30B model hits --
+//! ROOT CAUSE (traced via `RUST_LOG=debug` dumps of `Prepared::resolved`'s
+//! own node-id order at each `omega::metal::prepare` stage): the final
+//! combine's fused `Reduce` (`reduce-epilogue-fusion` folded the output
+//! multiply into the weighted-sum reduce, so this op reads round 1's own
+//! softmax gating weight -- `spec.rs`'s `append_moe_ffn` `weight` binding --
+//! ONLY through its `epilogue_operands`, never through `operands()`) is also
+//! a requested output, so `omega::metal::promote_output_placed_nodes` walks
+//! it. That function computed a promoted node's own dependency floor from
+//! `BoundOp::operands()` alone (`metal.rs`'s `promote_output_placed_nodes`),
+//! never `all_read_sources()`, so it moved the fused combine to right after
+//! its LAST plain reduce operand and ignored that its epilogue also reads
+//! four more nodes emitted LATER in the list -- among them round 1's own
+//! gating weight. The combine dispatched before its own epilogue operand's
+//! producer, so `omega::metal::buffer_for` found no buffer for it:
 //! `NotLowerable { node: NodeId(35), reason: "operand buffer missing at
-//! execution time" }` (`NodeId(15)` when no extra `MoeSite` outputs are
-//! requested -- the round-0 analogue of the same node shape). A
-//! `proxima_tensor::bind` dump of this exact fixture (`infer` + `bind`,
-//! `BoundOp::kind` printed per node) shows the failing node is round 1's
-//! own softmax gating weight, `weight = exp(max_selection_round1 -
-//! max_selection_round0)` (`spec.rs`'s `append_moe_ffn`, the `weight`
-//! binding inside its `for round in 0..expert_used_count` loop), and that
-//! this node is a genuine standalone `BoundOp::Elementwise` in `bind`'s own
-//! resolved list (`reduce-epilogue-fusion` does not, and structurally
-//! cannot, absorb it away -- only a `Reduce`-kind node is
-//! `is_epilogue_fusable_reduce`, and this node is `Elementwise`) with TWO
-//! real, independent readers: the `weight_total` accumulation (`sd->sd`
-//! `Add`, "the normalizing sum") and the final combine reduce's OWN fused
-//! epilogue (`epilogue_operands` naming this node directly, "the divide"
-//! that renormalizes `weighted_sum / weight_total`). Both readers, and this
-//! node's own `BoundOp`, are ordered correctly in `bind`'s resolved
-//! sequence (producer before both consumers) -- narrowed that far with
-//! captured data, not walked past that point in the 30-minute window: the
-//! next instrumentation to close the gap is a `debug!` inside
-//! `omega::metal::encode_op`/the dispatch loop (`metal.rs` around the
-//! `for (position, bound) in prepared.resolved.iter().enumerate()` loop)
-//! logging every `device_buffers.insert`/`.remove` key against this node's
-//! id, to see whether its own dispatch's insert is skipped, mis-keyed, or
-//! evicted before the epilogue consumer reads it.
+//! execution time" }` (`NodeId(15)` for round 0's analogous weight when no
+//! extra `MoeSite` outputs are requested). Fixed by reading
+//! `all_read_sources()` in `promote_output_placed_nodes` instead of
+//! `operands()`.
 
 #![cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
@@ -198,14 +189,24 @@ fn moe_topk_fused_fold_parity_sweep_on_metal() {
                         let metal_values = metal.get(node).map(|(values, _shape)| values.to_vec());
                         match (cpu_values, metal_values) {
                             (Some(cpu_values), Some(metal_values)) => {
-                                let max_diff = cpu_values
+                                // Relative, not absolute: this fixture's logits sit
+                                // around 1e4, where a single-ULP f32 accumulation-order
+                                // difference between the CPU scalar reduce and Metal's
+                                // GPU reduce is already ~1e-2 absolute -- an artifact of
+                                // summation order, not a correctness defect. `1e-6` floors
+                                // the denominator so a near-zero logit does not blow up a
+                                // tiny absolute difference into a spurious failure.
+                                let max_relative_diff = cpu_values
                                     .iter()
                                     .zip(metal_values.iter())
-                                    .map(|(&want, &got)| (want - got).abs())
+                                    .map(|(&want, &got)| {
+                                        let denominator = want.abs().max(got.abs()).max(1e-6);
+                                        (want - got).abs() / denominator
+                                    })
                                     .fold(0.0f32, f32::max);
-                                if max_diff > 1e-3 {
+                                if max_relative_diff > 1e-3 {
                                     failures.push(format!(
-                                        "experts={expert_count} top_k={expert_used_count} node_slot={round_index} node={node:?} max_abs_diff={max_diff} cpu={cpu_values:?} metal={metal_values:?}"
+                                        "experts={expert_count} top_k={expert_used_count} node_slot={round_index} node={node:?} max_relative_diff={max_relative_diff} cpu={cpu_values:?} metal={metal_values:?}"
                                     ));
                                 }
                             }
