@@ -1566,19 +1566,6 @@ impl LayerCache {
         self.k_odd.extend_from_slice(odd);
         self.v.extend_from_slice(value);
     }
-
-    fn named_blocks<'cache>(
-        &'cache self,
-        k_even_name: &'cache str,
-        k_odd_name: &'cache str,
-        v_name: &'cache str,
-    ) -> [(&'cache str, QuantizedBlock<'cache>); 3] {
-        [
-            (k_even_name, QuantizedBlock::Float32(self.k_even.as_slice())),
-            (k_odd_name, QuantizedBlock::Float32(self.k_odd.as_slice())),
-            (v_name, QuantizedBlock::Float32(self.v.as_slice())),
-        ]
-    }
 }
 
 /// [`LayerCache`]'s bucket-padded mirror -- the two-range decode loop's own
@@ -2133,6 +2120,128 @@ fn layer_pad_row_widths(program: &[Op], names: &LayerCacheNames) -> LayerPadRowW
         },
         LayerCacheNames::Ssm { .. } => LayerPadRowWidths::Ssm,
     }
+}
+
+/// One step's KV-cache `Op::Input` leaves, named and padded off whatever
+/// [`LayerCacheNames`]/[`LayerCacheState`]/[`LayerPadRowWidths`] this call's
+/// own layers declared -- the ONE place either
+/// [`LoadedModel::run_decode_loop_observed_seeded`] (a growing cache,
+/// `kv_pad_scratch` reused across steps) or
+/// [`LoadedModel::forward_node_values_on_backend`] (a fresh, empty cache,
+/// one shot) turns cache state into named blocks, so a foreign
+/// architecture's own leaf names (`k_first`/`k_second`/`k_pass` in place of
+/// `k_even`/`k_odd`) are fed identically by both callers. Two passes over
+/// the same `layer`/`cache` pairing, not one interleaved pass: see this
+/// function's own former call-site comment (now here) on why
+/// `KvPadScratch::named_blocks`'s borrow of `kv_pad_scratch[layer]` forces
+/// fill-then-emit rather than an interleaved loop.
+///
+/// # Errors
+///
+/// Whatever [`KvPadScratch::fill`]/[`Qwen35DenseAttentionPadScratch::fill`]
+/// can fail with.
+fn push_kv_named_blocks<'call>(
+    cache_names: &'call [LayerCacheNames],
+    layer_caches: &'call [LayerCacheState],
+    layer_row_widths: &[LayerPadRowWidths],
+    kv_bound_extent: usize,
+    kv_pad_scratch: &'call mut [KvPadScratch],
+    qwen35_dense_pad_scratch: &'call mut [Qwen35DenseAttentionPadScratch],
+    named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
+) -> Result<(), InteropError> {
+    for (layer, cache) in layer_caches.iter().enumerate() {
+        match (cache, &layer_row_widths[layer]) {
+            (
+                LayerCacheState::Attention(cache),
+                LayerPadRowWidths::Attention { even_odd_row, v_row },
+            ) => {
+                let shape = KvPadShape {
+                    bound_extent: kv_bound_extent,
+                    even_odd_row: *even_odd_row,
+                    v_row: *v_row,
+                };
+                kv_pad_scratch[layer].fill(cache, &shape, layer)?;
+            }
+            (
+                LayerCacheState::DenseAttention(cache),
+                LayerPadRowWidths::DenseAttention {
+                    even_odd_row,
+                    pass_row,
+                    v_row,
+                },
+            ) => {
+                let shape = Qwen35DenseAttentionPadShape {
+                    bound_extent: kv_bound_extent,
+                    even_odd_row: *even_odd_row,
+                    pass_row: *pass_row,
+                    v_row: *v_row,
+                };
+                qwen35_dense_pad_scratch[layer].fill(cache, &shape, layer)?;
+            }
+            (LayerCacheState::Ssm(_), LayerPadRowWidths::Ssm) => {}
+            _ => unreachable!(
+                "layer_row_widths built from the same cache_names as layer_caches, in lockstep"
+            ),
+        }
+    }
+    for (layer, names) in cache_names.iter().enumerate() {
+        match (names, &layer_caches[layer], &layer_row_widths[layer]) {
+            (
+                LayerCacheNames::Attention { k_even, k_odd, v },
+                LayerCacheState::Attention(_),
+                LayerPadRowWidths::Attention { even_odd_row, v_row },
+            ) => {
+                let shape = KvPadShape {
+                    bound_extent: kv_bound_extent,
+                    even_odd_row: *even_odd_row,
+                    v_row: *v_row,
+                };
+                named_blocks.extend(kv_pad_scratch[layer].named_blocks(k_even, k_odd, v, &shape));
+            }
+            (
+                LayerCacheNames::DenseAttention {
+                    k_first,
+                    k_second,
+                    k_pass,
+                    v,
+                },
+                LayerCacheState::DenseAttention(_),
+                LayerPadRowWidths::DenseAttention {
+                    even_odd_row,
+                    pass_row,
+                    v_row,
+                },
+            ) => {
+                let shape = Qwen35DenseAttentionPadShape {
+                    bound_extent: kv_bound_extent,
+                    even_odd_row: *even_odd_row,
+                    pass_row: *pass_row,
+                    v_row: *v_row,
+                };
+                named_blocks.extend(qwen35_dense_pad_scratch[layer].named_blocks(
+                    k_first,
+                    k_second,
+                    k_pass,
+                    v,
+                    &shape,
+                ));
+            }
+            (
+                LayerCacheNames::Ssm {
+                    conv_history,
+                    state,
+                },
+                LayerCacheState::Ssm(cache),
+                LayerPadRowWidths::Ssm,
+            ) => {
+                named_blocks.extend(cache.named_blocks(conv_history, state));
+            }
+            _ => unreachable!(
+                "cache_names/layer_caches/layer_row_widths built from the same layer_roots, in lockstep"
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// Every per-call input the cached forward program needs beyond the model
@@ -3237,6 +3346,192 @@ impl<'file> LoadedModel<'file> {
             .collect()
     }
 
+    /// This checkpoint's own declared KV/SSM cache leaf names, derived from
+    /// the compiled program's `Op::Input` set, plus each layer's own pad-row
+    /// widths -- the SINGLE source of truth both
+    /// [`Self::run_decode_loop_observed_seeded`] and
+    /// [`Self::forward_node_values_on_backend`] read to learn which leaf
+    /// names a step must feed. Before this method existed, the decode loop
+    /// derived these from the program (correct) while the one-shot forward
+    /// path hard-coded `kv_cache.{layer}.{k_even,k_odd,v}` (wrong for any
+    /// architecture, such as a partial-rotary attention layer, whose cache
+    /// leaves are named differently) -- see this crate's own
+    /// `StepInputArch`-style fixtures in `tests/` for the shape a foreign
+    /// architecture takes advantage of. Never trusts
+    /// `self.layer_roots[layer]`'s own hand-kept discriminant over what the
+    /// program actually declared (`DeclaredCacheKind`'s own doc).
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::LayerCacheKindMismatch`] when a layer's declared
+    /// program leaves disagree with `self.layer_roots`' own tag for it.
+    fn declared_layer_cache_names_and_widths(
+        &self,
+    ) -> Result<(Vec<LayerCacheNames>, Vec<LayerPadRowWidths>), InteropError> {
+        let program_input_names: BTreeSet<&str> = self
+            .program
+            .iter()
+            .filter_map(|op| match op {
+                Op::Input { name: Some(name), .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut layer_cache_kinds: Vec<DeclaredCacheKind> = Vec::with_capacity(self.layer_roots.len());
+        for (layer, roots) in self.layer_roots.iter().enumerate() {
+            let bound = bound_cache_kind(roots);
+            let declared = declared_cache_kind(&program_input_names, layer).unwrap_or(bound);
+            if declared != bound {
+                return Err(InteropError::LayerCacheKindMismatch {
+                    layer,
+                    declared: declared.label(),
+                    bound: bound.label(),
+                });
+            }
+            layer_cache_kinds.push(declared);
+        }
+        let cache_names: Vec<LayerCacheNames> = layer_cache_kinds
+            .iter()
+            .enumerate()
+            .map(|(layer, kind)| match kind {
+                DeclaredCacheKind::Attention => LayerCacheNames::Attention {
+                    k_even: alloc::format!("kv_cache.{layer}.k_even"),
+                    k_odd: alloc::format!("kv_cache.{layer}.k_odd"),
+                    v: alloc::format!("kv_cache.{layer}.v"),
+                },
+                DeclaredCacheKind::DenseAttention => LayerCacheNames::DenseAttention {
+                    k_first: alloc::format!("kv_cache.{layer}.k_first"),
+                    k_second: alloc::format!("kv_cache.{layer}.k_second"),
+                    k_pass: alloc::format!("kv_cache.{layer}.k_pass"),
+                    v: alloc::format!("kv_cache.{layer}.v"),
+                },
+                DeclaredCacheKind::Ssm => LayerCacheNames::Ssm {
+                    conv_history: alloc::format!("ssm_cache.{layer}.conv_history"),
+                    state: alloc::format!("ssm_cache.{layer}.state"),
+                },
+            })
+            .collect();
+        let layer_row_widths: Vec<LayerPadRowWidths> = cache_names
+            .iter()
+            .map(|names| layer_pad_row_widths(&self.program, names))
+            .collect();
+        Ok((cache_names, layer_row_widths))
+    }
+
+    /// A fresh, empty [`LayerCacheState`] per layer, shaped off
+    /// [`Self::declared_layer_cache_names_and_widths`]'s own `cache_names` --
+    /// the decode loop's own prefill-step state (absent a `seed`) and
+    /// [`Self::forward_node_values_on_backend`]'s own always-fresh state
+    /// (every one-shot forward starts from an empty cache, that method's
+    /// own doc), unified so neither caller hand-picks which
+    /// [`LayerCacheState`] variant a layer gets independently of what
+    /// [`declared_layer_cache_names_and_widths`](Self::declared_layer_cache_names_and_widths)
+    /// already decided.
+    fn fresh_layer_caches(&self, cache_names: &[LayerCacheNames]) -> Vec<LayerCacheState> {
+        cache_names
+            .iter()
+            .map(|names| match names {
+                LayerCacheNames::Attention { .. } => LayerCacheState::Attention(LayerCache::new()),
+                LayerCacheNames::DenseAttention { .. } => {
+                    LayerCacheState::DenseAttention(Qwen35DenseAttentionCache::new())
+                }
+                LayerCacheNames::Ssm { .. } => LayerCacheState::Ssm(SsmLayerCache::new(
+                    self.qwen35_ssm_shape.unwrap_or(Qwen35SsmShape {
+                        qkv_dim: 0,
+                        conv_rows: 0,
+                        state_len: 0,
+                    }),
+                )),
+            })
+            .collect()
+    }
+
+    /// Pushes one step's position/RoPE inputs, `cached_len`/`lm_head_row`
+    /// scalars, [`Architecture::step_inputs`]' own per-step leaves, and
+    /// every KV/SSM cache leaf ([`push_kv_named_blocks`]) into `named_blocks`
+    /// -- the ONE assembly both
+    /// [`Self::run_decode_loop_observed_seeded`] and
+    /// [`Self::forward_node_values_on_backend`] call, so a foreign
+    /// architecture's own [`Architecture::step_inputs`] override and its own
+    /// cache leaf names are fed identically whether the caller is decoding
+    /// token-by-token or tapping one interior node from a single forward
+    /// pass. `position_inputs`/`cached_len_scalar`/`lm_head_row_scalar` are
+    /// owned by the CALLER (not this method) so the `QuantizedBlock`s this
+    /// method pushes can borrow them for `named_blocks`' own `'call`
+    /// lifetime without a self-referential return type. Returns the
+    /// [`bind_symbols`] result (this step's own `Extent::Symbolic` binding)
+    /// rather than leaving the caller to re-borrow `step_input_scratch`
+    /// afterward -- `named_blocks` already holds borrows into it once this
+    /// method returns, so a second, independent borrow to compute symbols
+    /// would conflict with the one `named_blocks` is holding.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::UnknownStepInput`] if `Architecture::step_inputs`
+    /// names a leaf this checkpoint's program never declared, plus whatever
+    /// [`push_kv_named_blocks`]/[`bind_symbols`] can fail with.
+    #[allow(clippy::too_many_arguments)]
+    fn push_step_named_blocks<'call>(
+        &'call self,
+        position_inputs: &'call PositionInputs,
+        cached_len_scalar: &'call [f32; 1],
+        lm_head_row_scalar: &'call [f32; 1],
+        token_history: &[u32],
+        new_start: usize,
+        new_count: usize,
+        cache_names: &'call [LayerCacheNames],
+        layer_caches: &'call [LayerCacheState],
+        layer_row_widths: &[LayerPadRowWidths],
+        kv_bound_extent: usize,
+        kv_pad_scratch: &'call mut [KvPadScratch],
+        qwen35_dense_pad_scratch: &'call mut [Qwen35DenseAttentionPadScratch],
+        step_input_scratch: &'call mut Vec<StepInput>,
+        named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
+    ) -> Result<Vec<u64>, InteropError> {
+        named_blocks.push(("ids", QuantizedBlock::Float32(position_inputs.ids_f32.as_slice())));
+        named_blocks.push(("eps", QuantizedBlock::Float32(position_inputs.epsilon.as_slice())));
+        named_blocks.push(("rope_cos", QuantizedBlock::Float32(position_inputs.cos.as_slice())));
+        named_blocks.push(("rope_sin", QuantizedBlock::Float32(position_inputs.sin.as_slice())));
+        named_blocks.push(("cached_len", QuantizedBlock::Float32(cached_len_scalar.as_slice())));
+        named_blocks.push((
+            "lm_head_row",
+            QuantizedBlock::Float32(lm_head_row_scalar.as_slice()),
+        ));
+
+        step_input_scratch.clear();
+        if let Some(architecture_impl) = self.architecture_impl {
+            let step_context = StepInputContext {
+                all_token_ids: token_history,
+                new_start,
+                new_count,
+            };
+            architecture_impl.step_inputs(&step_context, step_input_scratch);
+        }
+        for step_input in step_input_scratch.iter() {
+            if !self
+                .program
+                .iter()
+                .any(|op| op.name() == Some(step_input.name))
+            {
+                return Err(InteropError::UnknownStepInput {
+                    name: String::from(step_input.name),
+                });
+            }
+            named_blocks.push(step_input.as_named_block());
+        }
+        let symbols = bind_symbols(new_count, kv_bound_extent, step_input_scratch)?;
+
+        push_kv_named_blocks(
+            cache_names,
+            layer_caches,
+            layer_row_widths,
+            kv_bound_extent,
+            kv_pad_scratch,
+            qwen35_dense_pad_scratch,
+            named_blocks,
+        )?;
+        Ok(symbols)
+    }
+
     /// Pages `bytes` in as expert `expert`'s new weight for layer `layer` --
     /// a thin forward onto [`crate::expert_slab::ExpertSlab::page_expert`],
     /// the primitive this method composes (P2 teaching surface: read that
@@ -3751,68 +4046,13 @@ impl<'file> LoadedModel<'file> {
         // never `self.layer_roots[layer]`'s own discriminant, which a
         // foreign `Architecture::bind` assembles by hand and can tag
         // inconsistently with the ops it actually emitted (see
-        // `DeclaredCacheKind`'s own doc). Read once, here: `self.program`
-        // never changes for the lifetime of this call.
-        let program_input_names: BTreeSet<&str> = self
-            .program
-            .iter()
-            .filter_map(|op| match op {
-                Op::Input { name: Some(name), .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect();
-        let mut layer_cache_kinds: Vec<DeclaredCacheKind> = Vec::with_capacity(self.layer_roots.len());
-        for (layer, roots) in self.layer_roots.iter().enumerate() {
-            let bound = bound_cache_kind(roots);
-            let declared = declared_cache_kind(&program_input_names, layer).unwrap_or(bound);
-            if declared != bound {
-                return Err(InteropError::LayerCacheKindMismatch {
-                    layer,
-                    declared: declared.label(),
-                    bound: bound.label(),
-                });
-            }
-            layer_cache_kinds.push(declared);
-        }
-        let cache_names: Vec<LayerCacheNames> = layer_cache_kinds
-            .iter()
-            .enumerate()
-            .map(|(layer, kind)| match kind {
-                DeclaredCacheKind::Attention => LayerCacheNames::Attention {
-                    k_even: alloc::format!("kv_cache.{layer}.k_even"),
-                    k_odd: alloc::format!("kv_cache.{layer}.k_odd"),
-                    v: alloc::format!("kv_cache.{layer}.v"),
-                },
-                DeclaredCacheKind::DenseAttention => LayerCacheNames::DenseAttention {
-                    k_first: alloc::format!("kv_cache.{layer}.k_first"),
-                    k_second: alloc::format!("kv_cache.{layer}.k_second"),
-                    k_pass: alloc::format!("kv_cache.{layer}.k_pass"),
-                    v: alloc::format!("kv_cache.{layer}.v"),
-                },
-                DeclaredCacheKind::Ssm => LayerCacheNames::Ssm {
-                    conv_history: alloc::format!("ssm_cache.{layer}.conv_history"),
-                    state: alloc::format!("ssm_cache.{layer}.state"),
-                },
-            })
-            .collect();
+        // `DeclaredCacheKind`'s own doc). The SAME derivation
+        // [`Self::forward_node_values_on_backend`] calls, so a foreign
+        // architecture's cache leaf names are never hard-coded twice.
+        let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
         let mut layer_caches: Vec<LayerCacheState> = match seed {
             Some(state) => state.layer_caches,
-            None => layer_cache_kinds
-                .iter()
-                .map(|kind| match kind {
-                    DeclaredCacheKind::Attention => LayerCacheState::Attention(LayerCache::new()),
-                    DeclaredCacheKind::DenseAttention => {
-                        LayerCacheState::DenseAttention(Qwen35DenseAttentionCache::new())
-                    }
-                    DeclaredCacheKind::Ssm => LayerCacheState::Ssm(SsmLayerCache::new(
-                        self.qwen35_ssm_shape.unwrap_or(Qwen35SsmShape {
-                            qkv_dim: 0,
-                            conv_rows: 0,
-                            state_len: 0,
-                        }),
-                    )),
-                })
-                .collect(),
+            None => self.fresh_layer_caches(&cache_names),
         };
         // One [`KvPadScratch`] per layer, reused across every step of this
         // call -- only ever filled for a [`LayerCacheState::Attention`]
@@ -3831,16 +4071,6 @@ impl<'file> LoadedModel<'file> {
             .iter()
             .map(|_| Qwen35DenseAttentionPadScratch::new())
             .collect();
-        // Every layer's own pad-scratch row widths, read once off THIS
-        // layer's declared `Op::Input` cache leaves ([`layer_pad_row_widths`]'s
-        // own doc) -- never a single model-wide `kv_heads`/`head_dim`/
-        // `attn_head_dim` scalar pulled off `self.architecture`/
-        // `self.qwen35_attn_head_dim`, which for a `DenseAttention` layer
-        // depends on `crate::architecture::Architecture::step_state`, a
-        // trait method whose default impl a foreign bind can silently
-        // never override.
-        let layer_row_widths: Vec<LayerPadRowWidths> =
-            cache_names.iter().map(|names| layer_pad_row_widths(&self.program, names)).collect();
 
         // The caller's own knowledge of which named blocks are STATIC --
         // bound once in `LoadedModel::load` and never mutated again -- fixed
@@ -3930,7 +4160,6 @@ impl<'file> LoadedModel<'file> {
                 );
                 #[cfg(feature = "instrument")]
                 let named_blocks_weights_started = read_ticks();
-                named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
                 for (name, data) in &self.weights.owned {
                     named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
                 }
@@ -3940,9 +4169,12 @@ impl<'file> LoadedModel<'file> {
                 for (name, bytes, kind) in &self.weights.packed_owned {
                     named_blocks.push((name.as_str(), kind.as_block(bytes)));
                 }
-                named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
-                named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
-                named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
+                // Rounds `cached_len` up to `ServingConfig::kv_bucket_tokens`
+                // (`kv_extent`'s own doc) -- `usize::MAX` in place of the
+                // placed-KV path's fixed buffer capacity: the two-range KV
+                // cache below is a growing `Vec`, not a preallocated
+                // device buffer, so there is no hard cap to clamp against.
+                let kv_bound_extent = kv_extent(cached_len, usize::MAX, serving_config.kv_bucket_tokens);
                 // `mistral_cached_forward_program_with_experts`'s own
                 // `cached_len` `Op::Input` -- always present regardless of
                 // `ServingConfig::kv_bucket_tokens` (`proxima_tensor::bind::
@@ -3950,7 +4182,6 @@ impl<'file> LoadedModel<'file> {
                 // that reads it), so this scalar is fed on every step,
                 // bucketed or not.
                 let cached_len_scalar = [cached_len as f32];
-                named_blocks.push(("cached_len", QuantizedBlock::Float32(&cached_len_scalar)));
                 // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
                 // own `lm_head_row` `Op::Input` -- the last row of THIS
                 // step's `new_count` freshly-computed rows, host-supplied
@@ -3959,45 +4190,6 @@ impl<'file> LoadedModel<'file> {
                 // index is a named `NotLowerable` gap on the typed
                 // evaluator, not a silently-guessed execution path).
                 let lm_head_row_scalar = [(new_count - 1) as f32];
-                named_blocks.push((
-                    "lm_head_row",
-                    QuantizedBlock::Float32(&lm_head_row_scalar),
-                ));
-                // A foreign `Architecture`'s own per-step leaves --
-                // `token_history` already carries exactly `cached_len +
-                // new_count` entries at this point (the same invariant
-                // `recent_tokens`'s repeat-penalty slice below relies on),
-                // so no separate accumulator is needed. `step_input_scratch`
-                // is cleared, not reallocated, every step.
-                step_input_scratch.clear();
-                if let Some(architecture_impl) = self.architecture_impl {
-                    let step_context = StepInputContext {
-                        all_token_ids: &token_history,
-                        new_start: cached_len,
-                        new_count,
-                    };
-                    architecture_impl.step_inputs(&step_context, &mut step_input_scratch);
-                }
-                for step_input in &step_input_scratch {
-                    if !self
-                        .program
-                        .iter()
-                        .any(|op| op.name() == Some(step_input.name))
-                    {
-                        return Err(InteropError::UnknownStepInput {
-                            name: String::from(step_input.name),
-                        });
-                    }
-                    named_blocks.push(step_input.as_named_block());
-                }
-                #[cfg(feature = "instrument")]
-                let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
-                // Rounds `cached_len` up to `ServingConfig::kv_bucket_tokens`
-                // (`kv_extent`'s own doc) -- `usize::MAX` in place of the
-                // placed-KV path's fixed buffer capacity: the two-range KV
-                // cache below is a growing `Vec`, not a preallocated
-                // device buffer, so there is no hard cap to clamp against.
-                let kv_bound_extent = kv_extent(cached_len, usize::MAX, serving_config.kv_bucket_tokens);
 
                 // KV-cache HOST -> DEVICE traffic: every named block below is the
                 // FULL accumulated history (`LayerCache::append` only grows these,
@@ -4026,117 +4218,35 @@ impl<'file> LoadedModel<'file> {
                     .sum();
                 #[cfg(feature = "instrument")]
                 let named_blocks_kv_started = read_ticks();
-                // Two passes over the same `layer`/`cache` pairing, not one
-                // interleaved pass: `KvPadScratch::named_blocks` below
-                // borrows `kv_pad_scratch[layer]` immutably for as long as
-                // `named_blocks` (read by `evaluate` after this loop) holds
-                // it, so a later iteration's `&mut kv_pad_scratch[other_layer]`
-                // would conflict even though the indices never alias --
-                // the borrow checker sees one `Vec`, not per-index slots.
-                // Filling every layer's scratch first, then borrowing every
-                // layer's scratch second, keeps the two borrow kinds in
-                // disjoint passes instead of interleaved per iteration.
-                for (layer, cache) in layer_caches.iter().enumerate() {
-                    match (cache, &layer_row_widths[layer]) {
-                        (
-                            LayerCacheState::Attention(cache),
-                            LayerPadRowWidths::Attention { even_odd_row, v_row },
-                        ) => {
-                            let shape = KvPadShape {
-                                bound_extent: kv_bound_extent,
-                                even_odd_row: *even_odd_row,
-                                v_row: *v_row,
-                            };
-                            kv_pad_scratch[layer].fill(cache, &shape, layer)?;
-                        }
-                        (
-                            LayerCacheState::DenseAttention(cache),
-                            LayerPadRowWidths::DenseAttention {
-                                even_odd_row,
-                                pass_row,
-                                v_row,
-                            },
-                        ) => {
-                            let shape = Qwen35DenseAttentionPadShape {
-                                bound_extent: kv_bound_extent,
-                                even_odd_row: *even_odd_row,
-                                pass_row: *pass_row,
-                                v_row: *v_row,
-                            };
-                            qwen35_dense_pad_scratch[layer].fill(cache, &shape, layer)?;
-                        }
-                        (LayerCacheState::Ssm(_), LayerPadRowWidths::Ssm) => {}
-                        _ => unreachable!(
-                            "layer_row_widths built from the same cache_names as layer_caches, in lockstep"
-                        ),
-                    }
-                }
-                for (layer, names) in cache_names.iter().enumerate() {
-                    match (names, &layer_caches[layer], &layer_row_widths[layer]) {
-                        (
-                            LayerCacheNames::Attention { k_even, k_odd, v },
-                            LayerCacheState::Attention(_),
-                            LayerPadRowWidths::Attention { even_odd_row, v_row },
-                        ) => {
-                            let shape = KvPadShape {
-                                bound_extent: kv_bound_extent,
-                                even_odd_row: *even_odd_row,
-                                v_row: *v_row,
-                            };
-                            named_blocks.extend(kv_pad_scratch[layer].named_blocks(
-                                k_even,
-                                k_odd,
-                                v,
-                                &shape,
-                            ));
-                        }
-                        (
-                            LayerCacheNames::DenseAttention {
-                                k_first,
-                                k_second,
-                                k_pass,
-                                v,
-                            },
-                            LayerCacheState::DenseAttention(_),
-                            LayerPadRowWidths::DenseAttention {
-                                even_odd_row,
-                                pass_row,
-                                v_row,
-                            },
-                        ) => {
-                            let shape = Qwen35DenseAttentionPadShape {
-                                bound_extent: kv_bound_extent,
-                                even_odd_row: *even_odd_row,
-                                pass_row: *pass_row,
-                                v_row: *v_row,
-                            };
-                            named_blocks.extend(qwen35_dense_pad_scratch[layer].named_blocks(
-                                k_first,
-                                k_second,
-                                k_pass,
-                                v,
-                                &shape,
-                            ));
-                        }
-                        (
-                            LayerCacheNames::Ssm {
-                                conv_history,
-                                state,
-                            },
-                            LayerCacheState::Ssm(cache),
-                            LayerPadRowWidths::Ssm,
-                        ) => {
-                            named_blocks.extend(cache.named_blocks(conv_history, state));
-                        }
-                        _ => unreachable!(
-                            "cache_names/layer_caches/layer_row_widths built from the same layer_roots, in lockstep"
-                        ),
-                    }
-                }
+                // `token_history` already carries exactly `cached_len +
+                // new_count` entries at this point (the same invariant
+                // `recent_tokens`'s repeat-penalty slice below relies on).
+                // The SAME assembly [`Self::forward_node_values_on_backend`]
+                // calls -- position/RoPE inputs, `cached_len`/`lm_head_row`,
+                // `Architecture::step_inputs`' own leaves, and every KV/SSM
+                // cache leaf -- so a foreign architecture's own leaf names
+                // are fed identically whether decoding or tapping one node.
+                let symbols = self.push_step_named_blocks(
+                    &inputs,
+                    &cached_len_scalar,
+                    &lm_head_row_scalar,
+                    &token_history,
+                    cached_len,
+                    new_count,
+                    &cache_names,
+                    &layer_caches,
+                    &layer_row_widths,
+                    kv_bound_extent,
+                    &mut kv_pad_scratch,
+                    &mut qwen35_dense_pad_scratch,
+                    &mut step_input_scratch,
+                    &mut named_blocks,
+                )?;
+                #[cfg(feature = "instrument")]
+                let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
                 #[cfg(feature = "instrument")]
                 let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
 
-                let symbols = bind_symbols(new_count, kv_bound_extent, &step_input_scratch)?;
                 let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.layer_roots.len() * 3);
                 roots.push(self.logits_root);
                 for roots_for_layer in &self.layer_roots {
@@ -5157,26 +5267,34 @@ impl<'file> LoadedModel<'file> {
             self.architecture.rms_epsilon,
         );
 
-        let block_count = self.architecture.block_count as usize;
-        let empty_cache = LayerCache::new();
-        let kv_cache_names: Vec<(String, String, String)> = (0..block_count)
-            .map(|layer| {
-                (
-                    alloc::format!("kv_cache.{layer}.k_even"),
-                    alloc::format!("kv_cache.{layer}.k_odd"),
-                    alloc::format!("kv_cache.{layer}.v"),
-                )
-            })
+        // The SAME program-derived cache-leaf-name/step_inputs assembly
+        // `Self::run_decode_loop_observed_seeded` calls -- before this,
+        // this method hard-coded `kv_cache.{layer}.{k_even,k_odd,v}` and
+        // never ran `Architecture::step_inputs` at all, so a foreign
+        // architecture with differently-named cache leaves (or a leaf only
+        // `step_inputs` feeds) surfaced `InteropError::UnboundInputName`
+        // the moment a caller tapped an interior node here instead of
+        // decoding. `cached_len: 0`, `new_start: 0`, `new_count:
+        // ids.len()` -- this is always a one-shot forward from an empty
+        // cache over the WHOLE prompt (this method's own doc).
+        let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
+        let layer_caches = self.fresh_layer_caches(&cache_names);
+        let mut kv_pad_scratch: Vec<KvPadScratch> =
+            self.layer_roots.iter().map(|_| KvPadScratch::new()).collect();
+        let mut qwen35_dense_pad_scratch: Vec<Qwen35DenseAttentionPadScratch> = self
+            .layer_roots
+            .iter()
+            .map(|_| Qwen35DenseAttentionPadScratch::new())
             .collect();
+        let mut step_input_scratch: Vec<StepInput> = Vec::new();
 
         let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
             self.weights.owned.len()
                 + self.weights.packed.len()
                 + self.weights.packed_owned.len()
-                + 4
-                + block_count * 3,
+                + 6
+                + cache_names.len() * 4,
         );
-        named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
         for (name, data) in &self.weights.owned {
             named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
         }
@@ -5186,18 +5304,13 @@ impl<'file> LoadedModel<'file> {
         for (name, bytes, kind) in &self.weights.packed_owned {
             named_blocks.push((name.as_str(), kind.as_block(bytes)));
         }
-        named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
-        named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
-        named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
         // `mistral_cached_forward_program_with_experts`'s own `cached_len`
         // `Op::Input` (ROW 404/405's runtime bound the fused Metal
         // `CachedAttention` kernel reads) is present on every program this
         // method evaluates, fresh-KV or not -- this is always a one-shot
         // forward from an empty cache (this method's own doc), so `0.0` is
-        // the only correct value, the same fact `empty_cache` above already
-        // encodes for the KV-cache blocks themselves.
+        // the only correct value.
         let cached_len_scalar = [0.0f32];
-        named_blocks.push(("cached_len", QuantizedBlock::Float32(&cached_len_scalar)));
         // Same `lm_head_row` leaf the decode loop feeds -- this one-shot
         // forward's own `ids` IS the whole prompt, so `ids.len() - 1` is
         // its last row, matching `Self::forward_logits_on_backend`'s own
@@ -5206,17 +5319,27 @@ impl<'file> LoadedModel<'file> {
         // per-position logits (not just the last row) has no opt-in path
         // yet -- residual, not fixed here.
         let lm_head_row_scalar = [(ids.len() - 1) as f32];
-        named_blocks.push((
-            "lm_head_row",
-            QuantizedBlock::Float32(&lm_head_row_scalar),
-        ));
-        for (k_even_name, k_odd_name, v_name) in &kv_cache_names {
-            named_blocks.extend(empty_cache.named_blocks(k_even_name, k_odd_name, v_name));
-        }
+        let kv_bound_extent = kv_extent(ids.len(), usize::MAX, serving_config.kv_bucket_tokens);
+
+        let symbols = self.push_step_named_blocks(
+            &inputs,
+            &cached_len_scalar,
+            &lm_head_row_scalar,
+            &ids,
+            0,
+            ids.len(),
+            &cache_names,
+            &layer_caches,
+            &layer_row_widths,
+            kv_bound_extent,
+            &mut kv_pad_scratch,
+            &mut qwen35_dense_pad_scratch,
+            &mut step_input_scratch,
+            &mut named_blocks,
+        )?;
 
         let resident_names: BTreeSet<&str> = self.resident_names();
 
-        let symbols = [ids.len() as u64, 0u64];
         // A one-shot diagnostic forward, not a decode step -- no
         // `ExpertSlab::begin_step`/`end_step` pair runs around it, so this
         // reads whatever is currently paged (this checkpoint's own aliased

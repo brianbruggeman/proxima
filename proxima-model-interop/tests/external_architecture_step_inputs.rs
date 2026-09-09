@@ -367,6 +367,58 @@ async fn a_foreign_architecture_feeds_a_token_derived_leaf_each_step() {
     );
 }
 
+/// The defect [`crate::generate::LoadedModel::forward_node_values_on_backend`]
+/// used to carry: it built a step's named inputs with hard-coded
+/// `kv_cache.{layer}.{k_even,k_odd,v}` leaf names and never ran
+/// [`Architecture::step_inputs`] at all, so tapping ANY node through
+/// [`LoadedModel::forward_node_values`] on a foreign architecture that
+/// declares its own leaves (`aux_rows`/`aux_table` here) failed with
+/// [`InteropError::UnboundInputName`] the moment `evaluate` reached a leaf
+/// only `step_inputs` could feed -- before this crate's decode loop ever
+/// got a chance to prove the mechanism worked. This is the same
+/// [`StepInputArch`] fixture the happy-path test above already decodes
+/// with, tapping [`LoadedModel::hidden_root`] (a plain interior node, not
+/// the `aux`-gathered `logits_root`) through the one-shot forward path
+/// instead of the decode loop.
+#[proxima::test]
+async fn a_forward_tap_feeds_step_inputs_the_same_way_the_decode_loop_does() {
+    reset_observations();
+    let file_bytes = checkpoint_bytes(STEP_INPUT_ARCHITECTURE_NAME);
+    let parsed = parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let registry = registry_with(&LOW_MULTIPLIER);
+
+    let model = LoadedModel::load_with_registry(&parsed, &file_bytes, &registry)
+        .expect("loads through the foreign architecture's own bind");
+
+    let hidden_root = model
+        .hidden_root()
+        .expect("DenseArch::bind (this fixture's own delegate) always names a hidden root");
+    let prompt = "abc";
+
+    let values = model
+        .forward_node_values(prompt, &[hidden_root])
+        .expect(
+            "a one-shot forward tap must assemble this step's inputs the SAME way the decode \
+             loop does -- including running Architecture::step_inputs -- so a foreign \
+             architecture's own leaves (aux_rows/aux_table here) are fed, not left unbound",
+        );
+
+    assert_eq!(values.len(), 1, "one value vector per requested node");
+
+    let observed = OBSERVED_NEW_COUNTS.lock().expect("test-only mutex, never poisoned").clone();
+    assert_eq!(
+        observed.len(),
+        1,
+        "step_inputs runs exactly once for a one-shot forward tap, same as decode step 0"
+    );
+    assert!(
+        observed[0] >= prompt.len(),
+        "step_inputs' own new_count must cover the whole (bos-prefixed) prompt in one shot, \
+         got {}",
+        observed[0]
+    );
+}
+
 /// Sad path: a program with an [`Architecture::step_inputs`] that supplies
 /// nothing leaves `aux_rows` unbound -- [`InteropError::MissingStepInput`]
 /// names it rather than the decode loop silently reading garbage or the
