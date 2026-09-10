@@ -60,17 +60,27 @@ use core::future::Future;
 use proxima_gguf::GgmlType;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
+#[cfg(all(
+    feature = "instrument",
+    feature = "metal",
+    target_os = "macos",
+    not(feature = "metal-output-placement")
+))]
+use proxima_tensor::DType;
+use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 #[cfg(not(feature = "metal"))]
 use proxima_tensor::cpu::{
     evaluate_quantized_named_exact_with_scratch_and_experts,
     evaluate_quantized_named_with_scratch_and_experts,
 };
-use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
-#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-use proxima_tensor::DType;
-use proxima_tensor::op::{Extent, NodeId, Op};
-#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+#[cfg(all(
+    feature = "instrument",
+    feature = "metal",
+    target_os = "macos",
+    not(feature = "metal-output-placement")
+))]
 use proxima_tensor::op::ScalarOp;
+use proxima_tensor::op::{Extent, NodeId, Op};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::CachedLayerRoots;
 use proxima_tensor::spec::{
@@ -78,12 +88,24 @@ use proxima_tensor::spec::{
 };
 use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 
-#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+#[cfg(all(
+    feature = "instrument",
+    feature = "metal",
+    target_os = "macos",
+    not(feature = "metal-output-placement")
+))]
+use omega::backend::execute_plan_named;
+#[cfg(all(
+    feature = "instrument",
+    feature = "metal",
+    target_os = "macos",
+    not(feature = "metal-output-placement")
+))]
 use omega::backend::execute_plan_named_metal_op_timed;
 #[cfg(feature = "metal")]
 use omega::backend::{
-    Engine, Plan, execute_plan_named, mark_resident, plan_named, plan_named_exact,
-    release_resident_names, unregister_checkpoint_mapping,
+    Engine, Plan, execute_plan_named_with_expert_sources, mark_resident, plan_named,
+    plan_named_exact, release_resident_names, unregister_checkpoint_mapping,
 };
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same
@@ -131,10 +153,10 @@ use omega::{
 };
 #[cfg(feature = "instrument")]
 use proxima_telemetry::{debug, info};
-#[cfg(feature = "instrument")]
-use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::TensorError;
+#[cfg(feature = "instrument")]
+use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_forward_program};
 
@@ -160,7 +182,11 @@ const OP_PROFILE_TOP_N: usize = 20;
 /// (one stage-boundary encoder per position); `Some(position)` ends the
 /// compute encoder immediately before that plan position and opens a
 /// second one for the rest of the program, in the SAME command buffer.
-#[cfg(all(feature = "metal-output-placement", feature = "instrument", target_os = "macos"))]
+#[cfg(all(
+    feature = "metal-output-placement",
+    feature = "instrument",
+    target_os = "macos"
+))]
 fn encoder_split_at_from_env() -> Option<usize> {
     std::env::var("PROXIMA_METAL_ENCODER_SPLIT_AT")
         .ok()
@@ -176,7 +202,11 @@ fn encoder_split_at_from_env() -> Option<usize> {
 /// Asserts nothing -- this is a print, the same "informational, not a
 /// gate" contract [`report_op_timings`] already has for this crate's
 /// other diagnostic-only knobs.
-#[cfg(all(feature = "metal-output-placement", feature = "instrument", target_os = "macos"))]
+#[cfg(all(
+    feature = "metal-output-placement",
+    feature = "instrument",
+    target_os = "macos"
+))]
 fn report_encoder_split(step: usize, encoder_split_ns: (u64, u64), gpu_exec_ns: u64) {
     let (encoder_one_ns, encoder_two_ns) = encoder_split_ns;
     let ms = |nanos: u64| nanos as f64 / 1e6;
@@ -204,7 +234,12 @@ fn report_encoder_split(step: usize, encoder_split_ns: (u64, u64), gpu_exec_ns: 
 /// `materialize_quantized_weight_output` to dequantize the whole weight
 /// matrix to an owned `Vec<f32>` for a comparison that can never happen --
 /// see `evaluate_op_timed`'s own doc for the measured cost this excludes.
-#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+#[cfg(all(
+    feature = "instrument",
+    feature = "metal",
+    target_os = "macos",
+    not(feature = "metal-output-placement")
+))]
 fn is_quantized_matmul_multiply(program: &[Op], node: NodeId) -> bool {
     let Op::Elementwise {
         body: ScalarOp::Multiply,
@@ -239,10 +274,14 @@ fn is_quantized_matmul_multiply(program: &[Op], node: NodeId) -> bool {
 /// time with their operand bytes and bytes/ns -- exactly what settles
 /// whether GPU time tracks operand bytes or is flat per dispatch.
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
+fn report_op_timings(step: usize, timings: &[OpGpuTiming], program: &[Op]) {
     let op_count = timings.len();
     let total_gpu_ns: u64 = timings.iter().map(|timing| timing.gpu_ns).sum();
     let total_operand_bytes: u64 = timings.iter().map(|timing| timing.operand_bytes).sum();
+    eprintln!(
+        "op_profile step={step} op_count={op_count} total_gpu_ms={:.3} operand_bytes={total_operand_bytes}",
+        total_gpu_ns as f64 / 1e6,
+    );
 
     info!(
         step = step as u64,
@@ -262,6 +301,10 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
         entry.2 += timing.operand_bytes;
     }
     for (kind, (count, ns, bytes)) in &by_kind {
+        eprintln!(
+            "op_profile_kind step={step} kind={kind} op_count={count} gpu_ms={:.3} operand_bytes={bytes}",
+            *ns as f64 / 1e6,
+        );
         info!(
             step = step as u64,
             kind = *kind,
@@ -270,6 +313,37 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
             gpu_ns_per_op = *ns as f64 / *count as f64,
             operand_bytes = *bytes,
             "op_profile_bucket: gpu op-timing bucketed by op kind"
+        );
+    }
+
+    let mut cooperative_shapes: alloc::collections::BTreeMap<
+        (Vec<u64>, Vec<u16>),
+        (u64, u64, u64),
+    > = alloc::collections::BTreeMap::new();
+    for timing in timings
+        .iter()
+        .filter(|timing| timing.kind == "reduce-cooperative" && timing.weight_name.is_none())
+    {
+        let entry = cooperative_shapes
+            .entry((timing.extents.clone(), timing.output_axes.clone()))
+            .or_insert((0, 0, 0));
+        entry.0 += 1;
+        entry.1 += timing.gpu_ns;
+        entry.2 += timing.operand_bytes;
+    }
+    for ((extents, output_axes), (count, gpu_ns, bytes)) in &cooperative_shapes {
+        eprintln!(
+            "op_profile_cooperative_shape step={step} extents={extents:?} output_axes={output_axes:?} op_count={count} gpu_ms={:.3} operand_bytes={bytes}",
+            *gpu_ns as f64 / 1e6,
+        );
+        info!(
+            step = step as u64,
+            extents = ?extents,
+            output_axes = ?output_axes,
+            op_count = *count,
+            gpu_ms = *gpu_ns as f64 / 1e6,
+            operand_bytes = *bytes,
+            "op_profile_cooperative_shape: unnamed cooperative reductions grouped by iteration shape"
         );
     }
 
@@ -315,6 +389,29 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
         );
     }
 
+    if let Ok(selected_family) = std::env::var("PROXIMA_METAL_OP_PROFILE_FAMILY") {
+        for timing in timings.iter().filter(|timing| {
+            timing.weight_name.as_deref().is_some_and(|name| {
+                strip_layer_index(name) == selected_family
+                    || name.starts_with(selected_family.as_str())
+            })
+        }) {
+            eprintln!(
+                "op_profile_selected step={step} node={} family={selected_family} gpu_ms={:.3} operand_bytes={} operand_count={}",
+                timing.node.0,
+                timing.gpu_ns as f64 / 1e6,
+                timing.operand_bytes,
+                timing.operand_count,
+            );
+            if let Some(op) = program.get(timing.node.0 as usize) {
+                eprintln!(
+                    "op_profile_selected_node step={step} node={} op={op:?}",
+                    timing.node.0
+                );
+            }
+        }
+    }
+
     let mut ranked: Vec<&OpGpuTiming> = timings.iter().collect();
     ranked.sort_by_key(|timing| core::cmp::Reverse(timing.gpu_ns));
     for (rank, timing) in ranked.iter().take(OP_PROFILE_TOP_N).enumerate() {
@@ -337,6 +434,45 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
             gpu_ns_per_byte,
             "op_profile_top: top-N ops ranked by gpu time"
         );
+        if timing.weight_name.is_none() {
+            eprintln!(
+                "op_profile_top step={step} rank={} node={} kind={} gpu_ms={:.3} operand_bytes={} operand_count={}",
+                rank + 1,
+                timing.node.0,
+                timing.kind,
+                timing.gpu_ns as f64 / 1e6,
+                timing.operand_bytes,
+                timing.operand_count,
+            );
+            if let Some(op) = program.get(timing.node.0 as usize) {
+                eprintln!(
+                    "op_profile_node step={step} node={} op={op:?}",
+                    timing.node.0
+                );
+            }
+        }
+    }
+
+    for timing in timings
+        .iter()
+        .filter(|timing| timing.kind == "reduce-cooperative" && timing.weight_name.is_none())
+    {
+        eprintln!(
+            "op_profile_cooperative_node step={step} node={} gpu_ms={:.3} operand_bytes={} operand_count={}",
+            timing.node.0,
+            timing.gpu_ns as f64 / 1e6,
+            timing.operand_bytes,
+            timing.operand_count,
+        );
+        if timing.gpu_ns >= 100_000 {
+            if let Some(op) = program.get(timing.node.0 as usize) {
+                eprintln!(
+                    "op_profile_cooperative_slow step={step} node={} gpu_ms={:.3} op={op:?}",
+                    timing.node.0,
+                    timing.gpu_ns as f64 / 1e6,
+                );
+            }
+        }
     }
 
     // one row per real weight FAMILY (`blk.N.ffn_down.weight` -> `ffn_down.weight`,
@@ -372,6 +508,15 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
         } else {
             stats.gpu_ns as f64 / stats.operand_bytes as f64
         };
+        eprintln!(
+            "op_profile_family step={step} family={family} op_count={} gpu_ms={:.3} operand_bytes={} row_blocked_count={} rejected_count={} gates={:?}",
+            stats.op_count,
+            stats.gpu_ns as f64 / 1e6,
+            stats.operand_bytes,
+            stats.row_blocked_count,
+            stats.rejected_count,
+            stats.packed_row_block_gates,
+        );
         info!(
             step = step as u64,
             family = %family,
@@ -501,6 +646,7 @@ struct TokenBreakdown {
     named_blocks_weights_ticks: u64,
     named_blocks_kv_ticks: u64,
     kv_cache_upload_bytes: u64,
+    ssm_state_transfer_bytes: u64,
     evaluate_ticks: u64,
     layer_cache_append_ticks: u64,
     layer_cache_append_bytes: u64,
@@ -520,6 +666,7 @@ fn emit_token_breakdown(breakdown: &TokenBreakdown) {
         named_blocks_weights_ticks,
         named_blocks_kv_ticks,
         kv_cache_upload_bytes,
+        ssm_state_transfer_bytes,
         evaluate_ticks,
         layer_cache_append_ticks,
         layer_cache_append_bytes,
@@ -535,6 +682,7 @@ fn emit_token_breakdown(breakdown: &TokenBreakdown) {
         named_blocks_weights_ms = ms(named_blocks_weights_ticks),
         named_blocks_kv_ms = ms(named_blocks_kv_ticks),
         kv_cache_upload_bytes,
+        ssm_state_transfer_bytes,
         evaluate_ms = ms(evaluate_ticks),
         layer_cache_append_ms = ms(layer_cache_append_ticks),
         layer_cache_append_bytes,
@@ -915,11 +1063,9 @@ impl Drop for LoadedModel<'_> {
 /// either never fed or fed with the wrong name.
 fn missing_program_input(program: &[Op], named: &[(&str, QuantizedBlock<'_>)]) -> Option<String> {
     program.iter().find_map(|op| match op {
-        Op::Input { name: Some(name), .. }
-            if !named.iter().any(|(bound_name, _)| bound_name == name) =>
-        {
-            Some(name.clone())
-        }
+        Op::Input {
+            name: Some(name), ..
+        } if !named.iter().any(|(bound_name, _)| bound_name == name) => Some(name.clone()),
         _ => None,
     })
 }
@@ -1288,9 +1434,7 @@ impl<'file> LoadedModel<'file> {
                     dense_bytes: dense_weight_bytes,
                     expert_bytes: expert_weight_bytes,
                     table_bytes: table_weight_bytes,
-                    ssm_state_bytes: step_state
-                        .as_ref()
-                        .map_or(0, |state| state.ssm_state_bytes),
+                    ssm_state_bytes: step_state.as_ref().map_or(0, |state| state.ssm_state_bytes),
                 },
                 vocab,
                 program: bound.program,
@@ -1516,7 +1660,6 @@ impl<'file> LoadedModel<'file> {
     }
 }
 
-
 pub(crate) enum LogitsSink<'sink> {
     Discard,
     Collect(&'sink mut Vec<Vec<f32>>),
@@ -1526,6 +1669,38 @@ pub(crate) enum LogitsSink<'sink> {
     /// `std`-only test build.
     #[cfg(all(test, feature = "metal"))]
     SumBarriers(&'sink mut u64),
+}
+
+pub enum NodeValuesSink<'sink> {
+    Discard,
+    Collect {
+        nodes: &'sink [NodeId],
+        steps: &'sink mut Vec<Vec<Vec<f32>>>,
+    },
+}
+
+impl NodeValuesSink<'_> {
+    pub fn nodes(&self) -> &[NodeId] {
+        match self {
+            Self::Discard => &[],
+            Self::Collect { nodes, .. } => nodes,
+        }
+    }
+
+    pub fn observe(&mut self, evaluated: &Evaluated) -> Result<(), InteropError> {
+        let Self::Collect { nodes, steps } = self else {
+            return Ok(());
+        };
+        let mut values = Vec::with_capacity(nodes.len());
+        for &node in *nodes {
+            let (data, _) = evaluated
+                .get(node)
+                .ok_or(InteropError::MissingEvaluatedNode { node })?;
+            values.push(data.to_vec());
+        }
+        steps.push(values);
+        Ok(())
+    }
 }
 
 impl LogitsSink<'_> {
@@ -1613,7 +1788,12 @@ impl KvPadScratch {
     /// when a foreign bind's program under-declares a leaf its own
     /// [`LayerCache::append`] then over-fills, not on any checkpoint whose
     /// program and cache stay in agreement.
-    fn fill(&mut self, source: &LayerCache, shape: &KvPadShape, layer: usize) -> Result<(), InteropError> {
+    fn fill(
+        &mut self,
+        source: &LayerCache,
+        shape: &KvPadShape,
+        layer: usize,
+    ) -> Result<(), InteropError> {
         let even_odd_len = shape.even_odd_len();
         let v_len = shape.v_len();
         if self.k_even.len() < even_odd_len {
@@ -1647,10 +1827,7 @@ impl KvPadScratch {
                 k_odd_name,
                 QuantizedBlock::Float32(&self.k_odd[..shape.even_odd_len()]),
             ),
-            (
-                v_name,
-                QuantizedBlock::Float32(&self.v[..shape.v_len()]),
-            ),
+            (v_name, QuantizedBlock::Float32(&self.v[..shape.v_len()])),
         ]
     }
 }
@@ -1693,7 +1870,12 @@ impl KvPadShape {
 ///
 /// [`InteropError::CacheScratchShapeMismatch`] when `source.len() >
 /// dest.len()`.
-fn copy_into_padded(dest: &mut [f32], source: &[f32], layer: usize, leaf: &'static str) -> Result<(), InteropError> {
+fn copy_into_padded(
+    dest: &mut [f32],
+    source: &[f32],
+    layer: usize,
+    leaf: &'static str,
+) -> Result<(), InteropError> {
     let expected = dest.len();
     let found = source.len();
     if found > expected {
@@ -1897,11 +2079,23 @@ impl SsmLayerCache {
     /// fall out of the causal conv1d kernel's left context and are never
     /// read again.
     fn advance(&mut self, qkv_mixed_new: &[f32], state_new: &[f32], conv_history_len: usize) {
+        self.advance_conv_history(qkv_mixed_new, conv_history_len);
+        if self.state.len() == state_new.len() {
+            self.state.copy_from_slice(state_new);
+        } else {
+            self.state.clear();
+            self.state.extend_from_slice(state_new);
+        }
+    }
+
+    fn advance_conv_history(&mut self, qkv_mixed_new: &[f32], conv_history_len: usize) {
         self.conv_history.extend_from_slice(qkv_mixed_new);
         let drop = self.conv_history.len().saturating_sub(conv_history_len);
-        self.conv_history.drain(0..drop);
-        self.state.clear();
-        self.state.extend_from_slice(state_new);
+        if drop != 0 {
+            let retained = self.conv_history.len() - drop;
+            self.conv_history.copy_within(drop.., 0);
+            self.conv_history.truncate(retained);
+        }
     }
 
     fn named_blocks<'cache>(
@@ -1940,7 +2134,8 @@ enum LayerCacheState {
 /// appended but they are all-zero.
 #[cfg(feature = "instrument")]
 fn layer_cache_checksum(cache: &LayerCacheState) -> (usize, f64) {
-    let sum_abs = |values: &[f32]| -> f64 { values.iter().map(|value| f64::from(value.abs())).sum() };
+    let sum_abs =
+        |values: &[f32]| -> f64 { values.iter().map(|value| f64::from(value.abs())).sum() };
     match cache {
         LayerCacheState::Attention(cache) => (
             cache.k_even.len() + cache.k_odd.len() + cache.v.len(),
@@ -1948,7 +2143,10 @@ fn layer_cache_checksum(cache: &LayerCacheState) -> (usize, f64) {
         ),
         LayerCacheState::DenseAttention(cache) => (
             cache.k_first.len() + cache.k_second.len() + cache.k_pass.len() + cache.v.len(),
-            sum_abs(&cache.k_first) + sum_abs(&cache.k_second) + sum_abs(&cache.k_pass) + sum_abs(&cache.v),
+            sum_abs(&cache.k_first)
+                + sum_abs(&cache.k_second)
+                + sum_abs(&cache.k_pass)
+                + sum_abs(&cache.v),
         ),
         LayerCacheState::Ssm(cache) => (
             cache.conv_history.len() + cache.state.len(),
@@ -2057,7 +2255,11 @@ impl DeclaredCacheKind {
     /// emit.
     fn expected_leaf_templates(self) -> &'static [&'static str] {
         match self {
-            Self::Attention => &["kv_cache.{layer}.k_even", "kv_cache.{layer}.k_odd", "kv_cache.{layer}.v"],
+            Self::Attention => &[
+                "kv_cache.{layer}.k_even",
+                "kv_cache.{layer}.k_odd",
+                "kv_cache.{layer}.v",
+            ],
             Self::DenseAttention => &[
                 "kv_cache.{layer}.k_first",
                 "kv_cache.{layer}.k_second",
@@ -2076,12 +2278,17 @@ impl DeclaredCacheKind {
 /// still resolve unambiguously. `None` when `layer` declares no recognized
 /// cache leaf at all (a non-cached layer, or a name this function's own
 /// three prefixes do not cover).
-fn declared_cache_kind(program_input_names: &BTreeSet<&str>, layer: usize) -> Option<DeclaredCacheKind> {
+fn declared_cache_kind(
+    program_input_names: &BTreeSet<&str>,
+    layer: usize,
+) -> Option<DeclaredCacheKind> {
     if program_input_names.contains(alloc::format!("kv_cache.{layer}.k_first").as_str()) {
         Some(DeclaredCacheKind::DenseAttention)
     } else if program_input_names.contains(alloc::format!("kv_cache.{layer}.k_even").as_str()) {
         Some(DeclaredCacheKind::Attention)
-    } else if program_input_names.contains(alloc::format!("ssm_cache.{layer}.conv_history").as_str()) {
+    } else if program_input_names
+        .contains(alloc::format!("ssm_cache.{layer}.conv_history").as_str())
+    {
         Some(DeclaredCacheKind::Ssm)
     } else {
         None
@@ -2133,10 +2340,12 @@ fn cache_leaf_row_elements(program: &[Op], name: &str) -> Option<usize> {
         _ => None,
     })?;
     let (_bound_extent, row_dims) = shape.split_first()?;
-    row_dims.iter().try_fold(1usize, |product, extent| match extent {
-        Extent::Static(value) => Some(product * (*value as usize)),
-        Extent::Symbolic(_) => None,
-    })
+    row_dims
+        .iter()
+        .try_fold(1usize, |product, extent| match extent {
+            Extent::Static(value) => Some(product * (*value as usize)),
+            Extent::Symbolic(_) => None,
+        })
 }
 
 /// `name`'s own declared [`Op::Input`] shape, collapsed to its flat total
@@ -2166,10 +2375,12 @@ fn cache_leaf_total_elements(program: &[Op], name: &str) -> Option<usize> {
         } if leaf_name == name => Some(shape.as_slice()),
         _ => None,
     })?;
-    shape.iter().try_fold(1usize, |product, extent| match extent {
-        Extent::Static(value) => Some(product * (*value as usize)),
-        Extent::Symbolic(_) => None,
-    })
+    shape
+        .iter()
+        .try_fold(1usize, |product, extent| match extent {
+            Extent::Static(value) => Some(product * (*value as usize)),
+            Extent::Symbolic(_) => None,
+        })
 }
 
 /// [`KvPadShape`]/[`Qwen35DenseAttentionPadShape`]'s own row widths for one
@@ -2178,14 +2389,24 @@ fn cache_leaf_total_elements(program: &[Op], name: &str) -> Option<usize> {
 /// step -- see [`cache_leaf_row_elements`]'s own doc for why this is the
 /// authoritative source.
 enum LayerPadRowWidths {
-    Attention { even_odd_row: usize, v_row: usize },
-    DenseAttention { even_odd_row: usize, pass_row: usize, v_row: usize },
+    Attention {
+        even_odd_row: usize,
+        v_row: usize,
+    },
+    DenseAttention {
+        even_odd_row: usize,
+        pass_row: usize,
+        v_row: usize,
+    },
     /// [`SsmLayerCache::new`]/[`SsmLayerCache::advance`]'s own initial and
     /// steady-state window sizes -- the flat element count of
     /// `ssm_cache.{layer}.conv_history`/`.state` as the program itself
     /// declared them ([`cache_leaf_total_elements`]), never
     /// [`crate::architecture::Architecture::step_state`]'s `ssm_shape`.
-    Ssm { conv_history_len: usize, state_len: usize },
+    Ssm {
+        conv_history_len: usize,
+        state_len: usize,
+    },
 }
 
 /// Builds [`LayerPadRowWidths`] for one layer from its own
@@ -2204,12 +2425,17 @@ fn layer_pad_row_widths(program: &[Op], names: &LayerCacheNames) -> LayerPadRowW
             even_odd_row: cache_leaf_row_elements(program, k_even).unwrap_or(0),
             v_row: cache_leaf_row_elements(program, v).unwrap_or(0),
         },
-        LayerCacheNames::DenseAttention { k_first, k_pass, v, .. } => LayerPadRowWidths::DenseAttention {
+        LayerCacheNames::DenseAttention {
+            k_first, k_pass, v, ..
+        } => LayerPadRowWidths::DenseAttention {
             even_odd_row: cache_leaf_row_elements(program, k_first).unwrap_or(0),
             pass_row: cache_leaf_row_elements(program, k_pass).unwrap_or(0),
             v_row: cache_leaf_row_elements(program, v).unwrap_or(0),
         },
-        LayerCacheNames::Ssm { conv_history, state } => LayerPadRowWidths::Ssm {
+        LayerCacheNames::Ssm {
+            conv_history,
+            state,
+        } => LayerPadRowWidths::Ssm {
             conv_history_len: cache_leaf_total_elements(program, conv_history).unwrap_or(0),
             state_len: cache_leaf_total_elements(program, state).unwrap_or(0),
         },
@@ -2247,7 +2473,10 @@ fn push_kv_named_blocks<'call>(
         match (cache, &layer_row_widths[layer]) {
             (
                 LayerCacheState::Attention(cache),
-                LayerPadRowWidths::Attention { even_odd_row, v_row },
+                LayerPadRowWidths::Attention {
+                    even_odd_row,
+                    v_row,
+                },
             ) => {
                 let shape = KvPadShape {
                     bound_extent: kv_bound_extent,
@@ -2283,7 +2512,10 @@ fn push_kv_named_blocks<'call>(
             (
                 LayerCacheNames::Attention { k_even, k_odd, v },
                 LayerCacheState::Attention(_),
-                LayerPadRowWidths::Attention { even_odd_row, v_row },
+                LayerPadRowWidths::Attention {
+                    even_odd_row,
+                    v_row,
+                },
             ) => {
                 let shape = KvPadShape {
                     bound_extent: kv_bound_extent,
@@ -2312,13 +2544,10 @@ fn push_kv_named_blocks<'call>(
                     pass_row: *pass_row,
                     v_row: *v_row,
                 };
-                named_blocks.extend(qwen35_dense_pad_scratch[layer].named_blocks(
-                    k_first,
-                    k_second,
-                    k_pass,
-                    v,
-                    &shape,
-                ));
+                named_blocks.extend(
+                    qwen35_dense_pad_scratch[layer]
+                        .named_blocks(k_first, k_second, k_pass, v, &shape),
+                );
             }
             (
                 LayerCacheNames::Ssm {
@@ -2339,13 +2568,13 @@ fn push_kv_named_blocks<'call>(
 }
 
 /// Every per-call input the cached forward program needs beyond the model
-/// weights and the growing key/value cache: `ids_f32`/RoPE `cos`/`sin` for
+/// weights and the growing key/value cache: `ids_i32`/RoPE `cos`/`sin` for
 /// only the `new` positions this call introduces, at their true absolute
 /// angle (`start_position`, not 0 -- a generated token's position is
 /// `cached_len`, never the start of the sequence), plus the
 /// reduce-broadcast `eps` vector sized to match.
 struct PositionInputs {
-    ids_f32: Vec<f32>,
+    ids_i32: Vec<i32>,
     epsilon: Vec<f32>,
     cos: Vec<f32>,
     sin: Vec<f32>,
@@ -2357,10 +2586,11 @@ fn build_position_inputs(
     head_dim: u32,
     rope_freq_base: f32,
     rms_epsilon: f32,
+    _qwen35_mrope: bool,
 ) -> PositionInputs {
     let new_count = new_ids.len();
     let pairs = head_dim as usize / 2;
-    let ids_f32: Vec<f32> = new_ids.iter().map(|&id| id as f32).collect();
+    let ids_i32: Vec<i32> = new_ids.iter().map(|&id| id as i32).collect();
     let epsilon = alloc::vec![rms_epsilon; new_count];
 
     let mut cos = alloc::vec![0.0f32; new_count * pairs];
@@ -2368,14 +2598,20 @@ fn build_position_inputs(
     for offset in 0..new_count {
         let position = (start_position + offset) as f32;
         for pair in 0..pairs {
-            let theta = position * rope_freq_base.powf(-((2 * pair) as f32) / (head_dim as f32));
+            // Qwen3.6 text positions use three MRoPE sections (11, 11, 10
+            // pairs). Each section restarts its local frequency index; the
+            // graph still consumes one flat table, so only angle generation
+            // changes here.
+            let frequency_pair = pair;
+            let theta =
+                position * rope_freq_base.powf(-((2 * frequency_pair) as f32) / (head_dim as f32));
             cos[offset * pairs + pair] = theta.cos();
             sin[offset * pairs + pair] = theta.sin();
         }
     }
 
     PositionInputs {
-        ids_f32,
+        ids_i32,
         epsilon,
         cos,
         sin,
@@ -2611,12 +2847,9 @@ impl BackendRuntime {
     /// `Plan` object that was already marked). See `omega::metal::Plan::mark_resident`'s
     /// own doc for why this needs a name set the tensor program itself
     /// cannot derive.
-    // `expert_sources` is not yet wired through `omega::backend`'s
-    // polymorphic plan cache (this crate's GPU path) -- CPU-only for now,
-    // see `crate::expert_slab`'s own module doc. Accepted and ignored here
-    // purely so this method keeps the SAME signature as the non-`metal`
-    // `BackendRuntime::evaluate` below and the decode loop's one call site
-    // never needs a `cfg` of its own.
+    // A modified expert table crosses the same backend boundary on every
+    // engine. CPU consumes it; a GPU without expert-source bindings returns
+    // a typed error instead of silently reading the original full stack.
     fn evaluate(
         &mut self,
         program: &[Op],
@@ -2624,9 +2857,10 @@ impl BackendRuntime {
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
-        expert_sources: Option<&alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>>,
+        expert_sources: Option<
+            &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+        >,
     ) -> Result<Evaluated, InteropError> {
-        let _ = expert_sources;
         let shape = (symbols[0] as usize, symbols[1] as usize);
         let exact_activations = self.exact_activations;
         let plan = Self::resolve_cached_plan(
@@ -2660,12 +2894,21 @@ impl BackendRuntime {
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 {
                     set_math_mode(&mut plan, self.math_mode)?;
-                    set_dispatch_type(&mut plan, self.dispatch_type);
+                    // The backend-polymorphic executor historically opens a
+                    // serial Metal encoder. Its stable-buffer implementation
+                    // must preserve that ordering: the concurrent hazard
+                    // schedule is proven only for the placed single-range
+                    // program, not hybrid recurrent graphs.
+                    set_dispatch_type(&mut plan, omega::metal::DispatchType::Serial);
                 }
                 Ok(plan)
             },
         )?;
-        Ok(execute_plan_named(plan, named)?)
+        Ok(execute_plan_named_with_expert_sources(
+            plan,
+            named,
+            expert_sources,
+        )?)
     }
 
     /// [`Self::evaluate`]'s placed-KV counterpart: same `(new_count,
@@ -2965,7 +3208,11 @@ impl BackendRuntime {
     /// loop. Reachable only behind the `instrument` feature and only from
     /// this crate's own diagnostic call sites (`run_decode_loop`'s
     /// `PROXIMA_METAL_OP_PROFILE_STEP` branch).
-    #[cfg(all(feature = "instrument", target_os = "macos"))]
+    #[cfg(all(
+        feature = "instrument",
+        target_os = "macos",
+        not(feature = "metal-output-placement")
+    ))]
     fn evaluate_op_timed(
         &mut self,
         program: &[Op],
@@ -3124,7 +3371,9 @@ impl BackendRuntime {
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
         _resident_names: &BTreeSet<&str>,
-        expert_sources: Option<&alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>>,
+        expert_sources: Option<
+            &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+        >,
     ) -> Result<Evaluated, InteropError> {
         if self.exact_activations {
             return Ok(evaluate_quantized_named_exact_with_scratch_and_experts(
@@ -3395,7 +3644,8 @@ impl Drop for EndStepOnDrop<'_, '_> {
 fn lock_expert_slab<'lock, 'file>(
     slab: &'lock std::sync::Mutex<crate::expert_slab::ExpertSlab<'file>>,
 ) -> std::sync::MutexGuard<'lock, crate::expert_slab::ExpertSlab<'file>> {
-    slab.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    slab.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl<'file> LoadedModel<'file> {
@@ -3413,7 +3663,11 @@ impl<'file> LoadedModel<'file> {
         self.generate_with_serving_config(
             prompt,
             max_tokens,
-            supported_serving_config(0, #[cfg(all(feature = "metal", target_os = "macos"))] omega::MathMode::default()),
+            supported_serving_config(
+                0,
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                omega::MathMode::default(),
+            ),
         )
     }
 
@@ -3479,11 +3733,14 @@ impl<'file> LoadedModel<'file> {
             .program
             .iter()
             .filter_map(|op| match op {
-                Op::Input { name: Some(name), .. } => Some(name.as_str()),
+                Op::Input {
+                    name: Some(name), ..
+                } => Some(name.as_str()),
                 _ => None,
             })
             .collect();
-        let mut layer_cache_kinds: Vec<DeclaredCacheKind> = Vec::with_capacity(self.layer_roots.len());
+        let mut layer_cache_kinds: Vec<DeclaredCacheKind> =
+            Vec::with_capacity(self.layer_roots.len());
         for (layer, roots) in self.layer_roots.iter().enumerate() {
             let bound = bound_cache_kind(roots);
             let declared = match declared_cache_kind(&program_input_names, layer) {
@@ -3559,12 +3816,17 @@ impl<'file> LoadedModel<'file> {
             .iter()
             .zip(layer_row_widths)
             .map(|(names, widths)| match (names, widths) {
-                (LayerCacheNames::Attention { .. }, _) => LayerCacheState::Attention(LayerCache::new()),
+                (LayerCacheNames::Attention { .. }, _) => {
+                    LayerCacheState::Attention(LayerCache::new())
+                }
                 (LayerCacheNames::DenseAttention { .. }, _) => {
                     LayerCacheState::DenseAttention(Qwen35DenseAttentionCache::new())
                 }
                 (
-                    LayerCacheNames::Ssm { conv_history, state },
+                    LayerCacheNames::Ssm {
+                        conv_history,
+                        state,
+                    },
                     LayerPadRowWidths::Ssm {
                         conv_history_len,
                         state_len,
@@ -3631,11 +3893,26 @@ impl<'file> LoadedModel<'file> {
         step_input_scratch: &'call mut Vec<StepInput>,
         named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
     ) -> Result<Vec<u64>, InteropError> {
-        named_blocks.push(("ids", QuantizedBlock::Float32(position_inputs.ids_f32.as_slice())));
-        named_blocks.push(("eps", QuantizedBlock::Float32(position_inputs.epsilon.as_slice())));
-        named_blocks.push(("rope_cos", QuantizedBlock::Float32(position_inputs.cos.as_slice())));
-        named_blocks.push(("rope_sin", QuantizedBlock::Float32(position_inputs.sin.as_slice())));
-        named_blocks.push(("cached_len", QuantizedBlock::Float32(cached_len_scalar.as_slice())));
+        named_blocks.push((
+            "ids",
+            QuantizedBlock::Int32(position_inputs.ids_i32.as_slice()),
+        ));
+        named_blocks.push((
+            "eps",
+            QuantizedBlock::Float32(position_inputs.epsilon.as_slice()),
+        ));
+        named_blocks.push((
+            "rope_cos",
+            QuantizedBlock::Float32(position_inputs.cos.as_slice()),
+        ));
+        named_blocks.push((
+            "rope_sin",
+            QuantizedBlock::Float32(position_inputs.sin.as_slice()),
+        ));
+        named_blocks.push((
+            "cached_len",
+            QuantizedBlock::Float32(cached_len_scalar.as_slice()),
+        ));
         named_blocks.push((
             "lm_head_row",
             QuantizedBlock::Float32(lm_head_row_scalar.as_slice()),
@@ -3662,7 +3939,12 @@ impl<'file> LoadedModel<'file> {
             }
             named_blocks.push(step_input.as_named_block());
         }
-        let symbols = bind_symbols(new_count, kv_bound_extent, step_input_scratch, self.single_position_step)?;
+        let symbols = bind_symbols(
+            new_count,
+            kv_bound_extent,
+            step_input_scratch,
+            self.single_position_step,
+        )?;
 
         push_kv_named_blocks(
             cache_names,
@@ -3789,6 +4071,7 @@ impl<'file> LoadedModel<'file> {
                 &mut runtime,
                 None,
                 &mut LogitsSink::Discard,
+                &mut NodeValuesSink::Discard,
                 &mut |_event| Control::Continue,
                 None,
                 true,
@@ -3841,6 +4124,7 @@ impl<'file> LoadedModel<'file> {
                 &mut runtime,
                 None,
                 &mut LogitsSink::Discard,
+                &mut NodeValuesSink::Discard,
                 on_token,
                 Some(seed),
                 true,
@@ -3876,19 +4160,30 @@ impl<'file> LoadedModel<'file> {
     /// `1` cannot fit this checkpoint's own weights plus the fixed arena
     /// allowance inside the host's own reported limit.
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    fn apply_memory_fit_gate(&self, serving_config: &mut ServingConfig) -> Result<(), InteropError> {
+    fn apply_memory_fit_gate(
+        &self,
+        serving_config: &mut ServingConfig,
+    ) -> Result<(), InteropError> {
         if !serving_config.gpu_memory_fit {
             return Ok(());
         }
         let Ok(facts) = omega::metal::system_memory_facts() else {
             return Ok(());
         };
-        let limit = crate::memory_fit::HostMemoryLimit {
+        let detected_limit = crate::memory_fit::HostMemoryLimit {
             limit_bytes: facts
                 .recommended_max_working_set_size
                 .min(facts.physical_memory_bytes),
             os_headroom_bytes: omega::sized::LOAD_TIME_FIT_OS_HEADROOM_BYTES,
         };
+        let limit = serving_config
+            .gpu_memory_limit_bytes
+            .map_or(detected_limit, |configured| {
+                crate::memory_fit::HostMemoryLimit {
+                    limit_bytes: configured.min(detected_limit.available_bytes()),
+                    os_headroom_bytes: 0,
+                }
+            });
         // Page-rounded on the dense class only: the checkpoint's whole
         // mmap is ONE no-copy `MTLBuffer`
         // (`omega::metal::checkpoint_mapping_offset`'s own doc), so the
@@ -3937,7 +4232,10 @@ impl<'file> LoadedModel<'file> {
                 "memory_budget: load-time device-memory budget derived from checkpoint shape, by class"
             );
         }
-        if matches!(outcome, crate::memory_fit::FitOutcome::ReducedContext { .. }) {
+        if matches!(
+            outcome,
+            crate::memory_fit::FitOutcome::ReducedContext { .. }
+        ) {
             #[cfg(feature = "instrument")]
             if let crate::memory_fit::FitOutcome::ReducedContext { from, to } = outcome {
                 proxima_telemetry::warn!(
@@ -4052,6 +4350,7 @@ impl<'file> LoadedModel<'file> {
                 runtime,
                 token_override,
                 logits_sink,
+                &mut NodeValuesSink::Discard,
                 on_token,
                 None,
                 false,
@@ -4091,6 +4390,7 @@ impl<'file> LoadedModel<'file> {
         runtime: &mut BackendRuntime,
         token_override: Option<&[u32]>,
         logits_sink: &mut LogitsSink,
+        node_values_sink: &mut NodeValuesSink,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
         seed: Option<PrefixState>,
         force_two_range: bool,
@@ -4111,7 +4411,9 @@ impl<'file> LoadedModel<'file> {
             )?
         };
         let seed_cached_len = seed.as_ref().map_or(0, PrefixState::len);
-        let seed_ids: Vec<u32> = seed.as_ref().map_or_else(Vec::new, |state| state.ids.clone());
+        let seed_ids: Vec<u32> = seed
+            .as_ref()
+            .map_or_else(Vec::new, |state| state.ids.clone());
         // The repetition-penalty filter's own window: prompt tokens included,
         // matching upstream (`tools/main/main.cpp:725` feeds prompt tokens
         // through the same `common_sampler_accept` generated tokens use), grown
@@ -4178,11 +4480,16 @@ impl<'file> LoadedModel<'file> {
             // doc) -- so there is nothing real to report here. Callers
             // that need a real [`PrefixState`] set `force_two_range: true`
             // and never reach this branch at all.
-            return Ok((generated_ids, text, stopped_by_eos, PrefixState {
-                ids: Vec::new(),
-                layer_caches: Vec::new(),
-                cached_len: 0,
-            }));
+            return Ok((
+                generated_ids,
+                text,
+                stopped_by_eos,
+                PrefixState {
+                    ids: Vec::new(),
+                    layer_caches: Vec::new(),
+                    cached_len: 0,
+                },
+            ));
         }
 
         // The program's own declared `Op::Input` leaves are the single
@@ -4203,8 +4510,11 @@ impl<'file> LoadedModel<'file> {
         // layer (the only cache shape `mistral_cached_forward_program_with_experts`
         // produces, `Qwen35LayerRoots`'s own doc), left empty and unread for
         // every `DenseAttention`/`Ssm` layer a qwen35 checkpoint carries.
-        let mut kv_pad_scratch: Vec<KvPadScratch> =
-            self.layer_roots.iter().map(|_| KvPadScratch::new()).collect();
+        let mut kv_pad_scratch: Vec<KvPadScratch> = self
+            .layer_roots
+            .iter()
+            .map(|_| KvPadScratch::new())
+            .collect();
         // [`Qwen35DenseAttentionPadScratch`]'s own doc: the `Attention` arm's
         // padding above is not enough on its own -- a `DenseAttention` layer
         // shares the identical `Extent::Symbolic(1)` slot, so it needs the
@@ -4215,6 +4525,59 @@ impl<'file> LoadedModel<'file> {
             .iter()
             .map(|_| Qwen35DenseAttentionPadScratch::new())
             .collect();
+
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let ssm_state_input_nodes: Vec<Option<NodeId>> = cache_names
+            .iter()
+            .map(|names| match names {
+                LayerCacheNames::Ssm { state, .. } => self
+                    .program
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, op)| match op {
+                        Op::Input {
+                            name: Some(name), ..
+                        } if name == state => Some(NodeId(index as u32)),
+                        _ => None,
+                    }),
+                _ => None,
+            })
+            .collect();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let ssm_placement_enabled = std::env::var("PROXIMA_METAL_SSM_PLACEMENT")
+            .is_ok_and(|value| value == "1" || value == "true");
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let ssm_placement_max_layer = std::env::var("PROXIMA_METAL_SSM_PLACEMENT_MAX_LAYER")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok());
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let ssm_state_buffers: Vec<Option<(PlacedBuffer, PlacedBuffer)>> = layer_row_widths
+            .iter()
+            .map(|widths| {
+                if !ssm_placement_enabled {
+                    return Ok::<Option<(PlacedBuffer, PlacedBuffer)>, InteropError>(None);
+                }
+                match widths {
+                    LayerPadRowWidths::Ssm { state_len, .. } => {
+                        let byte_length = state_len * core::mem::size_of::<f32>();
+                        let input = allocate_placed_buffer(byte_length)?;
+                        let output = allocate_placed_buffer(byte_length)?;
+                        Ok(Some((input, output)))
+                    }
+                    _ => Ok(None),
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        for (buffer, widths) in ssm_state_buffers.iter().zip(&layer_row_widths) {
+            if let (Some((input, output)), LayerPadRowWidths::Ssm { state_len, .. }) =
+                (buffer, widths)
+            {
+                let byte_length = state_len * core::mem::size_of::<f32>();
+                omega::metal::zero_placed_buffer(input, byte_length);
+                omega::metal::zero_placed_buffer(output, byte_length);
+            }
+        }
 
         // The caller's own knowledge of which named blocks are STATIC --
         // bound once in `LoadedModel::load` and never mutated again -- fixed
@@ -4254,7 +4617,9 @@ impl<'file> LoadedModel<'file> {
                 // `evaluate` would leak `step_in_progress = true` forever on
                 // any earlier error path in this closure.
                 lock_expert_slab(&self.expert_slab).begin_step();
-                let _end_step_on_drop = EndStepOnDrop { slab: &self.expert_slab };
+                let _end_step_on_drop = EndStepOnDrop {
+                    slab: &self.expert_slab,
+                };
                 // Dropped at the end of this closure, before `_end_step_on_drop`
                 // (reverse declaration order) -- see that type's own doc. The
                 // `begin_step` lock above already released (a temporary,
@@ -4287,7 +4652,10 @@ impl<'file> LoadedModel<'file> {
                 // one position (ordinary decode, or a one-token prompt).
                 let step_batches: Vec<Vec<u32>> = if self.single_position_step && next_ids.len() > 1
                 {
-                    next_ids.iter().map(|&position_id| alloc::vec![position_id]).collect()
+                    next_ids
+                        .iter()
+                        .map(|&position_id| alloc::vec![position_id])
+                        .collect()
                 } else {
                     alloc::vec![next_ids.clone()]
                 };
@@ -4301,600 +4669,733 @@ impl<'file> LoadedModel<'file> {
                     let step_started = read_ticks();
 
                     let new_count = ids_for_step.len();
-                #[cfg(feature = "instrument")]
-                let apply_serving_config_started = read_ticks();
-                apply_serving_config(serving_config, cached_len + new_count)?;
-                #[cfg(feature = "instrument")]
-                let apply_serving_config_ticks = elapsed_ticks(apply_serving_config_started);
+                    #[cfg(feature = "instrument")]
+                    let apply_serving_config_started = read_ticks();
+                    apply_serving_config(serving_config, cached_len + new_count)?;
+                    #[cfg(feature = "instrument")]
+                    let apply_serving_config_ticks = elapsed_ticks(apply_serving_config_started);
 
-                #[cfg(feature = "instrument")]
-                let build_position_inputs_started = read_ticks();
-                let inputs = build_position_inputs(
-                    ids_for_step,
-                    cached_len,
-                    self.architecture.head_dim,
-                    self.architecture.rope_freq_base,
-                    self.architecture.rms_epsilon,
-                );
-                #[cfg(feature = "instrument")]
-                let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
+                    #[cfg(feature = "instrument")]
+                    let build_position_inputs_started = read_ticks();
+                    let inputs = build_position_inputs(
+                        ids_for_step,
+                        cached_len,
+                        self.architecture.head_dim,
+                        self.architecture.rope_freq_base,
+                        self.architecture.rms_epsilon,
+                        self.architecture_impl
+                            .as_ref()
+                            .is_some_and(|architecture| architecture.name() == "qwen35moe"),
+                    );
+                    #[cfg(feature = "instrument")]
+                    let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
 
-                let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
-                    self.weights.owned.len()
-                        + self.weights.packed.len()
-                        + self.weights.packed_owned.len()
-                        + 3
-                        + layer_caches.len() * 3,
-                );
-                #[cfg(feature = "instrument")]
-                let named_blocks_weights_started = read_ticks();
-                for (name, data) in &self.weights.owned {
-                    named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
-                }
-                for (name, block) in &self.weights.packed {
-                    named_blocks.push((name.as_str(), *block));
-                }
-                for (name, bytes, kind) in &self.weights.packed_owned {
-                    named_blocks.push((name.as_str(), kind.as_block(bytes)));
-                }
-                // Rounds `cached_len` up to `ServingConfig::kv_bucket_tokens`
-                // (`kv_extent`'s own doc) -- `usize::MAX` in place of the
-                // placed-KV path's fixed buffer capacity: the two-range KV
-                // cache below is a growing `Vec`, not a preallocated
-                // device buffer, so there is no hard cap to clamp against.
-                let kv_bound_extent = kv_extent(cached_len, usize::MAX, serving_config.kv_bucket_tokens);
-                // `mistral_cached_forward_program_with_experts`'s own
-                // `cached_len` `Op::Input` -- always present regardless of
-                // `ServingConfig::kv_bucket_tokens` (`proxima_tensor::bind::
-                // cached_attention_candidates`'s own doc on the runtime bound
-                // that reads it), so this scalar is fed on every step,
-                // bucketed or not.
-                let cached_len_scalar = [cached_len as f32];
-                // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
-                // own `lm_head_row` `Op::Input` -- the last row of THIS
-                // step's `new_count` freshly-computed rows, host-supplied
-                // because the gather it feeds is a data-dependent index
-                // (`spec.rs`'s own doc on that leaf: an in-graph-computed
-                // index is a named `NotLowerable` gap on the typed
-                // evaluator, not a silently-guessed execution path).
-                let lm_head_row_scalar = [(new_count - 1) as f32];
+                    let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
+                        self.weights.owned.len()
+                            + self.weights.packed.len()
+                            + self.weights.packed_owned.len()
+                            + 3
+                            + layer_caches.len() * 3,
+                    );
+                    #[cfg(feature = "instrument")]
+                    let named_blocks_weights_started = read_ticks();
+                    for (name, data) in &self.weights.owned {
+                        named_blocks
+                            .push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
+                    }
+                    for (name, block) in &self.weights.packed {
+                        named_blocks.push((name.as_str(), *block));
+                    }
+                    for (name, bytes, kind) in &self.weights.packed_owned {
+                        named_blocks.push((name.as_str(), kind.as_block(bytes)));
+                    }
+                    // Rounds `cached_len` up to `ServingConfig::kv_bucket_tokens`
+                    // (`kv_extent`'s own doc) -- `usize::MAX` in place of the
+                    // placed-KV path's fixed buffer capacity: the two-range KV
+                    // cache below is a growing `Vec`, not a preallocated
+                    // device buffer, so there is no hard cap to clamp against.
+                    let kv_bound_extent = kv_extent(
+                        cached_len + new_count,
+                        usize::MAX,
+                        serving_config.kv_bucket_tokens,
+                    );
+                    // `mistral_cached_forward_program_with_experts`'s own
+                    // `cached_len` `Op::Input` -- always present regardless of
+                    // `ServingConfig::kv_bucket_tokens` (`proxima_tensor::bind::
+                    // cached_attention_candidates`'s own doc on the runtime bound
+                    // that reads it), so this scalar is fed on every step,
+                    // bucketed or not.
+                    let cached_len_scalar = [cached_len as f32];
+                    // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
+                    // own `lm_head_row` `Op::Input` -- the last row of THIS
+                    // step's `new_count` freshly-computed rows, host-supplied
+                    // because the gather it feeds is a data-dependent index
+                    // (`spec.rs`'s own doc on that leaf: an in-graph-computed
+                    // index is a named `NotLowerable` gap on the typed
+                    // evaluator, not a silently-guessed execution path).
+                    let lm_head_row_scalar = [(new_count - 1) as f32];
 
-                // KV-cache HOST -> DEVICE traffic: every named block below is the
-                // FULL accumulated history (`LayerCache::append` only grows these,
-                // never truncates), so this is the full `cached_len`-sized array
-                // re-bound as a model input every single step -- not the
-                // `new_count`-sized increment. Measured directly as element
-                // counts read off the `Vec`s themselves (a size, not a timing),
-                // so it is exact and needs no instrumentation to be turned on.
-                #[cfg(feature = "instrument")]
-                let kv_cache_upload_elements: u64 = layer_caches
-                    .iter()
-                    .map(|cache| match cache {
-                        LayerCacheState::Attention(cache) => {
-                            (cache.k_even.len() + cache.k_odd.len() + cache.v.len()) as u64
-                        }
-                        LayerCacheState::DenseAttention(cache) => {
-                            (cache.k_first.len()
-                                + cache.k_second.len()
-                                + cache.k_pass.len()
-                                + cache.v.len()) as u64
-                        }
-                        LayerCacheState::Ssm(cache) => {
-                            (cache.conv_history.len() + cache.state.len()) as u64
-                        }
-                    })
-                    .sum();
-                #[cfg(feature = "instrument")]
-                let named_blocks_kv_started = read_ticks();
-                // `token_history` already carries exactly `cached_len +
-                // new_count` entries at this point (the same invariant
-                // `recent_tokens`'s repeat-penalty slice below relies on).
-                // The SAME assembly [`Self::forward_node_values_on_backend`]
-                // calls -- position/RoPE inputs, `cached_len`/`lm_head_row`,
-                // `Architecture::step_inputs`' own leaves, and every KV/SSM
-                // cache leaf -- so a foreign architecture's own leaf names
-                // are fed identically whether decoding or tapping one node.
-                let symbols = self.push_step_named_blocks(
-                    &inputs,
-                    &cached_len_scalar,
-                    &lm_head_row_scalar,
-                    &token_history,
-                    cached_len,
-                    new_count,
-                    &cache_names,
-                    &layer_caches,
-                    &layer_row_widths,
-                    kv_bound_extent,
-                    &mut kv_pad_scratch,
-                    &mut qwen35_dense_pad_scratch,
-                    &mut step_input_scratch,
-                    &mut named_blocks,
-                )?;
-                #[cfg(feature = "instrument")]
-                let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
-                #[cfg(feature = "instrument")]
-                let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
+                    // KV-cache HOST -> DEVICE traffic: every named block below is the
+                    // FULL accumulated history (`LayerCache::append` only grows these,
+                    // never truncates), so this is the full `cached_len`-sized array
+                    // re-bound as a model input every single step -- not the
+                    // `new_count`-sized increment. Measured directly as element
+                    // counts read off the `Vec`s themselves (a size, not a timing),
+                    // so it is exact and needs no instrumentation to be turned on.
+                    #[cfg(feature = "instrument")]
+                    let kv_cache_upload_elements: u64 = layer_caches
+                        .iter()
+                        .map(|cache| match cache {
+                            LayerCacheState::Attention(cache) => {
+                                (cache.k_even.len() + cache.k_odd.len() + cache.v.len()) as u64
+                            }
+                            LayerCacheState::DenseAttention(cache) => {
+                                (cache.k_first.len()
+                                    + cache.k_second.len()
+                                    + cache.k_pass.len()
+                                    + cache.v.len()) as u64
+                            }
+                            LayerCacheState::Ssm(cache) => {
+                                (cache.conv_history.len() + cache.state.len()) as u64
+                            }
+                        })
+                        .sum();
+                    #[cfg(feature = "instrument")]
+                    let ssm_state_transfer_bytes: u64 = layer_caches
+                        .iter()
+                        .filter_map(|cache| match cache {
+                            LayerCacheState::Ssm(cache) => {
+                                Some((cache.state.len() * core::mem::size_of::<f32>()) as u64)
+                            }
+                            _ => None,
+                        })
+                        .sum();
+                    #[cfg(feature = "instrument")]
+                    let named_blocks_kv_started = read_ticks();
+                    // `token_history` already carries exactly `cached_len +
+                    // new_count` entries at this point (the same invariant
+                    // `recent_tokens`'s repeat-penalty slice below relies on).
+                    // The SAME assembly [`Self::forward_node_values_on_backend`]
+                    // calls -- position/RoPE inputs, `cached_len`/`lm_head_row`,
+                    // `Architecture::step_inputs`' own leaves, and every KV/SSM
+                    // cache leaf -- so a foreign architecture's own leaf names
+                    // are fed identically whether decoding or tapping one node.
+                    let symbols = self.push_step_named_blocks(
+                        &inputs,
+                        &cached_len_scalar,
+                        &lm_head_row_scalar,
+                        &token_history,
+                        cached_len,
+                        new_count,
+                        &cache_names,
+                        &layer_caches,
+                        &layer_row_widths,
+                        kv_bound_extent,
+                        &mut kv_pad_scratch,
+                        &mut qwen35_dense_pad_scratch,
+                        &mut step_input_scratch,
+                        &mut named_blocks,
+                    )?;
+                    #[cfg(feature = "instrument")]
+                    let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
+                    #[cfg(feature = "instrument")]
+                    let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
 
-                let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.layer_roots.len() * 3);
-                roots.push(self.logits_root);
-                for roots_for_layer in &self.layer_roots {
-                    match roots_for_layer {
-                        Qwen35LayerRoots::Attention((even, odd, value)) => {
-                            roots.push(*even);
-                            roots.push(*odd);
-                            roots.push(*value);
-                        }
-                        Qwen35LayerRoots::DenseAttention((first, second, pass, value)) => {
-                            roots.push(*first);
-                            roots.push(*second);
-                            roots.push(*pass);
-                            roots.push(*value);
-                        }
-                        Qwen35LayerRoots::Ssm {
-                            qkv_mixed,
-                            state_out,
-                        } => {
-                            roots.push(*qkv_mixed);
-                            roots.push(*state_out);
+                    let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.layer_roots.len() * 3);
+                    roots.push(self.logits_root);
+                    roots.extend_from_slice(node_values_sink.nodes());
+                    for roots_for_layer in &self.layer_roots {
+                        match roots_for_layer {
+                            Qwen35LayerRoots::Attention((even, odd, value)) => {
+                                roots.push(*even);
+                                roots.push(*odd);
+                                roots.push(*value);
+                            }
+                            Qwen35LayerRoots::DenseAttention((first, second, pass, value)) => {
+                                roots.push(*first);
+                                roots.push(*second);
+                                roots.push(*pass);
+                                roots.push(*value);
+                            }
+                            Qwen35LayerRoots::Ssm {
+                                qkv_mixed,
+                                state_out,
+                            } => {
+                                roots.push(*qkv_mixed);
+                                roots.push(*state_out);
+                            }
                         }
                     }
-                }
-                // Only requested when a routing observer is actually
-                // registered (`instrument::expert_observer`'s own doc): the
-                // CPU evaluator keeps every requested output's full lifetime
-                // alive, so a program with no observer never pays to hold
-                // these nodes live. `proxima_tensor::instrument` itself is
-                // `instrument`-feature-gated (`proxima-tensor/src/lib.rs`),
-                // so a build with `std` but not `instrument` never observes
-                // routing at all -- `observe_routing` is a compile-time
-                // `false` there, not a call into a module that does not
-                // exist.
-                #[cfg(feature = "instrument")]
-                let observe_routing = proxima_tensor::instrument::expert_observer().is_some()
-                    && !self.moe_sites.0.is_empty();
-                #[cfg(not(feature = "instrument"))]
-                let observe_routing = false;
-                if observe_routing {
-                    for site in &self.moe_sites.0 {
-                        roots.extend(site.selected.iter().copied());
-                        roots.extend(site.weights.iter().copied());
+                    // Only requested when a routing observer is actually
+                    // registered (`instrument::expert_observer`'s own doc): the
+                    // CPU evaluator keeps every requested output's full lifetime
+                    // alive, so a program with no observer never pays to hold
+                    // these nodes live. `proxima_tensor::instrument` itself is
+                    // `instrument`-feature-gated (`proxima-tensor/src/lib.rs`),
+                    // so a build with `std` but not `instrument` never observes
+                    // routing at all -- `observe_routing` is a compile-time
+                    // `false` there, not a call into a module that does not
+                    // exist.
+                    #[cfg(feature = "instrument")]
+                    let observe_routing = proxima_tensor::instrument::expert_observer().is_some()
+                        && !self.moe_sites.0.is_empty();
+                    #[cfg(not(feature = "instrument"))]
+                    let observe_routing = false;
+                    if observe_routing {
+                        for site in &self.moe_sites.0 {
+                            roots.extend(site.selected.iter().copied());
+                            roots.extend(site.weights.iter().copied());
+                        }
                     }
-                }
 
-                if let Some(name) = missing_program_input(&self.program, &named_blocks) {
-                    return Err(InteropError::MissingStepInput { name });
-                }
+                    if let Some(name) = missing_program_input(&self.program, &named_blocks) {
+                        return Err(InteropError::MissingStepInput { name });
+                    }
 
-                // This step's own [`proxima_tensor::cpu::ExpertSource`]
-                // snapshot -- built AFTER `begin_step` above and read by
-                // `run_reduce_with_quantized_weights` under the SAME weight
-                // `NodeId` [`crate::bind::build_expert_slab`] bound it under,
-                // so a dense checkpoint's empty slab costs one `BTreeMap`
-                // miss per gathered reduce and changes nothing else.
-                let mut expert_entries_scratch: Vec<(
-                    NodeId,
-                    Vec<proxima_tensor::cpu::ExpertEntry<'_>>,
-                )> = Vec::new();
-                let expert_sources =
-                    expert_slab_guard.sources_for_step(&mut expert_entries_scratch);
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let mut ssm_input_placements: Vec<(NodeId, &PlacedBuffer, usize)> =
+                        Vec::new();
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let mut ssm_output_placements: Vec<(NodeId, &PlacedBuffer, usize)> =
+                        Vec::new();
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    for (layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
+                        if ssm_placement_enabled
+                            && ssm_placement_max_layer.is_none_or(|maximum| layer <= maximum)
+                            && let (
+                            Qwen35LayerRoots::Ssm { state_out, .. },
+                            Some(state_input),
+                            Some((input_buffer, output_buffer)),
+                        ) = (
+                            roots_for_layer,
+                            ssm_state_input_nodes[layer],
+                            ssm_state_buffers[layer].as_ref(),
+                        ) {
+                            let (input_buffer, output_buffer) = if cached_len % 2 == 0 {
+                                (input_buffer, output_buffer)
+                            } else {
+                                (output_buffer, input_buffer)
+                            };
+                            ssm_input_placements.push((state_input, input_buffer, 0));
+                            ssm_output_placements.push((*state_out, output_buffer, 0));
+                        }
+                    }
 
-                // `BackendRuntime::evaluate` under the `metal` feature
-                // accepts `expert_sources` and drops it (that impl's own
-                // doc: not yet wired through `omega::backend`'s polymorphic
-                // plan cache), so it cannot honor an evicted expert with no
-                // paged replacement -- it would otherwise silently gather
-                // the checkpoint's original, evicted bytes as if the
-                // eviction never happened. Fail closed here, before that
-                // backend ever runs, instead of after a wrong forward pass.
-                // The non-`metal` `BackendRuntime::evaluate` reads through
-                // `expert_sources` itself (`evaluate_quantized_named_with_scratch_and_experts`),
-                // so an incomplete layer there already surfaces as
-                // `proxima_tensor::TensorError::GatherIndexOutOfRange` from
-                // the gather -- this check would be redundant on that path.
-                #[cfg(feature = "metal")]
-                if let Some(layer) = expert_slab_guard.first_incomplete_layer() {
-                    return Err(InteropError::ExpertRoutingUnsupportedByBackend { layer });
-                }
+                    // This step's own [`proxima_tensor::cpu::ExpertSource`]
+                    // snapshot -- built AFTER `begin_step` above and read by
+                    // `run_reduce_with_quantized_weights` under the SAME weight
+                    // `NodeId` [`crate::bind::build_expert_slab`] bound it under,
+                    // so a dense checkpoint's empty slab costs one `BTreeMap`
+                    // miss per gathered reduce and changes nothing else.
+                    let mut expert_entries_scratch: Vec<(
+                        NodeId,
+                        Vec<proxima_tensor::cpu::ExpertEntry<'_>>,
+                    )> = Vec::new();
+                    let expert_sources =
+                        expert_slab_guard.sources_for_step(&mut expert_entries_scratch);
 
-                #[cfg(feature = "instrument")]
-                let evaluate_started = read_ticks();
-                // `PROXIMA_METAL_OP_PROFILE_STEP` -- diagnostic-only, `instrument`-gated,
-                // default-off: unset in every production run, so `runtime.evaluate`
-                // is the only path a caller without this env var ever takes. When
-                // set to this step's own index, this ONE step instead runs
-                // `evaluate_op_timed` (per-op command buffers, see that method's own
-                // doc for the cost) and prints the per-op GPU attribution this
-                // crate's own discipline log needed to settle the `gpu_exec`
-                // investigation. Every other step, and every run without the env
-                // var, is byte-for-byte the pre-existing path.
-                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-                let evaluated = match std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
-                    .ok()
-                    .and_then(|value| value.parse::<usize>().ok())
-                {
-                    Some(target) if target == _step => {
-                        let (evaluated, timings) = runtime.evaluate_op_timed(
+                    // The pristine table aliases the named checkpoint stack and
+                    // needs no substitution. Once a policy pages or evicts any
+                    // expert, pass the table across omega's backend boundary;
+                    // CPU consumes it and Metal fails closed until its packed
+                    // gather has a per-expert address-table binding.
+                    #[cfg(feature = "metal")]
+                    let expert_source_substitutions = expert_slab_guard
+                        .first_modified_layer()
+                        .map(|_| &expert_sources);
+                    #[cfg(not(feature = "metal"))]
+                    let expert_source_substitutions = Some(&expert_sources);
+
+                    #[cfg(feature = "instrument")]
+                    let evaluate_started = read_ticks();
+                    // `PROXIMA_METAL_OP_PROFILE_STEP` -- diagnostic-only, `instrument`-gated,
+                    // default-off: unset in every production run, so `runtime.evaluate`
+                    // is the only path a caller without this env var ever takes. When
+                    // set to this step's own index, this ONE step instead runs
+                    // `evaluate_op_timed` (per-op command buffers, see that method's own
+                    // doc for the cost) and prints the per-op GPU attribution this
+                    // crate's own discipline log needed to settle the `gpu_exec`
+                    // investigation. Every other step, and every run without the env
+                    // var, is byte-for-byte the pre-existing path.
+                    #[cfg(all(
+                        feature = "instrument",
+                        feature = "metal",
+                        target_os = "macos",
+                        not(feature = "metal-output-placement")
+                    ))]
+                    let evaluated = match std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
+                        .ok()
+                        .and_then(|value| value.parse::<usize>().ok())
+                    {
+                        Some(target) if target == _step => {
+                            if let Some(layer) = expert_slab_guard.first_modified_layer() {
+                                return Err(InteropError::ExpertRoutingUnsupportedByBackend {
+                                    layer,
+                                });
+                            }
+                            let (evaluated, timings) = runtime.evaluate_op_timed(
+                                &self.program,
+                                &symbols,
+                                &named_blocks,
+                                &roots,
+                                &resident_names,
+                            )?;
+                            report_op_timings(_step, &timings, &self.program);
+                            evaluated
+                        }
+                        _ => runtime.evaluate(
                             &self.program,
                             &symbols,
                             &named_blocks,
                             &roots,
                             &resident_names,
-                        )?;
-                        report_op_timings(_step, &timings);
-                        evaluated
-                    }
-                    _ => runtime.evaluate(
+                            expert_source_substitutions,
+                        )?,
+                    };
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let evaluated = if !ssm_input_placements.is_empty() {
+                        runtime.evaluate_with_placements(
+                            &self.program,
+                            &symbols,
+                            &named_blocks,
+                            &roots,
+                            &resident_names,
+                            &ssm_input_placements,
+                            &ssm_output_placements,
+                        )?
+                    } else {
+                        runtime.evaluate(
+                            &self.program,
+                            &symbols,
+                            &named_blocks,
+                            &roots,
+                            &resident_names,
+                            expert_source_substitutions,
+                        )?
+                    };
+                    #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+                    let evaluated = runtime.evaluate(
                         &self.program,
                         &symbols,
                         &named_blocks,
                         &roots,
                         &resident_names,
-                        Some(&expert_sources),
-                    )?,
-                };
-                #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
-                let evaluated = runtime.evaluate(
-                    &self.program,
-                    &symbols,
-                    &named_blocks,
-                    &roots,
-                    &resident_names,
-                    Some(&expert_sources),
-                )?;
-                #[cfg(feature = "instrument")]
-                let evaluate_ticks = elapsed_ticks(evaluate_started);
-                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-                let metal_stage = metal_stage_totals();
+                        expert_source_substitutions,
+                    )?;
+                    #[cfg(feature = "instrument")]
+                    let evaluate_ticks = elapsed_ticks(evaluate_started);
+                    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                    let metal_stage = metal_stage_totals();
 
-                // One `ExpertRouting` event per layer per new position --
-                // `proxima_tensor::instrument::ExpertObserver`'s own doc on
-                // why this is the decode loop's job, not the kernel's:
-                // `evaluated.get` reads back exactly the extra outputs
-                // `observe_routing` requested above, never the kernel's own
-                // per-position gather.
-                #[cfg(feature = "instrument")]
-                if observe_routing {
-                    for site in &self.moe_sites.0 {
-                        let weight_total_node =
-                            site.weights.last().copied().unwrap_or(self.logits_root);
-                        let Some((weight_total, _)) = evaluated.get(weight_total_node) else {
-                            continue;
-                        };
-                        for local in 0..new_count {
-                            let experts: Vec<u32> = site
-                                .selected
-                                .iter()
-                                .filter_map(|node| evaluated.get(*node))
-                                .filter_map(|(values, _)| values.get(local).copied())
-                                .map(|value| value as u32)
-                                .collect();
-                            let Some(&total) = weight_total.get(local) else {
+                    node_values_sink.observe(&evaluated)?;
+
+                    // One `ExpertRouting` event per layer per new position --
+                    // `proxima_tensor::instrument::ExpertObserver`'s own doc on
+                    // why this is the decode loop's job, not the kernel's:
+                    // `evaluated.get` reads back exactly the extra outputs
+                    // `observe_routing` requested above, never the kernel's own
+                    // per-position gather.
+                    #[cfg(feature = "instrument")]
+                    if observe_routing {
+                        for site in &self.moe_sites.0 {
+                            let weight_total_node =
+                                site.weights.last().copied().unwrap_or(self.logits_root);
+                            let Some((weight_total, _)) = evaluated.get(weight_total_node) else {
                                 continue;
                             };
-                            let weights: Vec<f32> = site
-                                .weights
-                                .iter()
-                                .take(site.weights.len().saturating_sub(1))
-                                .filter_map(|node| evaluated.get(*node))
-                                .filter_map(|(values, _)| values.get(local).copied())
-                                .map(|value| value / total)
-                                .collect();
-                            if experts.len() != weights.len() {
-                                continue;
+                            for local in 0..new_count {
+                                let experts: Vec<u32> = site
+                                    .selected
+                                    .iter()
+                                    .filter_map(|node| evaluated.get(*node))
+                                    .filter_map(|(values, _)| values.get(local).copied())
+                                    .map(|value| value as u32)
+                                    .collect();
+                                let Some(&total) = weight_total.get(local) else {
+                                    continue;
+                                };
+                                let weights: Vec<f32> = site
+                                    .weights
+                                    .iter()
+                                    .take(site.weights.len().saturating_sub(1))
+                                    .filter_map(|node| evaluated.get(*node))
+                                    .filter_map(|(values, _)| values.get(local).copied())
+                                    .map(|value| value / total)
+                                    .collect();
+                                if experts.len() != weights.len() {
+                                    continue;
+                                }
+                                let event = proxima_tensor::instrument::ExpertRouting {
+                                    layer: site.layer,
+                                    position: (cached_len + local) as u64,
+                                    experts: &experts,
+                                    weights: &weights,
+                                };
+                                proxima_tensor::instrument::notify_expert_routed(&event);
                             }
-                            let event = proxima_tensor::instrument::ExpertRouting {
-                                layer: site.layer,
-                                position: (cached_len + local) as u64,
-                                experts: &experts,
-                                weights: &weights,
-                            };
-                            proxima_tensor::instrument::notify_expert_routed(&event);
                         }
                     }
-                }
 
-                // KV-cache DEVICE -> HOST readback + host append: unlike the
-                // upload above, `evaluated.get(*even)` etc. is this step's own
-                // `new_count`-sized OUTPUT increment (what the forward computed
-                // for the newly-added positions), which `LayerCache::append`
-                // then extends onto the growing history -- so this side is
-                // expected to stay FLAT across tokens where the upload side
-                // grows. `layer_cache_append` ticks/bytes below are the pure
-                // host `extend_from_slice` memcpy cost, distinct from the GPU
-                // readback `metal_stage_totals` already reports.
-                #[cfg(feature = "instrument")]
-                let layer_cache_append_started = read_ticks();
-                #[cfg(feature = "instrument")]
-                let mut layer_cache_append_elements: u64 = 0;
-                // History-carry bisection step 3 (diag/qwen35moe-history-carry):
-                // before-state for layers 0 (GDN) and 3 (this checkpoint's
-                // first attention layer, 3-GDN-to-1-attention interleave) --
-                // paired with the AFTER checksum below to prove whether this
-                // step's cache append actually mutated either layer's state.
-                // `.get` rather than a literal index: a foreign `Architecture`
-                // with an empty `layer_roots` (no cache leaves at all) has an
-                // empty `layer_caches` too, and this diagnostic must degrade
-                // to "nothing to report" rather than index out of bounds.
-                #[cfg(feature = "instrument")]
-                let (layer0_before_len, layer0_before_checksum) =
-                    layer_caches.first().map_or((0, 0.0), layer_cache_checksum);
-                #[cfg(feature = "instrument")]
-                let (layer3_before_len, layer3_before_checksum) =
-                    layer_caches.get(3).map_or((0, 0.0), layer_cache_checksum);
-                for (layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
-                    match (roots_for_layer, &mut layer_caches[layer]) {
-                        (
-                            Qwen35LayerRoots::Attention((even, odd, value)),
-                            LayerCacheState::Attention(cache),
-                        ) => {
-                            let (even_data, _) = evaluated
-                                .get(*even)
-                                .ok_or(InteropError::MissingEvaluatedNode { node: *even })?;
-                            let (odd_data, _) = evaluated
-                                .get(*odd)
-                                .ok_or(InteropError::MissingEvaluatedNode { node: *odd })?;
-                            let (value_data, _) = evaluated
-                                .get(*value)
-                                .ok_or(InteropError::MissingEvaluatedNode { node: *value })?;
-                            #[cfg(feature = "instrument")]
-                            {
-                                layer_cache_append_elements +=
-                                    (even_data.len() + odd_data.len() + value_data.len()) as u64;
-                            }
-                            cache.append(even_data, odd_data, value_data);
-                        }
-                        (
-                            Qwen35LayerRoots::DenseAttention((first, second, pass, value)),
-                            LayerCacheState::DenseAttention(cache),
-                        ) => {
-                            let (first_data, _) = evaluated
-                                .get(*first)
-                                .ok_or(InteropError::MissingEvaluatedNode { node: *first })?;
-                            let (second_data, _) = evaluated
-                                .get(*second)
-                                .ok_or(InteropError::MissingEvaluatedNode { node: *second })?;
-                            let (pass_data, _) = evaluated
-                                .get(*pass)
-                                .ok_or(InteropError::MissingEvaluatedNode { node: *pass })?;
-                            let (value_data, _) = evaluated
-                                .get(*value)
-                                .ok_or(InteropError::MissingEvaluatedNode { node: *value })?;
-                            #[cfg(feature = "instrument")]
-                            {
-                                layer_cache_append_elements += (first_data.len()
-                                    + second_data.len()
-                                    + pass_data.len()
-                                    + value_data.len())
-                                    as u64;
-                            }
-                            cache.append(first_data, second_data, pass_data, value_data);
-                        }
-                        (
-                            Qwen35LayerRoots::Ssm {
-                                qkv_mixed,
-                                state_out,
-                            },
-                            LayerCacheState::Ssm(cache),
-                        ) => {
-                            let (qkv_mixed_data, _) = evaluated
-                                .get(*qkv_mixed)
-                                .ok_or(InteropError::MissingEvaluatedNode { node: *qkv_mixed })?;
-                            let (state_out_data, _) = evaluated
-                                .get(*state_out)
-                                .ok_or(InteropError::MissingEvaluatedNode { node: *state_out })?;
-                            #[cfg(feature = "instrument")]
-                            {
-                                layer_cache_append_elements +=
-                                    (qkv_mixed_data.len() + state_out_data.len()) as u64;
-                            }
-                            // `layer_row_widths[layer]`'s own `Ssm` arm --
-                            // the program's own declared
-                            // `ssm_cache.{layer}.conv_history` shape, the
-                            // SAME source [`fresh_layer_caches`] sized this
-                            // cache's initial window from, never
-                            // `Architecture::step_state` (that hook's `None`
-                            // default is exactly the real-world defect this
-                            // read used to reproduce on a foreign
-                            // architecture).
-                            let conv_history_len = match &layer_row_widths[layer] {
-                                LayerPadRowWidths::Ssm { conv_history_len, .. } => *conv_history_len,
-                                _ => unreachable!(
-                                    "layer_row_widths built from the same layer_roots, in lockstep"
-                                ),
-                            };
-                            cache.advance(qkv_mixed_data, state_out_data, conv_history_len);
-                        }
-                        _ => unreachable!(
-                            "layer_roots/layer_caches built from the same layer_roots, in lockstep"
-                        ),
-                    }
-                }
-                #[cfg(feature = "instrument")]
-                let layer_cache_append_ticks = elapsed_ticks(layer_cache_append_started);
-                #[cfg(feature = "instrument")]
-                let cached_len_before_step = cached_len;
-                #[cfg(feature = "instrument")]
-                {
-                    let (layer0_after_len, layer0_after_checksum) =
+                    // KV-cache DEVICE -> HOST readback + host append: unlike the
+                    // upload above, `evaluated.get(*even)` etc. is this step's own
+                    // `new_count`-sized OUTPUT increment (what the forward computed
+                    // for the newly-added positions), which `LayerCache::append`
+                    // then extends onto the growing history -- so this side is
+                    // expected to stay FLAT across tokens where the upload side
+                    // grows. `layer_cache_append` ticks/bytes below are the pure
+                    // host `extend_from_slice` memcpy cost, distinct from the GPU
+                    // readback `metal_stage_totals` already reports.
+                    #[cfg(feature = "instrument")]
+                    let layer_cache_append_started = read_ticks();
+                    #[cfg(feature = "instrument")]
+                    let mut layer_cache_append_elements: u64 = 0;
+                    // History-carry bisection step 3 (diag/qwen35moe-history-carry):
+                    // before-state for layers 0 (GDN) and 3 (this checkpoint's
+                    // first attention layer, 3-GDN-to-1-attention interleave) --
+                    // paired with the AFTER checksum below to prove whether this
+                    // step's cache append actually mutated either layer's state.
+                    // `.get` rather than a literal index: a foreign `Architecture`
+                    // with an empty `layer_roots` (no cache leaves at all) has an
+                    // empty `layer_caches` too, and this diagnostic must degrade
+                    // to "nothing to report" rather than index out of bounds.
+                    #[cfg(feature = "instrument")]
+                    let (layer0_before_len, layer0_before_checksum) =
                         layer_caches.first().map_or((0, 0.0), layer_cache_checksum);
-                    let (layer3_after_len, layer3_after_checksum) =
+                    #[cfg(feature = "instrument")]
+                    let (layer3_before_len, layer3_before_checksum) =
                         layer_caches.get(3).map_or((0, 0.0), layer_cache_checksum);
-                    debug!(
-                        step = _step as u64,
-                        batch_index = batch_index as u64,
-                        token_fed = ids_for_step[0],
-                        cached_len_before = cached_len_before_step as u64,
-                        layer0_len_before = layer0_before_len as u64,
-                        layer0_len_after = layer0_after_len as u64,
-                        layer0_checksum_before = layer0_before_checksum,
-                        layer0_checksum_after = layer0_after_checksum,
-                        layer3_len_before = layer3_before_len as u64,
-                        layer3_len_after = layer3_after_len as u64,
-                        layer3_checksum_before = layer3_before_checksum,
-                        layer3_checksum_after = layer3_after_checksum,
-                        "decode_loop_step_trace: layer 0/3 cache state before/after this step's append"
-                    );
-                }
-                cached_len += new_count;
-
-                // Everything below samples a token off THIS batch's logits.
-                // For a `single_position_step` architecture's expanded
-                // prefill (`step_batches` above), every batch except the
-                // last is a known prompt token, not a sampled one -- only
-                // the cache-append above needs to run for it. Running this
-                // tail on every batch would draw from `rng` once per prompt
-                // position instead of once per generated token, diverging
-                // from the sequential single-position oracle the ROW 427
-                // tests compare against (`RE-VERIFY: rng` in that doc's own
-                // row). Skipping it here is what makes `next_ids`'s LAST
-                // batch's logits the ones `decode_until_stop_or_budget`
-                // actually samples, exactly like a `new_count == 1` decode
-                // step always has.
-                if is_last_step_batch {
-                let (logits, _shape) =
-                    evaluated
-                        .get(self.logits_root)
-                        .ok_or(InteropError::MissingEvaluatedNode {
-                            node: self.logits_root,
-                        })?;
-                // `logits_root` must be the `lm_head_row`-gathered LAST row
-                // only (`crate::architecture`'s doc on `BoundProgram::logits_root`)
-                // -- exactly one row of `vocab_size`. A foreign `Architecture`
-                // that hands back the full `[new_count, vocab]` buffer is
-                // rejected here rather than silently sampled at row 0.
-                if logits.len() != vocab_size {
-                    return Err(InteropError::LogitsShapeMismatch {
-                        expected_rows: 1,
-                        found_rows: logits.len() / vocab_size,
-                        vocab: vocab_size,
-                    });
-                }
-                let last_position = &logits[..vocab_size];
-                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-                let barriers_step = metal_stage.barriers_emitted;
-                #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
-                let barriers_step = 0_u64;
-                logits_sink.observe(last_position, barriers_step);
-
-                #[cfg(feature = "instrument")]
-                let greedy_pick_started = read_ticks();
-                token_id = match token_override.and_then(|forced| forced.get(_step)) {
-                    Some(&forced_token) => forced_token,
-                    None => {
-                        let recent_window_start = token_history.len().saturating_sub(repeat_window);
-                        let recent_tokens = &token_history[recent_window_start..];
-                        sample_next_token(last_position, recent_tokens, sample_config, &mut rng)
-                            .ok_or(InteropError::EmptyLogits)?
+                    for (layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
+                        match (roots_for_layer, &mut layer_caches[layer]) {
+                            (
+                                Qwen35LayerRoots::Attention((even, odd, value)),
+                                LayerCacheState::Attention(cache),
+                            ) => {
+                                let (even_data, _) = evaluated
+                                    .get(*even)
+                                    .ok_or(InteropError::MissingEvaluatedNode { node: *even })?;
+                                let (odd_data, _) = evaluated
+                                    .get(*odd)
+                                    .ok_or(InteropError::MissingEvaluatedNode { node: *odd })?;
+                                let (value_data, _) = evaluated
+                                    .get(*value)
+                                    .ok_or(InteropError::MissingEvaluatedNode { node: *value })?;
+                                #[cfg(feature = "instrument")]
+                                {
+                                    layer_cache_append_elements +=
+                                        (even_data.len() + odd_data.len() + value_data.len())
+                                            as u64;
+                                }
+                                cache.append(even_data, odd_data, value_data);
+                            }
+                            (
+                                Qwen35LayerRoots::DenseAttention((first, second, pass, value)),
+                                LayerCacheState::DenseAttention(cache),
+                            ) => {
+                                let (first_data, _) = evaluated
+                                    .get(*first)
+                                    .ok_or(InteropError::MissingEvaluatedNode { node: *first })?;
+                                let (second_data, _) = evaluated
+                                    .get(*second)
+                                    .ok_or(InteropError::MissingEvaluatedNode { node: *second })?;
+                                let (pass_data, _) = evaluated
+                                    .get(*pass)
+                                    .ok_or(InteropError::MissingEvaluatedNode { node: *pass })?;
+                                let (value_data, _) = evaluated
+                                    .get(*value)
+                                    .ok_or(InteropError::MissingEvaluatedNode { node: *value })?;
+                                #[cfg(feature = "instrument")]
+                                {
+                                    layer_cache_append_elements += (first_data.len()
+                                        + second_data.len()
+                                        + pass_data.len()
+                                        + value_data.len())
+                                        as u64;
+                                }
+                                cache.append(first_data, second_data, pass_data, value_data);
+                            }
+                            (
+                                Qwen35LayerRoots::Ssm {
+                                    qkv_mixed,
+                                    state_out,
+                                },
+                                LayerCacheState::Ssm(cache),
+                            ) => {
+                                let (qkv_mixed_data, _) = evaluated.get(*qkv_mixed).ok_or(
+                                    InteropError::MissingEvaluatedNode { node: *qkv_mixed },
+                                )?;
+                                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                                let state_is_placed = !ssm_input_placements.is_empty();
+                                #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+                                let state_is_placed = false;
+                                let state_out_data = if state_is_placed {
+                                    None
+                                } else {
+                                    Some(
+                                        evaluated
+                                            .get(*state_out)
+                                            .ok_or(InteropError::MissingEvaluatedNode {
+                                                node: *state_out,
+                                            })?
+                                            .0,
+                                    )
+                                };
+                                #[cfg(feature = "instrument")]
+                                {
+                                    layer_cache_append_elements += qkv_mixed_data.len() as u64
+                                        + state_out_data.map_or(0, |data| data.len() as u64);
+                                    debug!(
+                                        layer = layer as u64,
+                                        qkv_mixed_elements = qkv_mixed_data.len() as u64,
+                                        state_elements = state_out_data.map_or(0, |data| data.len() as u64),
+                                        state_bytes = state_out_data.map_or(0, |data| {
+                                            (data.len() * core::mem::size_of::<f32>()) as u64
+                                        }),
+                                        state_is_placed,
+                                        "ssm_state_host_transfer: recurrent output placement"
+                                    );
+                                }
+                                // `layer_row_widths[layer]`'s own `Ssm` arm --
+                                // the program's own declared
+                                // `ssm_cache.{layer}.conv_history` shape, the
+                                // SAME source [`fresh_layer_caches`] sized this
+                                // cache's initial window from, never
+                                // `Architecture::step_state` (that hook's `None`
+                                // default is exactly the real-world defect this
+                                // read used to reproduce on a foreign
+                                // architecture).
+                                let conv_history_len = match &layer_row_widths[layer] {
+                                    LayerPadRowWidths::Ssm {
+                                        conv_history_len, ..
+                                    } => *conv_history_len,
+                                    _ => unreachable!(
+                                        "layer_row_widths built from the same layer_roots, in lockstep"
+                                    ),
+                                };
+                                if let Some(state_out_data) = state_out_data {
+                                    cache.advance(qkv_mixed_data, state_out_data, conv_history_len);
+                                } else {
+                                    cache.advance_conv_history(qkv_mixed_data, conv_history_len);
+                                }
+                            }
+                            _ => unreachable!(
+                                "layer_roots/layer_caches built from the same layer_roots, in lockstep"
+                            ),
+                        }
                     }
-                };
-                token_history.push(token_id);
-                #[cfg(feature = "instrument")]
-                let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
-                #[cfg(feature = "instrument")]
-                debug!(
-                    step = _step as u64,
-                    cached_len_after = (cached_len_before_step + new_count) as u64,
-                    token_sampled = token_id,
-                    "decode_loop_step_trace: sampled token fed forward as next step's next_ids"
-                );
-                next_ids = alloc::vec![token_id];
-
-                #[cfg(feature = "instrument")]
-                {
-                    emit_token_breakdown(&TokenBreakdown {
-                        step: _step,
-                        new_count,
-                        cached_len_before: cached_len_before_step,
-                        step_wall_ticks: elapsed_ticks(step_started),
-                        apply_serving_config_ticks,
-                        build_position_inputs_ticks,
-                        named_blocks_weights_ticks,
-                        named_blocks_kv_ticks,
-                        kv_cache_upload_bytes: kv_cache_upload_elements * 4,
-                        evaluate_ticks,
-                        layer_cache_append_ticks,
-                        layer_cache_append_bytes: layer_cache_append_elements * 4,
-                        greedy_pick_ticks,
-                    });
-                    // ROW 130's per-step-reset attribution: kernel / dispatch+
-                    // setup / park+spin+wake, all on the CALLING thread's own
-                    // wall clock (never summed across the cohort's other worker
-                    // threads, which run concurrently with it, not serially
-                    // inside it -- see `CohortLeaderAttribution`'s own doc).
-                    // `evaluate_ns` is this step's own tick-based total, already
-                    // reset per step by `reset_step`; `residual_ns` is
-                    // everything `evaluate_ms` paid for that these three terms
-                    // do not name -- non-matmul ops (elementwise/reduce/scan),
-                    // quantize/transpose bookkeeping, and staged-batch setup
-                    // outside the cohort round itself. `saturating_sub` so a
-                    // negative residual is impossible to construct by
-                    // arithmetic; reported as 0 with `residual_underflow=true`
-                    // if the three named terms would have exceeded the parent,
-                    // which is itself a sanity-gate failure worth seeing rather
-                    // than silently wrapping.
-                    let attribution = proxima_tensor::instrument::cohort_leader_attribution();
-                    let evaluate_ns = ticks_to_nanos(evaluate_ticks);
-                    let named_ns = attribution.kernel_nanos
-                        + attribution.dispatch_nanos
-                        + attribution.park_spin_wake_nanos;
-                    let residual_underflow = named_ns > evaluate_ns;
-                    let residual_ns = evaluate_ns.saturating_sub(named_ns);
-                    info!(
-                        step = _step as u64,
-                        evaluate_ms = evaluate_ns as f64 / 1e6,
-                        kernel_ms = attribution.kernel_nanos as f64 / 1e6,
-                        dispatch_ms = attribution.dispatch_nanos as f64 / 1e6,
-                        park_spin_wake_ms = attribution.park_spin_wake_nanos as f64 / 1e6,
-                        residual_ms = residual_ns as f64 / 1e6,
-                        residual_underflow,
-                        named_plus_residual_ms = (named_ns + residual_ns) as f64 / 1e6,
-                        cached_attention_ops =
-                            proxima_tensor::instrument::path_totals().op_kind_cached_attention,
-                        "token_attribution: per-step kernel/dispatch/park-spin-wake split"
-                    );
-                    // ROW 140's own redundant-activation-quantize hypothesis
-                    // check: `total_calls` vs `distinct_nodes` across every
-                    // matmul reduce node this step evaluated. 1:1 kills the
-                    // hypothesis; a ratio near the QKV/gate-up fan-out (2-3x)
-                    // confirms it.
-                    let (quantize_total_calls, quantize_distinct_nodes) =
-                        proxima_tensor::instrument::quantize_activation_call_stats();
-                    let quantize_cache_hits =
-                        proxima_tensor::instrument::QUANTIZE_ACTIVATION_CACHE_HITS.get();
-                    info!(
-                        step = _step as u64,
-                        total_calls = quantize_total_calls,
-                        distinct_nodes = quantize_distinct_nodes,
-                        cache_hits = quantize_cache_hits,
-                        "token_quantize_calls: redundant-activation-quantize hypothesis check"
-                    );
-                    #[cfg(all(feature = "metal", target_os = "macos"))]
-                    emit_token_breakdown_metal(
-                        _step,
-                        &metal_stage,
-                        runtime.plans_len(),
-                        runtime.plan_hits,
-                        runtime.plan_misses,
-                    );
-                    // This arm's `kv_cache.{layer}.*` blocks are ordinary
-                    // named blocks folded into `metal_stage`'s weight
-                    // counters above (`emit_device_memory_by_class`'s own
-                    // doc), never a separately sized device allocation --
-                    // `None` here is honest, not a placeholder.
-                    #[cfg(all(feature = "metal", target_os = "macos"))]
-                    if _step == 0 {
-                        emit_device_memory_by_class(
-                            _step,
-                            metal_stage.block_nocopy_bound_bytes,
-                            metal_stage.block_copied_bytes,
-                            metal_stage.block_offset_bound_bytes,
-                            None,
-                            omega::metal::current_allocated_size().unwrap_or(0),
-                            phys_footprint_bytes(),
+                    #[cfg(feature = "instrument")]
+                    let layer_cache_append_ticks = elapsed_ticks(layer_cache_append_started);
+                    #[cfg(feature = "instrument")]
+                    let cached_len_before_step = cached_len;
+                    #[cfg(feature = "instrument")]
+                    {
+                        let (layer0_after_len, layer0_after_checksum) =
+                            layer_caches.first().map_or((0, 0.0), layer_cache_checksum);
+                        let (layer3_after_len, layer3_after_checksum) =
+                            layer_caches.get(3).map_or((0, 0.0), layer_cache_checksum);
+                        debug!(
+                            step = _step as u64,
+                            batch_index = batch_index as u64,
+                            token_fed = ids_for_step[0],
+                            cached_len_before = cached_len_before_step as u64,
+                            layer0_len_before = layer0_before_len as u64,
+                            layer0_len_after = layer0_after_len as u64,
+                            layer0_checksum_before = layer0_before_checksum,
+                            layer0_checksum_after = layer0_after_checksum,
+                            layer3_len_before = layer3_before_len as u64,
+                            layer3_len_after = layer3_after_len as u64,
+                            layer3_checksum_before = layer3_before_checksum,
+                            layer3_checksum_after = layer3_after_checksum,
+                            "decode_loop_step_trace: layer 0/3 cache state before/after this step's append"
                         );
                     }
-                }
-                }
+                    cached_len += new_count;
+
+                    // Everything below samples a token off THIS batch's logits.
+                    // For a `single_position_step` architecture's expanded
+                    // prefill (`step_batches` above), every batch except the
+                    // last is a known prompt token, not a sampled one -- only
+                    // the cache-append above needs to run for it. Running this
+                    // tail on every batch would draw from `rng` once per prompt
+                    // position instead of once per generated token, diverging
+                    // from the sequential single-position oracle the ROW 427
+                    // tests compare against (`RE-VERIFY: rng` in that doc's own
+                    // row). Skipping it here is what makes `next_ids`'s LAST
+                    // batch's logits the ones `decode_until_stop_or_budget`
+                    // actually samples, exactly like a `new_count == 1` decode
+                    // step always has.
+                    if is_last_step_batch {
+                        let (logits, _shape) = evaluated.get(self.logits_root).ok_or(
+                            InteropError::MissingEvaluatedNode {
+                                node: self.logits_root,
+                            },
+                        )?;
+                        // `logits_root` must be the `lm_head_row`-gathered LAST row
+                        // only (`crate::architecture`'s doc on `BoundProgram::logits_root`)
+                        // -- exactly one row of `vocab_size`. A foreign `Architecture`
+                        // that hands back the full `[new_count, vocab]` buffer is
+                        // rejected here rather than silently sampled at row 0.
+                        if logits.len() != vocab_size {
+                            return Err(InteropError::LogitsShapeMismatch {
+                                expected_rows: 1,
+                                found_rows: logits.len() / vocab_size,
+                                vocab: vocab_size,
+                            });
+                        }
+                        let last_position = &logits[..vocab_size];
+                        #[cfg(feature = "instrument")]
+                        {
+                            let (argmax_token, argmax_logit) = last_position
+                                .iter()
+                                .copied()
+                                .enumerate()
+                                .max_by(|left, right| left.1.total_cmp(&right.1))
+                                .unwrap_or((0, f32::NEG_INFINITY));
+                            debug!(
+                                step = _step as u64,
+                                batch_index = batch_index as u64,
+                                cached_len = cached_len as u64,
+                                argmax_token = argmax_token as u64,
+                                argmax_logit,
+                                "decode_loop_step_trace: logits before sampling"
+                            );
+                        }
+                        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                        let barriers_step = metal_stage.barriers_emitted;
+                        #[cfg(not(all(
+                            feature = "instrument",
+                            feature = "metal",
+                            target_os = "macos"
+                        )))]
+                        let barriers_step = 0_u64;
+                        logits_sink.observe(last_position, barriers_step);
+
+                        #[cfg(feature = "instrument")]
+                        let greedy_pick_started = read_ticks();
+                        token_id = match token_override.and_then(|forced| forced.get(_step)) {
+                            Some(&forced_token) => forced_token,
+                            None => {
+                                let recent_window_start =
+                                    token_history.len().saturating_sub(repeat_window);
+                                let recent_tokens = &token_history[recent_window_start..];
+                                sample_next_token(
+                                    last_position,
+                                    recent_tokens,
+                                    sample_config,
+                                    &mut rng,
+                                )
+                                .ok_or(InteropError::EmptyLogits)?
+                            }
+                        };
+                        token_history.push(token_id);
+                        #[cfg(feature = "instrument")]
+                        let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
+                        #[cfg(feature = "instrument")]
+                        debug!(
+                            step = _step as u64,
+                            cached_len_after = (cached_len_before_step + new_count) as u64,
+                            token_sampled = token_id,
+                            "decode_loop_step_trace: sampled token fed forward as next step's next_ids"
+                        );
+                        next_ids = alloc::vec![token_id];
+
+                        #[cfg(feature = "instrument")]
+                        {
+                            emit_token_breakdown(&TokenBreakdown {
+                                step: _step,
+                                new_count,
+                                cached_len_before: cached_len_before_step,
+                                step_wall_ticks: elapsed_ticks(step_started),
+                                apply_serving_config_ticks,
+                                build_position_inputs_ticks,
+                                named_blocks_weights_ticks,
+                                named_blocks_kv_ticks,
+                                kv_cache_upload_bytes: kv_cache_upload_elements * 4,
+                                ssm_state_transfer_bytes,
+                                evaluate_ticks,
+                                layer_cache_append_ticks,
+                                layer_cache_append_bytes: layer_cache_append_elements * 4,
+                                greedy_pick_ticks,
+                            });
+                            // ROW 130's per-step-reset attribution: kernel / dispatch+
+                            // setup / park+spin+wake, all on the CALLING thread's own
+                            // wall clock (never summed across the cohort's other worker
+                            // threads, which run concurrently with it, not serially
+                            // inside it -- see `CohortLeaderAttribution`'s own doc).
+                            // `evaluate_ns` is this step's own tick-based total, already
+                            // reset per step by `reset_step`; `residual_ns` is
+                            // everything `evaluate_ms` paid for that these three terms
+                            // do not name -- non-matmul ops (elementwise/reduce/scan),
+                            // quantize/transpose bookkeeping, and staged-batch setup
+                            // outside the cohort round itself. `saturating_sub` so a
+                            // negative residual is impossible to construct by
+                            // arithmetic; reported as 0 with `residual_underflow=true`
+                            // if the three named terms would have exceeded the parent,
+                            // which is itself a sanity-gate failure worth seeing rather
+                            // than silently wrapping.
+                            let attribution =
+                                proxima_tensor::instrument::cohort_leader_attribution();
+                            let evaluate_ns = ticks_to_nanos(evaluate_ticks);
+                            let named_ns = attribution.kernel_nanos
+                                + attribution.dispatch_nanos
+                                + attribution.park_spin_wake_nanos;
+                            let residual_underflow = named_ns > evaluate_ns;
+                            let residual_ns = evaluate_ns.saturating_sub(named_ns);
+                            info!(
+                                step = _step as u64,
+                                evaluate_ms = evaluate_ns as f64 / 1e6,
+                                kernel_ms = attribution.kernel_nanos as f64 / 1e6,
+                                dispatch_ms = attribution.dispatch_nanos as f64 / 1e6,
+                                park_spin_wake_ms = attribution.park_spin_wake_nanos as f64 / 1e6,
+                                residual_ms = residual_ns as f64 / 1e6,
+                                residual_underflow,
+                                named_plus_residual_ms = (named_ns + residual_ns) as f64 / 1e6,
+                                cached_attention_ops = proxima_tensor::instrument::path_totals()
+                                    .op_kind_cached_attention,
+                                "token_attribution: per-step kernel/dispatch/park-spin-wake split"
+                            );
+                            // ROW 140's own redundant-activation-quantize hypothesis
+                            // check: `total_calls` vs `distinct_nodes` across every
+                            // matmul reduce node this step evaluated. 1:1 kills the
+                            // hypothesis; a ratio near the QKV/gate-up fan-out (2-3x)
+                            // confirms it.
+                            let (quantize_total_calls, quantize_distinct_nodes) =
+                                proxima_tensor::instrument::quantize_activation_call_stats();
+                            let quantize_cache_hits =
+                                proxima_tensor::instrument::QUANTIZE_ACTIVATION_CACHE_HITS.get();
+                            info!(
+                                step = _step as u64,
+                                total_calls = quantize_total_calls,
+                                distinct_nodes = quantize_distinct_nodes,
+                                cache_hits = quantize_cache_hits,
+                                "token_quantize_calls: redundant-activation-quantize hypothesis check"
+                            );
+                            #[cfg(all(feature = "metal", target_os = "macos"))]
+                            emit_token_breakdown_metal(
+                                _step,
+                                &metal_stage,
+                                runtime.plans_len(),
+                                runtime.plan_hits,
+                                runtime.plan_misses,
+                            );
+                            // This arm's `kv_cache.{layer}.*` blocks are ordinary
+                            // named blocks folded into `metal_stage`'s weight
+                            // counters above (`emit_device_memory_by_class`'s own
+                            // doc), never a separately sized device allocation --
+                            // `None` here is honest, not a placeholder.
+                            #[cfg(all(feature = "metal", target_os = "macos"))]
+                            if _step == 0 {
+                                emit_device_memory_by_class(
+                                    _step,
+                                    metal_stage.block_nocopy_bound_bytes,
+                                    metal_stage.block_copied_bytes,
+                                    metal_stage.block_offset_bound_bytes,
+                                    None,
+                                    omega::metal::current_allocated_size().unwrap_or(0),
+                                    phys_footprint_bytes(),
+                                );
+                            }
+                        }
+                    }
                 }
 
                 Ok(token_id)
@@ -5070,6 +5571,9 @@ impl<'file> LoadedModel<'file> {
                     self.architecture.head_dim,
                     self.architecture.rope_freq_base,
                     self.architecture.rms_epsilon,
+                    self.architecture_impl
+                        .as_ref()
+                        .is_some_and(|architecture| architecture.name() == "qwen35moe"),
                 );
                 #[cfg(feature = "instrument")]
                 let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
@@ -5081,7 +5585,7 @@ impl<'file> LoadedModel<'file> {
                         + 4
                         + block_count * 3,
                 );
-                named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
+                named_blocks.push(("ids", QuantizedBlock::Int32(inputs.ids_i32.as_slice())));
                 #[cfg(feature = "instrument")]
                 let named_blocks_weights_started = read_ticks();
                 for (name, data) in &self.weights.owned {
@@ -5102,10 +5606,7 @@ impl<'file> LoadedModel<'file> {
                 // `lm_head_row` above -- same leaf, same host-supplied
                 // reason, this step's own last new row.
                 let lm_head_row_scalar = [(new_count - 1) as f32];
-                named_blocks.push((
-                    "lm_head_row",
-                    QuantizedBlock::Float32(&lm_head_row_scalar),
-                ));
+                named_blocks.push(("lm_head_row", QuantizedBlock::Float32(&lm_head_row_scalar)));
                 #[cfg(feature = "instrument")]
                 let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
 
@@ -5125,8 +5626,11 @@ impl<'file> LoadedModel<'file> {
                 // SAME extent the KV `Op::Input` leaves bind to) and
                 // `symbols[1]` a few lines down, so the two can never
                 // disagree.
-                let kv_bound_extent =
-                    kv_extent(merged_len, positions_needed, serving_config.kv_bucket_tokens);
+                let kv_bound_extent = kv_extent(
+                    merged_len,
+                    positions_needed,
+                    serving_config.kv_bucket_tokens,
+                );
                 let even_odd_len = kv_bound_extent * kv_heads * pairs;
                 let v_len = kv_bound_extent * kv_heads * head_dim;
                 if cache_length_scratch_even_odd.len() < even_odd_len {
@@ -5241,7 +5745,7 @@ impl<'file> LoadedModel<'file> {
                             &input_placements,
                             &output_placements,
                         )?;
-                        report_op_timings(_step, &timings);
+                        report_op_timings(_step, &timings, &single_range.program);
                         evaluated
                     }
                     // `PROXIMA_METAL_DISPATCH_PROFILE_STEP` -- this branch's
@@ -5271,7 +5775,7 @@ impl<'file> LoadedModel<'file> {
                             sampling_mode,
                             "dispatch_profile: per-dispatch gpu-timestamp sampling mode"
                         );
-                        report_op_timings(_step, &timings);
+                        report_op_timings(_step, &timings, &single_range.program);
                         encoder_split_ns = split_ns;
                         evaluated
                     }
@@ -5387,6 +5891,7 @@ impl<'file> LoadedModel<'file> {
                         // `emit_token_breakdown_metal`'s `block_offered_bytes`
                         // field below.
                         kv_cache_upload_bytes: 0,
+                        ssm_state_transfer_bytes: 0,
                         evaluate_ticks,
                         // No separate host layer-cache append step on this
                         // arm -- `output_placements` above writes each
@@ -5408,9 +5913,8 @@ impl<'file> LoadedModel<'file> {
                     );
                     #[cfg(all(feature = "metal", target_os = "macos"))]
                     if _step == 0 {
-                        let kv_cache_device_bytes = (block_count
-                            * (2 * capacity_even_odd + capacity_v))
-                            as u64;
+                        let kv_cache_device_bytes =
+                            (block_count * (2 * capacity_even_odd + capacity_v)) as u64;
                         emit_device_memory_by_class(
                             _step,
                             metal_stage.block_nocopy_bound_bytes,
@@ -5467,6 +5971,41 @@ impl<'file> LoadedModel<'file> {
         self.forward_node_values_on_backend(prompt, node_ids, 0)
     }
 
+    /// Captures `node_ids` after every stateful prompt-position evaluation
+    /// through the ordinary cached decode loop. This is the causal companion
+    /// to [`Self::forward_node_values_on_backend`], whose cache is always empty.
+    pub fn forward_cached_node_values_on_backend(
+        &self,
+        prompt: &str,
+        node_ids: &[NodeId],
+        gpu_layers: i32,
+    ) -> Result<Vec<Vec<Vec<f32>>>, InteropError> {
+        let serving_config = supported_serving_config(
+            gpu_layers,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            omega::MathMode::default(),
+        );
+        let mut runtime = BackendRuntime::new(&serving_config);
+        let mut steps = Vec::new();
+        let mut node_values_sink = NodeValuesSink::Collect {
+            nodes: node_ids,
+            steps: &mut steps,
+        };
+        let _ = self.run_decode_loop_observed_seeded(
+            prompt,
+            1,
+            &serving_config,
+            &mut runtime,
+            None,
+            &mut LogitsSink::Discard,
+            &mut node_values_sink,
+            &mut |_event| Control::Continue,
+            None,
+            true,
+        )?;
+        Ok(steps)
+    }
+
     /// [`Self::forward_node_values`] with the backend left open --
     /// `gpu_layers` reaches `BackendRuntime::new`/`select_backend` the
     /// same way [`Self::generate_with_serving_config`]'s own
@@ -5512,6 +6051,9 @@ impl<'file> LoadedModel<'file> {
             self.architecture.head_dim,
             self.architecture.rope_freq_base,
             self.architecture.rms_epsilon,
+            self.architecture_impl
+                .as_ref()
+                .is_some_and(|architecture| architecture.name() == "qwen35moe"),
         );
 
         // The SAME program-derived cache-leaf-name/step_inputs assembly
@@ -5526,8 +6068,11 @@ impl<'file> LoadedModel<'file> {
         // cache over the WHOLE prompt (this method's own doc).
         let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
         let layer_caches = self.fresh_layer_caches(&cache_names, &layer_row_widths);
-        let mut kv_pad_scratch: Vec<KvPadScratch> =
-            self.layer_roots.iter().map(|_| KvPadScratch::new()).collect();
+        let mut kv_pad_scratch: Vec<KvPadScratch> = self
+            .layer_roots
+            .iter()
+            .map(|_| KvPadScratch::new())
+            .collect();
         let mut qwen35_dense_pad_scratch: Vec<Qwen35DenseAttentionPadScratch> = self
             .layer_roots
             .iter()
@@ -5642,6 +6187,33 @@ impl<'file> LoadedModel<'file> {
         prompt: &str,
         gpu_layers: i32,
     ) -> Result<Vec<f32>, InteropError> {
+        let prompt_ids = proxima_tokenizer::encode_with_bos_eos(
+            prompt,
+            &self.vocab,
+            wants_bos(&self.vocab),
+            self.vocab.add_eos_token().unwrap_or(false),
+        )?;
+        if self.single_position_step && prompt_ids.len() > 1 {
+            let serving_config = supported_serving_config(
+                gpu_layers,
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                omega::MathMode::default(),
+            );
+            let mut runtime = BackendRuntime::new(&serving_config);
+            let mut captured = Vec::new();
+            let mut logits_sink = LogitsSink::Collect(&mut captured);
+            let mut on_token = |_event: TokenEvent<'_>| Control::Continue;
+            self.run_decode_loop_observed(
+                prompt,
+                1,
+                &serving_config,
+                &mut runtime,
+                None,
+                &mut logits_sink,
+                &mut on_token,
+            )?;
+            return captured.pop().ok_or(InteropError::EmptyLogits);
+        }
         // `forward_node_values_on_backend` re-tokenizes `prompt` itself;
         // this binding survives only for the `instrument`-gated debug
         // event below (`prompt_tokens`) now that the last-row slice no
@@ -5688,19 +6260,49 @@ impl<'file> LoadedModel<'file> {
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use super::{SsmLayerCache, kv_extent};
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use proxima_gguf::value::MetadataValue as Value;
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_gguf::value::MetadataArray;
+    use proxima_gguf::value::MetadataValue as Value;
     use proxima_gguf::{GgmlType as WireType, GgufModel, TensorPayload, write_complete};
     use proxima_tokenizer::Vocab;
 
-    use super::{Control, Phase, TokenEvent, build_position_inputs, decode_until_stop_or_budget};
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::{BackendRuntime, LoadedModel};
+    use super::{Control, Phase, TokenEvent, build_position_inputs, decode_until_stop_or_budget};
     use crate::bind::architecture_from_metadata;
+
+    #[test]
+    fn kv_bucket_extent_includes_the_new_position() {
+        let cached_len = 0usize;
+        let new_count = 1usize;
+        assert_eq!(
+            kv_extent(cached_len + new_count, usize::MAX, 32),
+            32,
+            "the first position must allocate a non-empty KV bucket"
+        );
+        assert_eq!(
+            kv_extent(cached_len, usize::MAX, 32),
+            0,
+            "the pre-step cache length is not a valid attention extent"
+        );
+    }
+
+    #[test]
+    fn ssm_state_replacement_preserves_fixed_capacity() {
+        let mut cache = SsmLayerCache::new(4, 3);
+        let state_capacity = cache.state.capacity();
+        cache.advance(&[1.0, 2.0], &[3.0, 4.0, 5.0], 4);
+        assert_eq!(cache.state, vec![3.0, 4.0, 5.0]);
+        assert_eq!(cache.state.capacity(), state_capacity);
+        cache.advance(&[6.0, 7.0], &[8.0, 9.0, 10.0], 4);
+        assert_eq!(cache.state, vec![8.0, 9.0, 10.0]);
+        assert_eq!(cache.state.capacity(), state_capacity);
+    }
+
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use crate::serving::{GPU_LAYERS_ALL, ServingConfig};
 
@@ -5762,6 +6364,7 @@ mod tests {
             architecture.head_dim,
             architecture.rope_freq_base,
             architecture.rms_epsilon,
+            false,
         );
 
         assert_eq!(
@@ -6023,7 +6626,10 @@ mod tests {
         let norm_weight = f32_bytes(&vec![1.0f32; embedding as usize]);
         let square = f32_bytes(&vec![0.05f32; (embedding * embedding) as usize]);
         let gate_inp = f32_bytes(&vec![0.05f32; (embedding * expert_count) as usize]);
-        let expert_stack = f32_bytes(&vec![0.05f32; (expert_count * feed_forward * embedding) as usize]);
+        let expert_stack = f32_bytes(&vec![
+            0.05f32;
+            (expert_count * feed_forward * embedding) as usize
+        ]);
         let output_weight = f32_bytes(&vec![0.05f32; (vocab_size * embedding) as usize]);
 
         let model = GgufModel {
@@ -6041,23 +6647,14 @@ mod tests {
                     "llama.feed_forward_length".to_string(),
                     Value::U32(feed_forward as u32),
                 ),
-                (
-                    "llama.attention.head_count".to_string(),
-                    Value::U32(1),
-                ),
-                (
-                    "llama.attention.head_count_kv".to_string(),
-                    Value::U32(1),
-                ),
+                ("llama.attention.head_count".to_string(), Value::U32(1)),
+                ("llama.attention.head_count_kv".to_string(), Value::U32(1)),
                 ("llama.block_count".to_string(), Value::U32(1)),
                 (
                     "llama.expert_count".to_string(),
                     Value::U32(expert_count as u32),
                 ),
-                (
-                    "llama.expert_used_count".to_string(),
-                    Value::U32(1),
-                ),
+                ("llama.expert_used_count".to_string(), Value::U32(1)),
                 (
                     "tokenizer.ggml.model".to_string(),
                     Value::String("gpt2".to_string()),
@@ -6282,9 +6879,18 @@ mod tests {
         let token_embd = f32_bytes(&vec![0.05f32; (embedding * vocab_size) as usize]);
         let norm_weight = f32_bytes(&vec![1.0f32; embedding as usize]);
         let head_norm_weight = f32_bytes(&vec![1.0f32; attn_head_dim as usize]);
-        let q_weight = f32_bytes(&vec![0.05f32; (embedding * query_heads * attn_head_dim * 2) as usize]);
-        let kv_weight = f32_bytes(&vec![0.05f32; (embedding * kv_heads * attn_head_dim) as usize]);
-        let output_weight = f32_bytes(&vec![0.05f32; (query_heads * attn_head_dim * embedding) as usize]);
+        let q_weight = f32_bytes(&vec![
+            0.05f32;
+            (embedding * query_heads * attn_head_dim * 2) as usize
+        ]);
+        let kv_weight = f32_bytes(&vec![
+            0.05f32;
+            (embedding * kv_heads * attn_head_dim) as usize
+        ]);
+        let output_weight = f32_bytes(&vec![
+            0.05f32;
+            (query_heads * attn_head_dim * embedding) as usize
+        ]);
         let ffn_gate_up = f32_bytes(&vec![0.05f32; (embedding * feed_forward) as usize]);
         let ffn_down = f32_bytes(&vec![0.05f32; (feed_forward * embedding) as usize]);
         let output_table = f32_bytes(&vec![0.05f32; (embedding * vocab_size) as usize]);
@@ -6321,10 +6927,7 @@ mod tests {
                     "qwen35.attention.key_length".to_string(),
                     Value::U32(attn_head_dim as u32),
                 ),
-                (
-                    "qwen35.full_attention_interval".to_string(),
-                    Value::U32(1),
-                ),
+                ("qwen35.full_attention_interval".to_string(), Value::U32(1)),
                 ("qwen35.ssm.conv_kernel".to_string(), Value::U32(2)),
                 ("qwen35.ssm.state_size".to_string(), Value::U32(1)),
                 ("qwen35.ssm.group_count".to_string(), Value::U32(1)),
@@ -6546,9 +7149,18 @@ mod tests {
         let token_embd = f32_bytes(&vec![0.05f32; (embedding * vocab_size) as usize]);
         let norm_weight = f32_bytes(&vec![1.0f32; embedding as usize]);
         let head_norm_weight = f32_bytes(&vec![1.0f32; attn_head_dim as usize]);
-        let q_weight = f32_bytes(&vec![0.05f32; (embedding * query_heads * attn_head_dim * 2) as usize]);
-        let kv_weight = f32_bytes(&vec![0.05f32; (embedding * kv_heads * attn_head_dim) as usize]);
-        let output_weight = f32_bytes(&vec![0.05f32; (query_heads * attn_head_dim * embedding) as usize]);
+        let q_weight = f32_bytes(&vec![
+            0.05f32;
+            (embedding * query_heads * attn_head_dim * 2) as usize
+        ]);
+        let kv_weight = f32_bytes(&vec![
+            0.05f32;
+            (embedding * kv_heads * attn_head_dim) as usize
+        ]);
+        let output_weight = f32_bytes(&vec![
+            0.05f32;
+            (query_heads * attn_head_dim * embedding) as usize
+        ]);
         let ffn_gate_up = f32_bytes(&vec![0.05f32; (embedding * feed_forward) as usize]);
         let ffn_down = f32_bytes(&vec![0.05f32; (feed_forward * embedding) as usize]);
         let output_table = f32_bytes(&vec![0.05f32; (embedding * vocab_size) as usize]);
@@ -6585,10 +7197,7 @@ mod tests {
                     "qwen35.attention.key_length".to_string(),
                     Value::U32(attn_head_dim as u32),
                 ),
-                (
-                    "qwen35.full_attention_interval".to_string(),
-                    Value::U32(1),
-                ),
+                ("qwen35.full_attention_interval".to_string(), Value::U32(1)),
                 ("qwen35.ssm.conv_kernel".to_string(), Value::U32(2)),
                 ("qwen35.ssm.state_size".to_string(), Value::U32(1)),
                 ("qwen35.ssm.group_count".to_string(), Value::U32(1)),
@@ -7130,10 +7739,8 @@ mod tests {
             let model = LoadedModel::load(&parsed, file_bytes)
                 .expect("load real checkpoint through the public path");
 
-            let serving_config = super::super::supported_serving_config(
-                GPU_LAYERS_ALL,
-                omega::MathMode::default(),
-            );
+            let serving_config =
+                super::super::supported_serving_config(GPU_LAYERS_ALL, omega::MathMode::default());
             let (generated_ids, _text, _stopped_by_eos) = model
                 .generate_with_serving_config("The quick brown fox", 4, serving_config)
                 .expect("decode 4 tokens on Metal");
@@ -7359,9 +7966,7 @@ mod memory_fit_gate_tests {
     /// tokens beyond the one this gate never reads anyway (the fit gate
     /// touches `self.architecture`/`self.checkpoint_weight_bytes` only).
     fn tiny_vocab() -> Vocab {
-        let tokens: Vec<String> = (0..=255u8)
-            .map(|byte| format!("<0x{byte:02X}>"))
-            .collect();
+        let tokens: Vec<String> = (0..=255u8).map(|byte| format!("<0x{byte:02X}>")).collect();
         Vocab::new(tokens, &[], None, None, None).expect("minimal vocab builds")
     }
 
@@ -7460,6 +8065,37 @@ mod memory_fit_gate_tests {
         );
     }
 
+    #[test]
+    fn configured_memory_ceiling_rejects_weights_before_device_allocation() {
+        const FOUR_GIB: u64 = 4 * 1024 * 1024 * 1024;
+        const FIVE_GIB: u64 = 5 * 1024 * 1024 * 1024;
+
+        let model = model_with(FIVE_GIB);
+        let mut serving_config = ServingConfig {
+            gpu_memory_fit: true,
+            gpu_memory_limit_bytes: Some(FOUR_GIB),
+            context_length: 1,
+            ..ServingConfig::default()
+        };
+
+        let error = model
+            .apply_memory_fit_gate(&mut serving_config)
+            .expect_err("five GiB of weights must not pass a four GiB device ceiling");
+
+        assert!(
+            matches!(
+                error,
+                crate::error::InteropError::MemoryBudgetExceeded {
+                    dense_weights_bytes: FIVE_GIB,
+                    limit_bytes: FOUR_GIB,
+                    os_headroom_bytes: 0,
+                    ..
+                }
+            ),
+            "the typed error must retain the configured ceiling and offending weight class: {error:?}"
+        );
+    }
+
     /// [`PrefixState`] against the real host-local qwen3-1.7B checkpoint
     /// [`crate::test_support::qwen3_gguf_path`] resolves -- this checkpoint
     /// is qk-norm, so ordinary [`LoadedModel::generate_with_serving_config`]
@@ -7508,7 +8144,7 @@ mod memory_fit_gate_tests {
         use proxima_telemetry::recorder::Recorder;
 
         use super::super::{
-            BackendRuntime, Control, LoadedModel, LogitsSink, Phase, PrefixState,
+            BackendRuntime, Control, LoadedModel, LogitsSink, NodeValuesSink, Phase, PrefixState,
             supported_serving_config,
         };
         use crate::serving::GPU_LAYERS_ALL;
@@ -7577,10 +8213,8 @@ mod memory_fit_gate_tests {
         /// a mismatch ambiguous between "the primitive is wrong" and "the
         /// rng streams diverged".
         fn greedy_serving_config() -> super::super::ServingConfig<'static> {
-            let mut config = supported_serving_config(
-                GPU_LAYERS_ALL,
-                crate::test_support::math_mode_from_env(),
-            );
+            let mut config =
+                supported_serving_config(GPU_LAYERS_ALL, crate::test_support::math_mode_from_env());
             config.temperature = 0.0;
             config
         }
@@ -7642,6 +8276,7 @@ mod memory_fit_gate_tests {
                     &mut direct_runtime,
                     None,
                     &mut LogitsSink::Collect(&mut direct_logits),
+                    &mut NodeValuesSink::Discard,
                     &mut |_event| Control::Continue,
                     None,
                     false,
@@ -7666,6 +8301,7 @@ mod memory_fit_gate_tests {
                     &mut resumed_runtime,
                     None,
                     &mut LogitsSink::Collect(&mut resumed_logits),
+                    &mut NodeValuesSink::Discard,
                     &mut |_event| Control::Continue,
                     Some(seed),
                     true,
@@ -7875,6 +8511,7 @@ mod memory_fit_gate_tests {
                     &mut runtime,
                     None,
                     &mut LogitsSink::Discard,
+                    &mut NodeValuesSink::Discard,
                     &mut |_event| Control::Continue,
                     None,
                     true,
@@ -8011,6 +8648,7 @@ mod memory_fit_gate_tests {
                     &mut runtime,
                     None,
                     &mut LogitsSink::Discard,
+                    &mut NodeValuesSink::Discard,
                     &mut |_event| Control::Continue,
                     None,
                     true,
@@ -8080,6 +8718,7 @@ mod memory_fit_gate_tests {
                         &mut runtime,
                         None,
                         &mut LogitsSink::Discard,
+                        &mut NodeValuesSink::Discard,
                         &mut |_event| Control::Continue,
                         None,
                         true,
@@ -8093,8 +8732,7 @@ mod memory_fit_gate_tests {
             let min_ms = ttft_ms[0];
             let med_ms = ttft_ms[1];
             let max_ms = ttft_ms[2];
-            let tokens_per_sec_at_median =
-                prompt_token_count as f64 / (med_ms / 1000.0);
+            let tokens_per_sec_at_median = prompt_token_count as f64 / (med_ms / 1000.0);
             std::println!(
                 "prefill_ttft_850 prompt_token_count={prompt_token_count} \
                  ttft_ms_min={min_ms:.1} ttft_ms_med={med_ms:.1} ttft_ms_max={max_ms:.1} \
@@ -8116,6 +8754,7 @@ mod memory_fit_gate_tests {
                     &mut identity_runtime,
                     None,
                     &mut LogitsSink::Discard,
+                    &mut NodeValuesSink::Discard,
                     &mut |_event| Control::Continue,
                     None,
                     true,
