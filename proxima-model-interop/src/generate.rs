@@ -7156,7 +7156,7 @@ impl<'file> LoadedModel<'file> {
                     let pre_gather = qwen35moe_pre_gather_enabled(
                         serving_config.qwen35moe_pre_gather,
                         self.architecture_impl.map(|architecture| architecture.name()),
-                    ) && !runtime.uses_gpu();
+                    );
                     let gdn_prefill_scan = pre_gather
                         && gdn_prefill_scan_enabled
                         && new_count > 1;
