@@ -6812,6 +6812,12 @@ fn upload_block(
     dtype: DType,
     resident_name: Option<&str>,
 ) -> Result<(MetalBuffer, usize), MetalError> {
+    if std::env::var_os("PROXIMA_DEBUG_BLOCK_UPLOADS").is_some() && !data.is_empty() {
+        eprintln!(
+            "metal block upload node={node:?} dtype={dtype:?} bytes={} resident={resident_name:?}",
+            size_of_val(data),
+        );
+    }
     match dtype {
         // unreached by every program this driver compiles today (none
         // declares a `Float16` block input -- `proxima-tensor/src/spec.rs`'s
