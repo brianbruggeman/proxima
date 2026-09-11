@@ -1541,21 +1541,23 @@ impl<'file> LoadedModel<'file> {
         let mut layers = Vec::with_capacity(layer_pairs.len());
         for layer in 0..layer_pairs.len() {
             let (router, gather) = layer_pairs[layer].clone();
-            let next_router_cuts = layer_pairs
-                .get(layer + 1)
-                .map_or_else(Vec::new, |pair| pair.0.1.clone());
-            let next_cuts = layer_pairs
-                .get(layer + 1)
-                .map_or_else(|| suffix.1.clone(), |pair| pair.0.1.clone());
+            let mut future_cuts = layer_pairs[layer + 1..]
+                .iter()
+                .flat_map(|pair| pair.0.1.iter().chain(pair.1.1.iter()))
+                .cloned()
+                .collect::<Vec<_>>();
+            future_cuts.extend(suffix.1.iter().cloned());
+            future_cuts.sort_by_key(|(node, _)| *node);
+            future_cuts.dedup_by_key(|(node, _)| *node);
             let mut router_future_cuts = gather.1.clone();
-            router_future_cuts.extend(next_router_cuts);
+            router_future_cuts.extend(future_cuts.iter().cloned());
             router_future_cuts.sort_by_key(|(node, _)| *node);
             router_future_cuts.dedup_by_key(|(node, _)| *node);
             layers.push(Qwen35MoeLayerSegments {
                 router,
                 gather,
                 router_future_cuts,
-                next_cuts,
+                next_cuts: future_cuts,
             });
         }
 
