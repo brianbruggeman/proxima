@@ -115,10 +115,11 @@ impl SizingSource {
     pub fn load(manifest_dir: &str, toml_filename: &str, env_prefix: &str) -> Result<Self> {
         let toml_path = Path::new(manifest_dir).join(toml_filename);
         println!("cargo:rerun-if-changed={}", toml_path.display());
-        let text =
-            fs::read_to_string(&toml_path).map_err(|err| SizingError::Read(toml_path.clone(), err))?;
-        let table: Value =
-            text.parse().map_err(|err| SizingError::Parse(toml_path.clone(), err))?;
+        let text = fs::read_to_string(&toml_path)
+            .map_err(|err| SizingError::Read(toml_path.clone(), err))?;
+        let table: Value = text
+            .parse()
+            .map_err(|err| SizingError::Parse(toml_path.clone(), err))?;
         Ok(Self {
             toml_path,
             table,
@@ -158,9 +159,11 @@ impl SizingSource {
         let env_name = self.env_name_nested(section, subsection, key);
         println!("cargo:rerun-if-env-changed={env_name}");
         match env::var(&env_name) {
-            Ok(raw) => raw
-                .parse::<i64>()
-                .map_err(|source| SizingError::EnvInt { env_name, raw, source }),
+            Ok(raw) => raw.parse::<i64>().map_err(|source| SizingError::EnvInt {
+                env_name,
+                raw,
+                source,
+            }),
             Err(_) => self
                 .table
                 .get(section)
@@ -190,9 +193,11 @@ impl SizingSource {
         let env_name = self.env_name(section, key);
         println!("cargo:rerun-if-env-changed={env_name}");
         match env::var(&env_name) {
-            Ok(raw) => raw
-                .parse::<i64>()
-                .map_err(|source| SizingError::EnvInt { env_name, raw, source }),
+            Ok(raw) => raw.parse::<i64>().map_err(|source| SizingError::EnvInt {
+                env_name,
+                raw,
+                source,
+            }),
             Err(_) => self
                 .table
                 .get(section)
@@ -217,9 +222,11 @@ impl SizingSource {
         let env_name = self.env_name(section, key);
         println!("cargo:rerun-if-env-changed={env_name}");
         match env::var(&env_name) {
-            Ok(raw) => raw
-                .parse::<f64>()
-                .map_err(|source| SizingError::EnvFloat { env_name, raw, source }),
+            Ok(raw) => raw.parse::<f64>().map_err(|source| SizingError::EnvFloat {
+                env_name,
+                raw,
+                source,
+            }),
             Err(_) => self
                 .table
                 .get(section)
@@ -271,9 +278,11 @@ impl SizingSource {
         let env_name = self.env_name(section, key);
         println!("cargo:rerun-if-env-changed={env_name}");
         match env::var(&env_name) {
-            Ok(raw) => raw
-                .parse::<bool>()
-                .map_err(|source| SizingError::EnvBool { env_name, raw, source }),
+            Ok(raw) => raw.parse::<bool>().map_err(|source| SizingError::EnvBool {
+                env_name,
+                raw,
+                source,
+            }),
             Err(_) => self
                 .table
                 .get(section)
@@ -350,7 +359,9 @@ mod tests {
             let source =
                 SizingSource::load(tmp.path().to_str().unwrap(), "crate-runtime.toml", "TEST")
                     .expect("load");
-            let err = source.resolve_int("section", "key").expect_err("missing key");
+            let err = source
+                .resolve_int("section", "key")
+                .expect_err("missing key");
             assert!(matches!(err, SizingError::MissingInt { .. }));
         });
     }

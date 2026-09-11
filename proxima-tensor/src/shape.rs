@@ -232,16 +232,19 @@ impl ShapeTable {
                 // anchor as a declared `len`, so the two are unified into
                 // the same `resolved` slot below and disagree the same way.
                 let defines = if let Some(len) = &axis.len {
-                    let target = axis.len_target_axis().ok_or(TensorError::AmbiguousLenAxis {
-                        node: here,
-                        dim: axis_index as u16,
-                    })?;
+                    let target = axis
+                        .len_target_axis()
+                        .ok_or(TensorError::AmbiguousLenAxis {
+                            node: here,
+                            dim: axis_index as u16,
+                        })?;
                     Some((target, resolve_extent(len, &self.symbols)?))
                 } else if let [term] = axis.terms.as_slice()
                     && term.coeff == 1
                     && axis.offset == 0
+                    && let Some(&extent) = operand_shape.get(axis_index)
                 {
-                    Some((term.axis, operand_shape[axis_index]))
+                    Some((term.axis, extent))
                 } else {
                     None
                 };
@@ -293,25 +296,27 @@ impl ShapeTable {
                 if is_pure_projection {
                     continue;
                 }
-                bounds_check(
-                    here,
-                    axis_index as u16,
-                    axis,
-                    &extents,
-                    operand_shape[axis_index],
-                )?;
+                let Some(&operand_extent) = operand_shape.get(axis_index) else {
+                    return Err(TensorError::IndexOutOfBounds {
+                        node: here,
+                        dim: axis_index as u16,
+                    });
+                };
+                bounds_check(here, axis_index as u16, axis, &extents, operand_extent)?;
             }
         }
 
         Ok(extents)
     }
 
-    /// A [`IndexMap::Computed`]'s `indices` must resolve to an integer
-    /// [`DType`] — a float or bool cannot select a dimension.
+    /// A [`IndexMap::Computed`]'s `indices` must resolve to an integer-like
+    /// [`DType`].  Float32 is accepted because the existing graph algebra
+    /// carries synthesized route indices in exact f32 values; the gather
+    /// boundary converts those values to integer offsets.
     fn check_indices_dtype(&self, here: NodeId, map: &IndexMap) -> Result<(), TensorError> {
         if let IndexMap::Computed { indices, .. } = map {
             let dtype = self.dtypes.borrow()[indices.0 as usize];
-            if !dtype.is_integer() {
+            if !dtype.is_integer() && dtype != DType::Float32 {
                 return Err(TensorError::NonIntegerIndices { node: here, dtype });
             }
         }
@@ -987,8 +992,9 @@ mod tests {
             },
         );
 
-        let error = infer(&program, &[])
-            .expect_err("a declared len (2) disagreeing with an anchor-derived extent (3) is rejected");
+        let error = infer(&program, &[]).expect_err(
+            "a declared len (2) disagreeing with an anchor-derived extent (3) is rejected",
+        );
         assert!(
             matches!(
                 error,
@@ -1043,8 +1049,8 @@ mod tests {
             },
         );
 
-        let shapes = infer(&program, &[])
-            .expect("a declared len with no competing anchor resolves cleanly");
+        let shapes =
+            infer(&program, &[]).expect("a declared len with no competing anchor resolves cleanly");
         assert_eq!(
             shapes.of(added),
             &[1, 2],
@@ -1286,6 +1292,42 @@ mod tests {
     }
 
     #[test]
+    fn a_non_pure_projection_cannot_index_past_a_lower_rank_operand() {
+        let mut program = Vec::new();
+        let source = leaf(&mut program, &[Extent::Static(4)]);
+        let map = IndexMap::Affine(IndexPattern {
+            iter_rank: 2,
+            axes: alloc::vec![
+                AxisIndex {
+                    terms: alloc::vec![AxisTerm::projection(0)].into(),
+                    offset: 0,
+                    len: None,
+                },
+                AxisIndex {
+                    terms: alloc::vec![AxisTerm { axis: 1, coeff: 2 }].into(),
+                    offset: 0,
+                    len: Some(Extent::Static(2)),
+                },
+            ],
+        });
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(source, map)],
+                name: None,
+            },
+        );
+
+        let error = infer(&program, &[]).expect_err("a rank-mismatched operand must be rejected");
+        assert!(
+            matches!(error, TensorError::IndexOutOfBounds { dim: 1, .. }),
+            "rank mismatch must become a typed bounds error: {error}"
+        );
+    }
+
+    #[test]
     fn scan_output_shape_equals_the_input_shape() {
         let mut program = Vec::new();
         let source = leaf(&mut program, &[Extent::Static(16)]);
@@ -1520,10 +1562,10 @@ mod tests {
     }
 
     #[test]
-    fn non_integer_gather_indices_are_rejected() {
+    fn exact_float_gather_indices_are_accepted() {
         let mut program = Vec::new();
         let table = leaf(&mut program, &[Extent::Static(4)]);
-        let float_ids = leaf(&mut program, &[Extent::Static(3)]); // float32, not integer
+        let float_ids = leaf(&mut program, &[Extent::Static(3)]); // route indices are exact f32
         append(
             &mut program,
             Op::Elementwise {
@@ -1534,11 +1576,7 @@ mod tests {
             },
         );
 
-        let error = infer(&program, &[]).expect_err("float32 indices are rejected");
-        assert!(
-            matches!(error, TensorError::NonIntegerIndices { .. }),
-            "{error}"
-        );
+        infer(&program, &[]).expect("exact f32 route indices are legal at the gather boundary");
     }
 
     #[test]

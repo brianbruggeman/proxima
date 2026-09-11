@@ -165,7 +165,10 @@ mod tests {
         }"#;
         let index = parse_sharded_index(json).expect("well-formed index parses");
 
-        assert_eq!(index.shard_filenames(), vec!["shard-1.safetensors", "shard-2.safetensors"]);
+        assert_eq!(
+            index.shard_filenames(),
+            vec!["shard-1.safetensors", "shard-2.safetensors"]
+        );
 
         let mut shard_one: Vec<&str> = index.tensors_in_shard("shard-1.safetensors").collect();
         shard_one.sort_unstable();
@@ -188,7 +191,10 @@ mod tests {
         let outcome = parse_sharded_index(json);
         assert!(matches!(
             outcome,
-            Err(SafetensorsError::MissingField { field: "weight_map", .. })
+            Err(SafetensorsError::MissingField {
+                field: "weight_map",
+                ..
+            })
         ));
     }
 
@@ -198,13 +204,19 @@ mod tests {
         let outcome = parse_sharded_index(json);
         assert!(matches!(
             outcome,
-            Err(SafetensorsError::InvalidField { field: "weight_map", .. })
+            Err(SafetensorsError::InvalidField {
+                field: "weight_map",
+                ..
+            })
         ));
     }
 
     #[proxima::test]
     async fn malformed_json_is_a_typed_error() {
         let outcome = parse_sharded_index(b"not json");
-        assert!(matches!(outcome, Err(SafetensorsError::MalformedJson { .. })));
+        assert!(matches!(
+            outcome,
+            Err(SafetensorsError::MalformedJson { .. })
+        ));
     }
 }

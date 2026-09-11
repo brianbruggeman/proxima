@@ -462,7 +462,10 @@ pub fn checkpoint_bytes_moe(
 /// test that must observe a routed expert's own bytes actually reaching the
 /// final logits (a zero output row makes every logit `0.0` regardless of
 /// which expert ran, [`push_output_projection`]'s own doc).
-#[allow(dead_code, reason = "only external_expert_paging.rs's own real-output test uses this")]
+#[allow(
+    dead_code,
+    reason = "only external_expert_paging.rs's own real-output test uses this"
+)]
 #[must_use]
 pub fn checkpoint_bytes_moe_with_real_output(
     weight_codec: GgmlType,

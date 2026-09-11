@@ -81,7 +81,11 @@ fn named_inputs<'a>(
 fn lower_for_batch(
     graph: &proxima_onnx::messages::GraphProto<'_>,
     batch: u64,
-) -> (proxima_onnx::lower::Lowered, proxima_tensor::NodeId, Vec<Vec<i64>>) {
+) -> (
+    proxima_onnx::lower::Lowered,
+    proxima_tensor::NodeId,
+    Vec<Vec<i64>>,
+) {
     let mut pins = BTreeMap::new();
     pins.insert("batch_size", batch);
     pins.insert("sequence_length", SEQUENCE_LENGTH as u64);
@@ -98,7 +102,11 @@ fn lower_for_batch(
     (lowered, output, rows)
 }
 
-fn run_one(lowered: &proxima_onnx::lower::Lowered, output: proxima_tensor::NodeId, rows: &[Vec<i64>]) {
+fn run_one(
+    lowered: &proxima_onnx::lower::Lowered,
+    output: proxima_tensor::NodeId,
+    rows: &[Vec<i64>],
+) {
     let (input_ids, attention_mask, token_type_ids) = dynamic_inputs_batch(rows);
     let named = named_inputs(lowered, &input_ids, &attention_mask, &token_type_ids);
     let evaluated = cpu::evaluate_named(&lowered.program, &[], &named, &[output])
@@ -184,9 +192,7 @@ fn census_one_batch(graph: &proxima_onnx::messages::GraphProto<'_>, batch: u64) 
     let row_remainder_elements_delta = row_remainder_elements_after - row_remainder_elements_before;
 
     let per_call_gemm = total_gemm / MEASURED_CALLS as u64;
-    println!(
-        "gemm-shaped reduce calls: {total_gemm} total ({per_call_gemm}/call, expect 96/call)"
-    );
+    println!("gemm-shaped reduce calls: {total_gemm} total ({per_call_gemm}/call, expect 96/call)");
     println!(
         "width_tile_plan gate: {width_gate_delta} of {width_fast_calls} WidthFast-classified calls \
          resolved Some ({width_invocations_delta} main-tile kernel invocations, {width_fallback_delta} \

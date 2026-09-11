@@ -85,7 +85,8 @@ pub fn stream_cached_attention(
                     key_row as i64
                 };
                 let relative = key_position - query_row as i64;
-                if relative < causal_band.lower_inclusive || relative > causal_band.upper_inclusive {
+                if relative < causal_band.lower_inclusive || relative > causal_band.upper_inclusive
+                {
                     continue;
                 }
                 let key_start = key_row * head_dim;
@@ -239,14 +240,14 @@ pub fn stream_cached_attention_split(
                     key_row as i64
                 };
                 let relative = key_position - query_row as i64;
-                if relative < causal_band.lower_inclusive || relative > causal_band.upper_inclusive {
+                if relative < causal_band.lower_inclusive || relative > causal_band.upper_inclusive
+                {
                     continue;
                 }
                 let key_start = key_row * pair_dim;
                 let mut score = 0.0;
                 for dimension in 0..pair_dim {
-                    score += query_even[query_start + dimension]
-                        * keys_even[key_start + dimension]
+                    score += query_even[query_start + dimension] * keys_even[key_start + dimension]
                         + query_odd[query_start + dimension] * keys_odd[key_start + dimension];
                 }
                 let score = score * scale;
@@ -344,7 +345,9 @@ pub fn stream_cached_attention_split_gqa(
     // the same buffer it passed for the new range, so its length is not
     // required to match a zero-sized cached extent.
     let cached_range_empty = extents.cached_key_rows == 0;
-    if queries.iter().any(|query| query.len() != query_width as usize)
+    if queries
+        .iter()
+        .any(|query| query.len() != query_width as usize)
         || (!cached_range_empty
             && keys[0]
                 .iter()
@@ -368,8 +371,7 @@ pub fn stream_cached_attention_split_gqa(
             for query_group in 0..query_groups {
                 let query_head = kv_head * query_groups + query_group;
                 let query_start = (query_row * kv_heads * query_groups + query_head) * pair_dim;
-                let output_start =
-                    (query_row * kv_heads * query_groups + query_head) * head_dim;
+                let output_start = (query_row * kv_heads * query_groups + query_head) * head_dim;
                 let output_row = &mut output[output_start..output_start + head_dim];
                 output_row.fill(0.0);
                 let mut running_max = f32::NEG_INFINITY;
@@ -399,21 +401,16 @@ pub fn stream_cached_attention_split_gqa(
                             key_row as i64
                         };
                         let relative = key_position - query_row as i64;
-                        let band = if range_index == 0 {
-                            bands[0]
-                        } else {
-                            bands[1]
-                        };
-                        if relative < band.lower_inclusive || relative > band.upper_inclusive
-                        {
+                        let band = if range_index == 0 { bands[0] } else { bands[1] };
+                        if relative < band.lower_inclusive || relative > band.upper_inclusive {
                             continue;
                         }
                         let key_start = (key_row * kv_heads + kv_head) * pair_dim;
                         let mut score = 0.0;
                         for dimension in 0..pair_dim {
-                        score += queries[0][query_start + dimension]
-                            * keys_even[key_start + dimension]
-                            + queries[1][query_start + dimension]
+                            score += queries[0][query_start + dimension]
+                                * keys_even[key_start + dimension]
+                                + queries[1][query_start + dimension]
                                     * keys_odd[key_start + dimension];
                         }
                         let score = score * scale;
@@ -606,10 +603,7 @@ mod tests {
         let mut output = [0.0; 4];
         assert!(stream_cached_attention_split_gqa(
             [&[1.0, 0.0][..], &[0.0, 1.0][..]],
-            [
-                [&[1.0][..], &[0.0][..]],
-                [&[0.0][..], &[1.0][..]],
-            ],
+            [[&[1.0][..], &[0.0][..]], [&[0.0][..], &[1.0][..]],],
             [&[2.0, 4.0][..], &[6.0, 8.0][..]],
             &mut output,
             extents,

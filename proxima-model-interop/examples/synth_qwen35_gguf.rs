@@ -102,7 +102,9 @@ fn lcg_bytes(len: usize, seed: u64) -> Vec<u8> {
     let mut state = seed | 1;
     let mut out = Vec::with_capacity(len);
     for _ in 0..len {
-        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         out.push((state >> 56) as u8);
     }
     out
@@ -120,7 +122,13 @@ fn tensor_bytes(elements: u64, ggml_type: GgmlType) -> u64 {
 /// `(row_len, rows)` in GGUF's own `[in_dim, out_dim]` `ne` convention
 /// (`qwen35.rs:40-42`'s own doc) -- `row_len` is `dims[0]`, the axis a
 /// quantized type's block size must divide.
-pub(crate) fn matmul_tensor(name: &str, row_len: u32, rows: u32, ggml_type: GgmlType, seed: u64) -> TensorPayload<'static> {
+pub(crate) fn matmul_tensor(
+    name: &str,
+    row_len: u32,
+    rows: u32,
+    ggml_type: GgmlType,
+    seed: u64,
+) -> TensorPayload<'static> {
     assert_eq!(
         u64::from(row_len) % block_elements(ggml_type),
         0,
@@ -157,10 +165,22 @@ pub(crate) fn vector_tensor(name: &str, len: u32, seed: u64) -> TensorPayload<'s
 /// tied-embedding table (`token_embd.weight`, also this checkpoint's head),
 /// F32 for every norm and every small `ssm_*` vector this checkpoint binds
 /// via `bind_dense` -- the production mix the land-brief specifies.
-pub(crate) fn layer_tensors(layer: u32, is_attention: bool, seed: u64) -> Vec<TensorPayload<'static>> {
+pub(crate) fn layer_tensors(
+    layer: u32,
+    is_attention: bool,
+    seed: u64,
+) -> Vec<TensorPayload<'static>> {
     let mut tensors = vec![
-        vector_tensor(&format!("blk.{layer}.attn_norm.weight"), EMBEDDING, seed + 1),
-        vector_tensor(&format!("blk.{layer}.post_attention_norm.weight"), EMBEDDING, seed + 2),
+        vector_tensor(
+            &format!("blk.{layer}.attn_norm.weight"),
+            EMBEDDING,
+            seed + 1,
+        ),
+        vector_tensor(
+            &format!("blk.{layer}.post_attention_norm.weight"),
+            EMBEDDING,
+            seed + 2,
+        ),
     ];
 
     if is_attention {
@@ -192,8 +212,16 @@ pub(crate) fn layer_tensors(layer: u32, is_attention: bool, seed: u64) -> Vec<Te
             GgmlType::Q4_K,
             seed + 13,
         ));
-        tensors.push(vector_tensor(&format!("blk.{layer}.attn_q_norm.weight"), ATTN_HEAD_DIM, seed + 14));
-        tensors.push(vector_tensor(&format!("blk.{layer}.attn_k_norm.weight"), ATTN_HEAD_DIM, seed + 15));
+        tensors.push(vector_tensor(
+            &format!("blk.{layer}.attn_q_norm.weight"),
+            ATTN_HEAD_DIM,
+            seed + 14,
+        ));
+        tensors.push(vector_tensor(
+            &format!("blk.{layer}.attn_k_norm.weight"),
+            ATTN_HEAD_DIM,
+            seed + 15,
+        ));
     } else {
         let ssm_key_dim = SSM_STATE_SIZE * SSM_GROUP_COUNT;
         let qkv_dim = 2 * ssm_key_dim + SSM_INNER_SIZE;
@@ -234,10 +262,26 @@ pub(crate) fn layer_tensors(layer: u32, is_attention: bool, seed: u64) -> Vec<Te
             GgmlType::Q4_K,
             seed + 24,
         ));
-        tensors.push(vector_tensor(&format!("blk.{layer}.ssm_conv1d.weight"), qkv_dim * SSM_CONV_KERNEL, seed + 25));
-        tensors.push(vector_tensor(&format!("blk.{layer}.ssm_dt"), SSM_TIME_STEP_RANK, seed + 26));
-        tensors.push(vector_tensor(&format!("blk.{layer}.ssm_a"), SSM_TIME_STEP_RANK, seed + 27));
-        tensors.push(vector_tensor(&format!("blk.{layer}.ssm_norm.weight"), head_v_dim, seed + 28));
+        tensors.push(vector_tensor(
+            &format!("blk.{layer}.ssm_conv1d.weight"),
+            qkv_dim * SSM_CONV_KERNEL,
+            seed + 25,
+        ));
+        tensors.push(vector_tensor(
+            &format!("blk.{layer}.ssm_dt"),
+            SSM_TIME_STEP_RANK,
+            seed + 26,
+        ));
+        tensors.push(vector_tensor(
+            &format!("blk.{layer}.ssm_a"),
+            SSM_TIME_STEP_RANK,
+            seed + 27,
+        ));
+        tensors.push(vector_tensor(
+            &format!("blk.{layer}.ssm_norm.weight"),
+            head_v_dim,
+            seed + 28,
+        ));
     }
 
     tensors.push(matmul_tensor(
@@ -272,33 +316,92 @@ pub(crate) fn layer_tensors(layer: u32, is_attention: bool, seed: u64) -> Vec<Te
 /// this fixture cares about the forward pass running, not about a
 /// realistic tokenizer.
 pub(crate) fn tokenizer_metadata() -> Vec<(String, MetadataValue)> {
-    let tokens: Vec<String> = (0..VOCAB).map(|byte| (char::from(byte as u8)).to_string()).collect();
+    let tokens: Vec<String> = (0..VOCAB)
+        .map(|byte| (char::from(byte as u8)).to_string())
+        .collect();
     let scores = vec![0.0f32; VOCAB as usize];
     vec![
-        ("tokenizer.ggml.model".to_string(), MetadataValue::String("llama".to_string())),
-        ("tokenizer.ggml.tokens".to_string(), MetadataValue::Array(MetadataArray::String(tokens))),
-        ("tokenizer.ggml.scores".to_string(), MetadataValue::Array(MetadataArray::F32(scores))),
-        ("tokenizer.ggml.bos_token_id".to_string(), MetadataValue::U32(1)),
-        ("tokenizer.ggml.eos_token_id".to_string(), MetadataValue::U32(2)),
+        (
+            "tokenizer.ggml.model".to_string(),
+            MetadataValue::String("llama".to_string()),
+        ),
+        (
+            "tokenizer.ggml.tokens".to_string(),
+            MetadataValue::Array(MetadataArray::String(tokens)),
+        ),
+        (
+            "tokenizer.ggml.scores".to_string(),
+            MetadataValue::Array(MetadataArray::F32(scores)),
+        ),
+        (
+            "tokenizer.ggml.bos_token_id".to_string(),
+            MetadataValue::U32(1),
+        ),
+        (
+            "tokenizer.ggml.eos_token_id".to_string(),
+            MetadataValue::U32(2),
+        ),
     ]
 }
 
 pub(crate) fn architecture_metadata() -> Vec<(String, MetadataValue)> {
     vec![
-        ("general.architecture".to_string(), MetadataValue::String("qwen35".to_string())),
-        ("qwen35.embedding_length".to_string(), MetadataValue::U32(EMBEDDING)),
-        ("qwen35.feed_forward_length".to_string(), MetadataValue::U32(FEED_FORWARD)),
-        ("qwen35.attention.head_count".to_string(), MetadataValue::U32(QUERY_HEADS)),
-        ("qwen35.attention.head_count_kv".to_string(), MetadataValue::U32(KV_HEADS)),
-        ("qwen35.block_count".to_string(), MetadataValue::U32(BLOCK_COUNT)),
-        ("qwen35.rope.dimension_count".to_string(), MetadataValue::U32(ROPE_DIM)),
-        ("qwen35.attention.key_length".to_string(), MetadataValue::U32(ATTN_HEAD_DIM)),
-        ("qwen35.full_attention_interval".to_string(), MetadataValue::U32(FULL_ATTENTION_INTERVAL)),
-        ("qwen35.ssm.conv_kernel".to_string(), MetadataValue::U32(SSM_CONV_KERNEL)),
-        ("qwen35.ssm.state_size".to_string(), MetadataValue::U32(SSM_STATE_SIZE)),
-        ("qwen35.ssm.group_count".to_string(), MetadataValue::U32(SSM_GROUP_COUNT)),
-        ("qwen35.ssm.time_step_rank".to_string(), MetadataValue::U32(SSM_TIME_STEP_RANK)),
-        ("qwen35.ssm.inner_size".to_string(), MetadataValue::U32(SSM_INNER_SIZE)),
+        (
+            "general.architecture".to_string(),
+            MetadataValue::String("qwen35".to_string()),
+        ),
+        (
+            "qwen35.embedding_length".to_string(),
+            MetadataValue::U32(EMBEDDING),
+        ),
+        (
+            "qwen35.feed_forward_length".to_string(),
+            MetadataValue::U32(FEED_FORWARD),
+        ),
+        (
+            "qwen35.attention.head_count".to_string(),
+            MetadataValue::U32(QUERY_HEADS),
+        ),
+        (
+            "qwen35.attention.head_count_kv".to_string(),
+            MetadataValue::U32(KV_HEADS),
+        ),
+        (
+            "qwen35.block_count".to_string(),
+            MetadataValue::U32(BLOCK_COUNT),
+        ),
+        (
+            "qwen35.rope.dimension_count".to_string(),
+            MetadataValue::U32(ROPE_DIM),
+        ),
+        (
+            "qwen35.attention.key_length".to_string(),
+            MetadataValue::U32(ATTN_HEAD_DIM),
+        ),
+        (
+            "qwen35.full_attention_interval".to_string(),
+            MetadataValue::U32(FULL_ATTENTION_INTERVAL),
+        ),
+        (
+            "qwen35.ssm.conv_kernel".to_string(),
+            MetadataValue::U32(SSM_CONV_KERNEL),
+        ),
+        (
+            "qwen35.ssm.state_size".to_string(),
+            MetadataValue::U32(SSM_STATE_SIZE),
+        ),
+        (
+            "qwen35.ssm.group_count".to_string(),
+            MetadataValue::U32(SSM_GROUP_COUNT),
+        ),
+        (
+            "qwen35.ssm.time_step_rank".to_string(),
+            MetadataValue::U32(SSM_TIME_STEP_RANK),
+        ),
+        (
+            "qwen35.ssm.inner_size".to_string(),
+            MetadataValue::U32(SSM_INNER_SIZE),
+        ),
     ]
 }
 
@@ -306,10 +409,20 @@ fn main() {
     let mut metadata = architecture_metadata();
     metadata.extend(tokenizer_metadata());
 
-    let mut tensors = vec![matmul_tensor("token_embd.weight", EMBEDDING, VOCAB, GgmlType::Q6_K, 1)];
+    let mut tensors = vec![matmul_tensor(
+        "token_embd.weight",
+        EMBEDDING,
+        VOCAB,
+        GgmlType::Q6_K,
+        1,
+    )];
     for layer in 0..BLOCK_COUNT {
         let is_attention = (layer + 1).is_multiple_of(FULL_ATTENTION_INTERVAL);
-        tensors.extend(layer_tensors(layer, is_attention, u64::from(layer) * 1000 + 100));
+        tensors.extend(layer_tensors(
+            layer,
+            is_attention,
+            u64::from(layer) * 1000 + 100,
+        ));
     }
     tensors.push(vector_tensor("output_norm.weight", EMBEDDING, 999_999));
 
@@ -337,7 +450,11 @@ fn main() {
     );
 
     let reparsed = proxima_gguf::parse_complete(&written).expect("written bytes parse back");
-    assert_eq!(reparsed.tensors.len(), model.tensors.len(), "tensor count round-trips");
+    assert_eq!(
+        reparsed.tensors.len(),
+        model.tensors.len(),
+        "tensor count round-trips"
+    );
 
     std::fs::write(OUTPUT_PATH, &written).expect("write synthetic gguf to scratchpad");
 }

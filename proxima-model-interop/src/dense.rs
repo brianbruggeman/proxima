@@ -49,6 +49,11 @@ impl Architecture for DenseArch {
         file_bytes: &'file [u8],
     ) -> Result<BoundProgram<'file>, InteropError> {
         let architecture = architecture_from_metadata(parsed)?;
+        // This builder has one KV cache shape for every layer. Preserve a
+        // checkpoint's per-layer configuration in `ModelArchitecture`, but
+        // do not silently select a representative value for this uniform
+        // program.
+        architecture.uniform_kv_heads()?;
         // `&[]`: this entry point takes no `ServingConfig`, so there is no
         // `weight_precision` rule set to thread here yet --
         // `crate::bind::bind_all_weights`'s own doc names this as the
@@ -84,7 +89,12 @@ impl Architecture for DenseArch {
             program,
             logits_root: roots.logits,
             hidden_root: Some(roots.hidden),
-            layer_roots: cache_roots.into_iter().map(Qwen35LayerRoots::Attention).collect(),
+            layer_roots: cache_roots
+                .into_iter()
+                .map(Qwen35LayerRoots::Attention)
+                .collect(),
+            qwen35moe_layer_diagnostics: Vec::new(),
+            router_roots: Vec::new(),
             moe_sites,
             single_position_step: false,
         })

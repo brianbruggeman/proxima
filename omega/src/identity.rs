@@ -264,6 +264,7 @@ pub(crate) fn operand_codecs(
 /// differing only in codec can share one compiled kernel.
 fn codec_token(codec: Option<PackedCodec>) -> char {
     match codec {
+        Some(PackedCodec::Q2K) => '2',
         Some(PackedCodec::Q3K) => '3',
         Some(PackedCodec::Q4K) => '4',
         Some(PackedCodec::Q5K) => '5',

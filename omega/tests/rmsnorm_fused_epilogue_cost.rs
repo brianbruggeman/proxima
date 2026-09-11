@@ -164,7 +164,10 @@ fn append_rmsnorm_chain(
             name: None,
         },
     );
-    RmsnormChain { scaled, sum_squares }
+    RmsnormChain {
+        scaled,
+        sum_squares,
+    }
 }
 
 /// [`build_batch`]'s own return shape: the program, its (empty, this file
@@ -297,13 +300,13 @@ fn run_cell(label: &str, seq: u32, dim: u32, fused: bool) {
     let named_blocks = as_named_blocks(&named);
 
     let shapes = infer(&program, &symbols).expect("rmsnorm batch program infers");
-    let resolved =
-        bind(&program, &shapes, &roots, production_numeric_policy()).expect("rmsnorm batch program binds");
+    let resolved = bind(&program, &shapes, &roots, production_numeric_policy())
+        .expect("rmsnorm batch program binds");
     let fused_count = epilogued_reduce_count(&resolved);
     println!(
         "=== ROW 368 {label} seq={seq} dim={dim} fused_requested={fused} \
-         fused_reduce_count={fused_count}/{INSTANCES} resolved_ops={} ==="
-        , resolved.len()
+         fused_reduce_count={fused_count}/{INSTANCES} resolved_ops={} ===",
+        resolved.len()
     );
     if fused {
         assert_eq!(
@@ -479,7 +482,8 @@ fn compile_to_air(source: &str, label: &str) -> (String, DivisionCounts) {
 fn air_division_count_for_shape(label: &str, seq: u32, dim: u32) {
     let (program, symbols, roots, _named) = build_batch(seq, dim, true);
     let shapes = infer(&program, &symbols).expect("rmsnorm batch program infers");
-    let resolved = bind(&program, &shapes, &roots, NumericPolicy::default()).expect("rmsnorm batch program binds");
+    let resolved = bind(&program, &shapes, &roots, NumericPolicy::default())
+        .expect("rmsnorm batch program binds");
     let bound = resolved
         .iter()
         .find(|bound| {
@@ -503,8 +507,16 @@ fn air_division_count_for_shape(label: &str, seq: u32, dim: u32) {
         "ROW 368 {label} seq={seq} dim={dim} AIR division-class instruction count: \
          baseline sdiv={} srem={} udiv={} urem={} total={} | \
          row350-rewrite sdiv={} srem={} udiv={} urem={} total={}",
-        baseline.sdiv, baseline.srem, baseline.udiv, baseline.urem, baseline.total(),
-        rewrite.sdiv, rewrite.srem, rewrite.udiv, rewrite.urem, rewrite.total()
+        baseline.sdiv,
+        baseline.srem,
+        baseline.udiv,
+        baseline.urem,
+        baseline.total(),
+        rewrite.sdiv,
+        rewrite.srem,
+        rewrite.udiv,
+        rewrite.urem,
+        rewrite.total()
     );
     assert!(
         rewrite.total() < baseline.total(),

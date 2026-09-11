@@ -12,7 +12,11 @@
 //! this program -- so this test also asserts that actually happened rather
 //! than silently passing on an unfused program.
 
-#![cfg(all(feature = "cpu", feature = "wgpu-backend", feature = "reduce-epilogue-fusion"))]
+#![cfg(all(
+    feature = "cpu",
+    feature = "wgpu-backend",
+    feature = "reduce-epilogue-fusion"
+))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};

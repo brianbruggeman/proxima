@@ -91,13 +91,15 @@ fn one_steady_state_decode_step_stays_under_the_debug_level_event_budget() {
 
     // cold cache: every op is a genuine miss/compile, warming
     // `metal::PIPELINE_CACHE` for the steady-state run below.
-    omega::execute(&program, &[], &blocks, &[], NumericPolicy::default()).expect("cold-cache run executes on a real Metal device");
+    omega::execute(&program, &[], &blocks, &[], NumericPolicy::default())
+        .expect("cold-cache run executes on a real Metal device");
     recorder.drain();
     logs.store(0, Ordering::Relaxed);
 
     // steady state: every op hits the pipeline cache the cold run warmed --
     // the exact cadence a real decode step's Nth token repeats.
-    omega::execute(&program, &[], &blocks, &[], NumericPolicy::default()).expect("steady-state run executes on a real Metal device");
+    omega::execute(&program, &[], &blocks, &[], NumericPolicy::default())
+        .expect("steady-state run executes on a real Metal device");
     recorder.drain();
 
     let steady_state_debug_or_above_events = logs.load(Ordering::Relaxed);

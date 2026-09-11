@@ -21,7 +21,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use proxima_build::sizing::{require_nonzero, SizingSource};
+use proxima_build::sizing::{SizingSource, require_nonzero};
 
 /// Emits into two separate `OUT_DIR` files rather than one, because the two
 /// consts are read under different cfgs: `RETRY_STATUS_CAP` only by the

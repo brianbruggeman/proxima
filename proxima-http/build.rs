@@ -42,7 +42,8 @@ fn emit_sizing_consts(out_dir: &Path) {
 
     let name = require_nonempty(
         "listener.name",
-        root.resolve_str("listener", "name").unwrap_or_else(|err| panic!("{err}")),
+        root.resolve_str("listener", "name")
+            .unwrap_or_else(|err| panic!("{err}")),
     );
     let drain_timeout_ms = root
         .resolve_int("listener", "drain_timeout_ms")

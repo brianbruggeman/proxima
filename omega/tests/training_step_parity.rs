@@ -620,14 +620,12 @@ fn run_multi_step_on(engine: Engine, gpu_driver: Option<GpuDriver>) -> Option<Ve
             &[],
             &named_blocks,
             &outputs,
-        NumericPolicy::default(),
+            NumericPolicy::default(),
         )
         .unwrap_or_else(|error| panic!("{name} plans training step {step_number}: {error}"));
         let evaluated = match execute_plan_named(&mut plan, &named_blocks) {
             Ok(evaluated) => evaluated,
-            Err(error)
-                if gpu_driver == Some(GpuDriver::Wgpu) && is_epilogue_rejection(&error) =>
-            {
+            Err(error) if gpu_driver == Some(GpuDriver::Wgpu) && is_epilogue_rejection(&error) => {
                 eprintln!("wgpu training step {step_number}: named decline -- {error}");
                 return None;
             }

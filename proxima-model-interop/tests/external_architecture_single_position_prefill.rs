@@ -49,7 +49,9 @@ use proxima_tokenizer::byte_level::byte_to_char;
 mod support;
 
 fn push_tokenizer_metadata(metadata: &mut Vec<(String, MetadataValue)>) {
-    let mut tokens: Vec<String> = (0..=255u8).map(|byte| String::from(byte_to_char(byte))).collect();
+    let mut tokens: Vec<String> = (0..=255u8)
+        .map(|byte| String::from(byte_to_char(byte)))
+        .collect();
     tokens.push(String::from("<|endoftext|>"));
     metadata.push((
         "tokenizer.ggml.model".to_string(),
@@ -63,7 +65,10 @@ fn push_tokenizer_metadata(metadata: &mut Vec<(String, MetadataValue)>) {
         "tokenizer.ggml.merges".to_string(),
         MetadataValue::Array(MetadataArray::String(Vec::new())),
     ));
-    metadata.push(("tokenizer.ggml.bos_token_id".to_string(), MetadataValue::U32(0)));
+    metadata.push((
+        "tokenizer.ggml.bos_token_id".to_string(),
+        MetadataValue::U32(0),
+    ));
     metadata.push((
         "tokenizer.ggml.eos_token_id".to_string(),
         MetadataValue::U32(support::EOS_TOKEN_ID),
@@ -110,21 +115,27 @@ fn checkpoint_bytes(architecture_name: &str) -> Vec<u8> {
     buffers.push(support::encode_weights(GgmlType::F32, &square));
     specs.push((
         String::from("blk.0.attn_q.weight"),
-        [u64::from(embedding), u64::from(embedding)].into_iter().collect(),
+        [u64::from(embedding), u64::from(embedding)]
+            .into_iter()
+            .collect(),
         GgmlType::F32,
     ));
     for name in ["blk.0.attn_k.weight", "blk.0.attn_v.weight"] {
         buffers.push(support::encode_weights(GgmlType::F32, &kv_projection));
         specs.push((
             String::from(name),
-            [u64::from(embedding), u64::from(kv_dim)].into_iter().collect(),
+            [u64::from(embedding), u64::from(kv_dim)]
+                .into_iter()
+                .collect(),
             GgmlType::F32,
         ));
     }
     buffers.push(support::encode_weights(GgmlType::F32, &square));
     specs.push((
         String::from("blk.0.attn_output.weight"),
-        [u64::from(embedding), u64::from(embedding)].into_iter().collect(),
+        [u64::from(embedding), u64::from(embedding)]
+            .into_iter()
+            .collect(),
         GgmlType::F32,
     ));
 
@@ -133,14 +144,18 @@ fn checkpoint_bytes(architecture_name: &str) -> Vec<u8> {
         buffers.push(support::encode_weights(GgmlType::F32, &ffn));
         specs.push((
             String::from(name),
-            [u64::from(embedding), u64::from(feed_forward)].into_iter().collect(),
+            [u64::from(embedding), u64::from(feed_forward)]
+                .into_iter()
+                .collect(),
             GgmlType::F32,
         ));
     }
     buffers.push(support::encode_weights(GgmlType::F32, &ffn));
     specs.push((
         String::from("blk.0.ffn_down.weight"),
-        [u64::from(feed_forward), u64::from(embedding)].into_iter().collect(),
+        [u64::from(feed_forward), u64::from(embedding)]
+            .into_iter()
+            .collect(),
         GgmlType::F32,
     ));
 
@@ -155,7 +170,9 @@ fn checkpoint_bytes(architecture_name: &str) -> Vec<u8> {
     buffers.push(support::encode_weights(GgmlType::F32, &output_values));
     specs.push((
         String::from("output.weight"),
-        [u64::from(embedding), u64::from(vocab)].into_iter().collect(),
+        [u64::from(embedding), u64::from(vocab)]
+            .into_iter()
+            .collect(),
         GgmlType::F32,
     ));
 
@@ -191,7 +208,10 @@ fn checkpoint_bytes(architecture_name: &str) -> Vec<u8> {
             format!("{architecture_name}.attention.head_count_kv"),
             MetadataValue::U32(support::KV_HEADS),
         ),
-        (format!("{architecture_name}.block_count"), MetadataValue::U32(1)),
+        (
+            format!("{architecture_name}.block_count"),
+            MetadataValue::U32(1),
+        ),
         (
             format!("{architecture_name}.rope.dimension_count"),
             MetadataValue::U32(support::HEAD_DIM),
@@ -217,7 +237,10 @@ static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn reset_observations() {
     CALL_COUNT.store(0, Ordering::SeqCst);
-    OBSERVED_NEW_COUNTS.lock().expect("test-only mutex, never poisoned").clear();
+    OBSERVED_NEW_COUNTS
+        .lock()
+        .expect("test-only mutex, never poisoned")
+        .clear();
 }
 
 /// Wraps [`DenseArch::bind`] unmodified except for `single_position_step`,
@@ -308,7 +331,10 @@ async fn single_position_step_splits_prefill_into_one_evaluation_per_position() 
     );
     assert_eq!(ids.len(), 2, "max_tokens=2 produces exactly two token ids");
 
-    let observed = OBSERVED_NEW_COUNTS.lock().expect("test-only mutex, never poisoned").clone();
+    let observed = OBSERVED_NEW_COUNTS
+        .lock()
+        .expect("test-only mutex, never poisoned")
+        .clone();
     assert!(
         observed.len() >= prompt.len() + 2,
         "one step_inputs call per prompt byte (bos-prefixed) plus one per generated token, \
@@ -334,15 +360,18 @@ async fn single_position_step_prefill_matches_the_pre_existing_batched_prefill()
 
     let batched_registry = registry_with(&SINGLE_POSITION_OFF);
     let batched_file_bytes = checkpoint_bytes(SINGLE_POSITION_OFF.name);
-    let batched_parsed = parse_complete(&batched_file_bytes).expect("parses the synthetic checkpoint");
-    let batched_model = LoadedModel::load_with_registry(&batched_parsed, &batched_file_bytes, &batched_registry)
-        .expect("loads with single_position_step: false");
+    let batched_parsed =
+        parse_complete(&batched_file_bytes).expect("parses the synthetic checkpoint");
+    let batched_model =
+        LoadedModel::load_with_registry(&batched_parsed, &batched_file_bytes, &batched_registry)
+            .expect("loads with single_position_step: false");
 
     let split_registry = registry_with(&SINGLE_POSITION_ON);
     let split_file_bytes = checkpoint_bytes(SINGLE_POSITION_ON.name);
     let split_parsed = parse_complete(&split_file_bytes).expect("parses the synthetic checkpoint");
-    let split_model = LoadedModel::load_with_registry(&split_parsed, &split_file_bytes, &split_registry)
-        .expect("loads with single_position_step: true");
+    let split_model =
+        LoadedModel::load_with_registry(&split_parsed, &split_file_bytes, &split_registry)
+            .expect("loads with single_position_step: true");
 
     let prompt = "abc";
     let (batched_ids, batched_text, _stopped) = batched_model

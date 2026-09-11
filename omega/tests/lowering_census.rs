@@ -62,11 +62,36 @@ struct WeightFamily {
 }
 
 const WEIGHT_FAMILIES: &[WeightFamily] = &[
-    WeightFamily { name: "attn_q.weight", in_dim: EMBEDDING, out_dim: EMBEDDING, codec: PackedCodec::Q4K },
-    WeightFamily { name: "ffn_gate.weight", in_dim: EMBEDDING, out_dim: FEED_FORWARD, codec: PackedCodec::Q4K },
-    WeightFamily { name: "ffn_up.weight", in_dim: EMBEDDING, out_dim: FEED_FORWARD, codec: PackedCodec::Q4K },
-    WeightFamily { name: "ffn_down.weight", in_dim: FEED_FORWARD, out_dim: EMBEDDING, codec: PackedCodec::Q5K },
-    WeightFamily { name: "output.weight", in_dim: EMBEDDING, out_dim: VOCAB, codec: PackedCodec::Q6K },
+    WeightFamily {
+        name: "attn_q.weight",
+        in_dim: EMBEDDING,
+        out_dim: EMBEDDING,
+        codec: PackedCodec::Q4K,
+    },
+    WeightFamily {
+        name: "ffn_gate.weight",
+        in_dim: EMBEDDING,
+        out_dim: FEED_FORWARD,
+        codec: PackedCodec::Q4K,
+    },
+    WeightFamily {
+        name: "ffn_up.weight",
+        in_dim: EMBEDDING,
+        out_dim: FEED_FORWARD,
+        codec: PackedCodec::Q4K,
+    },
+    WeightFamily {
+        name: "ffn_down.weight",
+        in_dim: FEED_FORWARD,
+        out_dim: EMBEDDING,
+        codec: PackedCodec::Q5K,
+    },
+    WeightFamily {
+        name: "output.weight",
+        in_dim: EMBEDDING,
+        out_dim: VOCAB,
+        codec: PackedCodec::Q6K,
+    },
 ];
 
 /// `metal`'s own feature list turns `metal-q4k-ggml-port` ON by default
@@ -82,7 +107,11 @@ fn codec_marker(codec: PackedCodec) -> &'static str {
         PackedCodec::Q3K => "q3k_pair_dot(blk",
         PackedCodec::Q4K | PackedCodec::Q5K => "acc1_0",
         PackedCodec::Q6K => "sums0",
-        PackedCodec::Q8_0 | PackedCodec::Q4_0 | PackedCodec::Float16 | PackedCodec::BFloat16 => {
+        PackedCodec::Q2K
+        | PackedCodec::Q8_0
+        | PackedCodec::Q4_0
+        | PackedCodec::Float16
+        | PackedCodec::BFloat16 => {
             unreachable!("WEIGHT_FAMILIES never assigns a non-K-quant codec")
         }
     }

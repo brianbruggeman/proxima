@@ -884,8 +884,16 @@ fn run_per_node_profile(lane: &TrainingLane) {
         );
     }
 
-    let (dot_calls, dot_ticks, width_calls, width_ticks, conv_calls, conv_ticks, generic_calls, generic_ticks) =
-        instrument::reduce_gemm_path_totals();
+    let (
+        dot_calls,
+        dot_ticks,
+        width_calls,
+        width_ticks,
+        conv_calls,
+        conv_ticks,
+        generic_calls,
+        generic_ticks,
+    ) = instrument::reduce_gemm_path_totals();
     eprintln!(
         "train_step_lane: reduce-gemm route census (cumulative over the whole run, warmup included) -- \
          dot_fast calls={dot_calls} ticks_us={:.3} width_fast calls={width_calls} ticks_us={:.3} \

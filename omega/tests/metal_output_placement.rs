@@ -249,3 +249,79 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
          Evaluated copy of row_out is skipped, not the GPU dispatch that produced it"
     );
 }
+
+#[test]
+fn a_four_dimensional_state_round_trips_through_placement() {
+    const STATE_ELEMENTS: usize = 2 * 3 * 4 * 5;
+    let mut program = Vec::new();
+    let state_input = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![
+                Extent::Static(2),
+                Extent::Static(3),
+                Extent::Static(4),
+                Extent::Static(5),
+            ],
+            name: None,
+        },
+    );
+    let state_output = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: vec![(state_input, IndexMap::Affine(projection(4, &[0, 1, 2, 3])))],
+            name: None,
+        },
+    );
+    let plan = omega::plan(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&[0.0; STATE_ELEMENTS])],
+        &[state_output],
+        NumericPolicy::default(),
+    )
+    .expect("plans a four-dimensional recurrent-state identity");
+    let input_buffer = omega::allocate_placed_buffer(STATE_ELEMENTS * size_of::<f32>())
+        .expect("allocates the recurrent-state input buffer");
+    let output_buffer = omega::allocate_placed_buffer(STATE_ELEMENTS * size_of::<f32>())
+        .expect("allocates the recurrent-state output buffer");
+    let state: Vec<f32> = (0..STATE_ELEMENTS).map(|index| index as f32).collect();
+    omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&state)],
+        &[],
+        &[(state_output, &input_buffer, 0)],
+        &mut Vec::new(),
+    )
+    .expect("seeds the placed input state");
+    omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&[0.0; STATE_ELEMENTS])],
+        &[(state_input, &input_buffer, 0)],
+        &[(state_output, &output_buffer, 0)],
+        &mut Vec::new(),
+    )
+    .expect("executes the four-dimensional placed state");
+    assert_eq!(
+        omega::read_placed_buffer_f32(&output_buffer, 0, STATE_ELEMENTS),
+        state,
+        "placement must preserve every element of the four-dimensional state"
+    );
+
+    omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&[0.0; STATE_ELEMENTS])],
+        &[(state_input, &output_buffer, 0)],
+        &[(state_output, &output_buffer, 0)],
+        &mut Vec::new(),
+    )
+    .expect("executes an in-place four-dimensional recurrent state");
+    assert_eq!(
+        omega::read_placed_buffer_f32(&output_buffer, 0, STATE_ELEMENTS),
+        state,
+        "same-offset input/output placement must preserve the recurrent state"
+    );
+}

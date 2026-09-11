@@ -970,6 +970,7 @@ fn cooperative_kernel_signature(source: &mut String, entry: &str, width: u32) {
 
 fn codec_function_name(node: NodeId, codec: PackedCodec) -> Result<&'static str, EmitError> {
     match codec {
+        PackedCodec::Q2K => Err(EmitError::UnsupportedPackedCodec { node }),
         PackedCodec::Q3K => Err(EmitError::UnsupportedPackedCodec { node }),
         PackedCodec::Q4K => Ok("q4k_element"),
         PackedCodec::Q5K => Ok("q5k_element"),
@@ -1725,7 +1726,13 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("bind succeeds");
         bound.into_iter().next().expect("one bound op")
     }
 
@@ -1779,7 +1786,13 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
         let kernel =
             emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("emit succeeds");
@@ -1808,7 +1821,13 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
         let error = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new())
             .expect_err("f16 is rejected without shader_f16");
@@ -1836,7 +1855,13 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
         let caps = WgslCaps {
             shader_f16: true,
@@ -1877,7 +1902,13 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
         let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new())
             .expect("bf16 collapses to f32 unconditionally");
@@ -1933,7 +1964,13 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("bind succeeds");
         bound
             .into_iter()
             .next_back()
@@ -2015,7 +2052,13 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
         let kernel =
             emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("iota emits");
@@ -2040,7 +2083,13 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default()).expect("bind succeeds");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
         let kernel =
             emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("constant emits");

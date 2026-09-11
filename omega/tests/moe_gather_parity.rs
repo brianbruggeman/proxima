@@ -175,13 +175,8 @@ fn moe_gather_parity_f32_bit_exact_on_metal() {
     let outputs = [sum];
 
     let shapes = infer(&program, &symbols).expect("gathered expert product fixture infers");
-    let resolved = bind(
-        &program,
-        &shapes,
-        &outputs,
-        bit_exact_numeric_policy(),
-    )
-    .expect("gathered expert product fixture binds");
+    let resolved = bind(&program, &shapes, &outputs, bit_exact_numeric_policy())
+        .expect("gathered expert product fixture binds");
     let _ = resolved;
 
     let mut free_buffers = Vec::new();
@@ -366,14 +361,17 @@ const KQUANT_ROUTE_DATA: [f32; 2] = [1.0, 0.0];
 const KQUANT_EXPERT_SCALES: [f32; 2] = [1.0, 9.0];
 
 fn kquant_expert_weight_f32(expert: usize, scale: f32) -> Vec<f32> {
-    random_vec(301 + expert as u64, KQUANT_ROWS as usize * KQUANT_K as usize)
-        .into_iter()
-        .map(|value| (value * 4.0 - 2.0) * scale)
-        .collect()
+    random_vec(
+        301 + expert as u64,
+        KQUANT_ROWS as usize * KQUANT_K as usize,
+    )
+    .into_iter()
+    .map(|value| (value * 4.0 - 2.0) * scale)
+    .collect()
 }
 
-fn kquant_activation_f32() -> Vec<f32> {
-    random_vec(411, KQUANT_SEQ as usize * KQUANT_K as usize)
+fn kquant_activation_f32(sequence: u32) -> Vec<f32> {
+    random_vec(411, sequence as usize * KQUANT_K as usize)
         .into_iter()
         .map(|value| value * 2.0 - 1.0)
         .collect()
@@ -389,8 +387,14 @@ fn kquant_activation_f32() -> Vec<f32> {
 /// this file's own `moe_gather_parity_f32_bit_exact_on_metal`/
 /// `moe_gather_parity_q8_0_within_measured_tolerance_on_metal` already use
 /// (two standalone `#[test]` functions, not a parameterized case).
-fn kquant_gather_parity<Q>(codec_name: &str, block_bytes: usize, quantize_row: Q, tolerance: f32)
-where
+fn kquant_gather_parity<Q>(
+    codec_name: &str,
+    block_bytes: usize,
+    quantize_row: Q,
+    tolerance: f32,
+    sequence: u32,
+    routes: &[f32],
+) where
     Q: Fn(&[f32], &mut [u8]),
 {
     let (program, sum) = gathered_expert_program(
@@ -398,7 +402,7 @@ where
         KQUANT_N_EXPERTS,
         KQUANT_ROWS,
         KQUANT_K,
-        KQUANT_SEQ,
+        sequence,
     );
     let mut stacked_weight: Vec<u8> = Vec::new();
     for (expert, &scale) in KQUANT_EXPERT_SCALES
@@ -421,7 +425,7 @@ where
         }
         stacked_weight.extend_from_slice(&blocks);
     }
-    let activation = kquant_activation_f32();
+    let activation = kquant_activation_f32(sequence);
 
     let symbols: Vec<u64> = Vec::new();
     let weight_block = match codec_name {
@@ -431,7 +435,7 @@ where
     };
     let named = [
         ("weight", weight_block),
-        ("route", QuantizedBlock::Float32(&KQUANT_ROUTE_DATA)),
+        ("route", QuantizedBlock::Float32(routes)),
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
     let outputs = [sum];
@@ -459,7 +463,9 @@ where
         &outputs,
         bit_exact_numeric_policy(),
     )
-    .unwrap_or_else(|error| panic!("metal plans the {codec_name} gathered expert fixture: {error:?}"));
+    .unwrap_or_else(|error| {
+        panic!("metal plans the {codec_name} gathered expert fixture: {error:?}")
+    });
     let metal = omega::execute_plan_named(&plan, &named).unwrap_or_else(|error| {
         panic!("metal runs the {codec_name} gathered expert fixture on a real device: {error:?}")
     });
@@ -490,6 +496,8 @@ fn moe_gather_parity_q4_k_within_tolerance_on_metal() {
         BLOCK_BYTES,
         |row, blocks| quantize(row, blocks).expect("row length is one q4_k super-block"),
         2e-3,
+        KQUANT_SEQ,
+        &KQUANT_ROUTE_DATA,
     );
 }
 
@@ -501,5 +509,21 @@ fn moe_gather_parity_q6_k_within_tolerance_on_metal() {
         BLOCK_BYTES,
         |row, blocks| quantize(row, blocks).expect("row length is one q6_k super-block"),
         2e-3,
+        KQUANT_SEQ,
+        &KQUANT_ROUTE_DATA,
+    );
+}
+
+#[test]
+fn one_token_moe_gather_q4_k_uses_the_routed_expert_on_metal() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, quantize};
+
+    kquant_gather_parity(
+        "q4_k",
+        BLOCK_BYTES,
+        |row, blocks| quantize(row, blocks).expect("row length is one q4_k super-block"),
+        2e-3,
+        1,
+        &[1.0],
     );
 }

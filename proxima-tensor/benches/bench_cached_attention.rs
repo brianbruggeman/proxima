@@ -44,24 +44,27 @@ fn materialized_attention(
         for kv_head in 0..KV_HEADS {
             for query_group in 0..QUERY_GROUPS {
                 let query_head = kv_head * QUERY_GROUPS + query_group;
-                let query_start = (query_row * KV_HEADS * QUERY_GROUPS + query_head) * (HEAD_DIM / 2);
+                let query_start =
+                    (query_row * KV_HEADS * QUERY_GROUPS + query_head) * (HEAD_DIM / 2);
                 let output_start = (query_row * KV_HEADS * QUERY_GROUPS + query_head) * HEAD_DIM;
                 let score_start = (query_row * KV_HEADS * QUERY_GROUPS + query_head)
                     * (cached_key_rows + new_key_rows);
                 let mut maximum = f32::NEG_INFINITY;
                 for key in 0..cached_key_rows + new_key_rows {
                     let range = usize::from(key >= cached_key_rows);
-                    let range_row = if range == 0 { key } else { key - cached_key_rows };
+                    let range_row = if range == 0 {
+                        key
+                    } else {
+                        key - cached_key_rows
+                    };
                     if range != 0 && range_row > query_row {
                         continue;
                     }
                     let key_start = (range_row * KV_HEADS + kv_head) * (HEAD_DIM / 2);
                     let mut score = 0.0;
                     for pair in 0..HEAD_DIM / 2 {
-                        score += queries[0][query_start + pair]
-                            * keys[range][0][key_start + pair]
-                            + queries[1][query_start + pair]
-                                * keys[range][1][key_start + pair];
+                        score += queries[0][query_start + pair] * keys[range][0][key_start + pair]
+                            + queries[1][query_start + pair] * keys[range][1][key_start + pair];
                     }
                     let slot = score_start + key;
                     scores[slot] = score * SCALE;
@@ -81,9 +84,14 @@ fn materialized_attention(
                     let mut value = 0.0;
                     for key in 0..cached_key_rows + new_key_rows {
                         let range = usize::from(key >= cached_key_rows);
-                        let range_row = if range == 0 { key } else { key - cached_key_rows };
+                        let range_row = if range == 0 {
+                            key
+                        } else {
+                            key - cached_key_rows
+                        };
                         let value_start = (range_row * KV_HEADS + kv_head) * HEAD_DIM;
-                        value += weights[score_start + key] * values[range][value_start + dimension];
+                        value +=
+                            weights[score_start + key] * values[range][value_start + dimension];
                     }
                     output[output_start + dimension] = if sum == 0.0 { 0.0 } else { value / sum };
                 }

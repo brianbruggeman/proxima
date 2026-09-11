@@ -21,14 +21,17 @@ mod http1_codec_sizing {
     use std::env;
     use std::fs;
 
-    use proxima_build::sizing::{require_nonzero, SizingSource};
+    use proxima_build::sizing::{SizingSource, require_nonzero};
 
     #[allow(clippy::expect_used)]
     pub(super) fn emit_sizing_consts(out_dir: &std::path::Path) {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-        let source =
-            SizingSource::load(&manifest_dir, "http1_codec.toml", "PROXIMA_PROTOCOLS_HTTP1_CODEC")
-                .unwrap_or_else(|err| panic!("{err}"));
+        let source = SizingSource::load(
+            &manifest_dir,
+            "http1_codec.toml",
+            "PROXIMA_PROTOCOLS_HTTP1_CODEC",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
 
         let header_inline_cap = require_nonzero(
             "header.inline_cap",
@@ -59,7 +62,7 @@ mod http3_codec_sizing {
     use std::env;
     use std::fs;
 
-    use proxima_build::sizing::{require_nonzero, SizingSource};
+    use proxima_build::sizing::{SizingSource, require_nonzero};
 
     fn require_pow2(name: &str, value: usize) -> usize {
         assert!(
@@ -72,11 +75,16 @@ mod http3_codec_sizing {
     #[allow(clippy::expect_used)]
     pub(super) fn emit_sizing_consts(out_dir: &std::path::Path) {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-        let source =
-            SizingSource::load(&manifest_dir, "http3_codec.toml", "PROXIMA_PROTOCOLS_HTTP3_CODEC")
-                .unwrap_or_else(|err| panic!("{err}"));
+        let source = SizingSource::load(
+            &manifest_dir,
+            "http3_codec.toml",
+            "PROXIMA_PROTOCOLS_HTTP3_CODEC",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
         let resolve = |section: &str, key: &str| {
-            source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
+            source
+                .resolve_int(section, key)
+                .unwrap_or_else(|err| panic!("{err}"))
         };
 
         let server_max_concurrent_requests = require_pow2(
@@ -135,7 +143,7 @@ mod quic_sizing {
     use std::env;
     use std::fs;
 
-    use proxima_build::sizing::{require_nonneg, require_nonzero, SizingSource};
+    use proxima_build::sizing::{SizingSource, require_nonneg, require_nonzero};
 
     fn require_pow2(name: &str, value: usize) -> usize {
         assert!(
@@ -151,7 +159,9 @@ mod quic_sizing {
         let source = SizingSource::load(&manifest_dir, "quic.toml", "PROXIMA_PROTOCOLS_QUIC")
             .unwrap_or_else(|err| panic!("{err}"));
         let resolve = |section: &str, key: &str| {
-            source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
+            source
+                .resolve_int(section, key)
+                .unwrap_or_else(|err| panic!("{err}"))
         };
 
         let streams_max_bidi = require_pow2(
@@ -193,8 +203,10 @@ mod quic_sizing {
             resolve("connection", "vn_max_offered_versions"),
         );
         let ack_max_ranges = require_nonzero("ack.max_ranges", resolve("ack", "max_ranges"));
-        let ack_default_max_ack_delay_micros =
-            require_nonneg("ack.default_max_ack_delay_micros", resolve("ack", "default_max_ack_delay_micros"));
+        let ack_default_max_ack_delay_micros = require_nonneg(
+            "ack.default_max_ack_delay_micros",
+            resolve("ack", "default_max_ack_delay_micros"),
+        );
         let loss_max_sent_packets =
             require_nonzero("loss.max_sent_packets", resolve("loss", "max_sent_packets"));
         let loss_max_loss_burst =
@@ -207,8 +219,10 @@ mod quic_sizing {
             "path.max_outstanding_challenges",
             resolve("path", "max_outstanding_challenges"),
         );
-        let bbr_min_rtt_filter_window_micros =
-            require_nonneg("bbr.min_rtt_filter_window_micros", resolve("bbr", "min_rtt_filter_window_micros"));
+        let bbr_min_rtt_filter_window_micros = require_nonneg(
+            "bbr.min_rtt_filter_window_micros",
+            resolve("bbr", "min_rtt_filter_window_micros"),
+        );
         let endpoint_dcid_table_cap = require_pow2(
             "endpoint.dcid_table_cap",
             require_nonzero(
@@ -216,8 +230,10 @@ mod quic_sizing {
                 resolve("endpoint", "dcid_table_cap"),
             ),
         );
-        let endpoint_max_udp_payload_size =
-            require_nonneg("endpoint.max_udp_payload_size", resolve("endpoint", "max_udp_payload_size"));
+        let endpoint_max_udp_payload_size = require_nonneg(
+            "endpoint.max_udp_payload_size",
+            resolve("endpoint", "max_udp_payload_size"),
+        );
         let zero_rtt_max_resumption_ticket_len = require_nonzero(
             "zero_rtt.max_resumption_ticket_len",
             resolve("zero_rtt", "max_resumption_ticket_len"),
@@ -259,10 +275,14 @@ mod quic_sizing {
             "handshake.early_data_max_datagrams",
             resolve("handshake", "early_data_max_datagrams"),
         );
-        let handshake_early_data_hold_micros =
-            require_nonneg("handshake.early_data_hold_micros", resolve("handshake", "early_data_hold_micros"));
-        let handshake_completion_micros =
-            require_nonneg("handshake.handshake_completion_micros", resolve("handshake", "handshake_completion_micros"));
+        let handshake_early_data_hold_micros = require_nonneg(
+            "handshake.early_data_hold_micros",
+            resolve("handshake", "early_data_hold_micros"),
+        );
+        let handshake_completion_micros = require_nonneg(
+            "handshake.handshake_completion_micros",
+            resolve("handshake", "handshake_completion_micros"),
+        );
 
         let out = format!(
             "// AUTO-GENERATED by build.rs from quic.toml. DO NOT EDIT.\n\

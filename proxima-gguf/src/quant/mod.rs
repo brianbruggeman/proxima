@@ -126,7 +126,8 @@ pub(crate) mod real_weights {
         let end = (start + needed_bytes).min(full_range.end as usize);
         let block_bytes = &bytes[start..end];
 
-        let element_count = super::q4_k::elements_for_blocks(block_bytes.len() / super::q4_k::BLOCK_BYTES);
+        let element_count =
+            super::q4_k::elements_for_blocks(block_bytes.len() / super::q4_k::BLOCK_BYTES);
         let mut output = alloc::vec![0.0f32; element_count];
         super::q4_k::dequantize(block_bytes, &mut output).expect("well-formed q4_k byte run");
         output

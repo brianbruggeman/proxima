@@ -93,7 +93,9 @@ fn main() {
     let source = SizingSource::load(&manifest_dir, CONFIG_FILE, "PROXIMA_CENTAURI")
         .unwrap_or_else(|err| panic!("{err}"));
     let sized_int = |section: &str, key: &str| -> u64 {
-        let value = source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"));
+        let value = source
+            .resolve_int(section, key)
+            .unwrap_or_else(|err| panic!("{err}"));
         u64::try_from(value)
             .unwrap_or_else(|_| panic!("[{section}].{key} = {value} must be non-negative"))
     };

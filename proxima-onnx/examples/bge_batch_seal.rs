@@ -85,7 +85,11 @@ fn named_inputs<'a>(
 fn lower_for_batch(
     graph: &proxima_onnx::messages::GraphProto<'_>,
     batch: u64,
-) -> (proxima_onnx::lower::Lowered, proxima_tensor::NodeId, Vec<Vec<i64>>) {
+) -> (
+    proxima_onnx::lower::Lowered,
+    proxima_tensor::NodeId,
+    Vec<Vec<i64>>,
+) {
     let mut pins = BTreeMap::new();
     pins.insert("batch_size", batch);
     pins.insert("sequence_length", SEQUENCE_LENGTH as u64);
@@ -102,7 +106,11 @@ fn lower_for_batch(
     (lowered, output, rows)
 }
 
-fn run_one(lowered: &proxima_onnx::lower::Lowered, output: proxima_tensor::NodeId, rows: &[Vec<i64>]) {
+fn run_one(
+    lowered: &proxima_onnx::lower::Lowered,
+    output: proxima_tensor::NodeId,
+    rows: &[Vec<i64>],
+) {
     let (input_ids, attention_mask, token_type_ids) = dynamic_inputs_batch(rows);
     let named = named_inputs(lowered, &input_ids, &attention_mask, &token_type_ids);
     let evaluated = cpu::evaluate_named(&lowered.program, &[], &named, &[output])
@@ -196,7 +204,8 @@ fn census_engagement(graph: &proxima_onnx::messages::GraphProto<'_>, batch: u64)
         println!("  no width_tile_plan declines at batch={batch}");
     } else {
         println!("  {} distinct decline node/reason pairs:", declines.len());
-        for (node_id, reason, calls, matmul_m, matmul_k, matmul_n, stride_a, stride_b) in &declines {
+        for (node_id, reason, calls, matmul_m, matmul_k, matmul_n, stride_a, stride_b) in &declines
+        {
             let onnx_name = lowered
                 .matmul_names
                 .iter()
@@ -233,7 +242,14 @@ fn main() {
     println!("\n=== bge_batch_seal: timing sweep (ours, S={SEQUENCE_LENGTH}) ===");
     println!(
         "{:>5} | {:>10} | {:>13} | {:>7} | {:>13} | {:>7} | {:>13} | {:>14}",
-        "batch", "arm", "total_ms/call", "CoV%", "ms/sentence", "CoV%", "sent/sec", "sent/sec(mean)"
+        "batch",
+        "arm",
+        "total_ms/call",
+        "CoV%",
+        "ms/sentence",
+        "CoV%",
+        "sent/sec",
+        "sent/sec(mean)"
     );
     for &batch in &BATCH_SIZES {
         let (lowered, output, rows) = lower_for_batch(graph, batch);
@@ -242,7 +258,8 @@ fn main() {
             let times_ms = time_cell(&lowered, output, &rows, accelerate);
             let call_mean = mean(&times_ms);
             let call_cov = coefficient_of_variation_percent(&times_ms);
-            let per_sentence: Vec<f64> = times_ms.iter().map(|value| value / batch as f64).collect();
+            let per_sentence: Vec<f64> =
+                times_ms.iter().map(|value| value / batch as f64).collect();
             let sentence_mean = mean(&per_sentence);
             let sentence_cov = coefficient_of_variation_percent(&per_sentence);
             let throughput_mean = 1000.0 / sentence_mean;

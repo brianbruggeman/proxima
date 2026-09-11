@@ -43,6 +43,26 @@ pub enum InteropError {
     #[error(transparent)]
     Safetensors(#[from] proxima_safetensors::SafetensorsError),
 
+    /// A sidecar writer failed while emitting its header, descriptors, or
+    /// one expert payload to the caller-owned destination.
+    #[cfg(feature = "std")]
+    #[error("expert sidecar io: {0}")]
+    SidecarIo(#[from] std::io::Error),
+
+    /// A sidecar descriptor cannot encode its projection name in the fixed
+    /// wire field.
+    #[error("expert sidecar projection name has {found} bytes; maximum is {max}")]
+    SidecarProjectionTooLong { found: usize, max: usize },
+
+    /// A sidecar's header or data offsets overflow the representable format.
+    #[error("expert sidecar size overflow")]
+    SidecarSizeOverflow,
+
+    /// A mapped sidecar did not satisfy its wire-format contract.
+    #[cfg(feature = "std")]
+    #[error("invalid expert sidecar: {0}")]
+    InvalidExpertSidecar(String),
+
     /// A block-quantized tensor's bytes didn't fit its codec's own shape
     /// contract (not a whole block multiple, or an output-size mismatch)
     /// -- propagated from [`proxima_gguf::quant`] rather than re-derived.
@@ -106,6 +126,26 @@ pub enum InteropError {
         "gguf metadata key {key:?} has {distinct_values} distinct per-layer values; ModelArchitecture cannot represent per-layer variation"
     )]
     HeterogeneousMetadataArray { key: String, distinct_values: usize },
+
+    /// A per-layer GGUF metadata array did not provide exactly one value for
+    /// every declared transformer block, so no architecture can align its
+    /// configuration to the tensor directory safely.
+    #[error(
+        "gguf metadata key {key:?} has {found} per-layer values, expected block_count {expected}"
+    )]
+    MetadataArrayLengthMismatch {
+        key: String,
+        expected: usize,
+        found: usize,
+    },
+
+    /// The checkpoint family was recognized from its header, but its
+    /// architecture-specific forward program has not been supplied yet.
+    /// This is deliberately distinct from an unknown architecture or a
+    /// malformed generic configuration: callers can inspect or route the
+    /// header without pretending a dense program is valid for a hybrid MoE.
+    #[error("architecture {name:?} needs its own hybrid MoE forward program")]
+    HybridMoeProgramUnsupported { name: String },
 
     /// `crate::generate`'s cached forward program failed to build or
     /// evaluate -- propagated from `proxima_tensor` rather than re-derived.
@@ -189,6 +229,17 @@ pub enum InteropError {
     /// caller (not just this crate) picks the config fields.
     #[error("unsupported serving config: {0}")]
     UnsupportedServingConfig(String),
+
+    /// The requested routed execution phase is not available for the bound
+    /// architecture or its forward graph.  This is preferable to silently
+    /// running the single-pass graph when a caller requires a residency
+    /// transition before the expert gather.
+    #[cfg(feature = "std")]
+    #[error("pre-gather execution is unavailable for architecture {architecture:?}: {reason}")]
+    PreGatherExecutionUnsupported {
+        architecture: String,
+        reason: String,
+    },
 
     /// `crate::bind::transpose_expert_stack`'s decoded element count did
     /// not equal `expert_count * out_dim * in_dim` — the tensor directory's
@@ -405,7 +456,9 @@ pub enum InteropError {
     /// (the default, no-op override) an architecture with a custom leaf
     /// never overrode `crate::Architecture::step_inputs` at
     /// all.
-    #[error("forward program leaf {name:?} is left unbound; no builtin block and no architecture step_inputs supplied it")]
+    #[error(
+        "forward program leaf {name:?} is left unbound; no builtin block and no architecture step_inputs supplied it"
+    )]
     MissingStepInput { name: String },
 
     /// `crate::Architecture::step_inputs` (feature-gated behind `std`) returned a
@@ -415,7 +468,9 @@ pub enum InteropError {
     /// -- a foreign architecture's own slot must start at
     /// `crate::symbols::FIRST_FREE` (feature-gated behind `std`), never overwrite a
     /// builtin one out from under the loop.
-    #[error("architecture step_inputs named reserved symbol slot {slot}; foreign slots start at FIRST_FREE")]
+    #[error(
+        "architecture step_inputs named reserved symbol slot {slot}; foreign slots start at FIRST_FREE"
+    )]
     ReservedSymbolSlot { slot: u16 },
 
     /// `crate::architecture::BoundProgram::single_position_step` is set
@@ -430,7 +485,9 @@ pub enum InteropError {
     /// position per evaluation instead (prefill becomes `new_count`
     /// sequential evaluations of `new_count == 1`, the same path decode
     /// already takes).
-    #[error("architecture declares single_position_step but new_count = {new_count}; feed one position per evaluation")]
+    #[error(
+        "architecture declares single_position_step but new_count = {new_count}; feed one position per evaluation"
+    )]
     MultiPositionStepUnsupported { new_count: usize },
 
     /// `layer`'s `crate::architecture::BoundProgram::layer_roots` entry
@@ -464,7 +521,9 @@ pub enum InteropError {
     /// the output degrades with a period equal to the interval between
     /// stateful layers, which is invisible on short generations. Caught
     /// once, at decode-loop setup, before the first token.
-    #[error("layer {layer} is bound as {kind} but the program declares none of its cache leaves ({expected:?})")]
+    #[error(
+        "layer {layer} is bound as {kind} but the program declares none of its cache leaves ({expected:?})"
+    )]
     LayerCacheLeavesMissing {
         layer: usize,
         kind: &'static str,
@@ -487,16 +546,27 @@ pub enum InteropError {
     #[error("expert {expert} of layer {layer} is out of range for this checkpoint's expert slab")]
     ExpertSlabIndexOutOfRange { layer: usize, expert: usize },
 
+    /// `crate::expert_slab::ExpertSlab::page_expert_mapped` received a byte
+    /// range that does not fit its supplied mmap. The range is rejected
+    /// before the slab records the mapping, so no later evaluation can slice
+    /// beyond the source file.
+    #[error("expert mmap range {start}..{end} is outside the mapping of {mapping_len} bytes")]
+    ExpertMappedRangeOutOfBounds {
+        start: usize,
+        end: usize,
+        mapping_len: usize,
+    },
+
     /// `layer` has at least one evicted expert with no paged replacement
     /// yet (`crate::expert_slab::ExpertSlab::first_incomplete_layer`), and
     /// the selected backend does not consult
-    /// `crate::expert_slab::ExpertSlab`'s per-step table at all --
-    /// `crate::generate::BackendRuntime`'s `metal`-feature `evaluate`
-    /// accepts `expert_sources` and drops it (its own doc: not yet wired
-    /// through `omega::backend`'s polymorphic plan cache). Surfaced here,
-    /// before that backend ever runs, instead of silently gathering the
-    /// checkpoint's original, evicted bytes as if nothing had changed.
-    #[error("layer {layer} has an evicted expert with no replacement, and this backend cannot honor per-step expert routing")]
+    /// `crate::expert_slab::ExpertSlab`'s per-step table at all. Metal now
+    /// consumes uniform packed-codec tables; this error remains for a
+    /// backend that cannot honor the table rather than silently gathering
+    /// the checkpoint's original, evicted bytes.
+    #[error(
+        "layer {layer} has an evicted expert with no replacement, and this backend cannot honor per-step expert routing"
+    )]
     ExpertRoutingUnsupportedByBackend { layer: usize },
 
     /// A pad-scratch buffer's row width (`expected`, elements) came out
@@ -511,7 +581,9 @@ pub enum InteropError {
     /// cannot self-heal from. Previously an unchecked `copy_from_slice`
     /// panic (`range end index out of range for slice of length N`); this
     /// is that same condition, named.
-    #[error("layer {layer} cache scratch {leaf:?} is sized for {expected} elements, but the cache holds {found}")]
+    #[error(
+        "layer {layer} cache scratch {leaf:?} is sized for {expected} elements, but the cache holds {found}"
+    )]
     CacheScratchShapeMismatch {
         layer: usize,
         leaf: &'static str,

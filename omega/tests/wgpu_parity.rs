@@ -174,8 +174,16 @@ fn the_two_layer_mlp_runs_on_wgpu_at_cpu_parity() {
         ("w2", QuantizedBlock::Float32(&w2)),
     ];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
-        .expect("omega::backend plans the mlp on cpu");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the mlp on cpu");
     let cpu =
         execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the mlp on cpu");
 
@@ -290,8 +298,16 @@ fn embedding_lookup_runs_on_wgpu_at_cpu_parity_for_integer_valued_inputs() {
         ("ids", QuantizedBlock::Float32(&ids_data)),
     ];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
-        .expect("omega::backend plans the gather on cpu");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the gather on cpu");
     let cpu =
         execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the gather on cpu");
 
@@ -452,8 +468,16 @@ fn f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_reje
         ("rhs", QuantizedBlock::Float32(&rhs)),
     ];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &f32_program, &[], &named, &[], NumericPolicy::default())
-        .expect("omega::backend plans the f32 oracle on cpu");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &f32_program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the f32 oracle on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
         .expect("omega::backend runs the f32 oracle on cpu");
 
@@ -792,8 +816,16 @@ fn matmul_runs_on_wgpu_at_cpu_parity_whichever_reduce_path_the_adapter_takes() {
         ("rhs", QuantizedBlock::Float32(&rhs)),
     ];
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::default())
-        .expect("cpu plans the matmul");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("cpu plans the matmul");
     let cpu = execute_plan_named(&mut cpu_plan, &named).expect("cpu runs the matmul");
 
     let mut wgpu_plan = omega::wgpu_driver::plan_named(&program, &[], &named, &[])

@@ -41,14 +41,21 @@
 //! runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reactor,
 //! runtime-prime-bgpool,http1-native,macros" -- <gguf-path> [bind-addr]
 //! [max-tokens]`
+//!
+//! Set `PROXIMA_QWEN35MOE_SIDECAR` to mmap and validate an expert sidecar at
+//! startup. The model owns the mapping and descriptor index after
+//! `LoadedModel::attach_expert_sidecar`; every routed-expert boundary can
+//! switch its three projection sources without reopening or copying it.
 
 use std::error::Error;
 use std::fmt::Write as _;
+use std::fs::File;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
+use memmap2::MmapOptions;
 use proxima::SendPipe;
 use proxima::error::ProximaError;
 use proxima::pipe::into_handle;
@@ -57,13 +64,14 @@ use proxima::request::{Request, Response};
 use proxima::runtime::PrimeServeExt;
 use proxima_gguf::pipe::parse_complete;
 use proxima_gguf::value::MetadataValue;
-use proxima_model_interop::{LoadedModel, ServingConfig};
+use proxima_model_interop::{LoadedModel, MappedExpertSidecar, ServingConfig};
 use serde::Deserialize;
 use serde_json::json;
 
 const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8081";
 const DEFAULT_MAX_TOKENS: usize = 64;
+const SIDECAR_ENV: &str = "PROXIMA_QWEN35MOE_SIDECAR";
 
 #[derive(Debug, Deserialize)]
 struct ChatCompletionRequest {
@@ -89,6 +97,18 @@ struct ServedModel {
     max_tokens: usize,
 }
 
+fn load_expert_sidecar() -> Result<Option<Arc<memmap2::Mmap>>, Box<dyn Error>> {
+    let Some(path) = std::env::var_os(SIDECAR_ENV) else {
+        return Ok(None);
+    };
+    let file = File::open(&path)?;
+    // the server retains the read-only mapping for its whole process lifetime.
+    let mapping = Arc::new(unsafe { MmapOptions::new().map(&file)? });
+    MappedExpertSidecar::new(Arc::clone(&mapping))
+        .map_err(|error| format!("{} {:?}: {error}", SIDECAR_ENV, path))?;
+    Ok(Some(mapping))
+}
+
 fn render_prompt(messages: &[ChatMessage]) -> String {
     let mut prompt = String::new();
     for message in messages {
@@ -98,7 +118,7 @@ fn render_prompt(messages: &[ChatMessage]) -> String {
     prompt
 }
 
-fn supported_serving_config(model_path: &str) -> ServingConfig<'_> {
+fn supported_serving_config(model_path: &str, qwen35moe_pre_gather: bool) -> ServingConfig<'_> {
     ServingConfig {
         model_path,
         kv_cache_key_quant: proxima_gguf::types::GgmlType::F32,
@@ -108,6 +128,7 @@ fn supported_serving_config(model_path: &str) -> ServingConfig<'_> {
         ubatch_size: 0,
         gpu_layers: 0,
         reasoning_budget: 0,
+        qwen35moe_pre_gather,
         ..ServingConfig::default()
     }
 }
@@ -142,7 +163,9 @@ impl SendPipe for ChatCompletions {
             };
             let prompt = render_prompt(&chat_request.messages);
 
-            let serving_config = supported_serving_config(&self.gguf_path);
+            let sidecar_descriptors = self.served.model.expert_sidecar_descriptor_count();
+            let serving_config =
+                supported_serving_config(&self.gguf_path, sidecar_descriptors != 0);
             let generate_started = Instant::now();
             let (generated_ids, text, _stopped_by_eos) = self
                 .served
@@ -169,7 +192,7 @@ impl SendPipe for ChatCompletions {
             println!(
                 "prompt_tokens={prompt_tokens} completion_tokens={completion_tokens} \
                  generate_ms={generate_ms:.3} tokens_per_sec={tokens_per_sec:.3} \
-                 prompt_render={prompt_template_path}"
+                 prompt_render={prompt_template_path} sidecar_descriptors={sidecar_descriptors}"
             );
 
             let body = json!({
@@ -180,19 +203,19 @@ impl SendPipe for ChatCompletions {
                     "total_tokens": prompt_tokens + completion_tokens,
                 },
             });
-            Ok(Response::ok(Bytes::from(serde_json::to_vec(&body).map_err(
-                |error| ProximaError::Encode(format!("chat response json: {error}")),
-            )?))
-            .with_header("content-type", "application/json"))
+            Ok(
+                Response::ok(Bytes::from(serde_json::to_vec(&body).map_err(|error| {
+                    ProximaError::Encode(format!("chat response json: {error}"))
+                })?))
+                .with_header("content-type", "application/json"),
+            )
         }
     }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
-    let gguf_path = args
-        .next()
-        .ok_or("argv[1]: path to a .gguf checkpoint")?;
+    let gguf_path = args.next().ok_or("argv[1]: path to a .gguf checkpoint")?;
     let bind_addr = args.next().unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string());
     let max_tokens: usize = args
         .next()
@@ -204,18 +227,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("bind_addr = {bind_addr}");
     println!("max_tokens = {max_tokens}");
 
+    let expert_sidecar = load_expert_sidecar()?;
+    if let Some(mapping) = expert_sidecar.as_ref() {
+        let sidecar = MappedExpertSidecar::new(Arc::clone(mapping))?;
+        println!(
+            "expert_sidecar_bytes = {} expert_sidecar_descriptors = {}",
+            mapping.len(),
+            sidecar.descriptor_count()
+        );
+    }
+
     let load_started = Instant::now();
     let file_bytes: &'static [u8] = Box::leak(std::fs::read(&gguf_path)?.into_boxed_slice());
-    let parsed = parse_complete(file_bytes)
-        .map_err(|error| format!("gguf parse failed: {error}"))?;
+    let parsed =
+        parse_complete(file_bytes).map_err(|error| format!("gguf parse failed: {error}"))?;
     let has_chat_template = matches!(
         parsed.metadata_value("tokenizer.chat_template"),
         Some(MetadataValue::String(_))
     );
     println!("has_chat_template = {has_chat_template}");
 
-    let model = LoadedModel::load(&parsed, file_bytes)
+    let mut model = LoadedModel::load(&parsed, file_bytes)
         .map_err(|error| format!("weight load failed: {error}"))?;
+    if let Some(mapping) = expert_sidecar {
+        model
+            .attach_expert_sidecar(mapping)
+            .map_err(|error| format!("expert sidecar attach failed: {error}"))?;
+    }
     let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
     println!("weight_load_ms = {load_ms:.3}");
 

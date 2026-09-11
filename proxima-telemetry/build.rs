@@ -24,7 +24,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use proxima_build::sizing::{require_nonzero, SizingError, SizingSource};
+use proxima_build::sizing::{SizingError, SizingSource, require_nonzero};
 
 /// Resolve the compile-time emit floor: `[emit] max_level` (a level name) with a
 /// `PROXIMA_TELEMETRY_EMIT_MAX_LEVEL` env override, mapped to proxima severity.
@@ -57,7 +57,9 @@ fn emit_sizing_consts(out_dir: &Path) {
     let source = SizingSource::load(&manifest_dir, "proxima-telemetry.toml", "PROXIMA_TELEMETRY")
         .unwrap_or_else(|err| panic!("{err}"));
     let resolve = |section: &str, key: &str| {
-        source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
+        source
+            .resolve_int(section, key)
+            .unwrap_or_else(|err| panic!("{err}"))
     };
 
     let drain_batch = require_nonzero("drain.batch", resolve("drain", "batch"));
@@ -116,12 +118,18 @@ fn emit_sizing_consts(out_dir: &Path) {
 #[allow(clippy::expect_used)]
 fn emit_log_buffer_sizing_consts(out_dir: &Path) {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-    let source = SizingSource::load(&manifest_dir, "proxima-log-buffer.toml", "PROXIMA_LOG_BUFFER")
-        .unwrap_or_else(|err| panic!("{err}"));
+    let source = SizingSource::load(
+        &manifest_dir,
+        "proxima-log-buffer.toml",
+        "PROXIMA_LOG_BUFFER",
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
 
     let capacity = require_nonzero(
         "buffer.capacity",
-        source.resolve_int("buffer", "capacity").unwrap_or_else(|err| panic!("{err}")),
+        source
+            .resolve_int("buffer", "capacity")
+            .unwrap_or_else(|err| panic!("{err}")),
     );
     let live_tail_channel_capacity = require_nonzero(
         "live_tail.channel_capacity",

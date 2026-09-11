@@ -403,7 +403,12 @@ fn prepare<'block>(
         buffers[node.0 as usize] = Some(Cow::Borrowed(data));
     }
 
-    let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
+    let resolved = bind::bind(
+        program,
+        &shapes,
+        &effective_outputs,
+        NumericPolicy::bit_exact(),
+    )?;
     let retires = node_retirement(&resolved, &effective_outputs);
 
     Ok(Prepared {
@@ -568,7 +573,12 @@ pub fn plan_trace_named(
     };
     reject_non_float32_outputs(program, &BTreeSet::new(), &effective_outputs)?;
 
-    let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
+    let resolved = bind::bind(
+        program,
+        &shapes,
+        &effective_outputs,
+        NumericPolicy::bit_exact(),
+    )?;
     let mut decisions = Vec::new();
 
     let bound_nodes: BTreeSet<NodeId> = resolved.iter().map(|computed| computed.node).collect();
@@ -579,7 +589,12 @@ pub fn plan_trace_named(
         }
         let into = resolved
             .iter()
-            .find(|computed| computed.operands().iter().any(|(operand, ..)| *operand == node))
+            .find(|computed| {
+                computed
+                    .operands()
+                    .iter()
+                    .any(|(operand, ..)| *operand == node)
+            })
             .map(|computed| computed.node);
         decisions.push(PlanDecision {
             node,
@@ -600,7 +615,10 @@ pub fn plan_trace_named(
         });
     }
 
-    for (position, retired_here) in node_retirement(&resolved, &effective_outputs).iter().enumerate() {
+    for (position, retired_here) in node_retirement(&resolved, &effective_outputs)
+        .iter()
+        .enumerate()
+    {
         for &node in retired_here {
             decisions.push(PlanDecision {
                 node,
@@ -612,8 +630,12 @@ pub fn plan_trace_named(
         }
     }
 
-    let (epilogue_fuse, layer_norm_cluster, _fires) =
-        run_rewrite_worklist(&resolved, program.len(), &effective_outputs, &BTreeMap::new());
+    let (epilogue_fuse, layer_norm_cluster, _fires) = run_rewrite_worklist(
+        &resolved,
+        program.len(),
+        &effective_outputs,
+        &BTreeMap::new(),
+    );
     for (&reduce_node, &(index, ..)) in &epilogue_fuse {
         decisions.push(PlanDecision {
             node: reduce_node,
@@ -628,7 +650,9 @@ pub fn plan_trace_named(
             node: r2_node,
             kind: "layer_norm_cluster",
             decision: "fused",
-            into: resolved.get(cluster.tail_index).map(|computed| computed.node),
+            into: resolved
+                .get(cluster.tail_index)
+                .map(|computed| computed.node),
             consumers: 1,
         });
     }
@@ -893,7 +917,12 @@ pub fn build_static_arena_with_constants(
         buffers[node.0 as usize] = Some(vec![0.0f32; element_count(shapes.of(*node))]);
     }
 
-    let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
+    let resolved = bind::bind(
+        program,
+        &shapes,
+        &effective_outputs,
+        NumericPolicy::bit_exact(),
+    )?;
     for computed in &resolved {
         buffers[computed.node.0 as usize] = Some(vec![0.0f32; node_output_len(computed)]);
     }
@@ -1197,7 +1226,15 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
             // `packed_width_panels` is always empty there.
             match arena.packed_width_panels.get(&node) {
                 Some(packed) => run_reduce(computed, &arena.buffers, &mut output, Some(packed))?,
-                None => run_node_into(computed, &arena.buffers, None, None, None, false, &mut output)?,
+                None => run_node_into(
+                    computed,
+                    &arena.buffers,
+                    None,
+                    None,
+                    None,
+                    false,
+                    &mut output,
+                )?,
             }
             #[cfg(feature = "epilogue-profile-probe")]
             epilogue_profile_record(
@@ -1243,7 +1280,11 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
                     .unwrap_or(&[]);
                 let fuse_started = std::time::Instant::now();
                 apply_epilogue_fused_monomorphic(
-                    EpilogueFuseKernel { kind, hoist_axis, slots: epilogue_slots },
+                    EpilogueFuseKernel {
+                        kind,
+                        hoist_axis,
+                        slots: epilogue_slots,
+                    },
                     &arena.resolved[consumer_index],
                     reduce_node,
                     reduce_values,
@@ -1793,9 +1834,7 @@ fn matches_binary_or_eliminated(
             op == expected_op && left == left_operand && right == right_operand
         }
         Some(_) => false,
-        None => {
-            arg == StepArg::Operand(left_operand) || arg == StepArg::Operand(right_operand)
-        }
+        None => arg == StepArg::Operand(left_operand) || arg == StepArg::Operand(right_operand),
     }
 }
 
@@ -1814,7 +1853,11 @@ fn matches_binary_or_eliminated(
 /// [`is_post_reduce_epilogue`] before `match_epilogue` is ever called --
 /// every other operand's SLOT is discovered here, never assumed. Returns
 /// `(bias_slot, zero_slot)`.
-fn matches_clip_head(body: &ComposedBody, arg: StepArg, reduce_slot: usize) -> Option<(usize, usize)> {
+fn matches_clip_head(
+    body: &ComposedBody,
+    arg: StepArg,
+    reduce_slot: usize,
+) -> Option<(usize, usize)> {
     let (op, left, right) = binary_edge(body, arg)?;
     if op != ScalarOp::Maximum {
         return None;
@@ -2050,7 +2093,12 @@ fn match_epilogue(
     let reciprocal_n = if var_arg == reduce_operand {
         None
     } else {
-        Some(resolve_other_operand(body, var_arg, ScalarOp::Multiply, reduce_slot)?)
+        Some(resolve_other_operand(
+            body,
+            var_arg,
+            ScalarOp::Multiply,
+            reduce_slot,
+        )?)
     };
     Some((
         EpilogueKind::LayerNorm,
@@ -2367,7 +2415,10 @@ fn epilogue_fuse_plan(
             consumers = consumer_counts.get(&reduce_node).copied().unwrap_or(0),
             "epilogue fuse admitted -- reduce node folded into consumer's epilogue"
         );
-        plan.insert(reduce_node, (index, fire_position, kind, hoist_axis, epilogue_slots));
+        plan.insert(
+            reduce_node,
+            (index, fire_position, kind, hoist_axis, epilogue_slots),
+        );
     }
     plan
 }
@@ -2504,7 +2555,11 @@ fn apply_epilogue_fused_monomorphic<B: Deref<Target = [f32]>>(
     buffers: &[Option<B>],
     output: &mut [f32],
 ) {
-    let EpilogueFuseKernel { kind, hoist_axis, slots: epilogue_slots } = kernel;
+    let EpilogueFuseKernel {
+        kind,
+        hoist_axis,
+        slots: epilogue_slots,
+    } = kernel;
     let BoundOpKind::Elementwise { operands, .. } = &consumer.kind else {
         return;
     };
@@ -2960,12 +3015,17 @@ fn layer_norm_cluster_plan(
         // reduce operand, `reciprocal_n` is the true scalar), never
         // assumed by slot -- `continue` when neither or both operands are
         // scalar rather than guessing which is which.
-        let ((r1_node, r1_layout_in_e2, r1_gather), (reciprocal_n_node, reciprocal_n_layout, reciprocal_n_gather)) =
-            match (epilogue_is_scalar_broadcast(&first.1), epilogue_is_scalar_broadcast(&second.1)) {
-                (false, true) => (first, second),
-                (true, false) => (second, first),
-                _ => continue,
-            };
+        let (
+            (r1_node, r1_layout_in_e2, r1_gather),
+            (reciprocal_n_node, reciprocal_n_layout, reciprocal_n_gather),
+        ) = match (
+            epilogue_is_scalar_broadcast(&first.1),
+            epilogue_is_scalar_broadcast(&second.1),
+        ) {
+            (false, true) => (first, second),
+            (true, false) => (second, first),
+            _ => continue,
+        };
         if x_gather.is_some() || r1_gather.is_some() || reciprocal_n_gather.is_some() {
             continue;
         }
@@ -3001,7 +3061,9 @@ fn layer_norm_cluster_plan(
         let Some(tail_reciprocal_n_slot) = tail_reciprocal_n_slot else {
             continue;
         };
-        let Some(&tail_reciprocal_n_index) = node_position.get(&tail_operands[tail_reciprocal_n_slot].0) else {
+        let Some(&tail_reciprocal_n_index) =
+            node_position.get(&tail_operands[tail_reciprocal_n_slot].0)
+        else {
             continue;
         };
         let (
@@ -3548,7 +3610,15 @@ pub fn evaluate_named_with_arena_masked(
             node: computed.node,
             reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
         })?;
-        run_node_into(computed, &arena.buffers, None, None, None, false, &mut output)?;
+        run_node_into(
+            computed,
+            &arena.buffers,
+            None,
+            None,
+            None,
+            false,
+            &mut output,
+        )?;
         arena.buffers[node_index] = Some(output);
     }
 
@@ -3722,6 +3792,7 @@ pub fn arena_named_input<'arena>(arena: &'arena StaticArena, name: &str) -> Opti
 #[derive(Debug, Clone, Copy)]
 pub enum QuantizedBlock<'a> {
     Float32(&'a [f32]),
+    Int32(&'a [i32]),
     Q4K(&'a [u8]),
     /// Raw packed `Q5_K` bytes -- same super-block shape as [`Self::Q4K`]
     /// (256 elements, 8 sub-blocks of 32) plus a `qh` high-bit plane; see
@@ -3857,6 +3928,7 @@ pub struct ExpertEntry<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct ExpertSource<'a> {
     entries: &'a [ExpertEntry<'a>],
+    selected_expert_ids: Option<&'a [u32]>,
 }
 
 impl<'a> ExpertSource<'a> {
@@ -3866,7 +3938,39 @@ impl<'a> ExpertSource<'a> {
     /// at the point `run_reduce_quantized` actually needs it.
     #[must_use]
     pub const fn new(entries: &'a [ExpertEntry<'a>]) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            selected_expert_ids: None,
+        }
+    }
+
+    /// Borrows a caller-owned fixed-capacity route list for backend staging.
+    /// The entries remain indexed by their original expert ID; the list only
+    /// controls which payloads a backend uploads for this snapshot.
+    #[must_use]
+    pub const fn with_selected_expert_ids(
+        entries: &'a [ExpertEntry<'a>],
+        selected_expert_ids: &'a [u32],
+    ) -> Self {
+        Self {
+            entries,
+            selected_expert_ids: Some(selected_expert_ids),
+        }
+    }
+
+    /// Returns the immutable per-expert snapshot so a device backend can
+    /// materialize the same table without changing the step's borrowed
+    /// lifetime contract.
+    #[must_use]
+    pub const fn entries(&self) -> &'a [ExpertEntry<'a>] {
+        self.entries
+    }
+
+    /// Returns the optional caller-owned route list used by a backend to
+    /// compact staged payload bytes. `None` means every entry is selected.
+    #[must_use]
+    pub const fn selected_expert_ids(&self) -> Option<&'a [u32]> {
+        self.selected_expert_ids
     }
 
     /// Resolves expert `index`'s own entry, rejecting a shape that
@@ -3887,11 +3991,14 @@ impl<'a> ExpertSource<'a> {
         expected_out: u32,
         expected_in: u32,
     ) -> Result<ExpertEntry<'a>, TensorError> {
-        let entry = *self.entries.get(index).ok_or(TensorError::GatherIndexOutOfRange {
-            node,
-            index: index as i64,
-            extent: self.entries.len() as u64,
-        })?;
+        let entry = *self
+            .entries
+            .get(index)
+            .ok_or(TensorError::GatherIndexOutOfRange {
+                node,
+                index: index as i64,
+                extent: self.entries.len() as u64,
+            })?;
         if entry.out_dim != expected_out || entry.in_dim != expected_in {
             return Err(TensorError::ExpertSourceShapeMismatch {
                 node,
@@ -3932,9 +4039,15 @@ pub fn expert_entries_from_stack(
 ) -> Result<Vec<ExpertEntry<'_>>, TensorError> {
     let bytes = stack
         .packed_bytes()
-        .ok_or(TensorError::ExpertStackNotAligned { expert_count, bytes: 0 })?;
+        .ok_or(TensorError::ExpertStackNotAligned {
+            expert_count,
+            bytes: 0,
+        })?;
     if expert_count == 0 || !bytes.len().is_multiple_of(expert_count) {
-        return Err(TensorError::ExpertStackNotAligned { expert_count, bytes: bytes.len() });
+        return Err(TensorError::ExpertStackNotAligned {
+            expert_count,
+            bytes: bytes.len(),
+        });
     }
     if bytes.is_empty() {
         return Err(TensorError::EmptyExpertPayload { expert_count });
@@ -3950,7 +4063,12 @@ pub fn expert_entries_from_stack(
     // (`expert_count` entries), never a hot-path allocation.
     Ok(bytes
         .chunks_exact(per_expert_bytes)
-        .map(|chunk| ExpertEntry { block: stack.with_bytes(chunk), out_dim, in_dim, epoch })
+        .map(|chunk| ExpertEntry {
+            block: stack.with_bytes(chunk),
+            out_dim,
+            in_dim,
+            epoch,
+        })
         .collect())
 }
 
@@ -3966,7 +4084,7 @@ impl<'a> QuantizedBlock<'a> {
     #[must_use]
     pub const fn packed_bytes(&self) -> Option<&'a [u8]> {
         match self {
-            QuantizedBlock::Float32(_) => None,
+            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => None,
             QuantizedBlock::Q4K(bytes)
             | QuantizedBlock::Q5K(bytes)
             | QuantizedBlock::Q3K(bytes)
@@ -3997,7 +4115,7 @@ impl<'a> QuantizedBlock<'a> {
     #[must_use]
     pub const fn with_bytes(&self, bytes: &'a [u8]) -> Self {
         match self {
-            QuantizedBlock::Float32(_) => QuantizedBlock::Q4K(bytes),
+            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => QuantizedBlock::Q4K(bytes),
             QuantizedBlock::Q4K(_) => QuantizedBlock::Q4K(bytes),
             QuantizedBlock::Q5K(_) => QuantizedBlock::Q5K(bytes),
             QuantizedBlock::Q3K(_) => QuantizedBlock::Q3K(bytes),
@@ -4031,6 +4149,7 @@ impl<'a> QuantizedBlock<'a> {
     pub fn element_count(&self) -> Result<usize, TensorError> {
         let (codec, bytes, block_bytes, blocks) = match self {
             QuantizedBlock::Float32(data) => return Ok(data.len()),
+            QuantizedBlock::Int32(data) => return Ok(data.len()),
             QuantizedBlock::Q4K(bytes) => (
                 "q4_k",
                 bytes.len(),
@@ -4370,6 +4489,18 @@ fn evaluate_quantized_with_scratch_impl(
                 }
                 buffers[node.0 as usize] = Some(Cow::Borrowed(data));
             }
+            QuantizedBlock::Int32(data) => {
+                let expected = element_count(shapes.of(*node));
+                if data.len() != expected {
+                    return Err(TensorError::InputSizeMismatch {
+                        node: *node,
+                        expected,
+                        found: data.len(),
+                    });
+                }
+                buffers[node.0 as usize] =
+                    Some(Cow::Owned(data.iter().map(|&value| value as f32).collect()));
+            }
             QuantizedBlock::Q4K(_)
             | QuantizedBlock::Q5K(_)
             | QuantizedBlock::Q3K(_)
@@ -4414,7 +4545,16 @@ fn evaluate_quantized_with_scratch_impl(
     }
     reject_non_float32_outputs(program, &quantized_weight_nodes, &effective_outputs)?;
 
-    let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
+    let resolved = bind::bind(
+        program,
+        &shapes,
+        &effective_outputs,
+        NumericPolicy::bit_exact(),
+    )?;
+    // Packed matmul lowering is valid only when the weight's contraction axes
+    // are physically contiguous.  Materialize the exceptional non-contiguous
+    // views before execution so `run_reduce` can honor their index maps; this
+    // is the same one-time setup seam used for requested quantized outputs.
     // A caller-requested output can force a node that ordinary decode always
     // fuses away into its own standalone `BoundOp` -- `node_retirement`
     // below correctly keeps ANY node in `effective_outputs` alive, but
@@ -4446,6 +4586,9 @@ fn evaluate_quantized_with_scratch_impl(
             continue;
         }
         for (operand, ..) in computed.operands() {
+            if expert_sources.is_some_and(|sources| sources.contains_key(operand)) {
+                continue;
+            }
             materialize_quantized_weight_output(
                 *operand,
                 &shapes,
@@ -4463,6 +4606,9 @@ fn evaluate_quantized_with_scratch_impl(
     // in `resolved` reads it as a plain operand), so it needs this second,
     // direct pass over the request itself.
     for &output in &effective_outputs {
+        if expert_sources.is_some_and(|sources| sources.contains_key(&output)) {
+            continue;
+        }
         materialize_quantized_weight_output(output, &shapes, &quantized_weights, &mut buffers)?;
     }
     let retires = node_retirement(&resolved, &effective_outputs);
@@ -4626,9 +4772,7 @@ fn evaluate_quantized_with_scratch_impl(
     let mut position = 0usize;
     while position < resolved.len() {
         #[cfg(feature = "cohort-staged-graph")]
-        if !exact_activations
-            && let Some(session_ref) = session.as_ref()
-        {
+        if !exact_activations && let Some(session_ref) = session.as_ref() {
             let run_end = staged_batch_run_end(&resolved, position, &quantized_weights);
             if run_end - position >= STAGED_BATCH_MIN_LEN {
                 #[cfg(feature = "instrument")]
@@ -4729,7 +4873,11 @@ fn evaluate_quantized_with_scratch_impl(
                 let mut fused_output = take_or_allocate(free_buffers, node_output_len(consumer));
                 let fuse_started = std::time::Instant::now();
                 apply_epilogue_fused_monomorphic(
-                    EpilogueFuseKernel { kind, hoist_axis, slots: epilogue_slots },
+                    EpilogueFuseKernel {
+                        kind,
+                        hoist_axis,
+                        slots: epilogue_slots,
+                    },
                     consumer,
                     *reduce_node,
                     reduce_values,
@@ -4926,6 +5074,39 @@ pub fn resolve_named_blocks<'block>(
     Ok(blocks)
 }
 
+pub fn resolve_named_blocks_with_experts<'block>(
+    program: &[Op],
+    named: &[(&str, QuantizedBlock<'block>)],
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'block>>>,
+) -> Result<Vec<QuantizedBlock<'block>>, TensorError> {
+    let block_nodes = block_node_ids(program);
+    let mut blocks = Vec::with_capacity(block_nodes.len());
+    for node in block_nodes {
+        let name = program[node.0 as usize]
+            .name()
+            .ok_or(TensorError::UnnamedInput(node))?;
+        // A source-backed expert node must win over any stale or placeholder
+        // named binding: its codec and per-expert layout are the data the
+        // gathered reducer actually executes.
+        if let Some(source) = expert_sources.and_then(|sources| sources.get(&node)) {
+            let block = source
+                .entries()
+                .first()
+                .map_or(QuantizedBlock::Float32(&[]), |entry| entry.block);
+            blocks.push(block);
+        } else if let Some(data) = named
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|(_, data)| *data)
+        {
+            blocks.push(data);
+        } else {
+            return Err(TensorError::UnboundInputName(String::from(name)));
+        }
+    }
+    Ok(blocks)
+}
+
 /// evaluator's body a third time.
 pub fn evaluate_quantized_named_with_scratch<'block>(
     program: &[Op],
@@ -4995,7 +5176,7 @@ pub fn evaluate_quantized_named_with_scratch_and_experts<'block>(
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, TensorError> {
-    let blocks = resolve_named_blocks(program, named)?;
+    let blocks = resolve_named_blocks_with_experts(program, named, expert_sources)?;
     evaluate_quantized_with_scratch_and_experts(
         program,
         symbols,
@@ -5019,7 +5200,7 @@ pub fn evaluate_quantized_named_exact_with_scratch_and_experts<'block>(
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, TensorError> {
-    let blocks = resolve_named_blocks(program, named)?;
+    let blocks = resolve_named_blocks_with_experts(program, named, expert_sources)?;
     evaluate_quantized_exact_with_scratch_and_experts(
         program,
         symbols,
@@ -5481,7 +5662,9 @@ fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
 
     if chunks.len() < 2 {
         return match (chunks.first(), slices.into_iter().next()) {
-            (Some(chunk), Some(slice)) => run_node_into(chunk, buffers, None, None, None, false, slice),
+            (Some(chunk), Some(slice)) => {
+                run_node_into(chunk, buffers, None, None, None, false, slice)
+            }
             _ => Ok(()),
         };
     }
@@ -5920,7 +6103,10 @@ fn is_quantized_matmul_operand(program: &[Op], node: NodeId) -> bool {
                         && program[source.0 as usize].dtype() == DType::Float32
                         && operand_traces_to_a_real_input(program, *source)
                 });
-                if *body != ScalarOp::Multiply || operands.len() != 2 || !other_operand_is_real_activation {
+                if *body != ScalarOp::Multiply
+                    || operands.len() != 2
+                    || !other_operand_is_real_activation
+                {
                     return false;
                 }
                 let elementwise_node = NodeId(position as u32);
@@ -6120,9 +6306,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     let result = match &resolved.kind {
-        BoundOpKind::CachedAttention {
-            ..
-        } => {
+        BoundOpKind::CachedAttention { .. } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::CachedAttention);
             run_cached_attention(resolved, buffers, output)
@@ -6130,13 +6314,22 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
         BoundOpKind::Elementwise { .. } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Elementwise);
-            let gather_block = quantized_gather_operand(resolved)
-                .and_then(|(source, lookup)| {
-                    quantized_weights.and_then(|weights| weights.get(&source).map(|block| (lookup, block)))
-                });
+            let gather_block = quantized_gather_operand(resolved).and_then(|(source, lookup)| {
+                quantized_weights
+                    .and_then(|weights| weights.get(&source).map(|block| (lookup, block)))
+            });
             match gather_block {
                 Some((lookup, block)) => {
-                    run_embedding_gather_quantized(resolved, buffers, &lookup, block, output)
+                    if let Some(source) = expert_sources.and_then(|sources| {
+                        quantized_gather_operand(resolved)
+                            .and_then(|(node, _)| sources.get(&node).copied())
+                    }) {
+                        run_embedding_gather_expert_source(
+                            resolved, buffers, &lookup, source, output,
+                        )
+                    } else {
+                        run_embedding_gather_quantized(resolved, buffers, &lookup, block, output)
+                    }
                 }
                 None => run_elementwise_dispatch(resolved, buffers, session, output),
             }
@@ -6282,7 +6475,8 @@ fn apply_plain_reduce_epilogue(
         }
         let offset = out_layout.offset_of(&full_coordinate) as usize;
         for (slot, (_, layout, _)) in epilogue_operands.iter().enumerate() {
-            operand_values[slot] = operand_buffers[slot][layout.offset_of(&local_coordinate) as usize];
+            operand_values[slot] =
+                operand_buffers[slot][layout.offset_of(&local_coordinate) as usize];
         }
         operand_values[epilogue_operands.len()] = output[offset];
         output[offset] = apply_body(epilogue_body, &operand_values, &mut step_values);
@@ -6331,7 +6525,8 @@ fn apply_broadcast_reduce_epilogue(
         // position's value on a broadcast axis.
         let fold_offset = out_layout.offset_of(&full_coordinate) as usize;
         for (slot, (_, layout, _)) in epilogue_operands.iter().enumerate() {
-            operand_values[slot] = operand_buffers[slot][layout.offset_of(&full_coordinate) as usize];
+            operand_values[slot] =
+                operand_buffers[slot][layout.offset_of(&full_coordinate) as usize];
         }
         operand_values[epilogue_operands.len()] = fold_scratch[fold_offset];
         output[flat as usize] = apply_body(epilogue_body, &operand_values, &mut step_values);
@@ -6369,7 +6564,8 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         scale,
         cached_lower_inclusive,
         new_upper_inclusive,
-    } = &resolved.kind else {
+    } = &resolved.kind
+    else {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
             reason: "cached attention runner received another bound operation",
@@ -6496,8 +6692,12 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         node: resolved.node,
         reason: "cached attention's live cached_key_rows exceeds its own buffer length",
     };
-    let cached_key_even = cached_key_even.get(..live_pair_len).ok_or(out_of_range.clone())?;
-    let cached_key_odd = cached_key_odd.get(..live_pair_len).ok_or(out_of_range.clone())?;
+    let cached_key_even = cached_key_even
+        .get(..live_pair_len)
+        .ok_or(out_of_range.clone())?;
+    let cached_key_odd = cached_key_odd
+        .get(..live_pair_len)
+        .ok_or(out_of_range.clone())?;
     let cached_value = cached_value.get(..live_value_len).ok_or(out_of_range)?;
     let streamed = crate::physical::stream_cached_attention_split_gqa(
         [query_even, query_odd],
@@ -7044,6 +7244,14 @@ fn run_embedding_gather_quantized<B: Deref<Target = [f32]>>(
         return Err(shape_error());
     }
     let indices = buffer_of(buffers, lookup.indices)?;
+    #[cfg(feature = "instrument")]
+    debug!(
+        node = resolved.node.0,
+        extent = lookup.extent,
+        element_stride = dim,
+        output_len = output.len(),
+        "quantized embedding gather addressing"
+    );
     let mut coordinate = vec![0u64; resolved.extents.len().max(1)];
     for (row, out_row) in output.chunks_exact_mut(dim).enumerate() {
         coordinate[0] = row as u64;
@@ -7060,6 +7268,96 @@ fn run_embedding_gather_quantized<B: Deref<Target = [f32]>>(
         }
         dequantize_row(resolved.node, block, row_index as usize, dim, out_row)
             .map_err(|_| shape_error())?;
+        #[cfg(feature = "instrument")]
+        if row == 0 {
+            debug!(
+                node = resolved.node.0,
+                raw_index,
+                row_index,
+                first = out_row.first().copied().unwrap_or(0.0),
+                second = out_row.get(1).copied().unwrap_or(0.0),
+                third = out_row.get(2).copied().unwrap_or(0.0),
+                fourth = out_row.get(3).copied().unwrap_or(0.0),
+                "quantized embedding gather first row"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_embedding_gather_expert_source<B: Deref<Target = [f32]>>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    lookup: &bind::Lookup,
+    source: ExpertSource<'_>,
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let dim = usize::try_from(lookup.element_stride).map_err(|_| TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "expert gather element width does not fit host usize",
+    })?;
+    if dim == 0 || !output.len().is_multiple_of(dim) {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "expert gather output is not a whole number of expert rows",
+        });
+    }
+    let indices = buffer_of(buffers, lookup.indices)?;
+    let coordinate_len = resolved.extents.len().max(1);
+    let mut coordinate = vec![0u64; coordinate_len];
+    let source_node = resolved
+        .operands()
+        .iter()
+        .find_map(|(node, _, gather)| gather.as_ref().map(|_| *node))
+        .unwrap_or(resolved.node);
+    for (row, output_row) in output.chunks_exact_mut(dim).enumerate() {
+        coordinate[0] = row as u64;
+        let index_offset =
+            usize::try_from(lookup.index_layout.offset_of(&coordinate)).map_err(|_| {
+                TensorError::NotLowerable {
+                    node: resolved.node,
+                    reason: "expert gather index offset does not fit host usize",
+                }
+            })?;
+        let raw_index = *indices.get(index_offset).ok_or(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "expert gather index buffer is shorter than its declared layout",
+        })?;
+        let expert_index = raw_index as usize;
+        let entry = source.entries().get(expert_index).copied().ok_or(
+            TensorError::GatherIndexOutOfRange {
+                node: source_node,
+                index: raw_index as i64,
+                extent: source.entries().len() as u64,
+            },
+        )?;
+        let expected_elements = usize::try_from(entry.out_dim)
+            .ok()
+            .and_then(|out| {
+                usize::try_from(entry.in_dim)
+                    .ok()
+                    .and_then(|input| out.checked_mul(input))
+            })
+            .ok_or(TensorError::NotLowerable {
+                node: resolved.node,
+                reason: "expert entry shape overflows host usize",
+            })?;
+        if expected_elements != dim {
+            return Err(TensorError::ExpertSourceShapeMismatch {
+                node: source_node,
+                expert: expert_index as u32,
+                entry_out: entry.out_dim,
+                entry_in: entry.in_dim,
+                expected_out: dim as u32,
+                expected_in: 1,
+            });
+        }
+        dequantize_row(resolved.node, &entry.block, 0, dim, output_row).map_err(|_| {
+            TensorError::NotLowerable {
+                node: resolved.node,
+                reason: "expert gather entry cannot decode its declared row width",
+            }
+        })?;
     }
     Ok(())
 }
@@ -7084,6 +7382,7 @@ fn dequantize_row(
         reason: "quantized embedding row width does not divide the codec's own block width",
     };
     let (data, block_bytes, block_elements): (&[u8], usize, usize) = match block {
+        QuantizedBlock::Int32(_) => unreachable!("integer index blocks never enter quantized dot"),
         QuantizedBlock::Q4K(data) => (data, q4_k::BLOCK_BYTES, q4_k::QK_K),
         QuantizedBlock::Q5K(data) => (data, q5_k::BLOCK_BYTES, q5_k::QK_K),
         QuantizedBlock::Q3K(data) => (data, q3_k::BLOCK_BYTES, q3_k::QK_K),
@@ -7108,7 +7407,9 @@ fn dequantize_row(
     }
     let row_bytes = (dim / block_elements) * block_bytes;
     let start = row_index * row_bytes;
-    let row_bytes_slice = data.get(start..start + row_bytes).ok_or_else(unaligned_row)?;
+    let row_bytes_slice = data
+        .get(start..start + row_bytes)
+        .ok_or_else(unaligned_row)?;
     match block {
         QuantizedBlock::Q4K(_) => q4_k::dequantize(row_bytes_slice, output),
         QuantizedBlock::Q5K(_) => q5_k::dequantize(row_bytes_slice, output),
@@ -7148,6 +7449,12 @@ fn materialize_quantized_weight_output(
     let Some(block) = quantized_weights.get(&node) else {
         return Ok(());
     };
+    #[cfg(feature = "instrument")]
+    debug!(
+        node = node.0,
+        elements = element_count(shapes.of(node)),
+        "materializing quantized weight for requested output"
+    );
     let mut dequantized = vec![0.0f32; element_count(shapes.of(node))];
     dequantize_row(node, block, 0, dequantized.len(), &mut dequantized)?;
     buffers[node.0 as usize] = Some(Cow::Owned(dequantized));
@@ -8362,6 +8669,9 @@ fn build_matmul_stage_plan<'weights>(
     let leading_total = usize::try_from(leading_total_u64).map_err(|_| shape_error())?;
 
     let (weights, block_bytes, block_elements): (&[u8], usize, usize) = match weight_block {
+        QuantizedBlock::Int32(_) => {
+            unreachable!("integer index blocks never enter quantized matmul")
+        }
         QuantizedBlock::Float32(_) => return Err(shape_error()),
         QuantizedBlock::Q4K(bytes) => (bytes, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
@@ -9134,6 +9444,9 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // position, so `block_elements` varies per codec rather than being one
     // shared constant.
     let (weights, block_bytes, block_elements): (&[u8], usize, usize) = match weight_block {
+        QuantizedBlock::Int32(_) => {
+            unreachable!("integer index blocks never enter quantized matmul")
+        }
         QuantizedBlock::Float32(_) => return Err(shape_error()),
         QuantizedBlock::Q4K(bytes) => (bytes, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
@@ -9175,7 +9488,11 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         let expected_total_bytes = per_expert_bytes
             .checked_mul(expert_count)
             .ok_or_else(shape_error)?;
-        if weights.len() != expected_total_bytes {
+        // A source-backed gather deliberately has no monolithic stack in the
+        // segment's bindings. Each position resolves its own entry below, so
+        // validating the absent stack length here would reject the exact
+        // residency path this reducer is meant to execute.
+        if expert_source.is_none() && weights.len() != expected_total_bytes {
             return Err(shape_error());
         }
     } else {
@@ -9363,8 +9680,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             if let Some(source) = expert_source.as_ref() {
                 let rows_u32 = u32::try_from(rows).map_err(|_| shape_error())?;
                 let k_u32 = u32::try_from(k).map_err(|_| shape_error())?;
-                let entry =
-                    source.entry(resolved.node, expert_index as usize, rows_u32, k_u32)?;
+                let entry = source.entry(resolved.node, expert_index as usize, rows_u32, k_u32)?;
                 let bytes = entry.block.packed_bytes().ok_or_else(shape_error)?;
                 expert_entry = Some(entry);
                 bytes
@@ -9393,6 +9709,9 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         #[cfg(feature = "instrument")]
         let diag_call_started = instrument::read_ticks();
         let result = match dispatch_block {
+            QuantizedBlock::Int32(_) => {
+                unreachable!("integer index blocks never enter quantized dispatch")
+            }
             QuantizedBlock::Float32(_) => return Err(shape_error()),
             QuantizedBlock::Q4K(_) => {
                 // reachable when `exact_activations` is set (the wide fold
@@ -9473,7 +9792,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             // `weight_block` would count e.g. a `Q2_K` expert's macs/ticks
             // as `Q4_K` whenever the stack's OWN declared codec was `Q4_K`.
             match dispatch_block {
-                QuantizedBlock::Float32(_) => {}
+                QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => {}
                 QuantizedBlock::Q4K(_) => {
                     counter!(instrument::MATMUL_Q4K_MACS, diag_call_macs);
                     counter!(instrument::MATMUL_Q4K_CALL_TICKS, diag_call_ticks);
@@ -12134,12 +12453,20 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
             (0, 0) => {
                 match (
                     composed_reduction_stride(context.resolved, &[first, second], layout_a),
-                    composed_reduction_stride(context.resolved, &[first, second], context.out_layout),
+                    composed_reduction_stride(
+                        context.resolved,
+                        &[first, second],
+                        context.out_layout,
+                    ),
                 ) {
                     (Some((extent_a, stride_a)), Some((extent_out, stride_out)))
                         if extent_a == leading_total_early && extent_out == leading_total_early =>
                     {
-                        (first, None, Some((stride_a, stride_out, leading_total_early as usize)))
+                        (
+                            first,
+                            None,
+                            Some((stride_a, stride_out, leading_total_early as usize)),
+                        )
                     }
                     _ => {
                         #[cfg(feature = "instrument")]
@@ -12242,10 +12569,13 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
                 composed_reduction_stride(context.resolved, &[first, second], layout_b),
                 composed_reduction_stride(context.resolved, &[first, second], context.out_layout),
             ) {
-                (Some((extent_a, stride_a)), Some((extent_b, stride_b)), Some((extent_out, stride_out)))
-                    if extent_a == outer_total_early
-                        && extent_b == outer_total_early
-                        && extent_out == outer_total_early =>
+                (
+                    Some((extent_a, stride_a)),
+                    Some((extent_b, stride_b)),
+                    Some((extent_out, stride_out)),
+                ) if extent_a == outer_total_early
+                    && extent_b == outer_total_early
+                    && extent_out == outer_total_early =>
                 {
                     Some((outer_total_early as usize, stride_a, stride_b, stride_out))
                 }
@@ -20411,7 +20741,12 @@ fn run_typed_program<T: Element>(
         buffers[node.0 as usize] = Some(Cow::Borrowed(data));
     }
 
-    let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
+    let resolved = bind::bind(
+        program,
+        &shapes,
+        &effective_outputs,
+        NumericPolicy::bit_exact(),
+    )?;
 
     let retires = node_retirement(&resolved, &effective_outputs);
     let mut free_buffers: Vec<Vec<T>> = Vec::new();
@@ -20555,7 +20890,12 @@ where
         }
     }
 
-    let resolved = bind::bind(program, &shapes, &effective_outputs, NumericPolicy::bit_exact())?;
+    let resolved = bind::bind(
+        program,
+        &shapes,
+        &effective_outputs,
+        NumericPolicy::bit_exact(),
+    )?;
 
     let retires = node_retirement(&resolved, &effective_outputs);
     let mut free_in: Vec<Vec<TIn>> = Vec::new();
@@ -21192,7 +21532,10 @@ mod tests {
             DType::Float32,
             ScalarOp::Multiply,
             &[
-                (wo_flat, alloc::format!("{}*u+{head_dim}*g+d,e->ugde", head_dim * group).as_str()),
+                (
+                    wo_flat,
+                    alloc::format!("{}*u+{head_dim}*g+d,e->ugde", head_dim * group).as_str(),
+                ),
                 (ones, "ugd->ugde"),
             ],
         )
@@ -21238,15 +21581,27 @@ mod tests {
             .iter()
             .find(|op| op.node == attn_out)
             .expect("attn_out is present in the bound program");
-        let BoundOpKind::Reduce { element_body, operands, .. } = &bound.kind else {
+        let BoundOpKind::Reduce {
+            element_body,
+            operands,
+            ..
+        } = &bound.kind
+        else {
             panic!("attn_out must bind to a Reduce");
         };
         assert_eq!(
             element_body.steps,
-            vec![BodyStep { op: ScalarOp::Multiply, args: vec![StepArg::Operand(0), StepArg::Operand(1)] }],
+            vec![BodyStep {
+                op: ScalarOp::Multiply,
+                args: vec![StepArg::Operand(0), StepArg::Operand(1)]
+            }],
             "the fused reduce must be a bare two-operand product, never a wider composed body"
         );
-        assert_eq!(operands.len(), 2, "packed_reduce_activation_operand requires exactly two operands");
+        assert_eq!(
+            operands.len(),
+            2,
+            "packed_reduce_activation_operand requires exactly two operands"
+        );
         let pre_reduction_extent: u64 = bound.extents.iter().product();
         for op in &resolved {
             if op.node == bound.node {
@@ -21294,7 +21649,10 @@ mod tests {
         let weight_node = NodeId(0);
         let x_node = NodeId(1);
         let g_node = NodeId(2);
-        let flat_layout = || bind::Layout { base: 0, strides: smallvec::smallvec![1] };
+        let flat_layout = || bind::Layout {
+            base: 0,
+            strides: smallvec::smallvec![1],
+        };
 
         let resolved = BoundOp {
             node: NodeId(3),
@@ -21303,7 +21661,10 @@ mod tests {
             kind: BoundOpKind::Reduce {
                 element_body: ComposedBody {
                     steps: alloc::vec![
-                        step(ScalarOp::Multiply, &[StepArg::Operand(1), StepArg::Operand(2)]),
+                        step(
+                            ScalarOp::Multiply,
+                            &[StepArg::Operand(1), StepArg::Operand(2)]
+                        ),
                         step(ScalarOp::Multiply, &[StepArg::Operand(0), StepArg::Step(0)]),
                     ],
                 },
@@ -21361,15 +21722,27 @@ mod tests {
         let mut program = Vec::new();
         let a = append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: None },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: None,
+            },
         );
         let scale = append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: None },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: None,
+            },
         );
         let bias = append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: None },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: None,
+            },
         );
         let identity = || crate::map::IndexMap::Affine(crate::map::projection(1, &[0]));
         let b = append(
@@ -21494,15 +21867,29 @@ mod tests {
         let identity_2d = || IndexMap::Affine(map::projection(2, &[0, 1]));
         let negated = append(
             &mut program,
-            Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Negate, operands: vec![(z, identity_2d())], name: None },
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: vec![(z, identity_2d())],
+                name: None,
+            },
         );
         let exponentiated = append(
             &mut program,
-            Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Exponential, operands: vec![(negated, identity_2d())], name: None },
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Exponential,
+                operands: vec![(negated, identity_2d())],
+                name: None,
+            },
         );
         let one = append(
             &mut program,
-            Op::Constant { dtype: DType::Float32, shape: vec![Extent::Static(8), Extent::Static(16)], value: 1.0 },
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(8), Extent::Static(16)],
+                value: 1.0,
+            },
         );
         let one_plus = append(
             &mut program,
@@ -21515,7 +21902,12 @@ mod tests {
         );
         let g = append(
             &mut program,
-            Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Reciprocal, operands: vec![(one_plus, identity_2d())], name: None },
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Reciprocal,
+                operands: vec![(one_plus, identity_2d())],
+                name: None,
+            },
         );
         (program, z, g)
     }
@@ -21530,13 +21922,17 @@ mod tests {
         let named: Vec<(&str, &[f32])> = vec![("x", &x_data), ("w", &w_data)];
 
         let small = evaluate_named(&program, &[], &named, &[g]).expect("small (g alone) evaluates");
-        let wide = evaluate_named(&program, &[], &named, &[z, g]).expect("wide (z and g) evaluates");
+        let wide =
+            evaluate_named(&program, &[], &named, &[z, g]).expect("wide (z and g) evaluates");
 
         let small_g = small.get(g).expect("small g present").0;
         let wide_z = wide.get(z).expect("wide z present").0;
         let wide_g = wide.get(g).expect("wide g present").0;
 
-        let manual_sigmoid: Vec<f32> = wide_z.iter().map(|value| 1.0 / (1.0 + (-value).exp())).collect();
+        let manual_sigmoid: Vec<f32> = wide_z
+            .iter()
+            .map(|value| 1.0 / (1.0 + (-value).exp()))
+            .collect();
 
         assert_eq!(
             small_g, wide_g,
@@ -21567,8 +21963,7 @@ mod tests {
         let mut placed = BTreeSet::new();
         placed.insert(requested);
 
-        let evaluated =
-            Evaluated::from_parts_with_placed(requested, Vec::new(), None, placed);
+        let evaluated = Evaluated::from_parts_with_placed(requested, Vec::new(), None, placed);
 
         assert!(evaluated.is_placed(requested));
         assert!(evaluated.get(requested).is_none());
@@ -21948,7 +22343,8 @@ mod tests {
             );
 
             let shapes = shape::infer(&program, &[]).expect("shape inference succeeds");
-            let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("bind succeeds");
+            let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+                .expect("bind succeeds");
             let BoundOpKind::Elementwise { body, .. } = &resolved
                 .iter()
                 .find(|op| op.node == root)
@@ -21960,7 +22356,11 @@ mod tests {
             body.clone()
         };
 
-        assert_eq!(build(true), build(false), "c+a*b and a*b+c must mint the identical BodyStep sequence");
+        assert_eq!(
+            build(true),
+            build(false),
+            "c+a*b and a*b+c must mint the identical BodyStep sequence"
+        );
     }
 
     /// Bit-identity, per the brief's requirement that canonicalizing operand
@@ -25336,7 +25736,8 @@ mod tests {
             embedding_matmul_program(vocab as u32, embed_dim as u32, seq as u32, out_dim as u32);
 
         let shapes = shape::infer(&program, &[]).expect("embedding matmul infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("embedding matmul resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("embedding matmul resolves");
         assert_eq!(
             resolved.len(),
             1,
@@ -25409,7 +25810,8 @@ mod tests {
             .collect();
 
         let shapes = shape::infer(&program, &[]).expect("infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("resolves");
+        let resolved =
+            bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("resolves");
         assert_eq!(resolved.len(), 1, "fused into one reduction node");
         assert!(
             element_count(&resolved[0].extents) >= PARALLEL_THRESHOLD,
@@ -25647,7 +26049,9 @@ mod tests {
         let lhs: Vec<f32> = (0..rows * contraction)
             .map(|value| value as f32 * 0.01 + 1.0)
             .collect();
-        let rhs: Vec<f32> = (0..contraction * width).map(|value| value as f32 * 0.001).collect();
+        let rhs: Vec<f32> = (0..contraction * width)
+            .map(|value| value as f32 * 0.001)
+            .collect();
 
         instrument::reset_width_tile_decline();
         let (gate_passes_before, invocations_before, _) = width_tile_counters();
@@ -25655,12 +26059,14 @@ mod tests {
             .expect("the two-leading-axis shared-weight reduce evaluates");
         let (gate_passes_after, invocations_after, _) = width_tile_counters();
 
-        assert_eq!(
-            evaluated.shape(),
-            &[batch as u64, seq as u64, width as u64]
+        assert_eq!(evaluated.shape(), &[batch as u64, seq as u64, width as u64]);
+        let reference = naive_matmul(
+            &lhs,
+            &rhs,
+            rows as usize,
+            contraction as usize,
+            width as usize,
         );
-        let reference =
-            naive_matmul(&lhs, &rhs, rows as usize, contraction as usize, width as usize);
         assert_all_close(evaluated.root(), &reference, 1e-5);
 
         let gate_delta = gate_passes_after - gate_passes_before;
@@ -25703,7 +26109,9 @@ mod tests {
         let lhs: Vec<f32> = (0..rows * contraction)
             .map(|value| value as f32 * 0.01 + 1.0)
             .collect();
-        let rhs: Vec<f32> = (0..contraction * width).map(|value| value as f32 * 0.001).collect();
+        let rhs: Vec<f32> = (0..contraction * width)
+            .map(|value| value as f32 * 0.001)
+            .collect();
 
         instrument::reset_width_tile_decline();
         let (gate_passes_before, _, _) = width_tile_counters();
@@ -25715,8 +26123,13 @@ mod tests {
             evaluated.shape(),
             &[outer as u64, batch as u64, seq as u64, width as u64]
         );
-        let reference =
-            naive_matmul(&lhs, &rhs, rows as usize, contraction as usize, width as usize);
+        let reference = naive_matmul(
+            &lhs,
+            &rhs,
+            rows as usize,
+            contraction as usize,
+            width as usize,
+        );
         assert_all_close(evaluated.root(), &reference, 1e-5);
 
         assert_eq!(
@@ -25771,8 +26184,8 @@ mod tests {
         );
         let mut reference = vec![0.0f32; (outer * batch * seq * width) as usize];
         for slice in 0..(outer * batch) as usize {
-            let lhs_slice = &lhs[slice * (seq * contraction) as usize
-                ..(slice + 1) * (seq * contraction) as usize];
+            let lhs_slice = &lhs
+                [slice * (seq * contraction) as usize..(slice + 1) * (seq * contraction) as usize];
             let rhs_slice = &rhs[slice * (contraction * width) as usize
                 ..(slice + 1) * (contraction * width) as usize];
             let slice_out = naive_matmul(
@@ -26172,7 +26585,8 @@ mod tests {
         let _ = current;
 
         let shapes = shape::infer(&program, &[]).expect("tanh chain infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("tanh chain resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("tanh chain resolves");
         assert_eq!(
             resolved.len(),
             1,
@@ -26231,7 +26645,8 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("elementwise chain resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("elementwise chain resolves");
         assert_eq!(
             resolved.len(),
             1,
@@ -26304,7 +26719,8 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("diamond chain infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("diamond chain resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("diamond chain resolves");
         assert_eq!(
             resolved.len(),
             2,
@@ -26353,8 +26769,8 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("requested-output chain infers");
-        let resolved =
-            bind::bind(&program, &shapes, &[b, c], NumericPolicy::bit_exact()).expect("requested-output chain resolves");
+        let resolved = bind::bind(&program, &shapes, &[b, c], NumericPolicy::bit_exact())
+            .expect("requested-output chain resolves");
         assert_eq!(
             resolved.len(),
             2,
@@ -26622,7 +27038,8 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("elementwise infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("elementwise resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("elementwise resolves");
         let node = &resolved[0];
 
         let data: Vec<f32> = (0..40).map(|value| value as f32 * 0.01).collect();
@@ -26636,7 +27053,8 @@ mod tests {
         let mut remaining = split_output.as_mut_slice();
         for chunk in &chunks {
             let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-            run_node_into(chunk, &buffers, None, None, None, false, this_chunk).expect("chunk runs");
+            run_node_into(chunk, &buffers, None, None, None, false, this_chunk)
+                .expect("chunk runs");
             remaining = rest;
         }
 
@@ -26651,7 +27069,8 @@ mod tests {
         let rhs: Vec<f32> = (0..k * n).map(|value| value as f32).collect();
 
         let shapes = shape::infer(&program, &[]).expect("matmul infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("matmul resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("matmul resolves");
         assert_eq!(resolved.len(), 1, "fused into one reduction node");
         let node = &resolved[0];
 
@@ -26666,7 +27085,8 @@ mod tests {
         let mut remaining = split_output.as_mut_slice();
         for chunk in &chunks {
             let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-            run_node_into(chunk, &buffers, None, None, None, false, this_chunk).expect("chunk runs");
+            run_node_into(chunk, &buffers, None, None, None, false, this_chunk)
+                .expect("chunk runs");
             remaining = rest;
         }
 
@@ -26945,7 +27365,8 @@ mod tests {
         let rhs: Vec<f32> = (0..k * n).map(|value| (value % 5) as f32).collect();
 
         let shapes = shape::infer(&program, &[]).expect("64x64x64 matmul infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("64x64x64 matmul resolves");
+        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("64x64x64 matmul resolves");
         assert_eq!(resolved.len(), 1, "fused into one reduction node");
         assert!(
             element_count(&resolved[0].extents) >= PARALLEL_THRESHOLD,
@@ -29018,7 +29439,9 @@ mod tests {
         // implies for zero-mean unit-variance inputs), i.e. it was NOT
         // reproducing independent rows.
         let activation: Vec<f32> = random_vec(97, k);
-        let rows_f32: Vec<Vec<f32>> = (0..rows).map(|row| random_vec(1000 + row as u64, k)).collect();
+        let rows_f32: Vec<Vec<f32>> = (0..rows)
+            .map(|row| random_vec(1000 + row as u64, k))
+            .collect();
 
         let mut weight_blocks = vec![0u8; rows * blocks_per_row * BLOCK_BYTES];
         for (row_f32, row_blocks) in rows_f32
@@ -29836,7 +30259,11 @@ mod tests {
         }
 
         let mut program = Vec::new();
-        let weight = block(&mut program, DType::UInt8, &[Extent::Static(rows), Extent::Static(k)]);
+        let weight = block(
+            &mut program,
+            DType::UInt8,
+            &[Extent::Static(rows), Extent::Static(k)],
+        );
         let raw = f32_block(&mut program, &[Extent::Static(k), Extent::Static(1)]);
         let one = crate::spec::scalar_constant(&mut program, 1.0);
         let real_activation = append(
@@ -29858,7 +30285,10 @@ mod tests {
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![
                     (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
-                    (real_activation, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                    (
+                        real_activation,
+                        IndexMap::Affine(map::projection(3, &[2, 1]))
+                    ),
                 ],
                 name: None,
             },
@@ -29877,7 +30307,10 @@ mod tests {
             }),
         );
 
-        let blocks = [QuantizedBlock::Q4K(&weight_blocks), QuantizedBlock::Float32(&raw_activation)];
+        let blocks = [
+            QuantizedBlock::Q4K(&weight_blocks),
+            QuantizedBlock::Float32(&raw_activation),
+        ];
 
         // fused: `bind` absorbs `real_activation`'s `+1.0` into the
         // reduce's own body since it has no other consumer -- the shape
@@ -29890,8 +30323,9 @@ mod tests {
         // materialized: requesting `real_activation` too keeps it `still_live`,
         // so `bind` cannot fuse it into the reduce -- the reduce now reads a
         // real, already-added buffer, the same path a plain f32 matmul takes.
-        let materialized_result = evaluate_quantized(&program, &[], &blocks, &[real_activation, sum])
-            .expect("materialized quantized matmul evaluates");
+        let materialized_result =
+            evaluate_quantized(&program, &[], &blocks, &[real_activation, sum])
+                .expect("materialized quantized matmul evaluates");
         let materialized = materialized_result
             .get(sum)
             .expect("the reduce output was requested")
@@ -29977,7 +30411,11 @@ mod tests {
         }
 
         let mut program = Vec::new();
-        let weight = block(&mut program, DType::UInt8, &[Extent::Static(rows), Extent::Static(k)]);
+        let weight = block(
+            &mut program,
+            DType::UInt8,
+            &[Extent::Static(rows), Extent::Static(k)],
+        );
         let attended_node = f32_block(&mut program, &[Extent::Static(k), Extent::Static(1)]);
         let gate_node = f32_block(&mut program, &[Extent::Static(k), Extent::Static(1)]);
         let one = crate::spec::scalar_constant(&mut program, 1.0);
@@ -29995,7 +30433,10 @@ mod tests {
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Exponential,
-                operands: alloc::vec![(negated_gate, IndexMap::Affine(map::projection(2, &[0, 1])))],
+                operands: alloc::vec![(
+                    negated_gate,
+                    IndexMap::Affine(map::projection(2, &[0, 1]))
+                )],
                 name: None,
             },
         );
@@ -30016,7 +30457,10 @@ mod tests {
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Reciprocal,
-                operands: alloc::vec![(one_plus_exp_gate, IndexMap::Affine(map::projection(2, &[0, 1])))],
+                operands: alloc::vec![(
+                    one_plus_exp_gate,
+                    IndexMap::Affine(map::projection(2, &[0, 1]))
+                )],
                 name: None,
             },
         );
@@ -30137,7 +30581,11 @@ mod tests {
         const HEAD_DIM: u64 = 64;
         const EMBED: u64 = 3;
         const IN_DIM: u64 = KV_HEADS * GROUP * HEAD_DIM;
-        assert_eq!(IN_DIM as usize, proxima_gguf::quant::q4_k::QK_K, "one clean super-block per output row");
+        assert_eq!(
+            IN_DIM as usize,
+            proxima_gguf::quant::q4_k::QK_K,
+            "one clean super-block per output row"
+        );
 
         let attended: Vec<f32> = random_vec(47, IN_DIM as usize)
             .into_iter()
@@ -30160,7 +30608,8 @@ mod tests {
             .chunks_exact(in_dim)
             .zip(weight_blocks.chunks_exact_mut(row_bytes))
         {
-            quantize(row_f32, row_blocks).expect("row length is a whole number of QK_K super-blocks");
+            quantize(row_f32, row_blocks)
+                .expect("row length is a whole number of QK_K super-blocks");
         }
 
         let mut program = Vec::new();
@@ -30193,7 +30642,10 @@ mod tests {
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Negate,
-                operands: alloc::vec![(gate_node, IndexMap::Affine(map::projection(3, &[0, 1, 2])))],
+                operands: alloc::vec![(
+                    gate_node,
+                    IndexMap::Affine(map::projection(3, &[0, 1, 2]))
+                )],
                 name: None,
             },
         );
@@ -30202,7 +30654,10 @@ mod tests {
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Exponential,
-                operands: alloc::vec![(negated_gate, IndexMap::Affine(map::projection(3, &[0, 1, 2])))],
+                operands: alloc::vec![(
+                    negated_gate,
+                    IndexMap::Affine(map::projection(3, &[0, 1, 2]))
+                )],
                 name: None,
             },
         );
@@ -30212,7 +30667,10 @@ mod tests {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
                 operands: alloc::vec![
-                    (exp_neg_gate, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                    (
+                        exp_neg_gate,
+                        IndexMap::Affine(map::projection(3, &[0, 1, 2]))
+                    ),
                     (one, IndexMap::Affine(map::projection(3, &[]))),
                 ],
                 name: None,
@@ -30223,7 +30681,10 @@ mod tests {
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Reciprocal,
-                operands: alloc::vec![(one_plus_exp_gate, IndexMap::Affine(map::projection(3, &[0, 1, 2])))],
+                operands: alloc::vec![(
+                    one_plus_exp_gate,
+                    IndexMap::Affine(map::projection(3, &[0, 1, 2]))
+                )],
                 name: None,
             },
         );
@@ -30233,8 +30694,14 @@ mod tests {
                 dtype: DType::Float32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![
-                    (attended_node, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
-                    (sigmoid_gate, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                    (
+                        attended_node,
+                        IndexMap::Affine(map::projection(3, &[0, 1, 2]))
+                    ),
+                    (
+                        sigmoid_gate,
+                        IndexMap::Affine(map::projection(3, &[0, 1, 2]))
+                    ),
                 ],
                 name: None,
             },
@@ -30588,8 +31055,8 @@ mod tests {
         activation: &'a [f32],
     ) -> (BoundOp, Vec<Option<Cow<'a, [f32]>>>, NodeId) {
         let shapes = shape::infer(program, &[]).expect("shape inference succeeds");
-        let resolved =
-            bind::bind(program, &shapes, &[sum], NumericPolicy::bit_exact()).expect("bind succeeds");
+        let resolved = bind::bind(program, &shapes, &[sum], NumericPolicy::bit_exact())
+            .expect("bind succeeds");
         let block_nodes = block_node_ids(program);
         let mut buffers: Vec<Option<Cow<'a, [f32]>>> = vec![None; program.len()];
         // `gathered_quantized_matmul_program` emits exactly three `Op::Input`
@@ -30667,8 +31134,9 @@ mod tests {
                 .collect();
             let block_bytes = BLOCK_BYTES;
             let mut blocks = vec![0u8; rows as usize * block_bytes];
-            for (row_f32, row_blocks) in
-                weight_f32.chunks_exact(k as usize).zip(blocks.chunks_exact_mut(block_bytes))
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(blocks.chunks_exact_mut(block_bytes))
             {
                 quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
             }
@@ -30682,17 +31150,12 @@ mod tests {
 
         let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
         let weight_block = QuantizedBlock::Q4K(&stacked_weight);
-        let entries =
-            expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
-                .expect("a block-aligned contiguous stack slices evenly");
+        let entries = expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
+            .expect("a block-aligned contiguous stack slices evenly");
         let source = ExpertSource::new(&entries);
 
-        let (resolved, buffers, weight_node) = resolve_gathered_reduce_for_expert_source_test(
-            &program,
-            sum,
-            &route_data,
-            &activation,
-        );
+        let (resolved, buffers, weight_node) =
+            resolve_gathered_reduce_for_expert_source_test(&program, sum, &route_data, &activation);
         let mut via_source = vec![0.0f32; seq as usize * rows as usize];
         run_reduce_quantized(
             &resolved,
@@ -30753,8 +31216,9 @@ mod tests {
                 .collect();
             let block_bytes = BLOCK_BYTES;
             let mut blocks = vec![0u8; rows as usize * block_bytes];
-            for (row_f32, row_blocks) in
-                weight_f32.chunks_exact(k as usize).zip(blocks.chunks_exact_mut(block_bytes))
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(blocks.chunks_exact_mut(block_bytes))
             {
                 quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
             }
@@ -30779,9 +31243,8 @@ mod tests {
 
         let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
         let weight_block = QuantizedBlock::Q4K(&stacked_weight);
-        let mut entries =
-            expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
-                .expect("a block-aligned contiguous stack slices evenly");
+        let mut entries = expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
+            .expect("a block-aligned contiguous stack slices evenly");
         entries[1] = ExpertEntry {
             block: QuantizedBlock::Q2K(&expert1_q2k),
             out_dim: rows,
@@ -30790,12 +31253,8 @@ mod tests {
         };
         let source = ExpertSource::new(&entries);
 
-        let (resolved, buffers, weight_node) = resolve_gathered_reduce_for_expert_source_test(
-            &program,
-            sum,
-            &route_data,
-            &activation,
-        );
+        let (resolved, buffers, weight_node) =
+            resolve_gathered_reduce_for_expert_source_test(&program, sum, &route_data, &activation);
         let mut actual = vec![0.0f32; seq as usize * rows as usize];
         run_reduce_quantized(
             &resolved,
@@ -30858,8 +31317,9 @@ mod tests {
                 .collect();
             let block_bytes = BLOCK_BYTES;
             let mut blocks = vec![0u8; rows as usize * block_bytes];
-            for (row_f32, row_blocks) in
-                weight_f32.chunks_exact(k as usize).zip(blocks.chunks_exact_mut(block_bytes))
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(blocks.chunks_exact_mut(block_bytes))
             {
                 quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
             }
@@ -30884,9 +31344,8 @@ mod tests {
 
         let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
         let weight_block = QuantizedBlock::Q4K(&stacked_weight);
-        let mut entries =
-            expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
-                .expect("a block-aligned contiguous stack slices evenly");
+        let mut entries = expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
+            .expect("a block-aligned contiguous stack slices evenly");
         entries[1] = ExpertEntry {
             block: QuantizedBlock::Q2K(&expert1_q2k),
             out_dim: rows,
@@ -30895,12 +31354,8 @@ mod tests {
         };
         let source = ExpertSource::new(&entries);
 
-        let (resolved, buffers, weight_node) = resolve_gathered_reduce_for_expert_source_test(
-            &program,
-            sum,
-            &route_data,
-            &activation,
-        );
+        let (resolved, buffers, weight_node) =
+            resolve_gathered_reduce_for_expert_source_test(&program, sum, &route_data, &activation);
         let mut actual = vec![0.0f32; seq as usize * rows as usize];
         instrument::reset_matmul_dispatch();
         run_reduce_quantized(
@@ -30952,8 +31407,9 @@ mod tests {
                 .collect();
             let block_bytes = BLOCK_BYTES;
             let mut blocks = vec![0u8; rows as usize * block_bytes];
-            for (row_f32, row_blocks) in
-                weight_f32.chunks_exact(k as usize).zip(blocks.chunks_exact_mut(block_bytes))
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(blocks.chunks_exact_mut(block_bytes))
             {
                 quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
             }
@@ -30978,16 +31434,11 @@ mod tests {
 
         let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
         let weight_block = QuantizedBlock::Q4K(&stacked_weight);
-        let entries_q4k =
-            expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
-                .expect("a block-aligned contiguous stack slices evenly");
+        let entries_q4k = expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
+            .expect("a block-aligned contiguous stack slices evenly");
 
-        let (resolved, buffers, weight_node) = resolve_gathered_reduce_for_expert_source_test(
-            &program,
-            sum,
-            &route_data,
-            &activation,
-        );
+        let (resolved, buffers, weight_node) =
+            resolve_gathered_reduce_for_expert_source_test(&program, sum, &route_data, &activation);
 
         let mut first = vec![0.0f32; seq as usize * rows as usize];
         run_reduce_quantized(
@@ -31052,11 +31503,13 @@ mod tests {
 
         let mut expert_blocks: Vec<Vec<u8>> = Vec::new();
         for expert in 0..n_experts {
-            let weight_f32: Vec<f32> = random_vec(601 + u64::from(expert), rows as usize * k as usize);
+            let weight_f32: Vec<f32> =
+                random_vec(601 + u64::from(expert), rows as usize * k as usize);
             let block_bytes = BLOCK_BYTES;
             let mut blocks = vec![0u8; rows as usize * block_bytes];
-            for (row_f32, row_blocks) in
-                weight_f32.chunks_exact(k as usize).zip(blocks.chunks_exact_mut(block_bytes))
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(blocks.chunks_exact_mut(block_bytes))
             {
                 quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
             }
@@ -31067,18 +31520,13 @@ mod tests {
 
         let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
         let weight_block = QuantizedBlock::Q4K(&stacked_weight);
-        let mut entries =
-            expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
-                .expect("a block-aligned contiguous stack slices evenly");
+        let mut entries = expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
+            .expect("a block-aligned contiguous stack slices evenly");
         // Expert 0's own entry now lies about its row count.
         entries[0].out_dim = rows + 1;
 
-        let (resolved, buffers, weight_node) = resolve_gathered_reduce_for_expert_source_test(
-            &program,
-            sum,
-            &route_data,
-            &activation,
-        );
+        let (resolved, buffers, weight_node) =
+            resolve_gathered_reduce_for_expert_source_test(&program, sum, &route_data, &activation);
         let mut output = vec![0.0f32; seq as usize * rows as usize];
         let error = run_reduce_quantized(
             &resolved,
@@ -31092,8 +31540,16 @@ mod tests {
         )
         .expect_err("a shape-mismatched entry must be rejected, not silently dotted");
         match error {
-            TensorError::ExpertSourceShapeMismatch { expert, entry_out, expected_out, .. } => {
-                assert_eq!(expert, 0, "expert 0's own entry is the one that lied about its shape");
+            TensorError::ExpertSourceShapeMismatch {
+                expert,
+                entry_out,
+                expected_out,
+                ..
+            } => {
+                assert_eq!(
+                    expert, 0,
+                    "expert 0's own entry is the one that lied about its shape"
+                );
                 assert_eq!(entry_out, rows + 1);
                 assert_eq!(expected_out, rows);
             }
@@ -31160,10 +31616,7 @@ mod tests {
         layer_a.sort_unstable_by_key(|(expert, _, _)| *expert);
         assert_eq!(
             layer_a,
-            alloc::vec![
-                (1u32, 3u64, expected_ema(3)),
-                (3u32, 2u64, expected_ema(2)),
-            ],
+            alloc::vec![(1u32, 3u64, expected_ema(3)), (3u32, 2u64, expected_ema(2)),],
             "expert 1 must show 3 selections and expert 3 must show 2, experts 0/2 never selected, \
              and each ema must match the same recurrence at that selection count"
         );
@@ -31192,16 +31645,15 @@ mod tests {
         let first = snapshot_expert_selection_top_n(100);
         assert!(
             first.iter().any(|(node, expert, count, ema)| {
-                *node == DRAIN_TEST_NODE
-                    && *expert == 0
-                    && *count == 1
-                    && *ema == expected_ema(1)
+                *node == DRAIN_TEST_NODE && *expert == 0 && *count == 1 && *ema == expected_ema(1)
             }),
             "the recorded selection must appear in the first snapshot with its own ema"
         );
         let second = snapshot_expert_selection_top_n(100);
         assert!(
-            !second.iter().any(|(node, _, _, _)| *node == DRAIN_TEST_NODE),
+            !second
+                .iter()
+                .any(|(node, _, _, _)| *node == DRAIN_TEST_NODE),
             "a drained entry must not reappear in the very next snapshot"
         );
     }
@@ -32703,7 +33155,9 @@ mod tests {
             .expect("decode real Q3_K row");
 
         let mut lcg = Lcg(99);
-        let activation: Vec<f32> = (0..row_elements).map(|_| lcg.next_unit() * 2.0 - 1.0).collect();
+        let activation: Vec<f32> = (0..row_elements)
+            .map(|_| lcg.next_unit() * 2.0 - 1.0)
+            .collect();
 
         let expected: f32 = row_f32
             .iter()

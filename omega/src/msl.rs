@@ -82,6 +82,95 @@ use crate::identity::{
 use crate::sized::PACKED_ROW_NSG;
 use crate::sized::SIMD_WIDTH;
 
+/// MSL source for one `Q2_K` element. The byte layout and index arithmetic
+/// mirror `proxima_gguf::quant::q2_k::dequantize_block`: sixteen scale/min
+/// bytes, sixty-four 2-bit payload bytes, then trailing `f16` `d`/`dmin`.
+pub const Q2K_UNPACK_MSL: &str = r#"
+static inline float q2k_element(device const uchar *block, uint index) {
+    device const uchar *scales = block;
+    device const uchar *qs = block + 16;
+    ushort d_bits = (ushort)((uint)block[80] | ((uint)block[81] << 8));
+    ushort dmin_bits = (ushort)((uint)block[82] | ((uint)block[83] << 8));
+    float d = (float)as_type<half>(d_bits);
+    float dmin = (float)as_type<half>(dmin_bits);
+
+    uint chunk = index / 128u;
+    uint within = index % 128u;
+    uint group = within / 32u;
+    uint local = within % 32u;
+    uint sub_block = chunk * 8u + group * 2u + (local >= 16u ? 1u : 0u);
+    uchar scale_min = scales[sub_block];
+    float scale = d * (float)(scale_min & 0x0Fu);
+    float minimum = dmin * (float)(scale_min >> 4u);
+    uchar level = (qs[chunk * 32u + local] >> (2u * group)) & 0x03u;
+    return scale * (float)level - minimum;
+}
+"#;
+
+/// Bytes and elements in one `Q2_K` super-block, sourced from the GGUF
+/// codec rather than restated numeric constants.
+pub const Q2K_BLOCK_BYTES: usize = proxima_gguf::quant::q2_k::BLOCK_BYTES;
+pub const Q2K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q2_k::QK_K;
+
+/// Emits the runtime codec selector used by a mixed HOBBIT expert gather.
+/// The payload pointer is one borrowed byte arena and each descriptor supplies
+/// its own byte offset; a later lowering can bind this helper without changing
+/// the graph's gather index map.
+pub const MIXED_EXPERT_READ_MSL: &str = r#"
+struct ExpertPayloadDescriptor {
+    uint expert_index;
+    uint codec;
+    uint byte_offset;
+    uint byte_length;
+    uint out_dim;
+    uint in_dim;
+    uint epoch;
+    uint reserved;
+};
+static inline float mixed_expert_element(device const uchar *payload,
+                                         device const ExpertPayloadDescriptor *descriptor,
+                                         uint expert,
+                                         uint element) {
+    ExpertPayloadDescriptor selected = descriptor[expert];
+    device const uchar *block = payload + selected.byte_offset;
+    if (selected.codec == 1u) {
+        return q2k_element(block + (element / 256u) * 84u, element % 256u);
+    }
+    if (selected.codec == 2u) {
+        return q4k_element(block + (element / 256u) * 144u, element % 256u);
+    }
+    if (selected.codec == 3u) {
+        return q6k_element(block + (element / 256u) * 210u, element % 256u);
+    }
+    return 0.0f;
+}
+static inline float mixed_expert_element_from_offset(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+    long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    ExpertPayloadDescriptor selected = descriptor[expert];
+    if (selected.codec == 1u) {
+        device const uchar *block = payload + selected.byte_offset +
+            (uint)(local / 256l) * 84u;
+        return q2k_element(block, (uint)(local % 256l));
+    }
+    if (selected.codec == 2u) {
+        device const uchar *block = payload + selected.byte_offset +
+            (uint)(local / 256l) * 144u;
+        return q4k_element(block, (uint)(local % 256l));
+    }
+    if (selected.codec == 3u) {
+        device const uchar *block = payload + selected.byte_offset +
+            (uint)(local / 256l) * 210u;
+        return q6k_element(block, (uint)(local % 256l));
+    }
+    return 0.0f;
+}
+"#;
+
 /// One compiled kernel: MSL source, its entry point, the buffer-index ->
 /// data mapping a driver needs to bind before dispatch, and the thread count
 /// this particular op needs.
@@ -101,6 +190,14 @@ pub struct Kernel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Binding {
     Input(NodeId),
+    /// Codec-specific payload bytes for a mixed expert source. The matching
+    /// [`ExpertDescriptors`] binding selects the byte span and decoder for
+    /// each routed expert index.
+    ExpertPayloads(NodeId),
+    /// Per-expert codec and byte-span records for a mixed expert source.
+    /// Kept separate from [`ExpertPayloads`] so the payloads remain borrowed
+    /// mapped ranges rather than one concatenated staging allocation.
+    ExpertDescriptors(NodeId),
     /// The `indices` buffer a gathered operand fetches from.
     Indices(NodeId),
     Output(NodeId),
@@ -1127,6 +1224,7 @@ static inline float bf16_element(device const uchar *block, uint index) {
 // its own wire name.
 #[allow(non_camel_case_types)]
 pub enum PackedCodec {
+    Q2K,
     Q3K,
     Q4K,
     Q5K,
@@ -1159,6 +1257,7 @@ impl PackedCodec {
     /// which uses its own, much smaller [`Q8_0_BLOCK_ELEMENTS`].
     pub(crate) const fn block_bytes(self) -> usize {
         match self {
+            PackedCodec::Q2K => Q2K_BLOCK_BYTES,
             PackedCodec::Q3K => Q3K_BLOCK_BYTES,
             PackedCodec::Q4K => Q4K_BLOCK_BYTES,
             PackedCodec::Q5K => Q5K_BLOCK_BYTES,
@@ -1180,9 +1279,11 @@ impl PackedCodec {
     #[cfg(any(feature = "wgpu-backend", feature = "instrument"))]
     pub(crate) const fn block_elements(self) -> usize {
         match self {
-            PackedCodec::Q3K | PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K => {
-                Q4K_BLOCK_ELEMENTS
-            }
+            PackedCodec::Q2K
+            | PackedCodec::Q3K
+            | PackedCodec::Q4K
+            | PackedCodec::Q5K
+            | PackedCodec::Q6K => Q4K_BLOCK_ELEMENTS,
             PackedCodec::Q8_0 => Q8_0_BLOCK_ELEMENTS,
             PackedCodec::Q4_0 => Q4_0_BLOCK_ELEMENTS,
             PackedCodec::Float16 => FLOAT16_BLOCK_ELEMENTS,
@@ -1246,6 +1347,15 @@ pub fn emit(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
 ) -> Result<Kernel, EmitError> {
+    emit_inner(resolved, packed_operands, numeric_policy, false)
+}
+
+fn emit_inner(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    expert_source_mode: bool,
+) -> Result<Kernel, EmitError> {
     validate(resolved)?;
     let entry = entry_name(resolved);
     let quantized = operand_codecs(resolved, packed_operands);
@@ -1256,7 +1366,7 @@ pub fn emit(
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => render_reduce(resolved, &entry, &quantized),
+        } => render_reduce(resolved, &entry, &quantized, expert_source_mode),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(resolved, &entry, &quantized),
@@ -1287,6 +1397,209 @@ pub fn emit(
             threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
         },
     })
+}
+
+/// Emits the ordinary kernel ABI plus the two buffers required by a HOBBIT
+/// substitution table.  The decoder is deliberately not selected here: this
+/// establishes the stable binding contract that the mixed-codec lowering will
+/// consume, while ordinary [`emit`] callers remain byte-for-byte unchanged.
+pub fn emit_with_expert_sources(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    source_node: NodeId,
+) -> Result<Kernel, EmitError> {
+    // A substituted expert source may select a different codec for every
+    // routed expert. Do not specialize this operand to the checkpoint's
+    // original codec: the packed-row bodies bake one decoder into the kernel
+    // and would interpret a low-copy Q2_K expert as Q4_K. Rendering the source
+    // operand as scalar first leaves every read visible to the descriptor-aware
+    // replacement below, whose codec tag selects the decoder at runtime.
+    let mut mixed_packed_operands = packed_operands.clone();
+    mixed_packed_operands.remove(&source_node);
+    let mut kernel = emit_inner(resolved, &mixed_packed_operands, numeric_policy, true)?;
+    // Replace the gathered weight read with the descriptor-aware form. The
+    // ordinary emitter remains unchanged; this opt-in path is selected only
+    // when a residency table is supplied for this operand.
+    if let Some((weight_index, (_, _, Some(_)))) = resolved
+        .operands()
+        .iter()
+        .enumerate()
+        .find(|(_, (node, _, _lookup))| *node == source_node)
+    {
+        let gather_slot = resolved
+            .operands()
+            .iter()
+            .take(weight_index)
+            .filter(|(_, _, lookup)| lookup.is_some())
+            .count();
+        let row_block_source = kernel.source.contains("long weight_base[");
+        let offset = format!("off{weight_index}");
+        for codec in [
+            None,
+            Some(PackedCodec::Q2K),
+            Some(PackedCodec::Q4K),
+            Some(PackedCodec::Q5K),
+            Some(PackedCodec::Q6K),
+        ] {
+            for offset_name in [
+                offset.as_str(),
+                &format!("walk{weight_index}"),
+                &format!("read_off{weight_index}"),
+                &format!("running{weight_index}"),
+                &format!("(weight_base[q] + k)"),
+            ] {
+                let expert_stride = if row_block_source {
+                    String::from("0l")
+                } else {
+                    format!("u.gather_element_stride[{gather_slot}]")
+                };
+                let old = operand_read(weight_index, offset_name, codec);
+                let replacement = format!(
+                    "mixed_expert_element_from_offset(expert_payloads, expert_descriptors, (uint)fetched{weight_index}, {offset_name}, {})",
+                    expert_stride,
+                );
+                kernel.source = kernel.source.replace(&old, &replacement);
+            }
+        }
+        let expert_base =
+            format!("expert_payloads + expert_descriptors[expert_route_index[q]].byte_offset");
+        // packed-row group bases fetch the route inside their per-row `q`
+        // scope.  The row-blocked body consumes that route later, after the
+        // scope has closed, so preserve it in a row-indexed array rather than
+        // referring to the local `fetchedN` declaration out of scope.
+        kernel.source = kernel
+            .source
+            .replace("long weight_base[", "long expert_route_index[");
+        if let Some(start) = kernel.source.find("long expert_route_index[") {
+            if let Some(end) = kernel.source[start..].find(';') {
+                let declaration_end = start + end + 1;
+                let declaration = kernel.source[start..declaration_end].to_owned();
+                let dimension = declaration
+                    .split_once('[')
+                    .and_then(|(_, rest)| rest.split_once(']'))
+                    .map(|(value, _)| value)
+                    .unwrap_or("1");
+                kernel.source = kernel.source.replacen(
+                    &declaration,
+                    &format!("long weight_base[{dimension}];\n    long expert_route_index[{dimension}];\n    long expert_row_base[{dimension}];"),
+                    1,
+                );
+            }
+        }
+        kernel.source = kernel
+            .source
+            .lines()
+            .map(|line| {
+                let marker = format!("blk_ptr[q] = in{weight_index} + ");
+                let packed_block_marker = format!(
+                    "device const uchar *blk = in{weight_index} + "
+                );
+                let packed_block_marker_compact = format!(
+                    "device const uchar* blk = in{weight_index} + "
+                );
+                if line.contains(&marker)
+                    || (row_block_source
+                        && (line.contains(&packed_block_marker)
+                            || line.contains(&packed_block_marker_compact)))
+                {
+                    line.replace(
+                        &format!("in{weight_index} + "),
+                        &format!("{expert_base} + "),
+                    )
+                        .replace(
+                            "weight_base[q]",
+                            &format!(
+                                "(expert_row_base[q] - u.operand_base[{weight_index}] - expert_route_index[q] * u.gather_element_stride[{gather_slot}])"
+                            ),
+                        )
+                } else if row_block_source && line.contains(&format!(
+                    "fetched{weight_index} = (long)simd_broadcast_first"
+                )) {
+                    format!("{line}\n        expert_route_index[q] = fetched{weight_index};")
+                } else if !row_block_source
+                    && (line.contains(&packed_block_marker)
+                        || line.contains(&packed_block_marker_compact))
+                {
+                    // The ordinary packed body has no row index `q`; its
+                    // fetched expert is broadcast in `fetchedN`.  Rebase the
+                    // full-stack offset to that expert's compact payload
+                    // before selecting the codec-specific block bytes.
+                    let mut rewritten = line.replace(
+                        &format!("in{weight_index} + "),
+                        &format!(
+                            "expert_payloads + expert_descriptors[(uint)fetched{weight_index}].byte_offset + "
+                        ),
+                    );
+                    let full_base = format!("base{weight_index}");
+                    rewritten = rewritten.replacen(
+                        &full_base,
+                        &format!(
+                            "(base{weight_index} - fetched{weight_index} * u.gather_element_stride[{gather_slot}])"
+                        ),
+                        1,
+                    );
+                    let slot_base = String::from("slot_off");
+                    rewritten.replacen(
+                        &slot_base,
+                        &format!(
+                            "(slot_off - fetched{weight_index} * u.gather_element_stride[{gather_slot}])"
+                        ),
+                        1,
+                    )
+                } else if line.trim() == "weight_base[q] = wb;" {
+                    format!("{line}\n        expert_row_base[q] = wb;")
+                } else if line.trim().starts_with("weight_base[q] += fetched") {
+                    format!("{line}\n        expert_row_base[q] = weight_base[q];")
+                } else { line.to_owned() }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if std::env::var_os("PROXIMA_DEBUG_EXPERT_EMIT").is_some() {
+            for line in kernel.source.lines().filter(|line| {
+                line.contains("mixed_expert")
+                    || line.contains("expert_route_index")
+                    || line.contains("fetched")
+                    || line.contains("walk0")
+                    || line.contains("base0")
+            }) {
+                eprintln!("qwen35 mixed msl: {line}");
+            }
+        }
+    }
+    let payload_binding = Binding::ExpertPayloads(source_node);
+    let descriptor_binding = Binding::ExpertDescriptors(source_node);
+    let next_buffer = kernel.bindings.len();
+    let signature = format!("kernel void {}(", kernel.entry);
+    let signature_start = kernel
+        .source
+        .find(&signature)
+        .ok_or(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "emitted kernel signature",
+            found: "missing",
+        })?;
+    let body_start = kernel.source[signature_start..]
+        .find(")\n{\n")
+        .map(|offset| signature_start + offset)
+        .ok_or(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "emitted kernel signature terminator",
+            found: "missing",
+        })?;
+    // `MIXED_EXPERT_READ_MSL` contributes the descriptor declaration in the
+    // shared preamble; do not splice a second definition into each kernel.
+    let descriptor_struct = "";
+    kernel.source.insert_str(signature_start, descriptor_struct);
+    let adjusted_body_start = body_start + descriptor_struct.len();
+    let parameters = format!(
+        ",\n    device const uchar* expert_payloads [[buffer({next_buffer})]],\n    device const ExpertPayloadDescriptor* expert_descriptors [[buffer({})]]",
+        next_buffer + 1
+    );
+    kernel.source.insert_str(adjusted_body_start, &parameters);
+    kernel.bindings.push(payload_binding);
+    kernel.bindings.push(descriptor_binding);
+    Ok(kernel)
 }
 
 /// The row-blocked/tiled-GEMM structural shape [`kernel_cache_key`] folds
@@ -1485,15 +1798,16 @@ pub(crate) fn kernel_dispatch_shape(
 
 /// Whether `resolved` is a `Keep::Reduce` fold whose `reduce_op` is
 /// associative and commutative (`Add`, `Multiply`, `Maximum`, `Minimum`) with
-/// no gathered operand, AND whose reduced-axis extent meets
+/// a gather whose index lookup is invariant across every reduction axis, AND
+/// whose reduced-axis extent meets
 /// [`crate::sized::COOPERATIVE_REDUCE_MIN_LEN`] — the set [`render_reduce`]
 /// emits a SIMD-group cooperative loop for instead of the one-thread-per-
 /// output serial fold. `Subtract`/`Divide` are not associative, so
 /// reordering their combination across lanes is not imprecise, it is wrong —
-/// they and every other `ScalarOp` stay on the serial path. Gather is
-/// excluded too: cooperative striding would need each lane recording its own
-/// fault-slot contribution, which this pass does not implement — default to
-/// serial when unsure.
+/// they and every other `ScalarOp` stay on the serial path. A gather is
+/// admitted only when its index lookup is constant over every reduced axis;
+/// the fetched index is then broadcast once per simdgroup and the existing
+/// lane-0 fault reporting remains sufficient.
 ///
 /// The length gate exists because a cooperative reduce always launches
 /// `SIMD_WIDTH`(32) lanes per output regardless of how many elements each
@@ -1516,12 +1830,27 @@ fn reduce_is_cooperative(resolved: &BoundOp) -> bool {
             output_axes,
             ..
         } => {
-            gather_count(resolved) == 0
-                && is_cooperative_reduce_op(*reduce_op)
+            is_cooperative_reduce_op(*reduce_op)
+                && gather_is_reduction_invariant(resolved, output_axes)
                 && meets_cooperative_min_len(reduction_len(resolved, output_axes))
         }
         _ => false,
     }
+}
+
+/// A route selected by the token axis has zero stride in contracted
+/// dimensions, so one fetched expert index can be shared by all lanes. Any
+/// nonzero stride would select different experts during the reduction and is
+/// therefore kept on the serial path.
+fn gather_is_reduction_invariant(resolved: &BoundOp, output_axes: &[u16]) -> bool {
+    let reduce_dims = reduction_dims(resolved, output_axes);
+    resolved.operands().iter().all(|(_, _, lookup)| {
+        lookup.as_ref().is_none_or(|lookup| {
+            reduce_dims
+                .iter()
+                .all(|&dim| lookup.index_layout.stride(dim) == 0)
+        })
+    })
 }
 
 /// `length >= COOPERATIVE_REDUCE_MIN_LEN`, factored out so clippy's
@@ -1578,7 +1907,10 @@ fn simd_combine_fn(node: NodeId, op: ScalarOp) -> Result<&'static str, EmitError
         | ScalarOp::Erf
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => Err(EmitError::NonCooperativeReduceOp { node, op: op_token(op) }),
+        | ScalarOp::Select => Err(EmitError::NonCooperativeReduceOp {
+            node,
+            op: op_token(op),
+        }),
     }
 }
 
@@ -1609,7 +1941,10 @@ fn cooperative_identity_token(node: NodeId, op: ScalarOp) -> Result<&'static str
         | ScalarOp::Erf
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => Err(EmitError::NonCooperativeReduceOp { node, op: op_token(op) }),
+        | ScalarOp::Select => Err(EmitError::NonCooperativeReduceOp {
+            node,
+            op: op_token(op),
+        }),
     }
 }
 
@@ -1715,7 +2050,11 @@ fn split_bindings_with_scratch(resolved: &BoundOp) -> Vec<Binding> {
 /// no gather, no fault buffer, since the merge is pure scratch-to-output
 /// rescale-and-copy.
 fn merge_bindings(resolved: &BoundOp) -> Vec<Binding> {
-    alloc::vec![Binding::Scratch, Binding::Output(resolved.node), Binding::Uniforms]
+    alloc::vec![
+        Binding::Scratch,
+        Binding::Output(resolved.node),
+        Binding::Uniforms
+    ]
 }
 
 /// Every `NodeId` `bindings` reads from a device buffer for — the exact
@@ -1734,7 +2073,12 @@ fn merge_bindings(resolved: &BoundOp) -> Vec<Binding> {
 pub(crate) fn hazard_read_nodes(bindings: &[Binding]) -> impl Iterator<Item = NodeId> + '_ {
     bindings.iter().filter_map(|binding| match binding {
         Binding::Input(node) | Binding::Indices(node) => Some(*node),
-        Binding::Output(_) | Binding::Uniforms | Binding::Fault | Binding::Scratch => None,
+        Binding::Output(_)
+        | Binding::ExpertPayloads(_)
+        | Binding::ExpertDescriptors(_)
+        | Binding::Uniforms
+        | Binding::Fault
+        | Binding::Scratch => None,
     })
 }
 
@@ -1751,7 +2095,13 @@ pub(crate) fn hazard_write_node(bindings: &[Binding]) -> Option<NodeId> {
         // `Binding::Scratch`'s own doc. A caller tracking hazards across the
         // split dispatch's scratch write needs the scratch buffer's own
         // pointer identity directly, not through this `NodeId` path.
-        Binding::Input(_) | Binding::Indices(_) | Binding::Uniforms | Binding::Fault | Binding::Scratch => None,
+        Binding::Input(_)
+        | Binding::ExpertPayloads(_)
+        | Binding::ExpertDescriptors(_)
+        | Binding::Indices(_)
+        | Binding::Uniforms
+        | Binding::Fault
+        | Binding::Scratch => None,
     })
 }
 
@@ -1878,7 +2228,11 @@ fn split_token_feature_axes(
     if feature_axes.is_empty() {
         return None;
     }
-    let reassembled: Vec<u16> = token_axes.iter().chain(feature_axes.iter()).copied().collect();
+    let reassembled: Vec<u16> = token_axes
+        .iter()
+        .chain(feature_axes.iter())
+        .copied()
+        .collect();
     if reassembled != output_axes {
         return None;
     }
@@ -1900,7 +2254,11 @@ fn split_token_feature_axes(
 /// functions below all re-derive the identical value from the identical
 /// block so none of them can drift from what the body actually emits.
 fn packed_row_block_token_total(block: &PackedRowBlock, extents: &[u64]) -> u64 {
-    block.token_axes.iter().map(|&axis| extents[axis as usize]).product()
+    block
+        .token_axes
+        .iter()
+        .map(|&axis| extents[axis as usize])
+        .product()
 }
 
 /// Why a given [`BoundOp`] did NOT take the row-blocked packed kernel —
@@ -1926,6 +2284,9 @@ pub enum PackedRowBlockRejection {
     OperandCountNotTwo,
     /// Neither exactly zero nor exactly one operand is packed.
     NotExactlyOnePackedOperand,
+    /// Gathered packed weights need the cooperative gather-aware renderer;
+    /// the row-blocked body has no index-buffer fetch path.
+    GatheredOperand,
     /// The packed operand's codec is [`PackedCodec::Q8_0`] or
     /// [`PackedCodec::Q4_0`] — this path's lane amortization
     /// ([`Q4K_BLOCK_ELEMENTS`], 8 lanes per 32-element sub-block) is
@@ -2018,7 +2379,11 @@ fn classify_packed_row_block(
     // decision here instead of slipping through.
     match codec {
         PackedCodec::Q3K | PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K => {}
-        PackedCodec::Q8_0 | PackedCodec::Q4_0 | PackedCodec::Float16 | PackedCodec::BFloat16 => {
+        PackedCodec::Q2K
+        | PackedCodec::Q8_0
+        | PackedCodec::Q4_0
+        | PackedCodec::Float16
+        | PackedCodec::BFloat16 => {
             return Err(PackedRowBlockRejection::NotKQuantCodec);
         }
     }
@@ -2073,6 +2438,15 @@ fn classify_packed_row_block(
         &resolved.extents,
     )
     .unwrap_or_else(|| (Vec::new(), output_axes.to_vec()));
+    if gather_count(resolved) != 0
+        && token_axes
+            .iter()
+            .map(|&axis| resolved.extents[axis as usize])
+            .product::<u64>()
+            > 1
+    {
+        return Err(PackedRowBlockRejection::GatheredOperand);
+    }
     Ok(PackedRowBlock {
         weight,
         other,
@@ -2087,6 +2461,11 @@ fn packed_row_block(
     resolved: &BoundOp,
     quantized: &[Option<PackedCodec>],
 ) -> Option<PackedRowBlock> {
+    // The experimental mixed-source path must use the descriptor-aware
+    // element reader; row-block pointer hoisting has a separate address ABI.
+    if std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES").is_some() {
+        return None;
+    }
     classify_packed_row_block(resolved, quantized).ok()
 }
 
@@ -2307,6 +2686,9 @@ fn tiled_gemm_block(
     init: ReduceInit,
     output_axes: &[u16],
 ) -> Option<TiledGemmBlock> {
+    if std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES").is_some() {
+        return None;
+    }
     classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes).ok()
 }
 
@@ -2992,6 +3374,35 @@ fn push_gather_fetch(
     ));
 }
 
+fn push_cooperative_gather_fetch(
+    source: &mut String,
+    operand_index: usize,
+    gather_slot: usize,
+    rank: usize,
+    coord_var: &str,
+    offset_var: &str,
+) {
+    source.push_str(&format!(
+        "    long gather_off{operand_index} = u.gather_index_base[{gather_slot}];\n"
+    ));
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "    gather_off{operand_index} += {coord_var}[{dim}] * u.gather_index_strides[{gather_slot}][{dim}];\n"
+        ));
+    }
+    source.push_str(&format!(
+        "    long fetched{operand_index} = (long)gather_idx{gather_slot}[gather_off{operand_index}];\n"
+    ));
+    source.push_str("    if (lane == 0u) {\n");
+    push_gather_fault_check(source, operand_index, gather_slot, "    ");
+    source.push_str(&format!(
+        "    }}\n    fetched{operand_index} = max((long)0, min(fetched{operand_index}, u.gather_extent[{gather_slot}] - 1));\n"
+    ));
+    source.push_str(&format!(
+        "    fetched{operand_index} = (long)simd_broadcast_first((uint)fetched{operand_index});\n    {offset_var} += fetched{operand_index} * u.gather_element_stride[{gather_slot}];\n"
+    ));
+}
+
 /// `metal_stdlib` has no `erf` in any namespace — verified against the real
 /// toolchain (`xcrun -sdk macosx metal -c`, `no member named 'erf'`, tried
 /// bare, `metal::`, and `metal::precise::`), not assumed from the ONNX
@@ -3014,6 +3425,8 @@ fn preamble(source: &mut String) {
     source.push_str("#include <metal_stdlib>\n");
     source.push_str("using namespace metal;\n\n");
     source.push_str(PROXIMA_ERF_FN);
+    source.push('\n');
+    source.push_str(Q2K_UNPACK_MSL);
     source.push('\n');
     // emitted unconditionally, the same way `PROXIMA_ERF_FN` is: a
     // `static inline` the kernel never calls costs nothing in the compiled
@@ -3052,6 +3465,10 @@ fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(Q6K_PAIR_DOT_MSL);
     source.push('\n');
+    // The mixed selector calls the Q2_K, Q4_K, and Q6_K element decoders,
+    // so it follows all three declarations in the generated translation unit.
+    source.push_str(MIXED_EXPERT_READ_MSL);
+    source.push('\n');
     source.push_str(Q8_0_UNPACK_MSL);
     source.push('\n');
     source.push_str(Q4_0_UNPACK_MSL);
@@ -3071,6 +3488,9 @@ fn preamble(source: &mut String) {
 fn operand_read(index: usize, offset: &str, codec: Option<PackedCodec>) -> String {
     match codec {
         None => format!("in{index}[{offset}]"),
+        Some(PackedCodec::Q2K) => format!(
+            "q2k_element(in{index} + ({offset} / {Q2K_BLOCK_ELEMENTS}) * {Q2K_BLOCK_BYTES}, (uint)({offset} % {Q2K_BLOCK_ELEMENTS}))"
+        ),
         Some(PackedCodec::Q3K) => format!(
             "q3k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q3K_BLOCK_BYTES}, (uint)({offset} % {Q4K_BLOCK_ELEMENTS}))"
         ),
@@ -3370,10 +3790,12 @@ pub(crate) fn cached_attention_merge_needed(kind: &BoundOpKind, policy: NumericP
 /// this trade. Not policy-gated: unlike [`cached_attention_merge_needed`],
 /// this reshapes an EXISTING dispatch rather than reassociating the online-
 /// softmax fold, so `bit_exact` renders it exactly like every other policy.
-pub(crate) fn cached_attention_per_query_head_grid(dynamic_cached_len: bool, context_length: u64) -> bool {
+pub(crate) fn cached_attention_per_query_head_grid(
+    dynamic_cached_len: bool,
+    context_length: u64,
+) -> bool {
     dynamic_cached_len && context_length < crate::sized::ATTENTION_SPLIT_KEYS_PER_SPLIT_AT_SCALE
 }
-
 
 /// `BoundOpKind::CachedAttention`'s Metal kernel: online (running max/sum,
 /// register-resident weighted-value accumulator) softmax attention over a
@@ -3605,8 +4027,10 @@ fn render_cached_attention(
     // `entry_name` names this decision (`_qh{0|1}`) precisely because it
     // changes the text below -- the compiled `kv-capacity-bucket` extent
     // still never appears in the text ITSELF, only this boolean does.
-    let per_query_head_grid =
-        cached_attention_per_query_head_grid(single_range_dynamic, *cached_key_rows + *new_key_rows);
+    let per_query_head_grid = cached_attention_per_query_head_grid(
+        single_range_dynamic,
+        *cached_key_rows + *new_key_rows,
+    );
     if single_range_dynamic {
         let grid_splits = if merge_needed {
             crate::sized::ATTENTION_SPLIT_MAX
@@ -3875,6 +4299,10 @@ fn render_elementwise(
     let gather_count = gather_count(resolved);
     let gather_slots = gather_slots(resolved);
     let element_type = type_token(resolved.node, resolved.dtype)?;
+    let coordinate_dims = elementwise_coordinate_dims(resolved, gather_count);
+    let coordinate_type = (resolved.extents.iter().product::<u64>() <= u32::MAX as u64)
+        .then_some("uint")
+        .unwrap_or("ulong");
 
     let mut source = String::new();
     preamble(&mut source);
@@ -3900,22 +4328,31 @@ fn render_elementwise(
     );
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
 
-    if rank > 0 {
-        source.push_str(&format!("    long coord[{rank_len}];\n"));
-        source.push_str("    long remaining = (long)gid;\n");
-        for dim in (0..rank).rev() {
+    if !coordinate_dims.is_empty() {
+        source.push_str(&format!("    {coordinate_type} coord[{rank_len}];\n"));
+        source.push_str(&format!(
+            "    {coordinate_type} remaining = ({coordinate_type})gid;\n"
+        ));
+        for &dim in coordinate_dims.iter().rev() {
             source.push_str(&format!(
-                "    coord[{dim}] = remaining % u.extents[{dim}]; remaining /= u.extents[{dim}];\n"
+                "    coord[{dim}] = remaining % ({coordinate_type})u.extents[{dim}]; remaining /= ({coordinate_type})u.extents[{dim}];\n"
             ));
         }
     }
 
     for (index, gather_slot) in gather_slots.iter().enumerate() {
-        source.push_str(&format!("    long off{index} = u.operand_base[{index}];\n"));
-        for dim in 0..rank {
+        let dense_operand = dense_layout(&resolved.operands()[index].1, &resolved.extents);
+        if dense_operand {
             source.push_str(&format!(
-                "    off{index} += coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                "    long off{index} = u.operand_base[{index}] + (long)gid;\n"
             ));
+        } else {
+            source.push_str(&format!("    long off{index} = u.operand_base[{index}];\n"));
+            for &dim in &coordinate_dims {
+                source.push_str(&format!(
+                    "    off{index} += (long)coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                ));
+            }
         }
         if let Some(slot) = gather_slot {
             push_gather_fetch(
@@ -3946,10 +4383,48 @@ fn render_elementwise(
     Ok(source)
 }
 
+fn elementwise_coordinate_dims(resolved: &BoundOp, gather_count: usize) -> Vec<usize> {
+    let rank = resolved.extents.len();
+    let mut coordinate_dims: Vec<usize> = if gather_count > 0 {
+        (0..rank).collect()
+    } else {
+        resolved
+            .operands()
+            .iter()
+            .filter(|(_, layout, _)| !dense_layout(layout, &resolved.extents))
+            .flat_map(|(_, layout, _)| {
+                layout
+                    .strides
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(dimension, stride)| (*stride != 0).then_some(dimension))
+            })
+            .collect()
+    };
+    coordinate_dims.sort_unstable();
+    coordinate_dims.dedup();
+    coordinate_dims
+}
+
+fn dense_layout(layout: &Layout, extents: &[u64]) -> bool {
+    if layout.base < 0 || layout.strides.len() != extents.len() {
+        return false;
+    }
+    let mut expected_stride = 1_i64;
+    for (extent, stride) in extents.iter().zip(layout.strides.iter()).rev() {
+        if *stride != expected_stride {
+            return false;
+        }
+        expected_stride = expected_stride.saturating_mul(*extent as i64);
+    }
+    true
+}
+
 fn render_reduce(
     resolved: &BoundOp,
     entry: &str,
     quantized: &[Option<PackedCodec>],
+    expert_source_mode: bool,
 ) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -4101,6 +4576,7 @@ fn render_reduce(
             epilogue_body,
             epilogue_operands,
             is_broadcast_epilogue,
+            expert_source_mode,
         )?;
     } else {
         push_serial_reduce_body(
@@ -4165,7 +4641,13 @@ fn push_reduce_epilogue_write(
         "{indent}{element_type} epi_scratch[{}];\n",
         epilogue_operand_count + 1
     ));
-    push_epilogue_operand_reads(source, 0..epilogue_operand_count, output_rank, indent, &coord);
+    push_epilogue_operand_reads(
+        source,
+        0..epilogue_operand_count,
+        output_rank,
+        indent,
+        &coord,
+    );
     source.push_str(&format!(
         "{indent}epi_scratch[{epilogue_operand_count}] = {accumulator_expr};\n"
     ));
@@ -4381,7 +4863,9 @@ fn push_serial_reduce_body(
 /// The SIMD-group cooperative fold: `SIMD_WIDTH` lanes split one output
 /// element's contraction axis, each striding through `reduction_total` by
 /// `SIMD_WIDTH` so every element is visited by exactly one lane, then
-/// combine via [`simd_combine_fn`]. Only lane 0 writes the result, and only
+/// combine via [`simd_combine_fn`]. Gathered expert products with a route
+/// invariant across the reduction use the same fold; their route index is
+/// fetched once per simdgroup and broadcast before the strided walk. Only lane 0 writes the result, and only
 /// lane 0 seeds from the `BoundOp`'s real `ReduceInit` — every other lane
 /// seeds from [`cooperative_identity_token`] so the true seed is folded into
 /// the group exactly once (see that function's doc). `gid / SIMD_WIDTH` is a
@@ -4722,6 +5206,7 @@ fn push_packed_row_multi_row_body(
     block: &PackedRowBlock,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    expert_source_mode: bool,
 ) -> Result<(), EmitError> {
     let weight = block.weight;
     let other = block.other;
@@ -4769,7 +5254,9 @@ fn push_packed_row_multi_row_body(
     source.push_str(&format!("    long feature_coord[{rows}][{rank_len}];\n"));
     source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str("        long flat = feature_first + q;\n");
-    source.push_str("        long remaining = (flat < feature_total) ? flat : (feature_total - 1);\n");
+    source.push_str(
+        "        long remaining = (flat < feature_total) ? flat : (feature_total - 1);\n",
+    );
     for dim in 0..rank {
         source.push_str(&format!("        feature_coord[q][{dim}] = 0;\n"));
     }
@@ -4821,13 +5308,21 @@ fn push_packed_row_multi_row_body(
     // codec (`Q3_K`/`Q5_K`/`Q6_K`) keeps the generic loop -- they have no
     // multi-row port yet, this landing only proves the pattern on `Q4_K`,
     // the codec `ROW 389`'s own trace named as the dominant contributor.
-    let fast_q4k = block.codec == PackedCodec::Q4K
+    let fast_q4k = !expert_source_mode
+        && block.codec == PackedCodec::Q4K
         && element_type == "float"
         && quantized[weight] == Some(PackedCodec::Q4K)
         && quantized[other].is_none()
         && is_plain_product_reduce(resolved, reduce_op, weight, other);
     if fast_q4k {
-        push_packed_row_multi_row_q4k_body(source, weight, other, rows, cap, block.codec.block_bytes());
+        push_packed_row_multi_row_q4k_body(
+            source,
+            weight,
+            other,
+            rows,
+            cap,
+            block.codec.block_bytes(),
+        );
     } else {
         source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
         source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
@@ -4842,9 +5337,18 @@ fn push_packed_row_multi_row_body(
         source.push_str(&format!("            for (int s = 0; s < {cap}; ++s) {{\n"));
         source.push_str(&format!(
             "                scratch[{other}] = {};\n",
-            operand_read(other, "(other_base[s] + k * other_stride)", quantized[other])
+            operand_read(
+                other,
+                "(other_base[s] + k * other_stride)",
+                quantized[other]
+            )
         ));
-        let value_expr = push_body_steps(source, resolved.element_body(), "                ", element_type);
+        let value_expr = push_body_steps(
+            source,
+            resolved.element_body(),
+            "                ",
+            element_type,
+        );
         source.push_str(&format!(
             "                {element_type} value = {value_expr};\n"
         ));
@@ -4863,7 +5367,9 @@ fn push_packed_row_multi_row_body(
     source.push_str("            if (lane == 0u) {\n");
     source.push_str("                long token_flat = token_first + s;\n");
     source.push_str("                long feature_flat = feature_first + q;\n");
-    source.push_str("                if (token_flat < token_total && feature_flat < feature_total) {\n");
+    source.push_str(
+        "                if (token_flat < token_total && feature_flat < feature_total) {\n",
+    );
     source.push_str("                    long out_offset = u.out_base;\n");
     for &dim in feature_axes {
         source.push_str(&format!(
@@ -5002,6 +5508,7 @@ fn push_packed_row_group_bases(
     weight: usize,
     other: usize,
 ) {
+    let gather_slots = gather_slots(resolved);
     if let Some(axis) = packed_row_direct_output_axis(resolved, output_axes) {
         source.push_str(&format!(
             "    long weight_row_stride = u.operand_strides[{weight}][{axis}];\n"
@@ -5021,6 +5528,26 @@ fn push_packed_row_group_bases(
         source.push_str(&format!(
             "        other_base[q] = u.operand_base[{other}] + flat * other_row_stride;\n"
         ));
+        if let Some(slot) = gather_slots[weight] {
+            push_cooperative_gather_fetch(
+                source,
+                weight,
+                slot,
+                rank,
+                "coord_q_cache[q]",
+                &format!("weight_base[q]"),
+            );
+        }
+        if let Some(slot) = gather_slots[other] {
+            push_cooperative_gather_fetch(
+                source,
+                other,
+                slot,
+                rank,
+                "coord_q_cache[q]",
+                &format!("other_base[q]"),
+            );
+        }
         source.push_str("    }\n");
         return;
     }
@@ -5053,6 +5580,26 @@ fn push_packed_row_group_bases(
     }
     source.push_str("        weight_base[q] = wb;\n");
     source.push_str("        other_base[q] = ob;\n");
+    if let Some(slot) = gather_slots[weight] {
+        push_cooperative_gather_fetch(
+            source,
+            weight,
+            slot,
+            rank,
+            "coord_q_cache[q]",
+            &format!("weight_base[q]"),
+        );
+    }
+    if let Some(slot) = gather_slots[other] {
+        push_cooperative_gather_fetch(
+            source,
+            other,
+            slot,
+            rank,
+            "coord_q_cache[q]",
+            &format!("other_base[q]"),
+        );
+    }
     source.push_str("    }\n");
 }
 
@@ -5081,7 +5628,10 @@ fn push_packed_row_group_bases(
 // with nothing left to call it.
 #[cfg_attr(
     not(all(feature = "metal", target_os = "macos", feature = "instrument")),
-    allow(dead_code, reason = "sole caller is the macOS-only, instrument-gated profiler")
+    allow(
+        dead_code,
+        reason = "sole caller is the macOS-only, instrument-gated profiler"
+    )
 )]
 pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     "q3k_pair_dot(blk",
@@ -5119,6 +5669,7 @@ fn push_packed_row_blocked_body(
     block: &PackedRowBlock,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    expert_source_mode: bool,
 ) -> Result<(), EmitError> {
     if packed_row_block_token_total(block, &resolved.extents) > 1 {
         push_packed_row_multi_row_body(
@@ -5132,6 +5683,7 @@ fn push_packed_row_blocked_body(
             block,
             epilogue_body,
             epilogue_operands,
+            expert_source_mode,
         )?;
         return Ok(());
     }
@@ -5197,9 +5749,7 @@ fn push_packed_row_blocked_body(
         // written dispatch never had a second uniform-driven coordinate
         // decode to pay, because it never had a first one either.
         source.push_str(&format!("    long coord_q_cache[{rows}][{rank_len}];\n"));
-        push_packed_row_group_bases(
-            source, resolved, output_axes, rank, rows, weight, other,
-        );
+        push_packed_row_group_bases(source, resolved, output_axes, rank, rows, weight, other);
         // STRIDE-FREE SPECIALIZATION (`docs/discipline.md` perf/packed-row-
         // addressing row): ggml's own row-blocked kernel assumes a
         // contiguous activation and addresses it with pure element offsets
@@ -5239,7 +5789,8 @@ fn push_packed_row_blocked_body(
         // `Int32`/`UInt32`/`Bool`/`Int8`/`UInt8` (every dtype `type_token`
         // happens to lower to the same MSL `float` storage type) and would
         // have run the scale/minimum float algebra below on integer data.
-        let plain_product = codec.supports_pair_dot()
+        let plain_product = !expert_source_mode
+            && codec.supports_pair_dot()
             && resolved.dtype == DType::Float32
             && is_plain_product_reduce(resolved, reduce_op, weight, other);
         // `metal-q4k-single-fetch` (default-off): eliminates the redundant
@@ -5291,15 +5842,39 @@ fn push_packed_row_blocked_body(
         // simply never read). `Q5_K` now has its own body
         // ([`push_q5k_ggml_port_body`]) instead of falling through to `Q4_K`'s.
         let use_ggml_port = plain_product
-            && matches!(codec, PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K)
+            && matches!(
+                codec,
+                PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K
+            )
             && cfg!(feature = "metal-q4k-ggml-port")
             && !cfg!(feature = "metal-q4k-split-k");
         if use_ggml_port && matches!(codec, PackedCodec::Q6K) {
-            push_q6k_ggml_port_body(source, weight, other, rows, block_bytes, other_stride_is_one);
+            push_q6k_ggml_port_body(
+                source,
+                weight,
+                other,
+                rows,
+                block_bytes,
+                other_stride_is_one,
+            );
         } else if use_ggml_port && matches!(codec, PackedCodec::Q5K) {
-            push_q5k_ggml_port_body(source, weight, other, rows, block_bytes, other_stride_is_one);
+            push_q5k_ggml_port_body(
+                source,
+                weight,
+                other,
+                rows,
+                block_bytes,
+                other_stride_is_one,
+            );
         } else if use_ggml_port {
-            push_q4k_ggml_port_body(source, weight, other, rows, block_bytes, other_stride_is_one);
+            push_q4k_ggml_port_body(
+                source,
+                weight,
+                other,
+                rows,
+                block_bytes,
+                other_stride_is_one,
+            );
         } else if use_single_fetch {
             push_q4k_single_fetch_body(
                 source,
@@ -5313,333 +5888,357 @@ fn push_packed_row_blocked_body(
                 block_bytes,
             );
         } else {
-        source.push_str(&format!("    uint ix = (uint)lane / {lanes_per_block}u;\n"));
-        source.push_str(&format!("    uint it = (uint)lane % {lanes_per_block}u;\n"));
-        source.push_str(&format!("    uint slot = it * {sub}u;\n"));
-        if plain_product {
-            source.push_str(
-                "    uint iq = it / 4u; uint ir = it % 4u;\n    float yl[16]; float yh[16];\n",
-            );
-        } else {
-            source.push_str(&format!("    {element_type} acts[{sub}];\n"));
-        }
-        source.push_str(&format!(
-            "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
-        ));
-        let ix_stride = SIMD_WIDTH as usize / lanes_per_block;
-        if cfg!(feature = "metal-q4k-split-k") {
-            // each simdgroup (`sgitg`, 0 at split == 1) owns a disjoint
-            // interleaved slice of super-blocks -- a plain strided loop, so a
-            // `super_blocks` not evenly divisible by `split` is handled by
-            // construction (some simdgroups simply run one fewer iteration),
-            // never a separate ragged-tail branch.
+            source.push_str(&format!("    uint ix = (uint)lane / {lanes_per_block}u;\n"));
+            source.push_str(&format!("    uint it = (uint)lane % {lanes_per_block}u;\n"));
+            source.push_str(&format!("    uint slot = it * {sub}u;\n"));
+            if plain_product {
+                source.push_str(
+                    "    uint iq = it / 4u; uint ir = it % 4u;\n    float yl[16]; float yh[16];\n",
+                );
+            } else {
+                source.push_str(&format!("    {element_type} acts[{sub}];\n"));
+            }
             source.push_str(&format!(
+                "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
+            ));
+            let ix_stride = SIMD_WIDTH as usize / lanes_per_block;
+            if cfg!(feature = "metal-q4k-split-k") {
+                // each simdgroup (`sgitg`, 0 at split == 1) owns a disjoint
+                // interleaved slice of super-blocks -- a plain strided loop, so a
+                // `super_blocks` not evenly divisible by `split` is handled by
+                // construction (some simdgroups simply run one fewer iteration),
+                // never a separate ragged-tail branch.
+                source.push_str(&format!(
                 "    int ib_first = (int)(ix + sgitg * {ix_stride}u);\n    int ib_step = (int)({ix_stride}u * split);\n"
             ));
-        } else {
+            } else {
+                source.push_str(&format!(
+                    "    int ib_first = (int)ix;\n    int ib_step = {ix_stride};\n"
+                ));
+            }
+            // HOIST + POINTER INCREMENT (`docs/discipline.md` perf/packed-row-
+            // addressing row): `weight_base[q]/Q4K_BLOCK_ELEMENTS` and the y4
+            // lane offset (`64*iq + 8*ir`) are invariant across every `ib` this
+            // thread visits -- only `ib` itself varies. The prior form
+            // recomputed `(weight_base[q]/256 + ib) * block_bytes` and
+            // `ib*256*other_stride` from scratch every iteration (a 64-bit
+            // multiply-add per row per iteration); ggml's own row/`y4` pointers
+            // instead advance by a CONSTANT per iteration
+            // (`ggml-metal.metal:5132,5182`'s `q1 += nb01/2`, `y4 += 4*QK_K`).
+            // This computes each row's starting byte pointer and the
+            // per-iteration byte step ONCE before the loop, then the loop body
+            // only adds.
             source.push_str(&format!(
-                "    int ib_first = (int)ix;\n    int ib_step = {ix_stride};\n"
+                "    long blk_step = (long)ib_step * {block_bytes};\n"
             ));
-        }
-        // HOIST + POINTER INCREMENT (`docs/discipline.md` perf/packed-row-
-        // addressing row): `weight_base[q]/Q4K_BLOCK_ELEMENTS` and the y4
-        // lane offset (`64*iq + 8*ir`) are invariant across every `ib` this
-        // thread visits -- only `ib` itself varies. The prior form
-        // recomputed `(weight_base[q]/256 + ib) * block_bytes` and
-        // `ib*256*other_stride` from scratch every iteration (a 64-bit
-        // multiply-add per row per iteration); ggml's own row/`y4` pointers
-        // instead advance by a CONSTANT per iteration
-        // (`ggml-metal.metal:5132,5182`'s `q1 += nb01/2`, `y4 += 4*QK_K`).
-        // This computes each row's starting byte pointer and the
-        // per-iteration byte step ONCE before the loop, then the loop body
-        // only adds.
-        source.push_str(&format!(
-            "    long blk_step = (long)ib_step * {block_bytes};\n"
-        ));
-        source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
-        source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
-        source.push_str(&format!(
+            source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
+            source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+            source.push_str(&format!(
             "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ib_first) * {block_bytes};\n"
         ));
-        source.push_str("    }\n");
-        if plain_product {
-            push_q4k_plain_product_y4_address(source, other, other_stride_is_one);
-        } else if other_stride_is_one {
-            // SAME HOIST, generic (non-plain-product) arm: `elem0 = ib*256 +
-            // slot` was rebuilt every `ib` purely to feed `(elem0+j)*
-            // other_stride` -- the identical 64-bit multiply-add-per-
-            // iteration shape arm1 already removed from the plain-product
-            // `y4` pointer above. `other_stride_is_one` additionally drops
-            // the multiply itself, same as the `y4` arm just above.
-            source.push_str(&format!(
-                "    long acts_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS};\n"
-            ));
-            source.push_str(&format!("    device const {element_type} *acts_row = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} + (long)slot;\n"));
-        } else {
-            source.push_str(&format!(
-                "    long acts_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
-            ));
-            source.push_str(&format!("    device const {element_type} *acts_row = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)slot * other_stride;\n"));
-        }
-        source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
-        if plain_product && other_stride_is_one {
-            source.push_str("        for (uint i = 0u; i < 8u; ++i) { yl[i] = y4[i]; yl[i + 8u] = y4[i + 32u]; yh[i] = y4[i + 128u]; yh[i + 8u] = y4[i + 160u]; }\n");
-        } else if plain_product {
-            // CORRECTNESS FIX, not part of the stride-free specialization
-            // above: this arm's `y4[i]`/`y4[i+32]`/... reads were pure
-            // element offsets regardless of `other_stride` before this
-            // landing -- correct only by accident, for every caller that
-            // happened to hand this path a contiguous activation. Ported
-            // from `push_q4k_ggml_port_body`'s own already-stride-aware
-            // form (`y4_base + (long)i * other_stride`, below in this
-            // file), the one sibling body that already got this right.
-            source.push_str("        for (uint i = 0u; i < 8u; ++i) { yl[i] = y4[(long)i * other_stride]; yl[i + 8u] = y4[(long)(i + 32u) * other_stride]; yh[i] = y4[(long)(i + 128u) * other_stride]; yh[i + 8u] = y4[(long)(i + 160u) * other_stride]; }\n");
-        } else {
-            source.push_str(&format!("        for (int j = 0; j < {sub}; ++j) {{\n"));
-            if other_stride_is_one {
-                source.push_str("            acts[j] = acts_row[j];\n");
+            source.push_str("    }\n");
+            if plain_product {
+                push_q4k_plain_product_y4_address(source, other, other_stride_is_one);
+            } else if other_stride_is_one {
+                // SAME HOIST, generic (non-plain-product) arm: `elem0 = ib*256 +
+                // slot` was rebuilt every `ib` purely to feed `(elem0+j)*
+                // other_stride` -- the identical 64-bit multiply-add-per-
+                // iteration shape arm1 already removed from the plain-product
+                // `y4` pointer above. `other_stride_is_one` additionally drops
+                // the multiply itself, same as the `y4` arm just above.
+                source.push_str(&format!(
+                    "    long acts_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS};\n"
+                ));
+                source.push_str(&format!("    device const {element_type} *acts_row = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} + (long)slot;\n"));
             } else {
-                source.push_str("            acts[j] = acts_row[(long)j * other_stride];\n");
-            }
-            source.push_str("        }\n");
-        }
-        source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
-        source.push_str("            device const uchar *blk = blk_ptr[q];\n");
-        match codec {
-            PackedCodec::Q3K if plain_product => {
-                // `plain_product` is codec-agnostic (the `yl`/`yh` gather
-                // above is built once, shared by `Q4_K`/`Q3_K` and, when
-                // `metal-q5k-pair-dot` is on, `Q5_K` too) -- no separate
-                // activation load path needed here, same posture as
-                // `Q5_K`'s own `plain_product` arm.
-                source.push_str(
-                    "            sumf[q] = sumf[q] + q3k_pair_dot(blk, iq, ir, yl, yh);\n",
-                );
-            }
-            PackedCodec::Q3K => {
-                // `Q3_K`'s sub-block width (16) is narrower than this
-                // loop's 32-element `sub` slot, unlike `Q5_K`'s matching
-                // 32-element sub-block -- amortizing one header decode
-                // across the whole slot the way the `Q5_K` arm below does
-                // would silently span two different sub-block scales. Each
-                // call to `q3k_element` decodes its own header, the same
-                // posture `Q6_K`'s per-element path takes for a different
-                // reason (its scale bytes are plain, not bit-packed, so the
-                // per-call cost is small either way). A follow-up
-                // optimization (a two-headers-per-slot amortization), not a
-                // correctness gap.
-                source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
                 source.push_str(&format!(
-                    "                {element_type} scratch[{}];\n",
-                    operand_count.max(1)
+                    "    long acts_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
                 ));
-                source.push_str(&format!(
-                    "                scratch[{weight}] = q3k_element(blk, slot + (uint)e);\n"
-                ));
-                source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
-                let value_expr = push_body_steps(
-                    source,
-                    resolved.element_body(),
-                    "                ",
-                    element_type,
-                );
-                source.push_str(&format!(
-                    "                {element_type} value = {value_expr};\n"
-                ));
-                let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
-                source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
-                source.push_str("            }\n");
+                source.push_str(&format!("    device const {element_type} *acts_row = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)slot * other_stride;\n"));
             }
-            PackedCodec::Q4K => {
-                if plain_product {
-                    source.push_str(
-                        "            sumf[q] = sumf[q] + q4k_pair_dot(blk, iq, ir, yl, yh);\n",
-                    );
-                } else if is_plain_product_reduce(resolved, reduce_op, weight, other) {
-                    // SCALE-DEFERRED PATH (`docs/discipline.md` ROW 106).
-                    // Accumulate the raw nibble x activation product and the
-                    // activation sum UNSCALED across the whole sub-block, then
-                    // apply `hdr.scale`/`hdr.minimum` ONCE at the end instead
-                    // of once per element — legal here because
-                    // `is_plain_product_reduce` already proved reduce_op is
-                    // `Add` and the body is exactly `weight * other`, so
-                    // `sum_j (scale*nibble_j - min)*act_j == scale*sum(nibble_j
-                    // *act_j) - min*sum(act_j)`. Mirrors
-                    // `ggml-metal.metal:5157-5175`'s `acc1`/`dall` split.
-                    // Two bodies behind `metal-q4k-mask-fma`: off, the
-                    // shift-then-mask `q4k_run8` extraction into a `dot`
-                    // reduce; on, ggml's actual mask-without-shift technique,
-                    // fused with the accumulate -- see
-                    // `push_q4k_product_reduce_body`'s own doc.
-                    push_q4k_header_decode(source);
-                    push_q4k_product_reduce_body(source, sub, run, element_type);
+            source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
+            if plain_product && other_stride_is_one {
+                source.push_str("        for (uint i = 0u; i < 8u; ++i) { yl[i] = y4[i]; yl[i + 8u] = y4[i + 32u]; yh[i] = y4[i + 128u]; yh[i + 8u] = y4[i + 160u]; }\n");
+            } else if plain_product {
+                // CORRECTNESS FIX, not part of the stride-free specialization
+                // above: this arm's `y4[i]`/`y4[i+32]`/... reads were pure
+                // element offsets regardless of `other_stride` before this
+                // landing -- correct only by accident, for every caller that
+                // happened to hand this path a contiguous activation. Ported
+                // from `push_q4k_ggml_port_body`'s own already-stride-aware
+                // form (`y4_base + (long)i * other_stride`, below in this
+                // file), the one sibling body that already got this right.
+                source.push_str("        for (uint i = 0u; i < 8u; ++i) { yl[i] = y4[(long)i * other_stride]; yl[i + 8u] = y4[(long)(i + 32u) * other_stride]; yh[i] = y4[(long)(i + 128u) * other_stride]; yh[i + 8u] = y4[(long)(i + 160u) * other_stride]; }\n");
+            } else {
+                source.push_str(&format!("        for (int j = 0; j < {sub}; ++j) {{\n"));
+                if other_stride_is_one {
+                    source.push_str("            acts[j] = acts_row[j];\n");
                 } else {
+                    source.push_str("            acts[j] = acts_row[(long)j * other_stride];\n");
+                }
+                source.push_str("        }\n");
+            }
+            source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+            source.push_str("            device const uchar *blk = blk_ptr[q];\n");
+            match codec {
+                PackedCodec::Q2K => {
+                    source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
                     source.push_str(&format!(
-                        "            for (int c = 0; c < {}; ++c) {{\n",
-                        sub / run
-                    ));
-                    // raw 4-bit levels (0..15) are exact in float regardless of
-                    // the kernel's element type; q4k_run8 takes `thread float
-                    // *out`, and the narrowing to element_type happens where
-                    // levels combine into scratch below, same as every other
-                    // operand read.
-                    source.push_str(&format!("                float levels[{run}];\n"));
-                    source.push_str(&format!(
-                        "                q4k_run8(blk, slot + (uint)(c * {run}), levels);\n"
-                    ));
-                    source.push_str(&format!(
-                        "                for (int j = 0; j < {run}; ++j) {{\n"
-                    ));
-                    source.push_str(&format!(
-                        "                    {element_type} scratch[{}];\n",
+                        "                {element_type} scratch[{}];\n",
                         operand_count.max(1)
                     ));
                     source.push_str(&format!(
-                        "                    scratch[{weight}] = hdr.scale * levels[j] - hdr.minimum;\n"
+                        "                scratch[{weight}] = q2k_element(blk, slot + (uint)e);\n"
                     ));
-                    source.push_str(&format!(
-                        "                    scratch[{other}] = acts[c * {run} + j];\n"
-                    ));
+                    source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
                     let value_expr = push_body_steps(
                         source,
                         resolved.element_body(),
-                        "                    ",
+                        "                ",
                         element_type,
                     );
                     source.push_str(&format!(
-                        "                    {element_type} value = {value_expr};\n"
+                        "                {element_type} value = {value_expr};\n"
                     ));
                     let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
-                    source.push_str(&format!("                    sumf[q] = {combine_expr};\n"));
-                    source.push_str("                }\n");
+                    source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
                     source.push_str("            }\n");
                 }
+                PackedCodec::Q3K if plain_product => {
+                    // `plain_product` is codec-agnostic (the `yl`/`yh` gather
+                    // above is built once, shared by `Q4_K`/`Q3_K` and, when
+                    // `metal-q5k-pair-dot` is on, `Q5_K` too) -- no separate
+                    // activation load path needed here, same posture as
+                    // `Q5_K`'s own `plain_product` arm.
+                    source.push_str(
+                        "            sumf[q] = sumf[q] + q3k_pair_dot(blk, iq, ir, yl, yh);\n",
+                    );
+                }
+                PackedCodec::Q3K => {
+                    // `Q3_K`'s sub-block width (16) is narrower than this
+                    // loop's 32-element `sub` slot, unlike `Q5_K`'s matching
+                    // 32-element sub-block -- amortizing one header decode
+                    // across the whole slot the way the `Q5_K` arm below does
+                    // would silently span two different sub-block scales. Each
+                    // call to `q3k_element` decodes its own header, the same
+                    // posture `Q6_K`'s per-element path takes for a different
+                    // reason (its scale bytes are plain, not bit-packed, so the
+                    // per-call cost is small either way). A follow-up
+                    // optimization (a two-headers-per-slot amortization), not a
+                    // correctness gap.
+                    source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
+                    source.push_str(&format!(
+                        "                {element_type} scratch[{}];\n",
+                        operand_count.max(1)
+                    ));
+                    source.push_str(&format!(
+                        "                scratch[{weight}] = q3k_element(blk, slot + (uint)e);\n"
+                    ));
+                    source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
+                    let value_expr = push_body_steps(
+                        source,
+                        resolved.element_body(),
+                        "                ",
+                        element_type,
+                    );
+                    source.push_str(&format!(
+                        "                {element_type} value = {value_expr};\n"
+                    ));
+                    let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+                    source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
+                    source.push_str("            }\n");
+                }
+                PackedCodec::Q4K => {
+                    if plain_product {
+                        source.push_str(
+                            "            sumf[q] = sumf[q] + q4k_pair_dot(blk, iq, ir, yl, yh);\n",
+                        );
+                    } else if is_plain_product_reduce(resolved, reduce_op, weight, other) {
+                        // SCALE-DEFERRED PATH (`docs/discipline.md` ROW 106).
+                        // Accumulate the raw nibble x activation product and the
+                        // activation sum UNSCALED across the whole sub-block, then
+                        // apply `hdr.scale`/`hdr.minimum` ONCE at the end instead
+                        // of once per element — legal here because
+                        // `is_plain_product_reduce` already proved reduce_op is
+                        // `Add` and the body is exactly `weight * other`, so
+                        // `sum_j (scale*nibble_j - min)*act_j == scale*sum(nibble_j
+                        // *act_j) - min*sum(act_j)`. Mirrors
+                        // `ggml-metal.metal:5157-5175`'s `acc1`/`dall` split.
+                        // Two bodies behind `metal-q4k-mask-fma`: off, the
+                        // shift-then-mask `q4k_run8` extraction into a `dot`
+                        // reduce; on, ggml's actual mask-without-shift technique,
+                        // fused with the accumulate -- see
+                        // `push_q4k_product_reduce_body`'s own doc.
+                        push_q4k_header_decode(source);
+                        push_q4k_product_reduce_body(source, sub, run, element_type);
+                    } else {
+                        source.push_str(&format!(
+                            "            for (int c = 0; c < {}; ++c) {{\n",
+                            sub / run
+                        ));
+                        // raw 4-bit levels (0..15) are exact in float regardless of
+                        // the kernel's element type; q4k_run8 takes `thread float
+                        // *out`, and the narrowing to element_type happens where
+                        // levels combine into scratch below, same as every other
+                        // operand read.
+                        source.push_str(&format!("                float levels[{run}];\n"));
+                        source.push_str(&format!(
+                            "                q4k_run8(blk, slot + (uint)(c * {run}), levels);\n"
+                        ));
+                        source.push_str(&format!(
+                            "                for (int j = 0; j < {run}; ++j) {{\n"
+                        ));
+                        source.push_str(&format!(
+                            "                    {element_type} scratch[{}];\n",
+                            operand_count.max(1)
+                        ));
+                        source.push_str(&format!(
+                        "                    scratch[{weight}] = hdr.scale * levels[j] - hdr.minimum;\n"
+                    ));
+                        source.push_str(&format!(
+                            "                    scratch[{other}] = acts[c * {run} + j];\n"
+                        ));
+                        let value_expr = push_body_steps(
+                            source,
+                            resolved.element_body(),
+                            "                    ",
+                            element_type,
+                        );
+                        source.push_str(&format!(
+                            "                    {element_type} value = {value_expr};\n"
+                        ));
+                        let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+                        source
+                            .push_str(&format!("                    sumf[q] = {combine_expr};\n"));
+                        source.push_str("                }\n");
+                        source.push_str("            }\n");
+                    }
+                }
+                PackedCodec::Q5K if plain_product => {
+                    // See [`Q5K_PAIR_DOT_MSL`]: the same `yl`/`yh` two-word-load pairing `Q4_K`'s own
+                    // `plain_product` arm above uses, extended with `Q5_K`'s `qh`
+                    // high-bit plane. Reads the SAME `yl`/`yh` activation gather
+                    // this preamble already built for `Q4_K` (`plain_product`
+                    // is codec-agnostic there), so no separate activation load
+                    // path is needed for this codec.
+                    source.push_str(
+                        "            sumf[q] = sumf[q] + q5k_pair_dot(blk, iq, ir, yl, yh);\n",
+                    );
+                }
+                PackedCodec::Q5K => {
+                    // No `q5k_run8`-style batched unpack yet — `Q5_K`'s `qh`
+                    // high-bit plane means each element needs a `qs` nibble AND
+                    // a `qh` bit from a DIFFERENT byte, the same shape gap
+                    // `Q6_K`'s own arm below documents. `d` and this sub-block's
+                    // scale/min/mask ARE decoded once per 32-element run via
+                    // `q5k_header_for` (the same granularity `q4k_header_for`
+                    // amortizes over) — a follow-up optimization, not a
+                    // correctness gap; see this landing's discipline row (ROW
+                    // 92) for the measured cost of skipping it. The `plain_product`
+                    // arm above replaces this whole per-element loop with the
+                    // paired-nibble body whenever the reduce is a plain product.
+                    source.push_str("            q5k_header hdr = q5k_header_for(blk, slot);\n");
+                    source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
+                    source.push_str(&format!(
+                        "                {element_type} scratch[{}];\n",
+                        operand_count.max(1)
+                    ));
+                    source.push_str(&format!(
+                        "                scratch[{weight}] = q5k_value(blk, slot + (uint)e, hdr);\n"
+                    ));
+                    source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
+                    let value_expr = push_body_steps(
+                        source,
+                        resolved.element_body(),
+                        "                ",
+                        element_type,
+                    );
+                    source.push_str(&format!(
+                        "                {element_type} value = {value_expr};\n"
+                    ));
+                    let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+                    source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
+                    source.push_str("            }\n");
+                }
+                PackedCodec::Q6K if plain_product => {
+                    // See [`Q6K_PAIR_DOT_MSL`]: the same paired-lane body `Q4_K`/`Q5_K`'s own
+                    // `plain_product` arms use above, ported to `Q6_K`'s
+                    // ql/qh/signed-scale layout. Reads the SAME `yl`/`yh`
+                    // activation gather this preamble already built for
+                    // `Q4_K` (`plain_product` is codec-agnostic there), so no
+                    // separate activation load path is needed for this codec.
+                    source.push_str(
+                        "            sumf[q] = sumf[q] + q6k_pair_dot(blk, iq, ir, yl, yh);\n",
+                    );
+                }
+                PackedCodec::Q6K => {
+                    // No `q6k_run8`-style batched unpack yet — `Q6_K`'s bit
+                    // layout does not reduce to two word loads the way `Q4_K`'s
+                    // does (each element needs a `ql` byte, a `qh` byte, AND a
+                    // sub-block scale byte, not one nibble out of an
+                    // already-loaded word). Correct, one element at a time; `d`
+                    // is still decoded ONCE per super-block via
+                    // `q6k_header_for` rather than per element. The `plain_product`
+                    // arm above replaces this whole per-element loop with the
+                    // paired-lane body whenever the reduce is a plain product.
+                    source.push_str("            q6k_header hdr = q6k_header_for(blk);\n");
+                    source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
+                    source.push_str(&format!(
+                        "                {element_type} scratch[{}];\n",
+                        operand_count.max(1)
+                    ));
+                    source.push_str(&format!(
+                        "                scratch[{weight}] = q6k_value(blk, slot + (uint)e, hdr);\n"
+                    ));
+                    source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
+                    let value_expr = push_body_steps(
+                        source,
+                        resolved.element_body(),
+                        "                ",
+                        element_type,
+                    );
+                    source.push_str(&format!(
+                        "                {element_type} value = {value_expr};\n"
+                    ));
+                    let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+                    source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
+                    source.push_str("            }\n");
+                }
+                PackedCodec::Q8_0 => {
+                    return Err(EmitError::NonKQuantPackedCodec {
+                        node: resolved.node,
+                        codec: "q8_0",
+                    });
+                }
+                PackedCodec::Q4_0 => {
+                    return Err(EmitError::NonKQuantPackedCodec {
+                        node: resolved.node,
+                        codec: "q4_0",
+                    });
+                }
+                PackedCodec::Float16 => {
+                    return Err(EmitError::NonKQuantPackedCodec {
+                        node: resolved.node,
+                        codec: "float16",
+                    });
+                }
+                PackedCodec::BFloat16 => {
+                    return Err(EmitError::NonKQuantPackedCodec {
+                        node: resolved.node,
+                        codec: "bfloat16",
+                    });
+                }
             }
-            PackedCodec::Q5K if plain_product => {
-                // See [`Q5K_PAIR_DOT_MSL`]: the same `yl`/`yh` two-word-load pairing `Q4_K`'s own
-                // `plain_product` arm above uses, extended with `Q5_K`'s `qh`
-                // high-bit plane. Reads the SAME `yl`/`yh` activation gather
-                // this preamble already built for `Q4_K` (`plain_product`
-                // is codec-agnostic there), so no separate activation load
-                // path is needed for this codec.
-                source.push_str(
-                    "            sumf[q] = sumf[q] + q5k_pair_dot(blk, iq, ir, yl, yh);\n",
-                );
+            source.push_str("        }\n");
+            source.push_str(&format!(
+                "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
+            ));
+            if plain_product {
+                source.push_str("        y4 += y4_step;\n");
+            } else {
+                source.push_str("        acts_row += acts_step;\n");
             }
-            PackedCodec::Q5K => {
-                // No `q5k_run8`-style batched unpack yet — `Q5_K`'s `qh`
-                // high-bit plane means each element needs a `qs` nibble AND
-                // a `qh` bit from a DIFFERENT byte, the same shape gap
-                // `Q6_K`'s own arm below documents. `d` and this sub-block's
-                // scale/min/mask ARE decoded once per 32-element run via
-                // `q5k_header_for` (the same granularity `q4k_header_for`
-                // amortizes over) — a follow-up optimization, not a
-                // correctness gap; see this landing's discipline row (ROW
-                // 92) for the measured cost of skipping it. The `plain_product`
-                // arm above replaces this whole per-element loop with the
-                // paired-nibble body whenever the reduce is a plain product.
-                source.push_str("            q5k_header hdr = q5k_header_for(blk, slot);\n");
-                source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
-                source.push_str(&format!(
-                    "                {element_type} scratch[{}];\n",
-                    operand_count.max(1)
-                ));
-                source.push_str(&format!(
-                    "                scratch[{weight}] = q5k_value(blk, slot + (uint)e, hdr);\n"
-                ));
-                source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
-                let value_expr = push_body_steps(
-                    source,
-                    resolved.element_body(),
-                    "                ",
-                    element_type,
-                );
-                source.push_str(&format!(
-                    "                {element_type} value = {value_expr};\n"
-                ));
-                let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
-                source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
-                source.push_str("            }\n");
-            }
-            PackedCodec::Q6K if plain_product => {
-                // See [`Q6K_PAIR_DOT_MSL`]: the same paired-lane body `Q4_K`/`Q5_K`'s own
-                // `plain_product` arms use above, ported to `Q6_K`'s
-                // ql/qh/signed-scale layout. Reads the SAME `yl`/`yh`
-                // activation gather this preamble already built for
-                // `Q4_K` (`plain_product` is codec-agnostic there), so no
-                // separate activation load path is needed for this codec.
-                source.push_str(
-                    "            sumf[q] = sumf[q] + q6k_pair_dot(blk, iq, ir, yl, yh);\n",
-                );
-            }
-            PackedCodec::Q6K => {
-                // No `q6k_run8`-style batched unpack yet — `Q6_K`'s bit
-                // layout does not reduce to two word loads the way `Q4_K`'s
-                // does (each element needs a `ql` byte, a `qh` byte, AND a
-                // sub-block scale byte, not one nibble out of an
-                // already-loaded word). Correct, one element at a time; `d`
-                // is still decoded ONCE per super-block via
-                // `q6k_header_for` rather than per element. The `plain_product`
-                // arm above replaces this whole per-element loop with the
-                // paired-lane body whenever the reduce is a plain product.
-                source.push_str("            q6k_header hdr = q6k_header_for(blk);\n");
-                source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
-                source.push_str(&format!(
-                    "                {element_type} scratch[{}];\n",
-                    operand_count.max(1)
-                ));
-                source.push_str(&format!(
-                    "                scratch[{weight}] = q6k_value(blk, slot + (uint)e, hdr);\n"
-                ));
-                source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
-                let value_expr = push_body_steps(
-                    source,
-                    resolved.element_body(),
-                    "                ",
-                    element_type,
-                );
-                source.push_str(&format!(
-                    "                {element_type} value = {value_expr};\n"
-                ));
-                let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
-                source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
-                source.push_str("            }\n");
-            }
-            PackedCodec::Q8_0 => {
-                return Err(EmitError::NonKQuantPackedCodec {
-                    node: resolved.node,
-                    codec: "q8_0",
-                });
-            }
-            PackedCodec::Q4_0 => {
-                return Err(EmitError::NonKQuantPackedCodec {
-                    node: resolved.node,
-                    codec: "q4_0",
-                });
-            }
-            PackedCodec::Float16 => {
-                return Err(EmitError::NonKQuantPackedCodec {
-                    node: resolved.node,
-                    codec: "float16",
-                });
-            }
-            PackedCodec::BFloat16 => {
-                return Err(EmitError::NonKQuantPackedCodec {
-                    node: resolved.node,
-                    codec: "bfloat16",
-                });
-            }
-        }
-        source.push_str("        }\n");
-        source.push_str(&format!(
-            "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
-        ));
-        if plain_product {
-            source.push_str("        y4 += y4_step;\n");
-        } else {
-            source.push_str("        acts_row += acts_step;\n");
-        }
-        source.push_str("    }\n");
+            source.push_str("    }\n");
         }
         push_packed_row_combine_and_write(
             source,
@@ -5831,7 +6430,12 @@ fn push_q4k_single_fetch_body(
 /// proves it is 1, see the caller's own `other_stride_is_one` doc) applies
 /// identically to both instead of drifting.
 fn push_q4k_plain_product_y4_address(source: &mut String, other: usize, other_stride_is_one: bool) {
-    push_packed_row_plain_product_y4_address(source, other, other_stride_is_one, "64u * iq + 8u * ir");
+    push_packed_row_plain_product_y4_address(
+        source,
+        other,
+        other_stride_is_one,
+        "64u * iq + 8u * ir",
+    );
 }
 
 /// [`push_q4k_plain_product_y4_address`] generalized to any ggml-port body's
@@ -5967,7 +6571,9 @@ fn push_q4k_ggml_port_body(
     source.push_str("    }\n");
     push_q4k_plain_product_y4_address(source, other, other_stride_is_one);
     source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
-    source.push_str("        float sumy0 = 0.0f; float sumy1 = 0.0f; float sumy2 = 0.0f; float sumy3 = 0.0f;\n");
+    source.push_str(
+        "        float sumy0 = 0.0f; float sumy1 = 0.0f; float sumy2 = 0.0f; float sumy3 = 0.0f;\n",
+    );
     if other_stride_is_one {
         source.push_str(
             "        for (uint i = 0u; i < 8u; ++i) {\n            yl[i] = y4[i]; sumy0 += yl[i];\n",
@@ -5982,9 +6588,8 @@ fn push_q4k_ggml_port_body(
         source.push_str(
             "            yl[i + 8u] = y4[(long)(i + 32u) * other_stride]; sumy1 += yl[i + 8u];\n",
         );
-        source.push_str(
-            "            yh[i] = y4[(long)(i + 128u) * other_stride]; sumy2 += yh[i];\n",
-        );
+        source
+            .push_str("            yh[i] = y4[(long)(i + 128u) * other_stride]; sumy2 += yh[i];\n");
         source.push_str(
             "            yh[i + 8u] = y4[(long)(i + 160u) * other_stride]; sumy3 += yh[i + 8u];\n",
         );
@@ -5992,7 +6597,8 @@ fn push_q4k_ggml_port_body(
     source.push_str("        }\n");
     source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str("            device const uchar *blk = blk_ptr[q];\n");
-    source.push_str("            device const ushort *sc = (device const ushort *)(blk + 4) + iq;\n");
+    source
+        .push_str("            device const ushort *sc = (device const ushort *)(blk + 4) + iq;\n");
     source.push_str("            device const ushort *q1 = (device const ushort *)(blk + 16) + 16u * iq + 4u * ir;\n");
     source.push_str("            device const ushort *q2 = q1 + 32;\n");
     source.push_str("            device const half *dh = (device const half *)blk;\n");
@@ -6004,10 +6610,18 @@ fn push_q4k_ggml_port_body(
     source.push_str(
         "            ushort sc16_3 = (ushort)(((sc[4] >> 4) & (ushort)0x0f0fu) | ((sc[2] & (ushort)0xc0c0u) >> 2));\n",
     );
-    source.push_str("            uchar sc8_0 = (uchar)(sc16_0 & 0xffu); uchar sc8_1 = (uchar)(sc16_0 >> 8);\n");
-    source.push_str("            uchar sc8_2 = (uchar)(sc16_1 & 0xffu); uchar sc8_3 = (uchar)(sc16_1 >> 8);\n");
-    source.push_str("            uchar sc8_4 = (uchar)(sc16_2 & 0xffu); uchar sc8_5 = (uchar)(sc16_2 >> 8);\n");
-    source.push_str("            uchar sc8_6 = (uchar)(sc16_3 & 0xffu); uchar sc8_7 = (uchar)(sc16_3 >> 8);\n");
+    source.push_str(
+        "            uchar sc8_0 = (uchar)(sc16_0 & 0xffu); uchar sc8_1 = (uchar)(sc16_0 >> 8);\n",
+    );
+    source.push_str(
+        "            uchar sc8_2 = (uchar)(sc16_1 & 0xffu); uchar sc8_3 = (uchar)(sc16_1 >> 8);\n",
+    );
+    source.push_str(
+        "            uchar sc8_4 = (uchar)(sc16_2 & 0xffu); uchar sc8_5 = (uchar)(sc16_2 >> 8);\n",
+    );
+    source.push_str(
+        "            uchar sc8_6 = (uchar)(sc16_3 & 0xffu); uchar sc8_7 = (uchar)(sc16_3 >> 8);\n",
+    );
     source.push_str(
         "            float acc1_0 = 0.0f; float acc1_1 = 0.0f; float acc1_2 = 0.0f; float acc1_3 = 0.0f;\n",
     );
@@ -6017,14 +6631,30 @@ fn push_q4k_ggml_port_body(
     source.push_str("            for (uint i = 0u; i < 4u; ++i) {\n");
     source.push_str("                ushort word1 = q1[i];\n");
     source.push_str("                ushort word2 = q2[i];\n");
-    source.push_str("                acc1_0 += yl[2u * i + 0u] * (float)(word1 & (ushort)0x000Fu);\n");
-    source.push_str("                acc1_1 += yl[2u * i + 1u] * (float)(word1 & (ushort)0x0F00u);\n");
-    source.push_str("                acc1_2 += yl[2u * i + 8u] * (float)(word1 & (ushort)0x00F0u);\n");
-    source.push_str("                acc1_3 += yl[2u * i + 9u] * (float)(word1 & (ushort)0xF000u);\n");
-    source.push_str("                acc2_0 += yh[2u * i + 0u] * (float)(word2 & (ushort)0x000Fu);\n");
-    source.push_str("                acc2_1 += yh[2u * i + 1u] * (float)(word2 & (ushort)0x0F00u);\n");
-    source.push_str("                acc2_2 += yh[2u * i + 8u] * (float)(word2 & (ushort)0x00F0u);\n");
-    source.push_str("                acc2_3 += yh[2u * i + 9u] * (float)(word2 & (ushort)0xF000u);\n");
+    source.push_str(
+        "                acc1_0 += yl[2u * i + 0u] * (float)(word1 & (ushort)0x000Fu);\n",
+    );
+    source.push_str(
+        "                acc1_1 += yl[2u * i + 1u] * (float)(word1 & (ushort)0x0F00u);\n",
+    );
+    source.push_str(
+        "                acc1_2 += yl[2u * i + 8u] * (float)(word1 & (ushort)0x00F0u);\n",
+    );
+    source.push_str(
+        "                acc1_3 += yl[2u * i + 9u] * (float)(word1 & (ushort)0xF000u);\n",
+    );
+    source.push_str(
+        "                acc2_0 += yh[2u * i + 0u] * (float)(word2 & (ushort)0x000Fu);\n",
+    );
+    source.push_str(
+        "                acc2_1 += yh[2u * i + 1u] * (float)(word2 & (ushort)0x0F00u);\n",
+    );
+    source.push_str(
+        "                acc2_2 += yh[2u * i + 8u] * (float)(word2 & (ushort)0x00F0u);\n",
+    );
+    source.push_str(
+        "                acc2_3 += yh[2u * i + 9u] * (float)(word2 & (ushort)0xF000u);\n",
+    );
     source.push_str("            }\n");
     source.push_str("            float dall = (float)dh[0];\n");
     source.push_str("            float dmin = (float)dh[1];\n");
@@ -6154,7 +6784,9 @@ fn push_q5k_ggml_port_body(
     source.push_str("    }\n");
     push_q4k_plain_product_y4_address(source, other, other_stride_is_one);
     source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
-    source.push_str("        float sumy0 = 0.0f; float sumy1 = 0.0f; float sumy2 = 0.0f; float sumy3 = 0.0f;\n");
+    source.push_str(
+        "        float sumy0 = 0.0f; float sumy1 = 0.0f; float sumy2 = 0.0f; float sumy3 = 0.0f;\n",
+    );
     if other_stride_is_one {
         source.push_str(
             "        for (uint i = 0u; i < 8u; ++i) {\n            yl[i] = y4[i]; sumy0 += yl[i];\n",
@@ -6169,9 +6801,8 @@ fn push_q5k_ggml_port_body(
         source.push_str(
             "            yl[i + 8u] = y4[(long)(i + 32u) * other_stride]; sumy1 += yl[i + 8u];\n",
         );
-        source.push_str(
-            "            yh[i] = y4[(long)(i + 128u) * other_stride]; sumy2 += yh[i];\n",
-        );
+        source
+            .push_str("            yh[i] = y4[(long)(i + 128u) * other_stride]; sumy2 += yh[i];\n");
         source.push_str(
             "            yh[i + 8u] = y4[(long)(i + 160u) * other_stride]; sumy3 += yh[i + 8u];\n",
         );
@@ -6179,7 +6810,8 @@ fn push_q5k_ggml_port_body(
     source.push_str("        }\n");
     source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str("            device const uchar *blk = blk_ptr[q];\n");
-    source.push_str("            device const ushort *sc = (device const ushort *)(blk + 4) + iq;\n");
+    source
+        .push_str("            device const ushort *sc = (device const ushort *)(blk + 4) + iq;\n");
     source.push_str("            device const uchar *qh = blk + 16u + l0;\n");
     source.push_str("            device const uchar *q1 = blk + 48u + q_offset;\n");
     source.push_str("            device const uchar *q2 = q1 + 64u;\n");
@@ -6192,10 +6824,18 @@ fn push_q5k_ggml_port_body(
     source.push_str(
         "            ushort sc16_3 = (ushort)(((sc[4] >> 4) & (ushort)0x0f0fu) | ((sc[2] & (ushort)0xc0c0u) >> 2));\n",
     );
-    source.push_str("            uchar sc8_0 = (uchar)(sc16_0 & 0xffu); uchar sc8_1 = (uchar)(sc16_0 >> 8);\n");
-    source.push_str("            uchar sc8_2 = (uchar)(sc16_1 & 0xffu); uchar sc8_3 = (uchar)(sc16_1 >> 8);\n");
-    source.push_str("            uchar sc8_4 = (uchar)(sc16_2 & 0xffu); uchar sc8_5 = (uchar)(sc16_2 >> 8);\n");
-    source.push_str("            uchar sc8_6 = (uchar)(sc16_3 & 0xffu); uchar sc8_7 = (uchar)(sc16_3 >> 8);\n");
+    source.push_str(
+        "            uchar sc8_0 = (uchar)(sc16_0 & 0xffu); uchar sc8_1 = (uchar)(sc16_0 >> 8);\n",
+    );
+    source.push_str(
+        "            uchar sc8_2 = (uchar)(sc16_1 & 0xffu); uchar sc8_3 = (uchar)(sc16_1 >> 8);\n",
+    );
+    source.push_str(
+        "            uchar sc8_4 = (uchar)(sc16_2 & 0xffu); uchar sc8_5 = (uchar)(sc16_2 >> 8);\n",
+    );
+    source.push_str(
+        "            uchar sc8_6 = (uchar)(sc16_3 & 0xffu); uchar sc8_7 = (uchar)(sc16_3 >> 8);\n",
+    );
     source.push_str(
         "            float acc1_0 = 0.0f; float acc1_1 = 0.0f; float acc1_2 = 0.0f; float acc1_3 = 0.0f;\n",
     );
@@ -6340,18 +6980,10 @@ fn push_q6k_ggml_port_body(
     source.push_str(
         "                uint q_hi1 = (uint)(q2l >> 4u) | (((uint)qhl & 0xC0u) >> 2u);\n",
     );
-    source.push_str(
-        "                sums0 += yl[4u * l + 0u] * (float)((int)q_lo0 - 32);\n",
-    );
-    source.push_str(
-        "                sums1 += yl[4u * l + 1u] * (float)((int)q_lo1 - 32);\n",
-    );
-    source.push_str(
-        "                sums2 += yl[4u * l + 2u] * (float)((int)q_hi0 - 32);\n",
-    );
-    source.push_str(
-        "                sums3 += yl[4u * l + 3u] * (float)((int)q_hi1 - 32);\n",
-    );
+    source.push_str("                sums0 += yl[4u * l + 0u] * (float)((int)q_lo0 - 32);\n");
+    source.push_str("                sums1 += yl[4u * l + 1u] * (float)((int)q_lo1 - 32);\n");
+    source.push_str("                sums2 += yl[4u * l + 2u] * (float)((int)q_hi0 - 32);\n");
+    source.push_str("                sums3 += yl[4u * l + 3u] * (float)((int)q_hi1 - 32);\n");
     source.push_str("            }\n");
     source.push_str(
         "            sumf[q] = sumf[q] + dall * (sums0 * (float)(char)sc[0] + sums1 * (float)(char)sc[2] + sums2 * (float)(char)sc[4] + sums3 * (float)(char)sc[6]);\n",
@@ -6888,6 +7520,11 @@ fn q4k_super_block_tiled(
     quantized: &[Option<PackedCodec>],
     reduce_dims: &[u16],
 ) -> bool {
+    // Mixed expert sources have per-entry codecs and compact payload bases;
+    // this Q4-only specialization cannot represent that ABI.
+    if std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES").is_some() {
+        return false;
+    }
     if reduce_dims.len() != 1 {
         return false;
     }
@@ -6960,7 +7597,6 @@ fn cooperative_reduce_width(
     SIMD_WIDTH
 }
 
-
 /// [`tiled_gemm_threadgroup_width`]'s own nsg multiplier for the packed
 /// row-blocked path -- `PACKED_ROW_NSG` with either nsg2 feature on and
 /// `metal-q4k-split-k` off (see that call site's own doc for why split-K
@@ -7004,6 +7640,7 @@ fn push_cooperative_reduce_body(
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     is_broadcast_epilogue: bool,
+    expert_source_mode: bool,
 ) -> Result<(), EmitError> {
     let rank_len = rank.max(1);
     let output_rank = output_axes.len();
@@ -7011,6 +7648,7 @@ fn push_cooperative_reduce_body(
     let reduce_rank = reduce_dims.len();
     let reduce_rank_len = reduce_rank.max(1);
     let operand_count = resolved.operands().len();
+    let gather_slots = gather_slots(resolved);
 
     // the tiled GEMM path owns its own preamble entirely (`tiitg`/`sgitg`/
     // `tile_index`, derived straight from `gid` against `TILED_GEMM_NSG *
@@ -7019,7 +7657,14 @@ fn push_cooperative_reduce_body(
     // `kernel_cache_key`'s own comment for why the two are mutually
     // exclusive by construction.
     if let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes) {
-        push_tiled_gemm_body(source, resolved.node, output_axes, rank, &block, element_type)?;
+        push_tiled_gemm_body(
+            source,
+            resolved.node,
+            output_axes,
+            rank,
+            &block,
+            element_type,
+        )?;
         return Ok(());
     }
 
@@ -7068,6 +7713,7 @@ fn push_cooperative_reduce_body(
             &block,
             epilogue_body,
             epilogue_operands,
+            expert_source_mode,
         )?;
         return Ok(());
     }
@@ -7165,7 +7811,8 @@ fn push_cooperative_reduce_body(
         // practice; forced off here rather than relied upon so a future
         // packed operand slipping past that gate still falls through to the
         // supported loop instead of silently skipping the epilogue write.
-        let tiled = !is_broadcast_epilogue && q4k_super_block_tiled(resolved, quantized, reduce_dims);
+        let tiled =
+            !is_broadcast_epilogue && q4k_super_block_tiled(resolved, quantized, reduce_dims);
         if tiled {
             let weight = packed[0];
             for index in 0..operand_count {
@@ -7184,6 +7831,16 @@ fn push_cooperative_reduce_body(
                     source.push_str(&format!(
                         "    long stride{index} = u.operand_strides[{index}][{reduce_dim}];\n"
                     ));
+                }
+                if let Some(slot) = gather_slots[index] {
+                    push_cooperative_gather_fetch(
+                        source,
+                        index,
+                        slot,
+                        rank,
+                        "full_coord",
+                        &format!("base{index}"),
+                    );
                 }
             }
             source.push_str(&format!("    uint slot = (uint)lane * {run}u;\n"));
@@ -7254,6 +7911,16 @@ fn push_cooperative_reduce_body(
                 source.push_str(&format!(
                     "    off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
                 ));
+            }
+            if let Some(slot) = gather_slots[index] {
+                push_cooperative_gather_fetch(
+                    source,
+                    index,
+                    slot,
+                    rank,
+                    "full_coord",
+                    &format!("off{index}"),
+                );
             }
             source.push_str(&format!("    off{index} += (long)lane * stride{index};\n"));
             // 32-bit from here down. The offsets ABOVE stay `long` because a
@@ -7336,6 +8003,16 @@ fn push_cooperative_reduce_body(
             source.push_str(&format!(
                 "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
             ));
+        }
+        if let Some(slot) = gather_slots[index] {
+            push_cooperative_gather_fetch(
+                source,
+                index,
+                slot,
+                rank,
+                "full_coord",
+                &format!("off{index}"),
+            );
         }
     }
     source.push_str(&format!(
@@ -7812,6 +8489,7 @@ fn render_scan(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use alloc::collections::BTreeSet;
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -7821,6 +8499,21 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn dense_layout_accepts_contiguous_and_rejects_broadcast() {
+        let dense = Layout {
+            base: 0,
+            strides: vec![8_i64, 4, 1].into(),
+        };
+        assert!(dense_layout(&dense, &[2, 2, 4]));
+
+        let broadcast = Layout {
+            base: 0,
+            strides: vec![0_i64, 4, 1].into(),
+        };
+        assert!(!dense_layout(&broadcast, &[2, 2, 4]));
+    }
 
     fn elementwise_tanh_op(extent: u32) -> BoundOp {
         let mut program = Vec::new();
@@ -7895,6 +8588,143 @@ mod tests {
         let shapes = infer(&program, &[]).expect("matmul infers");
         bind(&program, &shapes, &[], NumericPolicy::default())
             .expect("matmul lowers")
+            .into_iter()
+            .next()
+            .expect("one fused bound emitted")
+    }
+
+    fn gathered_matmul_op(tokens: u32, experts: u32, rows: u32, k: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let weight = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![
+                    Extent::Static(experts),
+                    Extent::Static(rows),
+                    Extent::Static(k),
+                ],
+                name: None,
+            },
+        );
+        let route = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Int32,
+                shape: vec![Extent::Static(tokens)],
+                name: None,
+            },
+        );
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(tokens), Extent::Static(k)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (
+                        weight,
+                        IndexMap::Computed {
+                            indices: route,
+                            index_map: map::projection(3, &[0]),
+                            base: map::IndexPattern {
+                                iter_rank: 3,
+                                axes: vec![
+                                    map::AxisIndex::default(),
+                                    map::AxisIndex {
+                                        terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                                        offset: 0,
+                                        len: None,
+                                    },
+                                    map::AxisIndex {
+                                        terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                                        offset: 0,
+                                        len: None,
+                                    },
+                                ],
+                            },
+                            gathered_dim: 0,
+                        },
+                    ),
+                    (activation, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("gathered matmul infers");
+        bind(&program, &shapes, &[], NumericPolicy::default())
+            .expect("gathered matmul lowers")
+            .into_iter()
+            .next()
+            .expect("one fused bound emitted")
+    }
+
+    #[expect(
+        dead_code,
+        reason = "fixture retained for the rejected physical-axis permutation case"
+    )]
+    fn permuted_reduction_matmul_op() -> BoundOp {
+        let mut program = Vec::new();
+        let gated = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(64), Extent::Static(2), Extent::Static(2)],
+                name: None,
+            },
+        );
+        let weight = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(3), Extent::Static(256)],
+                name: None,
+            },
+        );
+        let product = proxima_tensor::spec::elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(gated, "jug->jugd"), (weight, "d,4*j+2*u+g->jugd")],
+        )
+        .expect("permuted product builds");
+        proxima_tensor::spec::reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            product,
+            "jugd->jugd",
+            "d->jugd",
+        )
+        .expect("permuted reduce builds");
+        let shapes = infer(&program, &[]).expect("permuted reduction matmul infers");
+        let mut resolved = bind(&program, &shapes, &[], NumericPolicy::default())
+            .expect("permuted reduction matmul lowers");
+        let mut packed = BTreeSet::new();
+        packed.insert(weight);
+        proxima_tensor::correct_packed_matmul_layouts(&mut resolved, &packed);
+        resolved
             .into_iter()
             .next()
             .expect("one fused bound emitted")
@@ -8106,7 +8936,9 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             source.contains("q4k_pair_dot"),
             "Add-reduce over a plain weight*activation body must take the paired decode path:\n{source}"
@@ -8135,7 +8967,9 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let source = emit(&bound, &q5k, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &q5k, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             source.contains("q5k_pair_dot"),
             "Add-reduce over a plain weight*activation body must take the paired decode path by default:\n{source}"
@@ -8168,7 +9002,9 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let source = emit(&bound, &q6k, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &q6k, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             source.contains("q6k_pair_dot"),
             "Add-reduce over a plain weight*activation body must take the paired decode path by default:\n{source}"
@@ -8176,6 +9012,77 @@ mod tests {
         assert!(
             !source.contains("q6k_value(blk"),
             "the scalar per-element q6k_value dequant expression must not remain once the paired path is taken:\n{source}"
+        );
+    }
+
+    #[test]
+    fn one_token_gathered_q4k_matmul_uses_row_blocked_gather_body() {
+        let bound = gathered_matmul_op(1, 3, 4, 256);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+        let codecs = operand_codecs(&bound, &q4k);
+
+        assert!(
+            classify_packed_row_block(&bound, &codecs).is_ok(),
+            "one routed activation row selects one expert before the row-blocked reduction"
+        );
+
+        let source = emit(&bound, &q4k, NumericPolicy::default())
+            .expect("gathered q4k matmul emits")
+            .source;
+        assert!(
+            source.contains("gather_idx0")
+                && source.contains("weight_base[q] += fetched0 * u.gather_element_stride[0]")
+                && source.contains("q4k_pair_dot"),
+            "the row-blocked body must select the routed expert slab before its paired q4k decode:\n{source}"
+        );
+    }
+
+    #[test]
+    fn expert_source_uses_descriptor_codec_instead_of_checkpoint_codec() {
+        let bound = gathered_matmul_op(1, 3, 4, 256);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+        let kernel = emit_with_expert_sources(&bound, &q4k, NumericPolicy::default(), weight_node)
+            .expect("emits expert source kernel");
+        assert!(kernel.source.contains("mixed_expert_element_from_offset"));
+        assert!(
+            kernel.source.contains(
+                "mixed_expert_element_from_offset(expert_payloads, expert_descriptors, (uint)fetched0"
+            ),
+            "the selected descriptor must choose the decoder at runtime:\n{}",
+            kernel.source
+        );
+        assert!(
+            kernel.source.matches("q4k_pair_dot(").count() == 1,
+            "a mixed source must not retain the checkpoint's fixed Q4_K decoder:\n{}",
+            kernel.source
+        );
+        assert!(!kernel.source.contains("q4k_element(in0"));
+        assert!(!kernel.source.contains("q6k_element(in0"));
+        if std::env::var_os("PROXIMA_DUMP_EXPERT_TEST_SOURCE").is_some() {
+            eprintln!("{}", kernel.source);
+        }
+    }
+
+    #[test]
+    fn flattened_selected_axis_gathered_q4k_matmul_is_not_row_blocked() {
+        // `[sequence = 1, selected = 2]` flattened to two rows has the same
+        // physical `[2, d_in]` activation shape as a two-token gather. Each
+        // row may name a different expert, so it cannot reuse the packed
+        // multi-row body's one weight row across its activation group.
+        let flattened_sequence_selected = 2;
+        let bound = gathered_matmul_op(flattened_sequence_selected, 3, 4, 256);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+
+        assert_eq!(
+            classify_packed_row_block(&bound, &operand_codecs(&bound, &q4k)).err(),
+            Some(PackedRowBlockRejection::GatheredOperand),
+            "flattened selected rows may route to different expert slabs, so the packed multi-row body must not share one weight row"
         );
     }
 
@@ -8203,7 +9110,9 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             source.contains("raw_low") && source.contains("raw_high"),
             "Add-reduce over a plain weight*activation body must take the scale-deferred path, split across both sub-block halves:\n{source}"
@@ -8240,7 +9149,9 @@ mod tests {
             "packed_row_block must agree with classify_packed_row_block's own rejection"
         );
 
-        let source = emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &q4_0, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             source.contains("q4_0_element("),
             "a Q4_0 weight must render through the generic per-element accessor:\n{source}"
@@ -8281,7 +9192,9 @@ mod tests {
             "packed_row_block must agree with classify_packed_row_block's own rejection"
         );
 
-        let source = emit(&bound, &operands, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &operands, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             source.contains(expected_read),
             "a {codec:?} weight must render through its own generic per-element accessor:\n{source}"
@@ -8312,7 +9225,9 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             !source.contains("raw_acc"),
             "a Maximum reduce must never take the scale-deferred path, its identity does not hold under max:\n{source}"
@@ -8342,7 +9257,9 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             !source.contains("raw_low") && !source.contains("raw_high"),
             "a Maximum reduce must never take the scale-deferred path, its identity does not hold under max:\n{source}"
@@ -8565,7 +9482,9 @@ mod tests {
         let mut q4k = BTreeMap::new();
         q4k.insert(weight_node, PackedCodec::Q4K);
 
-        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             !source.contains("simdgroup_multiply_accumulate"),
             "the tiled GEMM path must not exist at all without `metal-tiled-gemm`:\n{source}"
@@ -8600,7 +9519,9 @@ mod tests {
             .is_none(),
             "one token must never clear TILED_GEMM_MIN_TOKENS"
         );
-        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             !source.contains("simdgroup_multiply_accumulate"),
             "a one-token (decode-shaped) dispatch must not take the tiled GEMM path:\n{source}"
@@ -8634,7 +9555,9 @@ mod tests {
             .is_some(),
             "16 tokens must clear TILED_GEMM_MIN_TOKENS"
         );
-        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             source.contains("simdgroup_multiply_accumulate"),
             "a 16-token dispatch must take the tiled GEMM path:\n{source}"
@@ -8670,7 +9593,9 @@ mod tests {
             .is_none(),
             "a Q6_K weight must never take the tiled GEMM path"
         );
-        let source = emit(&bound, &q6k, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &q6k, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             !source.contains("simdgroup_multiply_accumulate"),
             "a Q6_K weight must not emit the tiled GEMM kernel:\n{source}"
@@ -8707,7 +9632,9 @@ mod tests {
             tiled_gemm_block(&bound, &codecs, *reduce_op, *init, output_axes).is_none(),
             "a 3-output-axis matmul must never take the 2-D tiled GEMM path"
         );
-        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert!(
             !source.contains("simdgroup_multiply_accumulate"),
             "a multi-head-shaped matmul must stay on the row-blocked path:\n{source}"
@@ -8801,7 +9728,8 @@ mod tests {
     #[test]
     fn a_gather_op_emits_an_indices_binding_and_the_fetch_uniforms() {
         let bound = embedding_lookup_op(50_000, 8, 4);
-        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("gather emits");
+        let kernel =
+            emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("gather emits");
 
         assert_eq!(
             kernel.entry, "omega_elementwise_r2_n1_identity_g1",
@@ -8832,9 +9760,104 @@ mod tests {
     }
 
     #[test]
+    fn expert_source_emission_appends_payload_and_descriptor_bindings() {
+        let bound = embedding_lookup_op(50_000, 8, 4);
+        let kernel = emit_with_expert_sources(
+            &bound,
+            &BTreeMap::new(),
+            NumericPolicy::default(),
+            bound.operands()[0].0,
+        )
+        .expect("expert-source ABI emits");
+
+        assert_eq!(
+            &kernel.bindings[kernel.bindings.len() - 2..],
+            &[
+                Binding::ExpertPayloads(bound.operands()[0].0),
+                Binding::ExpertDescriptors(bound.operands()[0].0),
+            ],
+            "expert buffers follow the ordinary input/index/output/uniform ABI"
+        );
+        assert!(kernel.source.contains("expert_payloads"));
+        assert!(kernel.source.contains("expert_descriptors"));
+        assert!(kernel.source.contains("struct ExpertPayloadDescriptor"));
+    }
+
+    #[test]
+    fn preamble_contains_mixed_expert_codec_selector() {
+        let source = MIXED_EXPERT_READ_MSL;
+        assert!(source.contains("mixed_expert_element"));
+        assert!(source.contains("selected.codec == 1u"));
+        assert!(source.contains("selected.codec == 2u"));
+        assert!(source.contains("selected.codec == 3u"));
+    }
+
+    #[test]
+    fn routed_q4k_reduce_uses_cooperative_gather_fetch() {
+        let mut program = Vec::new();
+        let stack = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(3), Extent::Static(256), Extent::Static(2)],
+                name: Some("expert_stack".into()),
+            },
+        );
+        let route = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Int32,
+                shape: vec![Extent::Static(4)],
+                name: Some("route".into()),
+            },
+        );
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4), Extent::Static(256)],
+                name: Some("activation".into()),
+            },
+        );
+        let gathered =
+            proxima_tensor::spec::gathered_expert_product(&mut program, stack, route, activation);
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: gathered,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 2])),
+                keep: Keep::Reduce,
+                name: Some("routed_q4k".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("routed reduction infers");
+        let bound = bind(&program, &shapes, &[], NumericPolicy::default())
+            .expect("routed reduction lowers")
+            .into_iter()
+            .find(|bound| matches!(bound.kind, BoundOpKind::Reduce { .. }))
+            .expect("reduction bound op exists");
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, PackedCodec::Q4K);
+        let kernel =
+            emit(&bound, &packed, NumericPolicy::default()).expect("routed reduction emits");
+        assert!(kernel.source.contains("simd_sum(accumulator)"));
+        assert!(
+            kernel
+                .source
+                .contains("simd_broadcast_first((uint)fetched0)")
+        );
+        assert!(kernel.source.contains("q4k_header_for"));
+    }
+
+    #[test]
     fn a_gather_kernel_binds_and_declares_the_fault_buffer() {
         let bound = embedding_lookup_op(50_000, 8, 4);
-        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("gather emits");
+        let kernel =
+            emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("gather emits");
 
         assert!(
             kernel.bindings.contains(&Binding::Fault),
@@ -8857,7 +9880,8 @@ mod tests {
     #[test]
     fn a_gather_free_op_names_and_binds_exactly_as_before_gather_existed() {
         let bound = elementwise_tanh_op(10);
-        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("gather-free elementwise emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default())
+            .expect("gather-free elementwise emits");
         assert!(
             !kernel.entry.contains("_g"),
             "a gather-free kernel's name must not grow a gather suffix"
@@ -8881,7 +9905,8 @@ mod tests {
     #[test]
     fn elementwise_op_emits_one_input_one_output_and_a_matching_grid() {
         let bound = elementwise_tanh_op(10);
-        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("elementwise emits");
+        let kernel =
+            emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("elementwise emits");
 
         assert_eq!(kernel.entry, "omega_elementwise_r1_n1_tanh");
         assert_eq!(
@@ -8958,15 +9983,21 @@ mod tests {
         );
 
         let empty = BTreeMap::new();
-        let key_two_axes = kernel_cache_key(&keeps_two_axes, &empty, NumericPolicy::default()).expect("cache key builds");
-        let key_one_axis = kernel_cache_key(&keeps_one_axis, &empty, NumericPolicy::default()).expect("cache key builds");
+        let key_two_axes = kernel_cache_key(&keeps_two_axes, &empty, NumericPolicy::default())
+            .expect("cache key builds");
+        let key_one_axis = kernel_cache_key(&keeps_one_axis, &empty, NumericPolicy::default())
+            .expect("cache key builds");
         assert_ne!(
             key_two_axes, key_one_axis,
             "a coarser key would let a 1-output-axis fold hit the 2-output-axis pipeline"
         );
 
-        let source_two_axes = emit(&keeps_two_axes, &empty, NumericPolicy::default()).expect("emits").source;
-        let source_one_axis = emit(&keeps_one_axis, &empty, NumericPolicy::default()).expect("emits").source;
+        let source_two_axes = emit(&keeps_two_axes, &empty, NumericPolicy::default())
+            .expect("emits")
+            .source;
+        let source_one_axis = emit(&keeps_one_axis, &empty, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert_ne!(
             source_two_axes, source_one_axis,
             "output_extents/reduction_extents array sizes must differ in the rendered source"
@@ -8989,8 +10020,12 @@ mod tests {
         let add = matmul_op_with_reduce(4, 8, 5, ScalarOp::Add);
         let max = matmul_op_with_reduce(4, 8, 5, ScalarOp::Maximum);
         assert_ne!(
-            emit(&add, &empty, NumericPolicy::default()).expect("emits").source,
-            emit(&max, &empty, NumericPolicy::default()).expect("emits").source,
+            emit(&add, &empty, NumericPolicy::default())
+                .expect("emits")
+                .source,
+            emit(&max, &empty, NumericPolicy::default())
+                .expect("emits")
+                .source,
             "reduce op must change the emitted body"
         );
         assert_ne!(
@@ -9049,13 +10084,19 @@ mod tests {
             .next()
             .expect("one bound emitted");
         assert_ne!(
-            emit(&f32_bound, &empty, NumericPolicy::default()).expect("emits").source,
-            emit(&f16_bound, &empty, NumericPolicy::default()).expect("emits").source,
+            emit(&f32_bound, &empty, NumericPolicy::default())
+                .expect("emits")
+                .source,
+            emit(&f16_bound, &empty, NumericPolicy::default())
+                .expect("emits")
+                .source,
             "dtype must change the emitted body (half vs. float declarations)"
         );
         assert_ne!(
-            kernel_cache_key(&f32_bound, &empty, NumericPolicy::default()).expect("cache key builds"),
-            kernel_cache_key(&f16_bound, &empty, NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&f32_bound, &empty, NumericPolicy::default())
+                .expect("cache key builds"),
+            kernel_cache_key(&f16_bound, &empty, NumericPolicy::default())
+                .expect("cache key builds"),
             "dtype must change the identity"
         );
 
@@ -9068,8 +10109,12 @@ mod tests {
         let mut q5k = BTreeMap::new();
         q5k.insert(weight_node, PackedCodec::Q5K);
         assert_ne!(
-            emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source,
-            emit(&bound, &q5k, NumericPolicy::default()).expect("emits").source,
+            emit(&bound, &q4k, NumericPolicy::default())
+                .expect("emits")
+                .source,
+            emit(&bound, &q5k, NumericPolicy::default())
+                .expect("emits")
+                .source,
             "packed codec must change the emitted body"
         );
         assert_ne!(
@@ -9086,8 +10131,12 @@ mod tests {
         // `NumericPolicy`s could share one PIPELINE_CACHE entry.
         assert_ne!(
             kernel_cache_key(&bound, &q4k, NumericPolicy::bit_exact()).expect("cache key builds"),
-            kernel_cache_key(&bound, &q4k, NumericPolicy::bit_exact().with_contraction(true))
-                .expect("cache key builds"),
+            kernel_cache_key(
+                &bound,
+                &q4k,
+                NumericPolicy::bit_exact().with_contraction(true)
+            )
+            .expect("cache key builds"),
             "numeric policy must change the identity, or a bit_exact- and a \
              contraction-only-compiled kernel could share one PIPELINE_CACHE \
              entry even though both compile MathMode::Safe or MathMode::Relaxed"
@@ -9114,8 +10163,10 @@ mod tests {
             let narrow = single_axis_sum_op(34);
             let wide = single_axis_sum_op(4096);
             assert_ne!(
-                kernel_cache_key(&narrow, &empty, NumericPolicy::default()).expect("cache key builds"),
-                kernel_cache_key(&wide, &empty, NumericPolicy::default()).expect("cache key builds"),
+                kernel_cache_key(&narrow, &empty, NumericPolicy::default())
+                    .expect("cache key builds"),
+                kernel_cache_key(&wide, &empty, NumericPolicy::default())
+                    .expect("cache key builds"),
                 "two cooperative reduces at different widths must never share a pipeline \
                  (ROW 290: a stale narrower kernel silently drops reduction terms)"
             );
@@ -9145,16 +10196,22 @@ mod tests {
             "same total rank"
         );
         let key_first_second =
-            kernel_cache_key(&keeps_first_and_second, &empty, NumericPolicy::default()).expect("cache key builds");
+            kernel_cache_key(&keeps_first_and_second, &empty, NumericPolicy::default())
+                .expect("cache key builds");
         let key_first_third =
-            kernel_cache_key(&keeps_first_and_third, &empty, NumericPolicy::default()).expect("cache key builds");
+            kernel_cache_key(&keeps_first_and_third, &empty, NumericPolicy::default())
+                .expect("cache key builds");
         assert_ne!(
             key_first_second, key_first_third,
             "output_axes.len() alone cannot tell {{0,1}} from {{0,2}}"
         );
 
-        let source_first_second = emit(&keeps_first_and_second, &empty, NumericPolicy::default()).expect("emits").source;
-        let source_first_third = emit(&keeps_first_and_third, &empty, NumericPolicy::default()).expect("emits").source;
+        let source_first_second = emit(&keeps_first_and_second, &empty, NumericPolicy::default())
+            .expect("emits")
+            .source;
+        let source_first_third = emit(&keeps_first_and_third, &empty, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert_ne!(
             source_first_second, source_first_third,
             "the reduce dim, and every operand_strides[..][dim] read, must differ"
@@ -9167,15 +10224,21 @@ mod tests {
         let descending = rank3_identity_sum_op(&[1, 0]);
         let empty = BTreeMap::new();
 
-        let key_ascending = kernel_cache_key(&ascending, &empty, NumericPolicy::default()).expect("cache key builds");
-        let key_descending = kernel_cache_key(&descending, &empty, NumericPolicy::default()).expect("cache key builds");
+        let key_ascending = kernel_cache_key(&ascending, &empty, NumericPolicy::default())
+            .expect("cache key builds");
+        let key_descending = kernel_cache_key(&descending, &empty, NumericPolicy::default())
+            .expect("cache key builds");
         assert_ne!(
             key_ascending, key_descending,
             "the SEQUENCE order of output_axes selects which u.output_extents slot each dim reads"
         );
 
-        let source_ascending = emit(&ascending, &empty, NumericPolicy::default()).expect("emits").source;
-        let source_descending = emit(&descending, &empty, NumericPolicy::default()).expect("emits").source;
+        let source_ascending = emit(&ascending, &empty, NumericPolicy::default())
+            .expect("emits")
+            .source;
+        let source_descending = emit(&descending, &empty, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert_ne!(
             source_ascending, source_descending,
             "reversing output_axes must reverse which dim each output_extents index feeds"
@@ -9192,15 +10255,21 @@ mod tests {
         let mut q6k = BTreeMap::new();
         q6k.insert(weight_node, PackedCodec::Q6K);
 
-        let key_q4k = kernel_cache_key(&bound, &q4k, NumericPolicy::default()).expect("cache key builds");
-        let key_q6k = kernel_cache_key(&bound, &q6k, NumericPolicy::default()).expect("cache key builds");
+        let key_q4k =
+            kernel_cache_key(&bound, &q4k, NumericPolicy::default()).expect("cache key builds");
+        let key_q6k =
+            kernel_cache_key(&bound, &q6k, NumericPolicy::default()).expect("cache key builds");
         assert_ne!(
             key_q4k, key_q6k,
             "entry_name alone cannot see which codec an operand reads through"
         );
 
-        let source_q4k = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
-        let source_q6k = emit(&bound, &q6k, NumericPolicy::default()).expect("emits").source;
+        let source_q4k = emit(&bound, &q4k, NumericPolicy::default())
+            .expect("emits")
+            .source;
+        let source_q6k = emit(&bound, &q6k, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert_ne!(
             source_q4k, source_q6k,
             "Q4_K and Q6_K unpack through different MSL functions"
@@ -9260,15 +10329,21 @@ mod tests {
             .expect("one bound emitted");
 
         let empty = BTreeMap::new();
-        let key_f32 = kernel_cache_key(&f32_bound, &empty, NumericPolicy::default()).expect("cache key builds");
-        let key_f16 = kernel_cache_key(&f16_bound, &empty, NumericPolicy::default()).expect("cache key builds");
+        let key_f32 = kernel_cache_key(&f32_bound, &empty, NumericPolicy::default())
+            .expect("cache key builds");
+        let key_f16 = kernel_cache_key(&f16_bound, &empty, NumericPolicy::default())
+            .expect("cache key builds");
         assert_ne!(
             key_f32, key_f16,
             "entry_name does not encode dtype on its own"
         );
 
-        let source_f32 = emit(&f32_bound, &empty, NumericPolicy::default()).expect("emits").source;
-        let source_f16 = emit(&f16_bound, &empty, NumericPolicy::default()).expect("emits").source;
+        let source_f32 = emit(&f32_bound, &empty, NumericPolicy::default())
+            .expect("emits")
+            .source;
+        let source_f16 = emit(&f16_bound, &empty, NumericPolicy::default())
+            .expect("emits")
+            .source;
         assert_ne!(
             source_f32, source_f16,
             "float vs half declarations must differ in source"
@@ -9295,7 +10370,8 @@ mod tests {
             matches!(bound.kind, BoundOpKind::Reduce { .. }),
             "the elementwise op must have fused into the reduce"
         );
-        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("matmul emits");
+        let kernel =
+            emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("matmul emits");
 
         assert_eq!(kernel.entry, "omega_reduce_r3_o2_n2_multiply_add_zero");
         assert_eq!(kernel.bindings.len(), 4, "two inputs, one output, uniforms");
@@ -9363,19 +10439,19 @@ mod tests {
     /// Proven against the COMPILED `COOPERATIVE_REDUCE_MIN_LEN` constant,
     /// not a hardcoded 128 — this same test body is the re-prove artifact for
     /// BOTH claims the short-reduce initiative makes: at the
-    /// `omega-runtime.toml` default (128) it covers the exact shapes that
-    /// motivated the threshold (34 `attended`, 64 `score_even`/`score_odd`
-    /// now serial; 127/128 the boundary; 4096 `sum_squares` staying
-    /// cooperative), and re-run under `OMEGA_COOPERATIVE_REDUCE_MIN_LEN=0`
+    /// `omega-runtime.toml` default (2) it covers the unit-axis boundary
+    /// (1/2) while the 34 `attended`, 64 `score_even`/`score_odd`, and 4096
+    /// `sum_squares` shapes stay cooperative; re-run under
+    /// `OMEGA_COOPERATIVE_REDUCE_MIN_LEN=0`
     /// (a distinct build — the constant is compile-time) it proves 0
     /// restores every-qualifying-reduce-stays-cooperative, the routing every
     /// build before this key existed used, because `>= 0` is vacuously true
     /// for every case including the 34-length one.
     #[proxima::test]
+    #[case::unit_axis(1)]
+    #[case::at_threshold_2(2)]
     #[case::attended_34(34)]
     #[case::score_even_odd_64(64)]
-    #[case::one_below_threshold_127(127)]
-    #[case::at_threshold_128(128)]
     #[case::sum_squares_4096(4096)]
     async fn reduce_routes_on_reduced_axis_length_against_min_len(#[case] reduce_len: u32) {
         let bound = single_axis_sum_op(reduce_len);
@@ -9388,7 +10464,8 @@ mod tests {
             crate::sized::COOPERATIVE_REDUCE_MIN_LEN
         );
 
-        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("single-axis sum emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default())
+            .expect("single-axis sum emits");
         assert_eq!(
             kernel.source.contains("simd_sum(accumulator)"),
             expected_cooperative,
@@ -9399,7 +10476,8 @@ mod tests {
     #[test]
     fn cached_attention_emits_one_online_softmax_dispatch() {
         let bound = cached_attention_op();
-        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("cached attention emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default())
+            .expect("cached attention emits");
 
         let BoundOpKind::CachedAttention {
             cached_key_rows,
@@ -9410,7 +10488,8 @@ mod tests {
         else {
             panic!("cached_attention_op must build a CachedAttention bound op");
         };
-        let context_chunks = context_chunks_for(*cached_key_rows + *new_key_rows, NumericPolicy::default());
+        let context_chunks =
+            context_chunks_for(*cached_key_rows + *new_key_rows, NumericPolicy::default());
 
         assert!(kernel.source.contains("long relative ="));
         assert!(kernel.source.contains("simd_sum(partial_score)"));
@@ -9473,7 +10552,8 @@ mod tests {
             return;
         }
 
-        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("cached attention emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default())
+            .expect("cached attention emits");
         assert!(!kernel.source.contains("context_chunks"));
         assert!(!kernel.source.contains("long chunk ="));
         assert!(!kernel.source.contains("shared_m["));
@@ -9483,7 +10563,8 @@ mod tests {
     #[test]
     fn cumsum_op_emits_a_scan_kernel_with_one_thread_per_line() {
         let bound = cumsum_op(8);
-        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("cumsum emits");
+        let kernel =
+            emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("cumsum emits");
 
         assert_eq!(kernel.entry, "omega_scan_r1_o1_n1_identity_add_zero");
         assert!(kernel.source.contains("inner_len"));
@@ -9497,8 +10578,10 @@ mod tests {
     #[test]
     fn emit_is_deterministic_byte_equal() {
         let bound = matmul_op(4, 3, 5);
-        let first = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("first emit succeeds");
-        let second = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("second emit succeeds");
+        let first =
+            emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("first emit succeeds");
+        let second =
+            emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("second emit succeeds");
         assert_eq!(first, second);
     }
 
@@ -9507,8 +10590,10 @@ mod tests {
         let small = elementwise_tanh_op(4);
         let large = elementwise_tanh_op(4096);
 
-        let small_kernel = emit(&small, &BTreeMap::new(), NumericPolicy::default()).expect("small emits");
-        let large_kernel = emit(&large, &BTreeMap::new(), NumericPolicy::default()).expect("large emits");
+        let small_kernel =
+            emit(&small, &BTreeMap::new(), NumericPolicy::default()).expect("small emits");
+        let large_kernel =
+            emit(&large, &BTreeMap::new(), NumericPolicy::default()).expect("large emits");
 
         assert_eq!(small_kernel.source, large_kernel.source);
         assert_eq!(small_kernel.entry, large_kernel.entry);
@@ -9522,7 +10607,8 @@ mod tests {
             body.steps[0].op = ScalarOp::Add; // arity 2, but the step still carries 1 arg
         }
 
-        let error = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect_err("mismatched arity is rejected");
+        let error = emit(&bound, &BTreeMap::new(), NumericPolicy::default())
+            .expect_err("mismatched arity is rejected");
         assert!(matches!(error, EmitError::ArityMismatch { .. }), "{error}");
     }
 
@@ -9533,7 +10619,8 @@ mod tests {
             *reduce_op = ScalarOp::Select;
         }
 
-        let error = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect_err("select reduction body is rejected");
+        let error = emit(&bound, &BTreeMap::new(), NumericPolicy::default())
+            .expect_err("select reduction body is rejected");
         assert!(
             matches!(error, EmitError::ReductionBodyIsSelect { .. }),
             "{error}"
@@ -9548,14 +10635,15 @@ mod tests {
             output_axes.clear();
         }
 
-        let error = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect_err("an empty scan is rejected");
+        let error = emit(&bound, &BTreeMap::new(), NumericPolicy::default())
+            .expect_err("an empty scan is rejected");
         assert!(matches!(error, EmitError::EmptyScan { .. }), "{error}");
     }
 
     #[test]
     fn render_reduce_rejects_an_elementwise_bound_op() {
         let bound = elementwise_tanh_op(8);
-        let error = render_reduce(&bound, "entry", &[None])
+        let error = render_reduce(&bound, "entry", &[None], false)
             .expect_err("an elementwise chain is not a Reduce fold");
         assert!(matches!(
             error,
@@ -9588,7 +10676,7 @@ mod tests {
         };
         epilogue_broadcast_axes.push(1);
 
-        let error = render_reduce(&bound, "entry", &[None])
+        let error = render_reduce(&bound, "entry", &[None], false)
             .expect_err("a broadcast-reduce epilogue has no Metal renderer yet");
         assert!(
             matches!(error, EmitError::EpilogueNotSupported { .. }),
@@ -9677,6 +10765,7 @@ mod tests {
             &block,
             &ComposedBody::leaf(ScalarOp::Identity),
             &[],
+            false,
         )
         .expect_err("Q8_0 never reaches the row-blocked path");
         assert!(matches!(
@@ -9899,9 +10988,8 @@ mod tests {
 
         let rejected = render_cached_attention(&bound, "entry", NumericPolicy::bit_exact())
             .expect("bit_exact() still renders -- it falls back to the single-pass kernel");
-        let admitted =
-            render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
-                .expect("llama_relaxed() renders the cross-simdgroup merge kernel");
+        let admitted = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+            .expect("llama_relaxed() renders the cross-simdgroup merge kernel");
 
         assert!(
             !rejected.contains("merged_max"),
@@ -9995,7 +11083,11 @@ mod tests {
         assert!(merge_kernel.entry.ends_with("_merge"));
         assert_eq!(
             merge_kernel.bindings,
-            alloc::vec![Binding::Scratch, Binding::Output(bound.node), Binding::Uniforms],
+            alloc::vec![
+                Binding::Scratch,
+                Binding::Output(bound.node),
+                Binding::Uniforms
+            ],
             "the merge kernel reads the split's scratch and writes the real output"
         );
     }
@@ -10022,13 +11114,16 @@ mod tests {
         let packed_operands = PackedOperands::new();
 
         for policy in [NumericPolicy::bit_exact(), NumericPolicy::llama_relaxed()] {
-            let kernel = emit(&bound, &packed_operands, policy).expect("a 40-key context always renders");
+            let kernel =
+                emit(&bound, &packed_operands, policy).expect("a 40-key context always renders");
             assert!(
                 !kernel.source.contains("attn_scratch"),
                 "a 40-key context must never engage the scratch hop under {policy:?}"
             );
             assert!(
-                kernel.source.contains("long kv_head_and_group = (long)tgid % (kv_heads * query_groups);"),
+                kernel
+                    .source
+                    .contains("long kv_head_and_group = (long)tgid % (kv_heads * query_groups);"),
                 "a 40-key context must decode `group` off `tgid`, not shared threadgroup memory, \
                  under {policy:?}"
             );
@@ -10079,10 +11174,12 @@ mod tests {
         *new_key_rows = 256;
 
         let quantized: Vec<Option<PackedCodec>> = Vec::new();
-        let narrow_width = tiled_gemm_threadgroup_width(&narrow, &quantized, NumericPolicy::bit_exact())
-            .expect("a CachedAttention op always has a threadgroup width");
-        let wide_width = tiled_gemm_threadgroup_width(&wide, &quantized, NumericPolicy::bit_exact())
-            .expect("a CachedAttention op always has a threadgroup width");
+        let narrow_width =
+            tiled_gemm_threadgroup_width(&narrow, &quantized, NumericPolicy::bit_exact())
+                .expect("a CachedAttention op always has a threadgroup width");
+        let wide_width =
+            tiled_gemm_threadgroup_width(&wide, &quantized, NumericPolicy::bit_exact())
+                .expect("a CachedAttention op always has a threadgroup width");
         assert_eq!(
             wide_width,
             4 * narrow_width,
@@ -10129,7 +11226,8 @@ mod tests {
             "the slice formula must be exactly ceil_div(live, splits), [lo, hi)"
         );
         assert!(
-            source.contains("long scratch_index = (query_index * splits + split) * (2L + head_dim);"),
+            source
+                .contains("long scratch_index = (query_index * splits + split) * (2L + head_dim);"),
             "the scratch write must index by (query_index * splits + split) using the LIVE \
              u.splits value cached_attention_scratch_len sized the buffer with, not the \
              compiled ATTENTION_SPLIT_MAX -- ROW: production, 2026-09-07, striding by the \
@@ -10159,9 +11257,8 @@ mod tests {
              threadgroup's own [lo, hi) slice, not the whole live range"
         );
 
-        let sequential_source =
-            render_cached_attention(&bound, "entry", NumericPolicy::default())
-                .expect("bit_exact still renders (splits collapse to 1, but the shape is shared)");
+        let sequential_source = render_cached_attention(&bound, "entry", NumericPolicy::default())
+            .expect("bit_exact still renders (splits collapse to 1, but the shape is shared)");
         assert!(
             sequential_source.contains("for (long key = lo + chunk; key < hi; key += chunks)"),
             "the strictly-sequential per-key walk must be bounded to this threadgroup's own \
@@ -10176,8 +11273,8 @@ mod tests {
     #[test]
     fn merge_kernel_emits_the_online_softmax_combine() {
         let bound = cached_attention_op_dynamic(200, 56);
-        let source =
-            render_cached_attention_merge(&bound, "entry").expect("the merge kernel always renders");
+        let source = render_cached_attention_merge(&bound, "entry")
+            .expect("the merge kernel always renders");
 
         assert!(source.contains("long splits = u.splits;"));
         assert!(source.contains("float global_max = simd_max(own_max);"));
@@ -10296,13 +11393,22 @@ mod tests {
         let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
             .expect("llama_relaxed renders the block-staged body for an aligned head_dim");
 
-        assert!(source.contains("block_width"), "the block-staging constant must be emitted");
-        assert!(source.contains("threadgroup float ss["), "scores must stage into ss[]");
+        assert!(
+            source.contains("block_width"),
+            "the block-staging constant must be emitted"
+        );
+        assert!(
+            source.contains("threadgroup float ss["),
+            "scores must stage into ss[]"
+        );
         assert!(
             source.contains("simd_shuffle_down(partial_score, 4)"),
             "the Q*K reduce must tree-reduce over the 8-lane key group"
         );
-        assert!(source.contains("simd_max("), "one simd_max per 32-lane sub-block");
+        assert!(
+            source.contains("simd_max("),
+            "one simd_max per 32-lane sub-block"
+        );
         assert!(
             !source.contains("simd_broadcast_first(simd_sum(partial_score)) * scale"),
             "the block-staged body must not keep the old per-key reduce expression"
@@ -10328,7 +11434,8 @@ mod tests {
             .expect("llama_relaxed renders the block-staged body for a 32-aligned head_dim");
 
         assert!(
-            source.contains("float4* v4 = (device const float4*)((cached ? in6 : in7) + kbase * 2)"),
+            source
+                .contains("float4* v4 = (device const float4*)((cached ? in6 : in7) + kbase * 2)"),
             "V must be reinterpreted as a float4 pointer at the same kbase * 2 offset the \
              scalar form used"
         );
@@ -10338,7 +11445,9 @@ mod tests {
         );
         assert!(
             source.contains("v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 8)")
-                && source.contains("v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 16)"),
+                && source.contains(
+                    "v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 16)"
+                ),
             "the four ty groups' partials must be folded together by a butterfly \
              simd_shuffle_xor reduce (strides 8 then 16), not left un-combined"
         );
@@ -10416,10 +11525,7 @@ mod tests {
             splits_512 > 1,
             "512 keys (4x omega-runtime.toml's 128-key keys_per_split_at_scale) must split; got {splits_512}"
         );
-        assert!(
-            splits_4096 > 1,
-            "4096 keys must split; got {splits_4096}"
-        );
+        assert!(splits_4096 > 1, "4096 keys must split; got {splits_4096}");
         assert!(
             splits_4096 >= splits_512,
             "a longer context must never split into FEWER threadgroups than a shorter one"

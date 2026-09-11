@@ -9,7 +9,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use proxima_build::sizing::{require_nonneg, require_nonzero, SizingSource};
+use proxima_build::sizing::{SizingSource, require_nonneg, require_nonzero};
 
 fn main() {
     emit_sizing_consts();

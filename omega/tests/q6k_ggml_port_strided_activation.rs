@@ -145,7 +145,8 @@ fn assert_ggml_port_matches_reference_at_stride(label: &str, stride: i32) {
 
     let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
         .expect("metal plans the matmul");
-    let metal = omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
+    let metal =
+        omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
 
     let metal_root = metal.root();
     assert_eq!(

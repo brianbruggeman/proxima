@@ -66,13 +66,15 @@
 //! so a wrapper would relocate the impl without enabling any composition. The
 //! free-function pair stays.
 
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
 
+use proxima_tensor::cpu::ExpertSource;
 use proxima_tensor::{Evaluated, NodeId, NumericPolicy, Op, QuantizedBlock, TensorError};
 
 #[cfg(feature = "cpu")]
 use proxima_tensor::cpu::{
-    evaluate_quantized_named_exact_with_scratch, evaluate_quantized_named_with_scratch,
+    evaluate_quantized_named_exact_with_scratch_and_experts,
+    evaluate_quantized_named_with_scratch_and_experts,
 };
 #[cfg(feature = "cpu")]
 use proxima_tensor::resolve_named_blocks;
@@ -107,14 +109,9 @@ impl Engine {
         }
     }
 
-    /// Reads `OMEGA_BACKEND` once per process into a `OnceLock<String>`,
-    /// mirroring `proxima_tensor::cpu::matmul_worker_count`'s own idiom for
-    /// `PROXIMA_MATMUL_WORKERS` — a per-call `std::env::var` would allocate a
-    /// `String` on every plan for a value that cannot change once the
-    /// process has started. Only the raw string is cached; parsing re-runs
-    /// on every call, which is cheap (a match over a handful of short
-    /// literals) and lets an unrecognized name surface as a fresh
-    /// [`BackendError::UnknownName`] instead of being memoized away.
+    /// Reads `OMEGA_BACKEND` for this resolution. Parsing is cheap and keeping
+    /// the read live makes test and embedding-process environment changes
+    /// deterministic instead of pinning the first caller's value.
     ///
     /// Accepts `cpu`/`gpu`. For one release it also accepts the legacy
     /// `metal`/`wgpu` names, mapped to [`Engine::Gpu`] with a
@@ -139,19 +136,18 @@ impl Engine {
     /// [`BackendError::UnknownName`] when `OMEGA_BACKEND` is set to a name
     /// this does not recognize.
     pub fn from_env() -> Result<Engine, BackendError> {
-        static RAW: OnceLock<String> = OnceLock::new();
-        let raw = RAW.get_or_init(|| std::env::var("OMEGA_BACKEND").unwrap_or_default());
+        let raw = std::env::var("OMEGA_BACKEND").unwrap_or_default();
         if raw.is_empty() {
             return Ok(Engine::default_compiled());
         }
         match raw.as_str() {
             "metal" | "wgpu" => {
-                warn_deprecated_driver_name(raw);
+                warn_deprecated_driver_name(&raw);
                 Ok(Engine::Gpu)
             }
             _ => raw
                 .parse::<Engine>()
-                .inspect_err(|error| warn_unknown_backend_env(raw, error)),
+                .inspect_err(|error| warn_unknown_backend_env(&raw, error)),
         }
     }
 
@@ -264,6 +260,15 @@ pub enum BackendError {
     /// `metal` nor the `wgpu-backend` feature is compiled in.
     #[error("engine `gpu` has no compiled driver; enable the `metal` or `wgpu-backend` feature")]
     NoGpuDriver,
+
+    /// The selected GPU driver has no per-expert buffer-table binding yet.
+    /// Refusing a nonempty table prevents a residency decision from being
+    /// silently replaced by the original contiguous expert stack.
+    #[error("backend `{backend}` cannot bind {source_count} expert source tables")]
+    ExpertSourcesUnsupported {
+        backend: &'static str,
+        source_count: usize,
+    },
 
     /// The named backend's feature is on (its name is reserved,
     /// `Cargo.toml`), but `backend.rs` has no execution arm for it yet —
@@ -440,13 +445,37 @@ pub fn execute_plan_named(
     plan: &mut Plan,
     _named: &[(&str, QuantizedBlock<'_>)],
 ) -> Result<Evaluated, BackendError> {
+    execute_plan_named_with_expert_sources(plan, _named, None)
+}
+
+/// Executes a named plan with a per-step expert substitution table. CPU
+/// consumes the table through `proxima-tensor`'s expert-aware evaluator;
+/// Metal currently has an experimental uniform packed-codec staging arm only
+/// and does not yet implement mixed-precision HOBBIT substitution.
+///
+/// # Errors
+/// In addition to [`execute_plan_named`]'s errors, Metal rejects malformed
+/// tables (empty, unpacked, mixed-codec, or wrong-node) with a typed error.
+pub fn execute_plan_named_with_expert_sources(
+    plan: &mut Plan,
+    _named: &[(&str, QuantizedBlock<'_>)],
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+) -> Result<Evaluated, BackendError> {
     match plan {
         #[cfg(feature = "cpu")]
-        Plan::Cpu(cpu_plan) => execute_plan_named_cpu(cpu_plan, _named),
+        Plan::Cpu(cpu_plan) => execute_plan_named_cpu(cpu_plan, _named, expert_sources),
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        Plan::Metal(metal_plan) => execute_plan_named_metal(metal_plan, _named),
+        Plan::Metal(metal_plan) => match expert_sources {
+            Some(sources) if !sources.is_empty() => Ok(
+                metal::execute_plan_named_with_expert_sources(metal_plan, _named, sources)?,
+            ),
+            _ => execute_plan_named_metal(metal_plan, _named),
+        },
         #[cfg(feature = "wgpu-backend")]
-        Plan::Wgpu(wgpu_plan) => execute_plan_named_wgpu(wgpu_plan, _named),
+        Plan::Wgpu(wgpu_plan) => {
+            reject_gpu_expert_sources("wgpu", expert_sources)?;
+            execute_plan_named_wgpu(wgpu_plan, _named)
+        }
         // `Plan` is uninhabited with every backend feature off; `*plan {}`
         // is the never-pattern proof of that rather than a runtime `todo!`.
         #[cfg(not(any(
@@ -456,6 +485,21 @@ pub fn execute_plan_named(
         )))]
         _ => match *plan {},
     }
+}
+
+#[cfg(test)]
+fn reject_gpu_expert_sources(
+    backend: &'static str,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+) -> Result<(), BackendError> {
+    let source_count = expert_sources.map_or(0, BTreeMap::len);
+    if source_count == 0 {
+        return Ok(());
+    }
+    Err(BackendError::ExpertSourcesUnsupported {
+        backend,
+        source_count,
+    })
 }
 
 /// Classifies every named block bound to one of `resident_names` as data
@@ -608,7 +652,17 @@ fn plan_named_cpu(
     // own eager check, even though the CPU evaluator itself re-resolves names
     // on every `execute_plan_named` call (it has no persistent bind step to
     // cache into).
-    resolve_named_blocks(program, named)?;
+    for node in proxima_tensor::block_node_ids(program) {
+        let name = program[node.0 as usize]
+            .name()
+            .ok_or(proxima_tensor::error::TensorError::UnnamedInput(node))?;
+        if !name.contains("_exps.weight") && !named.iter().any(|(candidate, _)| *candidate == name)
+        {
+            return Err(BackendError::Tensor(
+                proxima_tensor::error::TensorError::UnboundInputName(name.to_owned()),
+            ));
+        }
+    }
     Ok(Plan::Cpu(CpuPlan {
         program: program.to_vec(),
         symbols: symbols.to_vec(),
@@ -680,7 +734,15 @@ pub fn plan_named_exact(
                 })
             }
         }
-        Engine::Gpu => plan_named(engine, gpu_driver, _program, _symbols, _named, _outputs, _numeric_policy),
+        Engine::Gpu => plan_named(
+            engine,
+            gpu_driver,
+            _program,
+            _symbols,
+            _named,
+            _outputs,
+            _numeric_policy,
+        ),
     }
 }
 
@@ -688,24 +750,27 @@ pub fn plan_named_exact(
 fn execute_plan_named_cpu(
     plan: &mut CpuPlan,
     named: &[(&str, QuantizedBlock<'_>)],
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, BackendError> {
     let evaluated = if plan.exact_activations {
-        evaluate_quantized_named_exact_with_scratch(
+        evaluate_quantized_named_exact_with_scratch_and_experts(
             &plan.program,
             &plan.symbols,
             named,
             &plan.outputs,
             &mut plan.free_buffers,
             &mut plan.validated_weight_nodes,
+            expert_sources,
         )?
     } else {
-        evaluate_quantized_named_with_scratch(
+        evaluate_quantized_named_with_scratch_and_experts(
             &plan.program,
             &plan.symbols,
             named,
             &plan.outputs,
             &mut plan.free_buffers,
             &mut plan.validated_weight_nodes,
+            expert_sources,
         )?
     };
     Ok(evaluated)
@@ -731,7 +796,7 @@ fn execute_plan_named_metal(
     plan: &metal::Plan,
     named: &[(&str, QuantizedBlock<'_>)],
 ) -> Result<Evaluated, BackendError> {
-    let evaluated = metal::execute_plan_named(plan, named)?;
+    let evaluated = metal::execute_plan_named_with_placements(plan, named, &[], &[])?;
     Ok(evaluated)
 }
 
@@ -789,7 +854,83 @@ pub fn execute_plan_named_metal_op_timed(
 // the test failing, same convention as every `omega/tests/*.rs` file.
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use proxima_tensor::NodeId;
+    use proxima_tensor::cpu::ExpertSource;
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use proxima_tensor::{
+        DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
+    };
+
     use super::{BackendError, Engine};
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use super::{GpuDriver, MetalError};
+
+    static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn gpu_expert_source_gate_rejects_a_nonempty_substitution_table() {
+        let mut sources = BTreeMap::new();
+        sources.insert(NodeId(7), ExpertSource::new(&[]));
+
+        assert!(super::reject_gpu_expert_sources("metal", None).is_ok());
+        assert!(super::reject_gpu_expert_sources("metal", Some(&BTreeMap::new())).is_ok());
+        assert!(matches!(
+            super::reject_gpu_expert_sources("metal", Some(&sources)),
+            Err(BackendError::ExpertSourcesUnsupported {
+                backend: "metal",
+                source_count: 1,
+            })
+        ));
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn metal_plan_rejects_malformed_expert_sources_at_the_public_execution_boundary() {
+        let mut program = Vec::new();
+        let input = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(1)],
+                name: Some("input".into()),
+            },
+        );
+        let output = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: vec![(input, IndexMap::Affine(projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let values = [1.0f32];
+        let named = [("input", QuantizedBlock::Float32(&values))];
+        let mut plan = super::plan_named(
+            Engine::Gpu,
+            Some(GpuDriver::Metal),
+            &program,
+            &[],
+            &named,
+            &[output],
+            NumericPolicy::default(),
+        )
+        .expect("plans the Metal identity program");
+        let mut sources = BTreeMap::new();
+        sources.insert(input, ExpertSource::new(&[]));
+
+        let error =
+            super::execute_plan_named_with_expert_sources(&mut plan, &named, Some(&sources))
+                .expect_err("Metal must not silently discard a malformed expert source table");
+
+        assert!(matches!(
+            error,
+            BackendError::Metal(MetalError::ExpertSourceUnsupported { node, .. }) if node == input
+        ));
+    }
 
     #[test]
     fn every_engine_name_round_trips_through_from_str() {
@@ -835,7 +976,15 @@ mod tests {
     #[test]
     fn requesting_cpu_without_the_feature_errors_naming_it() {
         let error = expect_plan_err(
-            super::plan_named(Engine::Cpu, None, &[], &[], &[], &[]),
+            super::plan_named(
+                Engine::Cpu,
+                None,
+                &[],
+                &[],
+                &[],
+                &[],
+                NumericPolicy::default(),
+            ),
             "cpu engine must not be selectable when its feature is off",
         );
         assert!(matches!(
@@ -870,13 +1019,13 @@ mod tests {
         ));
     }
 
-    // `Engine::from_env` caches `OMEGA_BACKEND` in a process-lifetime
-    // `OnceLock`, so these three tests each need their own process to see
-    // their own env var -- nextest's default one-test-per-process isolation
-    // gives them that; running them under plain `cargo test` in the same
-    // binary would let whichever runs first pin the value for the rest.
+    // Environment parsing is intentionally live so these tests remain
+    // deterministic under both nextest and plain cargo test.
     #[test]
     fn from_env_with_a_known_name_resolves_to_its_variant() {
+        let _guard = ENVIRONMENT_LOCK
+            .lock()
+            .expect("environment lock is not poisoned");
         // SAFETY: this test owns `OMEGA_BACKEND` for its own process; nextest
         // runs each test in a separate process, so no concurrent reader.
         unsafe {
@@ -888,6 +1037,9 @@ mod tests {
 
     #[test]
     fn from_env_with_an_unknown_name_errors_without_falling_back() {
+        let _guard = ENVIRONMENT_LOCK
+            .lock()
+            .expect("environment lock is not poisoned");
         // SAFETY: see `from_env_with_a_known_name_resolves_to_its_variant`.
         unsafe {
             std::env::set_var("OMEGA_BACKEND", "quantum");
@@ -901,11 +1053,14 @@ mod tests {
 
     #[test]
     fn from_env_unset_falls_back_to_the_compiled_default() {
-        // SAFETY: see `from_env_with_a_known_name_resolves_to_its_variant`;
-        // this test also relies on `OMEGA_BACKEND` starting unset in its own
-        // fresh process rather than removing it, since removal races nothing
-        // else in this process but is unsafe for the same reason `set_var`
-        // is.
+        let _guard = ENVIRONMENT_LOCK
+            .lock()
+            .expect("environment lock is not poisoned");
+        // SAFETY: this test owns `OMEGA_BACKEND` for its own process; remove
+        // an inherited shell value so the fallback assertion is deterministic.
+        unsafe {
+            std::env::remove_var("OMEGA_BACKEND");
+        }
         let engine = super::Engine::from_env().expect("unset falls back, never errors");
         assert_eq!(engine, super::Engine::default_compiled());
     }

@@ -44,7 +44,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mmap = unsafe { Mmap::map(&file) }?;
     let parsed = parse_complete(&mmap)?;
 
-    println!("general.architecture = {:?}", parsed.metadata_value("general.architecture"));
+    println!(
+        "general.architecture = {:?}",
+        parsed.metadata_value("general.architecture")
+    );
     for key in [
         "qwen3moe.expert_count",
         "qwen3moe.expert_used_count",

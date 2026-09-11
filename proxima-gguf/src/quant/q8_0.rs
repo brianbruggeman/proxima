@@ -299,7 +299,11 @@ mod tests {
             "max_error={max_error} exceeds scale/2={}",
             scale / 2.0
         );
-        assert_eq!(output[1..], input[1..], "non-outlier positions must quantize to exactly zero");
+        assert_eq!(
+            output[1..],
+            input[1..],
+            "non-outlier positions must quantize to exactly zero"
+        );
     }
 
     /// Alternating-sign block: every other element flips sign at the same
@@ -394,7 +398,10 @@ mod tests {
             }
         }
         let rms_error = (sum_sq_error / input.len() as f64).sqrt();
-        debug!(max_error, rms_error, "quant.q8_0 real-qwen3-weights round trip");
+        debug!(
+            max_error,
+            rms_error, "quant.q8_0 real-qwen3-weights round trip"
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ mod listen {
     use std::fs;
     use std::path::Path;
 
-    use proxima_build::sizing::{require_nonzero, SizingSource};
+    use proxima_build::sizing::{SizingSource, require_nonzero};
 
     fn require_i32(name: &str, value: usize) -> i32 {
         i32::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows i32"))
@@ -36,11 +36,15 @@ mod listen {
         let source = SizingSource::load(&manifest_dir, "proxima-listen.toml", "PROXIMA_LISTEN")
             .unwrap_or_else(|err| panic!("{err}"));
         let resolve = |section: &str, key: &str| {
-            source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
+            source
+                .resolve_int(section, key)
+                .unwrap_or_else(|err| panic!("{err}"))
         };
 
-        let backlog =
-            require_i32("listener.backlog", require_nonzero("listener.backlog", resolve("listener", "backlog")));
+        let backlog = require_i32(
+            "listener.backlog",
+            require_nonzero("listener.backlog", resolve("listener", "backlog")),
+        );
         let drain_timeout_ms = require_nonzero(
             "listener.drain_timeout_ms",
             resolve("listener", "drain_timeout_ms"),
@@ -88,7 +92,7 @@ mod listeners_stream {
     use std::fs;
     use std::path::Path;
 
-    use proxima_build::sizing::{require_nonzero, SizingSource};
+    use proxima_build::sizing::{SizingSource, require_nonzero};
 
     #[allow(clippy::expect_used)]
     pub fn emit_sizing_consts(out_dir: &Path) {
@@ -103,7 +107,9 @@ mod listeners_stream {
         let method = source
             .resolve_str("listener", "method")
             .unwrap_or_else(|err| panic!("{err}"));
-        let path = source.resolve_str("listener", "path").unwrap_or_else(|err| panic!("{err}"));
+        let path = source
+            .resolve_str("listener", "path")
+            .unwrap_or_else(|err| panic!("{err}"));
         let chunk_bytes = require_nonzero(
             "listener.chunk_bytes",
             source
@@ -145,7 +151,7 @@ mod admission_core {
     use std::fs;
     use std::path::Path;
 
-    use proxima_build::sizing::{require_nonzero, SizingSource};
+    use proxima_build::sizing::{SizingSource, require_nonzero};
 
     fn require_u32(name: &str, value: usize) -> u32 {
         u32::try_from(value).unwrap_or_else(|_| panic!("{name} = {value} overflows u32"))
@@ -162,11 +168,16 @@ mod admission_core {
     #[allow(clippy::expect_used)]
     pub fn emit_sizing_consts(out_dir: &Path) {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-        let source =
-            SizingSource::load(&manifest_dir, "proxima-listen-core.toml", "PROXIMA_LISTEN_CORE")
-                .unwrap_or_else(|err| panic!("{err}"));
+        let source = SizingSource::load(
+            &manifest_dir,
+            "proxima-listen-core.toml",
+            "PROXIMA_LISTEN_CORE",
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
         let resolve = |section: &str, key: &str| {
-            source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
+            source
+                .resolve_int(section, key)
+                .unwrap_or_else(|err| panic!("{err}"))
         };
         let resolve_nested = |section: &str, subsection: &str, key: &str| {
             source
@@ -200,11 +211,7 @@ mod admission_core {
             "admission.blacklist.unclassifiable_strike_threshold",
             require_nonzero(
                 "admission.blacklist.unclassifiable_strike_threshold",
-                resolve_nested(
-                    "admission",
-                    "blacklist",
-                    "unclassifiable_strike_threshold",
-                ),
+                resolve_nested("admission", "blacklist", "unclassifiable_strike_threshold"),
             ),
         );
         let blacklist_strike_window_ms = require_nonzero(

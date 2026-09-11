@@ -236,7 +236,9 @@ fn private_buffer_via_blit(
     let private_buffer = device
         .newBufferWithLength_options(length, MTLResourceOptions::StorageModePrivate)
         .expect("device allocates a private buffer");
-    let command_buffer = queue.commandBuffer().expect("command buffer for the fill blit");
+    let command_buffer = queue
+        .commandBuffer()
+        .expect("command buffer for the fill blit");
     let blit = command_buffer
         .blitCommandEncoder()
         .expect("command buffer refused to hand out a blit encoder");
@@ -354,7 +356,8 @@ fn read_back_partial_sums(buffer: &ProtocolObject<dyn MTLBuffer>, threadgroups: 
     // file's own callers with at least `threadgroups * size_of::<f32>()`
     // bytes; the compute dispatch that filled it has already completed
     // (`waitUntilCompleted` returned before this is called).
-    let slice = unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<f32>(), threadgroups) };
+    let slice =
+        unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<f32>(), threadgroups) };
     slice.iter().sum()
 }
 
@@ -434,7 +437,10 @@ fn time_empty_dispatch(
 
 fn mean_and_cov(samples: &[f64]) -> (f64, f64) {
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-    let variance = samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>()
+    let variance = samples
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
         / samples.len() as f64;
     let stddev = variance.sqrt();
     let cov = if mean.abs() > f64::MIN_POSITIVE {
@@ -574,12 +580,18 @@ fn sweep_one_size(
 /// double-counted byte range) shows up as a mismatch rather than silently
 /// producing a wrong bandwidth number.
 fn sum_u64_words_sequential(bytes: &[u8]) -> u64 {
-    assert_eq!(bytes.len() % 8, 0, "range must be a whole number of u64 words");
+    assert_eq!(
+        bytes.len() % 8,
+        0,
+        "range must be a whole number of u64 words"
+    );
     bytes
         .as_chunks::<8>()
         .0
         .iter()
-        .fold(0u64, |accumulator, chunk| accumulator.wrapping_add(u64::from_ne_bytes(*chunk)))
+        .fold(0u64, |accumulator, chunk| {
+            accumulator.wrapping_add(u64::from_ne_bytes(*chunk))
+        })
 }
 
 /// Splits `[0, total_len)` into `thread_count` disjoint, contiguous,
@@ -635,7 +647,8 @@ fn sum_u64_words_threaded(bytes: &[u8], thread_count: usize) -> u64 {
             .collect::<Vec<_>>()
             .into_iter()
             .fold(0u64, |accumulator, handle| {
-                accumulator.wrapping_add(handle.join().expect("cpu sum worker thread does not panic"))
+                accumulator
+                    .wrapping_add(handle.join().expect("cpu sum worker thread does not panic"))
             })
     })
 }
@@ -761,8 +774,9 @@ fn concurrent_sweep_one_split(
                 gpu_threadgroups,
             );
             assert_gpu_sums_close(gpu_sum, gpu_solo_sum, "concurrent vs solo gpu dispatch");
-            let (cpu_sum, cpu_finished) =
-                cpu_handle.join().expect("cpu sum worker thread does not panic");
+            let (cpu_sum, cpu_finished) = cpu_handle
+                .join()
+                .expect("cpu sum worker thread does not panic");
             (cpu_sum, cpu_finished, gpu_finished)
         });
         assert_eq!(
@@ -788,7 +802,9 @@ fn device_streaming_ceiling_across_three_sources_and_two_sizes() {
     }
 
     let device = MTLCreateSystemDefaultDevice().expect("a Metal device is available on this host");
-    let queue = device.newCommandQueue().expect("device creates a command queue");
+    let queue = device
+        .newCommandQueue()
+        .expect("device creates a command queue");
 
     let mapped = MappedFile::open(&checkpoint).expect("mmap the real openchat checkpoint");
     let file_bytes = mapped.as_slice();
@@ -801,7 +817,11 @@ fn device_streaming_ceiling_across_three_sources_and_two_sizes() {
         mapped.len
     );
     assert_eq!(ONE_GB_BYTES % 16, 0, "kernel reads whole uint4 (16B) lanes");
-    assert_eq!(FOUR_GB_BYTES % 16, 0, "kernel reads whole uint4 (16B) lanes");
+    assert_eq!(
+        FOUR_GB_BYTES % 16,
+        0,
+        "kernel reads whole uint4 (16B) lanes"
+    );
 
     let reduce_pipeline = compile_pipeline(&device, STREAMING_REDUCE_SOURCE, "streaming_reduce");
     let empty_pipeline = compile_pipeline(&device, EMPTY_DISPATCH_SOURCE, "empty_dispatch");
@@ -869,7 +889,10 @@ fn device_streaming_ceiling_across_three_sources_and_two_sizes() {
                 best.2, best.3, best.4
             );
             best_ceiling_gbps = best_ceiling_gbps.max(best.3);
-            assert!(best.3.is_finite() && best.3 > 0.0, "measured a non-positive bandwidth");
+            assert!(
+                best.3.is_finite() && best.3 > 0.0,
+                "measured a non-positive bandwidth"
+            );
         }
     }
 
@@ -882,7 +905,9 @@ fn device_streaming_ceiling_across_three_sources_and_two_sizes() {
     let cpu_read_range = &file_bytes[..usize::try_from(FOUR_GB_BYTES).expect("fits usize")];
     let cpu_only_results = cpu_only_sweep(cpu_read_range);
     for (thread_count, mean, cov) in &cpu_only_results {
-        println!("cpu_only thread_count={thread_count:<2} BEST mean_gbps={mean:.2} cov_pct={cov:.2}");
+        println!(
+            "cpu_only thread_count={thread_count:<2} BEST mean_gbps={mean:.2} cov_pct={cov:.2}"
+        );
     }
 
     println!("=== C2/C3: concurrent gpu+cpu read bandwidth (split sweep, 4 GB total) ===");
@@ -909,6 +934,8 @@ fn device_streaming_ceiling_across_three_sources_and_two_sizes() {
             gpu_total_threads,
             gpu_threadgroups,
         );
-        println!("concurrent split={split_name:<12} aggregate_mean_gbps={mean:.2} cov_pct={cov:.2}");
+        println!(
+            "concurrent split={split_name:<12} aggregate_mean_gbps={mean:.2} cov_pct={cov:.2}"
+        );
     }
 }

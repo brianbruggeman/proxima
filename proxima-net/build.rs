@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use proxima_build::sizing::{require_nonzero, SizingSource};
+use proxima_build::sizing::{SizingSource, require_nonzero};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -44,10 +44,18 @@ fn build_xdp_sized() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
     let source = SizingSource::load(&manifest_dir, "proxima-net-xdp.toml", "PROXIMA_NET_XDP")
         .unwrap_or_else(|err| panic!("{err}"));
-    let resolve =
-        |section: &str, key: &str| source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"));
+    let resolve = |section: &str, key: &str| {
+        source
+            .resolve_int(section, key)
+            .unwrap_or_else(|err| panic!("{err}"))
+    };
 
-    let ring = |key: &str| xdp_require_u32(key, xdp_require_pow2(key, require_nonzero(key, resolve("rings", key))));
+    let ring = |key: &str| {
+        xdp_require_u32(
+            key,
+            xdp_require_pow2(key, require_nonzero(key, resolve("rings", key))),
+        )
+    };
     let fill = ring("fill");
     let completion = ring("completion");
     let rx = ring("rx");

@@ -163,7 +163,9 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::{BLOCK_BYTES, CODEC, HALF_BLOCK, QH_OFFSET, QK5_1, QS_OFFSET, QuantError, dequantize};
+    use super::{
+        BLOCK_BYTES, CODEC, HALF_BLOCK, QH_OFFSET, QK5_1, QS_OFFSET, QuantError, dequantize,
+    };
 
     /// One block, hand-packed and hand-decoded, checked against the
     /// `x = q*d + m` formula computed by hand -- not by calling a quantize
@@ -175,12 +177,8 @@ mod tests {
     /// bit.
     #[test]
     fn dequantize_block_matches_hand_computed_fixture() {
-        let low_nibbles: [u8; HALF_BLOCK] = [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-        ];
-        let high_nibbles: [u8; HALF_BLOCK] = [
-            15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-        ];
+        let low_nibbles: [u8; HALF_BLOCK] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        let high_nibbles: [u8; HALF_BLOCK] = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
         // every bit of qh set: every element's 5th bit is 1.
         let qh: u32 = 0xFFFF_FFFF;
         let delta = 0.0123f32;

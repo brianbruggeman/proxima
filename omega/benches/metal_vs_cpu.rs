@@ -238,8 +238,8 @@ fn bench_gemm_square(c: &mut Criterion) {
         let gpu_blocks: [QuantizedBlock<'_>; 2] = blocks.map(QuantizedBlock::Float32);
 
         let cpu = evaluate(&program, &[], &blocks, &[]).expect("cpu gemm evaluates");
-        let metal =
-            execute(&program, &[], &gpu_blocks, &[], NumericPolicy::default()).expect("metal gemm executes on a real device");
+        let metal = execute(&program, &[], &gpu_blocks, &[], NumericPolicy::default())
+            .expect("metal gemm executes on a real device");
         let cpu_checksum = cpu.root()[0];
         let metal_checksum = metal.root()[0];
         assert_checksum_agrees("gemm_square", cpu_checksum, metal_checksum, size);
@@ -268,7 +268,10 @@ fn bench_gemm_square(c: &mut Criterion) {
         });
         group.bench_with_input(BenchmarkId::new("metal", size), &size, |bencher, _| {
             bencher.iter(|| {
-                black_box(execute(&program, &[], &gpu_blocks, &[], NumericPolicy::default()).expect("metal gemm executes"))
+                black_box(
+                    execute(&program, &[], &gpu_blocks, &[], NumericPolicy::default())
+                        .expect("metal gemm executes"),
+                )
             });
         });
     }
@@ -315,7 +318,10 @@ fn bench_matvec_batch1(c: &mut Criterion) {
         });
         group.bench_with_input(BenchmarkId::new("metal", label), &label, |bencher, _| {
             bencher.iter(|| {
-                black_box(execute(&program, &[], &gpu_blocks, &[], NumericPolicy::default()).expect("metal matvec executes"))
+                black_box(
+                    execute(&program, &[], &gpu_blocks, &[], NumericPolicy::default())
+                        .expect("metal matvec executes"),
+                )
             });
         });
     }

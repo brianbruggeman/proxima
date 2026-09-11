@@ -45,8 +45,11 @@ pub(crate) fn dispatch_type_from_env() -> omega::DispatchType {
 /// different quantization variant, most often) without touching
 /// `ServingConfig` or any non-test source.
 pub(crate) fn openchat_gguf_path() -> String {
-    std::env::var("PROXIMA_OPENCHAT_GGUF")
-        .unwrap_or_else(|_| crate::serving::ServingConfig::default().model_path.to_string())
+    std::env::var("PROXIMA_OPENCHAT_GGUF").unwrap_or_else(|_| {
+        crate::serving::ServingConfig::default()
+            .model_path
+            .to_string()
+    })
 }
 
 /// `PROXIMA_QWEN3_GGUF` read the same way [`openchat_gguf_path`] reads
@@ -97,7 +100,9 @@ pub(crate) fn require_fixture(path: &str, env_var: Option<&str>) {
         Some(name) => panic!(
             "no host-local gguf fixture at {path}: set {name} to a valid checkpoint path, or stage one at this default path"
         ),
-        None => panic!("no host-local gguf fixture at {path}: stage one at this hardcoded path (no environment override exists)"),
+        None => panic!(
+            "no host-local gguf fixture at {path}: stage one at this hardcoded path (no environment override exists)"
+        ),
     }
 }
 

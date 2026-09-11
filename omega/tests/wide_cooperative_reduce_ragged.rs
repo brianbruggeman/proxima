@@ -14,8 +14,8 @@
 
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, evaluate, infer, projection,
+    DType, Extent, IndexMap, Keep, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
+    append, evaluate, infer, projection,
 };
 
 /// Peak-magnitude-normalized relative error, never per-row -- a per-row
@@ -119,7 +119,13 @@ const RAGGED_COLS: [u32; 9] = [1, 17, 31, 33, 63, 100, 385, 4095, 4097];
 /// reads as "the exact measured shape broke", not lost in a sweep line.
 const RMS_NORM_COLS: u32 = 4096;
 
-fn assert_wide_reduce_parity(case: &str, cols: u32, body: ScalarOp, init: ReduceInit, input: &[f32]) {
+fn assert_wide_reduce_parity(
+    case: &str,
+    cols: u32,
+    body: ScalarOp,
+    init: ReduceInit,
+    input: &[f32],
+) {
     let program = single_row_reduce_program(cols, body, init);
     infer(&program, &[]).unwrap_or_else(|error| panic!("{case} cols={cols}: infers: {error}"));
     let cpu = evaluate(&program, &[], &[input], &[])
@@ -195,6 +201,12 @@ fn wide_cooperative_reduce_minimum_holds_parity_on_ragged_extents() {
 fn wide_cooperative_reduce_multiply_holds_parity_on_ragged_extents() {
     for cols in RAGGED_COLS.iter().copied().chain([RMS_NORM_COLS]) {
         let input = random_vec_near_one(0x4000 + u64::from(cols), cols as usize);
-        assert_wide_reduce_parity("multiply", cols, ScalarOp::Multiply, ReduceInit::One, &input);
+        assert_wide_reduce_parity(
+            "multiply",
+            cols,
+            ScalarOp::Multiply,
+            ReduceInit::One,
+            &input,
+        );
     }
 }

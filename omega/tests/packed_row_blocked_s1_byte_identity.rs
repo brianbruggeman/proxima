@@ -152,7 +152,12 @@ fn single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_bod
         .iter()
         .find(|op| op.node == sum)
         .expect("the reduce node is bound");
-    let kernel = omega::emit(resolved, &packed_operands, proxima_tensor::NumericPolicy::default()).expect("the synthetic program emits");
+    let kernel = omega::emit(
+        resolved,
+        &packed_operands,
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("the synthetic program emits");
 
     let expected = include_str!("fixtures/packed_row_blocked_s1_q4k.msl");
     assert_eq!(

@@ -41,9 +41,17 @@ fn build_fixture_bytes() -> Vec<u8> {
     )];
     for layer in 0..fixture::BLOCK_COUNT {
         let is_attention = (layer + 1).is_multiple_of(fixture::FULL_ATTENTION_INTERVAL);
-        tensors.extend(fixture::layer_tensors(layer, is_attention, u64::from(layer) * 1000 + 100));
+        tensors.extend(fixture::layer_tensors(
+            layer,
+            is_attention,
+            u64::from(layer) * 1000 + 100,
+        ));
     }
-    tensors.push(fixture::vector_tensor("output_norm.weight", fixture::EMBEDDING, 999_999));
+    tensors.push(fixture::vector_tensor(
+        "output_norm.weight",
+        fixture::EMBEDDING,
+        999_999,
+    ));
 
     let model = GgufModel {
         version: 3,

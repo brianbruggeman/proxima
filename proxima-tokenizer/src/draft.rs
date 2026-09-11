@@ -264,7 +264,11 @@ mod tests {
         // the 4-gram match must win, giving 99, not 1.
         let history = vec![1u32, 2, 3, 4, 1, 5, 6, 3, 4, 1, 2, 3, 4];
         let drafted = draft_ngram_lookup(&history, 1, 2, 4);
-        assert_eq!(drafted, vec![1u32], "4-gram [1,2,3,4] recurs at index 0, followed by 1");
+        assert_eq!(
+            drafted,
+            vec![1u32],
+            "4-gram [1,2,3,4] recurs at index 0, followed by 1"
+        );
     }
 
     fn row(peak_index: usize, width: usize) -> Vec<f32> {

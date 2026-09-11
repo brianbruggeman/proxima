@@ -87,7 +87,12 @@ fn run() {
         packed
     }
 
-    fn expected_output(packed: &[u8], in_dim: usize, out_dim: usize, activation: &[f32]) -> Vec<f32> {
+    fn expected_output(
+        packed: &[u8],
+        in_dim: usize,
+        out_dim: usize,
+        activation: &[f32],
+    ) -> Vec<f32> {
         let blocks_per_row = in_dim / QK_K;
         let mut expected = Vec::with_capacity(out_dim);
         for row_packed in packed.chunks_exact(blocks_per_row * BLOCK_BYTES) {

@@ -30,6 +30,7 @@ std = [
     "interop-bgpool",
     "dep:proxima-tokenizer",
     "dep:fastrand",
+    "memmap2",
 ]
 # split from `std` the same way proxima-tensor splits `tensor-bgpool`
 # (proxima-tensor/Cargo.toml:45): `dep:prime` pulls in OS threads, so it
@@ -168,12 +169,14 @@ kv-capacity-bucket = [
 ]
 # passthrough to `omega/metal-q4k-ggml-port` so the decode harness can measure that arm.
 metal-q4k-ggml-port = ["omega?/metal-q4k-ggml-port"]
+memmap2 = ["dep:memmap2"]
 
 [dependencies]
 arrayvec.workspace = true
 # only used by `generate.rs`, which is `#[cfg(feature = "std")]`-gated —
 # optional so the alloc-only floor never links it.
 fastrand = { workspace = true, optional = true }
+memmap2 = { version = "0.9.11", optional = true }
 omega = { version = "0.1.0", path = "../omega", default-features = false, features = ["metal", "cpu"], optional = true }
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool"], optional = true }
 proxima-core = { workspace = true, features = ["alloc"], optional = true }
@@ -210,7 +213,7 @@ rustix.workspace = true
 # `generate.rs`'s own doc for why that pipe never yields.
 proxima = { workspace = true, features = ["test-support"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["hf"] }
-memmap2 = "0.9.11"
+tempfile.workspace = true
 
 # Both examples below need `LoadedModel` (`std`-gated in `lib.rs`) and
 # `proxima_telemetry`'s recorder/macros (only pulled in by `instrument`,

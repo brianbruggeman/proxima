@@ -38,9 +38,9 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+use proxima_gguf::GgmlType;
 use proxima_gguf::quant::policy::{PrecisionPolicy, TensorRole};
 use proxima_gguf::quant::q4_k;
-use proxima_gguf::GgmlType;
 use proxima_tensor::NodeId;
 use proxima_tensor::cpu::evaluate_named;
 
@@ -218,8 +218,7 @@ fn build_condition(
                 Condition::AllQuantized => true,
                 Condition::Policy => policy.target_for_role(role) == GgmlType::Q4_K,
                 Condition::PolicyNoEmbed => {
-                    role != TensorRole::TokenEmbd
-                        && policy.target_for_role(role) == GgmlType::Q4_K
+                    role != TensorRole::TokenEmbd && policy.target_for_role(role) == GgmlType::Q4_K
                 }
             };
             if quantize_this {
@@ -414,7 +413,8 @@ fn main() {
                 let oracle = [0.936311f32, 0.378777, 0.334176];
                 let pairs = [(0usize, 1usize), (0, 2), (1, 2)];
                 for (index, &(left, right)) in pairs.iter().enumerate() {
-                    let measured = cosine(&quantized_embeddings[left], &quantized_embeddings[right]);
+                    let measured =
+                        cosine(&quantized_embeddings[left], &quantized_embeddings[right]);
                     println!(
                         "    quantized pair {left}-{right}: measured={measured:.6} oracle={:.6} delta={:.6}",
                         oracle[index],

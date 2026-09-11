@@ -143,7 +143,10 @@ fn main() {
             let activations: Vec<Vec<f32>> = (0..positions)
                 .map(|index| synthetic_activation(shape.k_padded, 0xACE0_0000 + index as u64))
                 .collect();
-            assert!(!activations.is_empty(), "N==0: zero activation positions — RED");
+            assert!(
+                !activations.is_empty(),
+                "N==0: zero activation positions — RED"
+            );
 
             // one untimed warm-up pass over the real activations, discarded,
             // before the timed reps below

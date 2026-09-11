@@ -1016,16 +1016,21 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
-        let bound = bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default())
-            .expect("bind succeeds");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("bind succeeds");
         bound.into_iter().next().expect("one bound op")
     }
 
     #[test]
     fn pack_reduce_uniforms_rejects_an_elementwise_bound_op() {
         let bound = elementwise_tanh_op(8);
-        let error = pack_reduce_uniforms(&bound)
-            .expect_err("an elementwise chain is not a Reduce fold");
+        let error =
+            pack_reduce_uniforms(&bound).expect_err("an elementwise chain is not a Reduce fold");
         assert!(matches!(
             error,
             EmitError::RenderKindMismatch {

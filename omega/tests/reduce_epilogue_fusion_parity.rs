@@ -53,8 +53,8 @@ fn assert_parity_at_padding(padding: u64) {
 
     let shapes =
         proxima_tensor::infer(&program, &symbols).expect("single-range padded fixture infers");
-    let resolved =
-        bind(&program, &shapes, &output_roots, NumericPolicy::default()).expect("single-range padded fixture binds");
+    let resolved = bind(&program, &shapes, &output_roots, NumericPolicy::default())
+        .expect("single-range padded fixture binds");
     assert!(
         epilogued_reduce_count(&resolved) > 0,
         "padding={padding}: reduce-epilogue-fusion is compiled in but fused nothing on \
@@ -74,8 +74,14 @@ fn assert_parity_at_padding(padding: u64) {
     )
     .expect("cpu runs the padded single-range program");
 
-    let plan = omega::plan_named(&program, &symbols, &named, &output_roots, NumericPolicy::default())
-        .expect("metal plans the padded single-range program");
+    let plan = omega::plan_named(
+        &program,
+        &symbols,
+        &named,
+        &output_roots,
+        NumericPolicy::default(),
+    )
+    .expect("metal plans the padded single-range program");
     let metal = omega::execute_plan_named(&plan, &named)
         .expect("metal runs the padded single-range program on a real device");
 
@@ -132,8 +138,14 @@ fn the_fused_epilogue_is_byte_identical_across_twenty_dispatches() {
     let output_roots = [roots[0]];
     let named = as_named_blocks(&owned);
 
-    let plan = omega::plan_named(&program, &symbols, &named, &output_roots, NumericPolicy::default())
-        .expect("metal plans the single-range program");
+    let plan = omega::plan_named(
+        &program,
+        &symbols,
+        &named,
+        &output_roots,
+        NumericPolicy::default(),
+    )
+    .expect("metal plans the single-range program");
     let first = omega::execute_plan_named(&plan, &named)
         .expect("metal runs the single-range program on a real device")
         .root()
@@ -287,8 +299,8 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
 
     let shapes = proxima_tensor::infer(&program, &[]).expect("rmsnorm program infers");
     let output_roots = [scaled];
-    let resolved =
-        bind(&program, &shapes, &output_roots, NumericPolicy::default()).expect("rmsnorm program binds with fusion");
+    let resolved = bind(&program, &shapes, &output_roots, NumericPolicy::default())
+        .expect("rmsnorm program binds with fusion");
     assert!(
         epilogued_reduce_count(&resolved) > 0,
         "reduce-epilogue-fusion is compiled in but fused nothing on the standalone rmsnorm \
@@ -320,8 +332,14 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     )
     .expect("cpu runs the rmsnorm program");
 
-    let plan = omega::plan_named(&program, &[], &named, &output_roots, NumericPolicy::default())
-        .expect("metal plans the rmsnorm program");
+    let plan = omega::plan_named(
+        &program,
+        &[],
+        &named,
+        &output_roots,
+        NumericPolicy::default(),
+    )
+    .expect("metal plans the rmsnorm program");
     let metal = omega::execute_plan_named(&plan, &named)
         .expect("metal runs the rmsnorm program on a real device");
 

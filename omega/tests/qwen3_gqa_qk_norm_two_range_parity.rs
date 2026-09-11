@@ -80,7 +80,9 @@ fn parity_cell(cached_len: u64, new_count: u64, policy: NumericPolicy) -> f32 {
         .zip(metal.root())
         .map(|(expected, actual)| (expected - actual).abs())
         .fold(0.0f32, f32::max);
-    eprintln!("qwen3_gqa_qk_norm_two_range_parity cached_len={cached_len} new_count={new_count} max_diff={max_diff}");
+    eprintln!(
+        "qwen3_gqa_qk_norm_two_range_parity cached_len={cached_len} new_count={new_count} max_diff={max_diff}"
+    );
     max_diff
 }
 
@@ -130,7 +132,8 @@ fn the_two_range_cached_attention_kernel_holds_parity_on_the_qwen3_gqa_qk_norm_s
 /// included here as the negative control. All four cells are noise-floor
 /// (`< 1e-3`) after the fix.
 #[test]
-fn the_two_range_cached_attention_kernel_holds_parity_under_production_policy_past_the_split_knee() {
+fn the_two_range_cached_attention_kernel_holds_parity_under_production_policy_past_the_split_knee()
+{
     let mut worst: Option<(u64, u64, f32)> = None;
     for cached_len in [5u64, 200, 700] {
         for new_count in [1u64, 4] {

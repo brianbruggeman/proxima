@@ -42,7 +42,9 @@ const STEP_INPUT_ARCHITECTURE_NAME: &str = "acme-step-input";
 const TABLE_ROWS: u32 = 8;
 
 fn push_tokenizer_metadata(metadata: &mut Vec<(String, MetadataValue)>) {
-    let mut tokens: Vec<String> = (0..=255u8).map(|byte| String::from(byte_to_char(byte))).collect();
+    let mut tokens: Vec<String> = (0..=255u8)
+        .map(|byte| String::from(byte_to_char(byte)))
+        .collect();
     tokens.push(String::from("<|endoftext|>"));
     metadata.push((
         "tokenizer.ggml.model".to_string(),
@@ -56,7 +58,10 @@ fn push_tokenizer_metadata(metadata: &mut Vec<(String, MetadataValue)>) {
         "tokenizer.ggml.merges".to_string(),
         MetadataValue::Array(MetadataArray::String(Vec::new())),
     ));
-    metadata.push(("tokenizer.ggml.bos_token_id".to_string(), MetadataValue::U32(0)));
+    metadata.push((
+        "tokenizer.ggml.bos_token_id".to_string(),
+        MetadataValue::U32(0),
+    ));
     metadata.push((
         "tokenizer.ggml.eos_token_id".to_string(),
         MetadataValue::U32(support::EOS_TOKEN_ID),
@@ -104,21 +109,27 @@ fn checkpoint_bytes(architecture_name: &str) -> Vec<u8> {
     buffers.push(support::encode_weights(GgmlType::F32, &square));
     specs.push((
         String::from("blk.0.attn_q.weight"),
-        [u64::from(embedding), u64::from(embedding)].into_iter().collect(),
+        [u64::from(embedding), u64::from(embedding)]
+            .into_iter()
+            .collect(),
         GgmlType::F32,
     ));
     for name in ["blk.0.attn_k.weight", "blk.0.attn_v.weight"] {
         buffers.push(support::encode_weights(GgmlType::F32, &kv_projection));
         specs.push((
             String::from(name),
-            [u64::from(embedding), u64::from(kv_dim)].into_iter().collect(),
+            [u64::from(embedding), u64::from(kv_dim)]
+                .into_iter()
+                .collect(),
             GgmlType::F32,
         ));
     }
     buffers.push(support::encode_weights(GgmlType::F32, &square));
     specs.push((
         String::from("blk.0.attn_output.weight"),
-        [u64::from(embedding), u64::from(embedding)].into_iter().collect(),
+        [u64::from(embedding), u64::from(embedding)]
+            .into_iter()
+            .collect(),
         GgmlType::F32,
     ));
 
@@ -127,14 +138,18 @@ fn checkpoint_bytes(architecture_name: &str) -> Vec<u8> {
         buffers.push(support::encode_weights(GgmlType::F32, &ffn));
         specs.push((
             String::from(name),
-            [u64::from(embedding), u64::from(feed_forward)].into_iter().collect(),
+            [u64::from(embedding), u64::from(feed_forward)]
+                .into_iter()
+                .collect(),
             GgmlType::F32,
         ));
     }
     buffers.push(support::encode_weights(GgmlType::F32, &ffn));
     specs.push((
         String::from("blk.0.ffn_down.weight"),
-        [u64::from(feed_forward), u64::from(embedding)].into_iter().collect(),
+        [u64::from(feed_forward), u64::from(embedding)]
+            .into_iter()
+            .collect(),
         GgmlType::F32,
     ));
 
@@ -149,7 +164,9 @@ fn checkpoint_bytes(architecture_name: &str) -> Vec<u8> {
     buffers.push(support::encode_weights(GgmlType::F32, &output_values));
     specs.push((
         String::from("output.weight"),
-        [u64::from(embedding), u64::from(vocab)].into_iter().collect(),
+        [u64::from(embedding), u64::from(vocab)]
+            .into_iter()
+            .collect(),
         GgmlType::F32,
     ));
 
@@ -185,7 +202,10 @@ fn checkpoint_bytes(architecture_name: &str) -> Vec<u8> {
             format!("{architecture_name}.attention.head_count_kv"),
             MetadataValue::U32(support::KV_HEADS),
         ),
-        (format!("{architecture_name}.block_count"), MetadataValue::U32(1)),
+        (
+            format!("{architecture_name}.block_count"),
+            MetadataValue::U32(1),
+        ),
         (
             format!("{architecture_name}.rope.dimension_count"),
             MetadataValue::U32(support::HEAD_DIM),
@@ -216,7 +236,10 @@ static OBSERVED_NEW_COUNTS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 fn reset_observations() {
     CALL_COUNT.store(0, Ordering::SeqCst);
-    OBSERVED_NEW_COUNTS.lock().expect("test-only mutex, never poisoned").clear();
+    OBSERVED_NEW_COUNTS
+        .lock()
+        .expect("test-only mutex, never poisoned")
+        .clear();
 }
 
 impl Architecture for StepInputArch {
@@ -288,9 +311,11 @@ impl Architecture for StepInputArch {
         let table_values: Vec<f32> = (0..TABLE_ROWS)
             .flat_map(|row| {
                 let spike_column = (row * 17 + 3) % (support::VOCAB - 1);
-                (0..support::VOCAB).map(move |column| {
-                    if column == spike_column { 1000.0 } else { 0.0 }
-                })
+                (0..support::VOCAB).map(
+                    move |column| {
+                        if column == spike_column { 1000.0 } else { 0.0 }
+                    },
+                )
             })
             .collect();
         out.push(StepInput {
@@ -337,9 +362,16 @@ async fn a_foreign_architecture_feeds_a_token_derived_leaf_each_step() {
     let (low_ids, _text, _stopped) = Pipe::call(&model, (prompt.to_string(), 3))
         .await
         .expect("greedy decode runs through the extra aux leaf");
-    assert_eq!(low_ids.len(), 3, "max_tokens=3 produces exactly three token ids");
+    assert_eq!(
+        low_ids.len(),
+        3,
+        "max_tokens=3 produces exactly three token ids"
+    );
 
-    let observed = OBSERVED_NEW_COUNTS.lock().expect("test-only mutex, never poisoned").clone();
+    let observed = OBSERVED_NEW_COUNTS
+        .lock()
+        .expect("test-only mutex, never poisoned")
+        .clone();
     assert_eq!(
         observed.len(),
         3,
@@ -349,8 +381,14 @@ async fn a_foreign_architecture_feeds_a_token_derived_leaf_each_step() {
         observed[0] >= prompt.len(),
         "step 0 (prefill) evaluates the whole (bos-prefixed) prompt, not one token"
     );
-    assert_eq!(observed[1], 1, "every step after prefill evaluates exactly one new token");
-    assert_eq!(observed[2], 1, "every step after prefill evaluates exactly one new token");
+    assert_eq!(
+        observed[1], 1,
+        "every step after prefill evaluates exactly one new token"
+    );
+    assert_eq!(
+        observed[2], 1,
+        "every step after prefill evaluates exactly one new token"
+    );
 
     reset_observations();
     let registry_high = registry_with(&HIGH_MULTIPLIER);
@@ -395,17 +433,18 @@ async fn a_forward_tap_feeds_step_inputs_the_same_way_the_decode_loop_does() {
         .expect("DenseArch::bind (this fixture's own delegate) always names a hidden root");
     let prompt = "abc";
 
-    let values = model
-        .forward_node_values(prompt, &[hidden_root])
-        .expect(
-            "a one-shot forward tap must assemble this step's inputs the SAME way the decode \
+    let values = model.forward_node_values(prompt, &[hidden_root]).expect(
+        "a one-shot forward tap must assemble this step's inputs the SAME way the decode \
              loop does -- including running Architecture::step_inputs -- so a foreign \
              architecture's own leaves (aux_rows/aux_table here) are fed, not left unbound",
-        );
+    );
 
     assert_eq!(values.len(), 1, "one value vector per requested node");
 
-    let observed = OBSERVED_NEW_COUNTS.lock().expect("test-only mutex, never poisoned").clone();
+    let observed = OBSERVED_NEW_COUNTS
+        .lock()
+        .expect("test-only mutex, never poisoned")
+        .clone();
     assert_eq!(
         observed.len(),
         1,
@@ -585,7 +624,9 @@ impl Architecture for SsmClaimNoLeavesArch {
         // `layer_roots` below still calls that layer SSM.
         for op in &mut bound.program {
             if let Op::Input { name, .. } = op
-                && name.as_deref().is_some_and(|leaf| leaf.starts_with("kv_cache.0."))
+                && name
+                    .as_deref()
+                    .is_some_and(|leaf| leaf.starts_with("kv_cache.0."))
             {
                 *name = None;
             }
@@ -609,9 +650,16 @@ async fn a_layer_bound_ssm_with_no_declared_cache_leaves_fails_at_load() {
     registry.register(&SSM_CLAIM_NO_LEAVES);
 
     match LoadedModel::load_with_registry(&parsed, &file_bytes, &registry) {
-        Err(InteropError::LayerCacheLeavesMissing { layer, kind, expected }) => {
+        Err(InteropError::LayerCacheLeavesMissing {
+            layer,
+            kind,
+            expected,
+        }) => {
             assert_eq!(layer, 0, "the mismatch was staged on layer 0");
-            assert!(kind.contains("ssm_cache"), "kind must name the bound SSM shape, got {kind:?}");
+            assert!(
+                kind.contains("ssm_cache"),
+                "kind must name the bound SSM shape, got {kind:?}"
+            );
             assert!(
                 expected.contains(&"ssm_cache.{layer}.conv_history"),
                 "expected must name the leaf templates the bound shape needs, got {expected:?}"
@@ -647,8 +695,18 @@ impl Architecture for MultiRowLogitsArch {
     ) -> Result<BoundProgram<'file>, InteropError> {
         let architecture = architecture_from_metadata(parsed)?;
         let mut weights = BoundWeights::new(&[]);
-        bind_dense(parsed, file_bytes, "token_embd.weight".to_string(), &mut weights)?;
-        bind_dense(parsed, file_bytes, "output.weight".to_string(), &mut weights)?;
+        bind_dense(
+            parsed,
+            file_bytes,
+            "token_embd.weight".to_string(),
+            &mut weights,
+        )?;
+        bind_dense(
+            parsed,
+            file_bytes,
+            "output.weight".to_string(),
+            &mut weights,
+        )?;
 
         let mut program = Vec::new();
         let ids = input_leaf(&mut program, DType::Int32, vec![Extent::Symbolic(0)], "ids");
@@ -700,6 +758,8 @@ impl Architecture for MultiRowLogitsArch {
             logits_root: logits,
             hidden_root: None,
             layer_roots: Vec::new(),
+            qwen35moe_layer_diagnostics: Vec::new(),
+            router_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
             single_position_step: false,
         })
@@ -739,7 +799,11 @@ async fn a_multi_row_logits_root_is_rejected_instead_of_silently_sampling_row_ze
                 found_rows > 1,
                 "found_rows must report the actual multi-row buffer, got {found_rows}"
             );
-            assert_eq!(vocab, support::VOCAB as usize, "vocab must be this checkpoint's own vocab");
+            assert_eq!(
+                vocab,
+                support::VOCAB as usize,
+                "vocab must be this checkpoint's own vocab"
+            );
         }
         Ok(_) => panic!(
             "expected LogitsShapeMismatch: logits_root never gathers to the last row, so decode \
@@ -813,8 +877,18 @@ impl Architecture for EmptyLayerRootsArch {
     ) -> Result<BoundProgram<'file>, InteropError> {
         let architecture = architecture_from_metadata(parsed)?;
         let mut weights = BoundWeights::new(&[]);
-        bind_dense(parsed, file_bytes, "token_embd.weight".to_string(), &mut weights)?;
-        bind_dense(parsed, file_bytes, "output.weight".to_string(), &mut weights)?;
+        bind_dense(
+            parsed,
+            file_bytes,
+            "token_embd.weight".to_string(),
+            &mut weights,
+        )?;
+        bind_dense(
+            parsed,
+            file_bytes,
+            "output.weight".to_string(),
+            &mut weights,
+        )?;
 
         let mut program = Vec::new();
         let ids = input_leaf(&mut program, DType::Int32, vec![Extent::Symbolic(0)], "ids");
@@ -858,7 +932,12 @@ impl Architecture for EmptyLayerRootsArch {
         // `MultiRowLogitsArch` above, this fixture's `logits_root` is the
         // correct single-row shape, so nothing about the shape check is
         // what this test is proving.
-        let lm_head_row = input_leaf(&mut program, DType::Int32, vec![Extent::Static(1)], "lm_head_row");
+        let lm_head_row = input_leaf(
+            &mut program,
+            DType::Int32,
+            vec![Extent::Static(1)],
+            "lm_head_row",
+        );
         let logits = embedding_lookup(&mut program, logits_all_rows, lm_head_row);
 
         Ok(BoundProgram {
@@ -868,6 +947,8 @@ impl Architecture for EmptyLayerRootsArch {
             logits_root: logits,
             hidden_root: None,
             layer_roots: Vec::new(),
+            qwen35moe_layer_diagnostics: Vec::new(),
+            router_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
             single_position_step: false,
         })
@@ -896,5 +977,9 @@ async fn a_stateless_architecture_with_no_layer_roots_decodes_without_panicking(
     let (ids, _text, _stopped) = Pipe::call(&model, ("abc".to_string(), 3))
         .await
         .expect("a stateless architecture with no cache leaves decodes without panicking");
-    assert_eq!(ids.len(), 3, "max_tokens=3 produces exactly three token ids");
+    assert_eq!(
+        ids.len(),
+        3,
+        "max_tokens=3 produces exactly three token ids"
+    );
 }

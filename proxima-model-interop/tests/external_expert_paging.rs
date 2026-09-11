@@ -45,12 +45,17 @@ const PROMPT: &str = "The capital of France is";
 const GATE_SITE: usize = 0;
 
 fn load_moe_fixture() -> LoadedModel<'static> {
-    let file_bytes: &'static [u8] =
-        Box::leak(support::checkpoint_bytes_moe(GgmlType::Q4_K, support::EXPERT_COUNT, support::EXPERT_USED_COUNT).into_boxed_slice());
-    let parsed: &'static proxima_gguf::pipe::ParsedGguf =
-        Box::leak(Box::new(proxima_gguf::parse_complete(file_bytes).expect(
-            "parses the synthetic Q4_K MoE checkpoint",
-        )));
+    let file_bytes: &'static [u8] = Box::leak(
+        support::checkpoint_bytes_moe(
+            GgmlType::Q4_K,
+            support::EXPERT_COUNT,
+            support::EXPERT_USED_COUNT,
+        )
+        .into_boxed_slice(),
+    );
+    let parsed: &'static proxima_gguf::pipe::ParsedGguf = Box::leak(Box::new(
+        proxima_gguf::parse_complete(file_bytes).expect("parses the synthetic Q4_K MoE checkpoint"),
+    ));
     LoadedModel::load(parsed, file_bytes).expect("loads the synthetic Q4_K MoE checkpoint")
 }
 
@@ -87,7 +92,11 @@ async fn paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues() {
     let (first_ids, _first_text, _stopped) = Pipe::call(&model, (PROMPT.to_string(), 2))
         .await
         .expect("the first two decode steps run before any paging");
-    assert_eq!(first_ids.len(), 2, "an unbounded budget runs the full 2 steps");
+    assert_eq!(
+        first_ids.len(),
+        2,
+        "an unbounded budget runs the full 2 steps"
+    );
 
     let paged_bytes = one_expert_q4k_bytes(support::FEED_FORWARD, support::EMBEDDING, 7);
     let epoch = model
@@ -118,7 +127,10 @@ async fn paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues() {
          so the paged run's ids equal the unpaged run's, proving the swap did not \
          corrupt the forward pass rather than proving it changed the routed content"
     );
-    assert!(!second_text.is_empty(), "a non-empty id sequence decodes to non-empty text");
+    assert!(
+        !second_text.is_empty(),
+        "a non-empty id sequence decodes to non-empty text"
+    );
 }
 
 /// [`LoadedModel::evict_expert`] then reselecting that expert's layer
@@ -174,7 +186,10 @@ async fn paging_an_out_of_range_expert_index_is_rejected() {
     assert!(
         matches!(
             result,
-            Err(InteropError::ExpertSlabIndexOutOfRange { layer: GATE_SITE, .. })
+            Err(InteropError::ExpertSlabIndexOutOfRange {
+                layer: GATE_SITE,
+                ..
+            })
         ),
         "an out-of-range expert index must be rejected, got {result:?}"
     );
@@ -221,7 +236,8 @@ fn load_real_output_moe_fixture(
 /// re-encoding as `Q2_K`, exactly the residency-downgrade shape
 /// [`proxima_model_interop::PackedOwnedKind::Q2K`]'s own doc names.
 fn paged_expert_hi_bytes(file_bytes: &[u8]) -> Vec<u8> {
-    let parsed = proxima_gguf::parse_complete(file_bytes).expect("re-parses this test's own fixture");
+    let parsed =
+        proxima_gguf::parse_complete(file_bytes).expect("re-parses this test's own fixture");
     let tensor = parsed
         .tensors
         .iter()
@@ -262,7 +278,9 @@ fn paged_expert_q2k_bytes(file_bytes: &[u8]) -> Vec<u8> {
 /// selection, rather than asserting a hand-picked position number no
 /// production caller could re-derive from the fixture's own seeds.
 fn first_divergence(left: &[u32], right: &[u32]) -> Option<usize> {
-    left.iter().zip(right.iter()).position(|(first, second)| first != second)
+    left.iter()
+        .zip(right.iter())
+        .position(|(first, second)| first != second)
 }
 
 /// Paging [`PAGED_EXPERT`] from `Q4_K` to a real [`encode_expert_copy`]-built
@@ -289,7 +307,11 @@ async fn q2k_paging_actually_changes_the_decoded_ids() {
     let (ids_a, _text_a, _stopped_a) = Pipe::call(&model_a, (PROMPT.to_string(), TOKENS))
         .await
         .expect("run A decodes before any paging");
-    assert_eq!(ids_a.len(), TOKENS, "an unbounded budget runs all four decode steps");
+    assert_eq!(
+        ids_a.len(),
+        TOKENS,
+        "an unbounded budget runs all four decode steps"
+    );
 
     // Run B: an independent model over the SAME checkpoint bytes,
     // PAGED_EXPERT re-paged to a Q2_K re-encoding BEFORE this model's own
@@ -305,11 +327,18 @@ async fn q2k_paging_actually_changes_the_decoded_ids() {
             support::EMBEDDING,
         )
         .expect("paging to a real Q2_K re-encoding of the same expert succeeds");
-    assert_eq!(epoch, 1, "the first page of a freshly loaded slab bumps epoch 0 -> 1");
+    assert_eq!(
+        epoch, 1,
+        "the first page of a freshly loaded slab bumps epoch 0 -> 1"
+    );
     let (ids_b, _text_b, _stopped_b) = Pipe::call(&model_b, (PROMPT.to_string(), TOKENS))
         .await
         .expect("run B decodes after paging");
-    assert_eq!(ids_b.len(), TOKENS, "paging must not change how many tokens a fresh call produces");
+    assert_eq!(
+        ids_b.len(),
+        TOKENS,
+        "paging must not change how many tokens a fresh call produces"
+    );
 
     // Run C: a FRESH model, paged to the SAME Q2_K bytes BEFORE its first
     // ever decode call -- "Q2_K from the start".

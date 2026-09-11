@@ -29,6 +29,7 @@ use proxima_tensor::spec::Qwen35LayerRoots;
 
 use crate::bind::{BoundWeights, ModelArchitecture, metadata_str};
 use crate::error::InteropError;
+use crate::qwen35moe::Qwen35MoeLayerDiagnostics;
 
 /// Names for every `Extent::Symbolic` slot the decode loop itself binds
 /// before it evaluates a step -- `crate::generate::LoadedModel`'s own
@@ -137,6 +138,13 @@ pub struct BoundProgram<'file> {
     /// leaves it `None`. See [`crate::generate::LoadedModel::hidden_root`].
     pub hidden_root: Option<NodeId>,
     pub layer_roots: Vec<Qwen35LayerRoots>,
+    /// One graph-level diagnostic boundary per qwen35moe layer, in layer
+    /// order. Other architectures leave this empty.
+    pub qwen35moe_layer_diagnostics: Vec<Qwen35MoeLayerDiagnostics>,
+    /// Per-layer router-logit roots for architectures that can expose a
+    /// router prepass.  Empty means the architecture has no routed layers or
+    /// has not implemented the pre-gather execution contract.
+    pub router_roots: Vec<NodeId>,
     /// One [`proxima_tensor::spec::MoeSite`] per MoE layer this
     /// architecture's forward-program builder produced -- empty on a dense
     /// checkpoint. `crate::generate`'s decode loop reads this to know which
@@ -370,6 +378,7 @@ impl ArchitectureRegistry {
             default: None,
         };
         registry.register(&crate::qwen35::QWEN35);
+        registry.register(&crate::qwen35moe::QWEN35MOE);
         registry.register(&crate::dense::DENSE);
         registry.default = Some(&crate::dense::DENSE);
         registry
@@ -392,7 +401,10 @@ impl ArchitectureRegistry {
     /// by [`Self::resolve`] itself.
     #[must_use]
     pub fn names(&self) -> Vec<&'static str> {
-        self.entries.iter().map(|architecture| architecture.name()).collect()
+        self.entries
+            .iter()
+            .map(|architecture| architecture.name())
+            .collect()
     }
 
     /// Reads `general.architecture` off `parsed` and returns the first
@@ -462,6 +474,7 @@ mod tests {
                     feed_forward: 0,
                     query_heads: 0,
                     kv_heads: 0,
+                    kv_heads_by_layer: Vec::new(),
                     head_dim: 0,
                     block_count: 0,
                     expert_count: 0,
@@ -474,6 +487,8 @@ mod tests {
                 logits_root: NodeId(0),
                 hidden_root: None,
                 layer_roots: Vec::new(),
+                qwen35moe_layer_diagnostics: Vec::new(),
+                router_roots: Vec::new(),
                 moe_sites: proxima_tensor::spec::MoeSites::default(),
                 single_position_step: false,
             })
@@ -498,8 +513,7 @@ mod tests {
         // fixture, not a hot path (the same reason
         // `bind.rs`'s own fixtures never worry about freeing this).
         let leaked: &'static [u8] = Vec::leak(file_bytes.clone());
-        let parsed =
-            proxima_gguf::parse_complete(leaked).expect("parses a minimal gguf");
+        let parsed = proxima_gguf::parse_complete(leaked).expect("parses a minimal gguf");
         (parsed, file_bytes)
     }
 
@@ -522,7 +536,8 @@ mod tests {
 
     #[test]
     fn bind_symbols_allows_new_count_above_one_when_single_position_step_is_unset() {
-        let bound = bind_symbols(4, 8, &[], false).expect("batched prefill is unaffected by the flag when it is false");
+        let bound = bind_symbols(4, 8, &[], false)
+            .expect("batched prefill is unaffected by the flag when it is false");
         assert_eq!(bound[symbols::NEW_COUNT as usize], 4);
     }
 
@@ -565,8 +580,11 @@ mod tests {
     }
 
     #[test]
-    fn with_builtin_registers_exactly_dense_and_qwen35_by_name() {
+    fn with_builtin_registers_all_shipped_architectures_by_name() {
         let registry = ArchitectureRegistry::with_builtin();
-        assert_eq!(registry.names(), alloc::vec!["qwen35", "dense"]);
+        assert_eq!(
+            registry.names(),
+            alloc::vec!["qwen35", "qwen35moe", "dense"]
+        );
     }
 }

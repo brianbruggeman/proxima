@@ -8,7 +8,11 @@
 //! degenerate-empty-profile check this workspace's N==0-is-RED discipline
 //! asks for).
 
-#![cfg(all(feature = "metal-output-placement", feature = "instrument", target_os = "macos"))]
+#![cfg(all(
+    feature = "metal-output-placement",
+    feature = "instrument",
+    target_os = "macos"
+))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::{
@@ -54,8 +58,14 @@ fn every_dispatch_gets_a_timing_and_a_named_sampling_mode() {
     const EXTENT: u32 = 8;
     let bodies = [ScalarOp::Identity, ScalarOp::Negate];
     let (program, output) = chained_unary_program(EXTENT, &bodies);
-    let plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&[0.0; EXTENT as usize])], &[output], NumericPolicy::default())
-        .expect("plans the two-dispatch program");
+    let plan = omega::plan(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&[0.0; EXTENT as usize])],
+        &[output],
+        NumericPolicy::default(),
+    )
+    .expect("plans the two-dispatch program");
 
     let input = vec![1.0f32; EXTENT as usize];
     let (_evaluated, timings, sampling_mode, encoder_split_ns) =
@@ -108,10 +118,21 @@ fn every_dispatch_gets_a_timing_and_a_named_sampling_mode() {
 #[test]
 fn encoder_split_reports_two_nonzero_encoder_spans_and_zeroes_per_op_gpu_ns() {
     const EXTENT: u32 = 8;
-    let bodies = [ScalarOp::Identity, ScalarOp::Negate, ScalarOp::Identity, ScalarOp::Negate];
+    let bodies = [
+        ScalarOp::Identity,
+        ScalarOp::Negate,
+        ScalarOp::Identity,
+        ScalarOp::Negate,
+    ];
     let (program, output) = chained_unary_program(EXTENT, &bodies);
-    let mut plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&[0.0; EXTENT as usize])], &[output], NumericPolicy::default())
-        .expect("plans the four-dispatch program");
+    let mut plan = omega::plan(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&[0.0; EXTENT as usize])],
+        &[output],
+        NumericPolicy::default(),
+    )
+    .expect("plans the four-dispatch program");
 
     let input = vec![1.0f32; EXTENT as usize];
     plan.set_encoder_split_at(Some(1));

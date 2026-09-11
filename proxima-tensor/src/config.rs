@@ -93,10 +93,7 @@ impl Validate for TensorExecutionConfig {
     fn validate(&self) -> conflaguration::Result<()> {
         let mut errors = Vec::new();
         if self.parallel_threshold == 0 {
-            errors.push(ValidationMessage::new(
-                "parallel_threshold",
-                "must be > 0",
-            ));
+            errors.push(ValidationMessage::new("parallel_threshold", "must be > 0"));
         }
         if self.oversubscribe == 0 {
             errors.push(ValidationMessage::new("oversubscribe", "must be > 0"));
@@ -186,7 +183,9 @@ mod tests {
 
     #[test]
     fn zero_fields_rejected() {
-        let config = TensorExecutionConfig::builder().parallel_threshold(0).build();
+        let config = TensorExecutionConfig::builder()
+            .parallel_threshold(0)
+            .build();
         let err = config
             .validate()
             .expect_err("validate must reject parallel_threshold = 0");

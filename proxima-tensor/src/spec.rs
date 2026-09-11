@@ -705,38 +705,56 @@ pub fn fused_rope_pair(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(source, same_pattern.as_str()), (cos_new, trig_pattern.as_str())],
+        &[
+            (source, same_pattern.as_str()),
+            (cos_new, trig_pattern.as_str()),
+        ],
     )?;
     let partner_sin = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(source, partner_pattern.as_str()), (sin_new, trig_pattern.as_str())],
+        &[
+            (source, partner_pattern.as_str()),
+            (sin_new, trig_pattern.as_str()),
+        ],
     )?;
     let rotated_same = elementwise(
         program,
         DType::Float32,
         ScalarOp::Subtract,
-        &[(same_cos, out_identity.as_str()), (partner_sin, out_identity.as_str())],
+        &[
+            (same_cos, out_identity.as_str()),
+            (partner_sin, out_identity.as_str()),
+        ],
     )?;
 
     let partner_cos = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(source, partner_pattern.as_str()), (cos_new, trig_pattern.as_str())],
+        &[
+            (source, partner_pattern.as_str()),
+            (cos_new, trig_pattern.as_str()),
+        ],
     )?;
     let same_sin = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(source, same_pattern.as_str()), (sin_new, trig_pattern.as_str())],
+        &[
+            (source, same_pattern.as_str()),
+            (sin_new, trig_pattern.as_str()),
+        ],
     )?;
     let rotated_partner = elementwise(
         program,
         DType::Float32,
         ScalarOp::Add,
-        &[(partner_cos, out_identity.as_str()), (same_sin, out_identity.as_str())],
+        &[
+            (partner_cos, out_identity.as_str()),
+            (same_sin, out_identity.as_str()),
+        ],
     )?;
 
     Ok((rotated_same, rotated_partner))
@@ -819,6 +837,81 @@ pub fn embedding_lookup(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> No
             name: None,
         },
     )
+}
+
+/// Gathers a plan-fixed permutation along the middle axis of a rank-three
+/// tensor. `indices` is a caller-owned index vector whose length is the
+/// output extent; keeping it as an input allows converted checkpoint layouts
+/// to express a permutation without inventing affine extent equations.
+pub fn gather_computed(
+    program: &mut Vec<Op>,
+    source: NodeId,
+    indices: NodeId,
+    index_map: IndexPattern,
+    base: IndexPattern,
+    gathered_dim: u16,
+    dtype: DType,
+) -> NodeId {
+    let gathered_map = IndexMap::Computed {
+        indices,
+        index_map,
+        base,
+        gathered_dim,
+    };
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(source, gathered_map)],
+            name: None,
+        },
+    )
+}
+
+pub fn gather_axis_permutation(
+    program: &mut Vec<Op>,
+    source: NodeId,
+    indices: NodeId,
+    dtype: DType,
+    head_dim: u32,
+) -> NodeId {
+    gather_computed(
+        program,
+        source,
+        indices,
+        map::projection(3, &[1]),
+        IndexPattern {
+            iter_rank: 3,
+            axes: alloc::vec![
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(0)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                    offset: 0,
+                    len: Some(Extent::Static(head_dim)),
+                },
+            ],
+        },
+        1,
+        dtype,
+    )
+}
+
+/// Gathers a fixed head permutation from `[s, kv_head, dim]` into
+/// `[s, head, dim]`, retaining the Qwen convenience spelling while delegating
+/// to the dtype-preserving permutation primitive.
+pub fn gather_head_permutation(
+    program: &mut Vec<Op>,
+    source: NodeId,
+    indices: NodeId,
+    head_dim: u32,
+) -> NodeId {
+    gather_axis_permutation(program, source, indices, DType::Float32, head_dim)
 }
 
 /// `specs/mistral_layer.toml`'s `attn_norm`/`ffn_norm` node run, node for
@@ -1021,7 +1114,10 @@ pub fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorErro
 /// [`Op::Input`], the same precedent `eps`/`rope_cos`/`rope_sin` set: a
 /// value the host supplies per call, not a build-time constant, because it
 /// grows every decode step without the graph being rebuilt.
-pub fn causal_mask_merged(program: &mut Vec<Op>, cached_len: NodeId) -> Result<NodeId, TensorError> {
+pub fn causal_mask_merged(
+    program: &mut Vec<Op>,
+    cached_len: NodeId,
+) -> Result<NodeId, TensorError> {
     let query_index = op::append(
         program,
         Op::Iota {
@@ -1470,9 +1566,7 @@ pub fn append_mistral_layer(
 /// gathers `stack[route[s], :, :]` (`stack` is a `[expert_count, d_in,
 /// d_out]` weight slab) and multiplies it elementwise against `x`'s `[s,
 /// d_in]`, broadcast over the `d_out` axis, ready for a later [`reduce`]
-/// over `d_in` to finish the matmul. The same [`IndexMap::Computed`] gather
-/// [`embedding_lookup`] uses, with one extra non-gathered axis (`d_out`)
-/// spliced in after the gathered one instead of none.
+/// over `d_in` to finish the matmul.
 #[must_use]
 pub fn gathered_expert_product(
     program: &mut Vec<Op>,
@@ -1508,6 +1602,163 @@ pub fn gathered_expert_product(
             dtype: DType::Float32,
             body: ScalarOp::Multiply,
             operands: alloc::vec![(stack, gathered_map), (x, x_map)],
+            name: None,
+        },
+    )
+}
+
+/// Builds the grouped counterpart of [`gathered_expert_product`]. The route
+/// tensor is `[sequence, selected]`, the activation is `[sequence, d_in]`,
+/// and the result is `[sequence, selected, d_in, d_out]`; a caller reduces
+/// the contraction axis and combines the selected outputs with its routing
+/// weights. Keeping the selected axis explicit lets one computed gather serve
+/// every top-k round without introducing a new operation kind.
+#[must_use]
+pub fn grouped_gathered_expert_product(
+    program: &mut Vec<Op>,
+    stack: NodeId,
+    route: NodeId,
+    x: NodeId,
+) -> NodeId {
+    let gathered_map = IndexMap::Computed {
+        indices: route,
+        index_map: map::projection(4, &[0, 1]),
+        base: IndexPattern {
+            iter_rank: 4,
+            axes: alloc::vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(3)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let x_map = IndexMap::Affine(map::projection(4, &[0, 2]));
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![(stack, gathered_map), (x, x_map)],
+            name: None,
+        },
+    )
+}
+
+/// Packs independently selected expert ids (`[sequence]` each) into the
+/// `[sequence, selected]` index tensor consumed by
+/// [`grouped_gathered_expert_product`].
+///
+/// This is graph-construction work, not a runtime host allocation: the
+/// selected axis is an [`Op::Iota`] and each column is selected with the
+/// existing elementwise algebra. Expert ids remain exact in `f32` for every
+/// representable model-sized expert table and are converted only by the
+/// computed-gather boundary.
+pub fn stack_selected_routes(
+    program: &mut Vec<Op>,
+    routes: &[NodeId],
+) -> Result<NodeId, TensorError> {
+    let selected_count =
+        u32::try_from(routes.len()).map_err(|_| TensorError::InvalidExpertConfig {
+            expert_count: u32::MAX,
+            expert_used_count: u32::MAX,
+        })?;
+    if selected_count == 0 {
+        return Err(TensorError::InvalidExpertConfig {
+            expert_count: 0,
+            expert_used_count: 0,
+        });
+    }
+
+    let selected_axis = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(selected_count),
+        },
+    );
+    let mut stacked = None;
+    for (round, route) in routes.iter().copied().enumerate() {
+        let round_value = op::append(
+            program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: Vec::new(),
+                value: round as f32,
+            },
+        );
+        let round_mask = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Equal,
+            &[(selected_axis, "k->k"), (round_value, "->k")],
+        )?;
+        let selected_route = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(route, "s->sk"), (round_mask, "k->sk")],
+        )?;
+        stacked = Some(match stacked {
+            Some(previous) => elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(previous, "sk->sk"), (selected_route, "sk->sk")],
+            )?,
+            None => selected_route,
+        });
+    }
+
+    stacked.ok_or(TensorError::InvalidExpertConfig {
+        expert_count: 0,
+        expert_used_count: 0,
+    })
+}
+
+/// Selects one `[sequence, feature]` plane from a grouped
+/// `[sequence, selected, feature]` projection without materializing a copy.
+#[must_use]
+pub fn select_grouped_round(
+    program: &mut Vec<Op>,
+    grouped: NodeId,
+    round: u32,
+    dtype: DType,
+) -> NodeId {
+    let map = IndexMap::Affine(IndexPattern {
+        iter_rank: 2,
+        axes: alloc::vec![
+            AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(0)).collect(),
+                offset: 0,
+                len: None,
+            },
+            AxisIndex {
+                terms: Default::default(),
+                offset: round as i32,
+                len: None,
+            },
+            AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                offset: 0,
+                len: None,
+            },
+        ],
+    });
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(grouped, map)],
             name: None,
         },
     )
@@ -1614,6 +1865,144 @@ pub fn append_moe_ffn(
     gating: ExpertGatingFunc,
     expert_bias: Option<NodeId>,
 ) -> Result<(NodeId, MoeSite), TensorError> {
+    append_moe_ffn_with_projection_strategy(
+        program,
+        layer,
+        x,
+        gate_inp,
+        expert_w_gate,
+        expert_w_up,
+        expert_w_down,
+        expert_count,
+        expert_used_count,
+        ones,
+        gating,
+        expert_bias,
+        MoeProjectionStrategy::PerRoute,
+    )
+}
+
+/// [`append_moe_ffn`] with gate and up projections grouped over the selected
+/// axis while each composed hidden activation still enters its own gathered
+/// down projection.
+#[allow(clippy::too_many_arguments)]
+pub fn append_moe_ffn_grouped_gate_up(
+    program: &mut Vec<Op>,
+    layer: u32,
+    x: NodeId,
+    gate_inp: NodeId,
+    expert_w_gate: NodeId,
+    expert_w_up: NodeId,
+    expert_w_down: NodeId,
+    expert_count: u32,
+    expert_used_count: u32,
+    ones: NodeId,
+    gating: ExpertGatingFunc,
+    expert_bias: Option<NodeId>,
+) -> Result<(NodeId, MoeSite), TensorError> {
+    append_moe_ffn_with_projection_strategy(
+        program,
+        layer,
+        x,
+        gate_inp,
+        expert_w_gate,
+        expert_w_up,
+        expert_w_down,
+        expert_count,
+        expert_used_count,
+        ones,
+        gating,
+        expert_bias,
+        MoeProjectionStrategy::GroupedGateUp,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoeProjectionStrategy {
+    PerRoute,
+    GroupedGateUp,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_moe_round_output(
+    program: &mut Vec<Op>,
+    gate: NodeId,
+    up: NodeId,
+    expert_w_down: NodeId,
+    route: NodeId,
+    weight: NodeId,
+    ones: NodeId,
+) -> Result<NodeId, TensorError> {
+    let neg_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Negate,
+        &[(gate, "sg->sg")],
+    )?;
+    let exp_neg_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(neg_gate, "sg->sg")],
+    )?;
+    let one_plus_exp = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(exp_neg_gate, "sg->sg"), (ones, "->sg")],
+    )?;
+    let sigmoid_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(one_plus_exp, "sg->sg")],
+    )?;
+    let silu_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")],
+    )?;
+    let hidden = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(silu_gate, "sg->sg"), (up, "sg->sg")],
+    )?;
+    let down_product = gathered_expert_product(program, expert_w_down, route, hidden);
+    let round_output = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        down_product,
+        "sio->sio",
+        "so->sio",
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(round_output, "sd->sd"), (weight, "s->sd")],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_moe_ffn_with_projection_strategy(
+    program: &mut Vec<Op>,
+    layer: u32,
+    x: NodeId,
+    gate_inp: NodeId,
+    expert_w_gate: NodeId,
+    expert_w_up: NodeId,
+    expert_w_down: NodeId,
+    expert_count: u32,
+    expert_used_count: u32,
+    ones: NodeId,
+    gating: ExpertGatingFunc,
+    expert_bias: Option<NodeId>,
+    projection_strategy: MoeProjectionStrategy,
+) -> Result<(NodeId, MoeSite), TensorError> {
     if expert_used_count == 0 || expert_used_count > expert_count {
         return Err(TensorError::InvalidExpertConfig {
             expert_count,
@@ -1676,6 +2065,10 @@ pub fn append_moe_ffn(
         None => scores,
     };
 
+    // Index expressions are carried in the compute stream as exact f32
+    // values.  The gather boundary converts them to integer offsets; keeping
+    // the route arithmetic in f32 is what lets the existing CPU and Metal
+    // elementwise kernels execute it without a second mixed-dtype pipeline.
     let expert_index = op::append(
         program,
         Op::Iota {
@@ -1685,11 +2078,11 @@ pub fn append_moe_ffn(
     );
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
 
-    let mut weighted_sum: Option<NodeId> = None;
-    let mut weight_total: Option<NodeId> = None;
     let mut max_selection_0: Option<NodeId> = None;
     let mut selected_routes: Vec<NodeId> = Vec::with_capacity(expert_used_count as usize);
     let mut round_weights: Vec<NodeId> = Vec::with_capacity(expert_used_count as usize);
+    let mut weighted_sum = None;
+    let mut weight_total = None;
 
     for round in 0..expert_used_count {
         let max_selection = reduce(
@@ -1762,100 +2155,48 @@ pub fn append_moe_ffn(
         selected_routes.push(route);
         round_weights.push(weight);
 
-        let gate_expert_product = gathered_expert_product(program, expert_w_gate, route, x);
-        let gate_expert = reduce(
-            program,
-            DType::Float32,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            gate_expert_product,
-            "sio->sio",
-            "so->sio",
-        )?;
-        let up_expert_product = gathered_expert_product(program, expert_w_up, route, x);
-        let up_expert = reduce(
-            program,
-            DType::Float32,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            up_expert_product,
-            "sio->sio",
-            "so->sio",
-        )?;
-
-        let neg_gate = elementwise(
-            program,
-            DType::Float32,
-            ScalarOp::Negate,
-            &[(gate_expert, "sg->sg")],
-        )?;
-        let exp_neg_gate = elementwise(
-            program,
-            DType::Float32,
-            ScalarOp::Exponential,
-            &[(neg_gate, "sg->sg")],
-        )?;
-        let one_plus_exp = elementwise(
-            program,
-            DType::Float32,
-            ScalarOp::Add,
-            &[(exp_neg_gate, "sg->sg"), (ones, "->sg")],
-        )?;
-        let sigmoid_gate = elementwise(
-            program,
-            DType::Float32,
-            ScalarOp::Reciprocal,
-            &[(one_plus_exp, "sg->sg")],
-        )?;
-        let silu_gate = elementwise(
-            program,
-            DType::Float32,
-            ScalarOp::Multiply,
-            &[(gate_expert, "sg->sg"), (sigmoid_gate, "sg->sg")],
-        )?;
-        let ffn_hidden = elementwise(
-            program,
-            DType::Float32,
-            ScalarOp::Multiply,
-            &[(silu_gate, "sg->sg"), (up_expert, "sg->sg")],
-        )?;
-
-        let down_expert_product =
-            gathered_expert_product(program, expert_w_down, route, ffn_hidden);
-        let round_ffn = reduce(
-            program,
-            DType::Float32,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            down_expert_product,
-            "sio->sio",
-            "so->sio",
-        )?;
-
-        let weighted_round = elementwise(
-            program,
-            DType::Float32,
-            ScalarOp::Multiply,
-            &[(round_ffn, "sd->sd"), (weight, "s->sd")],
-        )?;
-        weighted_sum = Some(match weighted_sum {
-            Some(accum) => elementwise(
+        if projection_strategy == MoeProjectionStrategy::PerRoute {
+            let gate_product = gathered_expert_product(program, expert_w_gate, route, x);
+            let gate = reduce(
                 program,
                 DType::Float32,
                 ScalarOp::Add,
-                &[(accum, "sd->sd"), (weighted_round, "sd->sd")],
-            )?,
-            None => weighted_round,
-        });
-        weight_total = Some(match weight_total {
-            Some(accum) => elementwise(
+                ReduceInit::Zero,
+                gate_product,
+                "sio->sio",
+                "so->sio",
+            )?;
+            let up_product = gathered_expert_product(program, expert_w_up, route, x);
+            let up = reduce(
                 program,
                 DType::Float32,
                 ScalarOp::Add,
-                &[(accum, "s->s"), (weight, "s->s")],
-            )?,
-            None => weight,
-        });
+                ReduceInit::Zero,
+                up_product,
+                "sio->sio",
+                "so->sio",
+            )?;
+            let weighted_round =
+                append_moe_round_output(program, gate, up, expert_w_down, route, weight, ones)?;
+            weighted_sum = Some(match weighted_sum {
+                Some(accumulated) => elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(accumulated, "sd->sd"), (weighted_round, "sd->sd")],
+                )?,
+                None => weighted_round,
+            });
+            weight_total = Some(match weight_total {
+                Some(accumulated) => elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(accumulated, "s->s"), (weight, "s->s")],
+                )?,
+                None => weight,
+            });
+        }
 
         if round + 1 < expert_used_count {
             selection_scores = elementwise(
@@ -1871,13 +2212,69 @@ pub fn append_moe_ffn(
         }
     }
 
-    // `expert_used_count > 0` was checked above, so exactly that many rounds
-    // ran and both accumulators are `Some`.
-    let weight_total = weight_total.ok_or(TensorError::InvalidExpertConfig {
+    if projection_strategy == MoeProjectionStrategy::GroupedGateUp {
+        let routes = stack_selected_routes(program, &selected_routes)?;
+        let gate_product = grouped_gathered_expert_product(program, expert_w_gate, routes, x);
+        let grouped_gate = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            gate_product,
+            "skio->skio",
+            "sko->skio",
+        )?;
+        let up_product = grouped_gathered_expert_product(program, expert_w_up, routes, x);
+        let grouped_up = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            up_product,
+            "skio->skio",
+            "sko->skio",
+        )?;
+
+        for (round, (route, weight)) in selected_routes
+            .iter()
+            .copied()
+            .zip(round_weights.iter().copied())
+            .enumerate()
+        {
+            let round = u32::try_from(round).map_err(|_| TensorError::InvalidExpertConfig {
+                expert_count,
+                expert_used_count,
+            })?;
+            let gate = select_grouped_round(program, grouped_gate, round, DType::Float32);
+            let up = select_grouped_round(program, grouped_up, round, DType::Float32);
+            let weighted_round =
+                append_moe_round_output(program, gate, up, expert_w_down, route, weight, ones)?;
+            weighted_sum = Some(match weighted_sum {
+                Some(accumulated) => elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(accumulated, "sd->sd"), (weighted_round, "sd->sd")],
+                )?,
+                None => weighted_round,
+            });
+            weight_total = Some(match weight_total {
+                Some(accumulated) => elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(accumulated, "s->s"), (weight, "s->s")],
+                )?,
+                None => weight,
+            });
+        }
+    }
+
+    let weighted_sum = weighted_sum.ok_or(TensorError::InvalidExpertConfig {
         expert_count,
         expert_used_count,
     })?;
-    let weighted_sum = weighted_sum.ok_or(TensorError::InvalidExpertConfig {
+    let weight_total = weight_total.ok_or(TensorError::InvalidExpertConfig {
         expert_count,
         expert_used_count,
     })?;
@@ -2448,7 +2845,7 @@ pub fn mistral_forward_program(
                 alloc::vec![
                     Extent::Static(expert_count),
                     Extent::Static(embedding),
-                    Extent::Static(feed_forward)
+                    Extent::Static(feed_forward),
                 ],
                 &alloc::format!("blk.{layer}.ffn_gate_exps.weight"),
             );
@@ -2458,7 +2855,7 @@ pub fn mistral_forward_program(
                 alloc::vec![
                     Extent::Static(expert_count),
                     Extent::Static(embedding),
-                    Extent::Static(feed_forward)
+                    Extent::Static(feed_forward),
                 ],
                 &alloc::format!("blk.{layer}.ffn_up_exps.weight"),
             );
@@ -2468,7 +2865,7 @@ pub fn mistral_forward_program(
                 alloc::vec![
                     Extent::Static(expert_count),
                     Extent::Static(feed_forward),
-                    Extent::Static(embedding)
+                    Extent::Static(embedding),
                 ],
                 &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
             );
@@ -2578,8 +2975,13 @@ type SingleRangeForwardProgram = (Vec<Op>, NodeId, Vec<CachedLayerRoots>, Option
 /// [`CachedLayerRoots`] per layer, one residual [`NodeId`] per layer
 /// (that function's own doc on what the fourth element is for), and one
 /// [`MoeSite`] per MoE layer (empty on a dense checkpoint).
-type MistralMoeForwardProgramWithLayerTaps =
-    (Vec<Op>, ForwardRoots, Vec<CachedLayerRoots>, Vec<NodeId>, MoeSites);
+type MistralMoeForwardProgramWithLayerTaps = (
+    Vec<Op>,
+    ForwardRoots,
+    Vec<CachedLayerRoots>,
+    Vec<NodeId>,
+    MoeSites,
+);
 
 /// Where, if anywhere, the ROW 326/328 diagnostic duplicate `output.weight`
 /// reduce is emitted relative to the real head -- ROW 328 turns ROW 326's
@@ -2769,7 +3171,10 @@ pub fn append_mistral_cached_layer(
             DType::Float32,
             ScalarOp::Multiply,
             &[
-                (qkv_reduced, alloc::format!("s,{head_dim}*h+d->shd").as_str()),
+                (
+                    qkv_reduced,
+                    alloc::format!("s,{head_dim}*h+d->shd").as_str(),
+                ),
                 (head_shape_ones, "hd->shd"),
             ],
         )?;
@@ -2833,14 +3238,19 @@ pub fn append_mistral_cached_layer(
     let (q, k_new) = match qk_norm {
         Some((q_norm_weight, k_norm_weight, inv_head_dim)) => {
             let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
-            let k_new = rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+            let k_new =
+                rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
             (q, k_new)
         }
         None => (q_raw, k_new_raw),
     };
 
     let v_new = match v_new_source {
-        QkvSource::Fused { node, v_offset, head_dim } => elementwise(
+        QkvSource::Fused {
+            node,
+            v_offset,
+            head_dim,
+        } => elementwise(
             program,
             DType::Float32,
             ScalarOp::Multiply,
@@ -2892,20 +3302,48 @@ pub fn append_mistral_cached_layer(
     let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match qk_norm {
         Some(_) => {
             let pairs = head_dim / 2;
-            let (rotated_q_first, rotated_q_second) =
-                fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
-            let (rotated_k_first, rotated_k_second) =
-                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
+            let (rotated_q_first, rotated_q_second) = fused_rope_pair(
+                program,
+                q,
+                'h',
+                cos_new,
+                sin_new,
+                RopePairing::SplitHalf { pairs },
+            )?;
+            let (rotated_k_first, rotated_k_second) = fused_rope_pair(
+                program,
+                k_new,
+                'u',
+                cos_new,
+                sin_new,
+                RopePairing::SplitHalf { pairs },
+            )?;
 
-            (rotated_q_first, rotated_q_second, rotated_k_first, rotated_k_second)
+            (
+                rotated_q_first,
+                rotated_q_second,
+                rotated_k_first,
+                rotated_k_second,
+            )
         }
         None => {
             let (rotated_q_even, rotated_q_odd) =
                 fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::Interleaved)?;
-            let (rotated_k_new_even, rotated_k_new_odd) =
-                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::Interleaved)?;
+            let (rotated_k_new_even, rotated_k_new_odd) = fused_rope_pair(
+                program,
+                k_new,
+                'u',
+                cos_new,
+                sin_new,
+                RopePairing::Interleaved,
+            )?;
 
-            (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd)
+            (
+                rotated_q_even,
+                rotated_q_odd,
+                rotated_k_new_even,
+                rotated_k_new_odd,
+            )
         }
     };
 
@@ -3397,34 +3835,155 @@ pub fn append_hyper_connection_mix(
     w_up: NodeId,
     w_inject: Option<NodeId>,
 ) -> Result<(NodeId, Option<NodeId>), TensorError> {
-    let squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, "shi->shi"), (x, "shi->shi")])?;
-    let sum_squares = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, squared, "shi->shi", "sh->shi")?;
-    let mean_square = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(sum_squares, "sh->sh"), (inv_dim, "->sh")])?;
-    let mean_square_eps = elementwise(program, DType::Float32, ScalarOp::Add, &[(mean_square, "sh->sh"), (eps, "s->sh")])?;
-    let rms = elementwise(program, DType::Float32, ScalarOp::SquareRoot, &[(mean_square_eps, "sh->sh")])?;
-    let inv_rms = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(rms, "sh->sh")])?;
-    let normed = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, "shi->shi"), (inv_rms, "sh->shi")])?;
-    let xn = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "shi->shi"), (w_norm, "hi->shi")])?;
+    let squared = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, "shi->shi"), (x, "shi->shi")],
+    )?;
+    let sum_squares = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        squared,
+        "shi->shi",
+        "sh->shi",
+    )?;
+    let mean_square = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(sum_squares, "sh->sh"), (inv_dim, "->sh")],
+    )?;
+    let mean_square_eps = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(mean_square, "sh->sh"), (eps, "s->sh")],
+    )?;
+    let rms = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::SquareRoot,
+        &[(mean_square_eps, "sh->sh")],
+    )?;
+    let inv_rms = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(rms, "sh->sh")],
+    )?;
+    let normed = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, "shi->shi"), (inv_rms, "sh->shi")],
+    )?;
+    let xn = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "shi->shi"), (w_norm, "hi->shi")],
+    )?;
 
-    let down_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(xn, "shi->shir"), (w_down, "hir->shir")])?;
-    let down_sum_i = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, down_product, "shir->shir", "shr->shir")?;
-    let lo = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, down_sum_i, "shr->shr", "sr->shr")?;
-    let lo_scaled = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(lo, "sr->sr"), (inv_hc, "->sr")])?;
+    let down_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(xn, "shi->shir"), (w_down, "hir->shir")],
+    )?;
+    let down_sum_i = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        down_product,
+        "shir->shir",
+        "shr->shir",
+    )?;
+    let lo = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        down_sum_i,
+        "shr->shr",
+        "sr->shr",
+    )?;
+    let lo_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(lo, "sr->sr"), (inv_hc, "->sr")],
+    )?;
     let lo_silu = silu(program, lo_scaled, one, "sr->sr")?;
 
-    let up_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(lo_silu, "sr->srhi"), (w_up, "rhi->srhi")])?;
-    let up_sum_r = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, up_product, "srhi->srhi", "shi->srhi")?;
+    let up_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(lo_silu, "sr->srhi"), (w_up, "rhi->srhi")],
+    )?;
+    let up_sum_r = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        up_product,
+        "srhi->srhi",
+        "shi->srhi",
+    )?;
     let gate = sigmoid(program, up_sum_r, one, "shi->shi")?;
 
-    let gated = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(xn, "shi->shi"), (gate, "shi->shi")])?;
-    let mixed_sum = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gated, "shi->shi", "si->shi")?;
-    let mixed = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(mixed_sum, "si->si"), (inv_hc, "->si")])?;
+    let gated = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(xn, "shi->shi"), (gate, "shi->shi")],
+    )?;
+    let mixed_sum = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gated,
+        "shi->shi",
+        "si->shi",
+    )?;
+    let mixed = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(mixed_sum, "si->si"), (inv_hc, "->si")],
+    )?;
 
     let inject = match w_inject {
         Some(w_inject) => {
-            let inject_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(xn, "shi->shio"), (w_inject, "hio->shio")])?;
-            let inject_sum_i = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, inject_product, "shio->shio", "sho->shio")?;
-            let inject_flat = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, inject_sum_i, "sho->sho", "so->sho")?;
+            let inject_product = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(xn, "shi->shio"), (w_inject, "hio->shio")],
+            )?;
+            let inject_sum_i = reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                inject_product,
+                "shio->shio",
+                "sho->shio",
+            )?;
+            let inject_flat = reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                inject_sum_i,
+                "sho->sho",
+                "so->sho",
+            )?;
             Some(inject_flat)
         }
         None => None,
@@ -3459,12 +4018,32 @@ pub fn append_hyper_connection_combine(
     one: NodeId,
     two: NodeId,
 ) -> Result<NodeId, TensorError> {
-    let inject_scaled = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(inject, "sh->sh"), (inv_hc, "->sh")])?;
+    let inject_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(inject, "sh->sh"), (inv_hc, "->sh")],
+    )?;
     let inject_sigmoid = sigmoid(program, inject_scaled, one, "sh->sh")?;
-    let weight = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(inject_sigmoid, "sh->sh"), (two, "->sh")])?;
+    let weight = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(inject_sigmoid, "sh->sh"), (two, "->sh")],
+    )?;
 
-    let broadcast_out = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(block_out, "si->shi"), (weight, "sh->shi")])?;
-    elementwise(program, DType::Float32, ScalarOp::Add, &[(residual, "shi->shi"), (broadcast_out, "shi->shi")])
+    let broadcast_out = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(block_out, "si->shi"), (weight, "sh->shi")],
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(residual, "shi->shi"), (broadcast_out, "shi->shi")],
+    )
 }
 
 #[cfg(test)]
@@ -3511,7 +4090,8 @@ mod hyper_connection_tests {
     ) -> (Vec<f64>, Option<Vec<f64>>) {
         let at_x = |s: usize, h: usize, i: usize| f64::from(x[(s * hc + h) * embedding + i]);
         let at_w_norm = |h: usize, i: usize| f64::from(w_norm[h * embedding + i]);
-        let at_w_down = |h: usize, i: usize, r: usize| f64::from(w_down[(h * embedding + i) * low_rank + r]);
+        let at_w_down =
+            |h: usize, i: usize, r: usize| f64::from(w_down[(h * embedding + i) * low_rank + r]);
         let at_w_up = |r: usize, h: usize, i: usize| f64::from(w_up[(r * hc + h) * embedding + i]);
 
         let mut xn = alloc::vec![0.0f64; tokens * hc * embedding];
@@ -3549,7 +4129,8 @@ mod hyper_connection_tests {
         }
 
         let inject = w_inject.map(|w_inject| {
-            let at_w_inject = |h: usize, i: usize, o: usize| f64::from(w_inject[(h * embedding + i) * hc + o]);
+            let at_w_inject =
+                |h: usize, i: usize, o: usize| f64::from(w_inject[(h * embedding + i) * hc + o]);
             let mut inject = alloc::vec![0.0f64; tokens * hc];
             for s in 0..tokens {
                 for o in 0..hc {
@@ -3580,7 +4161,8 @@ mod hyper_connection_tests {
                 for i in 0..embedding {
                     let residual_value = f64::from(residual[(s * hc + h) * embedding + i]);
                     let block_out_value = f64::from(block_out[s * embedding + i]);
-                    result[(s * hc + h) * embedding + i] = residual_value + block_out_value * weight;
+                    result[(s * hc + h) * embedding + i] =
+                        residual_value + block_out_value * weight;
                 }
             }
         }
@@ -3591,7 +4173,14 @@ mod hyper_connection_tests {
     /// `(tokens, hc, embedding, low_rank)`, evaluates it on random f32
     /// inputs, and asserts every output element matches
     /// [`hc_mix_f64_reference`]'s independent f64 loop within `1e-5`.
-    fn assert_mix_matches_reference(tokens: usize, hc: usize, embedding: usize, low_rank: usize, with_inject: bool, seed: u64) {
+    fn assert_mix_matches_reference(
+        tokens: usize,
+        hc: usize,
+        embedding: usize,
+        low_rank: usize,
+        with_inject: bool,
+        seed: u64,
+    ) {
         let mut state = seed;
         let x_data = filled(&mut state, tokens * hc * embedding);
         let w_norm_data = filled(&mut state, hc * embedding);
@@ -3601,25 +4190,51 @@ mod hyper_connection_tests {
         let eps_data = alloc::vec![1e-6f32; tokens];
 
         let mut program = Vec::new();
-        let x = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(hc as u32), Extent::Static(embedding as u32)], "x");
-        let w_norm = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(hc as u32), Extent::Static(embedding as u32)], "w_norm");
+        let x = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(hc as u32),
+                Extent::Static(embedding as u32)
+            ],
+            "x",
+        );
+        let w_norm = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(hc as u32), Extent::Static(embedding as u32)],
+            "w_norm",
+        );
         let w_down = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(hc as u32), Extent::Static(embedding as u32), Extent::Static(low_rank as u32)],
+            alloc::vec![
+                Extent::Static(hc as u32),
+                Extent::Static(embedding as u32),
+                Extent::Static(low_rank as u32)
+            ],
             "w_down",
         );
         let w_up = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(low_rank as u32), Extent::Static(hc as u32), Extent::Static(embedding as u32)],
+            alloc::vec![
+                Extent::Static(low_rank as u32),
+                Extent::Static(hc as u32),
+                Extent::Static(embedding as u32)
+            ],
             "w_up",
         );
         let w_inject = with_inject.then(|| {
             input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(hc as u32), Extent::Static(embedding as u32), Extent::Static(hc as u32)],
+                alloc::vec![
+                    Extent::Static(hc as u32),
+                    Extent::Static(embedding as u32),
+                    Extent::Static(hc as u32)
+                ],
                 "w_inject",
             )
         });
@@ -3628,8 +4243,19 @@ mod hyper_connection_tests {
         let inv_hc = scalar_constant(&mut program, 1.0 / hc as f32);
         let one = scalar_constant(&mut program, 1.0);
 
-        let (mixed, inject) =
-            append_hyper_connection_mix(&mut program, x, inv_dim, eps, inv_hc, one, w_norm, w_down, w_up, w_inject).expect("hyper-connection mix lowers");
+        let (mixed, inject) = append_hyper_connection_mix(
+            &mut program,
+            x,
+            inv_dim,
+            eps,
+            inv_hc,
+            one,
+            w_norm,
+            w_down,
+            w_up,
+            w_inject,
+        )
+        .expect("hyper-connection mix lowers");
 
         let mut named: Vec<(&str, &[f32])> = alloc::vec![
             ("x", x_data.as_slice()),
@@ -3646,8 +4272,8 @@ mod hyper_connection_tests {
             outputs.push(inject);
         }
 
-        let evaluated =
-            crate::cpu::evaluate_named(&program, &[tokens as u64], &named, &outputs).expect("hyper-connection mix evaluates");
+        let evaluated = crate::cpu::evaluate_named(&program, &[tokens as u64], &named, &outputs)
+            .expect("hyper-connection mix evaluates");
 
         let (mixed_values, _) = evaluated.get(mixed).expect("mixed output present");
         let (expected_mixed, expected_inject) = hc_mix_f64_reference(
@@ -3667,17 +4293,24 @@ mod hyper_connection_tests {
             .zip(expected_mixed.iter())
             .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
             .fold(0.0f64, f64::max);
-        assert!(max_abs_diff_mixed <= 1e-5, "mixed max-abs diff {max_abs_diff_mixed} exceeds 1e-5");
+        assert!(
+            max_abs_diff_mixed <= 1e-5,
+            "mixed max-abs diff {max_abs_diff_mixed} exceeds 1e-5"
+        );
 
         if let Some(inject_node) = inject {
             let (inject_values, _) = evaluated.get(inject_node).expect("inject output present");
-            let expected_inject = expected_inject.expect("reference computed inject when w_inject was Some");
+            let expected_inject =
+                expected_inject.expect("reference computed inject when w_inject was Some");
             let max_abs_diff_inject = inject_values
                 .iter()
                 .zip(expected_inject.iter())
                 .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
                 .fold(0.0f64, f64::max);
-            assert!(max_abs_diff_inject <= 1e-5, "inject max-abs diff {max_abs_diff_inject} exceeds 1e-5");
+            assert!(
+                max_abs_diff_inject <= 1e-5,
+                "inject max-abs diff {max_abs_diff_inject} exceeds 1e-5"
+            );
         }
     }
 
@@ -3712,34 +4345,67 @@ mod hyper_connection_tests {
         let residual = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Symbolic(0), Extent::Static(hc as u32), Extent::Static(embedding as u32)],
+            alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(hc as u32),
+                Extent::Static(embedding as u32)
+            ],
             "residual",
         );
-        let block_out = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(embedding as u32)], "block_out");
-        let inject = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(hc as u32)], "inject");
+        let block_out = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(embedding as u32)],
+            "block_out",
+        );
+        let inject = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(hc as u32)],
+            "inject",
+        );
         let inv_hc = scalar_constant(&mut program, 1.0 / hc as f32);
         let one = scalar_constant(&mut program, 1.0);
         let two = scalar_constant(&mut program, 2.0);
 
-        let combined = append_hyper_connection_combine(&mut program, residual, block_out, inject, inv_hc, one, two)
-            .expect("hyper-connection combine lowers");
+        let combined = append_hyper_connection_combine(
+            &mut program,
+            residual,
+            block_out,
+            inject,
+            inv_hc,
+            one,
+            two,
+        )
+        .expect("hyper-connection combine lowers");
 
         let named: Vec<(&str, &[f32])> = alloc::vec![
             ("residual", residual_data.as_slice()),
             ("block_out", block_out_data.as_slice()),
             ("inject", inject_data.as_slice()),
         ];
-        let evaluated = crate::cpu::evaluate_named(&program, &[tokens as u64], &named, &[combined]).expect("combine evaluates");
+        let evaluated = crate::cpu::evaluate_named(&program, &[tokens as u64], &named, &[combined])
+            .expect("combine evaluates");
         let (combined_values, _) = evaluated.get(combined).expect("combined output present");
 
         let inject_f64: Vec<f64> = inject_data.iter().map(|value| f64::from(*value)).collect();
-        let expected = hc_combine_f64_reference(tokens, hc, embedding, &residual_data, &block_out_data, &inject_f64);
+        let expected = hc_combine_f64_reference(
+            tokens,
+            hc,
+            embedding,
+            &residual_data,
+            &block_out_data,
+            &inject_f64,
+        );
         let max_abs_diff = combined_values
             .iter()
             .zip(expected.iter())
             .map(|(actual, expected)| (f64::from(*actual) - expected).abs())
             .fold(0.0f64, f64::max);
-        assert!(max_abs_diff <= 1e-5, "combine max-abs diff {max_abs_diff} exceeds 1e-5");
+        assert!(
+            max_abs_diff <= 1e-5,
+            "combine max-abs diff {max_abs_diff} exceeds 1e-5"
+        );
     }
 }
 
@@ -3868,7 +4534,12 @@ pub fn append_qwen35_dense_attention_only(
     )?;
     Ok((
         residual1,
-        (taps.rotated_k_new_first, taps.rotated_k_new_second, taps.k_pass, taps.v_new),
+        (
+            taps.rotated_k_new_first,
+            taps.rotated_k_new_second,
+            taps.k_pass,
+            taps.v_new,
+        ),
     ))
 }
 
@@ -3980,7 +4651,6 @@ pub fn append_qwen35_dense_attention_only_with_taps(
     k_pass_cache: NodeId,
     v_cache: NodeId,
 ) -> Result<(NodeId, Qwen35DenseAttentionTaps), TensorError> {
-    let pairs = rotary_dim / 2;
     let pass_dim = attn_head_dim - rotary_dim;
 
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
@@ -4016,7 +4686,14 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         "shc->shci",
     )?;
     let q_raw = per_head_channel_range(program, qg_raw, "h", attn_head_dim * 2, 0, attn_head_dim)?;
-    let gate_raw = per_head_channel_range(program, qg_raw, "h", attn_head_dim * 2, attn_head_dim, attn_head_dim)?;
+    let gate_raw = per_head_channel_range(
+        program,
+        qg_raw,
+        "h",
+        attn_head_dim * 2,
+        attn_head_dim,
+        attn_head_dim,
+    )?;
 
     let k_product = elementwise(
         program,
@@ -4061,29 +4738,32 @@ pub fn append_qwen35_dense_attention_only_with_taps(
     let q_pass = per_head_channel_range(program, q, "h", attn_head_dim, rotary_dim, pass_dim)?;
     let k_pass = per_head_channel_range(program, k, "u", attn_head_dim, rotary_dim, pass_dim)?;
 
-    // split-half RoPE (`ggml_compute_forward_rope_flt`'s
-    // `GGML_ROPE_TYPE_IMROPE` arm, `rotate_pairs(n_dims, n_dims/2, ...)`):
-    // `out[i] = x[i]*cos[i] - x[i+pairs]*sin[i]`,
-    // `out[i+pairs] = x[i+pairs]*cos[i] + x[i]*sin[i]`. Read directly off
-    // `q`/`k`'s own `attn_head_dim`-wide axis (not a pre-sliced
-    // `q_first`/`q_second`) -- see [`fused_rope_pair`].
+    // Qwen3.5 uses interleaved MRoPE, including on QK-norm layers. The two
+    // returned planes remain separate cache roots, but each plane contains
+    // one member of every adjacent pair (`2*i`, `2*i+1`).
     let (rotated_q_first, rotated_q_second) =
-        fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
+        fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::Interleaved)?;
     let (rotated_k_new_first, rotated_k_new_second) =
-        fused_rope_pair(program, k, 'u', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
+        fused_rope_pair(program, k, 'u', cos_new, sin_new, RopePairing::Interleaved)?;
 
     let group_map_i = alloc::format!("s,{group}*u+g,i->sugi");
     let q_first_grouped = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(rotated_q_first, group_map_i.as_str()), (group_ones, "ug->sugi")],
+        &[
+            (rotated_q_first, group_map_i.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
     )?;
     let q_second_grouped = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(rotated_q_second, group_map_i.as_str()), (group_ones, "ug->sugi")],
+        &[
+            (rotated_q_second, group_map_i.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
     )?;
     let group_map_p = alloc::format!("s,{group}*u+g,p->sugp");
     let q_pass_grouped = elementwise(
@@ -4093,7 +4773,15 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         &[(q_pass, group_map_p.as_str()), (group_ones, "ug->sugp")],
     )?;
 
-    let score_cached_first_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first_grouped, "sugi->stugi"), (k_first_cache, "tui->stugi")])?;
+    let score_cached_first_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_first_grouped, "sugi->stugi"),
+            (k_first_cache, "tui->stugi"),
+        ],
+    )?;
     let score_cached_first = reduce(
         program,
         DType::Float32,
@@ -4103,7 +4791,15 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         "stugi->stugi",
         "stug->stugi",
     )?;
-    let score_cached_second_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_second_grouped, "sugi->stugi"), (k_second_cache, "tui->stugi")])?;
+    let score_cached_second_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_second_grouped, "sugi->stugi"),
+            (k_second_cache, "tui->stugi"),
+        ],
+    )?;
     let score_cached_second = reduce(
         program,
         DType::Float32,
@@ -4113,7 +4809,15 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         "stugi->stugi",
         "stug->stugi",
     )?;
-    let score_cached_pass_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_pass_grouped, "sugp->stugp"), (k_pass_cache, "tup->stugp")])?;
+    let score_cached_pass_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_pass_grouped, "sugp->stugp"),
+            (k_pass_cache, "tup->stugp"),
+        ],
+    )?;
     let score_cached_pass = reduce(
         program,
         DType::Float32,
@@ -4127,7 +4831,10 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         program,
         DType::Float32,
         ScalarOp::Add,
-        &[(score_cached_first, "stug->stug"), (score_cached_second, "stug->stug")],
+        &[
+            (score_cached_first, "stug->stug"),
+            (score_cached_second, "stug->stug"),
+        ],
     )?;
     let score_cached = elementwise(
         program,
@@ -4142,7 +4849,10 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(score_cached, "stug->stug"), (inv_sqrt_attn_head_dim, "->stug")],
+        &[
+            (score_cached, "stug->stug"),
+            (inv_sqrt_attn_head_dim, "->stug"),
+        ],
     )?;
     // `k_first_cache`/`k_second_cache`/`k_pass_cache`/`v_cache` are bound to
     // the CALLER's own bucketed `kv_extent`, not the real `cached_len`
@@ -4172,7 +4882,10 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         program,
         DType::Float32,
         ScalarOp::Greater,
-        &[(cached_key_index, "t->t"), (cached_len_exclusive_bound, "->t")],
+        &[
+            (cached_key_index, "t->t"),
+            (cached_len_exclusive_bound, "->t"),
+        ],
     )?;
     let score_cached_scaled = elementwise(
         program,
@@ -4185,7 +4898,15 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         ],
     )?;
 
-    let score_new_first_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first_grouped, "sugi->swugi"), (rotated_k_new_first, "wui->swugi")])?;
+    let score_new_first_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_first_grouped, "sugi->swugi"),
+            (rotated_k_new_first, "wui->swugi"),
+        ],
+    )?;
     let score_new_first = reduce(
         program,
         DType::Float32,
@@ -4195,7 +4916,15 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         "swugi->swugi",
         "swug->swugi",
     )?;
-    let score_new_second_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_second_grouped, "sugi->swugi"), (rotated_k_new_second, "wui->swugi")])?;
+    let score_new_second_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_second_grouped, "sugi->swugi"),
+            (rotated_k_new_second, "wui->swugi"),
+        ],
+    )?;
     let score_new_second = reduce(
         program,
         DType::Float32,
@@ -4205,7 +4934,12 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         "swugi->swugi",
         "swug->swugi",
     )?;
-    let score_new_pass_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_pass_grouped, "sugp->swugp"), (k_pass, "wup->swugp")])?;
+    let score_new_pass_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q_pass_grouped, "sugp->swugp"), (k_pass, "wup->swugp")],
+    )?;
     let score_new_pass = reduce(
         program,
         DType::Float32,
@@ -4219,7 +4953,10 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         program,
         DType::Float32,
         ScalarOp::Add,
-        &[(score_new_first, "swug->swug"), (score_new_second, "swug->swug")],
+        &[
+            (score_new_first, "swug->swug"),
+            (score_new_second, "swug->swug"),
+        ],
     )?;
     let score_new = elementwise(
         program,
@@ -4234,7 +4971,10 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(score_new, "swug->swug"), (inv_sqrt_attn_head_dim, "->swug")],
+        &[
+            (score_new, "swug->swug"),
+            (inv_sqrt_attn_head_dim, "->swug"),
+        ],
     )?;
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
     let score_new_masked = elementwise(
@@ -4277,7 +5017,10 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         program,
         DType::Float32,
         ScalarOp::Subtract,
-        &[(score_cached_scaled, "stug->stug"), (global_max, "sug->stug")],
+        &[
+            (score_cached_scaled, "stug->stug"),
+            (global_max, "sug->stug"),
+        ],
     )?;
     let weights_cached = elementwise(
         program,
@@ -4329,7 +5072,12 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         &[(weight_sum, "sug->sug")],
     )?;
 
-    let attended_cached_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights_cached, "stug->stugd"), (v_cache, "tud->stugd")])?;
+    let attended_cached_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weights_cached, "stug->stugd"), (v_cache, "tud->stugd")],
+    )?;
     let attended_cached = reduce(
         program,
         DType::Float32,
@@ -4339,7 +5087,12 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         "stugd->stugd",
         "sugd->stugd",
     )?;
-    let attended_new_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights_new, "swug->swugd"), (v_new, "wud->swugd")])?;
+    let attended_new_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weights_new, "swug->swugd"), (v_new, "wud->swugd")],
+    )?;
     let attended_new = reduce(
         program,
         DType::Float32,
@@ -4353,7 +5106,10 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         program,
         DType::Float32,
         ScalarOp::Add,
-        &[(attended_cached, "sugd->sugd"), (attended_new, "sugd->sugd")],
+        &[
+            (attended_cached, "sugd->sugd"),
+            (attended_new, "sugd->sugd"),
+        ],
     )?;
     let attended = elementwise(
         program,
@@ -4371,15 +5127,30 @@ pub fn append_qwen35_dense_attention_only_with_taps(
         ScalarOp::Multiply,
         &[(gate_raw, group_map_d.as_str()), (group_ones, "ug->sugd")],
     )?;
-    let neg_attn_gate = elementwise(program, DType::Float32, ScalarOp::Negate, &[(gate_grouped, "sugd->sugd")])?;
-    let exp_neg_attn_gate = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_attn_gate, "sugd->sugd")])?;
+    let neg_attn_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Negate,
+        &[(gate_grouped, "sugd->sugd")],
+    )?;
+    let exp_neg_attn_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(neg_attn_gate, "sugd->sugd")],
+    )?;
     let one_plus_exp_attn_gate = elementwise(
         program,
         DType::Float32,
         ScalarOp::Add,
         &[(exp_neg_attn_gate, "sugd->sugd"), (ones, "->sugd")],
     )?;
-    let sigmoid_attn_gate = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp_attn_gate, "sugd->sugd")])?;
+    let sigmoid_attn_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(one_plus_exp_attn_gate, "sugd->sugd")],
+    )?;
     let gated_attended = elementwise(
         program,
         DType::Float32,
@@ -4534,15 +5305,30 @@ pub fn append_qwen35_dense_attention_layer(
         "sg->sdg",
     )?;
 
-    let neg_ffn_gate = elementwise(program, DType::Float32, ScalarOp::Negate, &[(ffn_gate, "sg->sg")])?;
-    let exp_neg_ffn_gate = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_ffn_gate, "sg->sg")])?;
+    let neg_ffn_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Negate,
+        &[(ffn_gate, "sg->sg")],
+    )?;
+    let exp_neg_ffn_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(neg_ffn_gate, "sg->sg")],
+    )?;
     let one_plus_exp_ffn_gate = elementwise(
         program,
         DType::Float32,
         ScalarOp::Add,
         &[(exp_neg_ffn_gate, "sg->sg"), (ones, "->sg")],
     )?;
-    let sigmoid_ffn_gate = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp_ffn_gate, "sg->sg")])?;
+    let sigmoid_ffn_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(one_plus_exp_ffn_gate, "sg->sg")],
+    )?;
     let silu_gate = elementwise(
         program,
         DType::Float32,
@@ -4718,7 +5504,8 @@ pub fn append_mistral_single_range_cached_layer(
     let (q, k_new) = match qk_norm {
         Some((q_norm_weight, k_norm_weight, inv_head_dim)) => {
             let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
-            let k_new = rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+            let k_new =
+                rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
             (q, k_new)
         }
         None => (q_raw, k_new_raw),
@@ -4731,18 +5518,46 @@ pub fn append_mistral_single_range_cached_layer(
     let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match qk_norm {
         Some(_) => {
             let pairs = head_dim / 2;
-            let (rotated_q_first, rotated_q_second) =
-                fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
-            let (rotated_k_first, rotated_k_second) =
-                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
-            (rotated_q_first, rotated_q_second, rotated_k_first, rotated_k_second)
+            let (rotated_q_first, rotated_q_second) = fused_rope_pair(
+                program,
+                q,
+                'h',
+                cos_new,
+                sin_new,
+                RopePairing::SplitHalf { pairs },
+            )?;
+            let (rotated_k_first, rotated_k_second) = fused_rope_pair(
+                program,
+                k_new,
+                'u',
+                cos_new,
+                sin_new,
+                RopePairing::SplitHalf { pairs },
+            )?;
+            (
+                rotated_q_first,
+                rotated_q_second,
+                rotated_k_first,
+                rotated_k_second,
+            )
         }
         None => {
             let (rotated_q_even, rotated_q_odd) =
                 fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::Interleaved)?;
-            let (rotated_k_new_even, rotated_k_new_odd) =
-                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::Interleaved)?;
-            (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd)
+            let (rotated_k_new_even, rotated_k_new_odd) = fused_rope_pair(
+                program,
+                k_new,
+                'u',
+                cos_new,
+                sin_new,
+                RopePairing::Interleaved,
+            )?;
+            (
+                rotated_q_even,
+                rotated_q_odd,
+                rotated_k_new_even,
+                rotated_k_new_odd,
+            )
         }
     };
 
@@ -5020,7 +5835,6 @@ pub fn append_mistral_single_range_cached_layer(
 
     Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new)))
 }
-
 
 /// [`mistral_single_range_cached_forward_program`] is
 /// [`mistral_cached_forward_program`]'s single-range counterpart: same
@@ -5467,7 +6281,8 @@ pub fn append_mistral_cached_moe_layer(
     let (q, k_new) = match qk_norm {
         Some((q_norm_weight, k_norm_weight, inv_head_dim)) => {
             let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
-            let k_new = rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+            let k_new =
+                rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
             (q, k_new)
         }
         None => (q_raw, k_new_raw),
@@ -5497,18 +6312,46 @@ pub fn append_mistral_cached_moe_layer(
     let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match qk_norm {
         Some(_) => {
             let pairs = head_dim / 2;
-            let (rotated_q_first, rotated_q_second) =
-                fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
-            let (rotated_k_first, rotated_k_second) =
-                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::SplitHalf { pairs })?;
-            (rotated_q_first, rotated_q_second, rotated_k_first, rotated_k_second)
+            let (rotated_q_first, rotated_q_second) = fused_rope_pair(
+                program,
+                q,
+                'h',
+                cos_new,
+                sin_new,
+                RopePairing::SplitHalf { pairs },
+            )?;
+            let (rotated_k_first, rotated_k_second) = fused_rope_pair(
+                program,
+                k_new,
+                'u',
+                cos_new,
+                sin_new,
+                RopePairing::SplitHalf { pairs },
+            )?;
+            (
+                rotated_q_first,
+                rotated_q_second,
+                rotated_k_first,
+                rotated_k_second,
+            )
         }
         None => {
             let (rotated_q_even, rotated_q_odd) =
                 fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::Interleaved)?;
-            let (rotated_k_new_even, rotated_k_new_odd) =
-                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, RopePairing::Interleaved)?;
-            (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd)
+            let (rotated_k_new_even, rotated_k_new_odd) = fused_rope_pair(
+                program,
+                k_new,
+                'u',
+                cos_new,
+                sin_new,
+                RopePairing::Interleaved,
+            )?;
+            (
+                rotated_q_even,
+                rotated_q_odd,
+                rotated_k_new_even,
+                rotated_k_new_odd,
+            )
         }
     };
 
@@ -6281,7 +7124,10 @@ pub fn append_qwen35_delta_net_step(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(query, i_head.as_str()), (inv_sqrt_key_dim, i_head_bcast.as_str())],
+        &[
+            (query, i_head.as_str()),
+            (inv_sqrt_key_dim, i_head_bcast.as_str()),
+        ],
     )?;
     let decay = elementwise(
         program,
@@ -6293,14 +7139,33 @@ pub fn append_qwen35_delta_net_step(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(state_in, ij_head.as_str()), (decay, head_to_ij_head.as_str())],
+        &[
+            (state_in, ij_head.as_str()),
+            (decay, head_to_ij_head.as_str()),
+        ],
+    )?;
+    // `state_decayed` feeds both the value prediction and the state write.
+    // Keep the prediction's shared value, but give the state write its own
+    // equivalent producer so chain fusion can inline this multiply into the
+    // 2 MiB state update instead of materializing and rereading that buffer.
+    let state_decayed_for_update = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (state_in, ij_head.as_str()),
+            (decay, head_to_ij_head.as_str()),
+        ],
     )?;
 
     let value_pred_product = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(state_decayed, ij_head.as_str()), (key, i_head_to_ij_head.as_str())],
+        &[
+            (state_decayed, ij_head.as_str()),
+            (key, i_head_to_ij_head.as_str()),
+        ],
     )?;
     let value_pred = reduce(
         program,
@@ -6329,20 +7194,29 @@ pub fn append_qwen35_delta_net_step(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(key, i_head_to_ij_head.as_str()), (delta, j_head_to_ij_head.as_str())],
+        &[
+            (key, i_head_to_ij_head.as_str()),
+            (delta, j_head_to_ij_head.as_str()),
+        ],
     )?;
     let state_out = elementwise(
         program,
         DType::Float32,
         ScalarOp::Add,
-        &[(state_decayed, ij_head.as_str()), (update, ij_head.as_str())],
+        &[
+            (state_decayed_for_update, ij_head.as_str()),
+            (update, ij_head.as_str()),
+        ],
     )?;
 
     let out_product = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(state_out, ij_head.as_str()), (query_scaled, i_head_to_ij_head.as_str())],
+        &[
+            (state_out, ij_head.as_str()),
+            (query_scaled, i_head_to_ij_head.as_str()),
+        ],
     )?;
     let out = reduce(
         program,
@@ -6364,7 +7238,12 @@ pub fn append_qwen35_delta_net_step(
 /// the same compose-not-mint move [`ExpertGatingFunc::Sigmoid`]'s own
 /// `neg -> exp -> +1 -> reciprocal` chain already makes for a activation this
 /// crate has no dedicated variant for.
-pub fn softplus(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
+pub fn softplus(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    one: NodeId,
+    map: &str,
+) -> Result<NodeId, TensorError> {
     let target = map.rsplit("->").next().unwrap_or(map);
     let one_map = alloc::format!("->{target}");
     let exp_x = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(x, map)])?;
@@ -6374,7 +7253,12 @@ pub fn softplus(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Res
         ScalarOp::Add,
         &[(exp_x, map), (one, one_map.as_str())],
     )?;
-    elementwise(program, DType::Float32, ScalarOp::Logarithm, &[(one_plus_exp, map)])
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Logarithm,
+        &[(one_plus_exp, map)],
+    )
 }
 
 /// [`rmsnorm`]'s L2-normalize variant: `x / sqrt(sum(x^2) + eps)`, no
@@ -6393,8 +7277,25 @@ pub fn l2norm(
 ) -> Result<NodeId, TensorError> {
     let reduced = sum_map.split("->").next().unwrap_or(sum_map);
     let reduced_map = alloc::format!("{reduced}->{reduced}");
+    l2norm_with_eps_map(program, x, eps, map, sum_map, reduced_map.as_str())
+}
 
-    let squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, map), (x, map)])?;
+fn l2norm_with_eps_map(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    eps: NodeId,
+    map: &str,
+    sum_map: &str,
+    eps_map: &str,
+) -> Result<NodeId, TensorError> {
+    let reduced = sum_map.split("->").next().unwrap_or(sum_map);
+    let reduced_map = alloc::format!("{reduced}->{reduced}");
+    let squared = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, map), (x, map)],
+    )?;
     let sum_squares = reduce(
         program,
         DType::Float32,
@@ -6408,7 +7309,7 @@ pub fn l2norm(
         program,
         DType::Float32,
         ScalarOp::Add,
-        &[(sum_squares, reduced_map.as_str()), (eps, reduced_map.as_str())],
+        &[(sum_squares, reduced_map.as_str()), (eps, eps_map)],
     )?;
     let norm = elementwise(
         program,
@@ -6422,7 +7323,12 @@ pub fn l2norm(
         ScalarOp::Reciprocal,
         &[(norm, reduced_map.as_str())],
     )?;
-    elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, map), (inv_norm, sum_map)])
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, map), (inv_norm, sum_map)],
+    )
 }
 
 /// `x * sigmoid(x)`, `ggml_silu`'s own contract (`qwen35.cpp:391-392`, run on
@@ -6432,19 +7338,39 @@ pub fn l2norm(
 /// more [`ScalarOp::Multiply`] against the un-gated input. No dedicated
 /// `Sigmoid`/`Silu` [`ScalarOp`] exists, matching that chain's own precedent
 /// for an activation this crate composes rather than mints.
-pub fn silu(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
+pub fn silu(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    one: NodeId,
+    map: &str,
+) -> Result<NodeId, TensorError> {
     let target = map.rsplit("->").next().unwrap_or(map);
     let one_map = alloc::format!("->{target}");
     let neg_x = elementwise(program, DType::Float32, ScalarOp::Negate, &[(x, map)])?;
-    let exp_neg_x = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_x, map)])?;
+    let exp_neg_x = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(neg_x, map)],
+    )?;
     let one_plus_exp = elementwise(
         program,
         DType::Float32,
         ScalarOp::Add,
         &[(exp_neg_x, map), (one, one_map.as_str())],
     )?;
-    let gate = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, map)])?;
-    elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, map), (gate, map)])
+    let gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(one_plus_exp, map)],
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, map), (gate, map)],
+    )
 }
 
 /// Reads `width` contiguous channels of `x` (`[s, total_channels]`) starting
@@ -6460,15 +7386,11 @@ pub fn silu(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<
 /// `qkv_dim`'s first channel) -- there is no bit in `AxisIndex` that
 /// disambiguates "the whole axis" from "a same-origin narrower window".
 ///
-/// This sidesteps offset addressing entirely: `channel_index` (an
-/// [`Op::Iota`] over `total_channels`) and `target = within + offset`
-/// (`within` a second `Iota` over `width`) feed [`ScalarOp::Equal`] to build
-/// a one-hot mask, `x` is multiplied against it and reduced over the
-/// channel axis -- the same select-then-reduce shape [`causal_conv1d`]'s own
-/// `is_raw_slot`/`masked_tap` already use for a data-computed position,
-/// applied here to a compile-time-constant one. Zero offset costs nothing
-/// extra by this route, unlike the donor slice which cannot express it at
-/// all.
+/// The declared-extent form now expresses this directly: one affine identity
+/// read (`d+offset@width`) narrows the source axis without constructing a
+/// one-hot mask, multiply, and reduction. The `@width` is the extent fact;
+/// the offset remains the address fact, so shape inference bounds-checks the
+/// window against `total_channels` while the backend can emit a plain view.
 pub fn channel_slice(
     program: &mut Vec<Op>,
     x: NodeId,
@@ -6476,47 +7398,12 @@ pub fn channel_slice(
     offset: u32,
     width: u32,
 ) -> Result<NodeId, TensorError> {
-    let channel_index = op::append(
-        program,
-        Op::Iota {
-            dtype: DType::Float32,
-            extent: Extent::Static(total_channels),
-        },
-    );
-    let within_index = op::append(
-        program,
-        Op::Iota {
-            dtype: DType::Float32,
-            extent: Extent::Static(width),
-        },
-    );
-    let offset_const = scalar_constant(program, offset as f32);
-    let target = elementwise(
+    let _ = total_channels;
+    elementwise(
         program,
         DType::Float32,
-        ScalarOp::Add,
-        &[(within_index, "w->w"), (offset_const, "->w")],
-    )?;
-    let mask = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Equal,
-        &[(channel_index, "d->dw"), (target, "w->dw")],
-    )?;
-    let selected = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(x, "sd->sdw"), (mask, "dw->sdw")],
-    )?;
-    reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        selected,
-        "sdw->sdw",
-        "sw->sdw",
+        ScalarOp::Identity,
+        &[(x, alloc::format!("s,w+{offset}@{width}->sw").as_str())],
     )
 }
 
@@ -6554,7 +7441,13 @@ pub fn per_head_channel_slice(
             extent: Extent::Static(width),
         },
     );
-    let head_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(heads) });
+    let head_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(heads),
+        },
+    );
     let period_const = scalar_constant(program, total_channels as f32);
     let offset_const = scalar_constant(program, offset as f32);
     let head_base = elementwise(
@@ -6762,18 +7655,33 @@ pub fn repeat_kv_heads(
 /// [`append_qwen35_ssm_mixer`] needs it twice (`beta`, the attention gate),
 /// the same "worth naming at two callers" threshold [`silu`]/[`softplus`]
 /// already crossed for their own chains.
-pub fn sigmoid(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
+pub fn sigmoid(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    one: NodeId,
+    map: &str,
+) -> Result<NodeId, TensorError> {
     let target = map.rsplit("->").next().unwrap_or(map);
     let one_map = alloc::format!("->{target}");
     let neg_x = elementwise(program, DType::Float32, ScalarOp::Negate, &[(x, map)])?;
-    let exp_neg_x = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_x, map)])?;
+    let exp_neg_x = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(neg_x, map)],
+    )?;
     let one_plus_exp = elementwise(
         program,
         DType::Float32,
         ScalarOp::Add,
         &[(exp_neg_x, map), (one, one_map.as_str())],
     )?;
-    elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, map)])
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(one_plus_exp, map)],
+    )
 }
 
 /// Qwen3.5's gated-DeltaNet mixer, one decode step (`n_tokens == 1`, the same
@@ -6978,6 +7886,68 @@ pub fn append_qwen35_ssm_mixer_with_taps(
     l_cache: u32,
     output_gate: GdnOutputGate,
 ) -> Result<(NodeId, SsmMixerTaps), TensorError> {
+    append_qwen35_ssm_mixer_with_taps_and_layout(
+        program,
+        x,
+        inv_dim,
+        eps,
+        head_eps,
+        one,
+        inv_sqrt_key_dim,
+        inv_head_v_dim,
+        attn_norm_weight,
+        wqkv,
+        wqkv_gate,
+        conv_weight,
+        conv_history_in,
+        ssm_beta,
+        ssm_alpha,
+        ssm_dt_bias,
+        ssm_a,
+        ssm_norm_weight,
+        ssm_out,
+        state_in,
+        key_dim,
+        value_dim,
+        kv_heads,
+        group,
+        l_cache,
+        output_gate,
+        false,
+    )
+}
+
+/// Builds the Qwen3.5 SSM mixer while selecting the checkpoint's V-head order.
+#[allow(clippy::too_many_arguments)]
+pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    head_eps: NodeId,
+    one: NodeId,
+    inv_sqrt_key_dim: NodeId,
+    inv_head_v_dim: NodeId,
+    attn_norm_weight: Option<NodeId>,
+    wqkv: NodeId,
+    wqkv_gate: NodeId,
+    conv_weight: NodeId,
+    conv_history_in: NodeId,
+    ssm_beta: NodeId,
+    ssm_alpha: NodeId,
+    ssm_dt_bias: NodeId,
+    ssm_a: NodeId,
+    ssm_norm_weight: NodeId,
+    ssm_out: NodeId,
+    state_in: NodeId,
+    key_dim: u32,
+    value_dim: u32,
+    kv_heads: u32,
+    group: u32,
+    l_cache: u32,
+    output_gate: GdnOutputGate,
+    v_head_reordered: bool,
+) -> Result<(NodeId, SsmMixerTaps), TensorError> {
     // `x`'s leading axis is `s` (sequence position) -- when it is a
     // statically-known extent (a synthetic caller, never the compiled
     // qwen35 program itself, whose `s` is `Extent::Symbolic` and only
@@ -7136,9 +8106,6 @@ pub fn append_qwen35_ssm_mixer_with_taps(
     let k_raw = channel_slice(program, activated, qkv_dim, key_dim, key_dim)?;
     let v_conv = channel_slice(program, activated, qkv_dim, 2 * key_dim, value_dim)?;
 
-    let q_conv = l2norm(program, q_raw, eps, "sw->sw", "s->sw")?;
-    let k_conv = l2norm(program, k_raw, eps, "sw->sw", "s->sw")?;
-
     // A read-side multi-term decomposition (`{coeff}*u+i`) constrains the
     // COMBINED axis, never `u`/`i` individually -- `shape::infer` cannot
     // solve one affine equation for two unknown extents, exactly the reason
@@ -7154,18 +8121,20 @@ pub fn append_qwen35_ssm_mixer_with_taps(
         },
     );
     let q_split_map = alloc::format!("s,{head_k_dim}*u+i->sui");
-    let q_split = elementwise(
+    let q_split_raw = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(q_conv, q_split_map.as_str()), (key_head_ones, "ui->sui")],
+        &[(q_raw, q_split_map.as_str()), (key_head_ones, "ui->sui")],
     )?;
-    let k_split = elementwise(
+    let k_split_raw = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(k_conv, q_split_map.as_str()), (key_head_ones, "ui->sui")],
+        &[(k_raw, q_split_map.as_str()), (key_head_ones, "ui->sui")],
     )?;
+    let q_split = l2norm_with_eps_map(program, q_split_raw, eps, "sui->sui", "su->sui", "s->su")?;
+    let k_split = l2norm_with_eps_map(program, k_split_raw, eps, "sui->sui", "su->sui", "s->su")?;
 
     let q_repeated = repeat_kv_heads(program, q_split, kv_heads, group)?;
     let k_repeated = repeat_kv_heads(program, k_split, kv_heads, group)?;
@@ -7174,16 +8143,27 @@ pub fn append_qwen35_ssm_mixer_with_taps(
         program,
         Op::Constant {
             dtype: DType::Float32,
-            shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group), Extent::Static(head_v_dim)],
+            shape: alloc::vec![
+                Extent::Static(kv_heads),
+                Extent::Static(group),
+                Extent::Static(head_v_dim)
+            ],
             value: 1.0,
         },
     );
-    let v_split_map = alloc::format!("s,{}*u+{head_v_dim}*g+j->sugj", group * head_v_dim);
+    let v_split_map = if v_head_reordered {
+        alloc::format!("s,{}*g+{}*u+j->sugj", kv_heads * head_v_dim, head_v_dim)
+    } else {
+        alloc::format!("s,{}*u+{}*g+j->sugj", group * head_v_dim, head_v_dim)
+    };
     let v_split = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(v_conv, v_split_map.as_str()), (value_head_ones, "ugj->sugj")],
+        &[
+            (v_conv, v_split_map.as_str()),
+            (value_head_ones, "ugj->sugj"),
+        ],
     )?;
 
     let group_ones = op::append(
@@ -7194,24 +8174,37 @@ pub fn append_qwen35_ssm_mixer_with_taps(
             value: 1.0,
         },
     );
-    let head_split_map = alloc::format!("s,{group}*u+g->sug");
+    let head_split_map = if v_head_reordered {
+        alloc::format!("s,{kv_heads}*g+u->sug")
+    } else {
+        alloc::format!("s,{group}*u+g->sug")
+    };
     let beta_split = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(beta_sigmoid, head_split_map.as_str()), (group_ones, "ug->sug")],
+        &[
+            (beta_sigmoid, head_split_map.as_str()),
+            (group_ones, "ug->sug"),
+        ],
     )?;
     let gate_split = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(gate_flat, head_split_map.as_str()), (group_ones, "ug->sug")],
+        &[
+            (gate_flat, head_split_map.as_str()),
+            (group_ones, "ug->sug"),
+        ],
     )?;
     let z_split = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(z_gated, v_split_map.as_str()), (value_head_ones, "ugj->sugj")],
+        &[
+            (z_gated, v_split_map.as_str()),
+            (value_head_ones, "ugj->sugj"),
+        ],
     )?;
 
     // squeeze the size-1 decode-step `s` axis away -- `append_qwen35_delta_net_step`
@@ -7219,39 +8212,149 @@ pub fn append_qwen35_ssm_mixer_with_taps(
     // doc), and reordering the surviving letters here (`dug`, not `ugd`)
     // doubles as the transpose `append_qwen35_delta_net_step`'s own
     // `i{head}`/`j{head}` maps expect.
-    let query = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_repeated, "sugd->sugd", "dug->sugd")?;
-    let key = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_repeated, "sugd->sugd", "dug->sugd")?;
-    let value = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, v_split, "sugj->sugj", "jug->sugj")?;
-    let beta = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, beta_split, "sug->sug", "ug->sug")?;
-    let gate = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_split, "sug->sug", "ug->sug")?;
-    let z_head = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, z_split, "sugj->sugj", "ugj->sugj")?;
+    let query = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        q_repeated,
+        "sugd->sugd",
+        "dug->sugd",
+    )?;
+    let key = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        k_repeated,
+        "sugd->sugd",
+        "dug->sugd",
+    )?;
+    let value = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        v_split,
+        "sugj->sugj",
+        "jug->sugj",
+    )?;
+    let beta = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        beta_split,
+        "sug->sug",
+        "ug->sug",
+    )?;
+    let gate = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gate_split,
+        "sug->sug",
+        "ug->sug",
+    )?;
+    let z_head = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        z_split,
+        "sugj->sugj",
+        "ugj->sugj",
+    )?;
 
-    let (delta_out, state_out) =
-        append_qwen35_delta_net_step(program, query, key, value, gate, beta, state_in, inv_sqrt_key_dim, "ug")?;
+    let (delta_out, state_out) = append_qwen35_delta_net_step(
+        program,
+        query,
+        key,
+        value,
+        gate,
+        beta,
+        state_in,
+        inv_sqrt_key_dim,
+        "ug",
+    )?;
 
     // gated RMSNorm over the per-head value axis `j`, `head_eps`/`inv_head_v_dim`
     // matched to the surviving `u,g` head space -- `build_norm_gated`
     // (`qwen35.cpp:243-250`): `rmsnorm(out, weight) * output_gate(z)`,
     // `output_gate` per [`GdnOutputGate`] (silu for qwen35, sigmoid for
     // qwen4exp, reference: PR 27742 line 2896-2899).
-    let squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(delta_out, "jug->jug"), (delta_out, "jug->jug")])?;
-    let sum_squares = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, squared, "jug->jug", "ug->jug")?;
-    let mean_square = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(sum_squares, "ug->ug"), (inv_head_v_dim, "->ug")])?;
-    let mean_square_eps = elementwise(program, DType::Float32, ScalarOp::Add, &[(mean_square, "ug->ug"), (head_eps, "ug->ug")])?;
-    let rms = elementwise(program, DType::Float32, ScalarOp::SquareRoot, &[(mean_square_eps, "ug->ug")])?;
-    let inv_rms = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(rms, "ug->ug")])?;
-    let normed_out = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(delta_out, "jug->jug"), (inv_rms, "ug->jug")])?;
+    let squared = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(delta_out, "jug->jug"), (delta_out, "jug->jug")],
+    )?;
+    let sum_squares = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        squared,
+        "jug->jug",
+        "ug->jug",
+    )?;
+    let mean_square = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(sum_squares, "ug->ug"), (inv_head_v_dim, "->ug")],
+    )?;
+    let mean_square_eps = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(mean_square, "ug->ug"), (head_eps, "ug->ug")],
+    )?;
+    let rms = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::SquareRoot,
+        &[(mean_square_eps, "ug->ug")],
+    )?;
+    let inv_rms = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(rms, "ug->ug")],
+    )?;
+    let normed_out = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(delta_out, "jug->jug"), (inv_rms, "ug->jug")],
+    )?;
     let normed_out_gamma = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
         &[(normed_out, "jug->jug"), (ssm_norm_weight, "j->jug")],
     )?;
+    let gated_out_map = if v_head_reordered {
+        "jug->guj"
+    } else {
+        "jug->jug"
+    };
+    let gated_gate_map = if v_head_reordered {
+        "ugj->guj"
+    } else {
+        "ugj->jug"
+    };
+    let gated_product_map = if v_head_reordered {
+        "guj->gujd"
+    } else {
+        "jug->gujd"
+    };
     let gated_out = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(normed_out_gamma, "jug->jug"), (z_head, "ugj->jug")],
+        &[(normed_out_gamma, gated_out_map), (z_head, gated_gate_map)],
     )?;
 
     // output projection: `ssm_out`'s declared `[value_dim, n_embd]` layout
@@ -7282,7 +8385,10 @@ pub fn append_qwen35_ssm_mixer_with_taps(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(gated_out, "jug->jugd"), (ssm_out_split, "ugjd->jugd")],
+        &[
+            (gated_out, gated_product_map),
+            (ssm_out_split, "ugjd->gujd"),
+        ],
     )?;
     let cur = reduce(
         program,
@@ -7290,11 +8396,16 @@ pub fn append_qwen35_ssm_mixer_with_taps(
         ScalarOp::Add,
         ReduceInit::Zero,
         cur_product,
-        "jugd->jugd",
-        "d->jugd",
+        "gujd->gujd",
+        "d->gujd",
     )?;
 
-    let mixer_out = elementwise(program, DType::Float32, ScalarOp::Add, &[(x, "sd->sd"), (cur, "d->sd")])?;
+    let mixer_out = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(x, "sd->sd"), (cur, "d->sd")],
+    )?;
 
     let taps = SsmMixerTaps {
         qkv_mixed,
@@ -8741,7 +9852,10 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
 pub enum Qwen35LayerRoots {
     Attention(CachedLayerRoots),
     DenseAttention(Qwen35DenseAttentionRoots),
-    Ssm { qkv_mixed: NodeId, state_out: NodeId },
+    Ssm {
+        qkv_mixed: NodeId,
+        state_out: NodeId,
+    },
 }
 
 /// Qwen3.5's whole-model incremental forward program: `full_attention_interval`
@@ -8797,8 +9911,51 @@ pub fn qwen35_forward_program(
     ssm_d_conv: u32,
     rms_eps: f32,
 ) -> Result<(Vec<Op>, NodeId, Vec<Qwen35LayerRoots>), TensorError> {
+    qwen35_forward_program_with_last_row(
+        vocab,
+        embedding,
+        feed_forward,
+        query_heads,
+        kv_heads,
+        head_dim,
+        attn_head_dim,
+        block_count,
+        full_attention_interval,
+        ssm_d_state,
+        ssm_dt_rank,
+        ssm_n_group,
+        ssm_d_inner,
+        ssm_d_conv,
+        rms_eps,
+        false,
+    )
+}
+
+/// Builds the Qwen35 program while optionally reducing the final vocabulary
+/// projection to a host-selected row before the packed weight is read.
+#[allow(clippy::too_many_arguments)]
+pub fn qwen35_forward_program_with_last_row(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    attn_head_dim: u32,
+    block_count: u32,
+    full_attention_interval: u32,
+    ssm_d_state: u32,
+    ssm_dt_rank: u32,
+    ssm_n_group: u32,
+    ssm_d_inner: u32,
+    ssm_d_conv: u32,
+    rms_eps: f32,
+    last_row_only: bool,
+) -> Result<(Vec<Op>, NodeId, Vec<Qwen35LayerRoots>), TensorError> {
     if full_attention_interval == 0 {
-        return Err(TensorError::InvalidFullAttentionInterval { full_attention_interval });
+        return Err(TensorError::InvalidFullAttentionInterval {
+            full_attention_interval,
+        });
     }
 
     let group = query_heads / kv_heads;
@@ -8808,7 +9965,12 @@ pub fn qwen35_forward_program(
 
     let mut program = Vec::new();
 
-    let ids = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Symbolic(0)], "ids");
+    let ids = input_leaf(
+        &mut program,
+        DType::Int32,
+        alloc::vec![Extent::Symbolic(0)],
+        "ids",
+    );
     let table = input_leaf(
         &mut program,
         DType::Float32,
@@ -8929,7 +10091,10 @@ pub fn qwen35_forward_program(
                 &mut program,
                 Op::Constant {
                     dtype: DType::Float32,
-                    shape: alloc::vec![Extent::Static(query_heads), Extent::Static(attn_head_dim * 2)],
+                    shape: alloc::vec![
+                        Extent::Static(query_heads),
+                        Extent::Static(attn_head_dim * 2)
+                    ],
                     value: 1.0,
                 },
             );
@@ -8938,14 +10103,20 @@ pub fn qwen35_forward_program(
                 DType::Float32,
                 ScalarOp::Multiply,
                 &[
-                    (wq_flat, alloc::format!("i,{}*h+c->ihc", attn_head_dim * 2).as_str()),
+                    (
+                        wq_flat,
+                        alloc::format!("i,{}*h+c->ihc", attn_head_dim * 2).as_str(),
+                    ),
                     (qg_head_ones, "hc->ihc"),
                 ],
             )?;
             let wk_flat = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads * attn_head_dim)],
+                alloc::vec![
+                    Extent::Static(embedding),
+                    Extent::Static(kv_heads * attn_head_dim)
+                ],
                 &alloc::format!("blk.{layer}.attn_k.weight"),
             );
             // `k` carries no gate and no partial-rotary truncation at the
@@ -8966,7 +10137,10 @@ pub fn qwen35_forward_program(
                 DType::Float32,
                 ScalarOp::Multiply,
                 &[
-                    (wk_flat, alloc::format!("i,{attn_head_dim}*u+d->iud").as_str()),
+                    (
+                        wk_flat,
+                        alloc::format!("i,{attn_head_dim}*u+d->iud").as_str(),
+                    ),
                     (k_head_ones, "ud->iud"),
                 ],
             )?;
@@ -8993,7 +10167,10 @@ pub fn qwen35_forward_program(
             let wv_flat = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads * attn_head_dim)],
+                alloc::vec![
+                    Extent::Static(embedding),
+                    Extent::Static(kv_heads * attn_head_dim)
+                ],
                 &alloc::format!("blk.{layer}.attn_v.weight"),
             );
             let wv = elementwise(
@@ -9001,7 +10178,10 @@ pub fn qwen35_forward_program(
                 DType::Float32,
                 ScalarOp::Multiply,
                 &[
-                    (wv_flat, alloc::format!("i,{attn_head_dim}*u+d->iud").as_str()),
+                    (
+                        wv_flat,
+                        alloc::format!("i,{attn_head_dim}*u+d->iud").as_str(),
+                    ),
                     (v_head_ones, "ud->iud"),
                 ],
             )?;
@@ -9021,11 +10201,8 @@ pub fn qwen35_forward_program(
                 &[
                     (
                         wo_flat,
-                        alloc::format!(
-                            "{}*u+{attn_head_dim}*g+d,e->ugde",
-                            attn_head_dim * group
-                        )
-                        .as_str(),
+                        alloc::format!("{}*u+{attn_head_dim}*g+d,e->ugde", attn_head_dim * group)
+                            .as_str(),
                     ),
                     (o_head_ones, "ugd->ugde"),
                 ],
@@ -9134,7 +10311,10 @@ pub fn qwen35_forward_program(
                 k_pass_cache,
                 v_cache,
             )?;
-            (x_next, Qwen35LayerRoots::DenseAttention(dense_attention_roots))
+            (
+                x_next,
+                Qwen35LayerRoots::DenseAttention(dense_attention_roots),
+            )
         } else {
             let qkv_dim = 2 * ssm_key_dim + ssm_d_inner;
             let wqkv = input_leaf(
@@ -9323,7 +10503,13 @@ pub fn qwen35_forward_program(
                 &[(ffn_out, "sd->sd"), (mixer_out, "sd->sd")],
             )?;
 
-            (x_after_ffn, Qwen35LayerRoots::Ssm { qkv_mixed, state_out })
+            (
+                x_after_ffn,
+                Qwen35LayerRoots::Ssm {
+                    qkv_mixed,
+                    state_out,
+                },
+            )
         };
 
         x = x_next;
@@ -9338,6 +10524,17 @@ pub fn qwen35_forward_program(
     );
     let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
 
+    let normed_last = if last_row_only {
+        let lm_head_row = input_leaf(
+            &mut program,
+            DType::Int32,
+            alloc::vec![Extent::Static(1)],
+            "lm_head_row",
+        );
+        embedding_lookup(&mut program, normed_final, lm_head_row)
+    } else {
+        normed_final
+    };
     let lm_head = input_leaf(
         &mut program,
         DType::Float32,
@@ -9348,7 +10545,7 @@ pub fn qwen35_forward_program(
         &mut program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")],
+        &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
     )?;
     let logits = reduce(
         &mut program,
@@ -9367,6 +10564,266 @@ pub fn qwen35_forward_program(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_gathered_expert_product_infers_selected_axis() {
+        let mut program = Vec::new();
+        let stack = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(3), Extent::Static(4), Extent::Static(2)],
+            "stack",
+        );
+        let route = input_leaf(
+            &mut program,
+            DType::Int32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(2)],
+            "route",
+        );
+        let activation = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(4)],
+            "activation",
+        );
+        let product = grouped_gathered_expert_product(&mut program, stack, route, activation);
+        let shapes = crate::shape::infer(&program, &[1]).expect("grouped gather infers");
+        assert_eq!(shapes.of(product), &[1, 2, 4, 2]);
+
+        let stack_values: Vec<f32> = (0..24).map(|value| value as f32).collect();
+        let route_values = [2.0_f32, 0.0];
+        let activation_values = [1.0_f32, 2.0, 3.0, 4.0];
+        let evaluated = crate::cpu::evaluate_quantized(
+            &program,
+            &[1],
+            &[
+                crate::cpu::QuantizedBlock::Float32(&stack_values),
+                crate::cpu::QuantizedBlock::Float32(&route_values),
+                crate::cpu::QuantizedBlock::Float32(&activation_values),
+            ],
+            &[product],
+        )
+        .expect("grouped gather evaluates");
+        let output = evaluated.root();
+        assert_eq!(output.len(), 16);
+        for (selected, expert) in [2_usize, 0].into_iter().enumerate() {
+            for input in 0..4 {
+                for output_index in 0..2 {
+                    let stack_index = (expert * 8) + input * 2 + output_index;
+                    let expected = stack_values[stack_index] * activation_values[input];
+                    let found = output[(selected * 4 + input) * 2 + output_index];
+                    assert_eq!(found, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_scalar_routes_stack_in_token_then_selected_order() {
+        let mut program = Vec::new();
+        let first = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(2)],
+            "first",
+        );
+        let second = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(2)],
+            "second",
+        );
+        let stacked = stack_selected_routes(&mut program, &[first, second])
+            .expect("two selected routes stack");
+
+        let shapes = crate::shape::infer(&program, &[]).expect("route stack infers");
+        assert_eq!(shapes.of(stacked), &[2, 2]);
+        let first_values = [2.0f32, 0.0];
+        let second_values = [0.0f32, 1.0];
+        let evaluated = crate::cpu::evaluate_quantized(
+            &program,
+            &[],
+            &[
+                crate::cpu::QuantizedBlock::Float32(&first_values),
+                crate::cpu::QuantizedBlock::Float32(&second_values),
+            ],
+            &[stacked],
+        )
+        .expect("route stack evaluates");
+        assert_eq!(evaluated.root(), &[2.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn grouped_gate_up_matches_the_per_route_moe_graph_on_cpu() {
+        const EXPERT_COUNT: u32 = 3;
+        const EXPERT_USED_COUNT: u32 = 2;
+        const EMBEDDING: u32 = 2;
+        const FEED_FORWARD: u32 = 2;
+
+        let build = |grouped: bool| {
+            let mut program = Vec::new();
+            let x = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(1), Extent::Static(EMBEDDING)],
+                "x",
+            );
+            let gate_inp = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(EMBEDDING), Extent::Static(EXPERT_COUNT)],
+                "gate_inp",
+            );
+            let gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EXPERT_COUNT),
+                    Extent::Static(EMBEDDING),
+                    Extent::Static(FEED_FORWARD),
+                ],
+                "gate",
+            );
+            let up = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EXPERT_COUNT),
+                    Extent::Static(EMBEDDING),
+                    Extent::Static(FEED_FORWARD),
+                ],
+                "up",
+            );
+            let down = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EXPERT_COUNT),
+                    Extent::Static(FEED_FORWARD),
+                    Extent::Static(EMBEDDING),
+                ],
+                "down",
+            );
+            let one = scalar_constant(&mut program, 1.0);
+            let appended = if grouped {
+                append_moe_ffn_grouped_gate_up
+            } else {
+                append_moe_ffn
+            };
+            let (root, _) = appended(
+                &mut program,
+                0,
+                x,
+                gate_inp,
+                gate,
+                up,
+                down,
+                EXPERT_COUNT,
+                EXPERT_USED_COUNT,
+                one,
+                ExpertGatingFunc::Softmax,
+                None,
+            )
+            .expect("the MoE graph builds");
+            (program, root)
+        };
+
+        let x = [3.0f32, 2.0];
+        let gate_inp = [1.0f32, 0.0, 0.0, 0.0, 1.0, 2.0];
+        let gate = [
+            1.0f32, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0, 1.0, 1.0, 1.0, 1.0,
+        ];
+        let up = [
+            1.0f32, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 2.0, 0.0, 0.0, 2.0,
+        ];
+        let down = [
+            1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0,
+        ];
+        let blocks: [&[f32]; 5] = [&x, &gate_inp, &gate, &up, &down];
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker exists");
+
+        let (per_route_program, per_route_root) = build(false);
+        let per_route = crate::cpu::evaluate_parallel(
+            &per_route_program,
+            &[],
+            &blocks,
+            &[per_route_root],
+            workers,
+        )
+        .expect("per-route graph evaluates");
+        let (grouped_program, grouped_root) = build(true);
+        let grouped =
+            crate::cpu::evaluate_parallel(&grouped_program, &[], &blocks, &[grouped_root], workers)
+                .expect("grouped gate/up graph evaluates");
+
+        assert_eq!(grouped.root(), per_route.root());
+        let gathered_count = |program: &[Op]| {
+            program
+                .iter()
+                .filter(|operation| {
+                    matches!(
+                        operation,
+                        Op::Elementwise { operands, .. }
+                            if operands.iter().any(|(_, index_map)| {
+                                matches!(index_map, IndexMap::Computed { .. })
+                            })
+                    )
+                })
+                .count()
+        };
+        assert_eq!(gathered_count(&per_route_program), 6);
+        assert_eq!(gathered_count(&grouped_program), 4);
+    }
+
+    #[test]
+    fn gather_head_permutation_selects_head_rows_without_reordering_tokens_or_features() {
+        let sequence = 2u32;
+        let source_heads = 3u32;
+        let output_heads = 3u32;
+        let head_dim = 2u32;
+        let mut program = Vec::new();
+        let source = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(sequence),
+                Extent::Static(source_heads),
+                Extent::Static(head_dim),
+            ],
+            "source",
+        );
+        let indices = input_leaf(
+            &mut program,
+            DType::Int32,
+            alloc::vec![Extent::Static(output_heads)],
+            "head_permutation",
+        );
+        let gathered = gather_head_permutation(&mut program, source, indices, head_dim);
+        let source_data = [
+            10.0f32, 11.0, 20.0, 21.0, 30.0, 31.0, 40.0, 41.0, 50.0, 51.0, 60.0, 61.0,
+        ];
+        let permutation = [2i32, 0, 1];
+        let evaluated = crate::cpu::evaluate_typed(
+            &program,
+            &[],
+            &[
+                crate::cpu::TypedBuffer::Float32(source_data.to_vec()),
+                crate::cpu::TypedBuffer::Int32(permutation.to_vec()),
+            ],
+            &[gathered],
+        )
+        .expect("head permutation gather evaluates");
+        let crate::cpu::TypedBuffer::Float32(output) = &evaluated[0].2 else {
+            panic!("head permutation must preserve the source dtype");
+        };
+        assert_eq!(
+            output,
+            &[
+                30.0, 31.0, 10.0, 11.0, 20.0, 21.0, 60.0, 61.0, 40.0, 41.0, 50.0, 51.0,
+            ],
+            "permutation must select only the head axis"
+        );
+    }
 
     /// Proves the per-layer builders this module exports as `pub` are
     /// actually SUFFICIENT to build a forward program from outside this
@@ -9394,7 +10851,12 @@ mod tests {
 
         let mut program = Vec::new();
 
-        let ids = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Symbolic(0)], "ids");
+        let ids = input_leaf(
+            &mut program,
+            DType::Int32,
+            alloc::vec![Extent::Symbolic(0)],
+            "ids",
+        );
         let table = input_leaf(
             &mut program,
             DType::Float32,
@@ -9437,28 +10899,56 @@ mod tests {
         )
         .expect("broadcast into hc streams lowers");
 
-        let w_norm = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(hc), Extent::Static(embedding)], "w_norm");
+        let w_norm = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(hc), Extent::Static(embedding)],
+            "w_norm",
+        );
         let w_down = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(hc), Extent::Static(embedding), Extent::Static(low_rank)],
+            alloc::vec![
+                Extent::Static(hc),
+                Extent::Static(embedding),
+                Extent::Static(low_rank)
+            ],
             "w_down",
         );
         let w_up = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(low_rank), Extent::Static(hc), Extent::Static(embedding)],
+            alloc::vec![
+                Extent::Static(low_rank),
+                Extent::Static(hc),
+                Extent::Static(embedding)
+            ],
             "w_up",
         );
         let w_inject = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(hc), Extent::Static(embedding), Extent::Static(hc)],
+            alloc::vec![
+                Extent::Static(hc),
+                Extent::Static(embedding),
+                Extent::Static(hc)
+            ],
             "w_inject",
         );
 
-        let (mixed, inject) = append_hyper_connection_mix(&mut program, residual, inv_dim, eps, inv_hc, one, w_norm, w_down, w_up, Some(w_inject))
-            .expect("hyper-connection mix lowers");
+        let (mixed, inject) = append_hyper_connection_mix(
+            &mut program,
+            residual,
+            inv_dim,
+            eps,
+            inv_hc,
+            one,
+            w_norm,
+            w_down,
+            w_up,
+            Some(w_inject),
+        )
+        .expect("hyper-connection mix lowers");
         let inject = inject.expect("w_inject was Some, so inject must be Some");
 
         let key_dim = 1u32;
@@ -9478,22 +10968,72 @@ mod tests {
         );
         let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0);
         let inv_head_v_dim = scalar_constant(&mut program, 1.0);
-        let attn_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding)], "attn_norm_weight");
-        let wqkv = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding), Extent::Static(qkv_dim)], "wqkv");
-        let wqkv_gate = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding), Extent::Static(value_dim)], "wqkv_gate");
-        let conv_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(qkv_dim), Extent::Static(l_cache)], "conv_weight");
+        let attn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            "attn_norm_weight",
+        );
+        let wqkv = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(qkv_dim)],
+            "wqkv",
+        );
+        let wqkv_gate = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(value_dim)],
+            "wqkv_gate",
+        );
+        let conv_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(qkv_dim), Extent::Static(l_cache)],
+            "conv_weight",
+        );
         let conv_history_in = input_leaf(
             &mut program,
             DType::Float32,
             alloc::vec![Extent::Static(l_cache - 1), Extent::Static(qkv_dim)],
             "conv_history_in",
         );
-        let ssm_beta = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads * group)], "ssm_beta");
-        let ssm_alpha = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads * group)], "ssm_alpha");
-        let ssm_dt_bias = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(kv_heads * group)], "ssm_dt_bias");
-        let ssm_a = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(kv_heads * group)], "ssm_a");
-        let ssm_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding)], "ssm_norm_weight");
-        let ssm_out = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(value_dim), Extent::Static(embedding)], "ssm_out");
+        let ssm_beta = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads * group)],
+            "ssm_beta",
+        );
+        let ssm_alpha = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads * group)],
+            "ssm_alpha",
+        );
+        let ssm_dt_bias = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(kv_heads * group)],
+            "ssm_dt_bias",
+        );
+        let ssm_a = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(kv_heads * group)],
+            "ssm_a",
+        );
+        let ssm_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            "ssm_norm_weight",
+        );
+        let ssm_out = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(value_dim), Extent::Static(embedding)],
+            "ssm_out",
+        );
         let state_in = input_leaf(
             &mut program,
             DType::Float32,
@@ -9536,31 +11076,77 @@ mod tests {
         )
         .expect("qwen4exp's own output gate lowers through the shared ssm mixer builder");
 
-        let residual = append_hyper_connection_combine(&mut program, residual, block_out, inject, inv_hc, one, two)
-            .expect("hyper-connection combine lowers");
+        let residual = append_hyper_connection_combine(
+            &mut program,
+            residual,
+            block_out,
+            inject,
+            inv_hc,
+            one,
+            two,
+        )
+        .expect("hyper-connection combine lowers");
 
-        let final_w_norm = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(hc), Extent::Static(embedding)], "final_w_norm");
+        let final_w_norm = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(hc), Extent::Static(embedding)],
+            "final_w_norm",
+        );
         let final_w_down = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(hc), Extent::Static(embedding), Extent::Static(low_rank)],
+            alloc::vec![
+                Extent::Static(hc),
+                Extent::Static(embedding),
+                Extent::Static(low_rank)
+            ],
             "final_w_down",
         );
         let final_w_up = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(low_rank), Extent::Static(hc), Extent::Static(embedding)],
+            alloc::vec![
+                Extent::Static(low_rank),
+                Extent::Static(hc),
+                Extent::Static(embedding)
+            ],
             "final_w_up",
         );
-        let (final_mixed, no_inject) = append_hyper_connection_mix(&mut program, residual, inv_dim, eps, inv_hc, one, final_w_norm, final_w_down, final_w_up, None)
-            .expect("final output mixer lowers");
-        assert!(no_inject.is_none(), "the final output mixer must pass w_inject: None");
+        let (final_mixed, no_inject) = append_hyper_connection_mix(
+            &mut program,
+            residual,
+            inv_dim,
+            eps,
+            inv_hc,
+            one,
+            final_w_norm,
+            final_w_down,
+            final_w_up,
+            None,
+        )
+        .expect("final output mixer lowers");
+        assert!(
+            no_inject.is_none(),
+            "the final output mixer must pass w_inject: None"
+        );
 
         // The same rmsnorm + multiply + reduce chain `qwen35_forward_program`
         // ends every program with.
-        let output_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding)], "output_norm.weight");
-        let normed_final = rmsnorm(&mut program, final_mixed, output_norm_weight, inv_dim, eps).expect("final rmsnorm lowers");
-        let lm_head_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding), Extent::Static(vocab)], "output.weight");
+        let output_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            "output_norm.weight",
+        );
+        let normed_final = rmsnorm(&mut program, final_mixed, output_norm_weight, inv_dim, eps)
+            .expect("final rmsnorm lowers");
+        let lm_head_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
+            "output.weight",
+        );
         let logits_product = elementwise(
             &mut program,
             DType::Float32,
@@ -9598,7 +11184,9 @@ mod tests {
         // through the same f32 buffer as every other input (the real
         // forward-program tests above bind their own `ids` this same way,
         // as `ids_f32`).
-        let ids_data: Vec<f32> = (0..tokens as i32).map(|token| (token % vocab as i32) as f32).collect();
+        let ids_data: Vec<f32> = (0..tokens as i32)
+            .map(|token| (token % vocab as i32) as f32)
+            .collect();
         let eps_data = alloc::vec![1e-6f32; tokens];
         let table_data = filled_input(vocab as usize * embedding as usize);
         let w_norm_data = filled_input(hc as usize * embedding as usize);
@@ -9650,7 +11238,8 @@ mod tests {
             ("output.weight", lm_head_data.as_slice()),
         ];
 
-        let evaluated = crate::cpu::evaluate_named(&program, &[tokens as u64], &named, &[logits]).expect("the composed program evaluates on cpu");
+        let evaluated = crate::cpu::evaluate_named(&program, &[tokens as u64], &named, &[logits])
+            .expect("the composed program evaluates on cpu");
         let (logits_values, logits_shape) = evaluated.get(logits).expect("logits output present");
 
         assert_eq!(
@@ -9746,10 +11335,11 @@ mod tests {
     /// before any real-checkpoint embedding test would even hint at it.
     #[test]
     fn forward_roots_hidden_is_an_operand_of_the_lm_head_product() {
-        let (program, roots, _cache_roots, _moe_sites) = mistral_cached_forward_program_with_experts(
-            32_002, 4096, 14336, 32, 8, 128, 2, 0, 0, false, false, false,
-        )
-        .expect("the dense cached forward pass lowers to a program");
+        let (program, roots, _cache_roots, _moe_sites) =
+            mistral_cached_forward_program_with_experts(
+                32_002, 4096, 14336, 32, 8, 128, 2, 0, 0, false, false, false,
+            )
+            .expect("the dense cached forward pass lowers to a program");
 
         let Op::Reduce(logits_reduce) = &program[roots.logits.0 as usize] else {
             panic!("ForwardRoots::logits must name an Op::Reduce (the vocab-projection sum)");
@@ -11032,6 +12622,24 @@ shape = ["seq"]
         )
         .expect("the routed ffn lowers");
 
+        let gathered_products = program
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    Op::Elementwise { operands, .. }
+                        if operands
+                            .iter()
+                            .any(|(_, index_map)| matches!(index_map, IndexMap::Computed { .. }))
+                )
+            })
+            .count();
+        assert_eq!(
+            gathered_products,
+            3 * EXPERT_USED_COUNT as usize,
+            "each selected route gathers its gate, up, and down expert independently"
+        );
+
         let symbols = [SEQUENCE as u64];
         crate::shape::infer(&program, &symbols).expect("the routed ffn infers");
 
@@ -11461,31 +13069,44 @@ shape = ["seq"]
         let group = 2usize;
         let head_v_dim = 32usize;
         let value_dim = kv_heads * group * head_v_dim;
-        assert_eq!(value_dim, QK_K, "one Q4_K super-block per output row, matching quantize_rows's own convention");
+        assert_eq!(
+            value_dim, QK_K,
+            "one Q4_K super-block per output row, matching quantize_rows's own convention"
+        );
         let embedding = 3usize;
 
         let mut program = Vec::new();
         let gated_out = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(head_v_dim as u32), Extent::Static(kv_heads as u32), Extent::Static(group as u32)],
+            alloc::vec![
+                Extent::Static(head_v_dim as u32),
+                Extent::Static(kv_heads as u32),
+                Extent::Static(group as u32)
+            ],
             "gated_out",
         );
         let ssm_out = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(value_dim as u32), Extent::Static(embedding as u32)],
+            alloc::vec![
+                Extent::Static(value_dim as u32),
+                Extent::Static(embedding as u32)
+            ],
             "ssm_out",
         );
         let value_head_ones = op::append(
             &mut program,
             Op::Constant {
                 dtype: DType::Float32,
-                shape: alloc::vec![Extent::Static(kv_heads as u32), Extent::Static(group as u32), Extent::Static(head_v_dim as u32)],
+                shape: alloc::vec![
+                    Extent::Static(kv_heads as u32),
+                    Extent::Static(group as u32),
+                    Extent::Static(head_v_dim as u32),
+                ],
                 value: 1.0,
             },
         );
-
         // exact copy of append_qwen35_ssm_mixer_with_taps's own
         // output-projection maps, spec.rs:7093-7117.
         let out_weight_split_map = alloc::format!("{}*j+{group}*u+g,d->ugjd", kv_heads * group);
@@ -11493,14 +13114,17 @@ shape = ["seq"]
             &mut program,
             DType::Float32,
             ScalarOp::Multiply,
-            &[(ssm_out, out_weight_split_map.as_str()), (value_head_ones, "ugj->ugjd")],
+            &[
+                (ssm_out, out_weight_split_map.as_str()),
+                (value_head_ones, "ugj->ugjd"),
+            ],
         )
         .expect("ssm_out_split lowers");
         let cur_product = elementwise(
             &mut program,
             DType::Float32,
             ScalarOp::Multiply,
-            &[(gated_out, "jug->jugd"), (ssm_out_split, "ugjd->jugd")],
+            &[(gated_out, "jug->gujd"), (ssm_out_split, "ugjd->gujd")],
         )
         .expect("cur_product lowers");
         let cur = reduce(
@@ -11509,8 +13133,8 @@ shape = ["seq"]
             ScalarOp::Add,
             ReduceInit::Zero,
             cur_product,
-            "jugd->jugd",
-            "d->jugd",
+            "gujd->gujd",
+            "d->gujd",
         )
         .expect("cur reduce lowers");
 
@@ -11544,7 +13168,10 @@ shape = ["seq"]
         let dequantized_evaluated = crate::cpu::evaluate_named(
             &program,
             &[],
-            &[("gated_out", gated_data.as_slice()), ("ssm_out", dequantized_declared.as_slice())],
+            &[
+                ("gated_out", gated_data.as_slice()),
+                ("ssm_out", dequantized_declared.as_slice()),
+            ],
             &[cur],
         )
         .expect("dequantized reduce evaluates");
@@ -11577,17 +13204,24 @@ shape = ["seq"]
             );
         }
 
-        let norm_inf = expected.iter().fold(0.0f64, |acc, value| acc.max(value.abs())).max(1e-12);
+        let norm_inf = expected
+            .iter()
+            .fold(0.0f64, |acc, value| acc.max(value.abs()))
+            .max(1e-12);
         let packed_vs_dequantized_scaled = packed_cur
             .iter()
             .zip(dequantized_cur.iter())
-            .map(|(packed_value, dequantized_value)| (f64::from(*packed_value) - f64::from(*dequantized_value)).abs())
+            .map(|(packed_value, dequantized_value)| {
+                (f64::from(*packed_value) - f64::from(*dequantized_value)).abs()
+            })
             .fold(0.0f64, f64::max)
             / norm_inf;
         let dequantized_vs_hand_scaled = dequantized_cur
             .iter()
             .zip(expected.iter())
-            .map(|(dequantized_value, expected_value)| (f64::from(*dequantized_value) - expected_value).abs())
+            .map(|(dequantized_value, expected_value)| {
+                (f64::from(*dequantized_value) - expected_value).abs()
+            })
             .fold(0.0f64, f64::max)
             / norm_inf;
         println!(
@@ -11677,22 +13311,16 @@ shape = ["seq"]
         let activation: alloc::vec::Vec<f32> = synth_row(211, SEQUENCE * k, 1.0);
 
         let mut program = Vec::new();
-        // `[expert_count, k, rows]` -- NOT `[expert_count, rows, k]` --
-        // matches [`gathered_expert_product`]'s own `x_map` (`Affine`
-        // over iteration axes `0, 1`): the operand's declared axis 1 is
-        // what iteration axis 1 (the CONTRACTED `i`/`k` axis `x` also maps
-        // its own axis 1 onto) draws its extent from, and axis 2 is the
-        // kept, non-reduced `o`/`rows` axis -- the same order
-        // [`append_moe_ffn`]'s own `expert_w_gate`/`expert_w_up`
-        // (`[expert_count, embedding, feed_forward]`, embedding is the
-        // reduced axis) already declare.
+        // The gather source is `[expert, k, rows]`: route selects the first
+        // axis, then the product maps `k` and `rows` onto its contraction
+        // and output axes.
         let stack_node = input_leaf(
             &mut program,
             DType::Float32,
             alloc::vec![
                 Extent::Static(EXPERT_COUNT),
                 Extent::Static(k as u32),
-                Extent::Static(ROWS as u32)
+                Extent::Static(ROWS as u32),
             ],
             "expert_stack",
         );
@@ -11884,7 +13512,7 @@ shape = ["seq"]
             alloc::vec![
                 Extent::Static(EXPERT_COUNT),
                 Extent::Static(EMBEDDING as u32),
-                Extent::Static(FEED_FORWARD as u32)
+                Extent::Static(FEED_FORWARD as u32),
             ],
             "expert_w_gate",
         );
@@ -11894,7 +13522,7 @@ shape = ["seq"]
             alloc::vec![
                 Extent::Static(EXPERT_COUNT),
                 Extent::Static(EMBEDDING as u32),
-                Extent::Static(FEED_FORWARD as u32)
+                Extent::Static(FEED_FORWARD as u32),
             ],
             "expert_w_up",
         );
@@ -11904,7 +13532,7 @@ shape = ["seq"]
             alloc::vec![
                 Extent::Static(EXPERT_COUNT),
                 Extent::Static(FEED_FORWARD as u32),
-                Extent::Static(EMBEDDING as u32)
+                Extent::Static(EMBEDDING as u32),
             ],
             "expert_w_down",
         );
@@ -12640,8 +14268,13 @@ shape = ["seq"]
         let ffn_out = NodeId(ffn_out as u32);
         let root = NodeId(program.len() as u32 - 1);
 
-        let bound =
-            crate::bind::bind(&program, &shapes, &[root, ffn_out], crate::numeric::NumericPolicy::bit_exact()).expect("the real layer binds");
+        let bound = crate::bind::bind(
+            &program,
+            &shapes,
+            &[root, ffn_out],
+            crate::numeric::NumericPolicy::bit_exact(),
+        )
+        .expect("the real layer binds");
         let ffn_out_body_steps = bound
             .iter()
             .find(|op| op.node == ffn_out)
@@ -12952,9 +14585,14 @@ value = 1.0
         }
         let cached_shapes = crate::shape::infer(&cached_program, &[1, 71])
             .expect("one new position against a 71-position cache infers");
-        let bound = crate::bind::bind(&cached_program, &cached_shapes, &cached_outputs, crate::numeric::NumericPolicy::bit_exact())
-            .expect("the cached program binds")
-            .len();
+        let bound = crate::bind::bind(
+            &cached_program,
+            &cached_shapes,
+            &cached_outputs,
+            crate::numeric::NumericPolicy::bit_exact(),
+        )
+        .expect("the cached program binds")
+        .len();
 
         const CACHE_READING_NODES: usize = 12;
         const CACHE_INPUT_LEAVES: usize = 3;
@@ -13237,49 +14875,49 @@ value = 1.0
             .expect("cached forward pass lowers");
 
             let (k_even_cache, k_odd_cache, v_cache): PerLayerCacheColumns = if cached_len == 0 {
-                    (
-                        alloc::vec![Vec::new(); BLOCK_COUNT as usize],
-                        alloc::vec![Vec::new(); BLOCK_COUNT as usize],
-                        alloc::vec![Vec::new(); BLOCK_COUNT as usize],
-                    )
-                } else {
-                    let prefill_cached_len_value = [0.0f32];
-                    let mut prefill_named = common_named.clone();
-                    prefill_named.push(("ids", &ids_f32[..cached_len]));
-                    prefill_named.push(("eps", eps_cached.as_slice()));
-                    prefill_named.push(("rope_cos", cos_cached.as_slice()));
-                    prefill_named.push(("rope_sin", sin_cached.as_slice()));
-                    prefill_named.push(("cached_len", prefill_cached_len_value.as_slice()));
-                    let empty = Vec::<f32>::new();
-                    for names in &kv_cache_names {
-                        prefill_named.push((names[0].as_str(), empty.as_slice()));
-                        prefill_named.push((names[1].as_str(), empty.as_slice()));
-                        prefill_named.push((names[2].as_str(), empty.as_slice()));
-                    }
-                    let mut prefill_roots = Vec::new();
-                    for (even, odd, value) in &cache_roots {
-                        prefill_roots.push(*even);
-                        prefill_roots.push(*odd);
-                        prefill_roots.push(*value);
-                    }
-                    let prefill_symbols = [cached_len as u64, 0u64];
-                    let prefill_evaluated = crate::cpu::evaluate_named(
-                        &cached_program,
-                        &prefill_symbols,
-                        &prefill_named,
-                        &prefill_roots,
-                    )
-                    .expect("prefill call evaluates");
-                    let mut even_out = Vec::with_capacity(BLOCK_COUNT as usize);
-                    let mut odd_out = Vec::with_capacity(BLOCK_COUNT as usize);
-                    let mut value_out = Vec::with_capacity(BLOCK_COUNT as usize);
-                    for (even, odd, value) in &cache_roots {
-                        even_out.push(prefill_evaluated.get(*even).expect("k_even").0.to_vec());
-                        odd_out.push(prefill_evaluated.get(*odd).expect("k_odd").0.to_vec());
-                        value_out.push(prefill_evaluated.get(*value).expect("v").0.to_vec());
-                    }
-                    (even_out, odd_out, value_out)
-                };
+                (
+                    alloc::vec![Vec::new(); BLOCK_COUNT as usize],
+                    alloc::vec![Vec::new(); BLOCK_COUNT as usize],
+                    alloc::vec![Vec::new(); BLOCK_COUNT as usize],
+                )
+            } else {
+                let prefill_cached_len_value = [0.0f32];
+                let mut prefill_named = common_named.clone();
+                prefill_named.push(("ids", &ids_f32[..cached_len]));
+                prefill_named.push(("eps", eps_cached.as_slice()));
+                prefill_named.push(("rope_cos", cos_cached.as_slice()));
+                prefill_named.push(("rope_sin", sin_cached.as_slice()));
+                prefill_named.push(("cached_len", prefill_cached_len_value.as_slice()));
+                let empty = Vec::<f32>::new();
+                for names in &kv_cache_names {
+                    prefill_named.push((names[0].as_str(), empty.as_slice()));
+                    prefill_named.push((names[1].as_str(), empty.as_slice()));
+                    prefill_named.push((names[2].as_str(), empty.as_slice()));
+                }
+                let mut prefill_roots = Vec::new();
+                for (even, odd, value) in &cache_roots {
+                    prefill_roots.push(*even);
+                    prefill_roots.push(*odd);
+                    prefill_roots.push(*value);
+                }
+                let prefill_symbols = [cached_len as u64, 0u64];
+                let prefill_evaluated = crate::cpu::evaluate_named(
+                    &cached_program,
+                    &prefill_symbols,
+                    &prefill_named,
+                    &prefill_roots,
+                )
+                .expect("prefill call evaluates");
+                let mut even_out = Vec::with_capacity(BLOCK_COUNT as usize);
+                let mut odd_out = Vec::with_capacity(BLOCK_COUNT as usize);
+                let mut value_out = Vec::with_capacity(BLOCK_COUNT as usize);
+                for (even, odd, value) in &cache_roots {
+                    even_out.push(prefill_evaluated.get(*even).expect("k_even").0.to_vec());
+                    odd_out.push(prefill_evaluated.get(*odd).expect("k_odd").0.to_vec());
+                    value_out.push(prefill_evaluated.get(*value).expect("v").0.to_vec());
+                }
+                (even_out, odd_out, value_out)
+            };
 
             // -- two-range decode step: the trusted incumbent.
             let two_range_cached_len_value = [cached_len as f32];
@@ -13365,7 +15003,8 @@ value = 1.0
                     names[1].as_str(),
                     merged_k_odd_cache[layer_index].as_slice(),
                 ));
-                single_range_named.push((names[2].as_str(), merged_v_cache[layer_index].as_slice()));
+                single_range_named
+                    .push((names[2].as_str(), merged_v_cache[layer_index].as_slice()));
             }
             let single_range_symbols = [new_count as u64, sequence as u64];
             let single_range_evaluated = crate::cpu::evaluate_named(
@@ -13402,7 +15041,9 @@ value = 1.0
         let cases = [(0usize, 1usize), (1usize, 1usize), (6usize, 2usize)];
         let results: Vec<((usize, usize), (f32, f32))> = cases
             .iter()
-            .map(|&(cached_len, new_count)| ((cached_len, new_count), max_error_at(cached_len, new_count)))
+            .map(|&(cached_len, new_count)| {
+                ((cached_len, new_count), max_error_at(cached_len, new_count))
+            })
             .collect();
         for (cached_len, new_count) in cases {
             let (max_error, normalized_error) = results
@@ -13678,7 +15319,8 @@ value = 1.0
                     names[1].as_str(),
                     merged_k_odd_cache[layer_index].as_slice(),
                 ));
-                single_range_named.push((names[2].as_str(), merged_v_cache[layer_index].as_slice()));
+                single_range_named
+                    .push((names[2].as_str(), merged_v_cache[layer_index].as_slice()));
             }
             let single_range_symbols = [new_count as u64, sequence as u64];
             let single_range_evaluated = crate::cpu::evaluate_named(
@@ -13715,7 +15357,9 @@ value = 1.0
         let cases = [(0usize, 1usize), (1usize, 1usize), (6usize, 2usize)];
         let results: Vec<((usize, usize), (f32, f32))> = cases
             .iter()
-            .map(|&(cached_len, new_count)| ((cached_len, new_count), max_error_at(cached_len, new_count)))
+            .map(|&(cached_len, new_count)| {
+                ((cached_len, new_count), max_error_at(cached_len, new_count))
+            })
             .collect();
         for (cached_len, new_count) in cases {
             let (max_error, normalized_error) = results
@@ -13767,7 +15411,11 @@ value = 1.0
         const NEW_COUNT: usize = 2;
         const MERGED_LEN: usize = CACHED_LEN + NEW_COUNT;
 
-        fn run_resolved(program_len: usize, resolved: &[BoundOp], inputs: Vec<(NodeId, Vec<f32>)>) -> Vec<Option<Vec<f32>>> {
+        fn run_resolved(
+            program_len: usize,
+            resolved: &[BoundOp],
+            inputs: Vec<(NodeId, Vec<f32>)>,
+        ) -> Vec<Option<Vec<f32>>> {
             let mut buffers: Vec<Option<Vec<f32>>> = alloc::vec![None; program_len];
             for (node, data) in inputs {
                 buffers[node.0 as usize] = Some(data);
@@ -13799,7 +15447,9 @@ value = 1.0
             let sequence = MERGED_LEN + padding;
 
             let table = random_vec(1, VOCAB as usize * EMBEDDING as usize);
-            let ids: Vec<f32> = (0..NEW_COUNT as u32).map(|id| 1.0 + (id % 3) as f32).collect();
+            let ids: Vec<f32> = (0..NEW_COUNT as u32)
+                .map(|id| 1.0 + (id % 3) as f32)
+                .collect();
             let eps = alloc::vec![1e-5f32; NEW_COUNT];
             let (cos_new, sin_new) = rope_angles(CACHED_LEN, NEW_COUNT, pairs, HEAD_DIM as usize);
             let cached_len_scalar = alloc::vec![CACHED_LEN as f32];
@@ -13814,23 +15464,41 @@ value = 1.0
             ];
             let mut seed = 900u64;
             for layer in 0..BLOCK_COUNT as usize {
-                owned.push((alloc::format!("blk.{layer}.attn_norm.weight"), alloc::vec![1.0f32; EMBEDDING as usize]));
-                owned.push((alloc::format!("blk.{layer}.ffn_norm.weight"), alloc::vec![1.0f32; EMBEDDING as usize]));
+                owned.push((
+                    alloc::format!("blk.{layer}.attn_norm.weight"),
+                    alloc::vec![1.0f32; EMBEDDING as usize],
+                ));
+                owned.push((
+                    alloc::format!("blk.{layer}.ffn_norm.weight"),
+                    alloc::vec![1.0f32; EMBEDDING as usize],
+                ));
                 owned.push((
                     alloc::format!("blk.{layer}.attn_q.weight"),
-                    random_vec(seed, EMBEDDING as usize * QUERY_HEADS as usize * HEAD_DIM as usize),
+                    random_vec(
+                        seed,
+                        EMBEDDING as usize * QUERY_HEADS as usize * HEAD_DIM as usize,
+                    ),
                 ));
                 owned.push((
                     alloc::format!("blk.{layer}.attn_k.weight"),
-                    random_vec(seed + 1, EMBEDDING as usize * KV_HEADS as usize * HEAD_DIM as usize),
+                    random_vec(
+                        seed + 1,
+                        EMBEDDING as usize * KV_HEADS as usize * HEAD_DIM as usize,
+                    ),
                 ));
                 owned.push((
                     alloc::format!("blk.{layer}.attn_v.weight"),
-                    random_vec(seed + 2, EMBEDDING as usize * KV_HEADS as usize * HEAD_DIM as usize),
+                    random_vec(
+                        seed + 2,
+                        EMBEDDING as usize * KV_HEADS as usize * HEAD_DIM as usize,
+                    ),
                 ));
                 owned.push((
                     alloc::format!("blk.{layer}.attn_output.weight"),
-                    random_vec(seed + 3, KV_HEADS as usize * group * HEAD_DIM as usize * EMBEDDING as usize),
+                    random_vec(
+                        seed + 3,
+                        KV_HEADS as usize * group * HEAD_DIM as usize * EMBEDDING as usize,
+                    ),
                 ));
                 owned.push((
                     alloc::format!("blk.{layer}.ffn_gate.weight"),
@@ -13848,15 +15516,22 @@ value = 1.0
                 k_even.resize(sequence * KV_HEADS as usize * pairs, 0.0);
                 let mut k_odd = random_vec(seed + 8, MERGED_LEN * KV_HEADS as usize * pairs);
                 k_odd.resize(sequence * KV_HEADS as usize * pairs, 0.0);
-                let mut v = random_vec(seed + 9, MERGED_LEN * KV_HEADS as usize * HEAD_DIM as usize);
+                let mut v =
+                    random_vec(seed + 9, MERGED_LEN * KV_HEADS as usize * HEAD_DIM as usize);
                 v.resize(sequence * KV_HEADS as usize * HEAD_DIM as usize, 0.0);
                 owned.push((alloc::format!("kv_cache.{layer}.k_even"), k_even));
                 owned.push((alloc::format!("kv_cache.{layer}.k_odd"), k_odd));
                 owned.push((alloc::format!("kv_cache.{layer}.v"), v));
                 seed += 10;
             }
-            owned.push((String::from("output_norm.weight"), alloc::vec![1.0f32; EMBEDDING as usize]));
-            owned.push((String::from("output.weight"), random_vec(seed, EMBEDDING as usize * VOCAB as usize)));
+            owned.push((
+                String::from("output_norm.weight"),
+                alloc::vec![1.0f32; EMBEDDING as usize],
+            ));
+            owned.push((
+                String::from("output.weight"),
+                random_vec(seed, EMBEDDING as usize * VOCAB as usize),
+            ));
 
             let shapes = crate::shape::infer(program, &[NEW_COUNT as u64, sequence as u64])
                 .expect("single-range fused-vs-unfused fixture infers");
@@ -13867,7 +15542,9 @@ value = 1.0
                     .into_iter()
                     .map(|node| {
                         let name = match &program[node.0 as usize] {
-                            Op::Input { name: Some(name), .. } => name.clone(),
+                            Op::Input {
+                                name: Some(name), ..
+                            } => name.clone(),
                             _ => unreachable!("block_node_ids only ever returns Op::Input nodes"),
                         };
                         let data = owned
@@ -13883,8 +15560,9 @@ value = 1.0
 
             let fused = bind_with_fusion(program, &shapes, &[root], true, NumericPolicy::default())
                 .expect("fused single-range bind succeeds");
-            let unfused = bind_with_fusion(program, &shapes, &[root], false, NumericPolicy::default())
-                .expect("unfused single-range bind succeeds");
+            let unfused =
+                bind_with_fusion(program, &shapes, &[root], false, NumericPolicy::default())
+                    .expect("unfused single-range bind succeeds");
 
             assert!(
                 fused
@@ -13990,7 +15668,9 @@ value = 1.0
         fn logits_at(cached_len: usize, bucket_tokens: usize) -> (Vec<f32>, Vec<f32>) {
             let merged_len = cached_len + NEW_COUNT;
             let bucket = bucket_of(merged_len, bucket_tokens);
-            let ids_f32: Vec<f32> = (0..merged_len as u32).map(|id| (1 + id % 3) as f32).collect();
+            let ids_f32: Vec<f32> = (0..merged_len as u32)
+                .map(|id| (1 + id % 3) as f32)
+                .collect();
 
             let table = random_vec(10, VOCAB * EMBEDDING);
             let eps_new = alloc::vec![1e-5f32; NEW_COUNT];
@@ -14135,7 +15815,11 @@ value = 1.0
                 .map(move |cached_len| (bucket_tokens, cached_len))
             })
             .collect();
-        assert_eq!(cases.len(), 9, "3 bucket sizes x 3 boundary-spanning cached_len values");
+        assert_eq!(
+            cases.len(),
+            9,
+            "3 bucket sizes x 3 boundary-spanning cached_len values"
+        );
 
         for (bucket_tokens, cached_len) in cases {
             let (tight, padded) = logits_at(cached_len, bucket_tokens);
@@ -14219,12 +15903,22 @@ value = 1.0
 
         let shapes_a = crate::shape::infer(&program, &[NEW_COUNT, CACHED_LEN_A])
             .expect("cached_len=50 infers");
-        let resolved_a =
-            crate::bind::bind(&program, &shapes_a, &outputs, crate::numeric::NumericPolicy::bit_exact()).expect("cached_len=50 binds");
+        let resolved_a = crate::bind::bind(
+            &program,
+            &shapes_a,
+            &outputs,
+            crate::numeric::NumericPolicy::bit_exact(),
+        )
+        .expect("cached_len=50 binds");
         let shapes_b = crate::shape::infer(&program, &[NEW_COUNT, CACHED_LEN_B])
             .expect("cached_len=51 infers");
-        let resolved_b =
-            crate::bind::bind(&program, &shapes_b, &outputs, crate::numeric::NumericPolicy::bit_exact()).expect("cached_len=51 binds");
+        let resolved_b = crate::bind::bind(
+            &program,
+            &shapes_b,
+            &outputs,
+            crate::numeric::NumericPolicy::bit_exact(),
+        )
+        .expect("cached_len=51 binds");
 
         assert_eq!(
             resolved_a.len(),
@@ -15038,9 +16732,9 @@ value = 1.0
                 crate::bind::BoundOpKind::Elementwise { .. } => elementwise += 1,
                 crate::bind::BoundOpKind::Reduce { .. } => {
                     let operands = op.operands();
-                    let is_two_operand = operands
-                        .first()
-                        .is_some_and(|(first, _, _)| operands.iter().any(|(node, _, _)| node != first));
+                    let is_two_operand = operands.first().is_some_and(|(first, _, _)| {
+                        operands.iter().any(|(node, _, _)| node != first)
+                    });
                     if is_two_operand {
                         reduce_two_operand += 1;
                     } else {
@@ -15142,9 +16836,7 @@ value = 1.0
                 quarantine_broadcast_declines += calls;
             }
         }
-        std::println!(
-            "rule_census quarantine_broadcast_declines={quarantine_broadcast_declines}"
-        );
+        std::println!("rule_census quarantine_broadcast_declines={quarantine_broadcast_declines}");
         assert!(
             quarantine_broadcast_declines > 0,
             "rule census recorded zero quarantine-broadcast declines -- the site is wired to nothing"
@@ -15160,7 +16852,8 @@ value = 1.0
         for (node, label) in [(7_u32, "rope_cos"), (8, "rope_sin")] {
             let mut costing = 0_u64;
             let mut free = 0_u64;
-            for (decline_node, _site, _reason, calls) in crate::instrument::fuse_decline_snapshot() {
+            for (decline_node, _site, _reason, calls) in crate::instrument::fuse_decline_snapshot()
+            {
                 if decline_node != node {
                     continue;
                 }
@@ -15173,7 +16866,10 @@ value = 1.0
             std::println!(
                 "rule_census named_node_check node={node} label={label} costing={costing} free={free}"
             );
-            assert_eq!(costing, 0, "{label} (node {node}) is an Op::Input leaf -- every one of its declines must be free");
+            assert_eq!(
+                costing, 0,
+                "{label} (node {node}) is an Op::Input leaf -- every one of its declines must be free"
+            );
         }
 
         // deliverable #4: is `non_identity_projection=129` here the SAME
@@ -15279,7 +16975,8 @@ value = 1.0
                 costing_phase_example_node.entry(phase).or_insert(node);
             }
         }
-        let still_live_costing_total = still_live_costing_in_block + still_live_costing_out_of_block;
+        let still_live_costing_total =
+            still_live_costing_in_block + still_live_costing_out_of_block;
         std::println!(
             "rule_census still_live_costing_in_block={still_live_costing_in_block} still_live_costing_outside_block={still_live_costing_out_of_block} still_live_costing_total={still_live_costing_total}"
         );
@@ -15298,8 +16995,7 @@ value = 1.0
         // online-softmax block's 96 (all three of global_max/weights_cached/
         // weights_new are Elementwise, so all 96 are costing by construction
         // -- confirmed below, not assumed).
-        let block_fraction_permille =
-            still_live_costing_in_block * 1000 / still_live_costing_total;
+        let block_fraction_permille = still_live_costing_in_block * 1000 / still_live_costing_total;
         std::println!(
             "rule_census online_softmax_block_share_of_costing calls={still_live_costing_in_block} of={still_live_costing_total} permille={block_fraction_permille}"
         );
@@ -15310,9 +17006,15 @@ value = 1.0
         // the 7th (phase 6) -- `spec.rs:2616,2632,2644`, read directly off
         // this test's own doc trace of the block, not guessed. All three
         // are `Op::Elementwise`, so they land in `costing_phase_totals`.
-        for (phase, label) in [(2_u32, "global_max"), (4, "weights_cached"), (6, "weights_new")] {
+        for (phase, label) in [
+            (2_u32, "global_max"),
+            (4, "weights_cached"),
+            (6, "weights_new"),
+        ] {
             let calls = costing_phase_totals.get(&phase).copied().unwrap_or(0);
-            std::println!("rule_census still_live_costing_phase={phase} label={label} calls={calls}");
+            std::println!(
+                "rule_census still_live_costing_phase={phase} label={label} calls={calls}"
+            );
         }
 
         let mut ranked_costing_phases: alloc::vec::Vec<(u32, u64)> =
@@ -15382,11 +17084,12 @@ value = 1.0
         // answer "how many consumers" on its own.
         let mut consumer_count: alloc::collections::BTreeMap<u32, u64> =
             alloc::collections::BTreeMap::new();
-        let count_map_indices = |map: &IndexMap, counts: &mut alloc::collections::BTreeMap<u32, u64>| {
-            if let IndexMap::Computed { indices, .. } = map {
-                *counts.entry(indices.0).or_insert(0) += 1;
-            }
-        };
+        let count_map_indices =
+            |map: &IndexMap, counts: &mut alloc::collections::BTreeMap<u32, u64>| {
+                if let IndexMap::Computed { indices, .. } = map {
+                    *counts.entry(indices.0).or_insert(0) += 1;
+                }
+            };
         for op in &program {
             match op {
                 Op::Elementwise { operands, .. } => {
@@ -15454,7 +17157,9 @@ value = 1.0
             *consumer_histogram.entry(count).or_insert(0) += 1;
         }
         for (consumers, nodes) in &consumer_histogram {
-            std::println!("rule_census rematerialize_histogram consumers={consumers} nodes={nodes}");
+            std::println!(
+                "rule_census rematerialize_histogram consumers={consumers} nodes={nodes}"
+            );
         }
         assert!(
             consumer_histogram.keys().all(|&count| count >= 2),
@@ -15584,7 +17289,10 @@ value = 1.0
         // reduce keeps its `BoundOpKind::Reduce` kind, just gains a
         // non-default `epilogue_body`.
         #[cfg(not(feature = "reduce-epilogue-fusion"))]
-        assert_eq!(total, 1196, "total BoundOps must match the measured forward");
+        assert_eq!(
+            total, 1196,
+            "total BoundOps must match the measured forward"
+        );
         #[cfg(feature = "reduce-epilogue-fusion")]
         assert_eq!(
             total,
@@ -15601,7 +17309,10 @@ value = 1.0
              BoundOpKind::Reduce kind, it only gains a non-default epilogue"
         );
         #[cfg(not(feature = "reduce-epilogue-fusion"))]
-        assert_eq!(elementwise, 547, "elementwise BoundOps must match the measured forward");
+        assert_eq!(
+            elementwise, 547,
+            "elementwise BoundOps must match the measured forward"
+        );
         #[cfg(feature = "reduce-epilogue-fusion")]
         assert_eq!(
             elementwise,
@@ -15609,7 +17320,10 @@ value = 1.0
             "419 = 547 unfused elementwise BoundOps minus the 128 reduce-epilogue-fusion \
              absorptions (4/layer x 32 layers) -- see epilogued_reduce_count's own doc above"
         );
-        assert_eq!(constant, 37, "constant BoundOps must match the measured forward");
+        assert_eq!(
+            constant, 37,
+            "constant BoundOps must match the measured forward"
+        );
         assert_eq!(iota, 2, "iota BoundOps must match the measured forward");
         assert_eq!(
             reduce_total + elementwise + constant + iota,
@@ -15706,15 +17420,14 @@ value = 1.0
         }
         let paired_shapes = crate::shape::infer(&paired_program, &[1, 71])
             .expect("paired: one new position against a 71-position cache infers");
-        let paired_bound =
-            crate::bind::bind_with_fusion(
-                &paired_program,
-                &paired_shapes,
-                &paired_outputs,
-                false,
-                crate::numeric::NumericPolicy::default(),
-            )
-                .expect("the paired program binds");
+        let paired_bound = crate::bind::bind_with_fusion(
+            &paired_program,
+            &paired_shapes,
+            &paired_outputs,
+            false,
+            crate::numeric::NumericPolicy::default(),
+        )
+        .expect("the paired program binds");
         let paired_reduce_total = paired_bound
             .iter()
             .filter(|op| matches!(&op.kind, crate::bind::BoundOpKind::Reduce { .. }))
@@ -15853,15 +17566,14 @@ value = 1.0
         }
         let fused_shapes = crate::shape::infer(&fused_program, &[1, 71])
             .expect("fused: one new position against a 71-position cache infers");
-        let fused_bound =
-            crate::bind::bind_with_fusion(
-                &fused_program,
-                &fused_shapes,
-                &fused_outputs,
-                false,
-                crate::numeric::NumericPolicy::default(),
-            )
-                .expect("the fused-qkv program binds");
+        let fused_bound = crate::bind::bind_with_fusion(
+            &fused_program,
+            &fused_shapes,
+            &fused_outputs,
+            false,
+            crate::numeric::NumericPolicy::default(),
+        )
+        .expect("the fused-qkv program binds");
         let fused_total = fused_bound.len();
         let fused_reduce_total = fused_bound
             .iter()
@@ -16441,7 +18153,12 @@ value = 1.0
         let mut program = Vec::new();
         let shape_d = alloc::vec![Extent::Static(1), Extent::Static(2)];
         let x = input_leaf(&mut program, DType::Float32, shape_d, "x");
-        let eps = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "eps");
+        let eps = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1)],
+            "eps",
+        );
 
         let out = l2norm(&mut program, x, eps, "sd->sd", "s->sd").expect("l2norm lowers");
 
@@ -16493,7 +18210,12 @@ value = 1.0
             alloc::vec![Extent::Static(qkv_dim), Extent::Static(l_cache)],
             "conv_weight",
         );
-        let eps = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "eps");
+        let eps = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0)],
+            "eps",
+        );
         let one = scalar_constant(&mut program, 1.0);
 
         let (q_conv, k_conv, v_conv) = append_qwen35_conv_branch(
@@ -16536,14 +18258,20 @@ value = 1.0
         let (v_values, v_shape) = evaluated.get(v_conv).expect("v_conv present");
 
         assert_eq!(v_shape, [2u64, 1u64]);
-        assert!((v_values[0] - 1.226_362).abs() < 1e-4, "got {}", v_values[0]);
+        assert!(
+            (v_values[0] - 1.226_362).abs() < 1e-4,
+            "got {}",
+            v_values[0]
+        );
         assert!((v_values[1] - 8.998_89).abs() < 1e-4, "got {}", v_values[1]);
         assert_eq!(
-            q_values, [1.0, 1.0],
+            q_values,
+            [1.0, 1.0],
             "silu(q_raw) is positive at both steps, so l2norm at width 1 is +1"
         );
         assert_eq!(
-            k_values, [-1.0, -1.0],
+            k_values,
+            [-1.0, -1.0],
             "silu(k_raw) is negative at both steps, so l2norm at width 1 is -1"
         );
     }
@@ -16570,7 +18298,12 @@ value = 1.0
             alloc::vec![Extent::Static(qkv_dim), Extent::Static(l_cache)],
             "conv_weight",
         );
-        let eps = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "eps");
+        let eps = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0)],
+            "eps",
+        );
         let one = scalar_constant(&mut program, 1.0);
 
         let (_, _, v_conv) = append_qwen35_conv_branch(
@@ -16634,7 +18367,11 @@ value = 1.0
         let x = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Symbolic(0), Extent::Static(kv_heads), Extent::Static(1)],
+            alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(kv_heads),
+                Extent::Static(1)
+            ],
             "x",
         );
         let repeated = repeat_kv_heads(&mut program, x, kv_heads, group).expect("repeat lowers");
@@ -16660,7 +18397,11 @@ value = 1.0
         let x = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Symbolic(0), Extent::Static(kv_heads), Extent::Static(1)],
+            alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(kv_heads),
+                Extent::Static(1)
+            ],
             "x",
         );
         let repeated = repeat_kv_heads(&mut program, x, kv_heads, group).expect("repeat lowers");
@@ -16692,7 +18433,12 @@ value = 1.0
     #[proxima::test]
     async fn qwen35_ssm_mixer_rejects_a_static_multi_position_step() {
         let mut program = Vec::new();
-        let x = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(2), Extent::Static(1)], "x");
+        let x = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(2), Extent::Static(1)],
+            "x",
+        );
 
         let result = append_qwen35_ssm_mixer_with_taps(
             &mut program,
@@ -16748,7 +18494,9 @@ value = 1.0
     /// mean-square to `delta_out^2`, so `normed_out = sign(delta_out)`
     /// exactly, the same width-1-l2norm-is-sign identity
     /// [`append_qwen35_conv_branch`]'s own test already exploits.
-    fn build_ssm_mixer_test_program(output_gate: GdnOutputGate) -> (Vec<Op>, NodeId, NodeId, NodeId) {
+    fn build_ssm_mixer_test_program(
+        output_gate: GdnOutputGate,
+    ) -> (Vec<Op>, NodeId, NodeId, NodeId) {
         let mut program = Vec::new();
         let key_dim = 1u32;
         let value_dim = 2u32;
@@ -16757,9 +18505,19 @@ value = 1.0
         let l_cache = 2u32;
         let qkv_dim = 2 * key_dim + value_dim;
 
-        let x = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(1)], "x");
+        let x = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(1)],
+            "x",
+        );
         let inv_dim = scalar_constant(&mut program, 1.0);
-        let eps = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "eps");
+        let eps = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0)],
+            "eps",
+        );
         let head_eps = input_leaf(
             &mut program,
             DType::Float32,
@@ -16769,7 +18527,12 @@ value = 1.0
         let one = scalar_constant(&mut program, 1.0);
         let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0);
         let inv_head_v_dim = scalar_constant(&mut program, 1.0);
-        let attn_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "attn_norm_weight");
+        let attn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1)],
+            "attn_norm_weight",
+        );
         let wqkv = input_leaf(
             &mut program,
             DType::Float32,
@@ -16818,7 +18581,12 @@ value = 1.0
             alloc::vec![Extent::Static(kv_heads * group)],
             "ssm_a",
         );
-        let ssm_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "ssm_norm_weight");
+        let ssm_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1)],
+            "ssm_norm_weight",
+        );
         let ssm_out = input_leaf(
             &mut program,
             DType::Float32,
@@ -16902,9 +18670,9 @@ value = 1.0
     /// 1 * sigmoid(1) ≈ 0.7310586`, `ffn_hidden = 0.7310586 * 1`,
     /// `ffn_out = 0.7310586`, `x_next = 0.7310586 + 4.0 ≈ 4.7310586`.
     #[test]
-    fn append_qwen35_dense_attention_layer_matches_a_hand_computed_gate_and_partial_rotary_concat() {
-        let (x_next, ..) =
-            evaluate_dense_attention_test_program(0.0, [0.0f32, 0.0, 0.0, 0.0]);
+    fn append_qwen35_dense_attention_layer_matches_a_hand_computed_gate_and_partial_rotary_concat()
+    {
+        let (x_next, ..) = evaluate_dense_attention_test_program(0.0, [0.0f32, 0.0, 0.0, 0.0]);
 
         assert!(
             (x_next - 4.731_058_6).abs() < 1e-4,
@@ -16947,14 +18715,20 @@ value = 1.0
         let rotary_shape = alloc::vec![Extent::Symbolic(0), Extent::Static(1)];
         let head4_shape = alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4)];
         let cache4_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(1)];
-        let cache_pass_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(2)];
+        let cache_pass_shape =
+            alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(2)];
         let cache_v_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(4)];
         let norm_shape = alloc::vec![Extent::Static(4)];
         let ffn_shape = alloc::vec![Extent::Static(1), Extent::Static(1)];
 
         let x = input_leaf(&mut program, DType::Float32, scalar_shape.clone(), "x");
         let inv_dim = scalar_constant(&mut program, 1.0);
-        let eps = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "eps");
+        let eps = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0)],
+            "eps",
+        );
         let ones = scalar_constant(&mut program, 1.0);
         let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 0.5);
         let inv_attn_head_dim = scalar_constant(&mut program, 0.25);
@@ -16972,55 +18746,92 @@ value = 1.0
         let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
 
         let head8_shape = alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(8)];
-        let attn_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "attn_norm_weight");
-        let ffn_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "ffn_norm_weight");
-        let q_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape.clone(), "q_norm_weight");
+        let attn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1)],
+            "attn_norm_weight",
+        );
+        let ffn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1)],
+            "ffn_norm_weight",
+        );
+        let q_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            norm_shape.clone(),
+            "q_norm_weight",
+        );
         let k_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape, "k_norm_weight");
         let wq_gate = input_leaf(&mut program, DType::Float32, head8_shape, "wq_gate");
         let wk = input_leaf(&mut program, DType::Float32, head4_shape.clone(), "wk");
         let wv = input_leaf(&mut program, DType::Float32, head4_shape.clone(), "wv");
-        let wo = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4), Extent::Static(1)], "wo");
+        let wo = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(1),
+                Extent::Static(1),
+                Extent::Static(4),
+                Extent::Static(1)
+            ],
+            "wo",
+        );
         let w_gate = input_leaf(&mut program, DType::Float32, ffn_shape.clone(), "w_gate");
         let w_up = input_leaf(&mut program, DType::Float32, ffn_shape.clone(), "w_up");
         let w_down = input_leaf(&mut program, DType::Float32, ffn_shape, "w_down");
-        let k_first_cache = input_leaf(&mut program, DType::Float32, cache4_shape.clone(), "k_first_cache");
-        let k_second_cache = input_leaf(&mut program, DType::Float32, cache4_shape, "k_second_cache");
-        let k_pass_cache = input_leaf(&mut program, DType::Float32, cache_pass_shape, "k_pass_cache");
+        let k_first_cache = input_leaf(
+            &mut program,
+            DType::Float32,
+            cache4_shape.clone(),
+            "k_first_cache",
+        );
+        let k_second_cache =
+            input_leaf(&mut program, DType::Float32, cache4_shape, "k_second_cache");
+        let k_pass_cache = input_leaf(
+            &mut program,
+            DType::Float32,
+            cache_pass_shape,
+            "k_pass_cache",
+        );
         let v_cache = input_leaf(&mut program, DType::Float32, cache_v_shape, "v_cache");
 
-        let (x_next, (rotated_k_first, rotated_k_second, k_pass, v_new)) = append_qwen35_dense_attention_layer(
-            &mut program,
-            x,
-            inv_dim,
-            eps,
-            ones,
-            inv_sqrt_attn_head_dim,
-            inv_attn_head_dim,
-            cos_new,
-            sin_new,
-            group_ones,
-            is_future,
-            cached_len,
-            1,
-            2,
-            4,
-            attn_norm_weight,
-            ffn_norm_weight,
-            q_norm_weight,
-            k_norm_weight,
-            wq_gate,
-            wk,
-            wv,
-            wo,
-            w_gate,
-            w_up,
-            w_down,
-            k_first_cache,
-            k_second_cache,
-            k_pass_cache,
-            v_cache,
-        )
-        .expect("dense attention layer lowers");
+        let (x_next, (rotated_k_first, rotated_k_second, k_pass, v_new)) =
+            append_qwen35_dense_attention_layer(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                ones,
+                inv_sqrt_attn_head_dim,
+                inv_attn_head_dim,
+                cos_new,
+                sin_new,
+                group_ones,
+                is_future,
+                cached_len,
+                1,
+                2,
+                4,
+                attn_norm_weight,
+                ffn_norm_weight,
+                q_norm_weight,
+                k_norm_weight,
+                wq_gate,
+                wk,
+                wv,
+                wo,
+                w_gate,
+                w_up,
+                w_down,
+                k_first_cache,
+                k_second_cache,
+                k_pass_cache,
+                v_cache,
+            )
+            .expect("dense attention layer lowers");
 
         let x_data = [2.0f32];
         let eps_data = [eps_value];
@@ -17030,7 +18841,16 @@ value = 1.0
         let ffn_norm_data = [1.0f32];
         let q_norm_data = [1.0f32, 1.0, 1.0, 1.0];
         let k_norm_data = [1.0f32, 1.0, 1.0, 1.0];
-        let wq_gate_data = [1.0f32, 1.0, 1.0, 1.0, gate_data[0], gate_data[1], gate_data[2], gate_data[3]];
+        let wq_gate_data = [
+            1.0f32,
+            1.0,
+            1.0,
+            1.0,
+            gate_data[0],
+            gate_data[1],
+            gate_data[2],
+            gate_data[3],
+        ];
         let wk_data = [1.0f32, 1.0, 1.0, 1.0];
         let wv_data = [1.0f32, 1.0, 1.0, 1.0];
         let wo_data = [1.0f32, 1.0, 1.0, 1.0];
@@ -17094,21 +18914,47 @@ value = 1.0
     fn dense_attention_only_test_inputs(
         program: &mut Vec<Op>,
     ) -> (
-        NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId,
-        NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
     ) {
         let scalar_shape = alloc::vec![Extent::Symbolic(0), Extent::Static(1)];
         let rotary_shape = alloc::vec![Extent::Symbolic(0), Extent::Static(1)];
         let head4_shape = alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4)];
         let head8_shape = alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(8)];
         let cache4_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(1)];
-        let cache_pass_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(2)];
+        let cache_pass_shape =
+            alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(2)];
         let cache_v_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(4)];
         let norm_shape = alloc::vec![Extent::Static(4)];
 
         let x = input_leaf(program, DType::Float32, scalar_shape, "x");
         let inv_dim = scalar_constant(program, 1.0);
-        let eps = input_leaf(program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "eps");
+        let eps = input_leaf(
+            program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0)],
+            "eps",
+        );
         let ones = scalar_constant(program, 1.0);
         let inv_sqrt_attn_head_dim = scalar_constant(program, 0.5);
         let inv_attn_head_dim = scalar_constant(program, 0.25);
@@ -17125,22 +18971,62 @@ value = 1.0
         let (is_future, _neg_infinity) = causal_mask(program).expect("causal mask lowers");
         let cached_len = input_leaf(program, DType::Float32, Vec::new(), "cached_len");
 
-        let attn_norm_weight = input_leaf(program, DType::Float32, alloc::vec![Extent::Static(1)], "attn_norm_weight");
-        let q_norm_weight = input_leaf(program, DType::Float32, norm_shape.clone(), "q_norm_weight");
+        let attn_norm_weight = input_leaf(
+            program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1)],
+            "attn_norm_weight",
+        );
+        let q_norm_weight =
+            input_leaf(program, DType::Float32, norm_shape.clone(), "q_norm_weight");
         let k_norm_weight = input_leaf(program, DType::Float32, norm_shape, "k_norm_weight");
         let wq_gate = input_leaf(program, DType::Float32, head8_shape, "wq_gate");
         let wk = input_leaf(program, DType::Float32, head4_shape.clone(), "wk");
         let wv = input_leaf(program, DType::Float32, head4_shape, "wv");
-        let wo = input_leaf(program, DType::Float32, alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4), Extent::Static(1)], "wo");
-        let k_first_cache = input_leaf(program, DType::Float32, cache4_shape.clone(), "k_first_cache");
+        let wo = input_leaf(
+            program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(1),
+                Extent::Static(1),
+                Extent::Static(4),
+                Extent::Static(1)
+            ],
+            "wo",
+        );
+        let k_first_cache = input_leaf(
+            program,
+            DType::Float32,
+            cache4_shape.clone(),
+            "k_first_cache",
+        );
         let k_second_cache = input_leaf(program, DType::Float32, cache4_shape, "k_second_cache");
         let k_pass_cache = input_leaf(program, DType::Float32, cache_pass_shape, "k_pass_cache");
         let v_cache = input_leaf(program, DType::Float32, cache_v_shape, "v_cache");
 
         (
-            x, inv_dim, eps, ones, inv_sqrt_attn_head_dim, inv_attn_head_dim, cos_new, sin_new, group_ones, is_future,
-            cached_len, attn_norm_weight, q_norm_weight, k_norm_weight, wq_gate, wk, wv, wo, k_first_cache,
-            k_second_cache, k_pass_cache, v_cache,
+            x,
+            inv_dim,
+            eps,
+            ones,
+            inv_sqrt_attn_head_dim,
+            inv_attn_head_dim,
+            cos_new,
+            sin_new,
+            group_ones,
+            is_future,
+            cached_len,
+            attn_norm_weight,
+            q_norm_weight,
+            k_norm_weight,
+            wq_gate,
+            wk,
+            wv,
+            wo,
+            k_first_cache,
+            k_second_cache,
+            k_pass_cache,
+            v_cache,
         )
     }
 
@@ -17155,9 +19041,28 @@ value = 1.0
     fn dense_attention_only_and_with_taps_produce_the_same_program() {
         let mut plain_program = Vec::new();
         let (
-            x, inv_dim, eps, ones, inv_sqrt_attn_head_dim, inv_attn_head_dim, cos_new, sin_new, group_ones, is_future,
-            cached_len, attn_norm_weight, q_norm_weight, k_norm_weight, wq_gate, wk, wv, wo, k_first_cache,
-            k_second_cache, k_pass_cache, v_cache,
+            x,
+            inv_dim,
+            eps,
+            ones,
+            inv_sqrt_attn_head_dim,
+            inv_attn_head_dim,
+            cos_new,
+            sin_new,
+            group_ones,
+            is_future,
+            cached_len,
+            attn_norm_weight,
+            q_norm_weight,
+            k_norm_weight,
+            wq_gate,
+            wk,
+            wv,
+            wo,
+            k_first_cache,
+            k_second_cache,
+            k_pass_cache,
+            v_cache,
         ) = dense_attention_only_test_inputs(&mut plain_program);
         let (plain_residual, plain_roots) = append_qwen35_dense_attention_only(
             &mut plain_program,
@@ -17191,9 +19096,28 @@ value = 1.0
 
         let mut taps_program = Vec::new();
         let (
-            x, inv_dim, eps, ones, inv_sqrt_attn_head_dim, inv_attn_head_dim, cos_new, sin_new, group_ones, is_future,
-            cached_len, attn_norm_weight, q_norm_weight, k_norm_weight, wq_gate, wk, wv, wo, k_first_cache,
-            k_second_cache, k_pass_cache, v_cache,
+            x,
+            inv_dim,
+            eps,
+            ones,
+            inv_sqrt_attn_head_dim,
+            inv_attn_head_dim,
+            cos_new,
+            sin_new,
+            group_ones,
+            is_future,
+            cached_len,
+            attn_norm_weight,
+            q_norm_weight,
+            k_norm_weight,
+            wq_gate,
+            wk,
+            wv,
+            wo,
+            k_first_cache,
+            k_second_cache,
+            k_pass_cache,
+            v_cache,
         ) = dense_attention_only_test_inputs(&mut taps_program);
         let (taps_residual, taps) = append_qwen35_dense_attention_only_with_taps(
             &mut taps_program,
@@ -17233,7 +19157,12 @@ value = 1.0
         assert_eq!(plain_residual, taps_residual);
         assert_eq!(
             plain_roots,
-            (taps.rotated_k_new_first, taps.rotated_k_new_second, taps.k_pass, taps.v_new)
+            (
+                taps.rotated_k_new_first,
+                taps.rotated_k_new_second,
+                taps.k_pass,
+                taps.v_new
+            )
         );
     }
 
@@ -17275,6 +19204,17 @@ value = 1.0
         crate::shape::infer(&program, &[1, 0])
             .expect("the whole qwen35 forward pass infers at a real decode step");
         let _ = logits;
+    }
+
+    #[test]
+    fn qwen35_last_row_projection_has_one_output_row() {
+        let (program, logits, _roots) = qwen35_forward_program_with_last_row(
+            100, 8, 16, 2, 1, 4, 8, 4, 2, 2, 2, 1, 4, 3, 1e-5, true,
+        )
+        .expect("the last-row qwen35 program lowers");
+        let shapes = crate::shape::infer(&program, &[3, 0])
+            .expect("the last-row qwen35 program infers for a three-token prompt");
+        assert_eq!(shapes.of(logits), &[1, 100]);
     }
 
     /// [`the_whole_qwen35_forward_pass_infers_at_real_dimensions`]'s own
@@ -17360,7 +19300,8 @@ value = 1.0
     /// -4.98530547`, `mixer_out = x + cur = -3.98530547`.
     #[proxima::test]
     async fn qwen35_ssm_mixer_matches_a_hand_computed_decode_step() {
-        let (program, mixer_out, qkv_mixed, state_out) = build_ssm_mixer_test_program(GdnOutputGate::Silu);
+        let (program, mixer_out, qkv_mixed, state_out) =
+            build_ssm_mixer_test_program(GdnOutputGate::Silu);
 
         let x_data = [1.0f32];
         let eps_data = [0.0f32];
@@ -17411,7 +19352,11 @@ value = 1.0
             "got {}",
             mixer_out_values[0]
         );
-        assert_eq!(qkv_mixed_values, [0.0, 0.0, 0.0, 0.0], "wqkv is zero, so qkv_mixed is zero");
+        assert_eq!(
+            qkv_mixed_values,
+            [0.0, 0.0, 0.0, 0.0],
+            "wqkv is zero, so qkv_mixed is zero"
+        );
         assert!(
             (state_out_values[0] - (-0.365_529_3)).abs() < 1e-4,
             "got {}",
@@ -17660,13 +19605,21 @@ value = 1.0
         let k_even_cache = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(pairs)],
+            alloc::vec![
+                Extent::Symbolic(1),
+                Extent::Static(1),
+                Extent::Static(pairs)
+            ],
             "kv_cache.k_even",
         );
         let k_odd_cache = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(pairs)],
+            alloc::vec![
+                Extent::Symbolic(1),
+                Extent::Static(1),
+                Extent::Static(pairs)
+            ],
             "kv_cache.k_odd",
         );
         let v_cache = input_leaf(
@@ -17761,9 +19714,18 @@ value = 1.0
         let (normed, _, _) =
             single_range_layer_with_order(true, true).expect("a qk-norm layer now builds");
 
-        let reduce_count = |program: &[Op]| program.iter().filter(|op| matches!(op, Op::Reduce { .. })).count();
-        let elementwise_count =
-            |program: &[Op]| program.iter().filter(|op| matches!(op, Op::Elementwise { .. })).count();
+        let reduce_count = |program: &[Op]| {
+            program
+                .iter()
+                .filter(|op| matches!(op, Op::Reduce { .. }))
+                .count()
+        };
+        let elementwise_count = |program: &[Op]| {
+            program
+                .iter()
+                .filter(|op| matches!(op, Op::Elementwise { .. }))
+                .count()
+        };
 
         assert_eq!(
             reduce_count(&normed),
