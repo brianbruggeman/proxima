@@ -997,6 +997,21 @@ mod tests {
                 && gdn_taps.state_in.0 < gdn_taps.state_out.0,
             "the production scan cut must expose its carried inputs before recurrence"
         );
+        let gdn_prefill = diagnostics[0]
+            .gdn_prefill
+            .expect("the gdn layer has a sequence-preserving router path");
+        let shapes = proxima_tensor::shape::infer(&program, &[2, 2])
+            .expect("two-position prefill shapes infer");
+        assert_eq!(
+            shapes.of(gdn_prefill.delta_out_input),
+            &[2, 2, 1, 2]
+        );
+        assert_eq!(shapes.of(gdn_prefill.post_mixer_residual), &[2, 8]);
+        assert_eq!(
+            shapes.of(gdn_prefill.post_attention_norm_output),
+            &[2, 8]
+        );
+        assert_eq!(shapes.of(gdn_prefill.router_logits), &[2, 2]);
         assert_ne!(
             roots.logits, roots.hidden,
             "logits follow the output projection"
