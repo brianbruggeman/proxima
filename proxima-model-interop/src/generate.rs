@@ -6135,7 +6135,8 @@ impl<'file> LoadedModel<'file> {
         };
 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let ssm_placement_enabled = std::env::var("PROXIMA_METAL_SSM_PLACEMENT")
+        let ssm_placement_enabled = !serving_config.qwen35moe_pre_gather
+            && std::env::var("PROXIMA_METAL_SSM_PLACEMENT")
             .ok()
             .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
