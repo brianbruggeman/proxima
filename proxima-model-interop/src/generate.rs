@@ -105,6 +105,12 @@ use omega::backend::execute_plan_named;
     not(feature = "metal-output-placement")
 ))]
 use omega::backend::execute_plan_named_metal_op_timed;
+#[cfg(all(
+    feature = "instrument",
+    feature = "metal",
+    target_os = "macos"
+))]
+use omega::backend::execute_plan_named_metal_op_timed_with_expert_sources;
 #[cfg(feature = "metal")]
 use omega::backend::{
     Engine, Plan, execute_plan_named_with_expert_sources, mark_resident, plan_named,
@@ -176,6 +182,13 @@ use crate::serving::apply_serving_config;
 /// individually -- the discipline log's own "top 20 ops by GPU time" ask.
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 const OP_PROFILE_TOP_N: usize = 20;
+
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+fn routed_segment_profile_selected(layer: usize, phase: &str) -> bool {
+    std::env::var("PROXIMA_METAL_SEGMENT_OP_PROFILE")
+        .ok()
+        .is_some_and(|target| target == alloc::format!("{phase}:{layer}"))
+}
 
 /// ROW 329: `PROXIMA_METAL_ENCODER_SPLIT_AT`, read the same
 /// unset-means-off, one-env-var-per-diagnostic-knob convention as
@@ -1907,6 +1920,29 @@ impl<'file> LoadedModel<'file> {
                     let result = if segment_input_placements.is_empty()
                         && segment_output_placements.is_empty()
                     {
+                        #[cfg(feature = "instrument")]
+                        if routed_segment_profile_selected(layer, "gather") {
+                            let (evaluated, timings) = runtime.evaluate_segment_op_timed(
+                                program,
+                                symbols,
+                                &segment_named,
+                                &requested_nodes,
+                                resident_names,
+                                &mapped_expert_sources,
+                            )?;
+                            report_op_timings(position_offset, &timings, program);
+                            Ok(evaluated)
+                        } else {
+                            runtime.evaluate_segment(
+                                program,
+                                symbols,
+                                &segment_named,
+                                &requested_nodes,
+                                resident_names,
+                                Some(&mapped_expert_sources),
+                            )
+                        }
+                        #[cfg(not(feature = "instrument"))]
                         runtime.evaluate_segment(
                             program,
                             symbols,
@@ -1929,7 +1965,42 @@ impl<'file> LoadedModel<'file> {
                             },
                         )
                     };
-                    #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+                    #[cfg(all(
+                        feature = "instrument",
+                        feature = "metal",
+                        target_os = "macos",
+                        not(feature = "metal-output-placement")
+                    ))]
+                    let result = if routed_segment_profile_selected(layer, "gather") {
+                        let (evaluated, timings) = runtime.evaluate_segment_op_timed(
+                            program,
+                            symbols,
+                            &segment_named,
+                            &requested_nodes,
+                            resident_names,
+                            &mapped_expert_sources,
+                        )?;
+                        report_op_timings(position_offset, &timings, program);
+                        Ok(evaluated)
+                    } else {
+                        runtime.evaluate_segment(
+                            program,
+                            symbols,
+                            &segment_named,
+                            &requested_nodes,
+                            resident_names,
+                            Some(&mapped_expert_sources),
+                        )
+                    };
+                    #[cfg(not(any(
+                        all(feature = "metal-output-placement", target_os = "macos"),
+                        all(
+                            feature = "instrument",
+                            feature = "metal",
+                            target_os = "macos",
+                            not(feature = "metal-output-placement")
+                        )
+                    )))]
                     let result = runtime.evaluate_segment(
                         program,
                         symbols,
@@ -4137,6 +4208,67 @@ impl BackendRuntime {
             }
         }
         result
+    }
+
+    /// Diagnostic twin of [`Self::evaluate_segment`] for a routed gather.
+    /// It resolves the identical cached segment plan and preserves its
+    /// per-expert source substitutions, changing only command-buffer
+    /// granularity so the caller can attribute GPU time to bound ops.
+    #[cfg(all(feature = "instrument", target_os = "macos"))]
+    fn evaluate_segment_op_timed(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        expert_sources: &alloc::collections::BTreeMap<
+            NodeId,
+            proxima_tensor::cpu::ExpertSource<'_>,
+        >,
+    ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
+        let program_key = program.as_ptr() as usize;
+        let new_count = symbols.first().copied().unwrap_or_default() as usize;
+        let kv_bound_extent = symbols.get(1).copied().unwrap_or_default() as usize;
+        let exact_activations = self.exact_activations;
+        let plan = Self::resolve_segment_plan(
+            &mut self.segment_plans,
+            &mut self.plan_hits,
+            &mut self.plan_misses,
+            (program_key, new_count, kv_bound_extent),
+            || {
+                let mut plan = if exact_activations {
+                    plan_named_exact(
+                        self.engine,
+                        None,
+                        program,
+                        symbols,
+                        named,
+                        outputs,
+                        self.numeric_policy,
+                    )?
+                } else {
+                    plan_named(
+                        self.engine,
+                        None,
+                        program,
+                        symbols,
+                        named,
+                        outputs,
+                        self.numeric_policy,
+                    )?
+                };
+                mark_resident(&mut plan, resident_names);
+                set_math_mode(&mut plan, self.math_mode)?;
+                set_dispatch_type(&mut plan, omega::metal::DispatchType::Serial);
+                Ok(plan)
+            },
+        )?;
+        Ok(execute_plan_named_metal_op_timed_with_expert_sources(
+            plan,
+            named,
+            expert_sources,
+        )?)
     }
 
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

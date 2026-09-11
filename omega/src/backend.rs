@@ -849,6 +849,34 @@ pub fn execute_plan_named_metal_op_timed(
     }
 }
 
+/// Routed-expert counterpart of [`execute_plan_named_metal_op_timed`].
+/// The diagnostic preserves the plan's mixed-codec expert substitutions
+/// while timing each bound operation independently.
+///
+/// # Errors
+/// Propagates the Metal driver's name-resolution, expert-source, and timing
+/// failures; reports a non-Metal plan as [`BackendError::NotImplemented`].
+#[cfg(all(feature = "metal", target_os = "macos", feature = "instrument"))]
+pub fn execute_plan_named_metal_op_timed_with_expert_sources(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+    expert_sources: &std::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+) -> Result<(Evaluated, Vec<metal::OpGpuTiming>), BackendError> {
+    match plan {
+        Plan::Metal(metal_plan) => Ok(
+            metal::execute_plan_named_op_timed_with_expert_sources(
+                metal_plan,
+                named,
+                expert_sources,
+            )?,
+        ),
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(_) => Err(BackendError::NotImplemented { backend: "cpu" }),
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(_) => Err(BackendError::NotImplemented { backend: "wgpu" }),
+    }
+}
+
 #[cfg(test)]
 // test fixtures below are hand-built to succeed; an expect/unwrap failure IS
 // the test failing, same convention as every `omega/tests/*.rs` file.
