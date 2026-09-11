@@ -244,6 +244,10 @@ impl<'file> ExpertBytes<'file> {
             Self::Borrowed(_) | Self::Owned(_) => 0,
         }
     }
+
+    const fn is_mapped(&self) -> bool {
+        matches!(self, Self::Mapped { .. })
+    }
 }
 
 /// One expert's own weight bytes for one gathered-reduce projection --
@@ -262,8 +266,12 @@ struct ExpertCopy<'file> {
 
 impl<'file> ExpertCopy<'file> {
     fn entry(&self) -> ExpertEntry<'_> {
+        self.entry_with_bytes(self.bytes.as_slice())
+    }
+
+    fn entry_with_bytes<'bytes>(&self, bytes: &'bytes [u8]) -> ExpertEntry<'bytes> {
         ExpertEntry {
-            block: self.codec.as_block(self.bytes.as_slice()),
+            block: self.codec.as_block(bytes),
             out_dim: self.out_dim,
             in_dim: self.in_dim,
             epoch: self.epoch,
@@ -356,6 +364,10 @@ impl<'file> ExpertSlab<'file> {
         for experts in &mut self.selected_experts {
             experts.clear();
         }
+    }
+
+    pub(crate) fn selected_experts(&self, layer: usize) -> &[u32] {
+        self.selected_experts.get(layer).map_or(&[], Vec::as_slice)
     }
 
     /// Registers layer `layer`'s own contiguous expert stack under
@@ -757,6 +769,15 @@ impl<'file> ExpertSlab<'file> {
         layer: usize,
         entries: &'scratch mut Vec<(NodeId, Vec<ExpertEntry<'scratch>>)>,
     ) -> Result<BTreeMap<NodeId, ExpertSource<'scratch>>, InteropError> {
+        self.sources_for_layer_with_sidecar(layer, None, entries)
+    }
+
+    pub(crate) fn sources_for_layer_with_sidecar<'scratch>(
+        &'scratch self,
+        layer: usize,
+        sidecar: Option<&'scratch crate::expert_sidecar::ExpertSidecarReadScratch>,
+        entries: &'scratch mut Vec<(NodeId, Vec<ExpertEntry<'scratch>>)>,
+    ) -> Result<BTreeMap<NodeId, ExpertSource<'scratch>>, InteropError> {
         entries.clear();
         if !self
             .layers
@@ -765,10 +786,11 @@ impl<'file> ExpertSlab<'file> {
         {
             return Err(InteropError::ExpertSlabIndexOutOfRange { layer, expert: 0 });
         }
-        for layer_slab in self
+        for (site, layer_slab) in self
             .layers
             .iter()
-            .filter(|candidate| candidate.model_layer == Some(layer))
+            .enumerate()
+            .filter(|(_, candidate)| candidate.model_layer == Some(layer))
         {
             let Some(weight_node) = layer_slab.weight_node else {
                 continue;
@@ -776,10 +798,26 @@ impl<'file> ExpertSlab<'file> {
             if let Some(expert) = layer_slab.experts.iter().position(Option::is_none) {
                 return Err(InteropError::ExpertSlabIndexOutOfRange { layer, expert });
             }
+            let projection = self
+                .model_layer_sites
+                .get(layer)
+                .and_then(|sites| sites.iter().position(|candidate| *candidate == Some(site)))
+                .and_then(|index| ExpertProjection::ALL.get(index).copied());
             let layer_entries = layer_slab
                 .experts
                 .iter()
-                .filter_map(|expert| expert.as_ref().map(ExpertCopy::entry))
+                .enumerate()
+                .filter_map(|(expert_index, expert)| {
+                    expert.as_ref().map(|expert| {
+                        sidecar
+                            .and_then(|scratch| {
+                                projection
+                                    .and_then(|projection| scratch.bytes(expert_index, projection))
+                            })
+                            .filter(|_| expert.bytes.is_mapped())
+                            .map_or_else(|| expert.entry(), |bytes| expert.entry_with_bytes(bytes))
+                    })
+                })
                 .collect();
             entries.push((weight_node, layer_entries));
         }

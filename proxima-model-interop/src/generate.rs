@@ -88,6 +88,7 @@ use proxima_tensor::spec::{
     Qwen35LayerRoots, mistral_cached_forward_program_with_experts_and_layer_taps,
 };
 use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
+use std::fs::File;
 use std::sync::Arc;
 
 #[cfg(all(
@@ -1635,6 +1636,7 @@ impl<'file> LoadedModel<'file> {
         let mut carried: BTreeMap<NodeId, (Vec<u64>, Vec<f32>)> = BTreeMap::new();
         let mut results: BTreeMap<NodeId, (Vec<u64>, Vec<f32>)> = BTreeMap::new();
         let mut routed_experts = Vec::with_capacity(self.architecture.expert_used_count as usize);
+        let mut sidecar_read_scratch = crate::expert_sidecar::ExpertSidecarReadScratch::default();
         #[cfg(feature = "instrument")]
         let mut segment_execution_count = 0_u64;
         #[cfg(feature = "instrument")]
@@ -1863,9 +1865,24 @@ impl<'file> LoadedModel<'file> {
                     }
                     result?
                 } else {
+                    let selected_sidecar = if let Some(sidecar) = &self.expert_sidecar
+                        && sidecar.uses_file_reads()
+                    {
+                        sidecar.read_selected_low(
+                            layer,
+                            expert_slab.selected_experts(layer),
+                            &mut sidecar_read_scratch,
+                        )?;
+                        Some(&sidecar_read_scratch)
+                    } else {
+                        None
+                    };
                     let mut expert_entries_scratch = Vec::with_capacity(3);
-                    let expert_sources =
-                        expert_slab.sources_for_layer(layer, &mut expert_entries_scratch)?;
+                    let expert_sources = expert_slab.sources_for_layer_with_sidecar(
+                        layer,
+                        selected_sidecar,
+                        &mut expert_entries_scratch,
+                    )?;
                     let mapped_expert_sources = expert_sources
                         .iter()
                         .flat_map(|(node, source)| {
@@ -5530,6 +5547,21 @@ impl<'file> LoadedModel<'file> {
     /// offsets retained by the sidecar become the high-codec promotion source.
     /// No expert payload is copied or heap-allocated by this operation.
     pub fn attach_expert_sidecar(&mut self, mapping: Arc<Mmap>) -> Result<(), InteropError> {
+        mapping.advise(Advice::Random)?;
+        let sidecar = crate::expert_sidecar::MappedExpertSidecar::new(mapping)?;
+        self.attach_indexed_expert_sidecar(sidecar)
+    }
+
+    /// Attaches a sidecar that preads only the expert ranges selected per layer.
+    pub fn attach_expert_sidecar_file(&mut self, file: File) -> Result<(), InteropError> {
+        let sidecar = crate::expert_sidecar::MappedExpertSidecar::from_file(file)?;
+        self.attach_indexed_expert_sidecar(sidecar)
+    }
+
+    fn attach_indexed_expert_sidecar(
+        &mut self,
+        sidecar: crate::expert_sidecar::MappedExpertSidecar,
+    ) -> Result<(), InteropError> {
         if self.architecture_impl.map(Architecture::name) != Some("qwen35moe") {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: self.architecture_impl.map_or_else(
@@ -5539,11 +5571,6 @@ impl<'file> LoadedModel<'file> {
                 reason: String::from("expert sidecars require a qwen35moe expert graph"),
             });
         }
-        // Expert routes are sparse and change per token; disabling sequential
-        // read-ahead prevents the VM from faulting adjacent sidecar pages that
-        // the residency policy will never touch in this step.
-        mapping.advise(Advice::Random)?;
-        let sidecar = crate::expert_sidecar::MappedExpertSidecar::new(mapping)?;
         sidecar.install_low_copies(
             &mut lock_expert_slab(&self.expert_slab),
             self.architecture.block_count as usize,
