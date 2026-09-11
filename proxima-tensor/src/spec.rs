@@ -8223,6 +8223,78 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
         ],
     )?;
 
+    // The persisted-history branch below is the decode path. Its history
+    // term is intentionally position-invariant and therefore cannot supply
+    // a multi-position prefill. Keep a separate, root-pruned causal branch
+    // for the opt-in prefill executor: with an empty cache it gives every
+    // sequence tap the same causal window repeated one-position decode would.
+    let (query_prefill, key_prefill, value_prefill) = append_qwen35_conv_branch(
+        program,
+        qkv_mixed,
+        conv_weight,
+        eps,
+        one,
+        key_dim,
+        value_dim,
+        l_cache,
+    )?;
+    let query_prefill_split = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (query_prefill, q_split_map.as_str()),
+            (key_head_ones, "ui->sui"),
+        ],
+    )?;
+    let key_prefill_split = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (key_prefill, q_split_map.as_str()),
+            (key_head_ones, "ui->sui"),
+        ],
+    )?;
+    let query_prefill_repeated = repeat_kv_heads(program, query_prefill_split, kv_heads, group)?;
+    let key_prefill_repeated = repeat_kv_heads(program, key_prefill_split, kv_heads, group)?;
+    let value_prefill_split = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (value_prefill, v_split_map.as_str()),
+            (value_head_ones, "ugj->sugj"),
+        ],
+    )?;
+    let query_sequence = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        query_prefill_repeated,
+        "sugd->sugd",
+        "sdug->sugd",
+    )?;
+    let key_sequence = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        key_prefill_repeated,
+        "sugd->sugd",
+        "sdug->sugd",
+    )?;
+    let value_sequence = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        value_prefill_split,
+        "sugj->sugj",
+        "sjug->sugj",
+    )?;
+
     // squeeze the size-1 decode-step `s` axis away -- `append_qwen35_delta_net_step`
     // has no `s` letter at all (a single already-selected token per its own
     // doc), and reordering the surviving letters here (`dug`, not `ugd`)
@@ -8425,9 +8497,9 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
 
     let taps = SsmMixerTaps {
         qkv_mixed,
-        query_sequence: q_repeated,
-        key_sequence: k_repeated,
-        value_sequence: v_split,
+        query_sequence,
+        key_sequence,
+        value_sequence,
         gate_sequence: gate_split,
         beta_sequence: beta_split,
         query,
@@ -18646,9 +18718,7 @@ value = 1.0
     /// mean-square to `delta_out^2`, so `normed_out = sign(delta_out)`
     /// exactly, the same width-1-l2norm-is-sign identity
     /// [`append_qwen35_conv_branch`]'s own test already exploits.
-    fn build_ssm_mixer_test_program(
-        output_gate: GdnOutputGate,
-    ) -> (Vec<Op>, NodeId, SsmMixerTaps) {
+    fn build_ssm_mixer_test_program(output_gate: GdnOutputGate) -> (Vec<Op>, NodeId, SsmMixerTaps) {
         let mut program = Vec::new();
         let key_dim = 1u32;
         let value_dim = 2u32;
@@ -18797,8 +18867,7 @@ value = 1.0
     /// `beta`, batch the prefix, and thread only `state_out` sequentially.
     #[test]
     fn qwen35_ssm_taps_expose_the_existing_delta_net_step_inputs() {
-        let (program, _mixer_out, taps) =
-            build_ssm_mixer_test_program(GdnOutputGate::Silu);
+        let (program, _mixer_out, taps) = build_ssm_mixer_test_program(GdnOutputGate::Silu);
         let shapes = crate::shape::infer(&program, &[1]).expect("mixer shapes infer");
 
         assert_eq!(shapes.of(taps.query), &[1, 1, 2]);
@@ -19476,8 +19545,7 @@ value = 1.0
     /// -4.98530547`, `mixer_out = x + cur = -3.98530547`.
     #[proxima::test]
     async fn qwen35_ssm_mixer_matches_a_hand_computed_decode_step() {
-        let (program, mixer_out, taps) =
-            build_ssm_mixer_test_program(GdnOutputGate::Silu);
+        let (program, mixer_out, taps) = build_ssm_mixer_test_program(GdnOutputGate::Silu);
 
         let x_data = [1.0f32];
         let eps_data = [0.0f32];
@@ -19530,12 +19598,8 @@ value = 1.0
         .expect("ssm mixer evaluates");
 
         let (mixer_out_values, _) = evaluated.get(mixer_out).expect("mixer_out present");
-        let (qkv_mixed_values, _) = evaluated
-            .get(taps.qkv_mixed)
-            .expect("qkv_mixed present");
-        let (state_out_values, _) = evaluated
-            .get(taps.state_out)
-            .expect("state_out present");
+        let (qkv_mixed_values, _) = evaluated.get(taps.qkv_mixed).expect("qkv_mixed present");
+        let (state_out_values, _) = evaluated.get(taps.state_out).expect("state_out present");
         let mut scanned_state = state_in_data;
         let mut scanned_output = [0.0_f32; 2];
         crate::cpu::run_gdn_prefill_scan(crate::cpu::GdnPrefillScan {
@@ -19555,9 +19619,7 @@ value = 1.0
             output: &mut scanned_output,
         })
         .expect("production prefill scan evaluates the tapped recurrence");
-        let (delta_out_values, _) = evaluated
-            .get(taps.delta_out)
-            .expect("delta_out present");
+        let (delta_out_values, _) = evaluated.get(taps.delta_out).expect("delta_out present");
 
         assert!(
             (mixer_out_values[0] - (-3.985_305_5)).abs() < 1e-4,
@@ -19588,6 +19650,81 @@ value = 1.0
             scanned_state.as_slice(),
             state_out_values,
             "the production scan substitution must preserve the carried graph state"
+        );
+    }
+
+    /// The opt-in prefill roots retain `s` and use a causal convolution
+    /// across that axis. With two identical projected rows and unit taps,
+    /// row zero sees one sample while row one sees both samples.
+    #[proxima::test]
+    async fn qwen35_prefill_sequence_taps_preserve_causal_rows() {
+        let (program, _, taps) = build_ssm_mixer_test_program(GdnOutputGate::Silu);
+        let x_data = [1.0_f32, 1.0];
+        let eps_data = [0.0_f32, 0.0];
+        let head_eps_data = [0.0_f32, 0.0];
+        let attn_norm_weight_data = [1.0_f32];
+        let wqkv_data = [1.0_f32, 1.0, 1.0, 1.0];
+        let wqkv_gate_data = [1.0_f32, 2.0];
+        let conv_weight_data = [1.0_f32; 8];
+        let conv_history_in_data = [0.0_f32; 4];
+        let ssm_beta_data = [0.0_f32, 0.0];
+        let ssm_alpha_data = [0.0_f32, 0.0];
+        let ssm_dt_bias_data = [0.0_f32, 0.0];
+        let ssm_a_data = [0.0_f32, 0.0];
+        let ssm_norm_weight_data = [2.0_f32];
+        let ssm_out_data = [1.0_f32, 1.0];
+        let state_in_data = [0.0_f32, 0.0];
+
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[2],
+            &[
+                ("x", &x_data),
+                ("eps", &eps_data),
+                ("head_eps", &head_eps_data),
+                ("attn_norm_weight", &attn_norm_weight_data),
+                ("wqkv", &wqkv_data),
+                ("wqkv_gate", &wqkv_gate_data),
+                ("conv_weight", &conv_weight_data),
+                ("conv_history_in", &conv_history_in_data),
+                ("ssm_beta", &ssm_beta_data),
+                ("ssm_alpha", &ssm_alpha_data),
+                ("ssm_dt_bias", &ssm_dt_bias_data),
+                ("ssm_a", &ssm_a_data),
+                ("ssm_norm_weight", &ssm_norm_weight_data),
+                ("ssm_out", &ssm_out_data),
+                ("state_in", &state_in_data),
+            ],
+            &[
+                taps.query_sequence,
+                taps.key_sequence,
+                taps.value_sequence,
+                taps.gate_sequence,
+                taps.beta_sequence,
+            ],
+        )
+        .expect("two-position prefill taps evaluate without the decode recurrence");
+
+        let (queries, query_shape) = evaluated
+            .get(taps.query_sequence)
+            .expect("query sequence present");
+        let (values, value_shape) = evaluated
+            .get(taps.value_sequence)
+            .expect("value sequence present");
+        assert_eq!(query_shape, [2, 1, 1, 2]);
+        assert_eq!(value_shape, [2, 1, 1, 2]);
+        assert_eq!(queries, [1.0, 1.0, 1.0, 1.0]);
+
+        let first_causal_value = 1.0_f32 / (1.0 + libm::expf(-1.0));
+        let second_causal_value = 2.0_f32 / (1.0 + libm::expf(-2.0));
+        assert_eq!(
+            values,
+            [
+                first_causal_value,
+                first_causal_value,
+                second_causal_value,
+                second_causal_value,
+            ]
         );
     }
 

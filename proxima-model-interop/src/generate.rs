@@ -106,11 +106,7 @@ use omega::backend::execute_plan_named;
     not(feature = "metal-output-placement")
 ))]
 use omega::backend::execute_plan_named_metal_op_timed;
-#[cfg(all(
-    feature = "instrument",
-    feature = "metal",
-    target_os = "macos"
-))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::backend::execute_plan_named_metal_op_timed_with_expert_sources;
 #[cfg(feature = "metal")]
 use omega::backend::{
@@ -1553,12 +1549,13 @@ impl<'file> LoadedModel<'file> {
 
         // layer zero's router is already the complete graph prefix, so a
         // second prefix segment would execute the same operations twice.
-        let first_entry_mapping = layer_parts
-            .first()
-            .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
-                reason: String::from("the bound graph has no first router segment"),
-            })?;
+        let first_entry_mapping =
+            layer_parts
+                .first()
+                .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
+                    architecture: String::from("qwen35moe"),
+                    reason: String::from("the bound graph has no first router segment"),
+                })?;
         let first_entry_mapping = first_entry_mapping
             .2
             .as_ref()
@@ -1583,20 +1580,19 @@ impl<'file> LoadedModel<'file> {
         let mut layers = Vec::with_capacity(layer_parts.len());
         for layer in 0..layer_parts.len() {
             let (router, gather, gdn_scan) = layer_parts[layer].clone();
-            let next_router_cuts = layer_parts
-                .get(layer + 1)
-                .map_or_else(Vec::new, |part| {
+            let next_router_cuts = layer_parts.get(layer + 1).map_or_else(Vec::new, |part| {
+                part.2
+                    .as_ref()
+                    .map_or_else(|| part.0.1.clone(), |scan| scan.producer.1.clone())
+            });
+            let next_cuts = layer_parts.get(layer + 1).map_or_else(
+                || suffix.1.clone(),
+                |part| {
                     part.2
                         .as_ref()
                         .map_or_else(|| part.0.1.clone(), |scan| scan.producer.1.clone())
-                });
-            let next_cuts = layer_parts
-                .get(layer + 1)
-                .map_or_else(|| suffix.1.clone(), |part| {
-                    part.2
-                        .as_ref()
-                        .map_or_else(|| part.0.1.clone(), |scan| scan.producer.1.clone())
-                });
+                },
+            );
             let mut router_future_cuts = gather.1.clone();
             router_future_cuts.extend(next_router_cuts);
             router_future_cuts.sort_by_key(|(node, _)| *node);
@@ -1706,30 +1702,29 @@ impl<'file> LoadedModel<'file> {
             {
                 continue;
             }
-            let (_, values) = carried.get(node).ok_or_else(|| {
-                InteropError::PreGatherExecutionUnsupported {
-                    architecture: String::from("qwen35moe"),
-                    reason: alloc::format!("gdn scan producer missing cut node {node:?} ({name})"),
-                }
-            })?;
+            let (_, values) =
+                carried
+                    .get(node)
+                    .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
+                        architecture: String::from("qwen35moe"),
+                        reason: alloc::format!(
+                            "gdn scan producer missing cut node {node:?} ({name})"
+                        ),
+                    })?;
             segment_named.push((name.as_str(), QuantizedBlock::Float32(values)));
         }
 
         let taps = scan.taps;
         let scan_inputs = [
-            taps.query,
-            taps.key,
-            taps.value,
-            taps.gate,
-            taps.beta,
+            taps.query_sequence,
+            taps.key_sequence,
+            taps.value_sequence,
+            taps.gate_sequence,
+            taps.beta_sequence,
             taps.state_in,
         ];
         let mut requested = BTreeMap::new();
-        for original in router_cuts
-            .iter()
-            .map(|(node, _)| *node)
-            .chain(scan_inputs)
-        {
+        for original in router_cuts.iter().map(|(node, _)| *node).chain(scan_inputs) {
             if let Some(mapped) = mapping.get(&original).copied() {
                 requested.insert(mapped, original);
             }
@@ -1751,38 +1746,56 @@ impl<'file> LoadedModel<'file> {
         }
 
         let query = carried
-            .get(&taps.query)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.query })?
+            .get(&taps.query_sequence)
+            .ok_or(InteropError::MissingEvaluatedNode {
+                node: taps.query_sequence,
+            })?
             .1
             .as_slice();
         let key = carried
-            .get(&taps.key)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.key })?
+            .get(&taps.key_sequence)
+            .ok_or(InteropError::MissingEvaluatedNode {
+                node: taps.key_sequence,
+            })?
             .1
             .as_slice();
-        let value_entry = carried
-            .get(&taps.value)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.value })?;
+        let value_entry =
+            carried
+                .get(&taps.value_sequence)
+                .ok_or(InteropError::MissingEvaluatedNode {
+                    node: taps.value_sequence,
+                })?;
         let value_shape = value_entry.0.clone();
         let value = value_entry.1.as_slice();
         let gate = carried
-            .get(&taps.gate)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.gate })?
+            .get(&taps.gate_sequence)
+            .ok_or(InteropError::MissingEvaluatedNode {
+                node: taps.gate_sequence,
+            })?
             .1
             .as_slice();
         let beta = carried
-            .get(&taps.beta)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.beta })?
+            .get(&taps.beta_sequence)
+            .ok_or(InteropError::MissingEvaluatedNode {
+                node: taps.beta_sequence,
+            })?
             .1
             .as_slice();
-        let state_entry = carried
-            .get(&taps.state_in)
-            .ok_or(InteropError::MissingEvaluatedNode {
-                node: taps.state_in,
-            })?;
+        let state_entry =
+            carried
+                .get(&taps.state_in)
+                .ok_or(InteropError::MissingEvaluatedNode {
+                    node: taps.state_in,
+                })?;
         let state_shape = state_entry.0.clone();
         let mut state = state_entry.1.clone();
         let mut output = vec![0.0_f32; value.len()];
+        let positions = value_shape.first().copied().ok_or_else(|| {
+            InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: String::from("gdn value sequence has no position dimension"),
+            }
+        })? as usize;
         let key_dim = state_shape.first().copied().ok_or_else(|| {
             InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from("qwen35moe"),
@@ -1811,7 +1824,7 @@ impl<'file> LoadedModel<'file> {
             })?;
         run_gdn_prefill_scan(GdnPrefillScan {
             shape: GdnPrefillShape {
-                positions: 1,
+                positions,
                 key_dim,
                 value_dim,
                 heads,
@@ -1825,7 +1838,7 @@ impl<'file> LoadedModel<'file> {
             state: &mut state,
             output: &mut output,
         })?;
-        carried.insert(taps.delta_out, (value_shape, output));
+        carried.insert(taps.delta_out, (value_shape[1..].to_vec(), output));
         carried.insert(taps.state_out, (state_shape, state));
         Ok(())
     }
@@ -6776,17 +6789,7 @@ impl<'file> LoadedModel<'file> {
                 // ROW 427: a `single_position_step` architecture (qwen35's
                 // GDN mixer -- `TensorError::SingleTokenStepOnly`'s own doc)
                 // refuses any `new_count != 1` bind, so a `new_count > 1`
-                // prefill (the whole prompt fed as one batched `next_ids`)
-                // cannot go through this step's evaluate call at all. Split
-                // it into one length-1 batch per prompt position instead --
-                // every batch below runs through the SAME evaluate + cache-
-                // append body as an ordinary decode step, just with
-                // `cached_len` advancing by one per batch rather than by
-                // `next_ids.len()` in a single call. `step_batches` is a
-                // single `next_ids`-sized batch (byte-identical to the
-                // pre-existing single-call path) for every dense/decode
-                // caller and for a qwen35 step that already carries exactly
-                // one position (ordinary decode, or a one-token prompt).
+                // prefill is split into one length-1 batch per position.
                 let split_prefill = self.single_position_step && next_ids.len() > 1;
                 let batch_count = if split_prefill { next_ids.len() } else { 1 };
                 let last_batch_index = batch_count - 1;
@@ -7096,16 +7099,12 @@ impl<'file> LoadedModel<'file> {
                         );
                     }
                     if pre_gather
-                        && qwen35moe_pre_gather_plan
-                            .as_ref()
-                            .is_none_or(|plan| {
-                                plan.symbols != symbols
-                                    || plan.gdn_scan_enabled != gdn_prefill_scan
-                            })
+                        && qwen35moe_pre_gather_plan.as_ref().is_none_or(|plan| {
+                            plan.symbols != symbols || plan.gdn_scan_enabled != gdn_prefill_scan
+                        })
                     {
-                        qwen35moe_pre_gather_plan = Some(
-                            self.qwen35moe_pre_gather_plan(&symbols, gdn_prefill_scan)?,
-                        );
+                        qwen35moe_pre_gather_plan =
+                            Some(self.qwen35moe_pre_gather_plan(&symbols, gdn_prefill_scan)?);
                     }
                     // The pristine table aliases the named checkpoint stack and
                     // needs no substitution. Once a policy pages or evicts any
