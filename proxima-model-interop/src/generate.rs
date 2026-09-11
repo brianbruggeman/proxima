@@ -8066,6 +8066,9 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
 
+    #[cfg(feature = "metal")]
+    use alloc::collections::BTreeMap;
+
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use alloc::collections::BTreeSet;
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -8077,6 +8080,34 @@ mod tests {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_tensor::{DType, Extent, NodeId, Op};
     use proxima_tokenizer::Vocab;
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn segment_plan_cache_distinguishes_kv_bucket_extent() {
+        let mut cache = BTreeMap::new();
+        let mut hits = 0;
+        let mut misses = 0;
+        let first = super::BackendRuntime::resolve_segment_plan(
+            &mut cache,
+            &mut hits,
+            &mut misses,
+            (17, 1, 64),
+            || Ok::<_, super::InteropError>(11_u32),
+        )
+        .expect("first segment shape resolves");
+        assert_eq!(*first, 11);
+        let second = super::BackendRuntime::resolve_segment_plan(
+            &mut cache,
+            &mut hits,
+            &mut misses,
+            (17, 1, 128),
+            || Ok::<_, super::InteropError>(22_u32),
+        )
+        .expect("new KV bucket resolves independently");
+        assert_eq!(*second, 22);
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 2);
+    }
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::{BackendRuntime, LoadedModel};
