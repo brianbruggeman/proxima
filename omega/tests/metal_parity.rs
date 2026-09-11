@@ -11,7 +11,7 @@
 
 use conflaguration::Validate;
 use omega::MetalError;
-use proxima_tensor::spec::ProgramSpec;
+use proxima_tensor::spec::{ProgramSpec, elementwise};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     AxisIndex, AxisTerm, BoundOpKind, DType, Extent, IndexMap, IndexPattern, Keep, NodeId,
@@ -527,6 +527,95 @@ fn matmul_parity_is_exact_for_integer_valued_inputs() {
         "integer-valued matmul inputs must round-trip exactly through f32 multiply-add \
          (max abs diff was {max_abs_diff})"
     );
+}
+
+#[test]
+fn cached_dense_kernel_does_not_override_reordered_head_split_layout() {
+    let mut dense_program = Vec::new();
+    let dense_left = append(
+        &mut dense_program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(2), Extent::Static(3), Extent::Static(2)],
+            name: None,
+        },
+    );
+    let dense_right = append(
+        &mut dense_program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(2), Extent::Static(3), Extent::Static(2)],
+            name: None,
+        },
+    );
+    elementwise(
+        &mut dense_program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(dense_left, "sug->sug"), (dense_right, "sug->sug")],
+    )
+    .expect("dense multiply builds");
+
+    let dense_left_data: Vec<f32> = (0..12).map(|value| value as f32).collect();
+    let dense_right_data = [1.0f32; 12];
+    let dense = omega::execute(
+        &dense_program,
+        &[],
+        &[
+            QuantizedBlock::Float32(&dense_left_data),
+            QuantizedBlock::Float32(&dense_right_data),
+        ],
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("dense multiply primes the pipeline cache");
+    assert_eq!(dense.root(), dense_left_data);
+
+    let mut program = Vec::new();
+    let flat = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(2), Extent::Static(6)],
+            name: None,
+        },
+    );
+    let ones = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(3), Extent::Static(2)],
+            name: None,
+        },
+    );
+    elementwise(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(flat, "s,3*g+u->sug"), (ones, "ug->sug")],
+    )
+    .expect("reordered head split builds");
+
+    let flat_data: Vec<f32> = (0..12).map(|value| value as f32).collect();
+    let ones_data = [1.0f32; 6];
+    let expected = [0.0, 3.0, 1.0, 4.0, 2.0, 5.0, 6.0, 9.0, 7.0, 10.0, 8.0, 11.0];
+
+    let cpu = evaluate(&program, &[], &[&flat_data, &ones_data], &[])
+        .expect("cpu reordered head split evaluates");
+    let metal = omega::execute(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Float32(&flat_data),
+            QuantizedBlock::Float32(&ones_data),
+        ],
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("metal reordered head split executes");
+
+    assert_eq!(cpu.root(), expected);
+    assert_eq!(metal.root(), expected);
 }
 
 #[test]
