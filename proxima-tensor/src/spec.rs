@@ -18059,6 +18059,130 @@ value = 1.0
         );
     }
 
+    /// The caller-buffered prefill scan drives the same one-position graph
+    /// transition twice and exposes both per-position outputs plus the final
+    /// carried matrix state. This is the executable boundary a layer-major
+    /// prefill path can call after producing [`SsmMixerTaps`]' query/key/
+    /// value/gate/beta tensors in a batch.
+    #[proxima::test]
+    async fn qwen35_gdn_prefill_scan_matches_repeated_graph_steps() {
+        let mut program = Vec::new();
+        let shape_ih = alloc::vec![Extent::Static(2), Extent::Static(1)];
+        let shape_jh = alloc::vec![Extent::Static(2), Extent::Static(1)];
+        let shape_h = alloc::vec![Extent::Static(1)];
+        let shape_ijh = alloc::vec![Extent::Static(2), Extent::Static(2), Extent::Static(1)];
+        let query = input_leaf(&mut program, DType::Float32, shape_ih.clone(), "query");
+        let key = input_leaf(&mut program, DType::Float32, shape_ih, "key");
+        let value = input_leaf(&mut program, DType::Float32, shape_jh, "value");
+        let gate = input_leaf(&mut program, DType::Float32, shape_h.clone(), "gate");
+        let beta = input_leaf(&mut program, DType::Float32, shape_h, "beta");
+        let state_in = input_leaf(&mut program, DType::Float32, shape_ijh, "state_in");
+        let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0);
+        let (out, state_out) = append_qwen35_delta_net_step(
+            &mut program,
+            query,
+            key,
+            value,
+            gate,
+            beta,
+            state_in,
+            inv_sqrt_key_dim,
+            "h",
+        )
+        .expect("delta net step lowers");
+
+        let queries = [1.0_f32, 0.0, 0.0, 1.0];
+        let keys = [1.0_f32, 0.0, 0.0, 1.0];
+        let values = [5.0_f32, 6.0, 7.0, 8.0];
+        let gates = [0.0_f32, 0.0];
+        let betas = [1.0_f32, 1.0];
+        let initial_state = [1.0_f32, 2.0, 3.0, 4.0];
+
+        let mut repeated_state = initial_state.to_vec();
+        let mut repeated_outputs = Vec::new();
+        for position in 0..2 {
+            let query_row = &queries[position * 2..position * 2 + 2];
+            let key_row = &keys[position * 2..position * 2 + 2];
+            let value_row = &values[position * 2..position * 2 + 2];
+            let evaluated = crate::cpu::evaluate_named(
+                &program,
+                &[],
+                &[
+                    ("query", query_row),
+                    ("key", key_row),
+                    ("value", value_row),
+                    ("gate", &gates[position..position + 1]),
+                    ("beta", &betas[position..position + 1]),
+                    ("state_in", repeated_state.as_slice()),
+                ],
+                &[out, state_out],
+            )
+            .expect("one recurrent graph step evaluates");
+            repeated_outputs.extend_from_slice(evaluated.get(out).expect("out present").0);
+            repeated_state = evaluated
+                .get(state_out)
+                .expect("state_out present")
+                .0
+                .to_vec();
+        }
+
+        let mut scanned_state = initial_state;
+        let mut scanned_outputs = [0.0_f32; 4];
+        crate::cpu::run_gdn_prefill_scan(crate::cpu::GdnPrefillScan {
+            shape: crate::cpu::GdnPrefillShape {
+                positions: 2,
+                key_dim: 2,
+                value_dim: 2,
+                heads: 1,
+            },
+            query: &queries,
+            key: &keys,
+            value: &values,
+            gate: &gates,
+            beta: &betas,
+            inv_sqrt_key_dim: 1.0,
+            state: &mut scanned_state,
+            output: &mut scanned_outputs,
+        })
+        .expect("caller-buffered prefill scan evaluates");
+
+        assert_eq!(scanned_outputs.as_slice(), repeated_outputs.as_slice());
+        assert_eq!(scanned_state.as_slice(), repeated_state.as_slice());
+        assert_eq!(scanned_outputs, [5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(scanned_state, [5.0, 6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn qwen35_gdn_prefill_scan_rejects_a_truncated_projection() {
+        let mut state = [0.0_f32; 4];
+        let mut output = [0.0_f32; 2];
+        let error = crate::cpu::run_gdn_prefill_scan(crate::cpu::GdnPrefillScan {
+            shape: crate::cpu::GdnPrefillShape {
+                positions: 1,
+                key_dim: 2,
+                value_dim: 2,
+                heads: 1,
+            },
+            query: &[1.0],
+            key: &[1.0, 0.0],
+            value: &[1.0, 0.0],
+            gate: &[0.0],
+            beta: &[1.0],
+            inv_sqrt_key_dim: 1.0,
+            state: &mut state,
+            output: &mut output,
+        })
+        .expect_err("a truncated query projection must be rejected");
+        assert!(matches!(
+            error,
+            TensorError::GdnPrefillBufferSizeMismatch {
+                buffer: "query",
+                expected: 2,
+                found: 1,
+            }
+        ));
+    }
+
     /// Proof the hand-computed test can fail: a nonzero `beta` on a
     /// perturbed run must move both `out` and `state_out` away from the
     /// `beta = 0` (no update at all) reference.

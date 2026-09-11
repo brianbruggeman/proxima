@@ -339,4 +339,18 @@ pub enum TensorError {
         "{op} sums its sequence axis (s = {s}) instead of stepping through it; only s == 1 is supported per evaluation"
     )]
     SingleTokenStepOnly { op: &'static str, s: u64 },
+
+    /// A caller-provided buffer at the GDN recurrent prefill boundary did
+    /// not match the exact tensor extent implied by the scan shape.
+    #[error("gdn prefill buffer `{buffer}` has {found} elements but needs {expected}")]
+    GdnPrefillBufferSizeMismatch {
+        buffer: &'static str,
+        expected: usize,
+        found: usize,
+    },
+
+    /// A GDN recurrent prefill shape contained a zero dimension or its
+    /// element-count multiplication overflowed `usize`.
+    #[error("invalid gdn prefill scan shape: {reason}")]
+    InvalidGdnPrefillShape { reason: &'static str },
 }
