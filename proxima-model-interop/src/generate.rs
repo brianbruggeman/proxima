@@ -2389,13 +2389,15 @@ impl<'file> LoadedModel<'file> {
             );
             if std::env::var_os("PROXIMA_DEBUG_QWEN35_SEGMENTS").is_some() {
                 eprintln!(
-                    "qwen35 segment summary position={} layers={} segments={} suffix_executed={} router_elapsed_us={} gather_elapsed_us={}",
+                    "qwen35 segment summary position={} layers={} segments={} suffix_executed={} router_elapsed_us={} gather_elapsed_us={} router_readback_bytes={} gather_readback_bytes={}",
                     position_offset,
                     plan.layers.len(),
                     segment_execution_count,
                     suffix_executed,
                     router_elapsed_us,
                     gather_elapsed_us,
+                    router_readback_bytes,
+                    gather_readback_bytes,
                 );
             }
         }
