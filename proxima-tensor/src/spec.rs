@@ -7787,7 +7787,6 @@ pub struct SsmMixerTaps {
     pub value_sequence: NodeId,
     pub gate_sequence: NodeId,
     pub beta_sequence: NodeId,
-    pub z_sequence: NodeId,
     pub query: NodeId,
     pub key: NodeId,
     pub value: NodeId,
@@ -7801,145 +7800,6 @@ pub struct SsmMixerTaps {
     pub gated_rmsnorm_out: NodeId,
     pub gated_value: NodeId,
     pub ssm_out_result: NodeId,
-}
-
-/// Inputs to the sequence-preserving tail of Qwen3.5's GDN mixer.
-///
-/// The recurrence is deliberately outside this value: a sans-IO executor
-/// supplies its caller-owned `[s,j,u,g]` scan output as `delta_out`, while
-/// this algebra applies the checkpoint's per-row RMSNorm, output gate,
-/// projection, and residual without erasing the sequence axis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Qwen35GdnSequenceTail {
-    pub x: NodeId,
-    pub delta_out: NodeId,
-    pub z: NodeId,
-    pub head_eps: NodeId,
-    pub inv_head_v_dim: NodeId,
-    pub norm_weight: NodeId,
-    pub out_weight: NodeId,
-    pub head_v_dim: u32,
-    pub kv_heads: u32,
-    pub group: u32,
-}
-
-/// Appends the row-preserving algebra after a caller-driven GDN prefill scan.
-///
-/// This composes the existing elementwise and reduction primitives; it adds
-/// no stateful operation. `delta_out` is `[s,j,u,g]`, `z` is `[s,u,g,j]`,
-/// and the result is the post-mixer residual `[s,d]` consumed by the MoE
-/// router.
-pub fn append_qwen35_gdn_sequence_tail(
-    program: &mut Vec<Op>,
-    tail: Qwen35GdnSequenceTail,
-) -> Result<NodeId, TensorError> {
-    let squared = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[
-            (tail.delta_out, "sjug->sjug"),
-            (tail.delta_out, "sjug->sjug"),
-        ],
-    )?;
-    let sum_squares = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        squared,
-        "sjug->sjug",
-        "sug->sjug",
-    )?;
-    let mean_square = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(sum_squares, "sug->sug"), (tail.inv_head_v_dim, "->sug")],
-    )?;
-    let mean_square_eps = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(mean_square, "sug->sug"), (tail.head_eps, "ug->sug")],
-    )?;
-    let rms = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::SquareRoot,
-        &[(mean_square_eps, "sug->sug")],
-    )?;
-    let inv_rms = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Reciprocal,
-        &[(rms, "sug->sug")],
-    )?;
-    let normed = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(tail.delta_out, "sjug->sjug"), (inv_rms, "sug->sjug")],
-    )?;
-    let normed_gamma = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed, "sjug->sjug"), (tail.norm_weight, "j->sjug")],
-    )?;
-    let gated = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed_gamma, "sjug->sguj"), (tail.z, "sugj->sguj")],
-    )?;
-    let out_weight_map = alloc::format!(
-        "{}*j+{}*u+g,d->ugjd",
-        tail.kv_heads * tail.group,
-        tail.group
-    );
-    let value_head_ones = op::append(
-        program,
-        Op::Constant {
-            dtype: DType::Float32,
-            shape: alloc::vec![
-                Extent::Static(tail.kv_heads),
-                Extent::Static(tail.group),
-                Extent::Static(tail.head_v_dim),
-            ],
-            value: 1.0,
-        },
-    );
-    let out_weight_split = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[
-            (tail.out_weight, out_weight_map.as_str()),
-            (value_head_ones, "ugj->ugjd"),
-        ],
-    )?;
-    let product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(gated, "sguj->sgujd"), (out_weight_split, "ugjd->sgujd")],
-    )?;
-    let projected = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        product,
-        "sgujd->sgujd",
-        "sd->sgujd",
-    )?;
-    elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(tail.x, "sd->sd"), (projected, "sd->sd")],
-    )
 }
 
 /// The GDN (gated delta-net) mixer [`qwen35_forward_program`] calls once
@@ -8642,7 +8502,6 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
         value_sequence,
         gate_sequence: gate_split,
         beta_sequence: beta_split,
-        z_sequence: z_split,
         query,
         key,
         value,
@@ -19867,113 +19726,6 @@ value = 1.0
                 second_causal_value,
             ]
         );
-    }
-
-    /// Worked example for the GDN sequence tail. Two rows with distinct
-    /// residual, recurrence, and gate values must equal evaluating the same
-    /// algebra once per row and concatenating the two `[1,d]` results. This
-    /// catches the former `[s,j,u,g] -> [j,u,g]` shape loss: broadcasting
-    /// either row would disagree with the independently evaluated other row.
-    #[proxima::test]
-    async fn qwen35_gdn_sequence_tail_matches_repeated_one_position_graphs() {
-        let mut program = Vec::new();
-        let x = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Symbolic(0), Extent::Static(2)],
-            "x",
-        );
-        let delta_out = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![
-                Extent::Symbolic(0),
-                Extent::Static(2),
-                Extent::Static(1),
-                Extent::Static(1),
-            ],
-            "delta_out",
-        );
-        let z = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![
-                Extent::Symbolic(0),
-                Extent::Static(1),
-                Extent::Static(1),
-                Extent::Static(2),
-            ],
-            "z",
-        );
-        let head_eps = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(1), Extent::Static(1)],
-            "head_eps",
-        );
-        let inv_head_v_dim = scalar_constant(&mut program, 0.5);
-        let norm_weight = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(2)],
-            "norm_weight",
-        );
-        let out_weight = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(2), Extent::Static(2)],
-            "out_weight",
-        );
-        let output = append_qwen35_gdn_sequence_tail(
-            &mut program,
-            Qwen35GdnSequenceTail {
-                x,
-                delta_out,
-                z,
-                head_eps,
-                inv_head_v_dim,
-                norm_weight,
-                out_weight,
-                head_v_dim: 2,
-                kv_heads: 1,
-                group: 1,
-            },
-        )
-        .expect("sequence tail lowers");
-
-        let x_data = [1.0_f32, 2.0, 3.0, 4.0];
-        let delta_data = [3.0_f32, 4.0, -5.0, 2.0];
-        let z_data = [0.5_f32, -1.0, 2.0, 0.25];
-        let head_eps_data = [0.01_f32];
-        let norm_weight_data = [1.5_f32, 0.5];
-        let out_weight_data = [2.0_f32, -1.0, 0.25, 3.0];
-        let evaluate = |symbols: &[u64], x: &[f32], delta: &[f32], z: &[f32]| {
-            crate::cpu::evaluate_named(
-                &program,
-                symbols,
-                &[
-                    ("x", x),
-                    ("delta_out", delta),
-                    ("z", z),
-                    ("head_eps", &head_eps_data),
-                    ("norm_weight", &norm_weight_data),
-                    ("out_weight", &out_weight_data),
-                ],
-                &[output],
-            )
-            .expect("sequence tail evaluates")
-            .get(output)
-            .expect("sequence output present")
-            .0
-            .to_vec()
-        };
-
-        let batched = evaluate(&[2], &x_data, &delta_data, &z_data);
-        let mut repeated = evaluate(&[1], &x_data[..2], &delta_data[..2], &z_data[..2]);
-        repeated.extend(evaluate(&[1], &x_data[2..], &delta_data[2..], &z_data[2..]));
-
-        assert_eq!(batched, repeated);
-        assert_ne!(batched[..2], batched[2..]);
     }
 
     /// Same inputs as the hand-computed decode step above, but with
