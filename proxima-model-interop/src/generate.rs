@@ -5869,6 +5869,7 @@ impl<'file> LoadedModel<'file> {
         qwen35_dense_pad_scratch: &'call mut [Qwen35DenseAttentionPadScratch],
         step_input_scratch: &'call mut Vec<StepInput>,
         named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
+        single_position_step: bool,
     ) -> Result<Vec<u64>, InteropError> {
         named_blocks.push((
             "ids",
@@ -5920,7 +5921,7 @@ impl<'file> LoadedModel<'file> {
             new_count,
             kv_bound_extent,
             step_input_scratch,
-            self.single_position_step,
+            single_position_step,
         )?;
 
         push_kv_named_blocks(
@@ -7030,6 +7031,7 @@ impl<'file> LoadedModel<'file> {
                         &mut qwen35_dense_pad_scratch,
                         &mut step_input_scratch,
                         &mut named_blocks,
+                        self.single_position_step && !gdn_prefill_scan_enabled,
                     )?;
                     #[cfg(feature = "instrument")]
                     let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
@@ -8580,6 +8582,7 @@ impl<'file> LoadedModel<'file> {
             &mut qwen35_dense_pad_scratch,
             &mut step_input_scratch,
             &mut named_blocks,
+            self.single_position_step,
         )?;
 
         let resident_names: BTreeSet<&str> = self.resident_names();
