@@ -72,8 +72,7 @@ use proxima_tensor::DType;
 #[cfg(not(feature = "metal"))]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts;
 use proxima_tensor::cpu::{
-    Evaluated, GdnPrefillScan, GdnPrefillShape, QuantizedBlock,
-    evaluate_quantized_named_exact_with_scratch_and_experts, run_gdn_prefill_scan,
+    Evaluated, QuantizedBlock, evaluate_quantized_named_exact_with_scratch_and_experts,
 };
 #[cfg(all(
     feature = "instrument",
@@ -1093,7 +1092,6 @@ pub struct LoadedModel<'file> {
 /// inference before it can execute the same router/residency/gather phases.
 struct Qwen35MoePreGatherPlan {
     symbols: Vec<u64>,
-    gdn_scan_enabled: bool,
     layers: Vec<Qwen35MoeLayerSegments>,
     suffix: crate::qwen35moe::execution::MappedLayerSegment,
     prefix_carried_nodes: BTreeSet<NodeId>,
@@ -1103,15 +1101,8 @@ struct Qwen35MoePreGatherPlan {
 struct Qwen35MoeLayerSegments {
     router: crate::qwen35moe::execution::MappedLayerSegment,
     gather: crate::qwen35moe::execution::MappedLayerSegment,
-    gdn_scan: Option<Qwen35MoeGdnScanSegment>,
     router_future_cuts: Vec<(NodeId, String)>,
     next_cuts: Vec<(NodeId, String)>,
-}
-
-#[derive(Clone)]
-struct Qwen35MoeGdnScanSegment {
-    producer: crate::qwen35moe::execution::MappedLayerSegment,
-    taps: proxima_tensor::spec::SsmMixerTaps,
 }
 
 /// Releases every device buffer this checkpoint's own load caused: the
@@ -1479,7 +1470,6 @@ impl<'file> LoadedModel<'file> {
     fn qwen35moe_pre_gather_plan(
         &self,
         symbols: &[u64],
-        gdn_scan_enabled: bool,
     ) -> Result<Qwen35MoePreGatherPlan, InteropError> {
         let last_layer_output = self
             .qwen35moe_layer_diagnostics
@@ -1497,49 +1487,19 @@ impl<'file> LoadedModel<'file> {
         )
         .map_err(InteropError::from)?;
 
-        let mut layer_parts = Vec::with_capacity(self.qwen35moe_layer_diagnostics.len());
+        let mut layer_pairs = Vec::with_capacity(self.qwen35moe_layer_diagnostics.len());
         let mut prefix_required_nodes = BTreeSet::new();
         let mut previous_output = None;
         for diagnostic in &self.qwen35moe_layer_diagnostics {
-            let (router, gdn_scan) = if let Some(taps) = diagnostic.ssm_taps
-                && gdn_scan_enabled
-            {
-                let producer = crate::qwen35moe::execution::split_mapped_layer_segment(
-                    &self.program,
-                    symbols,
-                    previous_output,
-                    taps.z_head,
-                )
-                .map_err(InteropError::from)?;
-                let router = crate::qwen35moe::execution::split_mapped_layer_segment(
-                    &self.program,
-                    symbols,
-                    Some(taps.delta_out),
-                    diagnostic.router_logits,
-                )
-                .map_err(InteropError::from)?;
-                (router, Some(Qwen35MoeGdnScanSegment { producer, taps }))
-            } else {
-                (
-                    crate::qwen35moe::execution::split_mapped_layer_segment(
-                        &self.program,
-                        symbols,
-                        previous_output,
-                        diagnostic.router_logits,
-                    )
-                    .map_err(InteropError::from)?,
-                    None,
-                )
-            };
-            let gather = crate::qwen35moe::execution::split_mapped_layer_segment(
+            let pair = crate::qwen35moe::execution::split_mapped_router_and_gather_segments(
                 &self.program,
                 symbols,
-                Some(diagnostic.router_logits),
+                previous_output,
+                diagnostic.router_logits,
                 diagnostic.block_output,
             )
             .map_err(InteropError::from)?;
-            let entry = gdn_scan.as_ref().map_or(&router, |scan| &scan.producer);
-            for (node, _) in &entry.1 {
+            for (node, _) in &pair.0.1 {
                 if !matches!(
                     self.program[node.0 as usize],
                     proxima_tensor::op::Op::Input { .. }
@@ -1547,23 +1507,21 @@ impl<'file> LoadedModel<'file> {
                     prefix_required_nodes.insert(*node);
                 }
             }
-            layer_parts.push((router, gather, gdn_scan));
+            layer_pairs.push(pair);
             previous_output = Some(diagnostic.block_output);
         }
 
         // layer zero's router is already the complete graph prefix, so a
         // second prefix segment would execute the same operations twice.
-        let first_entry_mapping = layer_parts
+        let first_router_mapping = &layer_pairs
             .first()
             .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from("qwen35moe"),
                 reason: String::from("the bound graph has no first router segment"),
-            })?;
-        let first_entry_mapping = first_entry_mapping
-            .2
-            .as_ref()
-            .map_or(&first_entry_mapping.0.2, |scan| &scan.producer.2);
-        let prefix_carried_nodes = first_entry_mapping
+            })?
+            .0
+            .2;
+        let prefix_carried_nodes = first_router_mapping
             .keys()
             .filter(|node| prefix_required_nodes.contains(node))
             .copied()
@@ -1580,23 +1538,15 @@ impl<'file> LoadedModel<'file> {
             })
             .collect();
 
-        let mut layers = Vec::with_capacity(layer_parts.len());
-        for layer in 0..layer_parts.len() {
-            let (router, gather, gdn_scan) = layer_parts[layer].clone();
-            let next_router_cuts = layer_parts
+        let mut layers = Vec::with_capacity(layer_pairs.len());
+        for layer in 0..layer_pairs.len() {
+            let (router, gather) = layer_pairs[layer].clone();
+            let next_router_cuts = layer_pairs
                 .get(layer + 1)
-                .map_or_else(Vec::new, |part| {
-                    part.2
-                        .as_ref()
-                        .map_or_else(|| part.0.1.clone(), |scan| scan.producer.1.clone())
-                });
-            let next_cuts = layer_parts
+                .map_or_else(Vec::new, |pair| pair.0.1.clone());
+            let next_cuts = layer_pairs
                 .get(layer + 1)
-                .map_or_else(|| suffix.1.clone(), |part| {
-                    part.2
-                        .as_ref()
-                        .map_or_else(|| part.0.1.clone(), |scan| scan.producer.1.clone())
-                });
+                .map_or_else(|| suffix.1.clone(), |pair| pair.0.1.clone());
             let mut router_future_cuts = gather.1.clone();
             router_future_cuts.extend(next_router_cuts);
             router_future_cuts.sort_by_key(|(node, _)| *node);
@@ -1604,21 +1554,16 @@ impl<'file> LoadedModel<'file> {
             layers.push(Qwen35MoeLayerSegments {
                 router,
                 gather,
-                gdn_scan,
                 router_future_cuts,
                 next_cuts,
             });
         }
 
         for (layer, segments) in layers.iter().enumerate() {
-            let programs = segments
-                .gdn_scan
-                .as_ref()
-                .map(|scan| ("gdn-scan-producer", &scan.producer.0));
-            for (phase, program) in programs.into_iter().chain([
+            for (phase, program) in [
                 ("router", &segments.router.0),
                 ("gather", &segments.gather.0),
-            ]) {
+            ] {
                 proxima_tensor::shape::infer(program, symbols).map_err(|error| {
                     InteropError::PreGatherExecutionUnsupported {
                         architecture: String::from("qwen35moe"),
@@ -1671,163 +1616,11 @@ impl<'file> LoadedModel<'file> {
 
         Ok(Qwen35MoePreGatherPlan {
             symbols: symbols.to_vec(),
-            gdn_scan_enabled,
             layers,
             suffix,
             prefix_carried_nodes,
             global_cut_nodes,
         })
-    }
-
-    fn evaluate_qwen35moe_gdn_scan_segment(
-        &self,
-        runtime: &mut BackendRuntime,
-        scan: &Qwen35MoeGdnScanSegment,
-        router_cuts: &[(NodeId, String)],
-        symbols: &[u64],
-        named: &[(&str, QuantizedBlock<'_>)],
-        resident_names: &BTreeSet<&str>,
-        carried: &mut BTreeMap<NodeId, (Vec<u64>, Vec<f32>)>,
-    ) -> Result<(), InteropError> {
-        let (program, cuts, mapping) = &scan.producer;
-        let mut segment_named: Vec<(&str, QuantizedBlock<'_>)> = named
-            .iter()
-            .copied()
-            .filter(|(name, _)| {
-                program
-                    .iter()
-                    .any(|operation| operation.name() == Some(*name))
-            })
-            .collect();
-        for (node, name) in cuts {
-            if segment_named
-                .iter()
-                .any(|(candidate, _)| *candidate == name)
-            {
-                continue;
-            }
-            let (_, values) = carried.get(node).ok_or_else(|| {
-                InteropError::PreGatherExecutionUnsupported {
-                    architecture: String::from("qwen35moe"),
-                    reason: alloc::format!("gdn scan producer missing cut node {node:?} ({name})"),
-                }
-            })?;
-            segment_named.push((name.as_str(), QuantizedBlock::Float32(values)));
-        }
-
-        let taps = scan.taps;
-        let scan_inputs = [
-            taps.query,
-            taps.key,
-            taps.value,
-            taps.gate,
-            taps.beta,
-            taps.state_in,
-        ];
-        let mut requested = BTreeMap::new();
-        for original in router_cuts
-            .iter()
-            .map(|(node, _)| *node)
-            .chain(scan_inputs)
-        {
-            if let Some(mapped) = mapping.get(&original).copied() {
-                requested.insert(mapped, original);
-            }
-        }
-        let requested_nodes: Vec<NodeId> = requested.keys().copied().collect();
-        let evaluated = runtime.evaluate_segment(
-            program,
-            symbols,
-            &segment_named,
-            &requested_nodes,
-            resident_names,
-            None,
-        )?;
-        for (mapped, original) in requested {
-            let (values, shape) = evaluated
-                .get(mapped)
-                .ok_or(InteropError::MissingEvaluatedNode { node: original })?;
-            carried.insert(original, (shape.to_vec(), values.to_vec()));
-        }
-
-        let query = carried
-            .get(&taps.query)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.query })?
-            .1
-            .as_slice();
-        let key = carried
-            .get(&taps.key)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.key })?
-            .1
-            .as_slice();
-        let value_entry = carried
-            .get(&taps.value)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.value })?;
-        let value_shape = value_entry.0.clone();
-        let value = value_entry.1.as_slice();
-        let gate = carried
-            .get(&taps.gate)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.gate })?
-            .1
-            .as_slice();
-        let beta = carried
-            .get(&taps.beta)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.beta })?
-            .1
-            .as_slice();
-        let state_entry = carried
-            .get(&taps.state_in)
-            .ok_or(InteropError::MissingEvaluatedNode {
-                node: taps.state_in,
-            })?;
-        let state_shape = state_entry.0.clone();
-        let mut state = state_entry.1.clone();
-        let mut output = vec![0.0_f32; value.len()];
-        let key_dim = state_shape.first().copied().ok_or_else(|| {
-            InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
-                reason: String::from("gdn state input has no key dimension"),
-            }
-        })? as usize;
-        let value_dim = state_shape.get(1).copied().ok_or_else(|| {
-            InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
-                reason: String::from("gdn state input has no value dimension"),
-            }
-        })? as usize;
-        let heads = state_shape
-            .get(2..)
-            .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
-                reason: String::from("gdn state input has no head dimensions"),
-            })?
-            .iter()
-            .try_fold(1_usize, |product, extent| {
-                product.checked_mul(*extent as usize)
-            })
-            .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
-                reason: String::from("gdn state head dimensions overflow usize"),
-            })?;
-        run_gdn_prefill_scan(GdnPrefillScan {
-            shape: GdnPrefillShape {
-                positions: 1,
-                key_dim,
-                value_dim,
-                heads,
-            },
-            query,
-            key,
-            value,
-            gate,
-            beta,
-            inv_sqrt_key_dim: 1.0 / (key_dim as f32).sqrt(),
-            state: &mut state,
-            output: &mut output,
-        })?;
-        carried.insert(taps.delta_out, (value_shape, output));
-        carried.insert(taps.state_out, (state_shape, state));
-        Ok(())
     }
 
     fn evaluate_qwen35moe_pre_gather<BeforeGather>(
@@ -1877,17 +1670,6 @@ impl<'file> LoadedModel<'file> {
             // router result. Build one union before the gather snapshot so
             // no row reads an unselected descriptor.
             let segments = &plan.layers[layer];
-            if let Some(scan) = &segments.gdn_scan {
-                self.evaluate_qwen35moe_gdn_scan_segment(
-                    runtime,
-                    scan,
-                    &segments.router.1,
-                    symbols,
-                    named,
-                    resident_names,
-                    &mut carried,
-                )?;
-            }
             let router = &segments.router;
             let gather = &segments.gather;
             let next_cuts = &segments.next_cuts;
@@ -7064,10 +6846,6 @@ impl<'file> LoadedModel<'file> {
                             .architecture_impl
                             .is_some_and(|architecture| architecture.name() == "qwen35moe")
                         && (self.expert_sidecar.is_some() || !runtime.uses_gpu());
-                    let gdn_prefill_scan = pre_gather
-                        && split_prefill
-                        && !runtime.uses_gpu()
-                        && std::env::var_os("PROXIMA_QWEN35MOE_GDN_PREFILL_SCAN").is_some();
                     if pre_gather {
                         expert_slab_guard.clear_selected_experts_for_step();
                     }
@@ -7100,14 +6878,9 @@ impl<'file> LoadedModel<'file> {
                     if pre_gather
                         && qwen35moe_pre_gather_plan
                             .as_ref()
-                            .is_none_or(|plan| {
-                                plan.symbols != symbols
-                                    || plan.gdn_scan_enabled != gdn_prefill_scan
-                            })
+                            .is_none_or(|plan| plan.symbols != symbols)
                     {
-                        qwen35moe_pre_gather_plan = Some(
-                            self.qwen35moe_pre_gather_plan(&symbols, gdn_prefill_scan)?,
-                        );
+                        qwen35moe_pre_gather_plan = Some(self.qwen35moe_pre_gather_plan(&symbols)?);
                     }
                     // The pristine table aliases the named checkpoint stack and
                     // needs no substitution. Once a policy pages or evicts any
