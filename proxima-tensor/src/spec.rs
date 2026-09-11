@@ -7782,6 +7782,11 @@ pub enum GdnOutputGate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SsmMixerTaps {
     pub qkv_mixed: NodeId,
+    pub query_sequence: NodeId,
+    pub key_sequence: NodeId,
+    pub value_sequence: NodeId,
+    pub gate_sequence: NodeId,
+    pub beta_sequence: NodeId,
     pub query: NodeId,
     pub key: NodeId,
     pub value: NodeId,
@@ -8418,6 +8423,11 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
 
     let taps = SsmMixerTaps {
         qkv_mixed,
+        query_sequence: q_repeated,
+        key_sequence: k_repeated,
+        value_sequence: v_split,
+        gate_sequence: gate_split,
+        beta_sequence: beta_split,
         query,
         key,
         value,
