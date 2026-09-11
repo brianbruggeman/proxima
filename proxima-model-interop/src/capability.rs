@@ -403,12 +403,12 @@ mod quant_format_tests {
     use super::quant_format::render_markdown;
 
     #[test]
-    fn renders_exactly_eight_packed_codec_rows_plus_the_header() {
+    fn renders_exactly_nine_packed_codec_rows_plus_the_header() {
         let rendered = render_markdown();
         assert_eq!(
             rendered.lines().count(),
-            10,
-            "8 PackedCodec variants, 1 header row, 1 separator row"
+            11,
+            "9 PackedCodec variants, 1 header row, 1 separator row"
         );
     }
 
