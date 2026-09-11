@@ -2211,7 +2211,17 @@ impl<'file> LoadedModel<'file> {
                 for (mapped, original) in requested {
                     let (values, shape) = evaluated
                         .get(mapped)
-                        .ok_or(InteropError::MissingEvaluatedNode { node: original })?;
+                        .ok_or_else(|| {
+                            if std::env::var_os("PROXIMA_DEBUG_QWEN35_MISSING_NODE").is_some() {
+                                eprintln!(
+                                    "qwen35 missing evaluated node phase={} original={:?} mapped={:?}",
+                                    if is_router { "router" } else { "gather" },
+                                    original,
+                                    mapped,
+                                );
+                            }
+                            InteropError::MissingEvaluatedNode { node: original }
+                        })?;
                     if future_cuts.iter().any(|(node, _)| *node == original)
                         || future_gather_cuts.contains(&original)
                         || plan.prefix_carried_nodes.contains(&original)
@@ -2370,7 +2380,15 @@ impl<'file> LoadedModel<'file> {
             for (mapped, original) in requested {
                 let (values, shape) = evaluated
                     .get(mapped)
-                    .ok_or(InteropError::MissingEvaluatedNode { node: original })?;
+                    .ok_or_else(|| {
+                        if std::env::var_os("PROXIMA_DEBUG_QWEN35_MISSING_NODE").is_some() {
+                            eprintln!(
+                                "qwen35 missing evaluated node phase=suffix node={:?} mapped={:?}",
+                                original, mapped
+                            );
+                        }
+                        InteropError::MissingEvaluatedNode { node: original }
+                    })?;
                 results.insert(original, (shape.to_vec(), values.to_vec()));
             }
         }
