@@ -3626,6 +3626,7 @@ fn execute_op_timed(
     always_live: &BTreeSet<NodeId>,
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
+    expert_buffers: Option<&ExpertSourceBuffers>,
     cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
 ) -> Result<OpGpuTiming, MetalError> {
     // this operand's own TENSOR bytes, not the shared buffer's `length()` --
@@ -3692,7 +3693,7 @@ fn execute_op_timed(
         None,
         None,
         None,
-        None,
+        expert_buffers,
     )?;
     encoder.finish();
     command_buffer.commit();
@@ -3776,8 +3777,53 @@ pub fn execute_plan_op_timed(
     blocks: &[QuantizedBlock<'_>],
     cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
+    execute_plan_op_timed_inner(plan, blocks, &BTreeMap::new(), cpu_reference)
+}
+
+/// [`execute_plan_op_timed`]'s routed-expert counterpart. It stages the
+/// same per-expert payload and descriptor buffers as
+/// [`execute_plan_with_expert_sources`] before splitting the plan into one
+/// command buffer per bound operation.
+///
+/// # Errors
+/// Same as [`execute_plan_with_expert_sources`] and [`execute_plan_op_timed`].
+#[cfg(feature = "instrument")]
+pub fn execute_plan_op_timed_with_expert_sources(
+    plan: &Plan,
+    blocks: &[QuantizedBlock<'_>],
+    expert_sources: &BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+    cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
+) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
+    if expert_sources.is_empty() {
+        return execute_plan_op_timed(plan, blocks, cpu_reference);
+    }
+    let expert_buffers = stage_expert_sources(plan, blocks, expert_sources)?;
+    execute_plan_op_timed_inner(plan, blocks, &expert_buffers, cpu_reference)
+}
+
+#[cfg(feature = "instrument")]
+fn execute_plan_op_timed_inner(
+    plan: &Plan,
+    blocks: &[QuantizedBlock<'_>],
+    expert_buffers: &BTreeMap<NodeId, ExpertSourceBuffers>,
+    cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
+) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
+
+    let mut effective_expert_buffers = expert_buffers.clone();
+    for (source_node, buffers) in expert_buffers {
+        let Some(source_name) = plan.program[source_node.0 as usize].name() else {
+            continue;
+        };
+        for (position, operation) in plan.program.iter().enumerate() {
+            if operation.name() == Some(source_name) {
+                effective_expert_buffers
+                    .entry(NodeId(position as u32))
+                    .or_insert_with(|| buffers.clone());
+            }
+        }
+    }
 
     let (device, queue) = device_and_queue()?;
 
@@ -3788,6 +3834,10 @@ pub fn execute_plan_op_timed(
         .zip(blocks.iter())
         .zip(plan.block_dtypes.iter())
     {
+        if let Some(buffers) = effective_expert_buffers.get(node) {
+            device_buffers.insert(*node, (buffers.payloads.clone(), 0));
+            continue;
+        }
         let resident_name = resident_name(plan, *node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(
@@ -3832,6 +3882,7 @@ pub fn execute_plan_op_timed(
     let no_placements: BTreeSet<NodeId> = BTreeSet::new();
     let mut timings: Vec<OpGpuTiming> = Vec::with_capacity(prepared.resolved.len());
     for (position, bound) in prepared.resolved.iter().enumerate() {
+        let expert_buffers = expert_buffers_for(bound, &effective_expert_buffers)?;
         let timing = execute_op_timed(
             &device,
             &queue,
@@ -3846,6 +3897,7 @@ pub fn execute_plan_op_timed(
             &no_placements,
             plan.math_mode,
             plan.numeric_policy,
+            expert_buffers,
             cpu_reference,
         )?;
         timings.push(timing);
@@ -3868,6 +3920,21 @@ pub fn execute_plan_named_op_timed(
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
     let blocks = resolve_named_blocks(&plan.program, named)?;
     execute_plan_op_timed(plan, &blocks, cpu_reference)
+}
+
+/// Name-keyed counterpart of
+/// [`execute_plan_op_timed_with_expert_sources`].
+///
+/// # Errors
+/// Propagates name-resolution, expert-source, and Metal driver failures.
+#[cfg(feature = "instrument")]
+pub fn execute_plan_named_op_timed_with_expert_sources(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+    expert_sources: &BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
+    let blocks = resolve_named_blocks(&plan.program, named)?;
+    execute_plan_op_timed_with_expert_sources(plan, &blocks, expert_sources, None)
 }
 
 /// [`execute_plan_with_placements`]'s op-timed twin -- the default decode
@@ -3989,6 +4056,7 @@ pub fn execute_plan_with_placements_op_timed(
             &always_live,
             plan.math_mode,
             plan.numeric_policy,
+            None,
             None,
         )?;
         timings.push(timing);
