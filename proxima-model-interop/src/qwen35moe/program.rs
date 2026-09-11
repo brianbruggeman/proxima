@@ -910,6 +910,11 @@ mod tests {
                 && gdn_taps.beta_sequence.0 < gdn_taps.state_out.0,
             "batched recurrence inputs must precede the state transition"
         );
+        assert!(
+            gdn_taps.z_head.0 < gdn_taps.delta_out.0
+                && gdn_taps.state_in.0 < gdn_taps.state_out.0,
+            "the production scan cut must expose its carried inputs before recurrence"
+        );
         assert_ne!(
             roots.logits, roots.hidden,
             "logits follow the output projection"
