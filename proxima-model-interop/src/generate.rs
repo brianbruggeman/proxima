@@ -72,7 +72,7 @@ use proxima_tensor::DType;
 #[cfg(not(feature = "metal"))]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts;
 use proxima_tensor::cpu::{
-    Evaluated, GdnPrefillScan, GdnPrefillShape, QuantizedBlock,
+    Evaluated, ExpertSource, GdnPrefillScan, GdnPrefillShape, QuantizedBlock,
     evaluate_quantized_named_exact_with_scratch_and_experts, run_gdn_prefill_scan,
 };
 #[cfg(all(
@@ -1977,7 +1977,7 @@ impl<'file> LoadedModel<'file> {
             // router result. Build one union before the gather snapshot so
             // no row reads an unselected descriptor.
             let segments = &plan.layers[layer];
-            if let Some(scan) = &segments.gdn_scan {
+            if let Some(scan) = &segments.gdn_scan && !runtime.uses_gpu() {
                 self.evaluate_qwen35moe_gdn_scan_segment(
                     runtime,
                     scan,
@@ -2216,19 +2216,12 @@ impl<'file> LoadedModel<'file> {
                         selected_sidecar,
                         &mut expert_entries_scratch,
                     )?;
-                    let mapped_expert_sources = expert_sources
-                        .iter()
-                        .flat_map(|(node, source)| {
-                            let source_name = self.program[node.0 as usize].name();
-                            program
-                                .iter()
-                                .enumerate()
-                                .filter_map(move |(position, operation)| {
-                                    (operation.name() == source_name)
-                                        .then_some((NodeId(position as u32), *source))
-                                })
-                        })
-                        .collect::<BTreeMap<_, _>>();
+                    let mapped_expert_sources = map_expert_sources_to_segment(
+                        layer,
+                        &self.program,
+                        program,
+                        &expert_sources,
+                    )?;
                     if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
                         eprintln!(
                             "qwen35 mapped expert source nodes={:?}",
@@ -4511,7 +4504,7 @@ impl BackendRuntime {
                 self.plan_hits,
                 self.plan_misses,
             );
-            #[cfg(all(feature = "metal", target_os = "macos"))]
+            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
             {
                 let stage = metal_stage_totals();
                 eprintln!(
@@ -8740,13 +8733,51 @@ fn qwen35moe_pre_gather_enabled(configured: bool, architecture_name: Option<&str
     configured && architecture_name == Some("qwen35moe")
 }
 
+fn map_expert_sources_to_segment<'source>(
+    layer: usize,
+    source_program: &[Op],
+    segment_program: &[Op],
+    expert_sources: &BTreeMap<NodeId, ExpertSource<'source>>,
+) -> Result<BTreeMap<NodeId, ExpertSource<'source>>, InteropError> {
+    let mut mapped = BTreeMap::new();
+    for (source_node, source) in expert_sources {
+        let source_name = source_program
+            .get(source_node.0 as usize)
+            .map(Op::name)
+            .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: alloc::format!(
+                    "layer {layer} expert source node {} is outside the source program",
+                    source_node.0
+                ),
+            })?;
+        let mut found = false;
+        for (position, operation) in segment_program.iter().enumerate() {
+            if operation.name() == source_name {
+                mapped.insert(NodeId(position as u32), *source);
+                found = true;
+            }
+        }
+        if !found {
+            return Err(InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: alloc::format!(
+                    "layer {layer} expert source node {} named {source_name:?} is absent from the gather segment",
+                    source_node.0
+                ),
+            });
+        }
+    }
+    Ok(mapped)
+}
+
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
         SsmLayerCache, begin_expert_gather_phase, kv_extent, lock_expert_slab,
-        qwen35moe_pre_gather_enabled, step_batch_needs_logits, visit_qwen35moe_router_boundary,
-        visit_qwen35moe_router_selections,
+        map_expert_sources_to_segment, qwen35moe_pre_gather_enabled, step_batch_needs_logits,
+        visit_qwen35moe_router_boundary, visit_qwen35moe_router_selections,
     };
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -8761,7 +8792,7 @@ mod tests {
     use proxima_gguf::value::MetadataValue as Value;
     use proxima_gguf::{GgmlType as WireType, GgufModel, TensorPayload, write_complete};
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    use proxima_tensor::cpu::QuantizedBlock;
+    use proxima_tensor::cpu::{ExpertEntry, ExpertSource, QuantizedBlock};
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_tensor::{DType, Extent, NodeId, Op};
     use proxima_tokenizer::Vocab;
@@ -8772,6 +8803,44 @@ mod tests {
         assert!(!qwen35moe_pre_gather_enabled(false, Some("qwen35moe")));
         assert!(!qwen35moe_pre_gather_enabled(true, Some("qwen3")));
         assert!(!qwen35moe_pre_gather_enabled(true, None));
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn qwen35moe_expert_source_mapping_rejects_a_missing_segment_node() {
+        let source_program = [Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(1)],
+            name: Some(String::from("blk.0.ffn_gate_exps.weight")),
+        }];
+        let segment_program = [Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(1)],
+            name: Some(String::from("activation")),
+        }];
+        let payload = [1.0_f32];
+        let entries = [ExpertEntry {
+            block: QuantizedBlock::Float32(&payload),
+            out_dim: 1,
+            in_dim: 1,
+            epoch: 7,
+        }];
+        let sources = BTreeMap::from([(NodeId(0), ExpertSource::new(&entries))]);
+
+        let error = map_expert_sources_to_segment(
+            0,
+            &source_program,
+            &segment_program,
+            &sources,
+        )
+        .expect_err("a source absent from the gather program must fail before Metal staging");
+        assert!(matches!(
+            error,
+            super::InteropError::PreGatherExecutionUnsupported { architecture, reason }
+                if architecture == "qwen35moe"
+                    && reason.contains("expert source node 0")
+                    && reason.contains("absent from the gather segment")
+        ));
     }
 
     #[cfg(feature = "metal")]
