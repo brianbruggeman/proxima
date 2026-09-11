@@ -75,6 +75,21 @@ pub struct MappedExpertSidecar {
     high_bytes_per_expert: u64,
 }
 
+/// Reusable owner for the low-codec ranges selected by one routed layer.
+#[derive(Debug, Default)]
+pub(crate) struct ExpertSidecarReadScratch {
+    buffers: Vec<Vec<u8>>,
+    descriptor_slots: Vec<[Option<usize>; 3]>,
+    used_buffers: usize,
+}
+
+impl ExpertSidecarReadScratch {
+    pub(crate) fn bytes(&self, expert: usize, projection: ExpertProjection) -> Option<&[u8]> {
+        let buffer_index = self.descriptor_slots.get(expert)?[projection.index()]?;
+        self.buffers.get(buffer_index).map(Vec::as_slice)
+    }
+}
+
 impl MappedExpertSidecar {
     /// Parses a complete sidecar while retaining its mmap owner.
     pub fn new(mapping: Arc<Mmap>) -> Result<Self, InteropError> {
@@ -131,21 +146,91 @@ impl MappedExpertSidecar {
         })
     }
 
+    /// Opens a sidecar whose selected expert payloads are read from the file.
+    pub fn from_file(source_file: File) -> Result<Self, InteropError> {
+        let source_file = Arc::new(source_file);
+        // SAFETY: the read-only mapping and its file owner are retained by
+        // the returned sidecar for the complete attachment lifetime.
+        let mapping = unsafe { memmap2::MmapOptions::new().map(source_file.as_ref()) }
+            .map_err(InteropError::SidecarIo)?;
+        mapping.advise(memmap2::Advice::Random)?;
+        Self::new_with_source_file(Arc::new(mapping), Some(source_file))
+    }
+
+    #[must_use]
+    pub(crate) const fn uses_file_reads(&self) -> bool {
+        self.source_file.is_some()
+    }
+
     /// Reads a range through the source file when available, avoiding mmap
     /// page faults for sparse expert payloads.
     pub fn read_range(&self, range: Range<usize>) -> Result<Vec<u8>, InteropError> {
+        let mut bytes = Vec::new();
+        self.read_range_into(range, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn read_range_into(
+        &self,
+        range: Range<usize>,
+        bytes: &mut Vec<u8>,
+    ) -> Result<(), InteropError> {
+        let source =
+            self.mapping
+                .get(range.clone())
+                .ok_or(InteropError::ExpertMappedRangeOutOfBounds {
+                    start: range.start,
+                    end: range.end,
+                    mapping_len: self.mapping.len(),
+                })?;
+        bytes.resize(range.len(), 0);
         let Some(source_file) = &self.source_file else {
-            return Ok(self.mapping[range].to_vec());
+            bytes.copy_from_slice(source);
+            return Ok(());
         };
-        let mut bytes = vec![0_u8; range.len()];
         let mut reader = source_file.try_clone().map_err(InteropError::SidecarIo)?;
         reader
             .seek(SeekFrom::Start(range.start as u64))
             .map_err(InteropError::SidecarIo)?;
-        reader
-            .read_exact(&mut bytes)
-            .map_err(InteropError::SidecarIo)?;
-        Ok(bytes)
+        reader.read_exact(bytes).map_err(InteropError::SidecarIo)
+    }
+
+    /// Reads only the routed low-codec ranges into reusable bounded storage.
+    pub(crate) fn read_selected_low(
+        &self,
+        layer: usize,
+        experts: &[u32],
+        scratch: &mut ExpertSidecarReadScratch,
+    ) -> Result<(), InteropError> {
+        scratch.used_buffers = 0;
+        scratch.descriptor_slots.clear();
+        scratch
+            .descriptor_slots
+            .resize(self.expert_count, [None; 3]);
+        for &expert in experts {
+            let address = ExpertAddress {
+                layer,
+                expert: expert as usize,
+            };
+            for projection in ExpertProjection::ALL {
+                let descriptor = self.descriptor(address, projection)?;
+                let range = Self::checked_range(
+                    descriptor,
+                    descriptor.data_offset,
+                    descriptor.data_bytes,
+                    self.mapping.len(),
+                    descriptor.target_codec,
+                )?;
+                let buffer_index = scratch.used_buffers;
+                if buffer_index == scratch.buffers.len() {
+                    scratch.buffers.push(Vec::new());
+                }
+                self.read_range_into(range, &mut scratch.buffers[buffer_index])?;
+                scratch.descriptor_slots[address.expert][projection.index()] = Some(buffer_index);
+                scratch.used_buffers += 1;
+            }
+        }
+        Ok(())
     }
 
     /// Releases resident file pages after a step has finished consuming them.

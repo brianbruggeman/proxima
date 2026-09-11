@@ -399,31 +399,25 @@ fn main() {
                 return;
             }
         };
-        // SAFETY: the sidecar is read-only for the lifetime of the model.
-        let sidecar_mapping = match unsafe { memmap2::Mmap::map(&sidecar_file) } {
-            Ok(mapping) => Arc::new(mapping),
-            Err(error) => {
-                eprintln!("mmap expert sidecar: {error}");
-                return;
+        let use_mmap =
+            env::var_os("PROXIMA_EXPERT_SIDECAR_SOURCE").is_some_and(|source| source == "mmap");
+        let attach_result = if use_mmap {
+            // SAFETY: the sidecar is read-only for the lifetime of the model.
+            match unsafe { memmap2::Mmap::map(&sidecar_file) } {
+                Ok(mapping) => model.attach_expert_sidecar(Arc::new(mapping)),
+                Err(error) => {
+                    eprintln!("mmap expert sidecar: {error}");
+                    return;
+                }
             }
+        } else {
+            model.attach_expert_sidecar_file(sidecar_file)
         };
-        #[cfg(target_os = "macos")]
-        if env::var_os("PROXIMA_MMAP_RANDOM").is_some() {
-            // SAFETY: the mapping remains alive and read-only for this process.
-            let result = unsafe {
-                libc::madvise(
-                    sidecar_mapping.as_ptr().cast_mut().cast(),
-                    sidecar_mapping.len(),
-                    libc::MADV_RANDOM,
-                )
-            };
-            if result != 0 {
-                eprintln!("madvise sidecar mapping random failed: {result}");
-                return;
-            }
-        }
-        match model.attach_expert_sidecar(sidecar_mapping) {
-            Ok(()) => println!("expert_sidecar_attached = true"),
+        match attach_result {
+            Ok(()) => println!(
+                "expert_sidecar_attached = true expert_sidecar_source = {}",
+                if use_mmap { "mmap" } else { "pread" }
+            ),
             Err(error) => {
                 eprintln!("attach expert sidecar: {error}");
                 return;
