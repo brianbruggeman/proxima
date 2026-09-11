@@ -6964,11 +6964,16 @@ impl<'file> LoadedModel<'file> {
         // doc) -- cleared, never reallocated from scratch, at the top of
         // each closure invocation below.
         let mut step_input_scratch: Vec<StepInput> = Vec::new();
-        // qwen35 GDN prefill is necessarily sequential by position, but its
-        // routed graph partitions are invariant throughout a KV bucket.
-        // Reuse them across prompt positions instead of repeating partition,
-        // topological-order, and shape-inference work for every token.
+        // The ordinary qwen35 GDN path is one position per graph evaluation.
+        // The opt-in scan keeps recurrence order inside one caller-driven
+        // batch, so both forms can reuse one partition plan per concrete shape.
         let mut qwen35moe_pre_gather_plan: Option<Qwen35MoePreGatherPlan> = None;
+        let gdn_prefill_scan_enabled = serving_config.qwen35moe_pre_gather
+            && self
+                .architecture_impl
+                .is_some_and(|architecture| architecture.name() == "qwen35moe")
+            && !runtime.uses_gpu()
+            && std::env::var_os("PROXIMA_QWEN35MOE_GDN_PREFILL_SCAN").is_some();
 
         let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
             &self.vocab,
@@ -6987,8 +6992,11 @@ impl<'file> LoadedModel<'file> {
                 // ROW 427: a `single_position_step` architecture (qwen35's
                 // GDN mixer -- `TensorError::SingleTokenStepOnly`'s own doc)
                 // refuses any `new_count != 1` bind, so a `new_count > 1`
-                // prefill is split into one length-1 batch per position.
-                let split_prefill = self.single_position_step && next_ids.len() > 1;
+                // prefill is split unless the sequence-preserving scan and
+                // router handoff own the recurrence for this whole batch.
+                let split_prefill = self.single_position_step
+                    && next_ids.len() > 1
+                    && !gdn_prefill_scan_enabled;
                 let batch_count = if split_prefill { next_ids.len() } else { 1 };
                 let last_batch_index = batch_count - 1;
                 let mut token_id: u32 = 0;
@@ -7208,7 +7216,8 @@ impl<'file> LoadedModel<'file> {
                                 && self
                                     .architecture_impl
                                     .is_some_and(|architecture| architecture.name() == "qwen35moe")
-                                && name.contains("_exps.weight"))
+                                && (name.contains("_exps.weight")
+                                    || name.starts_with("gdn_prefill.")))
                         })
                     {
                         return Err(InteropError::MissingStepInput { name });
@@ -7265,9 +7274,8 @@ impl<'file> LoadedModel<'file> {
                             .is_some_and(|architecture| architecture.name() == "qwen35moe")
                         && (self.expert_sidecar.is_some() || !runtime.uses_gpu());
                     let gdn_prefill_scan = pre_gather
-                        && split_prefill
-                        && !runtime.uses_gpu()
-                        && std::env::var_os("PROXIMA_QWEN35MOE_GDN_PREFILL_SCAN").is_some();
+                        && gdn_prefill_scan_enabled
+                        && new_count > 1;
                     if pre_gather {
                         expert_slab_guard.clear_selected_experts_for_step();
                     }
