@@ -2183,6 +2183,31 @@ impl<'file> LoadedModel<'file> {
                         readback_bytes,
                         "qwen35moe segment returned requested payload bytes"
                     );
+                    if std::env::var_os("PROXIMA_DEBUG_QWEN35_REQUEST_BYTES").is_some() {
+                        let mut returned = requested
+                            .iter()
+                            .filter_map(|(mapped, original)| {
+                                evaluated.get(*mapped).map(|(values, _)| {
+                                    (
+                                        original.0,
+                                        mapped.0,
+                                        values.len() as u64
+                                            * core::mem::size_of::<f32>() as u64,
+                                        self.program
+                                            .get(original.0 as usize)
+                                            .and_then(|operation| operation.name()),
+                                    )
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        returned.sort_unstable_by_key(|entry| core::cmp::Reverse(entry.2));
+                        eprintln!(
+                            "qwen35 segment returned bytes phase={} layer={} nodes={:?}",
+                            if is_router { "router" } else { "gather" },
+                            layer,
+                            returned,
+                        );
+                    }
                 }
                 if is_router {
                     let mapped_router = mapping.get(&diagnostic.router_logits).copied().ok_or(
