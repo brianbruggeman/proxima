@@ -106,16 +106,12 @@ use omega::backend::execute_plan_named;
     not(feature = "metal-output-placement")
 ))]
 use omega::backend::execute_plan_named_metal_op_timed;
-#[cfg(all(
-    feature = "instrument",
-    feature = "metal",
-    target_os = "macos"
-))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::backend::execute_plan_named_metal_op_timed_with_expert_sources;
 #[cfg(feature = "metal")]
 use omega::backend::{
-    Engine, Plan, execute_plan_named_with_resident_names, mark_resident, plan_named, plan_named_exact,
-    release_resident_names, unregister_checkpoint_mapping,
+    Engine, Plan, execute_plan_named_with_expert_sources, mark_resident, plan_named,
+    plan_named_exact, release_resident_names, unregister_checkpoint_mapping,
 };
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same
@@ -168,9 +164,7 @@ use proxima_tensor::TensorError;
 #[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-use proxima_tensor::spec::{
-    DuplicateHeadPosition, mistral_single_range_cached_forward_program_with_biases,
-};
+use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_forward_program};
 
 use crate::architecture::{Architecture, StepInput, StepInputContext, bind_symbols};
 use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
@@ -975,7 +969,7 @@ pub struct LoadedModel<'file> {
     /// `load_inner`'s local `parsed`/`file_bytes` bindings have gone out of
     /// scope. `cfg`-gated with [`Self::apply_memory_fit_gate`], its only
     /// reader.
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes,
     vocab: Vocab,
     program: Vec<Op>,
@@ -986,7 +980,6 @@ pub struct LoadedModel<'file> {
     /// qwen35 hybrid path (`crate::qwen35::qwen35_forward_program` returns
     /// a bare `logits` root with no named hidden-state counterpart yet).
     hidden_root: Option<NodeId>,
-    residual_roots: Vec<NodeId>,
     /// `general.name` off the checkpoint's own metadata ([`Self::load`]/
     /// [`Self::load_with_paired_gate_up_reduce`]/[`Self::load_with_fused_qkv_reduce`]),
     /// `None` for [`Self::load_from_safetensors`] (HF's `config.json` has no
@@ -1208,7 +1201,6 @@ fn find_input_node(program: &[Op], name: &str) -> Result<NodeId, InteropError> {
 fn build_single_range_program(
     architecture: &ModelArchitecture,
     qk_norm: bool,
-    qkv_biases: bool,
 ) -> Result<Option<SingleRangeProgram>, InteropError> {
     if architecture.expert_count != 0 {
         return Ok(None);
@@ -1233,7 +1225,7 @@ fn build_single_range_program(
     // maps to `Ok(None)` below for whatever this builder genuinely cannot
     // express (still dense-only -- MoE is turned away above).
     let (program, logits_root, cache_roots, duplicate_head_scratch) =
-        match mistral_single_range_cached_forward_program_with_biases(
+        match mistral_single_range_cached_forward_program(
             architecture.vocab,
             architecture.embedding,
             architecture.feed_forward,
@@ -1242,7 +1234,6 @@ fn build_single_range_program(
             architecture.head_dim,
             architecture.block_count,
             qk_norm,
-            qkv_biases,
             duplicate_head,
             true,
         ) {
@@ -1290,7 +1281,6 @@ fn build_single_range_program(
 /// arithmetic, no platform or feature dependency of its own -- available to
 /// any `std`-gated caller regardless of which backend feature is compiled
 /// in.
-#[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
 fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize) -> usize {
     merged_len
         .div_ceil(bucket_tokens)
@@ -1300,34 +1290,6 @@ fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize) -> usize 
 
 const fn step_batch_needs_logits(split_prefill: bool, is_last_step_batch: bool) -> bool {
     !split_prefill || is_last_step_batch
-}
-
-/// Select the physical prefill window for one prompt pass. A single-position
-/// architecture always uses one row; dense architectures use `ubatch_size`
-/// when set, bounded by the logical `batch_size`. Zero means "no requested
-/// bound", preserving the historical one-pass behavior.
-fn prefill_chunk_len(
-    single_position_step: bool,
-    batch_size: u32,
-    ubatch_size: u32,
-    prompt_len: usize,
-) -> usize {
-    if prompt_len == 0 {
-        return 1;
-    }
-    if single_position_step {
-        return 1;
-    }
-    let logical = usize::try_from(batch_size).ok().filter(|&value| value != 0);
-    let physical = usize::try_from(ubatch_size)
-        .ok()
-        .filter(|&value| value != 0);
-    physical
-        .or(logical)
-        .map_or(prompt_len, |chunk| {
-            chunk.min(logical.unwrap_or(chunk)).min(prompt_len)
-        })
-        .max(1)
 }
 
 impl<'file> LoadedModel<'file> {
@@ -1353,15 +1315,6 @@ impl<'file> LoadedModel<'file> {
         self.model_name.as_deref()
     }
 
-    /// Looks up one literal vocabulary piece without exposing the loaded
-    /// tokenizer internals. Task heads that score a fixed answer vocabulary
-    /// (for example a reranker comparing `yes` and `no`) need the exact GGUF
-    /// token ids rather than guessed ids from a model family.
-    #[must_use]
-    pub fn token_id_for_piece(&self, piece: &str) -> Option<u32> {
-        self.vocab.token_id(piece)
-    }
-
     /// This checkpoint's pre-`lm_head` hidden-state root
     /// (`proxima_tensor::spec::ForwardRoots::hidden`), when the load path
     /// named one -- `None` on the qwen35 hybrid path
@@ -1374,90 +1327,6 @@ impl<'file> LoadedModel<'file> {
     #[must_use]
     pub fn hidden_root(&self) -> Option<NodeId> {
         self.hidden_root
-    }
-
-    /// Post-layer residual roots emitted by the dense forward builder. These
-    /// are diagnostic outputs for cross-backend parity, not a second inference
-    /// path; an empty slice means the architecture does not expose them.
-    #[must_use]
-    pub fn layer_residual_roots(&self) -> &[NodeId] {
-        &self.residual_roots
-    }
-
-    /// Returns computed graph nodes in topological order through `end`,
-    /// excluding weight/cache/input leaves. This is a diagnostic seam for
-    /// backend bisection: requesting an input as an output would confuse a
-    /// packed weight buffer with an F32 activation readback.
-    #[must_use]
-    pub fn computed_node_ids_through(&self, end: NodeId) -> Vec<NodeId> {
-        self.program
-            .iter()
-            .enumerate()
-            .take(end.0 as usize + 1)
-            .filter_map(|(index, op)| {
-                (!matches!(op, Op::Input { .. })).then_some(NodeId(index as u32))
-            })
-            .collect()
-    }
-
-    /// Returns the graph operation label for a diagnostic node, if that node
-    /// is named. Input leaves are intentionally still addressable here; a
-    /// caller can distinguish them from computed nodes with
-    /// [`Self::computed_node_ids_through`].
-    #[must_use]
-    pub fn node_name(&self, node: NodeId) -> Option<&str> {
-        self.program.get(node.0 as usize).and_then(Op::name)
-    }
-
-    /// Returns the structural operation kind for a graph diagnostic node.
-    #[must_use]
-    pub fn node_kind(&self, node: NodeId) -> Option<&'static str> {
-        self.program.get(node.0 as usize).map(|op| match op {
-            Op::Input { .. } => "Input",
-            Op::Elementwise { .. } => "Elementwise",
-            Op::Reduce(_) => "Reduce",
-            Op::Constant { .. } => "Constant",
-            Op::Iota { .. } => "Iota",
-        })
-    }
-
-    /// Returns the direct graph dependencies of one node for backend
-    /// bisection. The result is structural only; it does not evaluate the
-    /// graph or expose packed input buffers as activations.
-    #[must_use]
-    pub fn node_dependencies(&self, node: NodeId) -> Vec<NodeId> {
-        match self.program.get(node.0 as usize) {
-            Some(Op::Elementwise { operands, .. }) => {
-                operands.iter().map(|(operand, _)| *operand).collect()
-            }
-            Some(Op::Reduce(reduce)) => vec![reduce.operand],
-            _ => Vec::new(),
-        }
-    }
-
-    /// Human-readable structural details for a reduction diagnostic, including
-    /// its operand and index maps. This deliberately reports graph metadata,
-    /// not guessed tensor semantics.
-    #[must_use]
-    pub fn reduce_node_description(&self, node: NodeId) -> Option<String> {
-        match self.program.get(node.0 as usize) {
-            Some(Op::Reduce(reduce)) => Some(alloc::format!(
-                "operand={:?} body={:?} keep={:?} in_map={:?} out_map={:?}",
-                reduce.operand, reduce.body, reduce.keep, reduce.in_map, reduce.out_map
-            )),
-            _ => None,
-        }
-    }
-
-    /// Returns the complete structural operation description for a graph
-    /// diagnostic node. This is intentionally a debug representation: it
-    /// preserves the exact index maps and operand IDs needed to interpret a
-    /// one-element backend probe without inventing a second graph schema.
-    #[must_use]
-    pub fn node_description(&self, node: NodeId) -> Option<String> {
-        self.program
-            .get(node.0 as usize)
-            .map(|op| alloc::format!("{op:?}"))
     }
 
     /// Router-logit roots aligned with the routed layers of this model.
@@ -1680,12 +1549,13 @@ impl<'file> LoadedModel<'file> {
 
         // layer zero's router is already the complete graph prefix, so a
         // second prefix segment would execute the same operations twice.
-        let first_entry_mapping = layer_parts
-            .first()
-            .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
-                reason: String::from("the bound graph has no first router segment"),
-            })?;
+        let first_entry_mapping =
+            layer_parts
+                .first()
+                .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
+                    architecture: String::from("qwen35moe"),
+                    reason: String::from("the bound graph has no first router segment"),
+                })?;
         let first_entry_mapping = first_entry_mapping
             .2
             .as_ref()
@@ -1833,30 +1703,29 @@ impl<'file> LoadedModel<'file> {
             {
                 continue;
             }
-            let (_, values) = carried.get(node).ok_or_else(|| {
-                InteropError::PreGatherExecutionUnsupported {
-                    architecture: String::from("qwen35moe"),
-                    reason: alloc::format!("gdn scan producer missing cut node {node:?} ({name})"),
-                }
-            })?;
+            let (_, values) =
+                carried
+                    .get(node)
+                    .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
+                        architecture: String::from("qwen35moe"),
+                        reason: alloc::format!(
+                            "gdn scan producer missing cut node {node:?} ({name})"
+                        ),
+                    })?;
             segment_named.push((name.as_str(), QuantizedBlock::Float32(values)));
         }
 
         let taps = scan.taps;
         let scan_inputs = [
-            taps.query,
-            taps.key,
-            taps.value,
-            taps.gate,
-            taps.beta,
+            taps.query_sequence,
+            taps.key_sequence,
+            taps.value_sequence,
+            taps.gate_sequence,
+            taps.beta_sequence,
             taps.state_in,
         ];
         let mut requested = BTreeMap::new();
-        for original in router_cuts
-            .iter()
-            .map(|(node, _)| *node)
-            .chain(scan_inputs)
-        {
+        for original in router_cuts.iter().map(|(node, _)| *node).chain(scan_inputs) {
             if let Some(mapped) = mapping.get(&original).copied() {
                 requested.insert(mapped, original);
             }
@@ -1878,38 +1747,56 @@ impl<'file> LoadedModel<'file> {
         }
 
         let query = carried
-            .get(&taps.query)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.query })?
+            .get(&taps.query_sequence)
+            .ok_or(InteropError::MissingEvaluatedNode {
+                node: taps.query_sequence,
+            })?
             .1
             .as_slice();
         let key = carried
-            .get(&taps.key)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.key })?
+            .get(&taps.key_sequence)
+            .ok_or(InteropError::MissingEvaluatedNode {
+                node: taps.key_sequence,
+            })?
             .1
             .as_slice();
-        let value_entry = carried
-            .get(&taps.value)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.value })?;
+        let value_entry =
+            carried
+                .get(&taps.value_sequence)
+                .ok_or(InteropError::MissingEvaluatedNode {
+                    node: taps.value_sequence,
+                })?;
         let value_shape = value_entry.0.clone();
         let value = value_entry.1.as_slice();
         let gate = carried
-            .get(&taps.gate)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.gate })?
+            .get(&taps.gate_sequence)
+            .ok_or(InteropError::MissingEvaluatedNode {
+                node: taps.gate_sequence,
+            })?
             .1
             .as_slice();
         let beta = carried
-            .get(&taps.beta)
-            .ok_or(InteropError::MissingEvaluatedNode { node: taps.beta })?
+            .get(&taps.beta_sequence)
+            .ok_or(InteropError::MissingEvaluatedNode {
+                node: taps.beta_sequence,
+            })?
             .1
             .as_slice();
-        let state_entry = carried
-            .get(&taps.state_in)
-            .ok_or(InteropError::MissingEvaluatedNode {
-                node: taps.state_in,
-            })?;
+        let state_entry =
+            carried
+                .get(&taps.state_in)
+                .ok_or(InteropError::MissingEvaluatedNode {
+                    node: taps.state_in,
+                })?;
         let state_shape = state_entry.0.clone();
         let mut state = state_entry.1.clone();
         let mut output = vec![0.0_f32; value.len()];
+        let positions = value_shape.first().copied().ok_or_else(|| {
+            InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: String::from("gdn value sequence has no position dimension"),
+            }
+        })? as usize;
         let key_dim = state_shape.first().copied().ok_or_else(|| {
             InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from("qwen35moe"),
@@ -1938,7 +1825,7 @@ impl<'file> LoadedModel<'file> {
             })?;
         run_gdn_prefill_scan(GdnPrefillScan {
             shape: GdnPrefillShape {
-                positions: 1,
+                positions,
                 key_dim,
                 value_dim,
                 heads,
@@ -1952,7 +1839,7 @@ impl<'file> LoadedModel<'file> {
             state: &mut state,
             output: &mut output,
         })?;
-        carried.insert(taps.delta_out, (value_shape, output));
+        carried.insert(taps.delta_out, (value_shape[1..].to_vec(), output));
         carried.insert(taps.state_out, (state_shape, state));
         Ok(())
     }
@@ -3001,7 +2888,7 @@ impl<'file> LoadedModel<'file> {
         // long after `parsed` has gone out of scope -- computed once, here,
         // before any weight is bound, shared by both the qwen35 and dense
         // branches below.
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         let (dense_weight_bytes, expert_weight_bytes, table_weight_bytes) =
             crate::bind::tensor_bytes_by_class(parsed);
         // The common case resolves the checkpoint's own `general.architecture`
@@ -3043,11 +2930,7 @@ impl<'file> LoadedModel<'file> {
                 None
             } else {
                 let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
-                build_single_range_program(
-                    &bound.architecture,
-                    qk_norm,
-                    crate::bind::checkpoint_qkv_biases(parsed, &bound.architecture)?,
-                )?
+                build_single_range_program(&bound.architecture, qk_norm)?
             };
             let bound = bound;
             let expert_slab =
@@ -3058,27 +2941,17 @@ impl<'file> LoadedModel<'file> {
                 weights: bound.weights,
                 architecture: bound.architecture,
                 architecture_impl: Some(resolved),
-                #[cfg(feature = "metal")]
+                #[cfg(all(feature = "metal", target_os = "macos"))]
                 checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                     dense_bytes: dense_weight_bytes,
                     expert_bytes: expert_weight_bytes,
                     table_bytes: table_weight_bytes,
-                    ssm_state_bytes: {
-                        #[cfg(all(feature = "metal", target_os = "macos"))]
-                        {
-                            step_state.as_ref().map_or(0, |state| state.ssm_state_bytes)
-                        }
-                        #[cfg(not(all(feature = "metal", target_os = "macos")))]
-                        {
-                            0
-                        }
-                    },
+                    ssm_state_bytes: step_state.as_ref().map_or(0, |state| state.ssm_state_bytes),
                 },
                 vocab,
                 program: bound.program,
                 logits_root: bound.logits_root,
                 hidden_root: bound.hidden_root,
-                residual_roots: bound.residual_roots,
                 layer_roots: bound.layer_roots,
                 qwen35moe_layer_diagnostics: bound.qwen35moe_layer_diagnostics,
                 router_roots: bound.router_roots,
@@ -3129,7 +3002,6 @@ impl<'file> LoadedModel<'file> {
                 architecture.expert_count,
                 architecture.expert_used_count,
                 qk_norm,
-                crate::bind::checkpoint_qkv_biases(parsed, &architecture)?,
                 paired_gate_up_reduce,
                 fused_qkv_reduce,
                 true,
@@ -3170,11 +3042,7 @@ impl<'file> LoadedModel<'file> {
         let single_range = if paired_gate_up_reduce || fused_qkv_reduce {
             None
         } else {
-            build_single_range_program(
-                &architecture,
-                qk_norm,
-                crate::bind::checkpoint_qkv_biases(parsed, &architecture)?,
-            )?
+            build_single_range_program(&architecture, qk_norm)?
         };
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
         Self {
@@ -3183,7 +3051,7 @@ impl<'file> LoadedModel<'file> {
             weights,
             architecture,
             architecture_impl: None,
-            #[cfg(feature = "metal")]
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: dense_weight_bytes,
                 expert_bytes: expert_weight_bytes,
@@ -3194,7 +3062,6 @@ impl<'file> LoadedModel<'file> {
             program,
             logits_root,
             hidden_root: Some(forward_roots.hidden),
-            residual_roots: Vec::new(),
             layer_roots: cache_roots
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
@@ -3264,12 +3131,11 @@ impl<'file> LoadedModel<'file> {
                 false,
                 false,
                 false,
-                false,
                 true,
             )?;
         let logits_root = forward_roots.logits;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let single_range = build_single_range_program(&architecture, false, false)?;
+        let single_range = build_single_range_program(&architecture, false)?;
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
         Self {
             expert_slab: std::sync::Mutex::new(expert_slab),
@@ -3283,7 +3149,7 @@ impl<'file> LoadedModel<'file> {
             // byte counts as dense here rather than guessing a split;
             // `expert_bytes`/`table_bytes` stay `0` until a real HF MoE
             // checkpoint proves what its own expert-tensor names look like.
-            #[cfg(feature = "metal")]
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes {
                 dense_bytes: file_bytes.len() as u64,
                 expert_bytes: 0,
@@ -3294,7 +3160,6 @@ impl<'file> LoadedModel<'file> {
             program,
             logits_root,
             hidden_root: Some(forward_roots.hidden),
-            residual_roots: Vec::new(),
             layer_roots: cache_roots
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
@@ -3778,53 +3643,6 @@ enum LayerCacheState {
     Attention(LayerCache),
     DenseAttention(Qwen35DenseAttentionCache),
     Ssm(SsmLayerCache),
-}
-
-fn layer_cache_len(cache: &LayerCacheState) -> usize {
-    match cache {
-        LayerCacheState::Attention(cache) => cache.k_even.len() + cache.k_odd.len() + cache.v.len(),
-        LayerCacheState::DenseAttention(cache) => {
-            cache.k_first.len() + cache.k_second.len() + cache.k_pass.len() + cache.v.len()
-        }
-        LayerCacheState::Ssm(cache) => cache.conv_history.len() + cache.state.len(),
-    }
-}
-
-fn layer_cache_abs_sum(cache: &LayerCacheState) -> f64 {
-    let sum = |values: &[f32]| {
-        values
-            .iter()
-            .map(|value| f64::from(value.abs()))
-            .sum::<f64>()
-    };
-    match cache {
-        LayerCacheState::Attention(cache) => sum(&cache.k_even) + sum(&cache.k_odd) + sum(&cache.v),
-        LayerCacheState::DenseAttention(cache) => {
-            sum(&cache.k_first) + sum(&cache.k_second) + sum(&cache.k_pass) + sum(&cache.v)
-        }
-        LayerCacheState::Ssm(cache) => sum(&cache.conv_history) + sum(&cache.state),
-    }
-}
-
-fn layer_cache_fingerprint(cache: &LayerCacheState) -> f64 {
-    let fold = |values: &[f32], seed: f64| {
-        values.iter().enumerate().fold(seed, |sum, (index, value)| {
-            sum + f64::from(*value) * (index as f64 + 1.0)
-        })
-    };
-    match cache {
-        LayerCacheState::Attention(cache) => {
-            fold(&cache.v, fold(&cache.k_odd, fold(&cache.k_even, 0.0)))
-        }
-        LayerCacheState::DenseAttention(cache) => fold(
-            &cache.v,
-            fold(
-                &cache.k_pass,
-                fold(&cache.k_second, fold(&cache.k_first, 0.0)),
-            ),
-        ),
-        LayerCacheState::Ssm(cache) => fold(&cache.state, fold(&cache.conv_history, 0.0)),
-    }
 }
 
 /// Diagnostic-only (history-carry bisection step 3): `(element_count,
@@ -4354,17 +4172,6 @@ pub(crate) fn supported_serving_config(
         ubatch_size: 0,
         gpu_layers,
         reasoning_budget: 0,
-        numeric_policy: if std::env::var_os("PROXIMA_BIT_EXACT").is_some()
-            || std::env::var_os("PROXIMA_RELAXED_NUMERICS").is_none()
-        {
-            proxima_tensor::NumericPolicy::bit_exact()
-        } else {
-            proxima_tensor::NumericPolicy::llama_relaxed()
-        },
-        // Correctness-first parity gate: exact activation arithmetic is the
-        // normal path. The relaxed route is an explicit performance escape,
-        // so a backend comparison cannot silently compare different oracles.
-        exact_activations: std::env::var_os("PROXIMA_RELAXED_ACTIVATIONS").is_none(),
         #[cfg(all(feature = "metal", target_os = "macos"))]
         math_mode,
         ..ServingConfig::default()
@@ -4427,10 +4234,9 @@ fn select_backend(config: &ServingConfig) -> Engine {
 /// cache directly rather than through a trait object -- [`Engine`] is
 /// already a closed, non-`dyn` enum (`omega::backend`'s own doc), and this
 /// struct's whole job is picking one arm of it once per
-/// [`LoadedModel::generate_with_serving_config`] call. A `metal` build
-/// resolves `Engine::Gpu` to Metal on macOS. A `vulkan` build additionally
-/// enables omega's wgpu driver; on non-macOS targets the same engine then
-/// resolves through wgpu (normally its Vulkan backend).
+/// [`LoadedModel::generate_with_serving_config`] call. This crate never links
+/// `wgpu-backend`, so `Engine::Gpu` here always resolves to the Metal driver
+/// through [`omega::backend::GpuDriver::for_target`].
 /// [`BackendRuntime::math_mode`]/[`BackendRuntime::numeric_policy`]/
 /// [`BackendRuntime::dispatch_type`] -- the three `ServingConfig` knobs
 /// [`BackendRuntime::build_placed_plan`] applies together, in this order,
@@ -4495,7 +4301,7 @@ pub(crate) struct BackendRuntime {
     /// stayed flat over the same steps, proving the growth was not
     /// GPU-side). Clearing on miss keeps exactly the one entry worth
     /// keeping: the bucket a caller is currently inside.
-    plans: alloc::collections::BTreeMap<(usize, usize, u64), Plan>,
+    plans: alloc::collections::BTreeMap<(usize, usize), Plan>,
     /// Plans for the stable pre-gather router/gather partitions. The segment
     /// programs reuse node IDs across layers, so this cache is keyed by the
     /// partition's address and shape rather than the ordinary decode key.
@@ -4531,7 +4337,7 @@ pub(crate) struct BackendRuntime {
     /// `(new_count, merged_len)` shape space -- sharing one map would let a
     /// single-range plan satisfy a two-range lookup by coincidence of key.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    placed_plans: alloc::collections::BTreeMap<(usize, usize, u64), omega::metal::Plan>,
+    placed_plans: alloc::collections::BTreeMap<(usize, usize), omega::metal::Plan>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     placed_segment_plans: alloc::collections::BTreeMap<(usize, usize, usize), omega::metal::Plan>,
     pub(crate) plan_hits: usize,
@@ -4550,13 +4356,8 @@ pub(crate) struct BackendRuntime {
 #[cfg(feature = "metal")]
 impl BackendRuntime {
     pub(crate) fn new(config: &ServingConfig) -> Self {
-        let engine = if config.gpu_correctness_fallback && cfg!(feature = "vulkan") {
-            Engine::Cpu
-        } else {
-            select_backend(config)
-        };
         Self {
-            engine,
+            engine: select_backend(config),
             plans: alloc::collections::BTreeMap::new(),
             segment_plans: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -4610,34 +4411,7 @@ impl BackendRuntime {
             &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
         >,
     ) -> Result<Evaluated, InteropError> {
-        // CUDA and wgpu emit every integer graph input as a float buffer
-        // (their gather kernels consume the numeric value), but the shared
-        // tokenizer binding quite correctly supplies `QuantizedBlock::Int32`
-        // on CPU. Convert only at this backend boundary; the CPU evaluator
-        // keeps its native integer contract and no graph dtype is changed.
-        let gpu_integer_inputs: Vec<Option<Vec<f32>>> = named
-            .iter()
-            .map(|(_, block)| match block {
-                QuantizedBlock::Int32(values) => {
-                    Some(values.iter().map(|value| *value as f32).collect())
-                }
-                _ => None,
-            })
-            .collect();
-        let gpu_named: Vec<(&str, QuantizedBlock<'_>)> = named
-            .iter()
-            .zip(gpu_integer_inputs.iter())
-            .map(|((name, block), converted)| {
-                converted.as_ref().map_or((*name, *block), |values| {
-                    (*name, QuantizedBlock::Float32(values.as_slice()))
-                })
-            })
-            .collect();
-        let shape = (
-            symbols[0] as usize,
-            symbols[1] as usize,
-            Self::output_signature(outputs),
-        );
+        let shape = (symbols[0] as usize, symbols[1] as usize);
         let exact_activations = self.exact_activations;
         let plan = Self::resolve_cached_plan(
             &mut self.plans,
@@ -4651,7 +4425,7 @@ impl BackendRuntime {
                         None,
                         program,
                         symbols,
-                        &gpu_named,
+                        named,
                         outputs,
                         self.numeric_policy,
                     )?
@@ -4661,7 +4435,7 @@ impl BackendRuntime {
                         None,
                         program,
                         symbols,
-                        &gpu_named,
+                        named,
                         outputs,
                         self.numeric_policy,
                     )?
@@ -4680,10 +4454,9 @@ impl BackendRuntime {
                 Ok(plan)
             },
         )?;
-        Ok(execute_plan_named_with_resident_names(
+        Ok(execute_plan_named_with_expert_sources(
             plan,
-            &gpu_named,
-            Some(resident_names),
+            named,
             expert_sources,
         )?)
     }
@@ -4703,24 +4476,6 @@ impl BackendRuntime {
             &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
         >,
     ) -> Result<Evaluated, InteropError> {
-        let gpu_integer_inputs: Vec<Option<Vec<f32>>> = named
-            .iter()
-            .map(|(_, block)| match block {
-                QuantizedBlock::Int32(values) => {
-                    Some(values.iter().map(|value| *value as f32).collect())
-                }
-                _ => None,
-            })
-            .collect();
-        let gpu_named: Vec<(&str, QuantizedBlock<'_>)> = named
-            .iter()
-            .zip(gpu_integer_inputs.iter())
-            .map(|((name, block), converted)| {
-                converted.as_ref().map_or((*name, *block), |values| {
-                    (*name, QuantizedBlock::Float32(values.as_slice()))
-                })
-            })
-            .collect();
         let host_timing = std::env::var_os("PROXIMA_DEBUG_SEGMENT_HOST").is_some();
         let resolve_started = std::time::Instant::now();
         let program_key = program.as_ptr() as usize;
@@ -4739,7 +4494,7 @@ impl BackendRuntime {
                         None,
                         program,
                         symbols,
-                        &gpu_named,
+                        named,
                         outputs,
                         self.numeric_policy,
                     )?
@@ -4749,7 +4504,7 @@ impl BackendRuntime {
                         None,
                         program,
                         symbols,
-                        &gpu_named,
+                        named,
                         outputs,
                         self.numeric_policy,
                     )?
@@ -4765,12 +4520,7 @@ impl BackendRuntime {
         )?;
         let resolve_elapsed_us = resolve_started.elapsed().as_micros();
         let execute_started = std::time::Instant::now();
-        let result = execute_plan_named_with_resident_names(
-            plan,
-            &gpu_named,
-            Some(resident_names),
-            expert_sources,
-        )
+        let result = execute_plan_named_with_expert_sources(plan, named, expert_sources)
             .map_err(InteropError::from);
         if host_timing {
             eprintln!(
@@ -4920,11 +4670,7 @@ impl BackendRuntime {
         input_placements: &[(NodeId, &PlacedBuffer, usize)],
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<Evaluated, InteropError> {
-        let shape = (
-            symbols[0] as usize,
-            symbols[1] as usize,
-            Self::output_signature(outputs),
-        );
+        let shape = (symbols[0] as usize, symbols[1] as usize);
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -5015,11 +4761,7 @@ impl BackendRuntime {
         input_placements: &[(NodeId, &PlacedBuffer, usize)],
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
-        let shape = (
-            symbols[0] as usize,
-            symbols[1] as usize,
-            Self::output_signature(outputs),
-        );
+        let shape = (symbols[0] as usize, symbols[1] as usize);
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -5079,11 +4821,7 @@ impl BackendRuntime {
         input_placements: &[(NodeId, &PlacedBuffer, usize)],
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<omega::metal::DispatchTimedOutcome, InteropError> {
-        let shape = (
-            symbols[0] as usize,
-            symbols[1] as usize,
-            Self::output_signature(outputs),
-        );
+        let shape = (symbols[0] as usize, symbols[1] as usize);
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -5143,10 +4881,10 @@ impl BackendRuntime {
     /// next miss would evict it) while making superseded entries collectible
     /// instead of retained for the rest of the call.
     fn resolve_cached_plan<'cache, PlanType>(
-        cache: &'cache mut alloc::collections::BTreeMap<(usize, usize, u64), PlanType>,
+        cache: &'cache mut alloc::collections::BTreeMap<(usize, usize), PlanType>,
         plan_hits: &mut usize,
         plan_misses: &mut usize,
-        shape: (usize, usize, u64),
+        shape: (usize, usize),
         build: impl FnOnce() -> Result<PlanType, InteropError>,
     ) -> Result<&'cache mut PlanType, InteropError> {
         use alloc::collections::btree_map::Entry;
@@ -5165,19 +4903,6 @@ impl BackendRuntime {
                 Ok(entry.insert(plan))
             }
         }
-    }
-
-    /// A plan's live output set is part of its semantic shape. Caching only
-    /// by tensor dimensions is unsound when a split prefill first requests
-    /// cache-tap roots and the final chunk additionally requests logits: the
-    /// first plan can legally prune the logits node, then be reused for the
-    /// final chunk. Keep this signature algebraic and order-sensitive so two
-    /// output sets cannot alias merely because their dimensions match.
-    fn output_signature(outputs: &[NodeId]) -> u64 {
-        outputs.iter().fold(0xcbf29ce484222325, |hash, node| {
-            let mixed = (node.0 as u64).wrapping_add(0x9e3779b97f4a7c15);
-            (hash ^ mixed).wrapping_mul(0x100000001b3)
-        }) ^ outputs.len() as u64
     }
 
     fn resolve_segment_plan<'cache, PlanType>(
@@ -5251,11 +4976,7 @@ impl BackendRuntime {
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
-        let shape = (
-            symbols[0] as usize,
-            symbols[1] as usize,
-            Self::output_signature(outputs),
-        );
+        let shape = (symbols[0] as usize, symbols[1] as usize);
         let plan = Self::resolve_cached_plan(
             &mut self.plans,
             &mut self.plan_hits,
@@ -6530,7 +6251,7 @@ impl<'file> LoadedModel<'file> {
         max_tokens: usize,
         serving_config: ServingConfig,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         let serving_config = {
             let mut serving_config = serving_config;
             self.apply_memory_fit_gate(&mut serving_config)?;
@@ -6565,13 +6286,13 @@ impl<'file> LoadedModel<'file> {
         prompt: &str,
         serving_config: &ServingConfig,
     ) -> Result<PrefixState, InteropError> {
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         let effective_serving_config = {
             let mut effective_serving_config = *serving_config;
             self.apply_memory_fit_gate(&mut effective_serving_config)?;
             effective_serving_config
         };
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(all(feature = "metal", target_os = "macos")))]
         let effective_serving_config = *serving_config;
         let mut runtime = BackendRuntime::new(&effective_serving_config);
         let (_generated_ids, _text, _stopped_by_eos, prefix_state) = self
@@ -6621,7 +6342,7 @@ impl<'file> LoadedModel<'file> {
         serving_config: &ServingConfig,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         let effective_serving_config = {
             let mut effective_serving_config = *serving_config;
             // Prefix-resume reaches the same device allocator as ordinary
@@ -6631,7 +6352,7 @@ impl<'file> LoadedModel<'file> {
             self.apply_memory_fit_gate(&mut effective_serving_config)?;
             effective_serving_config
         };
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(all(feature = "metal", target_os = "macos")))]
         let effective_serving_config = *serving_config;
         let mut runtime = BackendRuntime::new(&effective_serving_config);
         let seed = PrefixState {
@@ -6682,7 +6403,7 @@ impl<'file> LoadedModel<'file> {
     /// [`InteropError::MemoryBudgetExceeded`] when even a context length of
     /// `1` cannot fit this checkpoint's own weights plus the fixed arena
     /// allowance inside the host's own reported limit.
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     fn apply_memory_fit_gate(
         &self,
         serving_config: &mut ServingConfig,
@@ -6690,42 +6411,14 @@ impl<'file> LoadedModel<'file> {
         if !serving_config.gpu_memory_fit {
             return Ok(());
         }
-        let detected_limit = {
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            {
-                let Ok(facts) = omega::metal::system_memory_facts() else {
-                    return Ok(());
-                };
-                crate::memory_fit::HostMemoryLimit {
-                    limit_bytes: facts
-                        .recommended_max_working_set_size
-                        .min(facts.physical_memory_bytes),
-                    os_headroom_bytes: omega::sized::LOAD_TIME_FIT_OS_HEADROOM_BYTES,
-                }
-            }
-            #[cfg(all(feature = "cuda", not(target_os = "macos")))]
-            {
-                let Ok(driver) = omega::CudaDriver::new(0) else {
-                    return Ok(());
-                };
-                let Ok((_, total_bytes)) = driver.memory_info() else {
-                    return Ok(());
-                };
-                crate::memory_fit::HostMemoryLimit {
-                    limit_bytes: total_bytes as u64,
-                    os_headroom_bytes: 0,
-                }
-            }
-            #[cfg(all(not(target_os = "macos"), not(feature = "cuda")))]
-            {
-                let Some(configured) = serving_config.gpu_memory_limit_bytes else {
-                    return Ok(());
-                };
-                crate::memory_fit::HostMemoryLimit {
-                    limit_bytes: configured,
-                    os_headroom_bytes: 0,
-                }
-            }
+        let Ok(facts) = omega::metal::system_memory_facts() else {
+            return Ok(());
+        };
+        let detected_limit = crate::memory_fit::HostMemoryLimit {
+            limit_bytes: facts
+                .recommended_max_working_set_size
+                .min(facts.physical_memory_bytes),
+            os_headroom_bytes: omega::sized::LOAD_TIME_FIT_OS_HEADROOM_BYTES,
         };
         let limit = serving_config
             .gpu_memory_limit_bytes
@@ -6744,18 +6437,10 @@ impl<'file> LoadedModel<'file> {
         // absorbs that difference without inventing a fourth bucket for a
         // few-KB header.
         let weights = crate::memory_fit::WeightClassBytes {
-            dense_bytes: {
-                #[cfg(all(feature = "metal", target_os = "macos"))]
-                {
-                    self.checkpoint_weight_bytes
-                        .dense_bytes
-                        .next_multiple_of(omega::metal::page_size() as u64)
-                }
-                #[cfg(not(all(feature = "metal", target_os = "macos")))]
-                {
-                    self.checkpoint_weight_bytes.dense_bytes
-                }
-            },
+            dense_bytes: self
+                .checkpoint_weight_bytes
+                .dense_bytes
+                .next_multiple_of(omega::metal::page_size() as u64),
             ..self.checkpoint_weight_bytes
         };
         let requested_context_length = serving_config.context_length;
@@ -7210,39 +6895,21 @@ impl<'file> LoadedModel<'file> {
                 // is exact for the integer counts ROW 129 used it for, and NOT
                 // for timings -- ROW 130's own postmortem on why it produced a
                 // sub-bucket larger than its parent and a negative duration).
-                // A single-position architecture (qwen35's GDN mixer) must
-                // use one row. For dense models, the same loop now honors the
-                // caller's bounded prefill window: each chunk executes the
-                // identical graph/cache append path, advances `cached_len`,
-                // and only the final chunk requests logits. This is the
-                // serialized-prefill seam; it avoids materializing the whole
-                // prompt's activation batch while preserving the old one-pass
-                // behavior when both bounds are zero.
-                let chunk_len = prefill_chunk_len(
-                    self.single_position_step,
-                    serving_config.batch_size,
-                    serving_config.ubatch_size,
-                    next_ids.len(),
-                );
-                let split_prefill = cached_len == seed_cached_len && next_ids.len() > chunk_len;
-                let batch_count = if split_prefill {
-                    next_ids.len().div_ceil(chunk_len)
-                } else {
-                    1
-                };
+                // ROW 427: a `single_position_step` architecture (qwen35's
+                // GDN mixer -- `TensorError::SingleTokenStepOnly`'s own doc)
+                // refuses any `new_count != 1` bind, so a `new_count > 1`
+                // prefill is split into one length-1 batch per position.
+                let split_prefill = self.single_position_step && next_ids.len() > 1;
+                let batch_count = if split_prefill { next_ids.len() } else { 1 };
                 let last_batch_index = batch_count - 1;
                 let mut token_id: u32 = 0;
                 for batch_index in 0..batch_count {
                     let ids_for_step: &[u32] = if split_prefill {
-                        let start = batch_index * chunk_len;
-                        let end = (start + chunk_len).min(next_ids.len());
-                        &next_ids[start..end]
+                        core::slice::from_ref(&next_ids[batch_index])
                     } else {
                         next_ids.as_slice()
                     };
                     let is_last_step_batch = batch_index == last_batch_index;
-                    let debug_prefill_chunks =
-                        std::env::var_os("PROXIMA_DEBUG_PREFILL_CHUNKS").is_some();
                     #[cfg(feature = "instrument")]
                     proxima_tensor::instrument::reset_step();
                     #[cfg(feature = "instrument")]
@@ -7289,19 +6956,22 @@ impl<'file> LoadedModel<'file> {
                     for (name, bytes, kind) in &self.weights.packed_owned {
                         named_blocks.push((name.as_str(), kind.as_block(bytes)));
                     }
-                    // The CUDA path currently binds the two-range cache at its
-                    // exact logical history length. Its generic kernels do not
-                    // have the fused CachedAttention operation's dynamic
-                    // live-row bound, so bucket padding would become visible
-                    // to attention. The allocation-reuse optimization remains
-                    // available to backends with that bound.
-                    let kv_bound_extent = cached_len;
+                    // Rounds `cached_len` up to `ServingConfig::kv_bucket_tokens`
+                    // (`kv_extent`'s own doc) -- `usize::MAX` in place of the
+                    // placed-KV path's fixed buffer capacity: the two-range KV
+                    // cache below is a growing `Vec`, not a preallocated
+                    // device buffer, so there is no hard cap to clamp against.
+                    let kv_bound_extent = kv_extent(
+                        cached_len + new_count,
+                        usize::MAX,
+                        serving_config.kv_bucket_tokens,
+                    );
                     // `mistral_cached_forward_program_with_experts`'s own
                     // `cached_len` `Op::Input` -- always present regardless of
-                    // This scalar is still supplied on every step for fused
-                    // CPU/Metal implementations that use the dynamic live-row
-                    // bound, even though CUDA's exact extent makes its value
-                    // equal to the cache shape here.
+                    // `ServingConfig::kv_bucket_tokens` (`proxima_tensor::bind::
+                    // cached_attention_candidates`'s own doc on the runtime bound
+                    // that reads it), so this scalar is fed on every step,
+                    // bucketed or not.
                     let cached_len_scalar = [cached_len as f32];
                     // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
                     // own `lm_head_row` `Op::Input` -- the last row of THIS
@@ -7539,16 +7209,12 @@ impl<'file> LoadedModel<'file> {
                         );
                     }
                     if pre_gather
-                        && qwen35moe_pre_gather_plan
-                            .as_ref()
-                            .is_none_or(|plan| {
-                                plan.symbols != symbols
-                                    || plan.gdn_scan_enabled != gdn_prefill_scan
-                            })
+                        && qwen35moe_pre_gather_plan.as_ref().is_none_or(|plan| {
+                            plan.symbols != symbols || plan.gdn_scan_enabled != gdn_prefill_scan
+                        })
                     {
-                        qwen35moe_pre_gather_plan = Some(
-                            self.qwen35moe_pre_gather_plan(&symbols, gdn_prefill_scan)?,
-                        );
+                        qwen35moe_pre_gather_plan =
+                            Some(self.qwen35moe_pre_gather_plan(&symbols, gdn_prefill_scan)?);
                     }
                     // The pristine table aliases the named checkpoint stack and
                     // needs no substitution. Once a policy pages or evicts any
@@ -7738,7 +7404,6 @@ impl<'file> LoadedModel<'file> {
                             expert_source_substitutions,
                         )?
                     };
-
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                     let evaluated = if pre_gather {
                         let pre_gather_plan =
@@ -7773,29 +7438,6 @@ impl<'file> LoadedModel<'file> {
                             expert_source_substitutions,
                         )?
                     };
-                    if debug_prefill_chunks && _step == 0 {
-                        let (logits_sum, logits_first) =
-                            evaluated
-                                .get(self.logits_root)
-                                .map_or((0.0, 0.0), |(values, _)| {
-                                    (
-                                        values.iter().copied().sum(),
-                                        values.first().copied().unwrap_or(0.0),
-                                    )
-                                });
-                        eprintln!(
-                            "prefill_chunk step={} batch={}/{} cached_len={} new_start={} new_count={} last={} logits_sum={} logits_first={}",
-                            _step,
-                            batch_index + 1,
-                            batch_count,
-                            cached_len,
-                            cached_len,
-                            new_count,
-                            is_last_step_batch,
-                            logits_sum,
-                            logits_first,
-                        );
-                    }
                     #[cfg(feature = "instrument")]
                     let evaluate_ticks = elapsed_ticks(evaluate_started);
                     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -8032,36 +7674,6 @@ impl<'file> LoadedModel<'file> {
                         );
                     }
                     cached_len += new_count;
-
-                    if debug_prefill_chunks && _step == 0 {
-                        let (cache_len, cache_sum, cache_fingerprint) =
-                            layer_caches.first().map_or((0, 0.0, 0.0), |cache| {
-                                (
-                                    layer_cache_len(cache),
-                                    layer_cache_abs_sum(cache),
-                                    layer_cache_fingerprint(cache),
-                                )
-                            });
-                        eprintln!(
-                            "prefill_cache step={} batch={} cached_len_after={} layer0_len={} layer0_abs_sum={} layer0_fingerprint={}",
-                            _step,
-                            batch_index + 1,
-                            cached_len,
-                            cache_len,
-                            cache_sum,
-                            cache_fingerprint,
-                        );
-                        for (layer, cache) in layer_caches.iter().enumerate() {
-                            eprintln!(
-                                "prefill_cache_layer step={} batch={} layer={} len={} fingerprint={}",
-                                _step,
-                                batch_index + 1,
-                                layer,
-                                layer_cache_len(cache),
-                                layer_cache_fingerprint(cache),
-                            );
-                        }
-                    }
 
                     // Everything below samples a token off THIS batch's logits.
                     // For a `single_position_step` architecture's expanded
@@ -8964,11 +8576,7 @@ impl<'file> LoadedModel<'file> {
         // per-position logits (not just the last row) has no opt-in path
         // yet -- residual, not fixed here.
         let lm_head_row_scalar = [(ids.len() - 1) as f32];
-        // This diagnostic starts from an empty historical cache.  Binding
-        // prompt-length zero-filled rows here makes generic cached-attention
-        // lowering treat those rows as real keys; the serving decode loop
-        // correctly uses `cached_len` for the same empty-cache boundary.
-        let kv_bound_extent = 0;
+        let kv_bound_extent = kv_extent(ids.len(), usize::MAX, serving_config.kv_bucket_tokens);
 
         let symbols = self.push_step_named_blocks(
             &inputs,
@@ -9398,16 +9006,6 @@ mod tests {
         assert!(step_batch_needs_logits(false, true));
         assert!(!step_batch_needs_logits(true, false));
         assert!(step_batch_needs_logits(true, true));
-    }
-
-    #[test]
-    fn prefill_chunk_len_respects_logical_and_physical_bounds() {
-        assert_eq!(super::prefill_chunk_len(false, 0, 0, 100), 100);
-        assert_eq!(super::prefill_chunk_len(false, 32, 0, 100), 32);
-        assert_eq!(super::prefill_chunk_len(false, 32, 8, 100), 8);
-        assert_eq!(super::prefill_chunk_len(false, 8, 32, 100), 8);
-        assert_eq!(super::prefill_chunk_len(true, 32, 8, 100), 1);
-        assert_eq!(super::prefill_chunk_len(false, 32, 8, 3), 3);
     }
 
     #[test]
@@ -11242,7 +10840,6 @@ mod memory_fit_gate_tests {
             program: Vec::new(),
             logits_root: proxima_tensor::op::NodeId(0),
             hidden_root: None,
-            residual_roots: Vec::new(),
             layer_roots: Vec::new(),
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
