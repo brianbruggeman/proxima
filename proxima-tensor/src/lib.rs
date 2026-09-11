@@ -8,6 +8,17 @@
 //! addressing ([`bind::bind`]) are read off a program, never built into a
 //! separate arena a program has to agree with.
 //!
+//! This crate is the tensor execution and compilation substrate, not a model
+//! family registry or a training framework. A model-family configuration
+//! describes its metadata and assembles these generic operations; once
+//! assembled, shape inference, binding, fusion, and backend lowering are
+//! family-independent. That separation is what lets a new architecture add
+//! composition data and binding rules without introducing a new tensor
+//! runtime type or a PyTorch-shaped object graph.
+//! The configuration is therefore the model front end; build-time generation
+//! may select which family descriptions are compiled in, while the runtime
+//! still executes the same reified algebra.
+//!
 //! # Three op forms
 //!
 //! A composed [`Pipe`](proxima_primitives::pipe::Pipe) chain is already a
@@ -251,13 +262,11 @@ pub use cpu::QuantDot;
 #[cfg(feature = "std")]
 pub use cpu::{
     Evaluated, Interpreter, QuantizedBlock, TypedBuffer, evaluate, evaluate_parallel,
-    evaluate_typed, evaluate_with_scratch, resolve_named_blocks,
+    evaluate_typed, evaluate_with_scratch, resolve_named_blocks, resolve_named_blocks_with_experts,
 };
 pub use dtype::DType;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use error::TensorError;
-#[cfg(feature = "std")]
-pub use similarity::cosine_top_k;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use live::annotate;
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -268,3 +277,5 @@ pub use numeric::{NumericPolicy, NumericRewrite, admit};
 pub use op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use shape::{ShapeTable, Shapes, infer};
+#[cfg(feature = "std")]
+pub use similarity::cosine_top_k;

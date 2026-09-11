@@ -290,6 +290,7 @@ pub mod quant_format {
     /// `todo!`/`unimplemented!` on any other codec arm).
     const fn codec_name(codec: PackedCodec) -> &'static str {
         match codec {
+            PackedCodec::Q2K => "Q2_K",
             PackedCodec::Q3K => "Q3_K",
             PackedCodec::Q4K => "Q4_K",
             PackedCodec::Q5K => "Q5_K",
@@ -301,10 +302,11 @@ pub mod quant_format {
         }
     }
 
-    /// The 8 [`PackedCodec`] variants, exhaustively -- adding a 9th to
+    /// The 9 [`PackedCodec`] variants, exhaustively -- adding a 10th to
     /// `omega::msl::PackedCodec` without adding it here is a compile error,
     /// not a silently stale doc.
     const ALL_CODECS: &[PackedCodec] = &[
+        PackedCodec::Q2K,
         PackedCodec::Q3K,
         PackedCodec::Q4K,
         PackedCodec::Q5K,

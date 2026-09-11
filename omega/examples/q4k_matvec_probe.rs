@@ -109,7 +109,14 @@ fn run() {
         // plan ONCE, execute per iteration -- the serving-loop shape. This
         // is what takes `infer`/`bind`/codec-resolution out of the timed
         // region, where they never belonged.
-        let resolved = omega::plan(&program, &[], &blocks, &[sum], proxima_tensor::NumericPolicy::default()).expect("probe plans");
+        let resolved = omega::plan(
+            &program,
+            &[],
+            &blocks,
+            &[sum],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("probe plans");
         omega::execute_plan(&resolved, &blocks).expect("warmup executes");
         let mut samples = Vec::with_capacity(runs);
         for _ in 0..runs {
@@ -137,7 +144,13 @@ fn run() {
         use proxima_tensor::{bind, infer};
         let (program, sum) = matvec_program(4096, 4096);
         let shapes = infer(&program, &[]).expect("probe program infers");
-        let nests = bind(&program, &shapes, &[sum], proxima_tensor::NumericPolicy::default()).expect("probe program binds");
+        let nests = bind(
+            &program,
+            &shapes,
+            &[sum],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("probe program binds");
         println!(
             "q4k_matvec_probe bound_ops={} (1 == fused, 2 == materializing)",
             nests.len()
@@ -254,7 +267,14 @@ fn run() {
             QuantizedBlock::Float32(&weight),
             QuantizedBlock::Float32(&activation),
         ];
-        let resolved = omega::plan(&program, &[], &blocks, &[sum], proxima_tensor::NumericPolicy::default()).expect("f32 control plans");
+        let resolved = omega::plan(
+            &program,
+            &[],
+            &blocks,
+            &[sum],
+            proxima_tensor::NumericPolicy::default(),
+        )
+        .expect("f32 control plans");
         omega::execute_plan(&resolved, &blocks).expect("f32 control warms up");
         let mut samples = Vec::with_capacity(runs);
         for _ in 0..runs {
@@ -318,10 +338,6 @@ fn run() {
     const NAMED_RUNS: usize = 21;
     let (attn_q_ms, _) = measure(4096, 4096, NAMED_RUNS);
     let (ffn_up_ms, _) = measure(14336, 4096, NAMED_RUNS);
-    println!(
-        "  named attn_q  [4096x4096]  runs={NAMED_RUNS} median={attn_q_ms:.4} ms"
-    );
-    println!(
-        "  named ffn_up [14336x4096]  runs={NAMED_RUNS} median={ffn_up_ms:.4} ms"
-    );
+    println!("  named attn_q  [4096x4096]  runs={NAMED_RUNS} median={attn_q_ms:.4} ms");
+    println!("  named ffn_up [14336x4096]  runs={NAMED_RUNS} median={ffn_up_ms:.4} ms");
 }

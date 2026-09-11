@@ -17,6 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::TensorError;
+use crate::map::IndexMap;
 use crate::op::{Extent, NodeId, Op, Reduce};
 use crate::shape;
 
@@ -25,11 +26,20 @@ use crate::shape;
 fn producer_side_refs(op: &Op, boundary: u32) -> Vec<NodeId> {
     match op {
         Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => Vec::new(),
-        Op::Elementwise { operands, .. } => operands
-            .iter()
-            .map(|(node, _)| *node)
-            .filter(|node| node.0 <= boundary)
-            .collect(),
+        Op::Elementwise { operands, .. } => {
+            let mut references = Vec::with_capacity(operands.len() * 2);
+            for (node, index_map) in operands {
+                if node.0 <= boundary {
+                    references.push(*node);
+                }
+                if let IndexMap::Computed { indices, .. } = index_map
+                    && indices.0 <= boundary
+                {
+                    references.push(*indices);
+                }
+            }
+            references
+        }
         Op::Reduce(reduce) => {
             if reduce.operand.0 <= boundary {
                 alloc::vec![reduce.operand]
@@ -80,7 +90,21 @@ fn remap(op: &Op, table: &BTreeMap<NodeId, NodeId>, self_id: NodeId) -> Result<O
         } => {
             let mut translated = Vec::with_capacity(operands.len());
             for (node, index_map) in operands {
-                translated.push((translate(*node)?, index_map.clone()));
+                let translated_map = match index_map {
+                    IndexMap::Affine(pattern) => IndexMap::Affine(pattern.clone()),
+                    IndexMap::Computed {
+                        indices,
+                        index_map,
+                        base,
+                        gathered_dim,
+                    } => IndexMap::Computed {
+                        indices: translate(*indices)?,
+                        index_map: index_map.clone(),
+                        base: base.clone(),
+                        gathered_dim: *gathered_dim,
+                    },
+                };
+                translated.push((translate(*node)?, translated_map));
             }
             Ok(Op::Elementwise {
                 dtype: *dtype,
@@ -89,16 +113,34 @@ fn remap(op: &Op, table: &BTreeMap<NodeId, NodeId>, self_id: NodeId) -> Result<O
                 name: name.clone(),
             })
         }
-        Op::Reduce(reduce) => Ok(Op::Reduce(Reduce {
-            dtype: reduce.dtype,
-            body: reduce.body,
-            init: reduce.init,
-            operand: translate(reduce.operand)?,
-            in_map: reduce.in_map.clone(),
-            out_map: reduce.out_map.clone(),
-            keep: reduce.keep,
-            name: reduce.name.clone(),
-        })),
+        Op::Reduce(reduce) => {
+            let remap_index_map = |index_map: &IndexMap| -> Result<IndexMap, TensorError> {
+                match index_map {
+                    IndexMap::Affine(pattern) => Ok(IndexMap::Affine(pattern.clone())),
+                    IndexMap::Computed {
+                        indices,
+                        index_map,
+                        base,
+                        gathered_dim,
+                    } => Ok(IndexMap::Computed {
+                        indices: translate(*indices)?,
+                        index_map: index_map.clone(),
+                        base: base.clone(),
+                        gathered_dim: *gathered_dim,
+                    }),
+                }
+            };
+            Ok(Op::Reduce(Reduce {
+                dtype: reduce.dtype,
+                body: reduce.body,
+                init: reduce.init,
+                operand: translate(reduce.operand)?,
+                in_map: remap_index_map(&reduce.in_map)?,
+                out_map: remap_index_map(&reduce.out_map)?,
+                keep: reduce.keep,
+                name: reduce.name.clone(),
+            }))
+        }
     }
 }
 
@@ -177,6 +219,160 @@ pub fn partition_at(
     Ok((producer, cut_inputs, consumer))
 }
 
+/// Extracts the contiguous operation range `(start_exclusive, end_inclusive]`
+/// as an evaluable program. References to nodes at or before `start_exclusive`
+/// become named inputs; nodes inside the range are renumbered densely. The
+/// returned cut list uses original node ids, so a caller can carry values
+/// between sequential layer segments without relying on positional ids.
+pub fn partition_between(
+    program: &[Op],
+    symbols: &[u64],
+    start_exclusive: Option<NodeId>,
+    end_inclusive: NodeId,
+) -> Result<(Vec<Op>, Vec<(NodeId, String)>), TensorError> {
+    let (segment, cuts, _) =
+        partition_between_with_output(program, symbols, start_exclusive, end_inclusive)?;
+    Ok((segment, cuts))
+}
+
+/// Like [`partition_between`], also returns the dense id corresponding to the
+/// requested end node. Graph builders may store operations out of dependency
+/// order, so the extracted body is stably topologically ordered before ids are
+/// assigned.
+pub fn partition_between_with_output(
+    program: &[Op],
+    symbols: &[u64],
+    start_exclusive: Option<NodeId>,
+    end_inclusive: NodeId,
+) -> Result<(Vec<Op>, Vec<(NodeId, String)>, NodeId), TensorError> {
+    let (segment, cuts, mapping) =
+        partition_between_with_mapping(program, symbols, start_exclusive, end_inclusive)?;
+    let mapped_end = mapping
+        .get(&end_inclusive)
+        .copied()
+        .ok_or(TensorError::UnknownOutput(end_inclusive))?;
+    Ok((segment, cuts, mapped_end))
+}
+
+/// Like [`partition_between_with_output`], retaining the original-to-dense
+/// node map so a caller can request cache and diagnostic roots produced inside
+/// the same segment without relying on the source operation order.
+pub fn partition_between_with_mapping(
+    program: &[Op],
+    symbols: &[u64],
+    start_exclusive: Option<NodeId>,
+    end_inclusive: NodeId,
+) -> Result<(Vec<Op>, Vec<(NodeId, String)>, BTreeMap<NodeId, NodeId>), TensorError> {
+    let end = end_inclusive.0 as usize;
+    if end >= program.len() {
+        return Err(TensorError::UnknownOutput(end_inclusive));
+    }
+    let start = start_exclusive.map_or(usize::MAX, |node| node.0 as usize);
+    if start != usize::MAX && start >= end {
+        return Err(TensorError::UnknownOutput(end_inclusive));
+    }
+    let first = if start == usize::MAX { 0 } else { start + 1 };
+    let shapes = shape::infer(&program[..=end], symbols)?;
+    let mut crossing = BTreeMap::new();
+    for op in &program[first..=end] {
+        let references = match op {
+            Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => Vec::new(),
+            Op::Elementwise { operands, .. } => {
+                let mut references = Vec::with_capacity(operands.len() * 2);
+                for (node, index_map) in operands {
+                    references.push(*node);
+                    if let IndexMap::Computed { indices, .. } = index_map {
+                        references.push(*indices);
+                    }
+                }
+                references
+            }
+            Op::Reduce(reduce) => {
+                let mut references = alloc::vec![reduce.operand];
+                if let IndexMap::Computed { indices, .. } = &reduce.in_map {
+                    references.push(*indices);
+                }
+                if let IndexMap::Computed { indices, .. } = &reduce.out_map {
+                    references.push(*indices);
+                }
+                references
+            }
+        };
+        for node in references {
+            if (node.0 as usize) < first {
+                crossing.insert(node, ());
+            } else if (node.0 as usize) > end {
+                return Err(TensorError::NodeOutOfRange(end_inclusive, node));
+            }
+        }
+    }
+    let mut table = BTreeMap::new();
+    let mut segment = Vec::with_capacity(crossing.len() + end - first + 1);
+    let mut cut_inputs = Vec::with_capacity(crossing.len());
+    for (position, node) in crossing.keys().enumerate() {
+        let extents = shapes
+            .of(*node)
+            .iter()
+            .map(|extent| Extent::Static(*extent as u32))
+            .collect();
+        let name = program[node.0 as usize]
+            .name()
+            .map(String::from)
+            .unwrap_or_else(|| format!("__cut_{}", node.0));
+        let mapped = NodeId(position as u32);
+        table.insert(*node, mapped);
+        cut_inputs.push((*node, name.clone()));
+        segment.push(Op::Input {
+            dtype: program[node.0 as usize].dtype(),
+            shape: extents,
+            name: Some(name),
+        });
+    }
+    let mut pending: Vec<NodeId> = (first..=end).map(|index| NodeId(index as u32)).collect();
+    let mut ordered = Vec::with_capacity(pending.len());
+    while !pending.is_empty() {
+        let position = pending.iter().position(|candidate| {
+            let references = match &program[candidate.0 as usize] {
+                Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => Vec::new(),
+                Op::Elementwise { operands, .. } => {
+                    let mut references = Vec::with_capacity(operands.len() * 2);
+                    for (node, index_map) in operands {
+                        references.push(*node);
+                        if let IndexMap::Computed { indices, .. } = index_map {
+                            references.push(*indices);
+                        }
+                    }
+                    references
+                }
+                Op::Reduce(reduce) => {
+                    let mut references = alloc::vec![reduce.operand];
+                    if let IndexMap::Computed { indices, .. } = &reduce.in_map {
+                        references.push(*indices);
+                    }
+                    if let IndexMap::Computed { indices, .. } = &reduce.out_map {
+                        references.push(*indices);
+                    }
+                    references
+                }
+            };
+            references
+                .into_iter()
+                .all(|reference| (reference.0 as usize) < first || !pending.contains(&reference))
+        });
+        let Some(position) = position else {
+            return Err(TensorError::NodeOutOfRange(end_inclusive, pending[0]));
+        };
+        ordered.push(pending.remove(position));
+    }
+    for (offset, original) in ordered.iter().enumerate() {
+        table.insert(*original, NodeId((cut_inputs.len() + offset) as u32));
+    }
+    for original in &ordered {
+        segment.push(remap(&program[original.0 as usize], &table, *original)?);
+    }
+    Ok((segment, cut_inputs, table))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -226,6 +422,25 @@ mod tests {
             },
         );
         program
+    }
+
+    #[test]
+    fn partition_between_materializes_external_cut_inputs() {
+        let program = linear_chain();
+        let (segment, cuts) = partition_between(&program, &[], Some(NodeId(0)), NodeId(2))
+            .expect("the segment has an explicit external cut");
+        assert_eq!(cuts.len(), 1);
+        let evaluated = cpu::evaluate_named(
+            &segment,
+            &[],
+            &[
+                (cuts[0].1.as_str(), &[2.0_f32; 4]),
+                ("right", &[3.0_f32; 4]),
+            ],
+            &[NodeId(2)],
+        )
+        .expect("segment evaluates with cut bindings");
+        assert_eq!(evaluated.root(), &[5.0_f32; 4]);
     }
 
     #[test]

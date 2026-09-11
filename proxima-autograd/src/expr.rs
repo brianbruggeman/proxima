@@ -281,13 +281,13 @@ pub(crate) fn eliminate_broadcast_anchor_adds(program: &mut [Op]) {
         // exactly the same guarantee the ORIGINAL anchor-bearing operands
         // provided, so this can never turn a previously-resolvable program
         // unresolvable.
-        let covered = operands
-            .iter()
-            .zip(&rewritten)
-            .fold(0u64, |mask, ((_, original_view), replacement)| {
+        let covered = operands.iter().zip(&rewritten).fold(
+            0u64,
+            |mask, ((_, original_view), replacement)| {
                 let view = replacement.as_ref().map_or(original_view, |(_, view)| view);
                 mask | covered_axes(view)
-            });
+            },
+        );
         if covered != full_axis_mask(rank) {
             continue;
         }

@@ -398,7 +398,12 @@ static ARENA_PER_NODE_TICKS: OnceLock<Mutex<BTreeMap<u32, ArenaNodeStat>>> = Onc
 /// lock taken) unless [`arena_per_node_enabled`] is true, so a plain
 /// `--features instrument` run without the env var never touches the
 /// `Mutex`.
-pub fn record_arena_node_ticks(node: NodeId, kind_label: &'static str, extents: &[u64], ticks: u64) {
+pub fn record_arena_node_ticks(
+    node: NodeId,
+    kind_label: &'static str,
+    extents: &[u64],
+    ticks: u64,
+) {
     if !arena_per_node_enabled() {
         return;
     }
@@ -2504,8 +2509,12 @@ static EXPERT_OBSERVER: OnceLock<&'static dyn ExpertObserver> = OnceLock::new();
 /// [`ObserverAlreadySet`] if a caller already registered one -- set-once,
 /// not last-write-wins, so a second registration is a caller bug made
 /// loud rather than a silent observer swap mid-run.
-pub fn set_expert_observer(observer: &'static dyn ExpertObserver) -> Result<(), ObserverAlreadySet> {
-    let result = EXPERT_OBSERVER.set(observer).map_err(|_| ObserverAlreadySet);
+pub fn set_expert_observer(
+    observer: &'static dyn ExpertObserver,
+) -> Result<(), ObserverAlreadySet> {
+    let result = EXPERT_OBSERVER
+        .set(observer)
+        .map_err(|_| ObserverAlreadySet);
     // proxima-debugger: a two-binary-instance contradiction (one caller's
     // `on_expert_routed` firing thousands of times, another's staying at
     // zero on the same call site) is otherwise unfalsifiable from inside a
@@ -2565,7 +2574,8 @@ pub fn notify_expert_routed(event: &ExpertRouting<'_>) {
     let raw_calls = NOTIFY_EXPERT_ROUTED_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
     let registered = EXPERT_OBSERVER.get();
     if raw_calls % 10_000 == 1 {
-        let (data_ptr, vtable_ptr) = registered.map_or((0, 0), |observer| dyn_pointer_halves(*observer));
+        let (data_ptr, vtable_ptr) =
+            registered.map_or((0, 0), |observer| dyn_pointer_halves(*observer));
         proxima_telemetry::debug!(
             static_address = (core::ptr::addr_of!(EXPERT_OBSERVER) as usize) as u64,
             raw_calls,

@@ -348,7 +348,11 @@ mod tests {
             "max_error={max_error} exceeds scale/2={}",
             scale / 2.0
         );
-        assert_eq!(output[1..], input[1..], "non-outlier positions must quantize to exactly zero");
+        assert_eq!(
+            output[1..],
+            input[1..],
+            "non-outlier positions must quantize to exactly zero"
+        );
     }
 
     /// Alternating-sign block at EXACTLY equal magnitude on both sides:
@@ -382,7 +386,10 @@ mod tests {
             max_error <= scale + 1e-3,
             "max_error={max_error} exceeds the exact-tie clamp bound {scale}"
         );
-        assert_eq!(output[0], input[0], "the tie-break winner (+4.0) must be exact");
+        assert_eq!(
+            output[0], input[0],
+            "the tie-break winner (+4.0) must be exact"
+        );
     }
 
     /// Encoding the same input twice must yield byte-identical output.
@@ -454,7 +461,10 @@ mod tests {
             }
         }
         let rms_error = (sum_sq_error / input.len() as f64).sqrt();
-        debug!(max_error, rms_error, "quant.q4_0 real-qwen3-weights round trip");
+        debug!(
+            max_error,
+            rms_error, "quant.q4_0 real-qwen3-weights round trip"
+        );
     }
 
     #[test]

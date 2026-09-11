@@ -25,7 +25,9 @@ use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::{BoundOpKind, NumericPolicy, bind};
 
 mod support;
-use support::{as_named_blocks, production_numeric_policy, real_single_range_forward_fixture_with_padding};
+use support::{
+    as_named_blocks, production_numeric_policy, real_single_range_forward_fixture_with_padding,
+};
 
 /// One padding value's worth of the parity check, shared by every case in
 /// [`the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding`]
@@ -53,8 +55,8 @@ fn assert_parity_at_shape(cached_len: u64, new_count: u64, padding: u64, policy:
     let output_roots = [roots[0]];
     let named = as_named_blocks(&owned);
 
-    let shapes = proxima_tensor::infer(&program, &symbols)
-        .expect("single-range padded fixture infers");
+    let shapes =
+        proxima_tensor::infer(&program, &symbols).expect("single-range padded fixture infers");
     let resolved =
         bind(&program, &shapes, &output_roots, policy).expect("single-range padded fixture binds");
     let fused = resolved

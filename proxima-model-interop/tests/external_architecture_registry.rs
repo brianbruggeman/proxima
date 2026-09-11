@@ -47,7 +47,9 @@ const FOREIGN_ARCHITECTURE_NAME: &str = "acme-dense";
 /// (private to that module) builds, inlined here rather than widening that
 /// shared fixture's own visibility for one external-crate test file.
 fn push_tokenizer_metadata(metadata: &mut Vec<(String, MetadataValue)>) {
-    let mut tokens: Vec<String> = (0..=255u8).map(|byte| String::from(byte_to_char(byte))).collect();
+    let mut tokens: Vec<String> = (0..=255u8)
+        .map(|byte| String::from(byte_to_char(byte)))
+        .collect();
     tokens.push(String::from("<|endoftext|>"));
     metadata.push((
         "tokenizer.ggml.model".to_string(),
@@ -61,7 +63,10 @@ fn push_tokenizer_metadata(metadata: &mut Vec<(String, MetadataValue)>) {
         "tokenizer.ggml.merges".to_string(),
         MetadataValue::Array(MetadataArray::String(Vec::new())),
     ));
-    metadata.push(("tokenizer.ggml.bos_token_id".to_string(), MetadataValue::U32(0)));
+    metadata.push((
+        "tokenizer.ggml.bos_token_id".to_string(),
+        MetadataValue::U32(0),
+    ));
     metadata.push((
         "tokenizer.ggml.eos_token_id".to_string(),
         MetadataValue::U32(support::EOS_TOKEN_ID),
@@ -109,21 +114,27 @@ fn foreign_checkpoint_bytes() -> Vec<u8> {
     buffers.push(support::encode_weights(GgmlType::F32, &square));
     specs.push((
         String::from("blk.0.attn_q.weight"),
-        [u64::from(embedding), u64::from(embedding)].into_iter().collect(),
+        [u64::from(embedding), u64::from(embedding)]
+            .into_iter()
+            .collect(),
         GgmlType::F32,
     ));
     for name in ["blk.0.attn_k.weight", "blk.0.attn_v.weight"] {
         buffers.push(support::encode_weights(GgmlType::F32, &kv_projection));
         specs.push((
             String::from(name),
-            [u64::from(embedding), u64::from(kv_dim)].into_iter().collect(),
+            [u64::from(embedding), u64::from(kv_dim)]
+                .into_iter()
+                .collect(),
             GgmlType::F32,
         ));
     }
     buffers.push(support::encode_weights(GgmlType::F32, &square));
     specs.push((
         String::from("blk.0.attn_output.weight"),
-        [u64::from(embedding), u64::from(embedding)].into_iter().collect(),
+        [u64::from(embedding), u64::from(embedding)]
+            .into_iter()
+            .collect(),
         GgmlType::F32,
     ));
 
@@ -132,14 +143,18 @@ fn foreign_checkpoint_bytes() -> Vec<u8> {
         buffers.push(support::encode_weights(GgmlType::F32, &ffn));
         specs.push((
             String::from(name),
-            [u64::from(embedding), u64::from(feed_forward)].into_iter().collect(),
+            [u64::from(embedding), u64::from(feed_forward)]
+                .into_iter()
+                .collect(),
             GgmlType::F32,
         ));
     }
     buffers.push(support::encode_weights(GgmlType::F32, &ffn));
     specs.push((
         String::from("blk.0.ffn_down.weight"),
-        [u64::from(feed_forward), u64::from(embedding)].into_iter().collect(),
+        [u64::from(feed_forward), u64::from(embedding)]
+            .into_iter()
+            .collect(),
         GgmlType::F32,
     ));
 
@@ -154,7 +169,9 @@ fn foreign_checkpoint_bytes() -> Vec<u8> {
     buffers.push(support::encode_weights(GgmlType::F32, &output_values));
     specs.push((
         String::from("output.weight"),
-        [u64::from(embedding), u64::from(vocab)].into_iter().collect(),
+        [u64::from(embedding), u64::from(vocab)]
+            .into_iter()
+            .collect(),
         GgmlType::F32,
     ));
 
@@ -256,8 +273,15 @@ async fn a_foreign_architecture_loads_a_checkpoint_through_load_with_registry() 
     let (ids, text, _stopped_by_eos) = Pipe::call(&model, ("a".to_string(), 1))
         .await
         .expect("a single greedy decode step runs on the foreign-architecture-bound program");
-    assert_eq!(ids.len(), 1, "a max_tokens=1 budget produces exactly one token id");
-    assert!(!text.is_empty(), "the decoded id must round-trip to non-empty text");
+    assert_eq!(
+        ids.len(),
+        1,
+        "a max_tokens=1 budget produces exactly one token id"
+    );
+    assert!(
+        !text.is_empty(),
+        "the decoded id must round-trip to non-empty text"
+    );
 }
 
 /// [`ArchitectureRegistry::with_builtin`] always sets [`DenseArch`] as its
@@ -283,9 +307,9 @@ async fn a_strict_registry_with_no_default_and_no_foreign_arch_returns_the_typed
         Err(InteropError::UnknownArchitecture { name }) => {
             assert_eq!(name, FOREIGN_ARCHITECTURE_NAME);
         }
-        Ok(_) => panic!(
-            "expected InteropError::UnknownArchitecture for an unregistered strict registry"
-        ),
+        Ok(_) => {
+            panic!("expected InteropError::UnknownArchitecture for an unregistered strict registry")
+        }
         Err(other) => panic!("unexpected error: {other}"),
     }
 }

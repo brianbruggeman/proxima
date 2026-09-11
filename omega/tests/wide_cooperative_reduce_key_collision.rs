@@ -26,8 +26,8 @@ use proxima_telemetry::recorder::Recorder;
 use proxima_telemetry::tag::Tag;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, evaluate, infer, projection,
+    DType, Extent, IndexMap, Keep, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
+    append, evaluate, infer, projection,
 };
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
@@ -107,7 +107,8 @@ fn cooperative_reduce_extents_never_share_a_pipeline_cache_entry() {
         NumericPolicy::default(),
     )
     .expect("wide program executes on a real Metal device");
-    let wide_cpu = evaluate(&wide_program, &[], &[&wide_input], &[]).expect("wide program cpu-evaluates");
+    let wide_cpu =
+        evaluate(&wide_program, &[], &[&wide_input], &[]).expect("wide program cpu-evaluates");
     assert!(
         (wide_cpu.root()[0] - wide_metal.root()[0]).abs() <= 1e-4,
         "wide (cols={WIDE_COLS}) itself must already agree with cpu: cpu={}, metal={}",
@@ -126,8 +127,8 @@ fn cooperative_reduce_extents_never_share_a_pipeline_cache_entry() {
         NumericPolicy::default(),
     )
     .expect("narrow program executes on a real Metal device, reusing the shared pipeline cache");
-    let narrow_cpu =
-        evaluate(&narrow_program, &[], &[&narrow_input], &[]).expect("narrow program cpu-evaluates");
+    let narrow_cpu = evaluate(&narrow_program, &[], &[&narrow_input], &[])
+        .expect("narrow program cpu-evaluates");
 
     recorder.drain();
     let logs = pipe.logs();
@@ -137,7 +138,11 @@ fn cooperative_reduce_extents_never_share_a_pipeline_cache_entry() {
             let mut key = None;
             let mut hit = None;
             for tag in &record.attrs {
-                let Tag::Scalar { key: tag_key, value } = tag else {
+                let Tag::Scalar {
+                    key: tag_key,
+                    value,
+                } = tag
+                else {
                     continue;
                 };
                 match *tag_key {
@@ -162,7 +167,10 @@ fn cooperative_reduce_extents_never_share_a_pipeline_cache_entry() {
         "wide (cols={WIDE_COLS}) cache_key={wide_key} hit={wide_hit}\n\
          narrow (cols={NARROW_COLS}) cache_key={narrow_key} hit={narrow_hit}"
     );
-    assert!(!wide_hit, "the first call of a fresh process must be a compile, not a hit");
+    assert!(
+        !wide_hit,
+        "the first call of a fresh process must be a compile, not a hit"
+    );
     assert_ne!(
         wide_key, narrow_key,
         "wide and narrow reduces pick different cooperative_reduce_width values \

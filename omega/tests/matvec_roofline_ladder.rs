@@ -310,7 +310,10 @@ fn locate_real_tensor(
     name: &str,
     expect_type: GgmlType,
 ) -> Option<RealTensor> {
-    let tensor = parsed.tensors.iter().find(|candidate| candidate.name == name)?;
+    let tensor = parsed
+        .tensors
+        .iter()
+        .find(|candidate| candidate.name == name)?;
     if tensor.ggml_type != expect_type {
         eprintln!(
             "locate_real_tensor: {name} is {:?} in this file, not {expect_type:?} -- test skipped, not faked",
@@ -336,7 +339,10 @@ fn locate_real_tensor(
 /// `blk.1.ffn_up`, ...) -- the SAME order every arm below encodes its
 /// dispatches in, so index 0 always names `blk.0.ffn_up.weight` (the tensor
 /// this file's parity checks are anchored to) in every arm.
-fn locate_ffn_weight_tensors(parsed: &ParsedGguf, file_len: u64) -> Option<Vec<(String, RealTensor)>> {
+fn locate_ffn_weight_tensors(
+    parsed: &ParsedGguf,
+    file_len: u64,
+) -> Option<Vec<(String, RealTensor)>> {
     let mut tensors = Vec::with_capacity(WEIGHT_TENSOR_COUNT);
     for layer in 0..FFN_LAYERS {
         for kind in FFN_TENSOR_KINDS {
@@ -856,15 +862,24 @@ kernel void q6k_matvec_l3_shape(
 const METAL_PREAMBLE: &str = "#include <metal_stdlib>\nusing namespace metal;\n\n";
 
 fn l1_source() -> String {
-    format!("{METAL_PREAMBLE}{}\n{L1_KERNEL_BODY}", omega::msl::Q4K_UNPACK_MSL)
+    format!(
+        "{METAL_PREAMBLE}{}\n{L1_KERNEL_BODY}",
+        omega::msl::Q4K_UNPACK_MSL
+    )
 }
 
 fn l2_source() -> String {
-    format!("{METAL_PREAMBLE}{}\n{L2_KERNEL_BODY}", omega::msl::Q4K_UNPACK_MSL)
+    format!(
+        "{METAL_PREAMBLE}{}\n{L2_KERNEL_BODY}",
+        omega::msl::Q4K_UNPACK_MSL
+    )
 }
 
 fn l3_shape_source() -> String {
-    format!("{METAL_PREAMBLE}{}\n{L3_SHAPE_KERNEL_BODY}", omega::msl::Q4K_UNPACK_MSL)
+    format!(
+        "{METAL_PREAMBLE}{}\n{L3_SHAPE_KERNEL_BODY}",
+        omega::msl::Q4K_UNPACK_MSL
+    )
 }
 
 fn q6k_l3_shape_source() -> String {
@@ -928,7 +943,10 @@ fn shared_buffer_from_bytes(
     .expect("device allocates a fresh shared buffer copied from real checkpoint bytes")
 }
 
-fn uniform_u64(device: &ProtocolObject<dyn MTLDevice>, value: u64) -> Retained<ProtocolObject<dyn MTLBuffer>> {
+fn uniform_u64(
+    device: &ProtocolObject<dyn MTLDevice>,
+    value: u64,
+) -> Retained<ProtocolObject<dyn MTLBuffer>> {
     let bytes = value.to_ne_bytes();
     shared_buffer_from_bytes(device, &bytes)
 }
@@ -1175,13 +1193,23 @@ struct SampleStats {
 
 fn sample_stats(samples: &[f64]) -> SampleStats {
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-    let variance =
-        samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    let variance = samples
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / samples.len() as f64;
     let stddev = variance.sqrt();
-    let cov_pct = if mean.abs() > f64::MIN_POSITIVE { stddev / mean * 100.0 } else { 0.0 };
+    let cov_pct = if mean.abs() > f64::MIN_POSITIVE {
+        stddev / mean * 100.0
+    } else {
+        0.0
+    };
 
     let mut sorted = samples.to_vec();
-    sorted.sort_by(|left, right| left.partial_cmp(right).expect("bandwidth/latency samples are never NaN"));
+    sorted.sort_by(|left, right| {
+        left.partial_cmp(right)
+            .expect("bandwidth/latency samples are never NaN")
+    });
     let len = sorted.len();
     let median = if len % 2 == 1 {
         sorted[len / 2]
@@ -1298,8 +1326,7 @@ fn multi_tensor_matmul_program(
 fn cpu_reference_first_rows(weight_bytes: &[u8], activation: &[f32]) -> Vec<f32> {
     let mut reference = Vec::with_capacity(PARITY_ROWS);
     let mut dequantized_row = vec![0.0f32; IN_DIM];
-    let (row_chunks, _remainder) =
-        weight_bytes[..PARITY_ROWS * ROW_BYTES].as_chunks::<ROW_BYTES>();
+    let (row_chunks, _remainder) = weight_bytes[..PARITY_ROWS * ROW_BYTES].as_chunks::<ROW_BYTES>();
     for row_blocks in row_chunks {
         q4_k::dequantize(row_blocks, &mut dequantized_row)
             .expect("a whole number of q4_k super-blocks per row");
@@ -1320,11 +1347,18 @@ fn cpu_reference_first_rows(weight_bytes: &[u8], activation: &[f32]) -> Vec<f32>
 /// [`PARITY_MAX_REL_ERROR`]; callers collect every `Some` across all their
 /// arms and fail the test once, at the end, listing all of them.
 fn check_parity(label: &str, actual: &[f32], expected: &[f32]) -> Option<String> {
-    assert_eq!(actual.len(), expected.len(), "{label}: degenerate gate, row counts differ");
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{label}: degenerate gate, row counts differ"
+    );
     let mut max_abs_error = 0.0f32;
     let mut batch_peak = 0.0f32;
     for (&got, &want) in actual.iter().zip(expected.iter()) {
-        assert!(got.is_finite(), "{label}: produced a non-finite value: {got}");
+        assert!(
+            got.is_finite(),
+            "{label}: produced a non-finite value: {got}"
+        );
         max_abs_error = max_abs_error.max((got - want).abs());
         batch_peak = batch_peak.max(want.abs());
     }
@@ -1389,7 +1423,11 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
     let Some(ffn_tensors) = locate_ffn_weight_tensors(&parsed, file_len) else {
         return;
     };
-    assert_eq!(ffn_tensors.len(), WEIGHT_TENSOR_COUNT, "every layer's ffn_up/ffn_gate must resolve");
+    assert_eq!(
+        ffn_tensors.len(),
+        WEIGHT_TENSOR_COUNT,
+        "every layer's ffn_up/ffn_gate must resolve"
+    );
     for (name, tensor) in &ffn_tensors {
         assert_eq!(
             tensor.in_dim, IN_DIM,
@@ -1406,7 +1444,10 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         );
     }
     let weight_names: Vec<String> = ffn_tensors.iter().map(|(name, _)| name.clone()).collect();
-    let weight_offsets: Vec<usize> = ffn_tensors.iter().map(|(_, tensor)| tensor.byte_offset as usize).collect();
+    let weight_offsets: Vec<usize> = ffn_tensors
+        .iter()
+        .map(|(_, tensor)| tensor.byte_offset as usize)
+        .collect();
 
     let mapped = MappedFile::open(path).expect("mmap the real openchat checkpoint");
     let parity_weight_offset = ffn_tensors[0].1.byte_offset as usize;
@@ -1414,7 +1455,9 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         &mapped.as_slice()[parity_weight_offset..parity_weight_offset + PARITY_ROWS * ROW_BYTES];
 
     let device = MTLCreateSystemDefaultDevice().expect("a Metal device is available on this host");
-    let queue = device.newCommandQueue().expect("device creates a command queue");
+    let queue = device
+        .newCommandQueue()
+        .expect("device creates a command queue");
 
     let no_copy_weight = no_copy_buffer_over_whole_mapping(&device, &mapped);
 
@@ -1563,8 +1606,13 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
     // plan()/execute_plan() entry point -- byte-identical emitted MSL by
     // construction, all WEIGHT_TENSOR_COUNT tensors in ONE program so
     // execute_plan encodes all of them into ONE command buffer. ----
-    let (program, sums) =
-        multi_tensor_matmul_program(&weight_names, ROWS as u32, IN_DIM as u32, DType::UInt8, "activation");
+    let (program, sums) = multi_tensor_matmul_program(
+        &weight_names,
+        ROWS as u32,
+        IN_DIM as u32,
+        DType::UInt8,
+        "activation",
+    );
     let weight_slices: Vec<&[u8]> = ffn_tensors
         .iter()
         .map(|(_, tensor)| {
@@ -1572,8 +1620,10 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
             &mapped.as_slice()[offset..offset + tensor.byte_len as usize]
         })
         .collect();
-    let mut blocks: Vec<QuantizedBlock<'_>> =
-        weight_slices.iter().map(|slice| QuantizedBlock::Q4K(slice)).collect();
+    let mut blocks: Vec<QuantizedBlock<'_>> = weight_slices
+        .iter()
+        .map(|slice| QuantizedBlock::Q4K(slice))
+        .collect();
     blocks.push(QuantizedBlock::Float32(&activation));
 
     let mut plan = omega::metal::plan(&program, &[], &blocks, &sums, production_numeric_policy())
@@ -1710,7 +1760,12 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
     // -- the fixed per-dispatch cost every bandwidth arm above pays
     // WEIGHT_TENSOR_COUNT times, reported directly instead of inferred. ----
     println!("=== empty arm ({WEIGHT_TENSOR_COUNT} no-op dispatches, one command buffer) ===");
-    let empty_pipeline = compile_pipeline(&device, EMPTY_KERNEL_SOURCE, "q4k_matvec_empty", MTLMathMode::Safe);
+    let empty_pipeline = compile_pipeline(
+        &device,
+        EMPTY_KERNEL_SOURCE,
+        "q4k_matvec_empty",
+        MTLMathMode::Safe,
+    );
     let empty_output = device
         .newBufferWithLength_options(
             WEIGHT_TENSOR_COUNT * size_of::<u32>(),
@@ -1719,7 +1774,14 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         .expect("device allocates the empty arm's output buffer");
     {
         let elapsed_samples = warmed_up_samples(|| {
-            time_batch_empty(&queue, &empty_pipeline, &empty_output, WEIGHT_TENSOR_COUNT, 32, 32)
+            time_batch_empty(
+                &queue,
+                &empty_pipeline,
+                &empty_output,
+                WEIGHT_TENSOR_COUNT,
+                32,
+                32,
+            )
         });
         let ns_samples = ns_per_dispatch_samples(&elapsed_samples, WEIGHT_TENSOR_COUNT);
         let stats = sample_stats(&ns_samples);
@@ -1740,7 +1802,12 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
     println!(
         "L0={l0:.2} L1={l1:.2} L2={l2:.2} L3_shape={l3_shape:.2} L3_baseline={l3_base:.2} GB/s"
     );
-    println!("L1/L0={:.3} L2/L1={:.3} L3_shape/L2={:.3}", l1 / l0, l2 / l1, l3_shape / l2);
+    println!(
+        "L1/L0={:.3} L2/L1={:.3} L3_shape/L2={:.3}",
+        l1 / l0,
+        l2 / l1,
+        l3_shape / l2
+    );
 
     assert!(
         parity_failures.is_empty(),
@@ -1837,7 +1904,13 @@ impl ShapeCodec {
 /// `f32` (`k` elements) is reused per row rather than materializing the
 /// whole tensor in `f32` first, so peak host memory stays at the quantized
 /// output size, not `4x` that.
-fn synth_weight_bytes(codec: ShapeCodec, seed_base: u64, tensor_count: usize, rows: usize, k: usize) -> Vec<u8> {
+fn synth_weight_bytes(
+    codec: ShapeCodec,
+    seed_base: u64,
+    tensor_count: usize,
+    rows: usize,
+    k: usize,
+) -> Vec<u8> {
     let row_bytes = codec.row_bytes(k);
     let tensor_bytes = rows * row_bytes;
     let mut bytes = vec![0u8; tensor_bytes * tensor_count];
@@ -1872,7 +1945,11 @@ fn codec_cpu_reference_first_rows(
         codec
             .dequantize(row_blocks, &mut dequantized_row)
             .expect("a whole number of the codec's own super-blocks per row");
-        let dot: f32 = dequantized_row.iter().zip(activation.iter()).map(|(weight, act)| weight * act).sum();
+        let dot: f32 = dequantized_row
+            .iter()
+            .zip(activation.iter())
+            .map(|(weight, act)| weight * act)
+            .sum();
         reference.push(dot);
     }
     reference
@@ -1920,10 +1997,14 @@ fn run_shape_arm(
     );
 
     let weight_bytes = synth_weight_bytes(codec, seed_base, tensor_count, rows, k);
-    let weight_names: Vec<String> = (0..tensor_count).map(|index| format!("{label}_{index}")).collect();
+    let weight_names: Vec<String> = (0..tensor_count)
+        .map(|index| format!("{label}_{index}"))
+        .collect();
 
     let mut activation_lcg = Lcg(seed_base + 999);
-    let activation: Vec<f32> = (0..k).map(|_| activation_lcg.next_unit() * 4.0 - 2.0).collect();
+    let activation: Vec<f32> = (0..k)
+        .map(|_| activation_lcg.next_unit() * 4.0 - 2.0)
+        .collect();
 
     let cpu_reference =
         codec_cpu_reference_first_rows(codec, &weight_bytes[..rows * row_bytes], k, &activation);
@@ -1939,11 +2020,18 @@ fn run_shape_arm(
     // activation node per-`label` makes each arm's own resident entry
     // distinct, so no arm can ever be served another arm's activation.
     let activation_name = format!("{label}_activation");
-    let (program, sums) =
-        multi_tensor_matmul_program(&weight_names, rows as u32, k as u32, DType::UInt8, &activation_name);
+    let (program, sums) = multi_tensor_matmul_program(
+        &weight_names,
+        rows as u32,
+        k as u32,
+        DType::UInt8,
+        &activation_name,
+    );
     let weight_slices: Vec<&[u8]> = weight_bytes.chunks_exact(rows * row_bytes).collect();
-    let mut blocks: Vec<QuantizedBlock<'_>> =
-        weight_slices.iter().map(|slice| codec.quantized_block(slice)).collect();
+    let mut blocks: Vec<QuantizedBlock<'_>> = weight_slices
+        .iter()
+        .map(|slice| codec.quantized_block(slice))
+        .collect();
     blocks.push(QuantizedBlock::Float32(&activation));
 
     let mut plan = omega::metal::plan(&program, &[], &blocks, &sums, production_numeric_policy())
@@ -1976,8 +2064,7 @@ fn run_shape_arm(
     // served from a DIFFERENT arm's addresses) is now impossible by
     // construction, not by avoidance. The activation node stays resident
     // (label-unique since ROW 332) for the same reason it always was.
-    let mut resident_names: BTreeSet<&str> =
-        weight_names.iter().map(String::as_str).collect();
+    let mut resident_names: BTreeSet<&str> = weight_names.iter().map(String::as_str).collect();
     resident_names.insert(activation_name.as_str());
     plan.mark_resident(&resident_names);
 
@@ -2028,7 +2115,8 @@ fn run_shape_arm(
     {
         for (repeat_index, totals) in per_call_totals.iter().enumerate().skip(1) {
             assert_eq!(
-                totals.nocopy_uploads, totals.nocopy_reuses,
+                totals.nocopy_uploads,
+                totals.nocopy_reuses,
                 "arm={label} timed repeat {repeat_index}: {} of {} no-copy weight touches were \
                  a FRESH upload, not a cache reuse of the warm-up's own wrapper",
                 totals.nocopy_uploads - totals.nocopy_reuses,
@@ -2041,14 +2129,26 @@ fn run_shape_arm(
                 totals.resident_uploads
             );
         }
-        let total_nocopy_uploads: u64 = per_call_totals.iter().map(|totals| totals.nocopy_uploads).sum();
-        let total_nocopy_reuses: u64 = per_call_totals.iter().map(|totals| totals.nocopy_reuses).sum();
-        let total_resident_uploads: u64 =
-            per_call_totals.iter().map(|totals| totals.resident_uploads).sum();
-        let total_resident_reuses: u64 =
-            per_call_totals.iter().map(|totals| totals.resident_reuses).sum();
-        let total_copying_uploads: u64 =
-            per_call_totals.iter().map(|totals| totals.copying_uploads).sum();
+        let total_nocopy_uploads: u64 = per_call_totals
+            .iter()
+            .map(|totals| totals.nocopy_uploads)
+            .sum();
+        let total_nocopy_reuses: u64 = per_call_totals
+            .iter()
+            .map(|totals| totals.nocopy_reuses)
+            .sum();
+        let total_resident_uploads: u64 = per_call_totals
+            .iter()
+            .map(|totals| totals.resident_uploads)
+            .sum();
+        let total_resident_reuses: u64 = per_call_totals
+            .iter()
+            .map(|totals| totals.resident_reuses)
+            .sum();
+        let total_copying_uploads: u64 = per_call_totals
+            .iter()
+            .map(|totals| totals.copying_uploads)
+            .sum();
         println!(
             "arm={label} stage_totals: nocopy_uploads={total_nocopy_uploads} \
              nocopy_reuses={total_nocopy_reuses} resident_uploads={total_resident_uploads} \
@@ -2069,8 +2169,9 @@ fn run_shape_arm(
          ratio_to_device_ceiling={ratio_to_ceiling:.3}",
         stats.median, stats.mean, stats.min, stats.max, stats.cov_pct
     );
-    if let Some((_, row_310_gbps)) =
-        ROW_310_IN_PROGRAM_GBPS.iter().find(|(family, _)| *family == label)
+    if let Some((_, row_310_gbps)) = ROW_310_IN_PROGRAM_GBPS
+        .iter()
+        .find(|(family, _)| *family == label)
     {
         match row_310_gbps {
             Some(in_program) => println!(
@@ -2090,8 +2191,15 @@ fn run_shape_arm(
         let repeat_count: usize = raw_repeat_count
             .parse()
             .expect("PROXIMA_LADDER_REPEAT must be a positive integer");
-        let failures =
-            repeat_dump_divergences(label, &plan, &blocks, 0, sums[0], &cpu_reference, repeat_count);
+        let failures = repeat_dump_divergences(
+            label,
+            &plan,
+            &blocks,
+            0,
+            sums[0],
+            &cpu_reference,
+            repeat_count,
+        );
         println!(
             "PROXIMA_LADDER_REPEAT summary: label={label} repeats={repeat_count} failures={failures}"
         );
@@ -2138,7 +2246,9 @@ fn repeat_dump_divergences(
     cpu_reference: &[f32],
     repeat_count: usize,
 ) -> usize {
-    let batch_peak = cpu_reference.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+    let batch_peak = cpu_reference
+        .iter()
+        .fold(0.0f32, |peak, value| peak.max(value.abs()));
     let mut failing_repeats = 0usize;
     for repeat in 0..repeat_count {
         let evaluated = omega::metal::execute_plan(plan, blocks)
@@ -2153,8 +2263,12 @@ fn repeat_dump_divergences(
             .enumerate()
             .filter_map(|(row, (&reference, &observed))| {
                 let relative_error = (observed - reference).abs() / batch_peak.max(f32::EPSILON);
-                (relative_error > PARITY_MAX_REL_ERROR)
-                    .then_some(DivergentRow { row, reference, observed, relative_error })
+                (relative_error > PARITY_MAX_REL_ERROR).then_some(DivergentRow {
+                    row,
+                    reference,
+                    observed,
+                    relative_error,
+                })
             })
             .collect();
         if divergent.is_empty() {
@@ -2249,16 +2363,76 @@ struct DecodeShape {
 }
 
 const DECODE_SHAPES: &[DecodeShape] = &[
-    DecodeShape { family: "attn_q", codec: ShapeCodec::Q4K, rows: 4096, k: 4096, seed: 10_000 },
-    DecodeShape { family: "attn_k", codec: ShapeCodec::Q4K, rows: 1024, k: 4096, seed: 20_000 },
-    DecodeShape { family: "attn_v", codec: ShapeCodec::Q4K, rows: 1024, k: 4096, seed: 30_000 },
-    DecodeShape { family: "attn_v_q5k", codec: ShapeCodec::Q5K, rows: 1024, k: 4096, seed: 30_500 },
-    DecodeShape { family: "attn_output", codec: ShapeCodec::Q4K, rows: 4096, k: 4096, seed: 40_000 },
-    DecodeShape { family: "ffn_gate", codec: ShapeCodec::Q4K, rows: 14_336, k: 4096, seed: 50_000 },
-    DecodeShape { family: "ffn_up", codec: ShapeCodec::Q4K, rows: 14_336, k: 4096, seed: 60_000 },
-    DecodeShape { family: "ffn_down", codec: ShapeCodec::Q4K, rows: 4096, k: 14_336, seed: 70_000 },
-    DecodeShape { family: "ffn_down_q5k", codec: ShapeCodec::Q5K, rows: 4096, k: 14_336, seed: 70_500 },
-    DecodeShape { family: "head", codec: ShapeCodec::Q6K, rows: 32_000, k: 4096, seed: 80_000 },
+    DecodeShape {
+        family: "attn_q",
+        codec: ShapeCodec::Q4K,
+        rows: 4096,
+        k: 4096,
+        seed: 10_000,
+    },
+    DecodeShape {
+        family: "attn_k",
+        codec: ShapeCodec::Q4K,
+        rows: 1024,
+        k: 4096,
+        seed: 20_000,
+    },
+    DecodeShape {
+        family: "attn_v",
+        codec: ShapeCodec::Q4K,
+        rows: 1024,
+        k: 4096,
+        seed: 30_000,
+    },
+    DecodeShape {
+        family: "attn_v_q5k",
+        codec: ShapeCodec::Q5K,
+        rows: 1024,
+        k: 4096,
+        seed: 30_500,
+    },
+    DecodeShape {
+        family: "attn_output",
+        codec: ShapeCodec::Q4K,
+        rows: 4096,
+        k: 4096,
+        seed: 40_000,
+    },
+    DecodeShape {
+        family: "ffn_gate",
+        codec: ShapeCodec::Q4K,
+        rows: 14_336,
+        k: 4096,
+        seed: 50_000,
+    },
+    DecodeShape {
+        family: "ffn_up",
+        codec: ShapeCodec::Q4K,
+        rows: 14_336,
+        k: 4096,
+        seed: 60_000,
+    },
+    DecodeShape {
+        family: "ffn_down",
+        codec: ShapeCodec::Q4K,
+        rows: 4096,
+        k: 14_336,
+        seed: 70_000,
+    },
+    DecodeShape {
+        family: "ffn_down_q5k",
+        codec: ShapeCodec::Q5K,
+        rows: 4096,
+        k: 14_336,
+        seed: 70_500,
+    },
+    DecodeShape {
+        family: "head",
+        codec: ShapeCodec::Q6K,
+        rows: 32_000,
+        k: 4096,
+        seed: 80_000,
+    },
 ];
 
 /// Same amortization-floor reasoning as [`Q6K_HEAD_TENSOR_COUNT`]: the
@@ -2275,7 +2449,9 @@ fn tensor_count_for_shape(shape: &DecodeShape) -> usize {
     // no production path reads this, and `decode_shape_roofline_ladder`
     // itself (the real-scale gate) never sets it.
     if let Ok(raw) = std::env::var("PROXIMA_LADDER_TENSORS") {
-        return raw.parse().expect("PROXIMA_LADDER_TENSORS must be a positive integer");
+        return raw
+            .parse()
+            .expect("PROXIMA_LADDER_TENSORS must be a positive integer");
     }
     let tensor_bytes = (shape.rows * shape.codec.row_bytes(shape.k)) as u64;
     MIN_TIMED_BYTES.div_ceil(tensor_bytes) as usize
@@ -2352,10 +2528,30 @@ struct ShapeArmSweepSpec {
 }
 
 const SHAPE_ARM_SWEEP_SPECS: &[ShapeArmSweepSpec] = &[
-    ShapeArmSweepSpec { family: "attn_k", rows: 1024, k: 4096, seed: 210_000 },
-    ShapeArmSweepSpec { family: "attn_q", rows: 4096, k: 4096, seed: 220_000 },
-    ShapeArmSweepSpec { family: "ffn_up", rows: 14_336, k: 4096, seed: 230_000 },
-    ShapeArmSweepSpec { family: "ffn_down", rows: 4096, k: 14_336, seed: 240_000 },
+    ShapeArmSweepSpec {
+        family: "attn_k",
+        rows: 1024,
+        k: 4096,
+        seed: 210_000,
+    },
+    ShapeArmSweepSpec {
+        family: "attn_q",
+        rows: 4096,
+        k: 4096,
+        seed: 220_000,
+    },
+    ShapeArmSweepSpec {
+        family: "ffn_up",
+        rows: 14_336,
+        k: 4096,
+        seed: 230_000,
+    },
+    ShapeArmSweepSpec {
+        family: "ffn_down",
+        rows: 4096,
+        k: 14_336,
+        seed: 240_000,
+    },
 ];
 
 /// The two axes this sweep varies: `simdgroups_per_tg` (`threads_per_tg / 32`,
@@ -2415,18 +2611,21 @@ fn synth_weight_bytes_parallel(
 ) -> Vec<u8> {
     let row_bytes = codec.row_bytes(k);
     let mut bytes = vec![0u8; tensor_bytes * tensor_count];
-    bytes.par_chunks_mut(tensor_bytes).enumerate().for_each(|(tensor_index, tensor_slice)| {
-        let mut lcg = Lcg(seed_base + tensor_index as u64);
-        let mut row_f32 = vec![0.0f32; k];
-        for row_blocks in tensor_slice.chunks_exact_mut(row_bytes) {
-            for value in row_f32.iter_mut() {
-                *value = lcg.next_unit() * 4.0 - 2.0;
+    bytes
+        .par_chunks_mut(tensor_bytes)
+        .enumerate()
+        .for_each(|(tensor_index, tensor_slice)| {
+            let mut lcg = Lcg(seed_base + tensor_index as u64);
+            let mut row_f32 = vec![0.0f32; k];
+            for row_blocks in tensor_slice.chunks_exact_mut(row_bytes) {
+                for value in row_f32.iter_mut() {
+                    *value = lcg.next_unit() * 4.0 - 2.0;
+                }
+                codec
+                    .quantize(&row_f32, row_blocks)
+                    .expect("row length is a whole multiple of the codec's own QK_K");
             }
-            codec
-                .quantize(&row_f32, row_blocks)
-                .expect("row length is a whole multiple of the codec's own QK_K");
-        }
-    });
+        });
     bytes
 }
 
@@ -2445,26 +2644,45 @@ fn run_shape_arm_sweep(
         spec.family, spec.rows, spec.k
     );
 
-    let weight_bytes =
-        synth_weight_bytes_parallel(ShapeCodec::Q4K, spec.seed, tensor_count, spec.k, tensor_bytes as usize);
-    let weight_offsets: Vec<usize> = (0..tensor_count).map(|index| index * tensor_bytes as usize).collect();
+    let weight_bytes = synth_weight_bytes_parallel(
+        ShapeCodec::Q4K,
+        spec.seed,
+        tensor_count,
+        spec.k,
+        tensor_bytes as usize,
+    );
+    let weight_offsets: Vec<usize> = (0..tensor_count)
+        .map(|index| index * tensor_bytes as usize)
+        .collect();
     let weight_buffer = shared_buffer_from_bytes(device, &weight_bytes);
 
     let mut activation_lcg = Lcg(spec.seed + 999);
-    let activation: Vec<f32> = (0..spec.k).map(|_| activation_lcg.next_unit() * 4.0 - 2.0).collect();
+    let activation: Vec<f32> = (0..spec.k)
+        .map(|_| activation_lcg.next_unit() * 4.0 - 2.0)
+        .collect();
     // SAFETY: `activation` is a live `Vec<f32>` for the duration of this
     // call; the byte view is read-only and never outlives `activation`.
     let activation_bytes: &[u8] = unsafe {
-        core::slice::from_raw_parts(activation.as_ptr().cast::<u8>(), std::mem::size_of_val(activation.as_slice()))
+        core::slice::from_raw_parts(
+            activation.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(activation.as_slice()),
+        )
     };
     let activation_buffer = shared_buffer_from_bytes(device, activation_bytes);
     let blocks_per_row_uniform = uniform_u64(device, (spec.k / Q4K_BLOCK_ELEMENTS) as u64);
 
-    let cpu_reference =
-        codec_cpu_reference_first_rows(ShapeCodec::Q4K, &weight_bytes[..spec.rows * row_bytes], spec.k, &activation);
+    let cpu_reference = codec_cpu_reference_first_rows(
+        ShapeCodec::Q4K,
+        &weight_bytes[..spec.rows * row_bytes],
+        spec.k,
+        &activation,
+    );
 
     let output = device
-        .newBufferWithLength_options(tensor_count * spec.rows * size_of::<f32>(), MTLResourceOptions::StorageModeShared)
+        .newBufferWithLength_options(
+            tensor_count * spec.rows * size_of::<f32>(),
+            MTLResourceOptions::StorageModeShared,
+        )
         .expect("device allocates the sweep's output buffer");
 
     let total_simdgroups = spec.rows / PACKED_ROWS_PER_GROUP;
@@ -2472,7 +2690,12 @@ fn run_shape_arm_sweep(
     let mut parity_failures = Vec::new();
 
     for math_arm in SWEEP_MATH_MODE_ARMS {
-        let pipeline = compile_pipeline(device, &l3_shape_source_text, "q4k_matvec_l3_shape", math_arm.mode);
+        let pipeline = compile_pipeline(
+            device,
+            &l3_shape_source_text,
+            "q4k_matvec_l3_shape",
+            math_arm.mode,
+        );
         for simdgroups_per_tg in SWEEP_SIMDGROUPS_PER_THREADGROUP {
             let threadgroup_width = simdgroups_per_tg * 32;
             let threadgroup_count = total_simdgroups / simdgroups_per_tg;
@@ -2502,13 +2725,22 @@ fn run_shape_arm_sweep(
             let stats = sample_stats(&samples);
             let is_production_default = simdgroups_per_tg == 2 && math_arm.name == "relaxed";
             let first_tensor_rows = read_f32_buffer(&output, PARITY_ROWS);
-            let label = format!("{} nsg={simdgroups_per_tg} math={}", spec.family, math_arm.name);
+            let label = format!(
+                "{} nsg={simdgroups_per_tg} math={}",
+                spec.family, math_arm.name
+            );
             let parity_failure = check_parity(&label, &first_tensor_rows, &cpu_reference);
             println!(
                 "arm=shape_sweep family={} nsg={simdgroups_per_tg} math={:<8} production_default={is_production_default} \
                  median_gbps={:.2} mean_gbps={:.2} min_gbps={:.2} max_gbps={:.2} cov_pct={:.2} samples={samples:?} \
                  parity_ok={}",
-                spec.family, math_arm.name, stats.median, stats.mean, stats.min, stats.max, stats.cov_pct,
+                spec.family,
+                math_arm.name,
+                stats.median,
+                stats.mean,
+                stats.min,
+                stats.max,
+                stats.cov_pct,
                 parity_failure.is_none()
             );
             parity_failures.extend(parity_failure);
@@ -2535,12 +2767,18 @@ fn run_shape_arm_sweep(
 #[ignore = "synthesizes real quantized bytes per shape through the real encoder and needs a real metal device"]
 fn decode_shape_nsg_math_sweep() {
     let device = MTLCreateSystemDefaultDevice().expect("a Metal device is available on this host");
-    let queue = device.newCommandQueue().expect("device creates a command queue");
+    let queue = device
+        .newCommandQueue()
+        .expect("device creates a command queue");
 
     let requested_shape = std::env::var("PROXIMA_SWEEP_SHAPE").ok();
     let specs: Vec<&ShapeArmSweepSpec> = SHAPE_ARM_SWEEP_SPECS
         .iter()
-        .filter(|spec| requested_shape.as_deref().is_none_or(|shape| shape == spec.family))
+        .filter(|spec| {
+            requested_shape
+                .as_deref()
+                .is_none_or(|shape| shape == spec.family)
+        })
         .collect();
     assert!(
         !specs.is_empty(),
@@ -2548,8 +2786,10 @@ fn decode_shape_nsg_math_sweep() {
         requested_shape
     );
 
-    let failures: Vec<String> =
-        specs.iter().flat_map(|spec| run_shape_arm_sweep(&device, &queue, spec)).collect();
+    let failures: Vec<String> = specs
+        .iter()
+        .flat_map(|spec| run_shape_arm_sweep(&device, &queue, spec))
+        .collect();
 
     assert!(
         failures.is_empty(),
@@ -2568,7 +2808,10 @@ fn decode_shape_nsg_math_sweep() {
 #[test]
 #[ignore = "synthesizes real quantized bytes through the real encoder and needs a real metal device"]
 fn row334_attn_q_then_attn_output_real_scale() {
-    let attn_q = DECODE_SHAPES.iter().find(|shape| shape.family == "attn_q").expect("attn_q shape exists");
+    let attn_q = DECODE_SHAPES
+        .iter()
+        .find(|shape| shape.family == "attn_q")
+        .expect("attn_q shape exists");
     let attn_output = DECODE_SHAPES
         .iter()
         .find(|shape| shape.family == "attn_output")
@@ -2589,7 +2832,11 @@ fn row334_attn_q_then_attn_output_real_scale() {
             )
         })
         .collect();
-    assert!(failures.is_empty(), "parity failed for {} arm(s): {failures:#?}", failures.len());
+    assert!(
+        failures.is_empty(),
+        "parity failed for {} arm(s): {failures:#?}",
+        failures.len()
+    );
 }
 
 /// ROW 334's own verification pass: the exact four arms ROW 333's full-scale
@@ -2609,7 +2856,10 @@ fn row334_four_failing_arms_real_scale() {
     let shapes: Vec<&DecodeShape> = families
         .iter()
         .map(|family| {
-            DECODE_SHAPES.iter().find(|shape| shape.family == *family).expect("family exists in DECODE_SHAPES")
+            DECODE_SHAPES
+                .iter()
+                .find(|shape| shape.family == *family)
+                .expect("family exists in DECODE_SHAPES")
         })
         .collect();
     let mut weight_keepalive: Vec<Vec<u8>> = Vec::new();
@@ -2629,7 +2879,11 @@ fn row334_four_failing_arms_real_scale() {
         })
         .collect();
 
-    assert!(failures.is_empty(), "parity failed for {} arm(s): {failures:#?}", failures.len());
+    assert!(
+        failures.is_empty(),
+        "parity failed for {} arm(s): {failures:#?}",
+        failures.len()
+    );
 }
 
 // ---- ROW 327: output-head buffer-kind vs kernel-variant ladder ----
@@ -2765,7 +3019,9 @@ fn head_program(
         OpShape::LadderReduceLast => {
             multi_tensor_matmul_program(weight_names, rows, k, weight_dtype, "activation")
         }
-        OpShape::ProductionReduceMiddle => production_head_program(weight_names, rows, k, weight_dtype),
+        OpShape::ProductionReduceMiddle => {
+            production_head_program(weight_names, rows, k, weight_dtype)
+        }
     }
 }
 
@@ -2821,17 +3077,25 @@ fn run_head_arm(
     let row_bytes = ShapeCodec::Q6K.row_bytes(k as usize);
     let tensor_bytes = (rows as usize * row_bytes) as u64;
     let total_timed_bytes = tensor_bytes * tensor_count as u64;
-    let weight_names: Vec<String> = (0..tensor_count).map(|index| format!("{label}_{index}")).collect();
+    let weight_names: Vec<String> = (0..tensor_count)
+        .map(|index| format!("{label}_{index}"))
+        .collect();
 
     let synth_bytes = match buffer_kind {
-        HeadBufferKind::Synthesized => {
-            Some(synth_weight_bytes(ShapeCodec::Q6K, seed_base, tensor_count, rows as usize, k as usize))
-        }
+        HeadBufferKind::Synthesized => Some(synth_weight_bytes(
+            ShapeCodec::Q6K,
+            seed_base,
+            tensor_count,
+            rows as usize,
+            k as usize,
+        )),
         HeadBufferKind::RealNoCopy { .. } => None,
     };
 
     let mut activation_lcg = Lcg(seed_base + 999);
-    let activation: Vec<f32> = (0..k).map(|_| activation_lcg.next_unit() * 4.0 - 2.0).collect();
+    let activation: Vec<f32> = (0..k)
+        .map(|_| activation_lcg.next_unit() * 4.0 - 2.0)
+        .collect();
 
     let (program, sums) = head_program(op_shape, &weight_names, rows, k, DType::UInt8);
     let blocks_weights: Vec<QuantizedBlock<'_>> = match (buffer_kind, &synth_bytes) {
@@ -2839,9 +3103,9 @@ fn run_head_arm(
             .chunks_exact(rows as usize * row_bytes)
             .map(|slice| ShapeCodec::Q6K.quantized_block(slice))
             .collect(),
-        (HeadBufferKind::RealNoCopy { tensor_bytes }, _) => {
-            (0..tensor_count).map(|_| ShapeCodec::Q6K.quantized_block(tensor_bytes)).collect()
-        }
+        (HeadBufferKind::RealNoCopy { tensor_bytes }, _) => (0..tensor_count)
+            .map(|_| ShapeCodec::Q6K.quantized_block(tensor_bytes))
+            .collect(),
         _ => unreachable!("synth_bytes is Some exactly when buffer_kind is Synthesized"),
     };
     let mut blocks = blocks_weights;
@@ -2865,7 +3129,9 @@ fn run_head_arm(
     };
     resident_names.insert("activation");
     plan.mark_resident(&resident_names);
-    let keys = plan.kernel_keys().expect("every resolved position emits a kernel key");
+    let keys = plan
+        .kernel_keys()
+        .expect("every resolved position emits a kernel key");
     let key = keys
         .last()
         .cloned()
@@ -2896,8 +3162,12 @@ fn run_head_arm(
             (HeadBufferKind::RealNoCopy { tensor_bytes }, _) => tensor_bytes,
             _ => unreachable!("synth_bytes is Some exactly when buffer_kind is Synthesized"),
         };
-        let cpu_reference =
-            codec_cpu_reference_first_rows(ShapeCodec::Q6K, first_tensor_bytes, k as usize, &activation);
+        let cpu_reference = codec_cpu_reference_first_rows(
+            ShapeCodec::Q6K,
+            first_tensor_bytes,
+            k as usize,
+            &activation,
+        );
         check_parity(
             &format!("{label} vs cpu_reference"),
             &first_tensor_output[..PARITY_ROWS],
@@ -2945,18 +3215,31 @@ fn head_buffer_kind_by_kernel_variant() {
         real_gguf_header(path).expect("real openchat gguf checkpoint header parses");
     let real_tensor = locate_real_tensor(&parsed, file_len, "output.weight", GgmlType::Q6_K)
         .expect("output.weight is Q6_K in this checkpoint");
-    assert_eq!(real_tensor.in_dim, IN_DIM, "output.weight's own k must match this ladder's IN_DIM");
+    assert_eq!(
+        real_tensor.in_dim, IN_DIM,
+        "output.weight's own k must match this ladder's IN_DIM"
+    );
 
     let mapped = MappedFile::open(path).expect("mmap the real openchat gguf checkpoint");
     omega::backend::register_checkpoint_mapping(mapped.as_slice());
-    let real_tensor_bytes = &mapped.as_slice()
-        [real_tensor.byte_offset as usize..(real_tensor.byte_offset + real_tensor.byte_len) as usize];
+    let real_tensor_bytes = &mapped.as_slice()[real_tensor.byte_offset as usize
+        ..(real_tensor.byte_offset + real_tensor.byte_len) as usize];
 
     let arms: [(OpShape, HeadBufferKind<'_>); 4] = [
         (OpShape::LadderReduceLast, HeadBufferKind::Synthesized),
         (OpShape::ProductionReduceMiddle, HeadBufferKind::Synthesized),
-        (OpShape::LadderReduceLast, HeadBufferKind::RealNoCopy { tensor_bytes: real_tensor_bytes }),
-        (OpShape::ProductionReduceMiddle, HeadBufferKind::RealNoCopy { tensor_bytes: real_tensor_bytes }),
+        (
+            OpShape::LadderReduceLast,
+            HeadBufferKind::RealNoCopy {
+                tensor_bytes: real_tensor_bytes,
+            },
+        ),
+        (
+            OpShape::ProductionReduceMiddle,
+            HeadBufferKind::RealNoCopy {
+                tensor_bytes: real_tensor_bytes,
+            },
+        ),
     ];
 
     let mut parity_failures = Vec::new();
@@ -2972,8 +3255,16 @@ fn head_buffer_kind_by_kernel_variant() {
             HeadBufferKind::RealNoCopy { .. } => real_tensor.out_dim as u32,
         };
 
-        let (_, first_dispatch_median_ns, _, _) =
-            run_head_arm(&label, *op_shape, buffer_kind, rows, IN_DIM as u32, 1, 90_000, false);
+        let (_, first_dispatch_median_ns, _, _) = run_head_arm(
+            &label,
+            *op_shape,
+            buffer_kind,
+            rows,
+            IN_DIM as u32,
+            1,
+            90_000,
+            false,
+        );
 
         let (key, steady_dispatch_median_ns, steady_median_gbps, parity_failure) = run_head_arm(
             &label,
@@ -3086,7 +3377,9 @@ fn time_bare_dispatch_sequence(
 /// packer either, ROW 344's own question) re-derives the identical axis set
 /// its own doc defines: every axis NOT in `output_axes`, ascending.
 fn reduction_dims_port(rank: usize, output_axes: &[u16]) -> Vec<u16> {
-    (0..rank as u16).filter(|axis| !output_axes.contains(axis)).collect()
+    (0..rank as u16)
+        .filter(|axis| !output_axes.contains(axis))
+        .collect()
 }
 
 fn push_i64(bytes: &mut Vec<u8>, value: i64) {
@@ -3101,13 +3394,18 @@ fn push_i64_row(bytes: &mut Vec<u8>, values: &[i64], width: usize) {
 
 fn push_gathered_extent_row(bytes: &mut Vec<u8>, extents: &[u64], axes: &[u16], width: usize) {
     for slot in 0..width {
-        let value = axes.get(slot).map(|axis| extents[*axis as usize] as i64).unwrap_or(0);
+        let value = axes
+            .get(slot)
+            .map(|axis| extents[*axis as usize] as i64)
+            .unwrap_or(0);
         push_i64(bytes, value);
     }
 }
 
 fn gathered_extent_product(extents: &[u64], axes: &[u16]) -> i64 {
-    axes.iter().map(|axis| extents[*axis as usize] as i64).product()
+    axes.iter()
+        .map(|axis| extents[*axis as usize] as i64)
+        .product()
 }
 
 /// Ports `omega::metal::pack_reduce_uniforms` field-for-field over public
@@ -3132,12 +3430,24 @@ fn pack_production_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
         ..
     } = &bound.kind
     else {
-        panic!("production reduce fold expected, found {}", bound.kind.name());
+        panic!(
+            "production reduce fold expected, found {}",
+            bound.kind.name()
+        );
     };
-    assert!(epilogue_operands.is_empty(), "epilogue-free fold expected for ROW 344's own head program");
-    assert!(out_scatter.is_none(), "affine (non-scatter) fold expected for ROW 344's own head program");
     assert!(
-        bound.operands().iter().all(|(_, _, gather)| gather.is_none()),
+        epilogue_operands.is_empty(),
+        "epilogue-free fold expected for ROW 344's own head program"
+    );
+    assert!(
+        out_scatter.is_none(),
+        "affine (non-scatter) fold expected for ROW 344's own head program"
+    );
+    assert!(
+        bound
+            .operands()
+            .iter()
+            .all(|(_, _, gather)| gather.is_none()),
         "gather-free operands expected for ROW 344's own head program"
     );
 
@@ -3147,8 +3457,14 @@ fn pack_production_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
     let reduce_rank_len = reduce_axes.len().max(1);
 
     let mut bytes = Vec::new();
-    push_i64(&mut bytes, gathered_extent_product(&bound.extents, output_axes));
-    push_i64(&mut bytes, gathered_extent_product(&bound.extents, &reduce_axes));
+    push_i64(
+        &mut bytes,
+        gathered_extent_product(&bound.extents, output_axes),
+    );
+    push_i64(
+        &mut bytes,
+        gathered_extent_product(&bound.extents, &reduce_axes),
+    );
     push_gathered_extent_row(&mut bytes, &bound.extents, output_axes, output_rank_len);
     push_gathered_extent_row(&mut bytes, &bound.extents, &reduce_axes, reduce_rank_len);
     for (_, layout, _) in bound.operands() {
@@ -3205,9 +3521,17 @@ fn row350_direct_addressing_rewrite(source: &str) -> String {
     let setup_new = "    long weight_base[4];\n    long other_base[4];\n    for (int q = 0; q < 4; ++q) {\n        long flat = group_first + q;\n        weight_base[q] = u.operand_base[1] + flat * u.operand_strides[1][2];\n        other_base[q] = u.operand_base[0] + flat * u.operand_strides[0][2];\n    }\n";
     let output_old = "    for (int q = 0; q < 4; ++q) {\n        float reduced = simd_sum(sumf[q]);\n        long flat = group_first + q;\n        if (lane == 0u && flat < u.output_total) {\n            long out_offset = u.out_base;\n            out_offset += coord_q_cache[q][0] * u.out_strides[0];\n            out_offset += coord_q_cache[q][1] * u.out_strides[1];\n            out_offset += coord_q_cache[q][2] * u.out_strides[2];\n            out[out_offset] = reduced;\n        }\n    }\n}\n";
     let output_new = "    for (int q = 0; q < 4; ++q) {\n        float reduced = simd_sum(sumf[q]);\n        long flat = group_first + q;\n        if (lane == 0u && flat < u.output_total) {\n            long out_offset = u.out_base + flat * u.out_strides[2];\n            out[out_offset] = reduced;\n        }\n    }\n}\n";
-    assert!(source.contains(setup_old), "row350 setup pattern not found in emitted source");
-    assert!(source.contains(output_old), "row350 output pattern not found in emitted source");
-    source.replace(setup_old, setup_new).replace(output_old, output_new)
+    assert!(
+        source.contains(setup_old),
+        "row350 setup pattern not found in emitted source"
+    );
+    assert!(
+        source.contains(output_old),
+        "row350 output pattern not found in emitted source"
+    );
+    source
+        .replace(setup_old, setup_new)
+        .replace(output_old, output_new)
 }
 
 /// ROW 350 cell selector: `0` = baseline (byte-identical to production's own
@@ -3236,7 +3560,8 @@ fn production_reduce_kernel(
 
     let production_policy = production_numeric_policy();
     let shapes = infer(&program, &[]).expect("production reduce program's shapes infer");
-    let mut bound_ops = bind(&program, &shapes, &sums, production_policy).expect("production reduce program binds");
+    let mut bound_ops =
+        bind(&program, &shapes, &sums, production_policy).expect("production reduce program binds");
     // `bind()` alone lays out the weight operand row-major over its DECLARED
     // axis order (`correct_packed_matmul_layouts`'s own doc) -- wrong for a
     // packed `Q4_K`/`Q6_K` weight's real on-disk bytes. `omega::metal::prepare`
@@ -3253,8 +3578,8 @@ fn production_reduce_kernel(
         .expect("the head sum's own fused reduce is present in the bound program");
 
     let packed_operands: omega::PackedOperands = BTreeMap::from([(weight_node, codec)]);
-    let kernel =
-        omega::emit(&bound, &packed_operands, production_policy).expect("production reduce fold emits an MSL kernel");
+    let kernel = omega::emit(&bound, &packed_operands, production_policy)
+        .expect("production reduce fold emits an MSL kernel");
 
     let weight_index = kernel
         .bindings
@@ -3264,7 +3589,9 @@ fn production_reduce_kernel(
     let activation_index = kernel
         .bindings
         .iter()
-        .position(|binding| matches!(binding, omega::Binding::Input(node) if *node == activation_node))
+        .position(
+            |binding| matches!(binding, omega::Binding::Input(node) if *node == activation_node),
+        )
         .expect("activation binding present in the emitted kernel");
     let output_index = kernel
         .bindings
@@ -3327,13 +3654,48 @@ struct WholeTokenLayerFamily {
 }
 
 const WHOLE_TOKEN_LAYER_FAMILIES: [WholeTokenLayerFamily; 7] = [
-    WholeTokenLayerFamily { name: "q", rows: 4096, k: 4096, seed: 100_000 },
-    WholeTokenLayerFamily { name: "k", rows: 1024, k: 4096, seed: 200_000 },
-    WholeTokenLayerFamily { name: "v", rows: 1024, k: 4096, seed: 300_000 },
-    WholeTokenLayerFamily { name: "o", rows: 4096, k: 4096, seed: 400_000 },
-    WholeTokenLayerFamily { name: "gate", rows: 14_336, k: 4096, seed: 500_000 },
-    WholeTokenLayerFamily { name: "up", rows: 14_336, k: 4096, seed: 600_000 },
-    WholeTokenLayerFamily { name: "down", rows: 4096, k: 14_336, seed: 700_000 },
+    WholeTokenLayerFamily {
+        name: "q",
+        rows: 4096,
+        k: 4096,
+        seed: 100_000,
+    },
+    WholeTokenLayerFamily {
+        name: "k",
+        rows: 1024,
+        k: 4096,
+        seed: 200_000,
+    },
+    WholeTokenLayerFamily {
+        name: "v",
+        rows: 1024,
+        k: 4096,
+        seed: 300_000,
+    },
+    WholeTokenLayerFamily {
+        name: "o",
+        rows: 4096,
+        k: 4096,
+        seed: 400_000,
+    },
+    WholeTokenLayerFamily {
+        name: "gate",
+        rows: 14_336,
+        k: 4096,
+        seed: 500_000,
+    },
+    WholeTokenLayerFamily {
+        name: "up",
+        rows: 14_336,
+        k: 4096,
+        seed: 600_000,
+    },
+    WholeTokenLayerFamily {
+        name: "down",
+        rows: 4096,
+        k: 14_336,
+        seed: 700_000,
+    },
 ];
 
 const WHOLE_TOKEN_HEAD_ROWS: usize = 32_000;
@@ -3362,10 +3724,26 @@ struct WholeTokenArm {
 }
 
 const WHOLE_TOKEN_ARMS: [WholeTokenArm; 4] = [
-    WholeTokenArm { name: "A_llama_encoding_production_kernel", simdgroups_per_tg: 1, math: MTLMathMode::Safe },
-    WholeTokenArm { name: "B_llama_encoding_nsg4_fast", simdgroups_per_tg: 4, math: MTLMathMode::Fast },
-    WholeTokenArm { name: "C_llama_encoding_nsg2_relaxed_production_cell", simdgroups_per_tg: 2, math: MTLMathMode::Relaxed },
-    WholeTokenArm { name: "D_llama_encoding_nsg2_fast", simdgroups_per_tg: 2, math: MTLMathMode::Fast },
+    WholeTokenArm {
+        name: "A_llama_encoding_production_kernel",
+        simdgroups_per_tg: 1,
+        math: MTLMathMode::Safe,
+    },
+    WholeTokenArm {
+        name: "B_llama_encoding_nsg4_fast",
+        simdgroups_per_tg: 4,
+        math: MTLMathMode::Fast,
+    },
+    WholeTokenArm {
+        name: "C_llama_encoding_nsg2_relaxed_production_cell",
+        simdgroups_per_tg: 2,
+        math: MTLMathMode::Relaxed,
+    },
+    WholeTokenArm {
+        name: "D_llama_encoding_nsg2_fast",
+        simdgroups_per_tg: 2,
+        math: MTLMathMode::Fast,
+    },
 ];
 
 /// ROW 339: does llama.cpp's own SERIAL encoding (one plain
@@ -3425,8 +3803,16 @@ fn time_bare_dispatch_sequence_with_gpu_time(
             encoder.setBuffer_offset_atIndex(Some(output), 0, op.output_index);
             encoder.setBuffer_offset_atIndex(Some(op.uniform), 0, op.uniform_index);
         }
-        let grid = MTLSize { width: op.grid_threads, height: 1, depth: 1 };
-        let threadgroup = MTLSize { width: op.threadgroup_width, height: 1, depth: 1 };
+        let grid = MTLSize {
+            width: op.grid_threads,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroup = MTLSize {
+            width: op.threadgroup_width,
+            height: 1,
+            depth: 1,
+        };
         encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
     }
     encoder.endEncoding();
@@ -3484,9 +3870,25 @@ fn run_row361_family_amortized(
             .find(|family| family.name == family_name)
             .unwrap_or_else(|| panic!("ROW361_FAMILY={family_name} is not a known family name"));
         let uses_q5k = family_name == "v" || family_name == "down";
-        let codec = if uses_q5k { ShapeCodec::Q5K } else { ShapeCodec::Q4K };
-        let packed_codec = if uses_q5k { omega::PackedCodec::Q5K } else { omega::PackedCodec::Q4K };
-        (family.name, codec, packed_codec, family.rows, family.k, family.seed, FFN_LAYERS)
+        let codec = if uses_q5k {
+            ShapeCodec::Q5K
+        } else {
+            ShapeCodec::Q4K
+        };
+        let packed_codec = if uses_q5k {
+            omega::PackedCodec::Q5K
+        } else {
+            omega::PackedCodec::Q4K
+        };
+        (
+            family.name,
+            codec,
+            packed_codec,
+            family.rows,
+            family.k,
+            family.seed,
+            FFN_LAYERS,
+        )
     };
 
     let row_bytes = codec.row_bytes(k);
@@ -3500,27 +3902,38 @@ fn run_row361_family_amortized(
         codec.name()
     );
 
-    let weight_bytes = synth_weight_bytes_parallel(codec, seed, synth_tensor_count, k, tensor_bytes);
+    let weight_bytes =
+        synth_weight_bytes_parallel(codec, seed, synth_tensor_count, k, tensor_bytes);
     let weight_buffer = shared_buffer_from_bytes(device, &weight_bytes);
     let offsets: Vec<usize> = if same_tensor {
         vec![0; dispatch_count]
     } else {
-        (0..dispatch_count).map(|index| index * tensor_bytes).collect()
+        (0..dispatch_count)
+            .map(|index| index * tensor_bytes)
+            .collect()
     };
 
     let mut activation_lcg = Lcg(seed + 999);
-    let activation: Vec<f32> = (0..k).map(|_| activation_lcg.next_unit() * 4.0 - 2.0).collect();
+    let activation: Vec<f32> = (0..k)
+        .map(|_| activation_lcg.next_unit() * 4.0 - 2.0)
+        .collect();
     // SAFETY: `activation` is a live `Vec<f32>` for the duration of this
     // call; the byte view is read-only and never outlives `activation`.
     let activation_bytes: &[u8] = unsafe {
-        core::slice::from_raw_parts(activation.as_ptr().cast::<u8>(), std::mem::size_of_val(activation.as_slice()))
+        core::slice::from_raw_parts(
+            activation.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(activation.as_slice()),
+        )
     };
     let activation_buffer = shared_buffer_from_bytes(device, activation_bytes);
 
     let kernel = production_reduce_kernel(device, packed_codec, rows as u32, k as u32);
 
     let output = device
-        .newBufferWithLength_options(rows * size_of::<f32>(), MTLResourceOptions::StorageModeShared)
+        .newBufferWithLength_options(
+            rows * size_of::<f32>(),
+            MTLResourceOptions::StorageModeShared,
+        )
         .expect("device allocates ROW 361's own scratch output buffer");
 
     let ops: Vec<BareDispatchOp<'_>> = offsets
@@ -3550,15 +3963,21 @@ fn run_row361_family_amortized(
         gpu_ms_samples.push(gpu_ms);
     }
 
-    let ms_samples: Vec<f64> = wall_samples.iter().map(Duration::as_secs_f64).map(|s| s * 1e3).collect();
+    let ms_samples: Vec<f64> = wall_samples
+        .iter()
+        .map(Duration::as_secs_f64)
+        .map(|s| s * 1e3)
+        .collect();
     let ms_stats = sample_stats(&ms_samples);
     let gbps_samples_vec = gbps_samples(&wall_samples, total_timed_bytes);
     let gbps_stats = sample_stats(&gbps_samples_vec);
     let us_per_dispatch = ms_stats.median * 1000.0 / dispatch_count as f64;
 
     let gpu_ms_stats = sample_stats(&gpu_ms_samples);
-    let gpu_gbps_samples: Vec<f64> =
-        gpu_ms_samples.iter().map(|ms| total_timed_bytes as f64 / (ms / 1e3) / 1e9).collect();
+    let gpu_gbps_samples: Vec<f64> = gpu_ms_samples
+        .iter()
+        .map(|ms| total_timed_bytes as f64 / (ms / 1e3) / 1e9)
+        .collect();
     let gpu_gbps_stats = sample_stats(&gpu_gbps_samples);
     let gpu_us_per_dispatch = gpu_ms_stats.median * 1000.0 / dispatch_count as f64;
 
@@ -3569,7 +3988,11 @@ fn run_row361_family_amortized(
          wall_us_per_dispatch={us_per_dispatch:.2} gpu_median_ms={:.3} gpu_min_ms={:.3} \
          gpu_max_ms={:.3} gpu_cov_pct={:.2} gpu_ms_samples={gpu_ms_samples:?} \
          gpu_median_gbps={:.2} gpu_us_per_dispatch={gpu_us_per_dispatch:.2}",
-        if same_tensor { "same_tensor" } else { "distinct_tensor" },
+        if same_tensor {
+            "same_tensor"
+        } else {
+            "distinct_tensor"
+        },
         codec.name(),
         ms_stats.median,
         ms_stats.min,
@@ -3589,7 +4012,9 @@ fn run_row361_family_amortized(
 #[ignore = "synthesizes real quantized bytes for a whole decode token and needs a real metal device"]
 fn whole_token_matvec_sequence_bare() {
     let device = MTLCreateSystemDefaultDevice().expect("a Metal device is available on this host");
-    let queue = device.newCommandQueue().expect("device creates a command queue");
+    let queue = device
+        .newCommandQueue()
+        .expect("device creates a command queue");
 
     // ROW 361: `ROW361_FAMILY=<name>` (`q`/`k`/`v`/`o`/`gate`/`up`/`down`/
     // `head`) restricts this whole-token construction to ONE family's
@@ -3598,39 +4023,48 @@ fn whole_token_matvec_sequence_bare() {
     // resulting per-dispatch number is comparable to ROW 360's llama
     // column rather than its isolated "ours" column. Additive: unset,
     // this function's behavior is byte-for-byte the same as before.
-    if let Some(family_name) = std::env::var("ROW361_FAMILY").ok().filter(|value| !value.is_empty()) {
+    if let Some(family_name) = std::env::var("ROW361_FAMILY")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
         let same_tensor = std::env::var_os("ROW361_SAME_TENSOR").is_some();
         run_row361_family_amortized(&device, &queue, &family_name, same_tensor);
         return;
     }
 
     type FamilyBuffer = (Retained<ProtocolObject<dyn MTLBuffer>>, Vec<usize>);
-    let family_buffers: Vec<FamilyBuffer> =
-        WHOLE_TOKEN_LAYER_FAMILIES
-            .iter()
-            .map(|family| {
-                let row_bytes = ShapeCodec::Q4K.row_bytes(family.k);
-                let tensor_bytes = family.rows * row_bytes;
-                let bytes = synth_weight_bytes_parallel(
-                    ShapeCodec::Q4K,
-                    family.seed,
-                    FFN_LAYERS,
-                    family.k,
-                    tensor_bytes,
-                );
-                let offsets: Vec<usize> = (0..FFN_LAYERS).map(|layer| layer * tensor_bytes).collect();
-                (shared_buffer_from_bytes(&device, &bytes), offsets)
-            })
-            .collect();
+    let family_buffers: Vec<FamilyBuffer> = WHOLE_TOKEN_LAYER_FAMILIES
+        .iter()
+        .map(|family| {
+            let row_bytes = ShapeCodec::Q4K.row_bytes(family.k);
+            let tensor_bytes = family.rows * row_bytes;
+            let bytes = synth_weight_bytes_parallel(
+                ShapeCodec::Q4K,
+                family.seed,
+                FFN_LAYERS,
+                family.k,
+                tensor_bytes,
+            );
+            let offsets: Vec<usize> = (0..FFN_LAYERS).map(|layer| layer * tensor_bytes).collect();
+            (shared_buffer_from_bytes(&device, &bytes), offsets)
+        })
+        .collect();
 
     let head_row_bytes = ShapeCodec::Q6K.row_bytes(WHOLE_TOKEN_HEAD_K);
     let head_tensor_bytes = WHOLE_TOKEN_HEAD_ROWS * head_row_bytes;
-    let head_bytes =
-        synth_weight_bytes_parallel(ShapeCodec::Q6K, 900_000, 1, WHOLE_TOKEN_HEAD_K, head_tensor_bytes);
+    let head_bytes = synth_weight_bytes_parallel(
+        ShapeCodec::Q6K,
+        900_000,
+        1,
+        WHOLE_TOKEN_HEAD_K,
+        head_tensor_bytes,
+    );
     let head_buffer = shared_buffer_from_bytes(&device, &head_bytes);
 
     let mut activation_lcg_4096 = Lcg(1);
-    let activation_4096: Vec<f32> = (0..4096).map(|_| activation_lcg_4096.next_unit() * 4.0 - 2.0).collect();
+    let activation_4096: Vec<f32> = (0..4096)
+        .map(|_| activation_lcg_4096.next_unit() * 4.0 - 2.0)
+        .collect();
     let activation_4096_bytes: &[u8] = unsafe {
         core::slice::from_raw_parts(
             activation_4096.as_ptr().cast::<u8>(),
@@ -3640,8 +4074,9 @@ fn whole_token_matvec_sequence_bare() {
     let activation_4096_buffer = shared_buffer_from_bytes(&device, activation_4096_bytes);
 
     let mut activation_lcg_14336 = Lcg(2);
-    let activation_14336: Vec<f32> =
-        (0..14_336).map(|_| activation_lcg_14336.next_unit() * 4.0 - 2.0).collect();
+    let activation_14336: Vec<f32> = (0..14_336)
+        .map(|_| activation_lcg_14336.next_unit() * 4.0 - 2.0)
+        .collect();
     let activation_14336_bytes: &[u8] = unsafe {
         core::slice::from_raw_parts(
             activation_14336.as_ptr().cast::<u8>(),
@@ -3654,7 +4089,10 @@ fn whole_token_matvec_sequence_bare() {
     let uniform_14336 = uniform_u64(&device, (14_336 / Q4K_BLOCK_ELEMENTS) as u64);
 
     let output = device
-        .newBufferWithLength_options(WHOLE_TOKEN_HEAD_ROWS * size_of::<f32>(), MTLResourceOptions::StorageModeShared)
+        .newBufferWithLength_options(
+            WHOLE_TOKEN_HEAD_ROWS * size_of::<f32>(),
+            MTLResourceOptions::StorageModeShared,
+        )
         .expect("device allocates the whole-token scratch output buffer");
 
     let total_timed_bytes: u64 = WHOLE_TOKEN_LAYER_FAMILIES
@@ -3688,16 +4126,26 @@ fn whole_token_matvec_sequence_bare() {
         if emitted_only {
             break;
         }
-        let q4k_pipeline =
-            compile_pipeline(&device, &q4k_shape_source_text, "q4k_matvec_l3_shape", arm.math);
-        let q6k_pipeline =
-            compile_pipeline(&device, &q6k_shape_source_text, "q6k_matvec_l3_shape", arm.math);
+        let q4k_pipeline = compile_pipeline(
+            &device,
+            &q4k_shape_source_text,
+            "q4k_matvec_l3_shape",
+            arm.math,
+        );
+        let q6k_pipeline = compile_pipeline(
+            &device,
+            &q6k_shape_source_text,
+            "q6k_matvec_l3_shape",
+            arm.math,
+        );
         let threadgroup_width = arm.simdgroups_per_tg * 32;
 
         let mut ops: Vec<BareDispatchOp<'_>> =
             Vec::with_capacity(WHOLE_TOKEN_LAYER_FAMILIES.len() * FFN_LAYERS + 1);
         for layer in 0..FFN_LAYERS {
-            for (family, (weight_buffer, offsets)) in WHOLE_TOKEN_LAYER_FAMILIES.iter().zip(&family_buffers) {
+            for (family, (weight_buffer, offsets)) in
+                WHOLE_TOKEN_LAYER_FAMILIES.iter().zip(&family_buffers)
+            {
                 let total_simdgroups = family.rows / PACKED_ROWS_PER_GROUP;
                 assert_eq!(
                     total_simdgroups % arm.simdgroups_per_tg,
@@ -3751,8 +4199,13 @@ fn whole_token_matvec_sequence_bare() {
 
         assert_eq!(ops.len(), WHOLE_TOKEN_LAYER_FAMILIES.len() * FFN_LAYERS + 1);
 
-        let elapsed_samples = warmed_up_samples(|| time_bare_dispatch_sequence(&queue, &output, &ops));
-        let ms_samples: Vec<f64> = elapsed_samples.iter().map(Duration::as_secs_f64).map(|s| s * 1e3).collect();
+        let elapsed_samples =
+            warmed_up_samples(|| time_bare_dispatch_sequence(&queue, &output, &ops));
+        let ms_samples: Vec<f64> = elapsed_samples
+            .iter()
+            .map(Duration::as_secs_f64)
+            .map(|s| s * 1e3)
+            .collect();
         let ms_stats = sample_stats(&ms_samples);
         let gbps_samples_vec = gbps_samples(&elapsed_samples, total_timed_bytes);
         let gbps_stats = sample_stats(&gbps_samples_vec);
@@ -3789,19 +4242,34 @@ fn whole_token_matvec_sequence_bare() {
     let family_kernels: Vec<_> = WHOLE_TOKEN_LAYER_FAMILIES
         .iter()
         .map(|family| {
-            production_reduce_kernel(&device, omega::PackedCodec::Q4K, family.rows as u32, family.k as u32)
+            production_reduce_kernel(
+                &device,
+                omega::PackedCodec::Q4K,
+                family.rows as u32,
+                family.k as u32,
+            )
         })
         .collect();
-    let head_kernel =
-        production_reduce_kernel(&device, omega::PackedCodec::Q6K, WHOLE_TOKEN_HEAD_ROWS as u32, WHOLE_TOKEN_HEAD_K as u32);
+    let head_kernel = production_reduce_kernel(
+        &device,
+        omega::PackedCodec::Q6K,
+        WHOLE_TOKEN_HEAD_ROWS as u32,
+        WHOLE_TOKEN_HEAD_K as u32,
+    );
 
     let mut production_ops: Vec<BareDispatchOp<'_>> =
         Vec::with_capacity(WHOLE_TOKEN_LAYER_FAMILIES.len() * FFN_LAYERS + 1);
     for layer in 0..FFN_LAYERS {
-        for ((family, (weight_buffer, offsets)), kernel) in
-            WHOLE_TOKEN_LAYER_FAMILIES.iter().zip(&family_buffers).zip(&family_kernels)
+        for ((family, (weight_buffer, offsets)), kernel) in WHOLE_TOKEN_LAYER_FAMILIES
+            .iter()
+            .zip(&family_buffers)
+            .zip(&family_kernels)
         {
-            let activation = if family.k == 4096 { &activation_4096_buffer } else { &activation_14336_buffer };
+            let activation = if family.k == 4096 {
+                &activation_4096_buffer
+            } else {
+                &activation_14336_buffer
+            };
             production_ops.push(BareDispatchOp {
                 pipeline: &kernel.pipeline,
                 weight: weight_buffer,
@@ -3830,11 +4298,18 @@ fn whole_token_matvec_sequence_bare() {
         output_index: head_kernel.output_index,
         uniform_index: head_kernel.uniform_index,
     });
-    assert_eq!(production_ops.len(), WHOLE_TOKEN_LAYER_FAMILIES.len() * FFN_LAYERS + 1);
+    assert_eq!(
+        production_ops.len(),
+        WHOLE_TOKEN_LAYER_FAMILIES.len() * FFN_LAYERS + 1
+    );
 
     let elapsed_samples =
         warmed_up_samples(|| time_bare_dispatch_sequence(&queue, &output, &production_ops));
-    let ms_samples: Vec<f64> = elapsed_samples.iter().map(Duration::as_secs_f64).map(|s| s * 1e3).collect();
+    let ms_samples: Vec<f64> = elapsed_samples
+        .iter()
+        .map(Duration::as_secs_f64)
+        .map(|s| s * 1e3)
+        .collect();
     let ms_stats = sample_stats(&ms_samples);
     let gbps_samples_vec = gbps_samples(&elapsed_samples, total_timed_bytes);
     let gbps_stats = sample_stats(&gbps_samples_vec);

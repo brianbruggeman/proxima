@@ -129,8 +129,14 @@ fn build_fixture(context_length: u64) -> Row376Fixture {
         let Op::Input { name, .. } = &program[node.0 as usize] else {
             unreachable!("block_node_ids only ever returns Op::Input nodes")
         };
-        let name = name.clone().expect("every block input in this program is named");
-        let count: usize = shapes.of(node).iter().map(|extent| *extent as usize).product();
+        let name = name
+            .clone()
+            .expect("every block input in this program is named");
+        let count: usize = shapes
+            .of(node)
+            .iter()
+            .map(|extent| *extent as usize)
+            .product();
         let data = if name == "ids" {
             vec![3.0f32; count]
         } else if name == "eps" {
@@ -164,7 +170,11 @@ fn stats(samples: &[f64]) -> Stats {
     } else {
         sorted[len / 2]
     };
-    let variance = samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / len as f64;
+    let variance = samples
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / len as f64;
     let cov_pct = if mean.abs() > f64::MIN_POSITIVE {
         100.0 * variance.sqrt() / mean
     } else {
@@ -196,8 +206,14 @@ fn run_cell(label: &str, context_length: u64) {
     let (program, symbols, roots, named) = build_fixture(context_length);
     let named_blocks = as_named_blocks(&named);
 
-    let plan = omega::plan_named(&program, &symbols, &named_blocks, &roots, NumericPolicy::llama_relaxed())
-        .expect("metal plans the real-shape fixture");
+    let plan = omega::plan_named(
+        &program,
+        &symbols,
+        &named_blocks,
+        &roots,
+        NumericPolicy::llama_relaxed(),
+    )
+    .expect("metal plans the real-shape fixture");
 
     omega::metal::execute_plan_named(&plan, &named_blocks).expect("plain warm-up run");
 
@@ -206,7 +222,8 @@ fn run_cell(label: &str, context_length: u64) {
     for _ in 0..REPEATS {
         let started = Instant::now();
         let (_evaluated, total_gpu_ns) =
-            omega::metal::execute_plan_named_timed(&plan, &named_blocks).expect("batched timed run");
+            omega::metal::execute_plan_named_timed(&plan, &named_blocks)
+                .expect("batched timed run");
         let wall_us = started.elapsed().as_secs_f64() * 1e6;
         batched_us_per_dispatch.push(total_gpu_ns as f64 / LAYERS as f64 / 1e3);
         println!("ROW 376 {label} batched raw wall_us={wall_us:.2} total_gpu_ns={total_gpu_ns}");
@@ -222,8 +239,10 @@ fn run_cell(label: &str, context_length: u64) {
         let (_evaluated, timings) =
             omega::metal::execute_plan_named_op_timed(&plan, &named_blocks, None)
                 .expect("per-op validation run");
-        let attention: Vec<&omega::metal::OpGpuTiming> =
-            timings.iter().filter(|timing| timing.kind == ATTENTION_KIND).collect();
+        let attention: Vec<&omega::metal::OpGpuTiming> = timings
+            .iter()
+            .filter(|timing| timing.kind == ATTENTION_KIND)
+            .collect();
         assert_eq!(
             attention.len(),
             LAYERS as usize,
@@ -242,8 +261,16 @@ fn run_cell(label: &str, context_length: u64) {
          batched_us_per_dispatch: mean={:.3} median={:.3} min={:.3} max={:.3} cov={:.2}% \
          per_op_timed_kind_validated_us_per_dispatch: mean={:.3} median={:.3} min={:.3} max={:.3} cov={:.2}% \
          kv_bytes_per_dispatch={kv_bytes_per_dispatch} effective_gbps_from_batched={effective_gbps:.2}",
-        batched_stat.mean_us, batched_stat.median_us, batched_stat.min_us, batched_stat.max_us, batched_stat.cov_pct,
-        per_op_stat.mean_us, per_op_stat.median_us, per_op_stat.min_us, per_op_stat.max_us, per_op_stat.cov_pct,
+        batched_stat.mean_us,
+        batched_stat.median_us,
+        batched_stat.min_us,
+        batched_stat.max_us,
+        batched_stat.cov_pct,
+        per_op_stat.mean_us,
+        per_op_stat.median_us,
+        per_op_stat.min_us,
+        per_op_stat.max_us,
+        per_op_stat.cov_pct,
     );
 }
 
@@ -260,9 +287,14 @@ fn assert_block_staging_parity(context_length: u64) {
     let (program, symbols, roots, named) = build_fixture(context_length);
     let named_blocks = as_named_blocks(&named);
 
-    let sequential_plan =
-        omega::plan_named(&program, &symbols, &named_blocks, &roots, NumericPolicy::bit_exact())
-            .expect("bit-exact (block_width=1) plan builds");
+    let sequential_plan = omega::plan_named(
+        &program,
+        &symbols,
+        &named_blocks,
+        &roots,
+        NumericPolicy::bit_exact(),
+    )
+    .expect("bit-exact (block_width=1) plan builds");
     let sequential = omega::metal::execute_plan_named(&sequential_plan, &named_blocks)
         .expect("bit-exact (block_width=1) run succeeds");
 
@@ -279,9 +311,16 @@ fn assert_block_staging_parity(context_length: u64) {
 
     let expected = sequential.root();
     let actual = block_staged.root();
-    assert_eq!(actual.len(), expected.len(), "context_length={context_length}");
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "context_length={context_length}"
+    );
 
-    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
     let max_diff = expected
         .iter()
         .zip(actual.iter())

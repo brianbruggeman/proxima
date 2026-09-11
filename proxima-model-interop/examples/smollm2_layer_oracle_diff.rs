@@ -151,9 +151,14 @@ fn main() {
     length_prefix.copy_from_slice(&file_bytes[..8]);
     let data_start = 8 + u64::from_le_bytes(length_prefix);
 
-    let model =
-        LoadedModel::load_from_safetensors(&manifest, &file_bytes, data_start, architecture, vocab)
-            .expect("load real smollm2 checkpoint");
+    let model = LoadedModel::load_from_safetensors(
+        &manifest,
+        &file_bytes,
+        data_start,
+        architecture.clone(),
+        vocab,
+    )
+    .expect("load real smollm2 checkpoint");
 
     let block_count = architecture.block_count;
     let mut node_ids = Vec::with_capacity(block_count as usize + 1);

@@ -90,7 +90,9 @@ pub enum TensorError {
     /// own codec's block size — never a legitimate on-disk GGUF payload (a
     /// partial trailing block), only ever bytes that are corrupt, truncated,
     /// or bound to the wrong codec.
-    #[error("{codec} packed block is {bytes} bytes, not a whole multiple of its {block_bytes}-byte block")]
+    #[error(
+        "{codec} packed block is {bytes} bytes, not a whole multiple of its {block_bytes}-byte block"
+    )]
     PackedBlockBytesNotAMultiple {
         codec: &'static str,
         bytes: usize,
@@ -181,9 +183,7 @@ pub enum TensorError {
     /// stack itself -- re-checked here rather than trusted blind, so a
     /// corrupt or mis-sized stack is a typed rejection, never a
     /// misaligned alias into the wrong expert's bytes.
-    #[error(
-        "expert stack of {bytes} bytes does not evenly divide by expert_count {expert_count}"
-    )]
+    #[error("expert stack of {bytes} bytes does not evenly divide by expert_count {expert_count}")]
     ExpertStackNotAligned { expert_count: usize, bytes: usize },
 
     /// [`crate::cpu::expert_entries_from_stack`]'s own empty-payload guard:
@@ -301,14 +301,18 @@ pub enum TensorError {
     /// reduce's `in_map` is rejected here rather than silently read from the
     /// operand's on-disk width, which would be wrong whenever `len` differs
     /// from it (the exact prefix-read case `len` exists for).
-    #[error("node {node} reduce iteration dim {dim} declares a len override, which reduce folding does not consult")]
+    #[error(
+        "node {node} reduce iteration dim {dim} declares a len override, which reduce folding does not consult"
+    )]
     ReduceLenAxisUnsupported { node: NodeId, dim: u16 },
 
     /// [`crate::map::AxisIndex::len_target_axis`] found zero or more than
     /// one `coeff == 1` term on an axis that declares `len` -- a multi-term
     /// address (`i+j@2`, `2*i+3*p@2`) with no single "plain" contribution
     /// has no iteration axis `len` can unambiguously describe.
-    #[error("node {node} operand axis {dim} declares a len override but its address has no single term len can describe")]
+    #[error(
+        "node {node} operand axis {dim} declares a len override but its address has no single term len can describe"
+    )]
     AmbiguousLenAxis { node: NodeId, dim: u16 },
 
     /// A program builder was asked for an architecture feature its own
@@ -331,6 +335,8 @@ pub enum TensorError {
     /// multi-token prefill batched into one evaluation) would otherwise SUM
     /// across positions silently rather than run the recurrence once per
     /// position -- raised here instead of producing a wrong program.
-    #[error("{op} sums its sequence axis (s = {s}) instead of stepping through it; only s == 1 is supported per evaluation")]
+    #[error(
+        "{op} sums its sequence axis (s = {s}) instead of stepping through it; only s == 1 is supported per evaluation"
+    )]
     SingleTokenStepOnly { op: &'static str, s: u64 },
 }

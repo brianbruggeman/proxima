@@ -66,17 +66,17 @@ use smallvec::SmallVec;
 
 use crate::dtype::DType;
 use crate::error::TensorError;
-use crate::numeric::{NumericPolicy, NumericRewrite, admit};
 #[cfg(feature = "instrument")]
 use crate::instrument;
 use crate::live;
-#[cfg(feature = "instrument")]
-use proxima_telemetry::debug;
 #[cfg(feature = "cached-attention-streaming")]
 use crate::map;
 use crate::map::{AxisIndex, AxisTerm, IndexMap, IndexPattern};
+use crate::numeric::{NumericPolicy, NumericRewrite, admit};
 use crate::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use crate::shape::{self, Shapes};
+#[cfg(feature = "instrument")]
+use proxima_telemetry::debug;
 
 /// Inline capacity for one bound op's per-iteration-axis buffers (`Layout`
 /// strides, a reduce's surviving `output_axes`). No rank bound is stated or
@@ -414,9 +414,7 @@ impl BoundOp {
         match &self.kind {
             BoundOpKind::CachedAttention { operands, .. }
             | BoundOpKind::Elementwise { operands, .. }
-            | BoundOpKind::Reduce { operands, .. } => {
-                operands
-            }
+            | BoundOpKind::Reduce { operands, .. } => operands,
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => &[],
         }
     }
@@ -729,6 +727,7 @@ fn rebase_layout(layout: &Layout, split_axis: u16, chunk_start: u64) -> Layout {
     }
 }
 
+#[derive(Clone)]
 struct HeldElementwise {
     dtype: DType,
     body: ScalarOp,
@@ -950,7 +949,7 @@ impl BoundOpBuilder {
                 let still_live = !retires.contains(&reduce.operand);
                 let non_identity = !is_identity_projection(&reduce.in_map);
                 let not_held = !self.held.borrow().contains_key(&reduce.operand);
-                let fuses = !still_live && !non_identity && !not_held;
+                let mut fuses = !still_live && !non_identity && !not_held;
                 if fuses
                     && let Some(activation_node) =
                         composed_packed_product_activation(&self.held, reduce.operand)
@@ -973,6 +972,13 @@ impl BoundOpBuilder {
                          (docs/discipline.md ROW 431, supersedes ROW 430)"
                     );
                     self.materialize_if_held(activation_node, shapes, &mut emitted)?;
+                    // The packed product's composed activation is not a
+                    // safe reduce-fusion operand: its fused body can retain
+                    // the absorbed node in backend bindings after the
+                    // producer's buffer is retired. Materialize the product
+                    // and keep the ordinary reduce path until that binding
+                    // representation carries the dependency explicitly.
+                    fuses = false;
                 }
                 #[cfg(feature = "instrument")]
                 {
@@ -1053,28 +1059,9 @@ impl BoundOpBuilder {
 
         let mut built = Vec::new();
         for node in remaining {
-            // NOT `if let Some(x) = self.held.borrow_mut()....` — that
-            // temporary's `RefMut` lives to the end of the `if let` body
-            // under Rust's temporary-lifetime-extension rule, and
-            // `build_elementwise_op` below borrows `self.held` itself, so
-            // the two would collide. Ending the borrow at this statement's
-            // semicolon first avoids the re-entrant panic.
-            let removed = self.held.borrow_mut().remove(&node);
-            if let Some(held) = removed {
-                built.push(build_elementwise_op(
-                    node,
-                    shapes,
-                    &self.held,
-                    held.dtype,
-                    held.body,
-                    &held.operands,
-                    Constants {
-                        ones: &self.ones.borrow(),
-                        values: &self.constant_value.borrow(),
-                        numeric_policy: self.numeric_policy,
-                    },
-                ));
-            }
+            let mut materialized = self.materialize_node(node, shapes)?;
+            materialized.reverse();
+            built.extend(materialized);
         }
         built.reverse();
         Ok(built)
@@ -1108,11 +1095,57 @@ impl BoundOpBuilder {
         shapes: &Shapes,
         emitted: &mut ReadyBatch,
     ) -> Result<(), TensorError> {
+        for materialized in self.materialize_node(node, shapes)? {
+            push_ready(emitted, node, materialized)?;
+        }
+        Ok(())
+    }
+
+    fn materialize_node(&self, node: NodeId, shapes: &Shapes) -> Result<Vec<BoundOp>, TensorError> {
+        let mut emitted = Vec::new();
+        loop {
+            let Some(held) = self.held.borrow().get(&node).cloned() else {
+                return Ok(emitted);
+            };
+            if self.preview_elementwise_buffer_count(node, shapes)? <= 31 {
+                break;
+            }
+
+            let candidate = held
+                .operands
+                .iter()
+                .filter(|(operand, map)| {
+                    is_identity_projection(map) && self.held.borrow().contains_key(operand)
+                })
+                .filter_map(|(operand, _)| {
+                    let mut preview_held = self.held.borrow().clone();
+                    preview_held.remove(operand);
+                    let count = preview_elementwise_buffer_count(
+                        node,
+                        shapes,
+                        &preview_held,
+                        &self.ones.borrow(),
+                        &self.constant_value.borrow(),
+                        self.numeric_policy,
+                    )
+                    .ok()?;
+                    Some((*operand, count))
+                })
+                .min_by_key(|(operand, count)| (*count, *operand))
+                .map(|(operand, _)| operand)
+                .ok_or(TensorError::NotLowerable {
+                    node,
+                    reason: "elementwise body exceeds Metal's 31-buffer ABI and has no composable child to materialize",
+                })?;
+
+            emitted.extend(self.materialize_node(candidate, shapes)?);
+        }
+
         // see `finish`'s comment: the borrow must end before this `if let`
         // body runs, since `build_elementwise_op` borrows `self.held` too.
         let removed = self.held.borrow_mut().remove(&node);
         if let Some(held) = removed {
-            let materialized = build_elementwise_op(
+            emitted.push(build_elementwise_op(
                 node,
                 shapes,
                 &self.held,
@@ -1124,10 +1157,24 @@ impl BoundOpBuilder {
                     values: &self.constant_value.borrow(),
                     numeric_policy: self.numeric_policy,
                 },
-            );
-            push_ready(emitted, node, materialized)?;
+            ));
         }
-        Ok(())
+        Ok(emitted)
+    }
+
+    fn preview_elementwise_buffer_count(
+        &self,
+        node: NodeId,
+        shapes: &Shapes,
+    ) -> Result<usize, TensorError> {
+        preview_elementwise_buffer_count(
+            node,
+            shapes,
+            &self.held.borrow(),
+            &self.ones.borrow(),
+            &self.constant_value.borrow(),
+            self.numeric_policy,
+        )
     }
 
     /// Walks `node`'s still-held operands and materializes any whose own
@@ -1232,6 +1279,40 @@ fn build_elementwise_op(
             operands: built_operands,
         },
     }
+}
+
+fn preview_elementwise_buffer_count(
+    node: NodeId,
+    shapes: &Shapes,
+    held: &BTreeMap<NodeId, HeldElementwise>,
+    ones: &[bool],
+    values: &[Option<f32>],
+    numeric_policy: NumericPolicy,
+) -> Result<usize, TensorError> {
+    let held = RefCell::new(held.clone());
+    let entry = held
+        .borrow()
+        .get(&node)
+        .cloned()
+        .ok_or(TensorError::NotLowerable {
+            node,
+            reason: "elementwise ABI preview requires a held node",
+        })?;
+    let (_, operands) = compose(
+        shapes,
+        &held,
+        entry.body,
+        &entry.operands,
+        Constants {
+            ones,
+            values,
+            numeric_policy,
+        },
+    );
+    Ok(metal_buffer_binding_count(
+        &operands,
+        &alloc::vec::Vec::new(),
+    ))
 }
 
 /// One operand's [`Layout`] (and, for a gather, its [`Lookup`]), built
@@ -1402,8 +1483,14 @@ fn composed_packed_product_activation(
     if first_packed == second_packed {
         return None;
     }
-    let other_node = if first_packed { *second_node } else { *first_node };
-    held.borrow().contains_key(&other_node).then_some(other_node)
+    let other_node = if first_packed {
+        *second_node
+    } else {
+        *first_node
+    };
+    held.borrow()
+        .contains_key(&other_node)
+        .then_some(other_node)
 }
 
 /// A fusion can compose through: every axis a plain, unshifted projection.
@@ -1520,9 +1607,14 @@ fn compose(
         absorbed: &mut absorbed,
     };
     let arg = match eliminate_identity_multiply(body, operands, constants.ones) {
-        Some((survivor_node, survivor_map)) => {
-            compose_operand(shapes, held, &mut state, survivor_node, survivor_map, constants)
-        }
+        Some((survivor_node, survivor_map)) => compose_operand(
+            shapes,
+            held,
+            &mut state,
+            survivor_node,
+            survivor_map,
+            constants,
+        ),
         None => compose_body(shapes, held, &mut state, body, operands, constants),
     };
     if state.steps.is_empty() {
@@ -1881,7 +1973,9 @@ const fn identity_element_signed_zero_nan(op: ScalarOp) -> Option<f32> {
 const fn identity_element_signed_zero_nan_rewrite(op: ScalarOp) -> Option<NumericRewrite> {
     match op {
         ScalarOp::Add => Some(NumericRewrite::IdentityEliminationSignedZero),
-        ScalarOp::Maximum | ScalarOp::Minimum => Some(NumericRewrite::IdentityEliminationNanAssumption),
+        ScalarOp::Maximum | ScalarOp::Minimum => {
+            Some(NumericRewrite::IdentityEliminationNanAssumption)
+        }
         _ => None,
     }
 }
@@ -1909,7 +2003,11 @@ fn step_arg_sort_key(arg: &StepArg) -> (bool, u16) {
 /// is a computed value, never a known literal at this point in composition,
 /// so it always returns `None` here (no recursive constant-folding of a
 /// step's own body in this slice).
-fn step_arg_constant(arg: StepArg, state: &ComposeState<'_>, constant_value: &[Option<f32>]) -> Option<f32> {
+fn step_arg_constant(
+    arg: StepArg,
+    state: &ComposeState<'_>,
+    constant_value: &[Option<f32>],
+) -> Option<f32> {
     match arg {
         StepArg::Operand(index) => {
             let (node, _, _) = state.operands.get(index as usize)?;
@@ -2260,6 +2358,13 @@ fn consumed_by_resolved_nodes(resolved: &[BoundOp]) -> BTreeSet<NodeId> {
                 consumed.insert(lookup.indices);
             }
         }
+        if let BoundOpKind::Reduce {
+            out_scatter: Some(lookup),
+            ..
+        } = &computed.kind
+        {
+            consumed.insert(lookup.indices);
+        }
     }
     consumed
 }
@@ -2332,11 +2437,7 @@ fn elementwise_operands(
 }
 
 #[cfg(feature = "cached-attention-streaming")]
-fn binary_elementwise(
-    program: &[Op],
-    node: NodeId,
-    body: ScalarOp,
-) -> Option<[NodeId; 2]> {
+fn binary_elementwise(program: &[Op], node: NodeId, body: ScalarOp) -> Option<[NodeId; 2]> {
     let operands = elementwise_operands(program, node, body)?;
     let [(left, _), (right, _)] = operands else {
         return None;
@@ -2362,9 +2463,7 @@ fn reduced_source(
 ) -> Option<NodeId> {
     match program.get(node.0 as usize)? {
         Op::Reduce(reduce)
-            if reduce.body == body
-                && reduce.init == init
-                && reduce.keep == Keep::Reduce =>
+            if reduce.body == body && reduce.init == init && reduce.keep == Keep::Reduce =>
         {
             Some(reduce.operand)
         }
@@ -2420,10 +2519,7 @@ fn is_exact_causal_mask(program: &[Op], node: NodeId) -> bool {
     }
     matches!(
         (program.get(key.0 as usize), program.get(query.0 as usize)),
-        (
-            Some(Op::Iota { .. }),
-            Some(Op::Iota { .. }),
-        )
+        (Some(Op::Iota { .. }), Some(Op::Iota { .. }),)
     )
 }
 
@@ -2499,31 +2595,41 @@ fn cached_attention_candidates(
         let Some(attended_sum) = binary_elementwise(program, output, ScalarOp::Multiply) else {
             continue;
         };
-        let Some(attended_parts) = binary_elementwise(program, attended_sum[0], ScalarOp::Add) else {
+        let Some(attended_parts) = binary_elementwise(program, attended_sum[0], ScalarOp::Add)
+        else {
             continue;
         };
-        let Some(inverse_sum) = unary_elementwise(program, attended_sum[1], ScalarOp::Reciprocal) else {
+        let Some(inverse_sum) = unary_elementwise(program, attended_sum[1], ScalarOp::Reciprocal)
+        else {
             continue;
         };
         let Some(sum_parts) = binary_elementwise(program, inverse_sum, ScalarOp::Add) else {
             continue;
         };
-        let Some(cached_weights) = reduced_source(program, sum_parts[0], ScalarOp::Add, ReduceInit::Zero) else {
+        let Some(cached_weights) =
+            reduced_source(program, sum_parts[0], ScalarOp::Add, ReduceInit::Zero)
+        else {
             continue;
         };
-        let Some(new_weights) = reduced_source(program, sum_parts[1], ScalarOp::Add, ReduceInit::Zero) else {
+        let Some(new_weights) =
+            reduced_source(program, sum_parts[1], ScalarOp::Add, ReduceInit::Zero)
+        else {
             continue;
         };
-        let Some(cached_shift) = unary_elementwise(program, cached_weights, ScalarOp::Exponential) else {
+        let Some(cached_shift) = unary_elementwise(program, cached_weights, ScalarOp::Exponential)
+        else {
             continue;
         };
         let Some(new_shift) = unary_elementwise(program, new_weights, ScalarOp::Exponential) else {
             continue;
         };
-        let Some(cached_score_parts) = binary_elementwise(program, cached_shift, ScalarOp::Subtract) else {
+        let Some(cached_score_parts) =
+            binary_elementwise(program, cached_shift, ScalarOp::Subtract)
+        else {
             continue;
         };
-        let Some(new_score_parts) = binary_elementwise(program, new_shift, ScalarOp::Subtract) else {
+        let Some(new_score_parts) = binary_elementwise(program, new_shift, ScalarOp::Subtract)
+        else {
             continue;
         };
         if cached_score_parts[1] != new_score_parts[1] {
@@ -2547,7 +2653,8 @@ fn cached_attention_candidates(
             continue;
         };
         let scale = cached_scaled_parts[1];
-        let Some(new_scaled_parts) = binary_elementwise(program, *new_scaled, ScalarOp::Multiply) else {
+        let Some(new_scaled_parts) = binary_elementwise(program, *new_scaled, ScalarOp::Multiply)
+        else {
             continue;
         };
         if new_scaled_parts[1] != scale {
@@ -2563,14 +2670,18 @@ fn cached_attention_candidates(
         else {
             continue;
         };
-        if new_query_even_grouped != query_even_grouped || new_query_odd_grouped != query_odd_grouped {
+        if new_query_even_grouped != query_even_grouped
+            || new_query_odd_grouped != query_odd_grouped
+        {
             continue;
         }
-        let Some(query_even_parts) = binary_elementwise(program, query_even_grouped, ScalarOp::Multiply)
+        let Some(query_even_parts) =
+            binary_elementwise(program, query_even_grouped, ScalarOp::Multiply)
         else {
             continue;
         };
-        let Some(query_odd_parts) = binary_elementwise(program, query_odd_grouped, ScalarOp::Multiply)
+        let Some(query_odd_parts) =
+            binary_elementwise(program, query_odd_grouped, ScalarOp::Multiply)
         else {
             continue;
         };
@@ -2657,8 +2768,7 @@ fn cached_attention_candidates(
             || new_key_shape[0] != new_value_shape[0]
             || cached_value_shape[2] != head_dim
             || new_value_shape[2] != head_dim
-            || shapes.of(output)
-                != [query_shape[0], query_shape[1], query_shape[2], head_dim]
+            || shapes.of(output) != [query_shape[0], query_shape[1], query_shape[2], head_dim]
         {
             continue;
         }
@@ -2669,7 +2779,13 @@ fn cached_attention_candidates(
             pair_dim as i64,
             1i64,
         ];
-        let key_strides = [0i64, (query_shape[1] * pair_dim) as i64, pair_dim as i64, 0, 1];
+        let key_strides = [
+            0i64,
+            (query_shape[1] * pair_dim) as i64,
+            pair_dim as i64,
+            0,
+            1,
+        ];
         let value_strides = [
             0i64,
             (query_shape[1] * query_shape[3] * 2) as i64,
@@ -2693,7 +2809,10 @@ fn cached_attention_candidates(
             .difference(&source_nodes.into_iter().collect())
             .copied()
             .collect::<BTreeSet<_>>();
-        if dependencies.iter().any(|node| effective_outputs.contains(node)) {
+        if dependencies
+            .iter()
+            .any(|node| effective_outputs.contains(node))
+        {
             #[cfg(feature = "instrument")]
             for node in &dependencies {
                 if effective_outputs.contains(node) {
@@ -2793,11 +2912,13 @@ fn cached_attention_single_range_candidates(
     let mut candidates = Vec::new();
     for output_position in (0..program.len()).rev() {
         let output = NodeId(output_position as u32);
-        let Some(attended_product) = reduced_source(program, output, ScalarOp::Add, ReduceInit::Zero)
+        let Some(attended_product) =
+            reduced_source(program, output, ScalarOp::Add, ReduceInit::Zero)
         else {
             continue;
         };
-        let Some(attended_parts) = binary_elementwise(program, attended_product, ScalarOp::Multiply)
+        let Some(attended_parts) =
+            binary_elementwise(program, attended_product, ScalarOp::Multiply)
         else {
             continue;
         };
@@ -2836,7 +2957,8 @@ fn cached_attention_single_range_candidates(
             continue;
         }
         let scores_masked = shifted_parts[0];
-        let Some(mask_parts) = elementwise_operands(program, scores_masked, ScalarOp::Select) else {
+        let Some(mask_parts) = elementwise_operands(program, scores_masked, ScalarOp::Select)
+        else {
             continue;
         };
         let [(mask, _), (negative_infinity, _), (scores_scaled, _)] = mask_parts else {
@@ -2863,7 +2985,8 @@ fn cached_attention_single_range_candidates(
         else {
             continue;
         };
-        let Some(query_odd_parts) = binary_elementwise(program, query_odd_grouped, ScalarOp::Multiply)
+        let Some(query_odd_parts) =
+            binary_elementwise(program, query_odd_grouped, ScalarOp::Multiply)
         else {
             continue;
         };
@@ -2874,14 +2997,7 @@ fn cached_attention_single_range_candidates(
         let query_odd = query_odd_parts[0];
         let value = attended_parts[1];
         let source_nodes = [
-            query_even,
-            query_odd,
-            key_even,
-            key_odd,
-            key_even,
-            key_odd,
-            value,
-            value,
+            query_even, query_odd, key_even, key_odd, key_even, key_odd, value, value,
         ];
         let mut operands = Vec::with_capacity(source_nodes.len());
         for source in source_nodes {
@@ -2938,7 +3054,14 @@ fn cached_attention_single_range_candidates(
         if !shapes.of(cached_len_node).is_empty() {
             continue;
         }
-        let cached_len_operand = (cached_len_node, Layout { base: 0, strides: SmallVec::new() }, None);
+        let cached_len_operand = (
+            cached_len_node,
+            Layout {
+                base: 0,
+                strides: SmallVec::new(),
+            },
+            None,
+        );
         let pair_dim = query_shape[3];
         let query_strides = [
             (query_shape[1] * query_shape[2] * pair_dim) as i64,
@@ -2946,7 +3069,13 @@ fn cached_attention_single_range_candidates(
             pair_dim as i64,
             1i64,
         ];
-        let key_strides = [0i64, (query_shape[1] * pair_dim) as i64, pair_dim as i64, 0, 1];
+        let key_strides = [
+            0i64,
+            (query_shape[1] * pair_dim) as i64,
+            pair_dim as i64,
+            0,
+            1,
+        ];
         let value_strides = [
             0i64,
             (query_shape[1] * query_shape[3] * 2) as i64,
@@ -2975,7 +3104,10 @@ fn cached_attention_single_range_candidates(
             .copied()
             .filter(|node| *node != cached_len_node)
             .collect::<BTreeSet<_>>();
-        if dependencies.iter().any(|node| effective_outputs.contains(node)) {
+        if dependencies
+            .iter()
+            .any(|node| effective_outputs.contains(node))
+        {
             #[cfg(feature = "instrument")]
             for node in &dependencies {
                 if effective_outputs.contains(node) {
@@ -3083,7 +3215,10 @@ fn attention_consumers(
             .into_iter()
             .filter(|node| dependencies.contains(node))
         {
-            consumers.entry(dependency).or_insert_with(BTreeSet::new).insert(consumer);
+            consumers
+                .entry(dependency)
+                .or_insert_with(BTreeSet::new)
+                .insert(consumer);
         }
     }
     consumers
@@ -3175,8 +3310,13 @@ pub fn bind_with_fusion(
     // `is_associative` has no such caller today).
     admit(numeric_policy, NumericRewrite::IdentityElimination)?;
     admit(numeric_policy, NumericRewrite::ChainFusion)?;
-    let built =
-        bind_cached_attention_fusion(program, shapes, outputs, fuse_cached_attention, numeric_policy)?;
+    let built = bind_cached_attention_fusion(
+        program,
+        shapes,
+        outputs,
+        fuse_cached_attention,
+        numeric_policy,
+    )?;
     #[cfg(feature = "reduce-epilogue-fusion")]
     {
         admit(numeric_policy, NumericRewrite::ReduceEpilogueFusion)?;
@@ -3202,59 +3342,60 @@ fn bind_cached_attention_fusion(
 
     #[cfg(feature = "cached-attention-streaming")]
     {
-    if !fuse_cached_attention {
-        return Ok(built);
-    }
-    let mut initial_candidates = cached_attention_candidates(program, shapes, &built, outputs);
-    initial_candidates
-        .extend(cached_attention_single_range_candidates(program, shapes, &built, outputs));
-    if initial_candidates.is_empty() {
-        return Ok(built);
-    }
-    let mut planning_outputs = outputs.to_vec();
-    if planning_outputs.is_empty() {
-        let root = program
-            .len()
-            .checked_sub(1)
-            .map(|position| NodeId(position as u32))
-            .ok_or(TensorError::Empty)?;
-        planning_outputs.push(root);
-    }
-    for (fused, _) in &initial_candidates {
-        let BoundOpKind::CachedAttention { operands, .. } = &fused.kind else {
-            continue;
-        };
-        for (source, _, _) in operands {
-            if !planning_outputs.contains(source) {
-                planning_outputs.push(*source);
+        if !fuse_cached_attention {
+            return Ok(built);
+        }
+        let mut initial_candidates = cached_attention_candidates(program, shapes, &built, outputs);
+        initial_candidates.extend(cached_attention_single_range_candidates(
+            program, shapes, &built, outputs,
+        ));
+        if initial_candidates.is_empty() {
+            return Ok(built);
+        }
+        let mut planning_outputs = outputs.to_vec();
+        if planning_outputs.is_empty() {
+            let root = program
+                .len()
+                .checked_sub(1)
+                .map(|position| NodeId(position as u32))
+                .ok_or(TensorError::Empty)?;
+            planning_outputs.push(root);
+        }
+        for (fused, _) in &initial_candidates {
+            let BoundOpKind::CachedAttention { operands, .. } = &fused.kind else {
+                continue;
+            };
+            for (source, _, _) in operands {
+                if !planning_outputs.contains(source) {
+                    planning_outputs.push(*source);
+                }
             }
         }
-    }
-    let rebuilt = bind_plain(program, shapes, &planning_outputs, numeric_policy)?;
-    let mut candidates = cached_attention_candidates(program, shapes, &rebuilt, outputs);
-    candidates.extend(cached_attention_single_range_candidates(
-        program, shapes, &rebuilt, outputs,
-    ));
-    if candidates.is_empty() {
-        return Ok(built);
-    }
-    let fused_by_node = candidates
-        .iter()
-        .map(|(fused, _)| (fused.node, fused))
-        .collect::<BTreeMap<_, _>>();
-    let absorbed = candidates
-        .iter()
-        .flat_map(|(_, absorbed)| absorbed.iter().copied())
-        .collect::<BTreeSet<_>>();
-    let mut rewritten = Vec::with_capacity(rebuilt.len());
-    for bound in rebuilt {
-        if let Some(fused) = fused_by_node.get(&bound.node) {
-            rewritten.push((*fused).clone());
-        } else if !absorbed.contains(&bound.node) {
-            rewritten.push(bound);
+        let rebuilt = bind_plain(program, shapes, &planning_outputs, numeric_policy)?;
+        let mut candidates = cached_attention_candidates(program, shapes, &rebuilt, outputs);
+        candidates.extend(cached_attention_single_range_candidates(
+            program, shapes, &rebuilt, outputs,
+        ));
+        if candidates.is_empty() {
+            return Ok(built);
         }
-    }
-    Ok(rewritten)
+        let fused_by_node = candidates
+            .iter()
+            .map(|(fused, _)| (fused.node, fused))
+            .collect::<BTreeMap<_, _>>();
+        let absorbed = candidates
+            .iter()
+            .flat_map(|(_, absorbed)| absorbed.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let mut rewritten = Vec::with_capacity(rebuilt.len());
+        for bound in rebuilt {
+            if let Some(fused) = fused_by_node.get(&bound.node) {
+                rewritten.push((*fused).clone());
+            } else if !absorbed.contains(&bound.node) {
+                rewritten.push(bound);
+            }
+        }
+        Ok(rewritten)
     }
 }
 
@@ -3508,6 +3649,16 @@ fn reduce_epilogue_fusion(
             ) else {
                 continue;
             };
+            // Metal exposes buffer indices 0..=30. Count the signature this
+            // fused op actually produces rather than capping only its
+            // epilogue: fold operands, epilogue operands, one index buffer
+            // per gather, output, uniforms, and the shared gather-fault
+            // buffer. If it does not fit, leaving the consumer materialized
+            // preserves the same algebra with two legal kernels.
+            let buffer_binding_count = metal_buffer_binding_count(operands, &epilogue_operands);
+            if buffer_binding_count > 31 {
+                continue;
+            }
             let fused = BoundOp {
                 node: consumer,
                 dtype: consumer_bound.dtype,
@@ -3543,6 +3694,15 @@ fn reduce_epilogue_fusion(
         resolved = rewritten;
     }
     Ok(resolved)
+}
+
+fn metal_buffer_binding_count(operands: &BoundOperands, epilogue: &BoundOperands) -> usize {
+    let gather_count = operands
+        .iter()
+        .chain(epilogue.iter())
+        .filter(|(_, _, gather)| gather.is_some())
+        .count();
+    operands.len() + epilogue.len() + gather_count + 2 + usize::from(gather_count > 0)
 }
 
 /// Which [`BoundOpKind::Reduce::epilogue_broadcast_axes`] value `consumer`'s
@@ -3878,6 +4038,13 @@ pub fn node_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<Node
                 last_use.insert(gather_access.indices, position);
             }
         }
+        if let BoundOpKind::Reduce {
+            out_scatter: Some(lookup),
+            ..
+        } = &node.kind
+        {
+            last_use.insert(lookup.indices, position);
+        }
     }
 
     let mut retires = vec![Vec::new(); resolved.len()];
@@ -3978,15 +4145,25 @@ mod tests {
         );
         let shapes = shape::infer(&program, &[]).expect("max(x,-inf) program infers");
 
-        let bit_exact = bind_with_fusion(&program, &shapes, &[output], true, NumericPolicy::bit_exact())
-            .expect("bit-exact bind succeeds");
-        let bit_exact_buffers =
-            run_resolved(program.len(), &bit_exact, alloc::vec![(x, alloc::vec![f32::NAN])]);
+        let bit_exact = bind_with_fusion(
+            &program,
+            &shapes,
+            &[output],
+            true,
+            NumericPolicy::bit_exact(),
+        )
+        .expect("bit-exact bind succeeds");
+        let bit_exact_buffers = run_resolved(
+            program.len(),
+            &bit_exact,
+            alloc::vec![(x, alloc::vec![f32::NAN])],
+        );
         let bit_exact_result = bit_exact_buffers[output.0 as usize]
             .as_ref()
             .expect("bit-exact output present")[0];
         assert_eq!(
-            bit_exact_result, f32::NEG_INFINITY,
+            bit_exact_result,
+            f32::NEG_INFINITY,
             "BitExact must compute the real max(NaN, -inf) == -inf, not eliminate the op"
         );
 
@@ -4050,10 +4227,19 @@ mod tests {
         );
         let shapes = shape::infer(&program, &[]).expect("x+0 program infers");
 
-        let bit_exact = bind_with_fusion(&program, &shapes, &[output], true, NumericPolicy::bit_exact())
-            .expect("bit-exact bind succeeds");
-        let bit_exact_buffers =
-            run_resolved(program.len(), &bit_exact, alloc::vec![(x, alloc::vec![-0.0f32])]);
+        let bit_exact = bind_with_fusion(
+            &program,
+            &shapes,
+            &[output],
+            true,
+            NumericPolicy::bit_exact(),
+        )
+        .expect("bit-exact bind succeeds");
+        let bit_exact_buffers = run_resolved(
+            program.len(),
+            &bit_exact,
+            alloc::vec![(x, alloc::vec![-0.0f32])],
+        );
         let bit_exact_result = bit_exact_buffers[output.0 as usize]
             .as_ref()
             .expect("bit-exact output present")[0];
@@ -4129,10 +4315,12 @@ mod tests {
         };
         let bound = bind_with_fusion(&program, &shapes, &[output], true, nan_assumption_policy)
             .expect("nan-assumption bind succeeds");
-        let buffers = run_resolved(program.len(), &bound, alloc::vec![(x, alloc::vec![-0.0f32])]);
-        let result = buffers[output.0 as usize]
-            .as_ref()
-            .expect("output present")[0];
+        let buffers = run_resolved(
+            program.len(),
+            &bound,
+            alloc::vec![(x, alloc::vec![-0.0f32])],
+        );
+        let result = buffers[output.0 as usize].as_ref().expect("output present")[0];
         assert_eq!(
             result.to_bits(),
             0.0f32.to_bits(),
@@ -4225,10 +4413,18 @@ mod tests {
             .expect("cached attention fixture builds");
         let shapes = crate::shape::infer(&program, &[1, 1]).expect("cached attention infers");
         let outputs: &[NodeId] = &[];
-        let plain = bind_plain(&program, &shapes, outputs, NumericPolicy::bit_exact()).expect("plain bind succeeds");
-        let cached_only = bind_cached_attention_fusion(&program, &shapes, outputs, true, NumericPolicy::bit_exact())
-            .expect("cached-attention-only bind succeeds");
-        let rewritten = bind(&program, &shapes, outputs, NumericPolicy::bit_exact()).expect("rewritten bind succeeds");
+        let plain = bind_plain(&program, &shapes, outputs, NumericPolicy::bit_exact())
+            .expect("plain bind succeeds");
+        let cached_only = bind_cached_attention_fusion(
+            &program,
+            &shapes,
+            outputs,
+            true,
+            NumericPolicy::bit_exact(),
+        )
+        .expect("cached-attention-only bind succeeds");
+        let rewritten = bind(&program, &shapes, outputs, NumericPolicy::bit_exact())
+            .expect("rewritten bind succeeds");
 
         assert_eq!(plain.len(), 48, "fixture baseline bound operation count");
         assert_eq!(
@@ -4268,9 +4464,11 @@ mod tests {
             1,
             "one-layer fixture must receive one fused step"
         );
-        assert!(rewritten
-            .iter()
-            .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })));
+        assert!(
+            rewritten
+                .iter()
+                .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        );
     }
 
     /// ROW 364's own artifact: the ACTUAL bound program the real openchat
@@ -4306,7 +4504,10 @@ mod tests {
     /// any time `reduce-epilogue-fusion` was not separately requested, which
     /// is every default invocation this crate's own gate script runs.
     #[test]
-    #[cfg(all(feature = "reduce-epilogue-fusion", feature = "cached-attention-streaming"))]
+    #[cfg(all(
+        feature = "reduce-epilogue-fusion",
+        feature = "cached-attention-streaming"
+    ))]
     fn row_364_per_layer_bound_op_list() {
         let (program, logits, roots, _duplicate_head_scratch) =
             crate::spec::mistral_single_range_cached_forward_program(
@@ -4334,9 +4535,7 @@ mod tests {
             match &op.kind {
                 BoundOpKind::Elementwise { body, .. } => {
                     let step_ops: Vec<ScalarOp> = body.steps.iter().map(|step| step.op).collect();
-                    std::println!(
-                        "row364 index={index} kind=elementwise step_ops={step_ops:?}"
-                    );
+                    std::println!("row364 index={index} kind=elementwise step_ops={step_ops:?}");
                 }
                 BoundOpKind::Reduce {
                     epilogue_body,
@@ -4376,8 +4575,8 @@ mod tests {
         for (even, odd, value) in cache_roots {
             outputs.extend_from_slice(&[even, odd, value]);
         }
-        let shapes = crate::shape::infer(&program, &[1, 5])
-            .expect("omega cached attention fixture infers");
+        let shapes =
+            crate::shape::infer(&program, &[1, 5]).expect("omega cached attention fixture infers");
         let rewritten = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
             .expect("omega cached attention fixture binds");
 
@@ -4389,9 +4588,11 @@ mod tests {
             2,
             "each production-shaped layer must receive its own fused step"
         );
-        assert!(rewritten
-            .iter()
-            .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })));
+        assert!(
+            rewritten
+                .iter()
+                .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        );
     }
 
     /// [`cached_attention_rewrite_accepts_the_omega_nonempty_cache_fixture`]'s
@@ -4422,8 +4623,8 @@ mod tests {
         for (even, odd, value) in cache_roots {
             outputs.extend_from_slice(&[even, odd, value]);
         }
-        let shapes = crate::shape::infer(&program, &[1, 5])
-            .expect("qwen3 gqa+qk_norm fixture infers");
+        let shapes =
+            crate::shape::infer(&program, &[1, 5]).expect("qwen3 gqa+qk_norm fixture infers");
         let rewritten = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
             .expect("qwen3 gqa+qk_norm fixture binds");
 
@@ -4473,20 +4674,38 @@ mod tests {
     #[test]
     #[cfg(feature = "cached-attention-streaming")]
     fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape() {
-        let (program, logits, cache_roots, _) = crate::spec::mistral_single_range_cached_forward_program(
-            32_002, 4096, 14336, 32, 8, 128, 32, false, crate::spec::DuplicateHeadPosition::None, false,
-        )
-        .expect("openchat-shaped single-range forward pass lowers to a program");
+        let (program, logits, cache_roots, _) =
+            crate::spec::mistral_single_range_cached_forward_program(
+                32_002,
+                4096,
+                14336,
+                32,
+                8,
+                128,
+                32,
+                false,
+                crate::spec::DuplicateHeadPosition::None,
+                false,
+            )
+            .expect("openchat-shaped single-range forward pass lowers to a program");
         let mut outputs = alloc::vec![logits];
         for (even, odd, value) in &cache_roots {
             outputs.extend_from_slice(&[*even, *odd, *value]);
         }
         let shapes = crate::shape::infer(&program, &[1, 71])
             .expect("one new position against a 71-position merged range infers");
-        let plain = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("plain bind succeeds");
-        let cached_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true, NumericPolicy::bit_exact())
-            .expect("cached-attention-only bind succeeds");
-        let rewritten = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
+        let plain = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("plain bind succeeds");
+        let cached_only = bind_cached_attention_fusion(
+            &program,
+            &shapes,
+            &outputs,
+            true,
+            NumericPolicy::bit_exact(),
+        )
+        .expect("cached-attention-only bind succeeds");
+        let rewritten = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("fused bind succeeds");
 
         assert_eq!(
             plain.len(),
@@ -4553,7 +4772,8 @@ mod tests {
             outputs.extend_from_slice(&[*even, *odd, *value]);
         }
         let shapes = crate::shape::infer(&program, &[1, 5]).expect("single-range fixture infers");
-        let resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("plain bind succeeds");
+        let resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("plain bind succeeds");
 
         let candidates =
             cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
@@ -4622,11 +4842,12 @@ mod tests {
         for (even, odd, value) in &cache_roots {
             outputs.extend_from_slice(&[*even, *odd, *value]);
         }
-        let shapes =
-            crate::shape::infer(&program, &[1, 5]).expect("single-range fixture infers");
-        let mut resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("plain bind succeeds");
+        let shapes = crate::shape::infer(&program, &[1, 5]).expect("single-range fixture infers");
+        let mut resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("plain bind succeeds");
 
-        let baseline = cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
+        let baseline =
+            cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
         assert!(
             !baseline.is_empty(),
             "the unpatched fixture must still produce a fusable candidate"
@@ -4655,7 +4876,8 @@ mod tests {
             }
         }
 
-        let patched = cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
+        let patched =
+            cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
         assert!(
             patched.is_empty(),
             "a gathered source must abort the candidate, not just shrink its operand list"
@@ -4727,7 +4949,8 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("iota infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("iota builds ops");
+        let built =
+            bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("iota builds ops");
 
         assert_eq!(built.len(), 1, "the iota leaf materializes on its own");
         assert_eq!(built[0].node, iota);
@@ -4744,7 +4967,8 @@ mod tests {
     fn matmul_resolves_to_one_fused_op_not_two() {
         let (program, product, sum, _lhs) = matmul_program();
         let shapes = shape::infer(&program, &[512]).expect("matmul infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("matmul builds ops");
+        let built =
+            bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("matmul builds ops");
 
         assert_eq!(
             built.len(),
@@ -4770,8 +4994,13 @@ mod tests {
     fn requesting_the_intermediate_elementwise_op_as_an_output_prevents_fusion() {
         let (program, product, sum, _lhs) = matmul_program();
         let shapes = shape::infer(&program, &[512]).expect("matmul infers");
-        let built =
-            bind(&program, &shapes, &[product, sum], NumericPolicy::bit_exact()).expect("matmul builds ops with two outputs");
+        let built = bind(
+            &program,
+            &shapes,
+            &[product, sum],
+            NumericPolicy::bit_exact(),
+        )
+        .expect("matmul builds ops with two outputs");
 
         assert_eq!(
             built.len(),
@@ -4855,7 +5084,8 @@ mod tests {
     fn a_chain_of_elementwise_ops_fuses_into_one_bound_op_not_three() {
         let (program, _b, _c, d) = elementwise_chain_program();
         let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("elementwise chain builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("elementwise chain builds ops");
 
         assert_eq!(
             built.len(),
@@ -4874,8 +5104,8 @@ mod tests {
     fn an_elementwise_intermediate_requested_as_an_output_prevents_fusion() {
         let (program, b, _c, d) = elementwise_chain_program();
         let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
-        let built =
-            bind(&program, &shapes, &[b, d], NumericPolicy::bit_exact()).expect("elementwise chain builds ops with 2 outputs");
+        let built = bind(&program, &shapes, &[b, d], NumericPolicy::bit_exact())
+            .expect("elementwise chain builds ops with 2 outputs");
 
         assert_eq!(
             built.len(),
@@ -4940,7 +5170,8 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("diamond chain infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("diamond chain builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("diamond chain builds ops");
 
         assert_eq!(
             built.len(),
@@ -5024,7 +5255,8 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("weighted dot infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("weighted dot builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("weighted dot builds ops");
 
         assert_eq!(
             built.len(),
@@ -5073,7 +5305,8 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("broadcast infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("broadcast builds ops");
+        let built =
+            bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("broadcast builds ops");
         let op = built.iter().find(|op| op.node == sum).expect("sum emitted");
         assert_eq!(
             op.operands()[1].1.stride(0),
@@ -5130,7 +5363,8 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("conv window infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("conv window builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("conv window builds ops");
         let op = built
             .iter()
             .find(|op| op.node == touched)
@@ -5167,7 +5401,8 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("transpose infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("transpose builds ops");
+        let built =
+            bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("transpose builds ops");
         let op = built
             .iter()
             .find(|op| op.node == transposed)
@@ -5247,7 +5482,8 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("two-axis output group infers");
-        let mut built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("two-axis output group binds");
+        let mut built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("two-axis output group binds");
         let packed: BTreeSet<NodeId> = core::iter::once(weight).collect();
         correct_packed_matmul_layouts(&mut built, &packed);
 
@@ -5296,7 +5532,8 @@ mod tests {
     /// this is that same proof for the un-tested complementary case,
     /// output = a single axis `e`, contraction = three.
     #[test]
-    fn correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_multi_axis_contraction_group() {
+    fn correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_multi_axis_contraction_group()
+     {
         const SEQ: u64 = 2;
         const KV_HEADS: u64 = 2;
         const GROUP: u64 = 2;
@@ -5349,7 +5586,10 @@ mod tests {
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![
                     (weight, weight_map),
-                    (activation, IndexMap::Affine(map::projection(5, &[0, 1, 2, 3]))),
+                    (
+                        activation,
+                        IndexMap::Affine(map::projection(5, &[0, 1, 2, 3]))
+                    ),
                 ],
                 name: None,
             },
@@ -5369,8 +5609,8 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("multi-axis contraction group infers");
-        let mut built =
-            bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("multi-axis contraction group binds");
+        let mut built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("multi-axis contraction group binds");
         let packed: BTreeSet<NodeId> = core::iter::once(weight).collect();
         correct_packed_matmul_layouts(&mut built, &packed);
 
@@ -5769,8 +6009,8 @@ mod tests {
         }
 
         let shapes = shape::infer(&program, &[512]).expect("free-function infer succeeds");
-        let built_via_free_function =
-            bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("free-function op building succeeds");
+        let built_via_free_function = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("free-function op building succeeds");
 
         assert_eq!(built_via_pipe, built_via_free_function);
         assert_eq!(built_via_pipe.len(), 1, "matmul fuses into one op");
@@ -5862,7 +6102,8 @@ mod tests {
         let shapes = shape::infer(&program, &[]).expect("computed-index program infers");
         let base_data: Vec<f32> = alloc::vec![10.0, 20.0, 30.0, 40.0];
 
-        let built = bind(&program, &shapes, &[output], NumericPolicy::bit_exact()).expect("binding itself never errors");
+        let built = bind(&program, &shapes, &[output], NumericPolicy::bit_exact())
+            .expect("binding itself never errors");
         let indices_position = built
             .iter()
             .position(|op| {
@@ -6041,7 +6282,8 @@ mod tests {
         let (program, source, reduced) =
             masked_window_reduce_program(1, 0, 5, 3, 3, 1, ScalarOp::Equal);
         let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("masked-window program builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("masked-window program builds ops");
 
         let folded = built
             .iter()
@@ -6081,7 +6323,8 @@ mod tests {
         let (program, _source, reduced) =
             masked_window_reduce_program(1, 0, 5, 3, 3, 2, ScalarOp::Equal);
         let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("masked-window program builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("masked-window program builds ops");
 
         let folded = built
             .iter()
@@ -6130,7 +6373,8 @@ mod tests {
         let (program, _source, reduced) =
             masked_window_reduce_program(1, 0, 5, 3, 3, 1, ScalarOp::Greater);
         let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("masked-window program builds ops");
+        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            .expect("masked-window program builds ops");
 
         let folded = built
             .iter()
@@ -6260,9 +6504,20 @@ mod tests {
         fn reduce_then_residual_add_fuses_into_one_epilogued_reduce() {
             let (program, reduced, consumer, _x, extra_x_use) = reduce_then_residual_add_program();
             let shapes = shape::infer(&program, &[]).expect("residual-add program infers");
-            let plain = bind_plain(&program, &shapes, &[extra_x_use], NumericPolicy::bit_exact())
-                .expect("plain bind succeeds");
-            let fused = bind(&program, &shapes, &[extra_x_use], NumericPolicy::bit_exact()).expect("fused bind succeeds");
+            let plain = bind_plain(
+                &program,
+                &shapes,
+                &[extra_x_use],
+                NumericPolicy::bit_exact(),
+            )
+            .expect("plain bind succeeds");
+            let fused = bind(
+                &program,
+                &shapes,
+                &[extra_x_use],
+                NumericPolicy::bit_exact(),
+            )
+            .expect("fused bind succeeds");
 
             assert_eq!(
                 fused.len(),
@@ -6354,7 +6609,8 @@ mod tests {
                     .collect()
             };
 
-            let fused = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
+            let fused = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+                .expect("fused bind succeeds");
             let fused_buffers = run_resolved(program.len(), &fused, inputs());
             let fused_consumer = fused_buffers[consumer.0 as usize]
                 .as_ref()
@@ -6365,7 +6621,8 @@ mod tests {
                 "epilogued reduce must match the hand-derived sum-plus-residual exactly"
             );
 
-            let plain = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("plain bind succeeds");
+            let plain = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+                .expect("plain bind succeeds");
             let plain_buffers = run_resolved(program.len(), &plain, inputs());
             let plain_consumer = plain_buffers[consumer.0 as usize]
                 .as_ref()
@@ -6391,8 +6648,13 @@ mod tests {
                 },
             );
             let shapes = shape::infer(&program, &[]).expect("two-consumer program infers");
-            let fused = bind(&program, &shapes, &[extra_x_use, second_consumer], NumericPolicy::bit_exact())
-                .expect("two-consumer program still binds");
+            let fused = bind(
+                &program,
+                &shapes,
+                &[extra_x_use, second_consumer],
+                NumericPolicy::bit_exact(),
+            )
+            .expect("two-consumer program still binds");
 
             assert!(
                 fused.iter().any(|bound| bound.node == reduced),
@@ -6448,8 +6710,13 @@ mod tests {
             };
             let consumer = NodeId(consumer_index as u32);
             let shapes = shape::infer(&program, &[]).expect("strided-consumer program infers");
-            let fused = bind(&program, &shapes, &[extra_x_use, consumer], NumericPolicy::bit_exact())
-                .expect("strided-consumer program still binds");
+            let fused = bind(
+                &program,
+                &shapes,
+                &[extra_x_use, consumer],
+                NumericPolicy::bit_exact(),
+            )
+            .expect("strided-consumer program still binds");
 
             assert!(
                 fused.iter().any(|bound| bound.node == reduced),
@@ -6475,8 +6742,13 @@ mod tests {
             // `node == consumer` convention exists for for (the epilogue
             // output IS the output, so nothing needs to keep the reduce
             // materialized separately).
-            let fused = bind(&program, &shapes, &[consumer, extra_x_use], NumericPolicy::bit_exact())
-                .expect("fused bind with the consumer as a required output succeeds");
+            let fused = bind(
+                &program,
+                &shapes,
+                &[consumer, extra_x_use],
+                NumericPolicy::bit_exact(),
+            )
+            .expect("fused bind with the consumer as a required output succeeds");
 
             assert!(
                 !fused.iter().any(|bound| bound.node == reduced),
@@ -6522,9 +6794,16 @@ mod tests {
             }
             let shapes = crate::shape::infer(&program, &[1, 71])
                 .expect("one new position against a 71-position merged range infers");
-            let attention_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true, NumericPolicy::bit_exact())
-                .expect("cached-attention-only bind succeeds");
-            let with_epilogue = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
+            let attention_only = bind_cached_attention_fusion(
+                &program,
+                &shapes,
+                &outputs,
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("cached-attention-only bind succeeds");
+            let with_epilogue = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+                .expect("fused bind succeeds");
 
             let epilogue_count = with_epilogue
                 .iter()
@@ -6747,7 +7026,9 @@ mod tests {
                             Op::Input {
                                 name: Some(name), ..
                             } => name.clone(),
-                            _ => unreachable!("block_node_ids only ever returns named Op::Input nodes"),
+                            _ => unreachable!(
+                                "block_node_ids only ever returns named Op::Input nodes"
+                            ),
                         };
                         let data = named
                             .iter()
@@ -6760,9 +7041,16 @@ mod tests {
                     .collect()
             };
 
-            let with_epilogue = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
-            let attention_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true, NumericPolicy::bit_exact())
-                .expect("cached-attention-only bind succeeds");
+            let with_epilogue = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+                .expect("fused bind succeeds");
+            let attention_only = bind_cached_attention_fusion(
+                &program,
+                &shapes,
+                &outputs,
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("cached-attention-only bind succeeds");
             assert!(
                 with_epilogue
                     .iter()
@@ -6879,7 +7167,10 @@ mod tests {
                 Op::Elementwise {
                     dtype: DType::Float32,
                     body: ScalarOp::Multiply,
-                    operands: alloc::vec![(sum_squares, keep_seq()), (inv_dim, broadcast_scalar_seq())],
+                    operands: alloc::vec![
+                        (sum_squares, keep_seq()),
+                        (inv_dim, broadcast_scalar_seq())
+                    ],
                     name: None,
                 },
             );
@@ -6949,9 +7240,10 @@ mod tests {
                 const DIM: u32 = 4096;
                 let (program, x, scaled) = rmsnorm_program(seq, DIM);
                 let shapes = shape::infer(&program, &[]).expect("rmsnorm program infers");
-                let plain =
-                    bind_plain(&program, &shapes, &[scaled], NumericPolicy::bit_exact()).expect("unfused rmsnorm binds");
-                let fused = bind(&program, &shapes, &[scaled], NumericPolicy::bit_exact()).expect("fused rmsnorm binds");
+                let plain = bind_plain(&program, &shapes, &[scaled], NumericPolicy::bit_exact())
+                    .expect("unfused rmsnorm binds");
+                let fused = bind(&program, &shapes, &[scaled], NumericPolicy::bit_exact())
+                    .expect("fused rmsnorm binds");
 
                 let fused_epilogue_count = fused
                     .iter()
@@ -6972,7 +7264,9 @@ mod tests {
                 );
 
                 let mut lcg = Lcg(seq as u64 * 97 + 3);
-                let x_data: Vec<f32> = (0..(seq as u64 * DIM as u64) as usize).map(|_| lcg.next_unit()).collect();
+                let x_data: Vec<f32> = (0..(seq as u64 * DIM as u64) as usize)
+                    .map(|_| lcg.next_unit())
+                    .collect();
                 let gamma_data: Vec<f32> = (0..DIM as usize).map(|_| lcg.next_unit()).collect();
                 let inputs = alloc::vec![
                     (x, x_data),
@@ -7075,8 +7369,10 @@ mod tests {
             );
 
             let shapes = shape::infer(&program, &[]).expect("silu*up program infers");
-            let plain = bind_plain(&program, &shapes, &[output], NumericPolicy::bit_exact()).expect("unfused silu*up binds");
-            let fused = bind(&program, &shapes, &[output], NumericPolicy::bit_exact()).expect("fused silu*up binds");
+            let plain = bind_plain(&program, &shapes, &[output], NumericPolicy::bit_exact())
+                .expect("unfused silu*up binds");
+            let fused = bind(&program, &shapes, &[output], NumericPolicy::bit_exact())
+                .expect("fused silu*up binds");
 
             // One of the two reduces (whichever `find_epilogue_source` picks
             // first) absorbs the WHOLE `silu(gate) * up` tail into its own
@@ -7120,8 +7416,7 @@ mod tests {
             let plain_buffers = run_resolved(program.len(), &plain, inputs.clone());
             let fused_buffers = run_resolved(program.len(), &fused, inputs);
             assert_eq!(
-                fused_buffers[output.0 as usize],
-                plain_buffers[output.0 as usize],
+                fused_buffers[output.0 as usize], plain_buffers[output.0 as usize],
                 "SiLU(gate) * up must be bit-identical fused vs unfused"
             );
         }
@@ -7184,8 +7479,10 @@ mod tests {
             );
 
             let shapes = shape::infer(&program, &[]).expect("x+reduced program infers");
-            let plain = bind_plain(&program, &shapes, &[consumer], NumericPolicy::bit_exact()).expect("unfused x+reduced binds");
-            let fused = bind(&program, &shapes, &[consumer], NumericPolicy::bit_exact()).expect("fused x+reduced binds");
+            let plain = bind_plain(&program, &shapes, &[consumer], NumericPolicy::bit_exact())
+                .expect("unfused x+reduced binds");
+            let fused = bind(&program, &shapes, &[consumer], NumericPolicy::bit_exact())
+                .expect("fused x+reduced binds");
             assert_eq!(
                 fused.len(),
                 plain.len() - 1,
@@ -7197,7 +7494,9 @@ mod tests {
             let epilogued = fused
                 .iter()
                 .find(|bound| has_real_epilogue(&bound.kind))
-                .unwrap_or_else(|| panic!("one BoundOp must carry the fused epilogue, got {fused:?}"));
+                .unwrap_or_else(|| {
+                    panic!("one BoundOp must carry the fused epilogue, got {fused:?}")
+                });
             let BoundOpKind::Reduce { epilogue_body, .. } = &epilogued.kind else {
                 panic!("epilogued BoundOp must be a Reduce, got {epilogued:?}");
             };
@@ -7234,8 +7533,7 @@ mod tests {
             let plain_buffers = run_resolved(program.len(), &plain, inputs.clone());
             let fused_buffers = run_resolved(program.len(), &fused, inputs);
             assert_eq!(
-                fused_buffers[consumer.0 as usize],
-                plain_buffers[consumer.0 as usize],
+                fused_buffers[consumer.0 as usize], plain_buffers[consumer.0 as usize],
                 "x + reduced must be bit-identical fused vs unfused"
             );
         }
@@ -7297,9 +7595,10 @@ mod tests {
             );
 
             let shapes = shape::infer(&program, &[]).expect("different-projection program infers");
-            let plain =
-                bind_plain(&program, &shapes, &[output], NumericPolicy::bit_exact()).expect("unfused different-projection binds");
-            let fused = bind(&program, &shapes, &[output], NumericPolicy::bit_exact()).expect("bind with fusion enabled still binds");
+            let plain = bind_plain(&program, &shapes, &[output], NumericPolicy::bit_exact())
+                .expect("unfused different-projection binds");
+            let fused = bind(&program, &shapes, &[output], NumericPolicy::bit_exact())
+                .expect("bind with fusion enabled still binds");
 
             assert_eq!(
                 fused.len(),
@@ -7313,6 +7612,33 @@ mod tests {
                 "no reduce may carry a fused epilogue here, got {fused:?}"
             );
             assert_no_dangling_operand_references(&program, &fused);
+        }
+
+        #[test]
+        fn metal_epilogue_binding_count_includes_fold_gathers_and_fixed_buffers() {
+            let layout = Layout {
+                base: 0,
+                strides: SmallVec::new(),
+            };
+            let lookup = Lookup {
+                indices: NodeId(2),
+                index_layout: layout.clone(),
+                element_stride: 1,
+                extent: 128,
+            };
+            let fold_operands = alloc::vec![
+                (NodeId(0), layout.clone(), Some(lookup)),
+                (NodeId(1), layout.clone(), None),
+            ];
+            let epilogue_operands = (0..27)
+                .map(|index| (NodeId(index + 3), layout.clone(), None))
+                .collect();
+
+            assert_eq!(
+                metal_buffer_binding_count(&fold_operands, &epilogue_operands),
+                33,
+                "2 fold + 27 epilogue + 1 gather index + output + uniforms + fault must exceed Metal's 31 slots"
+            );
         }
     }
 }

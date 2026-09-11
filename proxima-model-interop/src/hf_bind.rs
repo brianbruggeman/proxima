@@ -247,7 +247,12 @@ fn hf_bind_dense<'file>(
 /// adjacent-channel pairs `(x[2*i], x[2*i+1])`, the convention this crate's
 /// own RoPE rotation expects; see the module doc above for the derivation.
 #[must_use]
-pub fn permute_rope_rows(flat: &[f32], head_count: usize, head_dim: usize, in_dim: usize) -> Vec<f32> {
+pub fn permute_rope_rows(
+    flat: &[f32],
+    head_count: usize,
+    head_dim: usize,
+    in_dim: usize,
+) -> Vec<f32> {
     let half = head_dim / 2;
     let mut permuted = alloc::vec![0.0f32; flat.len()];
     for head in 0..head_count {
@@ -752,6 +757,7 @@ mod tests {
             feed_forward: 8,
             query_heads: 2,
             kv_heads: 1,
+            kv_heads_by_layer: vec![1],
             head_dim: 2,
             block_count: 1,
             expert_count: 0,
@@ -897,7 +903,9 @@ mod tests {
         const IN_DIM: usize = 1;
 
         // per head, split-half layout: [x1[0], x1[1], x2[0], x2[1]].
-        let original: Vec<f32> = (0..HEAD_COUNT * HEAD_DIM).map(|index| index as f32).collect();
+        let original: Vec<f32> = (0..HEAD_COUNT * HEAD_DIM)
+            .map(|index| index as f32)
+            .collect();
 
         let permuted = permute_rope_rows(&original, HEAD_COUNT, HEAD_DIM, IN_DIM);
 

@@ -138,8 +138,8 @@ fn main() {
     let mut pins_single = BTreeMap::new();
     pins_single.insert("batch_size", 1u64);
     pins_single.insert("sequence_length", SEQUENCE_LENGTH as u64);
-    let lowered_single =
-        proxima_onnx::lower::lower_graph_pinned(graph, &pins_single).expect("lower BGE-small batch=1");
+    let lowered_single = proxima_onnx::lower::lower_graph_pinned(graph, &pins_single)
+        .expect("lower BGE-small batch=1");
     let output_single = lowered_single.graph_outputs.first().expect("output").1;
     let constants_single: Vec<(&str, &[f32])> = lowered_single
         .initializers
@@ -183,5 +183,7 @@ fn main() {
         worst < 1e-4,
         "batch=8 row diverged from its own batch=1 reference beyond float tolerance: {worst:e}"
     );
-    println!("PASS: batch=8 width-tile-merge path matches batch=1 per-row reference within tolerance");
+    println!(
+        "PASS: batch=8 width-tile-merge path matches batch=1 per-row reference within tolerance"
+    );
 }

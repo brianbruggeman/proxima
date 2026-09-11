@@ -104,8 +104,13 @@ fn external_crate_composes_a_one_layer_forward_program() {
         &[(scores_masked, "st->st"), (score_max, "s->st")],
     )
     .expect("shift lowers");
-    let weights = elementwise(&mut program, DType::Float32, ScalarOp::Exponential, &[(shifted, "st->st")])
-        .expect("exponential lowers");
+    let weights = elementwise(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(shifted, "st->st")],
+    )
+    .expect("exponential lowers");
     let weight_sum = reduce(
         &mut program,
         DType::Float32,
@@ -116,8 +121,13 @@ fn external_crate_composes_a_one_layer_forward_program() {
         "s->st",
     )
     .expect("weight sum lowers");
-    let inv_weight_sum = elementwise(&mut program, DType::Float32, ScalarOp::Reciprocal, &[(weight_sum, "s->s")])
-        .expect("reciprocal lowers");
+    let inv_weight_sum = elementwise(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(weight_sum, "s->s")],
+    )
+    .expect("reciprocal lowers");
     let probabilities = elementwise(
         &mut program,
         DType::Float32,
@@ -241,7 +251,12 @@ fn external_crate_composes_a_one_layer_forward_program() {
         vec![Extent::Static(shared_hidden), Extent::Static(embedding)],
         "shared_w_down",
     );
-    let shared_gate_weight = input_leaf(&mut program, DType::Float32, vec![Extent::Static(embedding)], "shared_gate_weight");
+    let shared_gate_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Static(embedding)],
+        "shared_gate_weight",
+    );
 
     let shared_up_product = elementwise(
         &mut program,
@@ -314,8 +329,14 @@ fn external_crate_composes_a_one_layer_forward_program() {
 
     // The same `rmsnorm` + `elementwise` + `reduce` lm-head chain every
     // forward-program builder in this crate ends with.
-    let output_norm_weight = input_leaf(&mut program, DType::Float32, vec![Extent::Static(embedding)], "output_norm.weight");
-    let normed_final = rmsnorm(&mut program, ffn_out, output_norm_weight, inv_dim, eps).expect("final rmsnorm lowers");
+    let output_norm_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Static(embedding)],
+        "output_norm.weight",
+    );
+    let normed_final = rmsnorm(&mut program, ffn_out, output_norm_weight, inv_dim, eps)
+        .expect("final rmsnorm lowers");
     let lm_head_weight = input_leaf(
         &mut program,
         DType::Float32,
@@ -352,13 +373,18 @@ fn external_crate_composes_a_one_layer_forward_program() {
             .collect()
     };
 
-    let ids_data: Vec<f32> = (0..tokens as i32).map(|token| (token % vocab as i32) as f32).collect();
+    let ids_data: Vec<f32> = (0..tokens as i32)
+        .map(|token| (token % vocab as i32) as f32)
+        .collect();
     let eps_data = vec![1e-6f32; tokens];
     let table_data = filled(vocab as usize * embedding as usize);
     let gate_inp_data = filled(embedding as usize * expert_count as usize);
-    let expert_w_gate_data = filled(expert_count as usize * embedding as usize * expert_hidden as usize);
-    let expert_w_up_data = filled(expert_count as usize * embedding as usize * expert_hidden as usize);
-    let expert_w_down_data = filled(expert_count as usize * expert_hidden as usize * embedding as usize);
+    let expert_w_gate_data =
+        filled(expert_count as usize * embedding as usize * expert_hidden as usize);
+    let expert_w_up_data =
+        filled(expert_count as usize * embedding as usize * expert_hidden as usize);
+    let expert_w_down_data =
+        filled(expert_count as usize * expert_hidden as usize * embedding as usize);
     let shared_w_up_data = filled(embedding as usize * shared_hidden as usize);
     let shared_w_down_data = filled(shared_hidden as usize * embedding as usize);
     let shared_gate_weight_data = filled(embedding as usize);
@@ -380,8 +406,9 @@ fn external_crate_composes_a_one_layer_forward_program() {
         ("output.weight", lm_head_data.as_slice()),
     ];
 
-    let evaluated = proxima_tensor::cpu::evaluate_named(&program, &[tokens as u64], &named, &[logits])
-        .expect("the externally composed program evaluates on cpu");
+    let evaluated =
+        proxima_tensor::cpu::evaluate_named(&program, &[tokens as u64], &named, &[logits])
+            .expect("the externally composed program evaluates on cpu");
     let (logits_values, logits_shape) = evaluated.get(logits).expect("logits output present");
 
     assert_eq!(

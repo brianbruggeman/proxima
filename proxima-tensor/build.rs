@@ -5,7 +5,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use proxima_build::sizing::{require_nonzero, SizingSource};
+use proxima_build::sizing::{SizingSource, require_nonzero};
 
 fn main() {
     emit_dotprod_cfg();
@@ -139,8 +139,12 @@ fn resolve_float(source: &SizingSource, section: &str, key: &str) -> f64 {
 #[allow(clippy::expect_used)]
 fn emit_sizing_consts() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-    let root = SizingSource::load(&manifest_dir, "proxima-tensor-runtime.toml", "PROXIMA_TENSOR")
-        .unwrap_or_else(|err| panic!("{err}"));
+    let root = SizingSource::load(
+        &manifest_dir,
+        "proxima-tensor-runtime.toml",
+        "PROXIMA_TENSOR",
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
 
     let parallel_threshold = require_nonzero(
         "parallel.threshold",
@@ -234,8 +238,12 @@ fn emit_sizing_consts() {
 #[allow(clippy::expect_used)]
 fn emit_alloc_tier_sizing_consts() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-    let root = SizingSource::load(&manifest_dir, "proxima-tensor-runtime.toml", "PROXIMA_TENSOR")
-        .unwrap_or_else(|err| panic!("{err}"));
+    let root = SizingSource::load(
+        &manifest_dir,
+        "proxima-tensor-runtime.toml",
+        "PROXIMA_TENSOR",
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
 
     let rope_freq_base_default = resolve_float(&root, "rope", "freq_base_default");
     assert!(

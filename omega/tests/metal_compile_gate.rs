@@ -38,7 +38,12 @@ fn elementwise_tanh_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("elementwise infers");
     let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("elementwise lowers");
-    omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("elementwise emits")
+    omega::emit(
+        &nests[0],
+        &std::collections::BTreeMap::new(),
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("elementwise emits")
 }
 
 /// `Erf` has no `metal_stdlib` counterpart (verified against the real
@@ -66,7 +71,12 @@ fn elementwise_erf_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("erf infers");
     let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("erf lowers");
-    omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("erf emits")
+    omega::emit(
+        &nests[0],
+        &std::collections::BTreeMap::new(),
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("erf emits")
 }
 
 fn fused_matmul_kernel() -> omega::Kernel {
@@ -114,7 +124,12 @@ fn fused_matmul_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("matmul infers");
     let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("matmul lowers");
-    omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("matmul emits")
+    omega::emit(
+        &nests[0],
+        &std::collections::BTreeMap::new(),
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("matmul emits")
 }
 
 /// `simdgroup_matrix`-tiled Q4_K GEMM (ROW 107) -- 16 tokens clears
@@ -174,7 +189,8 @@ fn tiled_gemm_q4k_kernel() -> omega::Kernel {
     let weight_node = nests[0].operands()[0].0;
     let mut q4k = std::collections::BTreeMap::new();
     q4k.insert(weight_node, omega::PackedCodec::Q4K);
-    let kernel = omega::emit(&nests[0], &q4k, proxima_tensor::NumericPolicy::default()).expect("tiled gemm emits");
+    let kernel = omega::emit(&nests[0], &q4k, proxima_tensor::NumericPolicy::default())
+        .expect("tiled gemm emits");
     assert!(
         kernel.source.contains("simdgroup_multiply_accumulate"),
         "fixture must actually take the tiled GEMM path for this gate to mean anything:\n{}",
@@ -208,7 +224,12 @@ fn cumsum_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("cumsum infers");
     let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("cumsum lowers");
-    omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("cumsum emits")
+    omega::emit(
+        &nests[0],
+        &std::collections::BTreeMap::new(),
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("cumsum emits")
 }
 
 /// `table[ids[s], d]`: a standalone elementwise gather.
@@ -256,8 +277,14 @@ fn embedding_lookup_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("embedding lookup infers");
-    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("embedding lookup lowers");
-    omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("embedding lookup emits")
+    let nests =
+        bind(&program, &shapes, &[], NumericPolicy::default()).expect("embedding lookup lowers");
+    omega::emit(
+        &nests[0],
+        &std::collections::BTreeMap::new(),
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("embedding lookup emits")
 }
 
 /// `sum_k table[ids[i], k] * weight[k, j]`: a gather fused into a reduction.
@@ -327,8 +354,14 @@ fn embedding_matmul_kernel() -> omega::Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("embedding matmul infers");
-    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("embedding matmul lowers");
-    omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("embedding matmul emits")
+    let nests =
+        bind(&program, &shapes, &[], NumericPolicy::default()).expect("embedding matmul lowers");
+    omega::emit(
+        &nests[0],
+        &std::collections::BTreeMap::new(),
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("embedding matmul emits")
 }
 
 /// `Op::Iota` standing alone: a leaf with no operands, so this is the
@@ -346,7 +379,12 @@ fn iota_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("iota infers");
     let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("iota lowers");
-    omega::emit(&nests[0], &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("iota emits")
+    omega::emit(
+        &nests[0],
+        &std::collections::BTreeMap::new(),
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("iota emits")
 }
 
 #[cfg(feature = "cached-attention-streaming")]
@@ -380,7 +418,12 @@ fn cached_attention_kernel() -> omega::Kernel {
             new_upper_inclusive: 0,
         },
     };
-    omega::emit(&bound, &std::collections::BTreeMap::new(), proxima_tensor::NumericPolicy::default()).expect("cached attention emits")
+    omega::emit(
+        &bound,
+        &std::collections::BTreeMap::new(),
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("cached attention emits")
 }
 
 #[test]

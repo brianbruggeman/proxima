@@ -21,7 +21,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-#[cfg(all(feature = "metal", feature = "cpu", feature = "instrument", target_os = "macos"))]
+#[cfg(all(
+    feature = "metal",
+    feature = "cpu",
+    feature = "instrument",
+    target_os = "macos"
+))]
 fn cov_percent(samples: &[f64]) -> f64 {
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
     let variance = samples
@@ -32,13 +37,20 @@ fn cov_percent(samples: &[f64]) -> f64 {
     (variance.sqrt() / mean) * 100.0
 }
 
-#[cfg(all(feature = "metal", feature = "cpu", feature = "instrument", target_os = "macos"))]
+#[cfg(all(
+    feature = "metal",
+    feature = "cpu",
+    feature = "instrument",
+    target_os = "macos"
+))]
 fn run() {
     use std::hint::black_box;
     use std::time::Instant;
 
     use proxima_tensor::instrument::ticks_to_nanos;
-    use proxima_tensor::{DType, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, map};
+    use proxima_tensor::{
+        DType, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, map,
+    };
 
     fn elementwise_add_program(elements: u32) -> (Vec<Op>, NodeId) {
         let mut program = Vec::new();
@@ -153,7 +165,12 @@ fn run() {
     }
 }
 
-#[cfg(not(all(feature = "metal", feature = "cpu", feature = "instrument", target_os = "macos")))]
+#[cfg(not(all(
+    feature = "metal",
+    feature = "cpu",
+    feature = "instrument",
+    target_os = "macos"
+)))]
 fn run() {
     println!(
         "cut_boundary_submit_floor requires --features metal,cpu,instrument on macOS; skipped"

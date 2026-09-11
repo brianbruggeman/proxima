@@ -660,7 +660,10 @@ mod tests {
             .map(|(got, want)| (got - want).abs())
             .fold(0.0f32, f32::max);
         debug!(max_error, "quant.q3_k single-outlier round trip");
-        assert!(max_error < 1.2, "max_error={max_error} exceeds loose sanity bound");
+        assert!(
+            max_error < 1.2,
+            "max_error={max_error} exceeds loose sanity bound"
+        );
     }
 
     /// Alternating-sign super-block at constant magnitude.
@@ -679,7 +682,10 @@ mod tests {
             .map(|(got, want)| (got - want).abs())
             .fold(0.0f32, f32::max);
         debug!(max_error, "quant.q3_k alternating-sign round trip");
-        assert!(max_error < 1.2, "max_error={max_error} exceeds loose sanity bound");
+        assert!(
+            max_error < 1.2,
+            "max_error={max_error} exceeds loose sanity bound"
+        );
     }
 
     /// Encoding the same input twice must yield byte-identical output.
@@ -754,7 +760,10 @@ mod tests {
         }
         debug!(
             bytes_identical = once == twice,
-            max_abs_drift, block_d, worst_case_step, "quant.q3_k re-quantization drift (NOT idempotent)"
+            max_abs_drift,
+            block_d,
+            worst_case_step,
+            "quant.q3_k re-quantization drift (NOT idempotent)"
         );
         assert!(
             max_abs_drift < worst_case_step,
@@ -780,7 +789,10 @@ mod tests {
         dequantize(&once, &mut on_grid).expect("two blocks");
         let mut twice = vec![0u8; BLOCK_BYTES * 2];
         quantize(&on_grid, &mut twice).expect("two blocks");
-        assert_ne!(once, twice, "documents the known byte-level tie-break, not a stability guarantee");
+        assert_ne!(
+            once, twice,
+            "documents the known byte-level tie-break, not a stability guarantee"
+        );
     }
 
     /// Real weight data (principle 9), re-encoded through `Q3_K` (this
@@ -804,9 +816,18 @@ mod tests {
             sum_sq_error += f64::from(diff) * f64::from(diff);
         }
         let rms_error = (sum_sq_error / input.len() as f64).sqrt();
-        debug!(max_error, rms_error, "quant.q3_k real-qwen3-weights round trip");
-        assert!(max_error < 1.2, "max_error={max_error} exceeds loose sanity bound");
-        assert!(rms_error < 0.35, "rms_error={rms_error} exceeds loose sanity bound");
+        debug!(
+            max_error,
+            rms_error, "quant.q3_k real-qwen3-weights round trip"
+        );
+        assert!(
+            max_error < 1.2,
+            "max_error={max_error} exceeds loose sanity bound"
+        );
+        assert!(
+            rms_error < 0.35,
+            "rms_error={rms_error} exceeds loose sanity bound"
+        );
     }
 
     #[test]

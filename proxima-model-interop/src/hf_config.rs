@@ -23,6 +23,7 @@
 //! reason (see `proxima-model-interop/Cargo.toml`).
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use serde::Deserialize;
@@ -194,6 +195,7 @@ pub fn architecture_from_hf_config(config: &HfConfig) -> ModelArchitecture {
         feed_forward,
         query_heads: config.num_attention_heads,
         kv_heads,
+        kv_heads_by_layer: vec![kv_heads; config.num_hidden_layers as usize],
         head_dim,
         block_count: config.num_hidden_layers,
         expert_count,
@@ -293,6 +295,7 @@ mod tests {
                 feed_forward: 768,
                 query_heads: 32,
                 kv_heads: 4,
+                kv_heads_by_layer: vec![4; 48],
                 head_dim: 128,
                 block_count: 48,
                 expert_count: 128,
@@ -331,6 +334,7 @@ mod tests {
                 feed_forward: 32,
                 query_heads: 2,
                 kv_heads: 2,
+                kv_heads_by_layer: vec![2; 4],
                 head_dim: 4,
                 block_count: 4,
                 expert_count: 0,
@@ -416,6 +420,7 @@ mod tests {
                 feed_forward: 1536,
                 query_heads: 9,
                 kv_heads: 3,
+                kv_heads_by_layer: vec![3; 30],
                 head_dim: 64,
                 block_count: 30,
                 expert_count: 0,

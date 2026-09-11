@@ -228,16 +228,26 @@ fn assert_matches_dequantized_oracle(
 
     let actual = metal.root();
     let expected = cpu.root();
-    assert_eq!(actual.len(), rows, "{label}: degenerate gate, no outputs compared");
+    assert_eq!(
+        actual.len(),
+        rows,
+        "{label}: degenerate gate, no outputs compared"
+    );
     assert_eq!(actual.len(), expected.len());
 
     let mut max_diff = 0.0f32;
     for (&got, &want) in actual.iter().zip(expected.iter()) {
-        assert!(got.is_finite(), "{label}: ggml-port produced a non-finite value: {got}");
+        assert!(
+            got.is_finite(),
+            "{label}: ggml-port produced a non-finite value: {got}"
+        );
         max_diff = max_diff.max((got - want).abs());
     }
     if relative {
-        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let max_magnitude = expected
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f32, f32::max);
         let relative_error = max_diff / max_magnitude;
         eprintln!(
             "{label}: ggml-port vs dequantized-f32 cpu, {rows} rows, k={in_dim}: \
@@ -289,7 +299,14 @@ fn ggml_port_matches_dequantized_f32_cpu_on_real_attn_q_weight() {
     let mut lcg = Lcg(2026);
     let activation: Vec<f32> = (0..in_dim).map(|_| lcg.next_unit() * 4.0 - 2.0).collect();
 
-    assert_matches_dequantized_oracle("attn_q.weight", sliced_weight, in_dim, rows, &activation, false);
+    assert_matches_dequantized_oracle(
+        "attn_q.weight",
+        sliced_weight,
+        in_dim,
+        rows,
+        &activation,
+        false,
+    );
 }
 
 #[test]
@@ -321,7 +338,14 @@ fn ggml_port_matches_dequantized_f32_cpu_on_real_ffn_up_weight() {
     let mut lcg = Lcg(4091);
     let activation: Vec<f32> = (0..in_dim).map(|_| lcg.next_unit() * 4.0 - 2.0).collect();
 
-    assert_matches_dequantized_oracle("ffn_up.weight", sliced_weight, in_dim, rows, &activation, false);
+    assert_matches_dequantized_oracle(
+        "ffn_up.weight",
+        sliced_weight,
+        in_dim,
+        rows,
+        &activation,
+        false,
+    );
 }
 
 fn random_vec(seed: u64, count: usize, spread: f32) -> Vec<f32> {
@@ -361,7 +385,10 @@ fn ggml_port_matches_dequantized_f32_cpu_on_a_ragged_row_count_and_short_k() {
         .collect();
 
     let blocks_per_row = RAGGED_IN_DIM / QK_K;
-    assert_eq!(blocks_per_row, 2, "fixture must be exactly two super-blocks per row");
+    assert_eq!(
+        blocks_per_row, 2,
+        "fixture must be exactly two super-blocks per row"
+    );
     let row_bytes = blocks_per_row * BLOCK_BYTES;
     let mut packed = vec![0u8; RAGGED_OUT_DIM * row_bytes];
     for (row, row_packed) in rows.iter().zip(packed.chunks_exact_mut(row_bytes)) {

@@ -79,12 +79,10 @@ fn row_dot_products(query: &[f32], matrix: &[f32], dim: usize) -> Result<Vec<f32
     );
 
     let evaluated = evaluate(&program, &[], &[query, matrix], &[dots])?;
-    let (data, _shape) = evaluated
-        .get(dots)
-        .ok_or(TensorError::NotLowerable {
-            node: dots,
-            reason: "cosine_top_k's own dot-product root was not evaluated",
-        })?;
+    let (data, _shape) = evaluated.get(dots).ok_or(TensorError::NotLowerable {
+        node: dots,
+        reason: "cosine_top_k's own dot-product root was not evaluated",
+    })?;
     Ok(data.to_vec())
 }
 

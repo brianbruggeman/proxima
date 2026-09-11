@@ -331,7 +331,10 @@ fn score_prompt(
         let step_kl = kl_divergence(step_reference_logits, step_variant_logits);
         kl_sum += step_kl;
         kl_max = kl_max.max(step_kl);
-        logit_delta_max = logit_delta_max.max(max_abs_logit_delta(step_reference_logits, step_variant_logits));
+        logit_delta_max = logit_delta_max.max(max_abs_logit_delta(
+            step_reference_logits,
+            step_variant_logits,
+        ));
     }
 
     let matched_leading_tokens = first_divergence.unwrap_or(tokens_compared);
@@ -420,10 +423,7 @@ pub fn quality_report(
         .iter()
         .map(|row| row.kl_mean * row.tokens_compared as f64)
         .sum();
-    let kl_max = per_prompt
-        .iter()
-        .map(|row| row.kl_max)
-        .fold(0.0, f64::max);
+    let kl_max = per_prompt.iter().map(|row| row.kl_max).fold(0.0, f64::max);
     let max_abs_logit_delta = per_prompt
         .iter()
         .map(|row| row.max_abs_logit_delta)
@@ -462,17 +462,20 @@ pub fn quality_report(
 /// [`InteropError::MalformedQualityPrompt`] at the first line that is not
 /// valid JSON or is missing one of [`Prompt`]'s required fields.
 pub fn parse_prompts_jsonl(bytes: &[u8]) -> Result<Vec<Prompt>, InteropError> {
-    let text = core::str::from_utf8(bytes).map_err(|error| InteropError::MalformedQualityPrompt {
-        line_number: 0,
-        reason: error.to_string(),
-    })?;
+    let text =
+        core::str::from_utf8(bytes).map_err(|error| InteropError::MalformedQualityPrompt {
+            line_number: 0,
+            reason: error.to_string(),
+        })?;
     text.lines()
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty())
         .map(|(index, line)| {
-            serde_json::from_str::<Prompt>(line).map_err(|error| InteropError::MalformedQualityPrompt {
-                line_number: index + 1,
-                reason: error.to_string(),
+            serde_json::from_str::<Prompt>(line).map_err(|error| {
+                InteropError::MalformedQualityPrompt {
+                    line_number: index + 1,
+                    reason: error.to_string(),
+                }
             })
         })
         .collect()
@@ -626,9 +629,15 @@ mod tests {
             .expect_err("second line is not valid json and must be rejected");
 
         match error {
-            crate::error::InteropError::MalformedQualityPrompt { line_number, reason } => {
+            crate::error::InteropError::MalformedQualityPrompt {
+                line_number,
+                reason,
+            } => {
                 assert_eq!(line_number, 2, "the malformed line is 1-based line 2");
-                assert!(!reason.is_empty(), "the serde_json reason must be carried through");
+                assert!(
+                    !reason.is_empty(),
+                    "the serde_json reason must be carried through"
+                );
             }
             other => panic!("expected MalformedQualityPrompt, got {other:?}"),
         }
@@ -650,15 +659,29 @@ mod tests {
         let prompts = parse_prompts_jsonl(&bytes).expect("shipped fixture is well-formed jsonl");
 
         assert_eq!(prompts.len(), 32, "fixture is specified as 32 prompts");
-        for category in ["code", "math", "summarization", "factual_qa", "multilingual"] {
+        for category in [
+            "code",
+            "math",
+            "summarization",
+            "factual_qa",
+            "multilingual",
+        ] {
             assert!(
                 prompts.iter().any(|prompt| prompt.category == category),
                 "fixture must cover category {category:?}"
             );
         }
         for prompt in &prompts {
-            assert!(!prompt.text.trim().is_empty(), "{:?} has empty text", prompt.id);
-            assert!(!prompt.source.trim().is_empty(), "{:?} has empty source", prompt.id);
+            assert!(
+                !prompt.text.trim().is_empty(),
+                "{:?} has empty text",
+                prompt.id
+            );
+            assert!(
+                !prompt.source.trim().is_empty(),
+                "{:?} has empty source",
+                prompt.id
+            );
         }
     }
 }
@@ -681,9 +704,9 @@ mod real_openchat_file {
     use crate::generate::LoadedModel;
     use crate::serving::GPU_LAYERS_ALL;
 
-    use super::{Prompt, parse_prompts_jsonl, quality_report};
     #[cfg(feature = "instrument")]
     use super::print_quality_report;
+    use super::{Prompt, parse_prompts_jsonl, quality_report};
 
     /// Same read-only `mmap` of the fixture file `bind.rs`'s own
     /// `real_openchat_file::MappedGguf` uses, for the same reason (the
@@ -775,7 +798,8 @@ mod real_openchat_file {
             "/fixtures/quality_prompts.jsonl"
         ))
         .expect("quality_prompts.jsonl fixture ships in-tree");
-        let mut prompts = parse_prompts_jsonl(&bytes).expect("shipped fixture is well-formed jsonl");
+        let mut prompts =
+            parse_prompts_jsonl(&bytes).expect("shipped fixture is well-formed jsonl");
         prompts.truncate(quality_prompt_count());
         prompts
     }
@@ -830,7 +854,11 @@ mod real_openchat_file {
         #[cfg(feature = "instrument")]
         print_quality_report(&report);
 
-        assert_eq!(report.prompts, prompts.len(), "every prompt in the set must produce a row");
+        assert_eq!(
+            report.prompts,
+            prompts.len(),
+            "every prompt in the set must produce a row"
+        );
         assert_eq!(
             report.exact_match_rate, 1.0,
             "identical model and backend on both sides must match every compared token exactly"
@@ -891,12 +919,25 @@ mod real_openchat_file {
         #[cfg(feature = "instrument")]
         print_quality_report(&report);
 
-        assert_eq!(report.prompts, prompts.len(), "every prompt in the set must produce a row");
-        assert!(report.exact_match_rate.is_finite(), "exact_match_rate must be a real number");
-        assert!(report.top1_agreement_rate.is_finite(), "top1_agreement_rate must be a real number");
+        assert_eq!(
+            report.prompts,
+            prompts.len(),
+            "every prompt in the set must produce a row"
+        );
+        assert!(
+            report.exact_match_rate.is_finite(),
+            "exact_match_rate must be a real number"
+        );
+        assert!(
+            report.top1_agreement_rate.is_finite(),
+            "top1_agreement_rate must be a real number"
+        );
         assert!(report.kl_mean.is_finite(), "kl_mean must be a real number");
         assert!(report.kl_max.is_finite(), "kl_max must be a real number");
-        assert!(report.max_abs_logit_delta.is_finite(), "max_abs_logit_delta must be a real number");
+        assert!(
+            report.max_abs_logit_delta.is_finite(),
+            "max_abs_logit_delta must be a real number"
+        );
     }
 
     /// `PROXIMA_OPENCHAT_GGUF_VARIANT` names a second, differently-quantized
@@ -964,12 +1005,25 @@ mod real_openchat_file {
         #[cfg(feature = "instrument")]
         print_quality_report(&report);
 
-        assert_eq!(report.prompts, prompts.len(), "every prompt in the set must produce a row");
-        assert!(report.exact_match_rate.is_finite(), "exact_match_rate must be a real number");
-        assert!(report.top1_agreement_rate.is_finite(), "top1_agreement_rate must be a real number");
+        assert_eq!(
+            report.prompts,
+            prompts.len(),
+            "every prompt in the set must produce a row"
+        );
+        assert!(
+            report.exact_match_rate.is_finite(),
+            "exact_match_rate must be a real number"
+        );
+        assert!(
+            report.top1_agreement_rate.is_finite(),
+            "top1_agreement_rate must be a real number"
+        );
         assert!(report.kl_mean.is_finite(), "kl_mean must be a real number");
         assert!(report.kl_max.is_finite(), "kl_max must be a real number");
-        assert!(report.max_abs_logit_delta.is_finite(), "max_abs_logit_delta must be a real number");
+        assert!(
+            report.max_abs_logit_delta.is_finite(),
+            "max_abs_logit_delta must be a real number"
+        );
     }
 }
 
@@ -997,9 +1051,9 @@ mod real_qwen3_file {
     use crate::generate::LoadedModel;
     use crate::serving::GPU_LAYERS_ALL;
 
-    use super::{Prompt, parse_prompts_jsonl, quality_report};
     #[cfg(feature = "instrument")]
     use super::print_quality_report;
+    use super::{Prompt, parse_prompts_jsonl, quality_report};
 
     /// This module's own copy of
     /// [`super::real_openchat_file::quality_max_tokens`] -- same env var
@@ -1031,7 +1085,8 @@ mod real_qwen3_file {
             "/fixtures/quality_prompts.jsonl"
         ))
         .expect("quality_prompts.jsonl fixture ships in-tree");
-        let mut prompts = parse_prompts_jsonl(&bytes).expect("shipped fixture is well-formed jsonl");
+        let mut prompts =
+            parse_prompts_jsonl(&bytes).expect("shipped fixture is well-formed jsonl");
         prompts.truncate(quality_prompt_count());
         prompts
     }
@@ -1136,7 +1191,11 @@ mod real_qwen3_file {
         #[cfg(feature = "instrument")]
         print_quality_report(&report);
 
-        assert_eq!(report.prompts, prompts.len(), "every prompt in the set must produce a row");
+        assert_eq!(
+            report.prompts,
+            prompts.len(),
+            "every prompt in the set must produce a row"
+        );
         assert_eq!(
             report.exact_match_rate, 1.0,
             "identical model and backend on both sides must match every compared token exactly"
@@ -1186,12 +1245,25 @@ mod real_qwen3_file {
             report.max_abs_logit_delta,
         );
 
-        assert_eq!(report.prompts, prompts.len(), "every prompt in the set must produce a row");
-        assert!(report.exact_match_rate.is_finite(), "exact_match_rate must be a real number");
-        assert!(report.top1_agreement_rate.is_finite(), "top1_agreement_rate must be a real number");
+        assert_eq!(
+            report.prompts,
+            prompts.len(),
+            "every prompt in the set must produce a row"
+        );
+        assert!(
+            report.exact_match_rate.is_finite(),
+            "exact_match_rate must be a real number"
+        );
+        assert!(
+            report.top1_agreement_rate.is_finite(),
+            "top1_agreement_rate must be a real number"
+        );
         assert!(report.kl_mean.is_finite(), "kl_mean must be a real number");
         assert!(report.kl_max.is_finite(), "kl_max must be a real number");
-        assert!(report.max_abs_logit_delta.is_finite(), "max_abs_logit_delta must be a real number");
+        assert!(
+            report.max_abs_logit_delta.is_finite(),
+            "max_abs_logit_delta must be a real number"
+        );
     }
 
     /// The direct check: greedy 8-token decode of the SAME prompt through
@@ -1313,6 +1385,9 @@ mod real_qwen3_file {
             generated_ids.len()
         );
 
-        assert!(!generated_ids.is_empty(), "the model must produce at least one token");
+        assert!(
+            !generated_ids.is_empty(),
+            "the model must produce at least one token"
+        );
     }
 }

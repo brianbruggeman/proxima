@@ -19,8 +19,11 @@ fn main() {
 fn emit_batch_sizing(out_dir: &Path, manifest_dir: &str) {
     let source = SizingSource::load(manifest_dir, "proxima-core.toml", "PROXIMA_CORE")
         .unwrap_or_else(|err| panic!("{err}"));
-    let resolve =
-        |section: &str, key: &str| source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"));
+    let resolve = |section: &str, key: &str| {
+        source
+            .resolve_int(section, key)
+            .unwrap_or_else(|err| panic!("{err}"))
+    };
 
     let recv_slot_bytes = resolve("batch", "recv_slot_bytes");
     let recv_initial_cap = resolve("batch", "recv_initial_cap");

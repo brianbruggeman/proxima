@@ -196,19 +196,27 @@ fn run_case(codec: Codec, tokens: usize) {
     let expected = expected_output(codec, &packed, IN_DIM, OUT_ROWS, tokens, &activation);
 
     let (program, sum) = matmul_program(tokens as u32, IN_DIM as u32, OUT_ROWS as u32);
-    let blocks = [codec.quantized_block(&packed), QuantizedBlock::Float32(&activation)];
+    let blocks = [
+        codec.quantized_block(&packed),
+        QuantizedBlock::Float32(&activation),
+    ];
 
     let shapes = proxima_tensor::infer(&program, &[]).expect("the synthetic program infers");
     let packed_operands: omega::PackedOperands =
         [(NodeId(0), codec.packed())].into_iter().collect();
-    let mut bound =
-        proxima_tensor::bind(&program, &shapes, &[sum], NumericPolicy::default()).expect("the synthetic program binds");
+    let mut bound = proxima_tensor::bind(&program, &shapes, &[sum], NumericPolicy::default())
+        .expect("the synthetic program binds");
     proxima_tensor::correct_packed_matmul_layouts(&mut bound, &[NodeId(0)].into_iter().collect());
     let resolved = bound
         .iter()
         .find(|op| op.node == sum)
         .expect("the reduce node is bound");
-    let kernel = omega::emit(resolved, &packed_operands, proxima_tensor::NumericPolicy::default()).expect("the synthetic program emits");
+    let kernel = omega::emit(
+        resolved,
+        &packed_operands,
+        proxima_tensor::NumericPolicy::default(),
+    )
+    .expect("the synthetic program emits");
     // `metal-tiled-gemm` (`crate::sized::TILED_GEMM_MIN_TOKENS`, default 8)
     // is checked FIRST in `push_cooperative_reduce_body`'s own arm order and
     // legitimately supersedes this path once `tokens` clears that
@@ -227,13 +235,22 @@ fn run_case(codec: Codec, tokens: usize) {
     }
 
     let cpu = evaluate_quantized(&program, &[], &blocks, &[sum]).expect("cpu runs the matmul");
-    let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default()).expect("metal plans the matmul");
+    let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
+        .expect("metal plans the matmul");
     let metal =
         omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
 
     let element_count = tokens * OUT_ROWS;
-    assert_eq!(cpu.root().len(), element_count, "degenerate gate: cpu produced no output");
-    assert_eq!(metal.root().len(), element_count, "degenerate gate: metal produced no output");
+    assert_eq!(
+        cpu.root().len(),
+        element_count,
+        "degenerate gate: cpu produced no output"
+    );
+    assert_eq!(
+        metal.root().len(),
+        element_count,
+        "degenerate gate: metal produced no output"
+    );
 
     for (index, (&metal_value, &reference)) in metal.root().iter().zip(expected.iter()).enumerate()
     {
@@ -256,30 +273,78 @@ macro_rules! parity_case {
     };
 }
 
-parity_case!(q4k_single_activation_row_matches_independent_reference, Codec::Q4K, 1);
-parity_case!(q4k_two_activation_rows_match_independent_reference, Codec::Q4K, 2);
-parity_case!(q4k_four_activation_rows_match_independent_reference, Codec::Q4K, 4);
-parity_case!(q4k_eight_activation_rows_match_independent_reference, Codec::Q4K, 8);
+parity_case!(
+    q4k_single_activation_row_matches_independent_reference,
+    Codec::Q4K,
+    1
+);
+parity_case!(
+    q4k_two_activation_rows_match_independent_reference,
+    Codec::Q4K,
+    2
+);
+parity_case!(
+    q4k_four_activation_rows_match_independent_reference,
+    Codec::Q4K,
+    4
+);
+parity_case!(
+    q4k_eight_activation_rows_match_independent_reference,
+    Codec::Q4K,
+    8
+);
 parity_case!(
     q4k_nine_activation_rows_crosses_the_tile_boundary_and_matches_reference,
     Codec::Q4K,
     9
 );
 
-parity_case!(q5k_single_activation_row_matches_independent_reference, Codec::Q5K, 1);
-parity_case!(q5k_two_activation_rows_match_independent_reference, Codec::Q5K, 2);
-parity_case!(q5k_four_activation_rows_match_independent_reference, Codec::Q5K, 4);
-parity_case!(q5k_eight_activation_rows_match_independent_reference, Codec::Q5K, 8);
+parity_case!(
+    q5k_single_activation_row_matches_independent_reference,
+    Codec::Q5K,
+    1
+);
+parity_case!(
+    q5k_two_activation_rows_match_independent_reference,
+    Codec::Q5K,
+    2
+);
+parity_case!(
+    q5k_four_activation_rows_match_independent_reference,
+    Codec::Q5K,
+    4
+);
+parity_case!(
+    q5k_eight_activation_rows_match_independent_reference,
+    Codec::Q5K,
+    8
+);
 parity_case!(
     q5k_nine_activation_rows_crosses_the_tile_boundary_and_matches_reference,
     Codec::Q5K,
     9
 );
 
-parity_case!(q6k_single_activation_row_matches_independent_reference, Codec::Q6K, 1);
-parity_case!(q6k_two_activation_rows_match_independent_reference, Codec::Q6K, 2);
-parity_case!(q6k_four_activation_rows_match_independent_reference, Codec::Q6K, 4);
-parity_case!(q6k_eight_activation_rows_match_independent_reference, Codec::Q6K, 8);
+parity_case!(
+    q6k_single_activation_row_matches_independent_reference,
+    Codec::Q6K,
+    1
+);
+parity_case!(
+    q6k_two_activation_rows_match_independent_reference,
+    Codec::Q6K,
+    2
+);
+parity_case!(
+    q6k_four_activation_rows_match_independent_reference,
+    Codec::Q6K,
+    4
+);
+parity_case!(
+    q6k_eight_activation_rows_match_independent_reference,
+    Codec::Q6K,
+    8
+);
 parity_case!(
     q6k_nine_activation_rows_crosses_the_tile_boundary_and_matches_reference,
     Codec::Q6K,
@@ -306,16 +371,24 @@ fn q4k_eight_activation_rows_is_byte_identical_across_twenty_runs() {
         QuantizedBlock::Q4K(&packed),
         QuantizedBlock::Float32(&activation),
     ];
-    let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default()).expect("metal plans the matmul");
+    let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::default())
+        .expect("metal plans the matmul");
 
     let first =
         omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
-    let first_bytes: Vec<u8> = first.root().iter().flat_map(|value| value.to_le_bytes()).collect();
+    let first_bytes: Vec<u8> = first
+        .root()
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
     for run in 1..20 {
         let repeat =
             omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
-        let repeat_bytes: Vec<u8> =
-            repeat.root().iter().flat_map(|value| value.to_le_bytes()).collect();
+        let repeat_bytes: Vec<u8> = repeat
+            .root()
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
         assert_eq!(
             repeat_bytes, first_bytes,
             "run {run} disagrees byte-for-byte with run 0 on the same plan"

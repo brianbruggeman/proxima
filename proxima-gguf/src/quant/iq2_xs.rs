@@ -214,7 +214,11 @@ mod tests {
         let mut expected = [0.0f32; QK_K];
         let db_low = exact_delta * (0.5 + 1.0) * 0.25;
         let db_high = exact_delta * (0.5 + 2.0) * 0.25;
-        let fill_group = |expected: &mut [f32; QK_K], base: usize, grid_index: usize, db: f32, sign_index: usize| {
+        let fill_group = |expected: &mut [f32; QK_K],
+                          base: usize,
+                          grid_index: usize,
+                          db: f32,
+                          sign_index: usize| {
             let bytes = IQ2XS_GRID[grid_index].to_le_bytes();
             let signs = KSIGNS_IQ2XS[sign_index];
             for lane in 0..8 {

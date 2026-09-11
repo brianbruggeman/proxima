@@ -183,12 +183,15 @@ fn dispatch_once(
 #[ignore = "holds a real Metal device busy for PROXIMA_LOAD_SECONDS; run only as the race slice's contention generator"]
 fn gpu_load_generator() {
     let device = MTLCreateSystemDefaultDevice().expect("a Metal device is available on this host");
-    let queue = device.newCommandQueue().expect("device creates a command queue");
+    let queue = device
+        .newCommandQueue()
+        .expect("device creates a command queue");
     let pipeline = compile_pipeline(&device, STREAMING_REDUCE_SOURCE, "streaming_reduce");
 
     let data = zero_filled_shared_buffer(&device, LOAD_BUFFER_BYTES);
     let vec_count = (LOAD_BUFFER_BYTES / 16) as u64;
-    let total_threads = usize::try_from(vec_count).expect("vec_count fits in usize on a 64-bit host");
+    let total_threads =
+        usize::try_from(vec_count).expect("vec_count fits in usize on a 64-bit host");
     let threadgroups = total_threads.div_ceil(THREADGROUP).max(1);
     let partial_sums = zero_filled_shared_buffer(&device, threadgroups * size_of::<f32>());
     let uniforms = uniform_u64_pair(&device, vec_count, total_threads as u64);

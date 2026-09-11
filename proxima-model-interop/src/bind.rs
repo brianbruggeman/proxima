@@ -32,13 +32,14 @@ use proxima_gguf::MetadataValue;
 use proxima_gguf::pipe::ParsedGguf;
 #[cfg(feature = "std")]
 use proxima_gguf::quant::QuantError;
-use proxima_gguf::quant::{q3_k, q4_k, q5_k, q6_k, q8_0};
 #[cfg(feature = "std")]
 use proxima_gguf::quant::{bf16, f16, q2_k, q4_0};
+use proxima_gguf::quant::{q3_k, q4_k, q5_k, q6_k, q8_0};
 #[cfg(feature = "std")]
 use proxima_gguf::restack::{discover_experts, plan_stack, restack_into};
 use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::types::GgmlType;
+#[cfg(feature = "std")]
 use proxima_tensor::op::Op;
 
 use crate::error::InteropError;
@@ -84,12 +85,8 @@ pub fn gguf_tensor_as_f32(
         // checkpoint this crate has evaluated stores F16/Bf16 weights"),
         // but a genuinely valid GGUF byte layout this reader must not
         // reject just because no prior fixture happened to exercise it.
-        GgmlType::F16 => {
-            dequantize(data, element_count, proxima_gguf::quant::f16::dequantize)
-        }
-        GgmlType::Bf16 => {
-            dequantize(data, element_count, proxima_gguf::quant::bf16::dequantize)
-        }
+        GgmlType::F16 => dequantize(data, element_count, proxima_gguf::quant::f16::dequantize),
+        GgmlType::Bf16 => dequantize(data, element_count, proxima_gguf::quant::bf16::dequantize),
         other => Err(InteropError::UnrepresentableGgmlType {
             tensor: tensor.name.clone(),
             ggml_type: other,
@@ -227,10 +224,7 @@ pub(crate) fn aligned_f32_view(bytes: &[u8]) -> Option<&[f32]> {
     })
 }
 
-pub fn find_tensor<'a>(
-    parsed: &'a ParsedGguf,
-    name: &str,
-) -> Result<&'a TensorInfo, InteropError> {
+pub fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> Result<&'a TensorInfo, InteropError> {
     parsed
         .tensors
         .iter()
@@ -266,25 +260,25 @@ pub(crate) fn dequantize(
 /// `element_count() / embedding_length` reads it without inventing a key
 /// GGUF never wrote.
 // f32 has no Eq impl, so rope_freq_base drops this struct to PartialEq only.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelArchitecture {
     pub vocab: u32,
     pub embedding: u32,
     pub feed_forward: u32,
     pub query_heads: u32,
-    /// `{architecture}.attention.head_count_kv`. Confirmed against a real
-    /// checkpoint (LFM2.5-8B-A1B) to sometimes carry a per-layer
-    /// [`proxima_gguf::MetadataArray`] instead of one scalar `U32` -- a hybrid
-    /// architecture's convolution layers report `0` kv heads, its attention
-    /// layers a real count, and the two differ within the SAME checkpoint.
-    /// [`architecture_from_metadata`] reads that array shape without
-    /// erroring when every entry agrees (the common case, and every
-    /// checkpoint this field's doc could confirm before now), but returns
-    /// [`InteropError::HeterogeneousMetadataArray`] rather than collapsing a
-    /// genuinely per-layer-varying array into one number here -- this field
-    /// cannot represent "8 for these layers, 0 for those" and silently
-    /// picking one value would be architecturally wrong, not just imprecise.
+    /// The uniform `{architecture}.attention.head_count_kv` value consumed by
+    /// the existing dense-program builders. It is zero when
+    /// [`Self::kv_heads_by_layer`] varies; callers that require a uniform
+    /// shape must call [`Self::uniform_kv_heads`] before constructing a
+    /// uniform program.
     pub kv_heads: u32,
+    /// `{architecture}.attention.head_count_kv`, one entry for every block.
+    /// GGUF permits this hparam to be a scalar or an array: a scalar expands
+    /// to `block_count` entries, while an array is preserved exactly. This is
+    /// configuration data, not a choice made by the binder: Qwen3.6 35B-A3B
+    /// declares `[0, 0, 0, 2]` per four-layer cycle, where zero belongs to an
+    /// SSM layer and two belongs to the full-attention layer.
+    pub kv_heads_by_layer: Vec<u32>,
     /// The real per-head projection width -- `head_dim_from_metadata`'s own
     /// doc walks the three-way priority
     /// (`attention.key_length`/`rope.dimension_count`/derived quotient) this
@@ -345,6 +339,18 @@ pub struct ModelArchitecture {
     pub tied_embeddings: bool,
 }
 
+impl ModelArchitecture {
+    /// Returns the shared KV-head count only when every layer declares the
+    /// same value. A dense builder cannot legally substitute a representative
+    /// value for a per-layer configuration.
+    pub fn uniform_kv_heads(&self) -> Result<u32, InteropError> {
+        uniform_u32_array(
+            "attention.head_count_kv",
+            self.kv_heads_by_layer.iter().copied(),
+        )
+    }
+}
+
 /// Reads [`ModelArchitecture`] out of `parsed`'s own metadata: looks up
 /// `general.architecture` first (`"llama"` for a Mistral-shaped checkpoint
 /// such as openchat-3.5), then every `{architecture}.*` dimension key
@@ -359,18 +365,18 @@ pub struct ModelArchitecture {
 /// [`ModelArchitecture::head_dim`]'s own doc), falls back to
 /// `embedding / query_heads` instead of [`InteropError::MissingMetadataKey`].
 ///
-/// `kv_heads` reads `{architecture}.attention.head_count_kv` as a plain
-/// scalar `U32` in the common case, but also accepts a per-layer
-/// [`proxima_gguf::MetadataArray`] (confirmed on the same real checkpoint) PROVIDED every
-/// entry agrees -- see [`ModelArchitecture::kv_heads`]'s own doc for why a
-/// genuinely heterogeneous array is refused rather than collapsed.
+/// `kv_heads_by_layer` reads `{architecture}.attention.head_count_kv` as a
+/// scalar expanded across all layers or as the checkpoint's own per-layer
+/// array. `kv_heads` remains the uniform compatibility view; it is zero when
+/// that array varies, and uniform builders must call
+/// [`ModelArchitecture::uniform_kv_heads`] before using it.
 ///
 /// # Errors
 ///
 /// [`InteropError::MissingMetadataKey`] naming the first key that is
 /// absent, or present with the wrong [`MetadataValue`] variant;
-/// [`InteropError::HeterogeneousMetadataArray`] if `attention.head_count_kv`
-/// is a [`proxima_gguf::MetadataArray`] whose entries are not all equal;
+/// [`InteropError::MetadataArrayLengthMismatch`] if an array does not carry
+/// exactly one entry per block;
 /// [`InteropError::VocabShapeMismatch`] if `token_embd.weight`'s element
 /// count does not divide evenly by `embedding_length`.
 /// [`ModelArchitecture::head_dim`]'s three-way derivation, in priority
@@ -469,11 +475,17 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         parsed,
         &alloc::format!("{architecture}.attention.head_count"),
     )?;
-    let kv_heads = metadata_u32_or_uniform_array(
+    let block_count = metadata_u32(parsed, &alloc::format!("{architecture}.block_count"))?;
+    let kv_heads_by_layer = metadata_u32_per_layer(
         parsed,
         &alloc::format!("{architecture}.attention.head_count_kv"),
+        block_count,
     )?;
-    let block_count = metadata_u32(parsed, &alloc::format!("{architecture}.block_count"))?;
+    let kv_heads = uniform_u32_array(
+        &alloc::format!("{architecture}.attention.head_count_kv"),
+        kv_heads_by_layer.iter().copied(),
+    )
+    .unwrap_or(0);
     let head_dim = head_dim_from_metadata(parsed, architecture, embedding, query_heads);
     let vocab = vocab_from_token_embedding(parsed, embedding)?;
     let expert_count =
@@ -515,6 +527,7 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         feed_forward,
         query_heads,
         kv_heads,
+        kv_heads_by_layer,
         head_dim,
         block_count,
         expert_count,
@@ -553,10 +566,7 @@ pub fn metadata_str<'parsed>(
 // compiles this `pub fn` with no reachable caller (its own `pub use` is
 // also std-gated, `lib.rs`) and `-D dead-code` rejects it.
 #[cfg(feature = "std")]
-pub fn metadata_str_opt<'parsed>(
-    parsed: &'parsed ParsedGguf,
-    key: &str,
-) -> Option<&'parsed str> {
+pub fn metadata_str_opt<'parsed>(parsed: &'parsed ParsedGguf, key: &str) -> Option<&'parsed str> {
     parsed.metadata_value(key).and_then(MetadataValue::as_str)
 }
 
@@ -588,50 +598,61 @@ pub fn metadata_u32_optional_or(parsed: &ParsedGguf, key: &str, default: u32) ->
         .unwrap_or(default)
 }
 
-/// Same lookup as [`metadata_u32`], but also accepts `key` stored as a
-/// per-element [`proxima_gguf::value::MetadataArray`] of `U32`/`I32`
-/// entries -- confirmed necessary against a real checkpoint
-/// (LFM2.5-8B-A1B), whose `attention.head_count_kv` is `Array(I32[24])`
-/// (`0` for its 18 convolution layers, a real count for its 6 attention
-/// layers) rather than the single scalar every other checkpoint this crate
-/// has read declares.
-///
-/// Every entry must agree for this to return `Ok` -- see
-/// [`ModelArchitecture::kv_heads`]'s own doc for why a genuinely
-/// per-layer-varying array is refused ([`InteropError::HeterogeneousMetadataArray`])
-/// rather than collapsed into one scalar by, say, taking the max or the
-/// first nonzero entry: either of those would silently misrepresent a
-/// hybrid architecture's real per-layer structure as a uniform one.
+/// Reads `key` as a configuration value for every layer. GGUF permits a
+/// scalar or an array here; the scalar form expands to `block_count` entries
+/// so downstream architecture binders always receive one representation.
 ///
 /// # Errors
 ///
-/// [`InteropError::MissingMetadataKey`] if `key` is absent, or present with
-/// neither a scalar `U32`/`I32` nor an `Array` of one of those;
-/// [`InteropError::HeterogeneousMetadataArray`] if `key` is an `Array` whose
-/// entries are not all equal, or a negative `I32` entry has no `u32`
-/// representation.
-fn metadata_u32_or_uniform_array(parsed: &ParsedGguf, key: &str) -> Result<u32, InteropError> {
+/// [`InteropError::MissingMetadataKey`] when the key is absent, uses an
+/// unsupported wire type, or carries a negative signed value;
+/// [`InteropError::MetadataArrayLengthMismatch`] when the array length is not
+/// the declared block count.
+fn metadata_u32_per_layer(
+    parsed: &ParsedGguf,
+    key: &str,
+    block_count: u32,
+) -> Result<Vec<u32>, InteropError> {
     use proxima_gguf::value::MetadataArray;
 
     match parsed.metadata_value(key) {
-        Some(MetadataValue::U32(value)) => Ok(*value),
-        Some(MetadataValue::I32(value)) => {
-            u32::try_from(*value).map_err(|_| InteropError::HeterogeneousMetadataArray {
-                key: key.into(),
-                distinct_values: 1,
-            })
-        }
+        Some(MetadataValue::U32(value)) => Ok(vec![*value; block_count as usize]),
+        Some(MetadataValue::I32(value)) => u32::try_from(*value)
+            .map(|value| vec![value; block_count as usize])
+            .map_err(|_| InteropError::MissingMetadataKey { key: key.into() }),
         Some(MetadataValue::Array(MetadataArray::U32(values))) => {
-            uniform_u32_array(key, values.iter().copied())
+            metadata_u32_array_with_block_count(key, values.iter().copied(), block_count)
         }
-        Some(MetadataValue::Array(MetadataArray::I32(values))) => uniform_u32_array(
-            key,
-            values
-                .iter()
-                .map(|value| u32::try_from(*value).unwrap_or(u32::MAX)),
-        ),
+        Some(MetadataValue::Array(MetadataArray::I32(values))) => {
+            metadata_u32_array_with_block_count(
+                key,
+                values
+                    .iter()
+                    .map(|value| u32::try_from(*value))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| InteropError::MissingMetadataKey { key: key.into() })?
+                    .into_iter(),
+                block_count,
+            )
+        }
         _ => Err(InteropError::MissingMetadataKey { key: key.into() }),
     }
+}
+
+fn metadata_u32_array_with_block_count(
+    key: &str,
+    values: impl Iterator<Item = u32>,
+    block_count: u32,
+) -> Result<Vec<u32>, InteropError> {
+    let values: Vec<u32> = values.collect();
+    if values.len() != block_count as usize {
+        return Err(InteropError::MetadataArrayLengthMismatch {
+            key: key.into(),
+            expected: block_count as usize,
+            found: values.len(),
+        });
+    }
+    Ok(values)
 }
 
 /// Every element of `values` must be identical, or this returns
@@ -758,7 +779,12 @@ impl<'file> BoundWeights<'file> {
     /// name-tagged -- see [`bind_dense`]/[`bind_matmul_weight`]'s own doc
     /// for the borrow this wraps.
     #[must_use]
-    pub fn packed(&self) -> &[(alloc::string::String, proxima_tensor::cpu::QuantizedBlock<'file>)] {
+    pub fn packed(
+        &self,
+    ) -> &[(
+        alloc::string::String,
+        proxima_tensor::cpu::QuantizedBlock<'file>,
+    )] {
         &self.packed
     }
 
@@ -884,7 +910,7 @@ impl PackedOwnedKind {
     /// [`Self::from_ggml_type`], needed by [`Self::byte_len_for`] to look
     /// up a codec's block layout without re-typing
     /// [`GgmlType::block_layout`]'s numbers a second time here.
-    fn to_ggml_type(self) -> GgmlType {
+    pub(crate) fn to_ggml_type(self) -> GgmlType {
         match self {
             PackedOwnedKind::Q4K => GgmlType::Q4_K,
             PackedOwnedKind::Q5K => GgmlType::Q5_K,
@@ -961,7 +987,15 @@ pub fn bind_dense_as<'file>(
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
     if let Some(target) = precision_target_for(state, parsed, source_name)? {
-        return recode_tensor(parsed, file_bytes, source_name, target_name, target, None, state);
+        return recode_tensor(
+            parsed,
+            file_bytes,
+            source_name,
+            target_name,
+            target,
+            None,
+            state,
+        );
     }
     match gguf_tensor_as_packed_block(parsed, file_bytes, source_name) {
         Ok(block @ proxima_tensor::cpu::QuantizedBlock::Float32(borrowed)) => {
@@ -1043,6 +1077,46 @@ pub fn bind_matmul_weight<'file>(
     )
 }
 
+/// Binds a packed matrix through the program's `[in, out]` layout by
+/// dequantizing and transposing it. This is the explicit escape hatch for a
+/// packed tensor whose on-disk axis order cannot be represented by a borrowed
+/// [`QuantizedBlock`] view (the Qwen35 router is `[expert, embedding]` on disk
+/// but its contraction consumes `[embedding, expert]`).
+#[cfg(feature = "std")]
+pub fn bind_matmul_weight_transposed_f32<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    source_name: &str,
+    target_name: alloc::string::String,
+    out_dim: usize,
+    in_dim: usize,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    let decoded = gguf_tensor_as_f32(parsed, file_bytes, source_name)?;
+    let transposed = transpose_out_in_to_in_out(&decoded, source_name, out_dim, in_dim)?;
+    state.resident_bytes += transposed.len() * core::mem::size_of::<f32>();
+    state.owned.push((target_name, transposed));
+    Ok(())
+}
+
+/// Binds a packed tensor as owned `f32` in its native GGUF element order.
+/// This is reserved for tensors whose checkpoint layout already matches the
+/// program's declared axes but whose packed bytes would otherwise be passed
+/// through the generic `[out, in]` layout correction.
+#[cfg(feature = "std")]
+pub fn bind_native_f32<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    source_name: &str,
+    target_name: alloc::string::String,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    let decoded = gguf_tensor_as_f32(parsed, file_bytes, source_name)?;
+    state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
+    state.owned.push((target_name, decoded));
+    Ok(())
+}
+
 /// [`bind_matmul_weight`]'s underlying step, split out the same way
 /// [`bind_dense_as`] is: a caller whose real on-disk tensor and the
 /// forward program's own `Input` name disagree (`crate::lfm2`'s tied
@@ -1103,7 +1177,11 @@ fn precision_target_for(
         return Ok(None);
     };
     let on_disk = find_tensor(parsed, source_name)?.ggml_type;
-    Ok(if target == on_disk { None } else { Some(target) })
+    Ok(if target == on_disk {
+        None
+    } else {
+        Some(target)
+    })
 }
 
 /// [`crate::serving::ServingConfig::weight_precision`]'s bind-time recode
@@ -1174,7 +1252,13 @@ fn recode_tensor<'file>(
         let bytes_after = final_buffer.len() * core::mem::size_of::<f32>();
         state.resident_bytes += bytes_after;
         let recoded_name = alloc::format!("{target_name}@f32");
-        emit_weight_recoded(&recoded_name, source_type, target, bytes_before, bytes_after);
+        emit_weight_recoded(
+            &recoded_name,
+            source_type,
+            target,
+            bytes_before,
+            bytes_after,
+        );
         state.owned.push((recoded_name, final_buffer));
     } else {
         let kind = PackedOwnedKind::from_ggml_type(target).ok_or_else(|| {
@@ -1320,11 +1404,12 @@ pub(crate) fn bind_matmul_weight_paired<'file>(
         };
         state.packed.push((target_name, block));
     } else {
-        let kind =
-            PackedOwnedKind::from_ggml_type(codec).ok_or(InteropError::UnrepresentableGgmlType {
+        let kind = PackedOwnedKind::from_ggml_type(codec).ok_or(
+            InteropError::UnrepresentableGgmlType {
                 tensor: gate_name.into(),
                 ggml_type: codec,
-            })?;
+            },
+        )?;
         let gate_bytes = &file_bytes[gate_range.start as usize..gate_range.end as usize];
         let up_bytes = &file_bytes[up_range.start as usize..up_range.end as usize];
         let mut owned = vec![0u8; gate_bytes.len() + up_bytes.len()];
@@ -1401,11 +1486,12 @@ pub(crate) fn bind_matmul_weight_triple<'file>(
         };
         state.packed.push((target_name, block));
     } else {
-        let kind =
-            PackedOwnedKind::from_ggml_type(codec).ok_or(InteropError::UnrepresentableGgmlType {
+        let kind = PackedOwnedKind::from_ggml_type(codec).ok_or(
+            InteropError::UnrepresentableGgmlType {
                 tensor: q_name.into(),
                 ggml_type: codec,
-            })?;
+            },
+        )?;
         let q_bytes = &file_bytes[q_range.start as usize..q_range.end as usize];
         let k_bytes = &file_bytes[k_range.start as usize..k_range.end as usize];
         let v_bytes = &file_bytes[v_range.start as usize..v_range.end as usize];
@@ -1468,10 +1554,18 @@ fn bind_matmul_weight_private_copy<'file>(
         }
         Ok(block) => {
             let owned = match block {
-                proxima_tensor::cpu::QuantizedBlock::Q4K(bytes) => Some((bytes, PackedOwnedKind::Q4K)),
-                proxima_tensor::cpu::QuantizedBlock::Q5K(bytes) => Some((bytes, PackedOwnedKind::Q5K)),
-                proxima_tensor::cpu::QuantizedBlock::Q6K(bytes) => Some((bytes, PackedOwnedKind::Q6K)),
-                proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes) => Some((bytes, PackedOwnedKind::Q8_0)),
+                proxima_tensor::cpu::QuantizedBlock::Q4K(bytes) => {
+                    Some((bytes, PackedOwnedKind::Q4K))
+                }
+                proxima_tensor::cpu::QuantizedBlock::Q5K(bytes) => {
+                    Some((bytes, PackedOwnedKind::Q5K))
+                }
+                proxima_tensor::cpu::QuantizedBlock::Q6K(bytes) => {
+                    Some((bytes, PackedOwnedKind::Q6K))
+                }
+                proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes) => {
+                    Some((bytes, PackedOwnedKind::Q8_0))
+                }
                 _ => None,
             };
             match owned {
@@ -1688,7 +1782,7 @@ fn bind_moe_stacked_experts<'file>(
 // `append_mistral_moe_layer` (proxima-tensor/src/spec.rs) carry for the
 // identical MoE shape, not accidental complexity.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn bind_moe_expert_weights<'file>(
+pub fn bind_moe_expert_weights<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     layer: u32,
@@ -1956,7 +2050,6 @@ pub(crate) fn bind_all_weights<'file>(
             }
         }
     }
-
     bind_dense(parsed, file_bytes, "output_norm.weight".into(), &mut state)?;
     // tied embeddings (`general.tie_word_embeddings=true`, e.g. the real
     // SmolLM2-135M checkpoint's own GGUF export): no standalone
@@ -2062,12 +2155,26 @@ pub(crate) fn build_expert_slab<'file>(
         return slab;
     }
     let block_nodes = proxima_tensor::block_node_ids(program);
-    let mut site = 0usize;
     for layer in 0..architecture.block_count {
-        for (projection, out_dim, in_dim) in [
-            ("ffn_gate", architecture.feed_forward, architecture.embedding),
-            ("ffn_up", architecture.feed_forward, architecture.embedding),
-            ("ffn_down", architecture.embedding, architecture.feed_forward),
+        for (projection_kind, projection, out_dim, in_dim) in [
+            (
+                crate::expert_slab::ExpertProjection::Gate,
+                "ffn_gate",
+                architecture.feed_forward,
+                architecture.embedding,
+            ),
+            (
+                crate::expert_slab::ExpertProjection::Up,
+                "ffn_up",
+                architecture.feed_forward,
+                architecture.embedding,
+            ),
+            (
+                crate::expert_slab::ExpertProjection::Down,
+                "ffn_down",
+                architecture.embedding,
+                architecture.feed_forward,
+            ),
         ] {
             let name = alloc::format!("blk.{layer}.{projection}_exps.weight");
             let Some((bytes, codec)) = weights
@@ -2085,6 +2192,8 @@ pub(crate) fn build_expert_slab<'file>(
             else {
                 continue;
             };
+            let site = layer as usize * crate::expert_slab::ExpertProjection::ALL.len()
+                + projection_kind.index();
             if slab
                 .bind_layer_stack(
                     site,
@@ -2097,7 +2206,8 @@ pub(crate) fn build_expert_slab<'file>(
                 )
                 .is_ok()
             {
-                site += 1;
+                slab.register_model_layer_site(layer as usize, projection_kind, site);
+            } else {
             }
         }
     }
@@ -2865,6 +2975,7 @@ mod tests {
                 feed_forward: 32,
                 query_heads: 2,
                 kv_heads: 1,
+                kv_heads_by_layer: vec![1; 4],
                 head_dim: 4,
                 block_count: 4,
                 expert_count: 0,
@@ -3081,17 +3192,12 @@ mod tests {
     }
 
     /// `{architecture}.attention.head_count_kv` stored as a per-layer array
-    /// whose entries genuinely DISAGREE (confirmed real on LFM2.5-8B-A1B:
-    /// `0` for its 18 convolution layers, `8` for its 6 attention layers,
-    /// in the SAME array) must surface
-    /// [`InteropError::HeterogeneousMetadataArray`], never a silently picked
-    /// scalar -- the defect this test is named for: before this fix,
-    /// [`metadata_u32`]'s `MetadataValue::as_u32` had no `Array` arm at all,
-    /// so this exact shape returned [`InteropError::MissingMetadataKey`]
-    /// (a WRONG diagnosis -- the key is present, just array-shaped),
-    /// hard-failing every hybrid checkpoint's load with a misleading error.
+    /// whose entries genuinely differ must remain configuration data in
+    /// [`ModelArchitecture`]. A uniform builder can still reject it through
+    /// [`ModelArchitecture::uniform_kv_heads`], but parsing must not erase
+    /// the locations or select a representative layer.
     #[test]
-    fn architecture_from_metadata_refuses_a_heterogeneous_head_count_kv_array() {
+    fn architecture_from_metadata_preserves_a_heterogeneous_head_count_kv_array() {
         use proxima_gguf::value::MetadataArray;
         use proxima_gguf::value::MetadataValue as Value;
 
@@ -3125,17 +3231,20 @@ mod tests {
         let parsed = proxima_gguf::parse_complete(&file_bytes)
             .expect("parses gguf with a heterogeneous head_count_kv array");
 
-        let outcome = architecture_from_metadata(&parsed);
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("a heterogeneous per-layer configuration must parse");
         assert!(
             matches!(
-                outcome,
+                architecture.uniform_kv_heads(),
                 Err(InteropError::HeterogeneousMetadataArray {
                     distinct_values: 2,
                     ..
                 })
             ),
-            "a genuinely per-layer-varying array must be refused with a named, honest error, got {outcome:?}"
+            "a uniform consumer must still reject a genuinely varying configuration"
         );
+        assert_eq!(architecture.kv_heads, 0);
+        assert_eq!(architecture.kv_heads_by_layer, vec![0, 0, 8, 0, 8, 8]);
     }
 
     /// A checkpoint declaring a non-`10_000.0` `{architecture}.rope.freq_base`
@@ -3311,8 +3420,7 @@ mod tests {
         q4_k::quantize(&original_f32, &mut q4k_bytes)
             .expect("q4_k::quantize handles a multi-super-block run directly");
 
-        let (file_bytes, name) =
-            one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
+        let (file_bytes, name) = one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
         let parsed =
             proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
 
@@ -3416,8 +3524,7 @@ mod tests {
         q4_k::quantize(&original_f32, &mut q4k_bytes)
             .expect("q4_k::quantize handles a multi-super-block run directly");
 
-        let (file_bytes, name) =
-            one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
+        let (file_bytes, name) = one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
         let parsed =
             proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
 
@@ -3478,8 +3585,7 @@ mod tests {
         let mut q4k_bytes = vec![0u8; rows * q4_k::BLOCK_BYTES];
         q4_k::quantize(&original_f32, &mut q4k_bytes).expect("one QK_K-sized row");
 
-        let (file_bytes, name) =
-            one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
+        let (file_bytes, name) = one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
         let parsed =
             proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
 
@@ -3519,12 +3625,13 @@ mod tests {
         let rows = 1usize;
         let k = q4_k::QK_K;
         let element_count = rows * k;
-        let original_f32: Vec<f32> = (0..element_count).map(|index| index as f32 * 0.01).collect();
+        let original_f32: Vec<f32> = (0..element_count)
+            .map(|index| index as f32 * 0.01)
+            .collect();
         let mut q4k_bytes = vec![0u8; rows * q4_k::BLOCK_BYTES];
         q4_k::quantize(&original_f32, &mut q4k_bytes).expect("one QK_K-sized row");
 
-        let (file_bytes, name) =
-            one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
+        let (file_bytes, name) = one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
         let parsed =
             proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
 
@@ -3594,12 +3701,13 @@ mod tests {
         let rows = 1usize;
         let k = q4_k::QK_K;
         let element_count = rows * k;
-        let original_f32: Vec<f32> = (0..element_count).map(|index| index as f32 * 0.02).collect();
+        let original_f32: Vec<f32> = (0..element_count)
+            .map(|index| index as f32 * 0.02)
+            .collect();
         let mut q4k_bytes = vec![0u8; rows * q4_k::BLOCK_BYTES];
         q4_k::quantize(&original_f32, &mut q4k_bytes).expect("one QK_K-sized row");
 
-        let (file_bytes, name) =
-            one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
+        let (file_bytes, name) = one_tensor_gguf(WireType::Q4_K, &q4k_bytes, rows as u64, k as u64);
         let parsed =
             proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q4_k gguf fixture");
 
@@ -4034,10 +4142,8 @@ mod moe_memory_shape {
         let expert_slice =
             &packed_bytes[expert_index * per_expert_bytes..(expert_index + 1) * per_expert_bytes];
 
-        let activation: alloc::vec::Vec<f32> = expert_values(999)
-            .into_iter()
-            .take(IN_DIM)
-            .collect();
+        let activation: alloc::vec::Vec<f32> =
+            expert_values(999).into_iter().take(IN_DIM).collect();
         let gathered = proxima_tensor::cpu::matmul_q4k_f32(expert_slice, OUT_DIM, &activation)
             .expect("packed q4_k matmul evaluates over the gathered expert slice");
 
@@ -4132,7 +4238,8 @@ mod moe_memory_shape {
         // rows 100..124, offset well clear of expert 0's range so a
         // cross-expert addressing bug reads an obviously wrong value rather
         // than one that could coincidentally still look plausible.
-        let mut flat = alloc::vec::Vec::with_capacity(TEST_EXPERT_COUNT * TEST_OUT_DIM * TEST_IN_DIM);
+        let mut flat =
+            alloc::vec::Vec::with_capacity(TEST_EXPERT_COUNT * TEST_OUT_DIM * TEST_IN_DIM);
         for row in 0..(TEST_OUT_DIM * TEST_IN_DIM) {
             flat.push(row as f32);
         }
@@ -4456,7 +4563,9 @@ mod real_qwen3moe_file {
             } else {
                 matmul_q4k_f32(expert_bytes, out_dim, &activation)
             }
-            .unwrap_or_else(|error| panic!("{projection} packed matmul must evaluate, got {error:?}"));
+            .unwrap_or_else(|error| {
+                panic!("{projection} packed matmul must evaluate, got {error:?}")
+            });
 
             let mut dequantized = alloc::vec![0.0f32; out_dim * in_dim];
             if is_q6k {
@@ -4464,7 +4573,9 @@ mod real_qwen3moe_file {
             } else {
                 q4_k::dequantize(expert_bytes, &mut dequantized)
             }
-            .unwrap_or_else(|error| panic!("{projection} independent dequantize failed, got {error:?}"));
+            .unwrap_or_else(|error| {
+                panic!("{projection} independent dequantize failed, got {error:?}")
+            });
             let reference: alloc::vec::Vec<f32> = dequantized
                 .chunks(in_dim)
                 .map(|row| row.iter().zip(&activation).map(|(w, a)| w * a).sum())
@@ -4534,9 +4645,9 @@ mod real_openchat_file {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use crate::test_support::{dispatch_type_from_env, math_mode_from_env};
 
-    use super::{architecture_from_metadata, bind_all_weights, gguf_tensor_as_f32};
     #[cfg(feature = "metal")]
     use super::{ParsedGguf, find_tensor};
+    use super::{architecture_from_metadata, bind_all_weights, gguf_tensor_as_f32};
 
     /// A read-only `mmap` of the fixture file (rustix, already a workspace
     /// dependency used the same way by `proxima-storage/src/dax/region.rs`
@@ -4740,6 +4851,7 @@ mod real_openchat_file {
             "debug",
         ));
         let recorder = Recorder::builder()
+            .ring_capacity(65536)
             .export(Exporter::std())
             .expect("console exporter installs for an instrument-gated test")
             .install()
@@ -4872,9 +4984,8 @@ mod real_openchat_file {
         let baseline = block_on(baseline_model.call((prompt.clone(), max_tokens)))
             .expect("generate through the public Pipe path, baseline");
 
-        let paired_model =
-            LoadedModel::load_with_paired_gate_up_reduce(&parsed, file_bytes, true)
-                .expect("load real openchat checkpoint, one paired reduce per layer");
+        let paired_model = LoadedModel::load_with_paired_gate_up_reduce(&parsed, file_bytes, true)
+            .expect("load real openchat checkpoint, one paired reduce per layer");
         let paired = block_on(paired_model.call((prompt, max_tokens)))
             .expect("generate through the public Pipe path, paired");
 
@@ -5355,13 +5466,15 @@ mod real_openchat_file {
         #[cfg(feature = "instrument")]
         struct RouteCountingObserver {
             calls: std::sync::atomic::AtomicUsize,
-            distinct_layer_positions: std::sync::Mutex<alloc::collections::BTreeSet<(usize, usize)>>,
+            distinct_layer_positions:
+                std::sync::Mutex<alloc::collections::BTreeSet<(usize, usize)>>,
         }
 
         #[cfg(feature = "instrument")]
         impl proxima_tensor::instrument::ExpertObserver for RouteCountingObserver {
             fn on_expert_routed(&self, event: &proxima_tensor::instrument::ExpertRouting<'_>) {
-                self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.distinct_layer_positions
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5411,7 +5524,9 @@ mod real_openchat_file {
         );
         #[cfg(feature = "instrument")]
         {
-            let total_calls = ROUTE_OBSERVER.calls.load(std::sync::atomic::Ordering::Relaxed);
+            let total_calls = ROUTE_OBSERVER
+                .calls
+                .load(std::sync::atomic::Ordering::Relaxed);
             let distinct_layer_positions = ROUTE_OBSERVER
                 .distinct_layer_positions
                 .lock()
@@ -5599,10 +5714,7 @@ mod real_openchat_file {
             .collect();
 
         let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
-            weights.owned.len()
-                + weights.packed.len()
-                + 4
-                + architecture.block_count as usize * 3,
+            weights.owned.len() + weights.packed.len() + 4 + architecture.block_count as usize * 3,
         );
         named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
         for (name, data) in &weights.owned {
@@ -5617,11 +5729,7 @@ mod real_openchat_file {
         let cached_len = alloc::vec![0.0f32];
         named_blocks.push(("cached_len", QuantizedBlock::Float32(cached_len.as_slice())));
         for (layer, (k_even_name, k_odd_name, v_name)) in kv_cache_names.iter().enumerate() {
-            named_blocks.extend(layer_caches[layer].named_blocks(
-                k_even_name,
-                k_odd_name,
-                v_name,
-            ));
+            named_blocks.extend(layer_caches[layer].named_blocks(k_even_name, k_odd_name, v_name));
         }
 
         let symbols = [ids.len() as u64, 0u64];
@@ -6223,8 +6331,9 @@ mod real_openchat_file {
     fn fnv1a_hash(text: &str) -> u64 {
         const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
         const PRIME: u64 = 0x0000_0100_0000_01b3;
-        text.bytes()
-            .fold(OFFSET_BASIS, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(PRIME))
+        text.bytes().fold(OFFSET_BASIS, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+        })
     }
 
     /// First index where `candidate` departs from `reference`, or `None`
@@ -6384,7 +6493,9 @@ mod real_openchat_file {
         distinct.dedup();
         let distinct_texts = distinct.len();
 
-        std::println!("distinct_texts={distinct_texts} dispatch={dispatch_label} math={math_label}");
+        std::println!(
+            "distinct_texts={distinct_texts} dispatch={dispatch_label} math={math_label}"
+        );
 
         assert_eq!(
             distinct_texts, 1,
@@ -6702,7 +6813,9 @@ mod draft_acceptance {
                     .map(|(_, k_prime)| *k_prime)
                     .collect();
                 let category_mean = values.iter().sum::<f64>() / values.len() as f64;
-                category_line.push_str(&alloc::format!(" category_{category}_mean={category_mean:.4}"));
+                category_line.push_str(&alloc::format!(
+                    " category_{category}_mean={category_mean:.4}"
+                ));
             }
             std::println!(
                 "draft_acceptance_aggregate k={k} ngram={min_ngram}-{max_ngram} mean_k_prime={mean_k_prime:.4}{category_line}"
@@ -6733,8 +6846,7 @@ mod draft_acceptance {
     fn replay_draft_acceptance_on_a_repetitive_stream_beats_one_token_per_pass() {
         let vocab = base_byte_vocab();
         let line = "fn add(a, b) { a + b }\n";
-        let line_ids =
-            proxima_tokenizer::encode(line, &vocab).expect("encodes one real code line");
+        let line_ids = proxima_tokenizer::encode(line, &vocab).expect("encodes one real code line");
 
         let mut stream = Vec::new();
         for _ in 0..6 {

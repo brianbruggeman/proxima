@@ -46,14 +46,20 @@ fn derived_device_budget_bytes(weights_bytes: u64) -> (u64, u64, u64, u64) {
         .count() as u64;
     let ssm_layers = u64::from(BLOCK_COUNT) - attention_layers;
 
-    let kv_cache_bytes =
-        2 * u64::from(SERVING_CONTEXT) * u64::from(KV_HEADS) * u64::from(ATTN_HEAD_DIM) * 4 * attention_layers;
+    let kv_cache_bytes = 2
+        * u64::from(SERVING_CONTEXT)
+        * u64::from(KV_HEADS)
+        * u64::from(ATTN_HEAD_DIM)
+        * 4
+        * attention_layers;
 
     let ssm_key_dim = u64::from(SSM_STATE_SIZE) * u64::from(SSM_GROUP_COUNT);
     let head_v_dim = u64::from(SSM_INNER_SIZE) / u64::from(SSM_TIME_STEP_RANK);
     let qkv_dim = 2 * ssm_key_dim + u64::from(SSM_INNER_SIZE);
     let conv_rows = u64::from(SSM_CONV_KERNEL) - 1;
-    let state_len = u64::from(SSM_STATE_SIZE) * head_v_dim * u64::from(SSM_GROUP_COUNT)
+    let state_len = u64::from(SSM_STATE_SIZE)
+        * head_v_dim
+        * u64::from(SSM_GROUP_COUNT)
         * (u64::from(SSM_TIME_STEP_RANK) / u64::from(SSM_GROUP_COUNT));
     let ssm_state_bytes = (conv_rows * qkv_dim * 4 + state_len * 4) * ssm_layers;
 
@@ -63,7 +69,12 @@ fn derived_device_budget_bytes(weights_bytes: u64) -> (u64, u64, u64, u64) {
     // 256 MiB here is pure headroom, not a measurement.
     let arena_allowance_bytes: u64 = 256 * 1024 * 1024;
 
-    (weights_bytes, kv_cache_bytes, ssm_state_bytes, arena_allowance_bytes)
+    (
+        weights_bytes,
+        kv_cache_bytes,
+        ssm_state_bytes,
+        arena_allowance_bytes,
+    )
 }
 
 fn print_vm_stat(label: &str) {
@@ -77,7 +88,12 @@ fn print_vm_stat(label: &str) {
     }
 }
 
-fn decode(parsed: &proxima_gguf::pipe::ParsedGguf, file_bytes: &[u8], gpu_layers: i32, label: &str) -> Vec<u32> {
+fn decode(
+    parsed: &proxima_gguf::pipe::ParsedGguf,
+    file_bytes: &[u8],
+    gpu_layers: i32,
+    label: &str,
+) -> Vec<u32> {
     let loaded = LoadedModel::load(parsed, file_bytes).expect("load synthetic qwen35 checkpoint");
 
     // `ServingConfig::default()` is the owner's real `-ngl all -ctk q8_0
@@ -126,9 +142,13 @@ fn decode(parsed: &proxima_gguf::pipe::ParsedGguf, file_bytes: &[u8], gpu_layers
 fn main() {
     let file_bytes = std::fs::read(FIXTURE_PATH).expect("read synth_qwen35_gguf's own output");
     let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parse synthetic qwen35 gguf");
-    println!("synth_qwen35_decode: fixture={FIXTURE_PATH} bytes={}", file_bytes.len());
+    println!(
+        "synth_qwen35_decode: fixture={FIXTURE_PATH} bytes={}",
+        file_bytes.len()
+    );
 
-    let (weights, kv_cache, ssm_state, arena) = derived_device_budget_bytes(file_bytes.len() as u64);
+    let (weights, kv_cache, ssm_state, arena) =
+        derived_device_budget_bytes(file_bytes.len() as u64);
     let total = weights + kv_cache + ssm_state + arena;
     println!(
         "derived device budget: weights={weights} kv_cache={kv_cache} ssm_state={ssm_state} \

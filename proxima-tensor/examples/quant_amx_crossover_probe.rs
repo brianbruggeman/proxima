@@ -120,8 +120,17 @@ mod mac {
     }
 
     fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-        assert_eq!(a.len(), b.len(), "shape mismatch: {} vs {}", a.len(), b.len());
-        a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "shape mismatch: {} vs {}",
+            a.len(),
+            b.len()
+        );
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
     }
 
     struct Stats {
@@ -132,11 +141,19 @@ mod mac {
     fn stats(samples_ns: &[f64]) -> Stats {
         let n = samples_ns.len() as f64;
         let mean = samples_ns.iter().sum::<f64>() / n;
-        let variance = samples_ns.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / n;
+        let variance = samples_ns
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / n;
         let stddev = variance.sqrt();
         Stats {
             mean_ns: mean,
-            cov_pct: if mean > 0.0 { 100.0 * stddev / mean } else { 0.0 },
+            cov_pct: if mean > 0.0 {
+                100.0 * stddev / mean
+            } else {
+                0.0
+            },
         }
     }
 
@@ -189,8 +206,16 @@ mod mac {
     }
 
     const SHAPES: &[Shape] = &[
-        Shape { label: "attn_q_4096x4096", tensor_name: "blk.0.attn_q.weight", seed: 200 },
-        Shape { label: "ffn_gate_4096x14336", tensor_name: "blk.0.ffn_gate.weight", seed: 201 },
+        Shape {
+            label: "attn_q_4096x4096",
+            tensor_name: "blk.0.attn_q.weight",
+            seed: 200,
+        },
+        Shape {
+            label: "ffn_gate_4096x14336",
+            tensor_name: "blk.0.ffn_gate.weight",
+            seed: 201,
+        },
     ];
 
     fn probe_shape(file: &mut File, parsed: &ParsedGguf, file_len: u64, shape: &Shape) {
@@ -242,7 +267,11 @@ mod mac {
             for (row, slot) in reference.iter_mut().enumerate() {
                 let weight_row = &f32_weights_once[row * k..(row + 1) * k];
                 let activation_row = &activation[0..k];
-                *slot = weight_row.iter().zip(activation_row).map(|(w, a)| w * a).sum();
+                *slot = weight_row
+                    .iter()
+                    .zip(activation_row)
+                    .map(|(w, a)| w * a)
+                    .sum();
             }
 
             // --- arm A: native Q4_K int8-dot wide kernel ---
@@ -298,11 +327,19 @@ mod mac {
             let arm_b_dequant_stats = stats(&arm_b_dequant_only_samples);
             let arm_b_gemm_stats = stats(&arm_b_gemm_only_samples);
             let arm_b_bytes =
-                (weight_bytes.len() + rows * k * 4 * 2 + activation.len() * 4 + rows * m * 4) as f64;
+                (weight_bytes.len() + rows * k * 4 * 2 + activation.len() * 4 + rows * m * 4)
+                    as f64;
 
             // --- arm C: sgemm on already-f32 weights, no dequant (control) ---
             let mut arm_c_output = vec![0f32; rows * m];
-            sgemm_rows_by_m(&f32_weights_once, &activation, &mut arm_c_output, rows, k, m);
+            sgemm_rows_by_m(
+                &f32_weights_once,
+                &activation,
+                &mut arm_c_output,
+                rows,
+                k,
+                m,
+            );
             let arm_c_pos0: Vec<f32> = (0..rows).map(|row| arm_c_output[row * m]).collect();
             let arm_c_diff = max_abs_diff(&arm_c_pos0, &reference);
             assert!(
@@ -315,7 +352,14 @@ mod mac {
             let mut arm_c_samples = Vec::with_capacity(REPEATS);
             for _ in 0..REPEATS {
                 let start = Instant::now();
-                sgemm_rows_by_m(&f32_weights_once, &activation, &mut arm_c_output, rows, k, m);
+                sgemm_rows_by_m(
+                    &f32_weights_once,
+                    &activation,
+                    &mut arm_c_output,
+                    rows,
+                    k,
+                    m,
+                );
                 let elapsed = start.elapsed();
                 black_box(&arm_c_output);
                 arm_c_samples.push(elapsed.as_nanos() as f64);
@@ -367,8 +411,10 @@ mod mac {
     /// what the process saw in its environment, not proof the framework
     /// honored it; the sweep's own arm-C throughput is the behavioral check.
     pub fn run(path: &str) {
-        let workers = std::env::var("PROXIMA_MATMUL_WORKERS").unwrap_or_else(|_| "unset".to_string());
-        let veclib = std::env::var("VECLIB_MAXIMUM_THREADS").unwrap_or_else(|_| "unset".to_string());
+        let workers =
+            std::env::var("PROXIMA_MATMUL_WORKERS").unwrap_or_else(|_| "unset".to_string());
+        let veclib =
+            std::env::var("VECLIB_MAXIMUM_THREADS").unwrap_or_else(|_| "unset".to_string());
         println!("PROXIMA_MATMUL_WORKERS={workers} VECLIB_MAXIMUM_THREADS={veclib}");
         let (parsed, file_len) = parse_header(Path::new(path));
         let mut file = File::open(path).expect("reopen real gguf file for tensor data");
@@ -390,5 +436,7 @@ fn main() {
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 fn main() {
-    println!("this probe is macos/aarch64-only (Accelerate cblas_sgemm); nothing to run on this host");
+    println!(
+        "this probe is macos/aarch64-only (Accelerate cblas_sgemm); nothing to run on this host"
+    );
 }

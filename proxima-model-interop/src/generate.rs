@@ -52,11 +52,13 @@
 //! never see a turn-boundary marker reappear as if it were generated
 //! content.
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::future::Future;
+use core::ops::Range;
 
+use memmap2::{Advice, Mmap};
 use proxima_gguf::GgmlType;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
@@ -67,11 +69,10 @@ use proxima_primitives::pipe::Pipe;
     not(feature = "metal-output-placement")
 ))]
 use proxima_tensor::DType;
-use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 #[cfg(not(feature = "metal"))]
+use proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts;
 use proxima_tensor::cpu::{
-    evaluate_quantized_named_exact_with_scratch_and_experts,
-    evaluate_quantized_named_with_scratch_and_experts,
+    Evaluated, QuantizedBlock, evaluate_quantized_named_exact_with_scratch_and_experts,
 };
 #[cfg(all(
     feature = "instrument",
@@ -87,6 +88,7 @@ use proxima_tensor::spec::{
     Qwen35LayerRoots, mistral_cached_forward_program_with_experts_and_layer_taps,
 };
 use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
+use std::sync::Arc;
 
 #[cfg(all(
     feature = "instrument",
@@ -746,6 +748,8 @@ fn emit_token_breakdown_metal(
         output_buffer_allocations = metal_stage.output_buffer_allocations,
         plan_uniform_writes = metal_stage.plan_uniform_writes,
         barriers = metal_stage.barriers_emitted,
+        expert_source_cache_hits = metal_stage.expert_source_cache_hits,
+        expert_source_cache_misses = metal_stage.expert_source_cache_misses,
         plan_cache_len = plan_cache_len as u64,
         plan_hits = plan_hits as u64,
         plan_misses = plan_misses as u64,
@@ -753,6 +757,27 @@ fn emit_token_breakdown_metal(
         kind_filter,
         "token_breakdown_metal: per-decode-step metal stage attribution"
     );
+    if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+        eprintln!(
+            "token_breakdown_metal step={} expert_source_cache_hits={} expert_source_cache_misses={} expert_source_buffer_reuses={} plan_handoff_reuses={} expert_source_cache_entries={} nocopy_cache_entries={} block_upload_calls={} block_copied_bytes={} block_nocopy_bound_bytes={} block_offset_bound_bytes={} resident_uploads={} resident_reuses={} gpu_exec_ms={} phys_footprint_bytes={} device_allocated_bytes={}",
+            step,
+            metal_stage.expert_source_cache_hits,
+            metal_stage.expert_source_cache_misses,
+            metal_stage.expert_source_buffer_reuses,
+            metal_stage.plan_handoff_reuses,
+            metal_stage.expert_source_cache_entries,
+            metal_stage.nocopy_cache_entries,
+            metal_stage.block_upload_calls,
+            metal_stage.block_copied_bytes,
+            metal_stage.block_nocopy_bound_bytes,
+            metal_stage.block_offset_bound_bytes,
+            metal_stage.resident_uploads,
+            metal_stage.resident_reuses,
+            ms(metal_stage.gpu_exec_ticks),
+            phys_footprint_bytes(),
+            omega::metal::current_allocated_size().unwrap_or(0),
+        );
+    }
 }
 
 /// ROW 391's single load-time answer to "how much device memory does this
@@ -961,6 +986,13 @@ pub struct LoadedModel<'file> {
     /// of [`Qwen35LayerRoots::Attention`]/[`Qwen35LayerRoots::Ssm`] on the
     /// qwen35 path (`crate::qwen35::qwen35_forward_program`'s own return).
     layer_roots: Vec<Qwen35LayerRoots>,
+    /// Graph-level producer boundaries for each qwen35moe layer.
+    qwen35moe_layer_diagnostics: Vec<crate::qwen35moe::Qwen35MoeLayerDiagnostics>,
+    /// Router-logit roots aligned with routed layers.  Qwen35MoE fills this
+    /// from the same graph nodes used by its gather; other architectures leave
+    /// it empty.  These roots are the concrete input to a future per-layer
+    /// pre-gather evaluator, not a second router computation.
+    router_roots: Vec<NodeId>,
     /// One [`proxima_tensor::spec::MoeSite`] per MoE layer this
     /// checkpoint's forward-program builder produced -- empty on a dense
     /// checkpoint. [`Self::run_decode_loop_observed`] reads this to know
@@ -1031,6 +1063,32 @@ pub struct LoadedModel<'file> {
     /// mean an earlier panic mid-decode already violated that rule
     /// somewhere else; recovering is strictly better than a second panic.
     expert_slab: std::sync::Mutex<crate::expert_slab::ExpertSlab<'file>>,
+    /// HOBBIT's optional low-codec store and its mmap owner. Attachment
+    /// installs the low copies once; router boundaries subsequently switch
+    /// only the selected expert's three projection entries.
+    expert_sidecar: Option<crate::expert_sidecar::MappedExpertSidecar>,
+}
+
+/// Concrete qwen35moe router/gather partitions for one KV shape bucket.
+///
+/// GDN prefill must remain sequential by position, but the graph cuts do
+/// not change while `(new_count, kv_bound_extent)` is unchanged. Keeping
+/// the dense partitions beside that concrete shape prevents every prompt
+/// position from repeating partitioning, topological ordering, and shape
+/// inference before it can execute the same router/residency/gather phases.
+struct Qwen35MoePreGatherPlan {
+    symbols: Vec<u64>,
+    layers: Vec<Qwen35MoeLayerSegments>,
+    suffix: crate::qwen35moe::execution::MappedLayerSegment,
+    prefix_carried_nodes: BTreeSet<NodeId>,
+    global_cut_nodes: BTreeSet<NodeId>,
+}
+
+struct Qwen35MoeLayerSegments {
+    router: crate::qwen35moe::execution::MappedLayerSegment,
+    gather: crate::qwen35moe::execution::MappedLayerSegment,
+    router_future_cuts: Vec<(NodeId, String)>,
+    next_cuts: Vec<(NodeId, String)>,
 }
 
 /// Releases every device buffer this checkpoint's own load caused: the
@@ -1211,6 +1269,10 @@ fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize) -> usize 
         .min(capacity)
 }
 
+const fn step_batch_needs_logits(split_prefill: bool, is_last_step_batch: bool) -> bool {
+    !split_prefill || is_last_step_batch
+}
+
 impl<'file> LoadedModel<'file> {
     /// `true` when [`Self::load`] built a device-resident, single-range
     /// program for this checkpoint ([`Self::single_range`]'s own doc) --
@@ -1246,6 +1308,906 @@ impl<'file> LoadedModel<'file> {
     #[must_use]
     pub fn hidden_root(&self) -> Option<NodeId> {
         self.hidden_root
+    }
+
+    /// Router-logit roots aligned with the routed layers of this model.
+    /// These are the exact nodes already used by the production MoE graph;
+    /// an empty slice means the loaded architecture has no exposed
+    /// pre-gather roots.
+    #[must_use]
+    pub fn router_roots(&self) -> &[NodeId] {
+        &self.router_roots
+    }
+
+    /// Evaluates the bound qwen35moe router roots for one prompt position.
+    /// The returned vectors are the graph's actual per-layer router logits in
+    /// layer order, so DynaExq can make a residency decision from execution
+    /// data rather than from a duplicated host-side router. This diagnostic
+    /// does not claim a memory reduction: it uses the ordinary evaluator
+    /// until the production per-layer pre-gather path is enabled.
+    pub fn qwen35moe_router_logits(
+        &self,
+        prompt: &str,
+        gpu_layers: i32,
+    ) -> Result<Vec<Vec<f32>>, InteropError> {
+        if self.router_roots.is_empty()
+            || self
+                .architecture_impl
+                .map_or(true, |architecture| architecture.name() != "qwen35moe")
+        {
+            return Err(InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from(
+                    self.architecture_impl.map_or("unknown", Architecture::name),
+                ),
+                reason: String::from("the bound model does not expose qwen35moe router roots"),
+            });
+        }
+        self.forward_node_values_on_backend(prompt, &self.router_roots, gpu_layers)
+    }
+
+    /// Builds the graph cuts that surround each qwen35moe routed layer. The
+    /// cuts are plan-time data: callers evaluate one producer, apply the
+    /// residency transition, then evaluate its consumer with the borrowed
+    /// activation handoff. No cut is built for another architecture.
+    pub fn qwen35moe_layer_boundaries(
+        &self,
+        symbols: &[u64],
+    ) -> Result<Vec<crate::qwen35moe::execution::LayerProgramBoundary>, InteropError> {
+        if self.qwen35moe_layer_diagnostics.is_empty()
+            || self
+                .architecture_impl
+                .is_none_or(|architecture| architecture.name() != "qwen35moe")
+        {
+            return Err(InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from(
+                    self.architecture_impl.map_or("unknown", Architecture::name),
+                ),
+                reason: String::from("the bound model has no qwen35moe layer diagnostics"),
+            });
+        }
+        self.qwen35moe_layer_diagnostics
+            .iter()
+            .map(|diagnostic| {
+                crate::qwen35moe::execution::split_layer_program(
+                    &self.program,
+                    symbols,
+                    diagnostic.router_logits,
+                    diagnostic.routed_output,
+                )
+                .map_err(InteropError::from)
+            })
+            .collect()
+    }
+
+    /// Builds dense router and gather programs for every routed layer in
+    /// execution order. Each layer starts from the prior layer's block output,
+    /// so callers can evaluate one layer, change resident expert sources, and
+    /// continue without retaining a full-program suffix.
+    pub fn qwen35moe_layer_segments(
+        &self,
+        symbols: &[u64],
+    ) -> Result<
+        Vec<(
+            (Vec<proxima_tensor::op::Op>, Vec<(NodeId, String)>),
+            (Vec<proxima_tensor::op::Op>, Vec<(NodeId, String)>),
+        )>,
+        InteropError,
+    > {
+        if self.qwen35moe_layer_diagnostics.is_empty()
+            || self
+                .architecture_impl
+                .is_none_or(|architecture| architecture.name() != "qwen35moe")
+        {
+            return Err(InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from(
+                    self.architecture_impl.map_or("unknown", Architecture::name),
+                ),
+                reason: String::from("the bound model has no qwen35moe layer diagnostics"),
+            });
+        }
+        let mut segments = Vec::with_capacity(self.qwen35moe_layer_diagnostics.len());
+        let mut previous_output = None;
+        for diagnostic in &self.qwen35moe_layer_diagnostics {
+            let pair = crate::qwen35moe::execution::split_router_and_gather_segments(
+                &self.program,
+                symbols,
+                previous_output,
+                diagnostic.router_logits,
+                diagnostic.block_output,
+            )
+            .map_err(InteropError::from)?;
+            segments.push(pair);
+            previous_output = Some(diagnostic.block_output);
+        }
+        Ok(segments)
+    }
+
+    /// Builds one routed layer's segments on demand. The caller can drop the
+    /// pair after the layer gather, keeping graph metadata bounded by one
+    /// layer instead of materializing all 40 layer segments at once.
+    pub fn qwen35moe_layer_segment(
+        &self,
+        layer: usize,
+        symbols: &[u64],
+        previous_layer_output: Option<NodeId>,
+    ) -> Result<
+        (
+            (Vec<proxima_tensor::op::Op>, Vec<(NodeId, String)>),
+            (Vec<proxima_tensor::op::Op>, Vec<(NodeId, String)>),
+        ),
+        InteropError,
+    > {
+        let diagnostic = self.qwen35moe_layer_diagnostics.get(layer).ok_or_else(|| {
+            InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: String::from("requested routed layer is outside the bound diagnostics"),
+            }
+        })?;
+        crate::qwen35moe::execution::split_router_and_gather_segments(
+            &self.program,
+            symbols,
+            previous_layer_output,
+            diagnostic.router_logits,
+            diagnostic.block_output,
+        )
+        .map_err(InteropError::from)
+    }
+
+    fn qwen35moe_pre_gather_plan(
+        &self,
+        symbols: &[u64],
+    ) -> Result<Qwen35MoePreGatherPlan, InteropError> {
+        let last_layer_output = self
+            .qwen35moe_layer_diagnostics
+            .last()
+            .map(|diagnostic| diagnostic.block_output)
+            .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: String::from("the bound graph has no routed layer boundary"),
+            })?;
+        let suffix = crate::qwen35moe::execution::split_mapped_layer_segment(
+            &self.program,
+            symbols,
+            Some(last_layer_output),
+            self.logits_root,
+        )
+        .map_err(InteropError::from)?;
+
+        let mut layer_pairs = Vec::with_capacity(self.qwen35moe_layer_diagnostics.len());
+        let mut prefix_required_nodes = BTreeSet::new();
+        let mut previous_output = None;
+        for diagnostic in &self.qwen35moe_layer_diagnostics {
+            let pair = crate::qwen35moe::execution::split_mapped_router_and_gather_segments(
+                &self.program,
+                symbols,
+                previous_output,
+                diagnostic.router_logits,
+                diagnostic.block_output,
+            )
+            .map_err(InteropError::from)?;
+            for (node, _) in &pair.0.1 {
+                if !matches!(
+                    self.program[node.0 as usize],
+                    proxima_tensor::op::Op::Input { .. }
+                ) {
+                    prefix_required_nodes.insert(*node);
+                }
+            }
+            layer_pairs.push(pair);
+            previous_output = Some(diagnostic.block_output);
+        }
+
+        // layer zero's router is already the complete graph prefix, so a
+        // second prefix segment would execute the same operations twice.
+        let first_router_mapping = &layer_pairs
+            .first()
+            .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: String::from("the bound graph has no first router segment"),
+            })?
+            .0
+            .2;
+        let prefix_carried_nodes = first_router_mapping
+            .keys()
+            .filter(|node| prefix_required_nodes.contains(node))
+            .copied()
+            .collect();
+        let global_cut_nodes = self
+            .program
+            .iter()
+            .enumerate()
+            .filter_map(|(index, operation)| {
+                operation
+                    .name()
+                    .is_some_and(|name| name.starts_with("__cut_"))
+                    .then_some(NodeId(index as u32))
+            })
+            .collect();
+
+        let mut layers = Vec::with_capacity(layer_pairs.len());
+        for layer in 0..layer_pairs.len() {
+            let (router, gather) = layer_pairs[layer].clone();
+            let next_router_cuts = layer_pairs
+                .get(layer + 1)
+                .map_or_else(Vec::new, |pair| pair.0.1.clone());
+            let next_cuts = layer_pairs
+                .get(layer + 1)
+                .map_or_else(|| suffix.1.clone(), |pair| pair.0.1.clone());
+            let mut router_future_cuts = gather.1.clone();
+            router_future_cuts.extend(next_router_cuts);
+            router_future_cuts.sort_by_key(|(node, _)| *node);
+            router_future_cuts.dedup_by_key(|(node, _)| *node);
+            layers.push(Qwen35MoeLayerSegments {
+                router,
+                gather,
+                router_future_cuts,
+                next_cuts,
+            });
+        }
+
+        for (layer, segments) in layers.iter().enumerate() {
+            for (phase, program) in [
+                ("router", &segments.router.0),
+                ("gather", &segments.gather.0),
+            ] {
+                proxima_tensor::shape::infer(program, symbols).map_err(|error| {
+                    InteropError::PreGatherExecutionUnsupported {
+                        architecture: String::from("qwen35moe"),
+                        reason: alloc::format!("layer {layer} {phase} segment is invalid: {error}"),
+                    }
+                })?;
+            }
+            if std::env::var_os("PROXIMA_DEBUG_QWEN35_PLAN").is_some() && layer < 3 {
+                eprintln!(
+                    "qwen35 plan layer={layer} router_cuts={:?} gather_cuts={:?} router_future={:?} map={:?} op493={:?} gather_ops={:?}",
+                    segments.router.1,
+                    segments.gather.1,
+                    segments.router_future_cuts,
+                    segments
+                        .gather
+                        .2
+                        .iter()
+                        .filter(|(_, mapped)| {
+                            let maximum = std::env::var("PROXIMA_DEBUG_QWEN35_PLAN_MAX_MAPPED")
+                                .ok()
+                                .and_then(|value| value.parse::<u32>().ok())
+                                .unwrap_or(24);
+                            mapped.0 <= maximum
+                        })
+                        .collect::<Vec<_>>(),
+                    self.program.get(493),
+                    segments
+                        .gather
+                        .0
+                        .iter()
+                        .enumerate()
+                        .map(|(index, operation)| (index, operation.name()))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+
+        #[cfg(feature = "instrument")]
+        debug!(
+            symbol_count = symbols.len() as u64,
+            layer_count = layers.len() as u64,
+            source_program_ops = self.program.len() as u64,
+            cached_segment_ops = (layers
+                .iter()
+                .map(|segments| segments.router.0.len() + segments.gather.0.len())
+                .sum::<usize>()
+                + suffix.0.len()) as u64,
+            "qwen35moe pre-gather partitions built because the concrete shape changed"
+        );
+
+        Ok(Qwen35MoePreGatherPlan {
+            symbols: symbols.to_vec(),
+            layers,
+            suffix,
+            prefix_carried_nodes,
+            global_cut_nodes,
+        })
+    }
+
+    fn evaluate_qwen35moe_pre_gather<BeforeGather>(
+        &self,
+        runtime: &mut BackendRuntime,
+        plan: &Qwen35MoePreGatherPlan,
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        expert_slab: &mut crate::expert_slab::ExpertSlab<'file>,
+        position_offset: usize,
+        mut before_gather: BeforeGather,
+    ) -> Result<Evaluated, InteropError>
+    where
+        BeforeGather: FnMut(
+            usize,
+            u64,
+            &[crate::residency::RoutedExpert],
+            &mut crate::expert_slab::ExpertSlab<'file>,
+        ) -> Result<(), InteropError>,
+    {
+        let mut carried: BTreeMap<NodeId, (Vec<u64>, Vec<f32>)> = BTreeMap::new();
+        let mut results: BTreeMap<NodeId, (Vec<u64>, Vec<f32>)> = BTreeMap::new();
+        let mut routed_experts = Vec::with_capacity(self.architecture.expert_used_count as usize);
+        #[cfg(feature = "instrument")]
+        let mut segment_execution_count = 0_u64;
+        #[cfg(feature = "instrument")]
+        let mut router_elapsed_us = 0_u64;
+        #[cfg(feature = "instrument")]
+        let mut gather_elapsed_us = 0_u64;
+        for (index, operation) in self.program.iter().enumerate() {
+            if let proxima_tensor::op::Op::Constant { value, .. } = operation {
+                carried.insert(NodeId(index as u32), (Vec::new(), vec![*value]));
+            }
+        }
+        for layer in 0..self.qwen35moe_layer_diagnostics.len() {
+            let debug_layer = std::env::var("PROXIMA_DEBUG_EXPERT_GATHER_LAYER")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            // A prompt segment contains several rows, each with its own
+            // router result. Build one union before the gather snapshot so
+            // no row reads an unselected descriptor.
+            let segments = &plan.layers[layer];
+            let router = &segments.router;
+            let gather = &segments.gather;
+            let next_cuts = &segments.next_cuts;
+            let future_gather_cuts: Vec<NodeId> = plan.layers[layer + 1..]
+                .iter()
+                .flat_map(|future| future.gather.1.iter().map(|(node, _)| *node))
+                .collect();
+            let diagnostic = self.qwen35moe_layer_diagnostics[layer];
+            for (is_router, program, cuts, mapping, future_cuts, segment_output) in [
+                (
+                    true,
+                    &router.0,
+                    &router.1,
+                    &router.2,
+                    segments.router_future_cuts.as_slice(),
+                    diagnostic.router_logits,
+                ),
+                (
+                    false,
+                    &gather.0,
+                    &gather.1,
+                    &gather.2,
+                    next_cuts.as_slice(),
+                    diagnostic.block_output,
+                ),
+            ] {
+                let mut segment_named: Vec<(&str, QuantizedBlock<'_>)> = named
+                    .iter()
+                    .copied()
+                    .filter(|(name, _)| {
+                        program
+                            .iter()
+                            .any(|operation| operation.name() == Some(*name))
+                    })
+                    .collect();
+                for (node, name) in cuts {
+                    if segment_named
+                        .iter()
+                        .any(|(candidate, _)| *candidate == name)
+                    {
+                        continue;
+                    }
+                    if name.contains("_exps.weight") {
+                        // The mapped expert source supplies this input at
+                        // execution time; a placeholder would make the
+                        // resolver classify the node as an ordinary f32
+                        // binding and bypass the source table.
+                        continue;
+                    }
+                    let (_, values) = carried.get(node).ok_or_else(|| {
+                        InteropError::PreGatherExecutionUnsupported {
+                            architecture: String::from("qwen35moe"),
+                            reason: alloc::format!(
+                                "layer {layer} missing cut node {node:?} ({name})"
+                            ),
+                        }
+                    })?;
+                    segment_named.push((name.as_str(), QuantizedBlock::Float32(values)));
+                }
+
+                let mut requested = BTreeMap::new();
+                let prefix_carried_nodes =
+                    (layer == 0 && is_router).then_some(&plan.prefix_carried_nodes);
+                for node in future_cuts
+                    .iter()
+                    .filter(|(_, name)| !named.iter().any(|(candidate, _)| *candidate == name))
+                    .map(|(node, _)| node)
+                    .chain(prefix_carried_nodes.into_iter().flatten())
+                    .chain(plan.global_cut_nodes.iter())
+                    .chain(future_gather_cuts.iter())
+                    .chain(outputs)
+                    .filter(|node| {
+                        !matches!(
+                            self.program[node.0 as usize],
+                            proxima_tensor::op::Op::Input { .. }
+                        )
+                    })
+                {
+                    if let Some(mapped) = mapping.get(&node).copied() {
+                        requested.insert(mapped, *node);
+                    }
+                }
+                requested.insert(
+                    mapping.get(&segment_output).copied().ok_or(
+                        InteropError::MissingEvaluatedNode {
+                            node: segment_output,
+                        },
+                    )?,
+                    segment_output,
+                );
+                let mut requested_nodes: Vec<NodeId> = requested.keys().copied().collect();
+                if std::env::var_os("PROXIMA_DEBUG_QWEN35_REQUESTS").is_some() {
+                    eprintln!(
+                        "qwen35 segment requests phase={} layer={} program_ops={} named_inputs={} requested_nodes={} future_cuts={} global_cuts={} outputs={}",
+                        if is_router { "router" } else { "gather" },
+                        layer,
+                        program.len(),
+                        segment_named.len(),
+                        requested_nodes.len(),
+                        future_cuts.len(),
+                        plan.global_cut_nodes.len(),
+                        outputs.len(),
+                    );
+                }
+                if layer == debug_layer
+                    && !is_router
+                    && std::env::var_os("PROXIMA_DEBUG_EXPERT_GATHER_PARITY").is_some()
+                {
+                    if let Some(debug_node) = std::env::var("PROXIMA_DEBUG_EXPERT_GATHER_NODE")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                    {
+                        let debug_node = NodeId(debug_node);
+                        requested_nodes.push(debug_node);
+                        if let Some(proxima_tensor::op::Op::Elementwise { operands, .. }) =
+                            program.get(debug_node.0 as usize)
+                        {
+                            requested_nodes.extend(operands.iter().map(|(node, _)| *node));
+                        }
+                    }
+                    requested_nodes.sort_unstable_by_key(|node| node.0);
+                    requested_nodes.dedup();
+                }
+                let evaluated = if is_router {
+                    let segment_started = std::time::Instant::now();
+                    let result = runtime.evaluate_segment(
+                        program,
+                        symbols,
+                        &segment_named,
+                        &requested_nodes,
+                        resident_names,
+                        None,
+                    );
+                    #[cfg(feature = "instrument")]
+                    {
+                        router_elapsed_us += segment_started.elapsed().as_micros() as u64;
+                    }
+                    if std::env::var_os("PROXIMA_DEBUG_QWEN35_SEGMENTS").is_some() {
+                        eprintln!(
+                            "qwen35 segment phase=router layer={} elapsed_us={}",
+                            layer,
+                            segment_started.elapsed().as_micros()
+                        );
+                    }
+                    result?
+                } else {
+                    let mut expert_entries_scratch = Vec::with_capacity(3);
+                    let expert_sources =
+                        expert_slab.sources_for_layer(layer, &mut expert_entries_scratch)?;
+                    let mapped_expert_sources = expert_sources
+                        .iter()
+                        .flat_map(|(node, source)| {
+                            let source_name = self.program[node.0 as usize].name();
+                            program
+                                .iter()
+                                .enumerate()
+                                .filter_map(move |(position, operation)| {
+                                    (operation.name() == source_name)
+                                        .then_some((NodeId(position as u32), *source))
+                                })
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
+                        eprintln!(
+                            "qwen35 mapped expert source nodes={:?}",
+                            mapped_expert_sources.keys().collect::<Vec<_>>()
+                        );
+                    }
+                    let segment_started = std::time::Instant::now();
+                    let result = runtime.evaluate_segment(
+                        program,
+                        symbols,
+                        &segment_named,
+                        &requested_nodes,
+                        resident_names,
+                        Some(&mapped_expert_sources),
+                    );
+                    if layer == debug_layer
+                        && std::env::var_os("PROXIMA_DEBUG_EXPERT_GATHER_PARITY").is_some()
+                    {
+                        let mut scratch = Vec::new();
+                        let mut validated = None;
+                        let expected = evaluate_quantized_named_exact_with_scratch_and_experts(
+                            program,
+                            symbols,
+                            &segment_named,
+                            &requested_nodes,
+                            &mut scratch,
+                            &mut validated,
+                            Some(&mapped_expert_sources),
+                        )?;
+                        let debug_local_node = std::env::var("PROXIMA_DEBUG_EXPERT_GATHER_NODE")
+                            .ok()
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .map(NodeId);
+                        let parity_node = debug_local_node
+                            .and_then(|local| {
+                                mapping
+                                    .iter()
+                                    .find_map(|(original, mapped)| (*mapped == local).then_some(*original))
+                            })
+                            .unwrap_or(segment_output);
+                        let mapped_output = mapping.get(&parity_node).copied().ok_or(
+                            InteropError::MissingEvaluatedNode {
+                                node: parity_node,
+                            },
+                        )?;
+                        if let (Ok(actual), Some((expected_values, _))) =
+                            (&result, expected.get(mapped_output))
+                            && let Some((actual_values, _)) = actual.get(mapped_output)
+                        {
+                            let (index, maximum) = actual_values
+                                .iter()
+                                .zip(expected_values)
+                                .enumerate()
+                                .map(|(index, (actual, expected))| {
+                                    (index, (actual - expected).abs())
+                                })
+                                .max_by(|left, right| left.1.total_cmp(&right.1))
+                                .unwrap_or((0, 0.0));
+                            eprintln!(
+                                "qwen35 gather parity layer={layer} node={} original_op={:?} max_abs={maximum} index={index} metal={} cpu={}",
+                                parity_node.0,
+                                self.program.get(parity_node.0 as usize).map(|operation| operation.name()),
+                                actual_values.get(index).copied().unwrap_or_default(),
+                                expected_values.get(index).copied().unwrap_or_default(),
+                            );
+                        }
+                        if let Ok(actual) = &result {
+                            if std::env::var_os("PROXIMA_DEBUG_EXPERT_GATHER_GRAPH").is_some() {
+                                let graph_root = std::env::var("PROXIMA_DEBUG_EXPERT_GATHER_GRAPH_NODE")
+                                    .ok()
+                                    .and_then(|value| value.parse::<u32>().ok())
+                                    .map(NodeId)
+                                    .unwrap_or(parity_node);
+                                let mut pending = vec![graph_root];
+                                let mut visited = BTreeSet::new();
+                                while let Some(node) = pending.pop() {
+                                    if !visited.insert(node) {
+                                        continue;
+                                    }
+                                    let Some(operation) = program.get(node.0 as usize) else {
+                                        continue;
+                                    };
+                                    match operation {
+                                        proxima_tensor::op::Op::Input { name, .. } => {
+                                            eprintln!("qwen35 gather graph input node={node:?} name={name:?}");
+                                        }
+                                        proxima_tensor::op::Op::Elementwise { operands, .. } => {
+                                            pending.extend(operands.iter().map(|(operand, _)| *operand));
+                                        }
+                                        proxima_tensor::op::Op::Reduce(reduce) => pending.push(reduce.operand),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            for node in &requested_nodes {
+                                let Some((actual_values, _)) = actual.get(*node) else {
+                                    continue;
+                                };
+                                let Some((expected_values, _)) = expected.get(*node) else {
+                                    continue;
+                                };
+                                let maximum = actual_values
+                                    .iter()
+                                    .zip(expected_values)
+                                    .map(|(actual, expected)| (actual - expected).abs())
+                                    .fold(0.0_f32, f32::max);
+                                if maximum > 1.0e-3 {
+                                    eprintln!(
+                                        "qwen35 first gather divergence layer={layer} node={node:?} name={:?} op={:?} max_abs={maximum}",
+                                        program[node.0 as usize].name(),
+                                        program[node.0 as usize],
+                                    );
+                                    if let proxima_tensor::op::Op::Elementwise { operands, .. } = &program[node.0 as usize] {
+                                        for (operand_index, (operand, _)) in operands.iter().enumerate() {
+                                            if let (Some((actual_operand, _)), Some((expected_operand, _))) =
+                                                (actual.get(*operand), expected.get(*operand))
+                                            {
+                                                let operand_maximum = actual_operand
+                                                    .iter()
+                                                    .zip(expected_operand)
+                                                    .map(|(actual, expected)| (actual - expected).abs())
+                                                    .fold(0.0_f32, f32::max);
+                                                eprintln!(
+                                                    "qwen35 gather operand node={operand:?} index={operand_index} max_abs={operand_maximum}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(feature = "instrument")]
+                    {
+                        gather_elapsed_us += segment_started.elapsed().as_micros() as u64;
+                    }
+                    if std::env::var_os("PROXIMA_DEBUG_QWEN35_SEGMENTS").is_some() {
+                        eprintln!(
+                            "qwen35 segment phase=gather layer={} elapsed_us={}",
+                            layer,
+                            segment_started.elapsed().as_micros()
+                        );
+                    }
+                    result?
+                };
+                #[cfg(feature = "instrument")]
+                {
+                    segment_execution_count += 1;
+                }
+                if is_router {
+                    let mapped_router = mapping.get(&diagnostic.router_logits).copied().ok_or(
+                        InteropError::MissingEvaluatedNode {
+                            node: diagnostic.router_logits,
+                        },
+                    )?;
+                    let (router_logits, router_shape) =
+                        evaluated
+                            .get(mapped_router)
+                            .ok_or(InteropError::MissingEvaluatedNode {
+                                node: diagnostic.router_logits,
+                            })?;
+                    visit_qwen35moe_router_boundary(
+                        layer,
+                        position_offset,
+                        router_logits,
+                        router_shape,
+                        self.architecture.expert_count as usize,
+                        self.architecture.expert_used_count as usize,
+                        &mut routed_experts,
+                        expert_slab,
+                        &mut before_gather,
+                    )?;
+                }
+                for (mapped, original) in requested {
+                    let (values, shape) = evaluated
+                        .get(mapped)
+                        .ok_or(InteropError::MissingEvaluatedNode { node: original })?;
+                    if future_cuts.iter().any(|(node, _)| *node == original)
+                        || future_gather_cuts.contains(&original)
+                        || plan.prefix_carried_nodes.contains(&original)
+                        || plan.global_cut_nodes.contains(&original)
+                        || original == segment_output
+                    {
+                        carried.insert(original, (shape.to_vec(), values.to_vec()));
+                    }
+                    if outputs.contains(&original) {
+                        results.insert(original, (shape.to_vec(), values.to_vec()));
+                    }
+                }
+                let output_id = mapping.get(&segment_output).copied().ok_or(
+                    InteropError::MissingEvaluatedNode {
+                        node: segment_output,
+                    },
+                )?;
+                if let Some((values, shape)) = evaluated.get(output_id) {
+                    if !is_router && values.iter().any(|value| !value.is_finite()) {
+                        let first_nonfinite = values
+                            .iter()
+                            .enumerate()
+                            .find(|(_, value)| !value.is_finite())
+                            .map(|(index, value)| (index, *value));
+                        eprintln!(
+                            "qwen35 nonfinite gather layer={layer} node={segment_output:?} first={first_nonfinite:?}"
+                        );
+                        return Err(InteropError::PreGatherExecutionUnsupported {
+                            architecture: String::from("qwen35moe"),
+                            reason: alloc::format!(
+                                "layer {layer} expert gather produced a non-finite value"
+                            ),
+                        });
+                    }
+                    if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
+                        let nan_count = values.iter().filter(|value| value.is_nan()).count();
+                        let min = values.iter().copied().fold(f32::INFINITY, f32::min);
+                        let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                        eprintln!(
+                            "qwen35 segment output layer={} phase={} node={:?} elements={} nan_count={} min={} max={} first={:?}",
+                            layer,
+                            if is_router { "router" } else { "gather" },
+                            segment_output,
+                            values.len(),
+                            nan_count,
+                            min,
+                            max,
+                            values.get(..values.len().min(4)).unwrap_or_default()
+                        );
+                    }
+                    carried.insert(segment_output, (shape.to_vec(), values.to_vec()));
+                }
+            }
+            #[cfg(unix)]
+            if std::env::var("PROXIMA_EXPERT_SIDECAR_DISCARD_PER_LAYER")
+                .ok()
+                .as_deref()
+                == Some("1")
+                && let Some(sidecar) = &self.expert_sidecar
+            {
+                sidecar.discard_resident_pages()?;
+            }
+            // Sidecar payloads are an mmap, so leaving every low-codec page
+            // resident turns a bounded device slab into an unbounded host
+            // footprint over a long decode. Discard only the routes consumed
+            // by this layer; `KEEP_PAGES` is an explicit diagnostic opt-out.
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            if std::env::var_os("PROXIMA_EXPERT_SIDECAR_KEEP_PAGES").is_none()
+                && let Some(sidecar) = &self.expert_sidecar
+            {
+                let mut discarded = BTreeSet::new();
+                for route in &routed_experts {
+                    let address = crate::residency::ExpertAddress {
+                        layer,
+                        expert: route.expert,
+                    };
+                    if discarded.insert((address.layer, address.expert)) {
+                        sidecar.discard_expert_low(address)?;
+                    }
+                }
+            }
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            if std::env::var_os("PROXIMA_CHECKPOINT_DISCARD_PER_LAYER").is_some() {
+                omega::discard_checkpoint_mmap_range(self.checkpoint_mapping).map_err(|error| {
+                    InteropError::PreGatherExecutionUnsupported {
+                        architecture: String::from("qwen35moe"),
+                        reason: error.to_string(),
+                    }
+                })?;
+            }
+            let keep: BTreeSet<NodeId> = next_cuts.iter().map(|(node, _)| *node).collect();
+            // A gather segment may carry an intermediate produced by the
+            // preceding layer's gather rather than by its router. Retain
+            // every such cut until its consumer layer instead of assuming
+            // the next router cut list is complete.
+            let future_gather_cuts = plan.layers[layer + 1..]
+                .iter()
+                .flat_map(|segments| segments.gather.1.iter().map(|(node, _)| *node));
+            let keep: BTreeSet<NodeId> = keep.into_iter().chain(future_gather_cuts).collect();
+            // Keep only the handful of graph inputs that every layer may
+            // reference, plus the explicit next-segment cuts. Expert stack
+            // inputs are excluded above and can never enter this carry set.
+            carried.retain(|node, _| {
+                plan.prefix_carried_nodes.contains(node)
+                    || keep.contains(node)
+                    || matches!(
+                        self.program[node.0 as usize],
+                        proxima_tensor::op::Op::Constant { .. }
+                    )
+            });
+        }
+
+        let (suffix_program, suffix_cuts, suffix_mapping) = &plan.suffix;
+        let mut requested = BTreeMap::new();
+        for &node in outputs {
+            if let Some(mapped) = suffix_mapping.get(&node).copied() {
+                requested.insert(mapped, node);
+            }
+        }
+        let suffix_executed = !requested.is_empty();
+        if suffix_executed {
+            let mut suffix_named: Vec<(&str, QuantizedBlock<'_>)> = named
+                .iter()
+                .copied()
+                .filter(|(name, _)| {
+                    suffix_program
+                        .iter()
+                        .any(|operation| operation.name() == Some(*name))
+                })
+                .collect();
+            for (node, name) in suffix_cuts {
+                if suffix_named.iter().any(|(candidate, _)| *candidate == name) {
+                    continue;
+                }
+                let (_, values) = carried.get(node).ok_or_else(|| {
+                    InteropError::PreGatherExecutionUnsupported {
+                        architecture: String::from("qwen35moe"),
+                        reason: alloc::format!("suffix missing cut node {node:?} ({name})"),
+                    }
+                })?;
+                suffix_named.push((name.as_str(), QuantizedBlock::Float32(values)));
+            }
+            let requested_nodes: Vec<NodeId> = requested.keys().copied().collect();
+            let evaluated = runtime.evaluate_segment(
+                &suffix_program,
+                symbols,
+                &suffix_named,
+                &requested_nodes,
+                resident_names,
+                None,
+            )?;
+            #[cfg(feature = "instrument")]
+            {
+                segment_execution_count += 1;
+            }
+            for (mapped, original) in requested {
+                let (values, shape) = evaluated
+                    .get(mapped)
+                    .ok_or(InteropError::MissingEvaluatedNode { node: original })?;
+                results.insert(original, (shape.to_vec(), values.to_vec()));
+            }
+        }
+        #[cfg(feature = "instrument")]
+        {
+            debug!(
+                position_offset = position_offset as u64,
+                layer_count = plan.layers.len() as u64,
+                segment_execution_count,
+                suffix_executed,
+                router_elapsed_us,
+                gather_elapsed_us,
+                "qwen35moe pre-gather segment census recorded after requested outputs completed"
+            );
+            if std::env::var_os("PROXIMA_DEBUG_QWEN35_SEGMENTS").is_some() {
+                eprintln!(
+                    "qwen35 segment summary position={} layers={} segments={} suffix_executed={} router_elapsed_us={} gather_elapsed_us={}",
+                    position_offset,
+                    plan.layers.len(),
+                    segment_execution_count,
+                    suffix_executed,
+                    router_elapsed_us,
+                    gather_elapsed_us,
+                );
+            }
+        }
+
+        let ordered_results = outputs
+            .iter()
+            .map(|node| {
+                results
+                    .remove(node)
+                    .map(|(shape, values)| (*node, shape, values))
+                    .ok_or(InteropError::MissingEvaluatedNode { node: *node })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        #[cfg(unix)]
+        if std::env::var("PROXIMA_EXPERT_SIDECAR_DISCARD")
+            .ok()
+            .as_deref()
+            == Some("1")
+            && let Some(sidecar) = &self.expert_sidecar
+        {
+            sidecar.discard_resident_pages()?;
+        }
+        Ok(Evaluated::from_parts(
+            self.logits_root,
+            ordered_results,
+            None,
+        ))
+    }
+
+    /// Graph-level producer boundaries for every qwen35moe layer, in layer
+    /// order. Non-qwen35moe models return an empty slice.
+    #[must_use]
+    pub fn qwen35moe_layer_diagnostics(&self) -> &[crate::qwen35moe::Qwen35MoeLayerDiagnostics] {
+        &self.qwen35moe_layer_diagnostics
     }
 
     /// This checkpoint's own transformer block count
@@ -1404,7 +2366,9 @@ impl<'file> LoadedModel<'file> {
         // only a non-qwen35 checkpoint with a flag set falls through to
         // the narrow inline path below.
         let general_architecture = crate::bind::metadata_str(parsed, "general.architecture")?;
-        if general_architecture == "qwen35" || (!paired_gate_up_reduce && !fused_qkv_reduce) {
+        if matches!(general_architecture, "qwen35" | "qwen35moe")
+            || (!paired_gate_up_reduce && !fused_qkv_reduce)
+        {
             let resolved = registry.resolve(parsed)?;
             let bound = resolved.bind(parsed, file_bytes)?;
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -1422,10 +2386,12 @@ impl<'file> LoadedModel<'file> {
                 let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
                 build_single_range_program(&bound.architecture, qk_norm)?
             };
+            let bound = bound;
             let expert_slab =
                 crate::bind::build_expert_slab(&bound.architecture, &bound.program, &bound.weights);
             return Self {
                 expert_slab: std::sync::Mutex::new(expert_slab),
+                expert_sidecar: None,
                 weights: bound.weights,
                 architecture: bound.architecture,
                 architecture_impl: Some(resolved),
@@ -1441,6 +2407,8 @@ impl<'file> LoadedModel<'file> {
                 logits_root: bound.logits_root,
                 hidden_root: bound.hidden_root,
                 layer_roots: bound.layer_roots,
+                qwen35moe_layer_diagnostics: bound.qwen35moe_layer_diagnostics,
+                router_roots: bound.router_roots,
                 moe_sites: bound.moe_sites,
                 single_position_step: bound.single_position_step,
                 model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
@@ -1533,6 +2501,7 @@ impl<'file> LoadedModel<'file> {
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
         Self {
             expert_slab: std::sync::Mutex::new(expert_slab),
+            expert_sidecar: None,
             weights,
             architecture,
             architecture_impl: None,
@@ -1551,6 +2520,8 @@ impl<'file> LoadedModel<'file> {
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
                 .collect(),
+            qwen35moe_layer_diagnostics: Vec::new(),
+            router_roots: Vec::new(),
             moe_sites,
             single_position_step: false,
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
@@ -1622,6 +2593,7 @@ impl<'file> LoadedModel<'file> {
         let expert_slab = crate::bind::build_expert_slab(&architecture, &program, &weights);
         Self {
             expert_slab: std::sync::Mutex::new(expert_slab),
+            expert_sidecar: None,
             weights,
             architecture,
             architecture_impl: None,
@@ -1646,6 +2618,8 @@ impl<'file> LoadedModel<'file> {
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
                 .collect(),
+            qwen35moe_layer_diagnostics: Vec::new(),
+            router_roots: Vec::new(),
             moe_sites,
             single_position_step: false,
             // safetensors carries no `general.name`-equivalent key this
@@ -2766,6 +3740,10 @@ pub(crate) struct BackendRuntime {
     /// GPU-side). Clearing on miss keeps exactly the one entry worth
     /// keeping: the bucket a caller is currently inside.
     plans: alloc::collections::BTreeMap<(usize, usize), Plan>,
+    /// Plans for the stable pre-gather router/gather partitions. The segment
+    /// programs reuse node IDs across layers, so this cache is keyed by the
+    /// partition's address and shape rather than the ordinary decode key.
+    segment_plans: alloc::collections::BTreeMap<(usize, usize, usize), Plan>,
     /// `ServingConfig::math_mode`, read once at construction and narrowed
     /// into every freshly-built [`Plan`] below (`set_math_mode`'s own call
     /// sites) -- a plan-cache hit reuses a `Plan` already carrying it, same
@@ -2817,6 +3795,7 @@ impl BackendRuntime {
         Self {
             engine: select_backend(config),
             plans: alloc::collections::BTreeMap::new(),
+            segment_plans: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: config.math_mode,
             numeric_policy: config.numeric_policy,
@@ -2837,6 +3816,11 @@ impl BackendRuntime {
     /// this accessor rather than reading the field directly.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(crate) fn is_metal(&self) -> bool {
+        matches!(self.engine, Engine::Gpu)
+    }
+
+    #[cfg(feature = "metal")]
+    fn uses_gpu(&self) -> bool {
         matches!(self.engine, Engine::Gpu)
     }
 
@@ -2909,6 +3893,94 @@ impl BackendRuntime {
             named,
             expert_sources,
         )?)
+    }
+
+    /// Evaluates one graph partition without allowing the ordinary
+    /// shape-only decode-plan cache to alias a different partition having
+    /// the same `(new_count, kv_bound_extent)` pair. Routed execution uses
+    /// this for the router and gather programs surrounding one layer.
+    pub(crate) fn evaluate_segment(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        expert_sources: Option<
+            &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+        >,
+    ) -> Result<Evaluated, InteropError> {
+        let host_timing = std::env::var_os("PROXIMA_DEBUG_SEGMENT_HOST").is_some();
+        let resolve_started = std::time::Instant::now();
+        let program_key = program.as_ptr() as usize;
+        let new_count = symbols.first().copied().unwrap_or_default() as usize;
+        let kv_bound_extent = symbols.get(1).copied().unwrap_or_default() as usize;
+        let exact_activations = self.exact_activations;
+        let plan = Self::resolve_segment_plan(
+            &mut self.segment_plans,
+            &mut self.plan_hits,
+            &mut self.plan_misses,
+            (program_key, new_count, kv_bound_extent),
+            || {
+                let mut plan = if exact_activations {
+                    plan_named_exact(
+                        self.engine,
+                        None,
+                        program,
+                        symbols,
+                        named,
+                        outputs,
+                        self.numeric_policy,
+                    )?
+                } else {
+                    plan_named(
+                        self.engine,
+                        None,
+                        program,
+                        symbols,
+                        named,
+                        outputs,
+                        self.numeric_policy,
+                    )?
+                };
+                mark_resident(&mut plan, resident_names);
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                {
+                    set_math_mode(&mut plan, self.math_mode)?;
+                    set_dispatch_type(&mut plan, omega::metal::DispatchType::Serial);
+                }
+                Ok(plan)
+            },
+        )?;
+        let resolve_elapsed_us = resolve_started.elapsed().as_micros();
+        let execute_started = std::time::Instant::now();
+        let result = execute_plan_named_with_expert_sources(plan, named, expert_sources)
+            .map_err(InteropError::from);
+        if host_timing {
+            eprintln!(
+                "qwen35 segment host resolve_us={} execute_us={} plan_hits={} plan_misses={}",
+                resolve_elapsed_us,
+                execute_started.elapsed().as_micros(),
+                self.plan_hits,
+                self.plan_misses,
+            );
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            {
+                let stage = metal_stage_totals();
+                eprintln!(
+                    "qwen35 segment metal prepare_ms={:.3} emit_ms={:.3} pipeline_lookup_ms={:.3} op_setup_ms={:.3} gpu_exec_ms={:.3} encode_dispatch_ms={:.3} readback_ms={:.3} block_upload_ms={:.3}",
+                    ticks_to_nanos(stage.prepare_ticks) as f64 / 1_000_000.0,
+                    ticks_to_nanos(stage.emit_ticks) as f64 / 1_000_000.0,
+                    ticks_to_nanos(stage.pipeline_lookup_ticks) as f64 / 1_000_000.0,
+                    ticks_to_nanos(stage.op_setup_ticks) as f64 / 1_000_000.0,
+                    ticks_to_nanos(stage.gpu_exec_ticks) as f64 / 1_000_000.0,
+                    ticks_to_nanos(stage.encode_dispatch_ticks) as f64 / 1_000_000.0,
+                    ticks_to_nanos(stage.readback_ticks) as f64 / 1_000_000.0,
+                    ticks_to_nanos(stage.block_upload_ticks) as f64 / 1_000_000.0,
+                );
+            }
+        }
+        result
     }
 
     /// [`Self::evaluate`]'s placed-KV counterpart: same `(new_count,
@@ -3172,6 +4244,28 @@ impl BackendRuntime {
         }
     }
 
+    fn resolve_segment_plan<'cache, PlanType>(
+        cache: &'cache mut alloc::collections::BTreeMap<(usize, usize, usize), PlanType>,
+        plan_hits: &mut usize,
+        plan_misses: &mut usize,
+        shape: (usize, usize, usize),
+        build: impl FnOnce() -> Result<PlanType, InteropError>,
+    ) -> Result<&'cache mut PlanType, InteropError> {
+        use alloc::collections::btree_map::Entry;
+
+        match cache.entry(shape) {
+            Entry::Occupied(entry) => {
+                *plan_hits += 1;
+                Ok(entry.into_mut())
+            }
+            Entry::Vacant(entry) => {
+                *plan_misses += 1;
+                let plan = build()?;
+                Ok(entry.insert(plan))
+            }
+        }
+    }
+
     /// Live entry count in [`Self::plans`] -- the direct witness that
     /// [`Self::resolve_cached_plan`]'s clear-on-miss policy keeps this bounded at 1
     /// through ordinary autoregressive decode's strictly increasing
@@ -3360,6 +4454,10 @@ impl BackendRuntime {
         }
     }
 
+    fn uses_gpu(&self) -> bool {
+        false
+    }
+
     /// `resident_names` is unused on this backend: the CPU evaluator has no
     /// device buffer to cache, so there is nothing to mark resident. Carried
     /// anyway so both `BackendRuntime::evaluate` impls share one signature
@@ -3395,6 +4493,33 @@ impl BackendRuntime {
             &mut self.validated_weight_nodes,
             expert_sources,
         )?)
+    }
+
+    /// Evaluates one graph partition through the same reusable CPU scratch
+    /// state as [`Self::evaluate`]. The partition owns its node numbering and
+    /// therefore cannot alias the decode path's plan cache; CPU has no plan
+    /// cache, so the only safe reusable state is the evaluator's scratch pool
+    /// and weight-validation set. Keeping this method beside the Metal
+    /// implementation gives routed callers one backend-independent seam.
+    pub(crate) fn evaluate_segment(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        expert_sources: Option<
+            &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+        >,
+    ) -> Result<Evaluated, InteropError> {
+        self.evaluate(
+            program,
+            symbols,
+            named,
+            outputs,
+            resident_names,
+            expert_sources,
+        )
     }
 }
 
@@ -3446,6 +4571,76 @@ pub struct TokenEvent<'piece> {
     /// every build that reaches [`LoadedModel::generate_streaming`] at all,
     /// not only one compiled for op-level profiling.
     pub elapsed_ms: u64,
+}
+
+/// Allocation-free decode evidence assembled from the events a caller already
+/// receives. The labels preserve provenance when a record is written beside
+/// measurements from another runtime or benchmark harness.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecodeMetrics {
+    pub prompt_tokens: usize,
+    pub generated_tokens: usize,
+    pub elapsed_ms: u64,
+    pub tokens_per_second: f64,
+    pub per_token_latency_ms: f64,
+    pub peak_rss_bytes: u64,
+    pub cpu_percent: f64,
+    pub error_count: u64,
+    pub covariance: f64,
+    pub timing_source: &'static str,
+    pub memory_source: &'static str,
+    pub resource_source: &'static str,
+}
+
+impl DecodeMetrics {
+    /// Builds one record without allocating or re-reading the model output.
+    /// `elapsed_ms` is the final cumulative [`TokenEvent`] timestamp, so the
+    /// throughput and latency fields describe the same observed interval.
+    pub fn from_events(
+        events: &[TokenEvent<'_>],
+        peak_rss_bytes: u64,
+        cpu_percent: f64,
+        error_count: u64,
+        covariance: f64,
+    ) -> Self {
+        let mut prompt_tokens = 0;
+        let mut generated_tokens = 0;
+        let mut elapsed_ms = 0;
+        for event in events {
+            match event.phase {
+                Phase::Prefill {
+                    prompt_tokens: count,
+                } => prompt_tokens = count,
+                Phase::Token => generated_tokens += 1,
+            }
+            elapsed_ms = event.elapsed_ms;
+        }
+        let elapsed_seconds = elapsed_ms as f64 / 1000.0;
+        let tokens_per_second = if elapsed_seconds > 0.0 {
+            generated_tokens as f64 / elapsed_seconds
+        } else {
+            0.0
+        };
+        let per_token_latency_ms = if generated_tokens > 0 {
+            elapsed_ms as f64 / generated_tokens as f64
+        } else {
+            0.0
+        };
+        Self {
+            prompt_tokens,
+            generated_tokens,
+            elapsed_ms,
+            tokens_per_second,
+            per_token_latency_ms,
+            peak_rss_bytes,
+            cpu_percent,
+            error_count,
+            covariance,
+            timing_source: "TokenEvent::elapsed_ms",
+            memory_source: "caller_peak_rss_bytes",
+            resource_source: "caller_cpu_percent_and_error_count",
+        }
+    }
 }
 
 /// [`TokenEvent::phase`]: which part of the decode loop produced this
@@ -3624,10 +4819,8 @@ fn wants_bos(vocab: &Vocab) -> bool {
 }
 
 /// Calls [`crate::expert_slab::ExpertSlab::end_step`] on every exit from the
-/// decode loop's own per-step closure -- normal return AND an early `?`
-/// error -- so [`crate::expert_slab::ExpertSlab::begin_step`]'s
-/// `step_in_progress` guard never gets stuck `true` after a step that
-/// failed partway through (a missing program input, a shape mismatch, ...).
+/// expert-gather phase -- normal return and an early `?` error -- so the
+/// source-snapshot guard cannot remain closed after a failed evaluation.
 struct EndStepOnDrop<'a, 'file> {
     slab: &'a std::sync::Mutex<crate::expert_slab::ExpertSlab<'file>>,
 }
@@ -3646,6 +4839,148 @@ fn lock_expert_slab<'lock, 'file>(
 ) -> std::sync::MutexGuard<'lock, crate::expert_slab::ExpertSlab<'file>> {
     slab.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn begin_expert_gather_phase<'lock, 'file>(
+    slab: &'lock std::sync::Mutex<crate::expert_slab::ExpertSlab<'file>>,
+) -> EndStepOnDrop<'lock, 'file> {
+    lock_expert_slab(slab).begin_step();
+    EndStepOnDrop { slab }
+}
+
+fn visit_qwen35moe_router_selections<BeforeGather>(
+    layer: usize,
+    position_offset: usize,
+    logits: &[f32],
+    shape: &[u64],
+    expert_count: usize,
+    expert_used_count: usize,
+    scratch: &mut Vec<crate::residency::RoutedExpert>,
+    before_gather: &mut BeforeGather,
+) -> Result<(), InteropError>
+where
+    BeforeGather: FnMut(usize, u64, &[crate::residency::RoutedExpert]) -> Result<(), InteropError>,
+{
+    let [positions, shaped_experts] = shape else {
+        return Err(InteropError::PreGatherExecutionUnsupported {
+            architecture: String::from("qwen35moe"),
+            reason: alloc::format!(
+                "layer {layer} router logits have shape {shape:?}, expected [positions, experts]"
+            ),
+        });
+    };
+    let positions =
+        usize::try_from(*positions).map_err(|_| InteropError::PreGatherExecutionUnsupported {
+            architecture: String::from("qwen35moe"),
+            reason: alloc::format!("layer {layer} router position extent does not fit usize"),
+        })?;
+    let shaped_experts = usize::try_from(*shaped_experts).map_err(|_| {
+        InteropError::PreGatherExecutionUnsupported {
+            architecture: String::from("qwen35moe"),
+            reason: alloc::format!("layer {layer} router expert extent does not fit usize"),
+        }
+    })?;
+    let expected_values = positions.checked_mul(expert_count).ok_or_else(|| {
+        InteropError::PreGatherExecutionUnsupported {
+            architecture: String::from("qwen35moe"),
+            reason: alloc::format!("layer {layer} router shape overflows usize"),
+        }
+    })?;
+    if shaped_experts != expert_count
+        || logits.len() != expected_values
+        || expert_used_count == 0
+        || expert_used_count > expert_count
+    {
+        return Err(InteropError::PreGatherExecutionUnsupported {
+            architecture: String::from("qwen35moe"),
+            reason: alloc::format!(
+                "layer {layer} router has shape {shape:?}, {} values, expert_count {expert_count}, and expert_used_count {expert_used_count}",
+                logits.len()
+            ),
+        });
+    }
+
+    for (local_position, row) in logits.chunks_exact(expert_count).enumerate() {
+        if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
+            let nan_count = row.iter().filter(|value| value.is_nan()).count();
+            let min = row.iter().copied().fold(f32::INFINITY, f32::min);
+            let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            eprintln!(
+                "qwen35 router logits layer={} position={} min={} max={} nan_count={}",
+                layer,
+                position_offset.saturating_add(local_position),
+                min,
+                max,
+                nan_count
+            );
+        }
+        scratch.clear();
+        for (expert, &importance) in row.iter().enumerate() {
+            let candidate = crate::residency::RoutedExpert { expert, importance };
+            if scratch.len() < expert_used_count {
+                scratch.push(candidate);
+            } else {
+                let last = scratch[expert_used_count - 1];
+                if importance.total_cmp(&last.importance).is_gt()
+                    || (importance.total_cmp(&last.importance).is_eq() && expert < last.expert)
+                {
+                    scratch[expert_used_count - 1] = candidate;
+                } else {
+                    continue;
+                }
+            }
+            scratch.sort_unstable_by(|left, right| {
+                right
+                    .importance
+                    .total_cmp(&left.importance)
+                    .then_with(|| left.expert.cmp(&right.expert))
+            });
+        }
+        before_gather(
+            layer,
+            position_offset.saturating_add(local_position) as u64,
+            scratch,
+        )?;
+    }
+    Ok(())
+}
+
+fn visit_qwen35moe_router_boundary<'file, BeforeGather>(
+    layer: usize,
+    position_offset: usize,
+    logits: &[f32],
+    shape: &[u64],
+    expert_count: usize,
+    expert_used_count: usize,
+    scratch: &mut Vec<crate::residency::RoutedExpert>,
+    expert_slab: &mut crate::expert_slab::ExpertSlab<'file>,
+    before_gather: &mut BeforeGather,
+) -> Result<(), InteropError>
+where
+    BeforeGather: FnMut(
+        usize,
+        u64,
+        &[crate::residency::RoutedExpert],
+        &mut crate::expert_slab::ExpertSlab<'file>,
+    ) -> Result<(), InteropError>,
+{
+    visit_qwen35moe_router_selections(
+        layer,
+        position_offset,
+        logits,
+        shape,
+        expert_count,
+        expert_used_count,
+        scratch,
+        &mut |layer, position, routes| {
+            expert_slab.end_step();
+            let boundary_result = before_gather(layer, position, routes, expert_slab);
+            if boundary_result.is_ok() {
+                expert_slab.begin_step();
+            }
+            boundary_result
+        },
+    )
 }
 
 impl<'file> LoadedModel<'file> {
@@ -3985,6 +5320,223 @@ impl<'file> LoadedModel<'file> {
             .page_expert(layer, expert, codec, bytes, out_dim, in_dim)
     }
 
+    /// Pages a HOBBIT high-precision expert from one range of a live mmap,
+    /// without copying its payload into a `Vec<u8>`. This composes
+    /// [`crate::expert_slab::ExpertSlab::page_expert_mapped`]; that method
+    /// retains the [`Arc<Mmap>`] through every per-step
+    /// [`proxima_tensor::cpu::ExpertSource`] snapshot, so callers may drop
+    /// their own mapping handle after this returns.
+    ///
+    /// `layer` is the same gathered-reduce site index as [`Self::page_expert`],
+    /// while `range` selects exactly one encoded expert inside the source
+    /// mapping. The slab's [`crate::expert_slab::ExpertSlab::memory`] report
+    /// records this range as `mapped_bytes` and leaves `owned_bytes` unchanged.
+    ///
+    /// # Errors
+    /// [`InteropError::ExpertMappedRangeOutOfBounds`] when `range` falls
+    /// outside `mapping`, plus the same step/index errors as
+    /// [`Self::page_expert`].
+    pub fn page_expert_mapped(
+        &self,
+        layer: usize,
+        expert: usize,
+        codec: crate::bind::PackedOwnedKind,
+        mapping: Arc<Mmap>,
+        range: Range<usize>,
+        out_dim: u32,
+        in_dim: u32,
+    ) -> Result<u64, InteropError> {
+        lock_expert_slab(&self.expert_slab)
+            .page_expert_mapped(layer, expert, codec, mapping, range, out_dim, in_dim)
+    }
+
+    /// Attaches HOBBIT's mmap-backed low-codec expert store to this model.
+    ///
+    /// The mapping is parsed and indexed once, then every gate/up/down expert
+    /// entry is replaced by its low-codec mapped view. The original checkpoint
+    /// offsets retained by the sidecar become the high-codec promotion source.
+    /// No expert payload is copied or heap-allocated by this operation.
+    pub fn attach_expert_sidecar(&mut self, mapping: Arc<Mmap>) -> Result<(), InteropError> {
+        if self.architecture_impl.map(Architecture::name) != Some("qwen35moe") {
+            return Err(InteropError::PreGatherExecutionUnsupported {
+                architecture: self.architecture_impl.map_or_else(
+                    || String::from("unknown"),
+                    |value| String::from(value.name()),
+                ),
+                reason: String::from("expert sidecars require a qwen35moe expert graph"),
+            });
+        }
+        // Expert routes are sparse and change per token; disabling sequential
+        // read-ahead prevents the VM from faulting adjacent sidecar pages that
+        // the residency policy will never touch in this step.
+        mapping.advise(Advice::Random)?;
+        let sidecar = crate::expert_sidecar::MappedExpertSidecar::new(mapping)?;
+        sidecar.install_low_copies(
+            &mut lock_expert_slab(&self.expert_slab),
+            self.architecture.block_count as usize,
+            self.architecture.expert_count as usize,
+        )?;
+        if std::env::var_os("PROXIMA_DEBUG_MEMORY_OWNERS").is_some() {
+            let owned_bytes = self
+                .weights
+                .owned
+                .iter()
+                .map(|(_, values)| values.len() * core::mem::size_of::<f32>())
+                .sum::<usize>();
+            let packed_bytes = self
+                .weights
+                .packed
+                .iter()
+                .map(|(_, block)| block.packed_bytes().map_or(0, <[u8]>::len))
+                .sum::<usize>();
+            let packed_owned_bytes = self
+                .weights
+                .packed_owned
+                .iter()
+                .map(|(_, bytes, _)| bytes.len())
+                .sum::<usize>();
+            let slab_memory = lock_expert_slab(&self.expert_slab).memory();
+            eprintln!(
+                "qwen35 memory owners checkpoint_bytes={} owned_bytes={} packed_bytes={} packed_owned_bytes={} sidecar_mapped_bytes={} sidecar_owned_bytes={} sidecar_descriptors={}",
+                self.checkpoint_bytes,
+                owned_bytes,
+                packed_bytes,
+                packed_owned_bytes,
+                slab_memory.mapped_bytes,
+                slab_memory.owned_bytes,
+                sidecar.descriptor_count(),
+            );
+        }
+        // The whole-checkpoint Metal buffer is a convenient zero-copy fast
+        // path for ordinary GGUF serving, but it makes the driver account for
+        // the entire mmap even when HOBBIT substitutes every expert.  Once a
+        // sidecar owns the expert bytes, drop that device-wide mapping so the
+        // remaining tensors bind independently and the residency budget is
+        // reflected by actual device buffers.
+        #[cfg(feature = "metal")]
+        omega::backend::unregister_checkpoint_mapping(self.checkpoint_mapping);
+        self.expert_sidecar = Some(sidecar);
+        Ok(())
+    }
+
+    /// Number of sidecar expert-projection records owned by this model.
+    #[must_use]
+    pub fn expert_sidecar_descriptor_count(&self) -> usize {
+        self.expert_sidecar.as_ref().map_or(
+            0,
+            crate::expert_sidecar::MappedExpertSidecar::descriptor_count,
+        )
+    }
+
+    /// Applies one DynaExq/HOBBIT resident-set transition between decode
+    /// steps.  The caller owns the policy and the high-precision source; this
+    /// method only joins that policy to this model's slab, which is the table
+    /// the next decode step snapshots as [`ExpertSource`] entries.  Keeping
+    /// the page callback generic preserves the zero-allocation boundary and
+    /// lets a caller return bytes from an mmap or LSM segment without a
+    /// trait-object allocation.
+    ///
+    /// The method deliberately does not apply actions while a step is active:
+    /// [`ExpertSlab`] returns its typed boundary error, preventing a policy
+    /// update from invalidating the borrowed sources of the current step.
+    pub fn apply_expert_residency<
+        const LAYERS: usize,
+        const EXPERTS: usize,
+        const ACTIONS: usize,
+        Page,
+    >(
+        &self,
+        policy: &mut crate::residency::ExpertResidency<LAYERS, EXPERTS>,
+        actions: &crate::residency::ResidencyActions<ACTIONS>,
+        page: Page,
+    ) -> Result<(), InteropError>
+    where
+        Page: FnMut(
+            crate::residency::ExpertAddress,
+        ) -> Result<crate::residency::ExpertPage<'file>, InteropError>,
+    {
+        let mut slab = lock_expert_slab(&self.expert_slab);
+        policy.apply_at_boundary(&mut slab, actions, page)
+    }
+
+    /// Applies a fixed DynaExq action batch to the attached HOBBIT sidecar.
+    /// A page promotes all three projections from their original checkpoint
+    /// ranges; an eviction restores all three low-codec mapped ranges.
+    pub fn apply_attached_expert_residency<
+        const LAYERS: usize,
+        const EXPERTS: usize,
+        const ACTIONS: usize,
+    >(
+        &self,
+        policy: &mut crate::residency::ExpertResidency<LAYERS, EXPERTS>,
+        actions: &crate::residency::ResidencyActions<ACTIONS>,
+    ) -> Result<(), InteropError> {
+        let sidecar = self.expert_sidecar.as_ref().ok_or_else(|| {
+            InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: String::from("no expert sidecar is attached"),
+            }
+        })?;
+        let mut slab = lock_expert_slab(&self.expert_slab);
+        policy.apply_actions_at_boundary(&mut slab, actions, |slab, action| {
+            sidecar.apply_action(slab, self.checkpoint_mapping, action)
+        })
+    }
+
+    /// Runs the explicit router -> residency -> gather protocol for a
+    /// qwen35moe runtime integration.  The current forward graph exposes the
+    /// router and routed gather as one graph evaluation, so this seam accepts
+    /// a caller-owned router prepass and source transition rather than
+    /// pretending that the existing graph has been partitioned.  A caller
+    /// that has not built that prepass gets a typed error from its router
+    /// callback; the gather callback is never invoked before the boundary.
+    ///
+    /// The callbacks are consuming and return their storage to the caller;
+    /// no trait object, boxed future, or runtime allocation is introduced by
+    /// this phase boundary.  `Routes` may be a fixed-capacity route array or
+    /// a `Vec` owned by the caller, and `Source` may be an expert slab view or
+    /// an mmap-backed table.
+    pub fn execute_qwen35moe_pre_gather<Routes, Source, Output, Router, Boundary, Gather>(
+        &self,
+        router: Router,
+        boundary: Boundary,
+        gather: Gather,
+    ) -> Result<Output, InteropError>
+    where
+        Routes: AsRef<[crate::residency::ServeDecision]>,
+        Router: FnOnce() -> Result<Routes, InteropError>,
+        Boundary:
+            FnOnce(crate::qwen35moe::execution::RouterResult<'_>) -> Result<Source, InteropError>,
+        Gather: FnOnce(
+            crate::qwen35moe::execution::GatherPhase<'_, Source>,
+        ) -> Result<Output, InteropError>,
+    {
+        let architecture = self.architecture_impl.map_or("unknown", Architecture::name);
+        if architecture != "qwen35moe" {
+            return Err(InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from(architecture),
+                reason: String::from("the bound model is not a routed qwen35moe graph"),
+            });
+        }
+        if self.router_roots.is_empty() {
+            return Err(InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from(architecture),
+                reason: String::from("the bound qwen35moe graph exposes no router roots"),
+            });
+        }
+        crate::qwen35moe::execution::execute_pre_gather(router, boundary, gather)
+    }
+
+    /// Reports the active expert payloads retained by this model's slab.
+    /// `owned_bytes` is the actual copied-payload footprint; `mapped_bytes`
+    /// is the address-space range served directly from mmap. See
+    /// [`crate::expert_slab::ExpertSlabMemory`] for why the latter is not an
+    /// RSS claim.
+    #[must_use]
+    pub fn expert_slab_memory(&self) -> crate::expert_slab::ExpertSlabMemory {
+        lock_expert_slab(&self.expert_slab).memory()
+    }
+
     /// Removes expert `expert` of layer `layer`'s currently-bound bytes --
     /// see [`Self::page_expert`]'s own doc for what `layer` indexes, and
     /// [`crate::expert_slab::ExpertSlab::evict_expert`] for the primitive
@@ -4062,12 +5614,20 @@ impl<'file> LoadedModel<'file> {
         prompt: &str,
         serving_config: &ServingConfig,
     ) -> Result<PrefixState, InteropError> {
-        let mut runtime = BackendRuntime::new(serving_config);
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        let effective_serving_config = {
+            let mut effective_serving_config = *serving_config;
+            self.apply_memory_fit_gate(&mut effective_serving_config)?;
+            effective_serving_config
+        };
+        #[cfg(not(all(feature = "metal", target_os = "macos")))]
+        let effective_serving_config = *serving_config;
+        let mut runtime = BackendRuntime::new(&effective_serving_config);
         let (_generated_ids, _text, _stopped_by_eos, prefix_state) = self
             .run_decode_loop_observed_seeded(
                 prompt,
                 1,
-                serving_config,
+                &effective_serving_config,
                 &mut runtime,
                 None,
                 &mut LogitsSink::Discard,
@@ -4110,7 +5670,19 @@ impl<'file> LoadedModel<'file> {
         serving_config: &ServingConfig,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        let mut runtime = BackendRuntime::new(serving_config);
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        let effective_serving_config = {
+            let mut effective_serving_config = *serving_config;
+            // Prefix-resume reaches the same device allocator as ordinary
+            // generation. Apply the identical load-time budget before the
+            // resumed step, otherwise a caller can bypass the hard memory
+            // ceiling simply by supplying a PrefixState.
+            self.apply_memory_fit_gate(&mut effective_serving_config)?;
+            effective_serving_config
+        };
+        #[cfg(not(all(feature = "metal", target_os = "macos")))]
+        let effective_serving_config = *serving_config;
+        let mut runtime = BackendRuntime::new(&effective_serving_config);
         let seed = PrefixState {
             ids: prefix.ids.clone(),
             layer_caches: prefix.layer_caches.clone(),
@@ -4120,7 +5692,7 @@ impl<'file> LoadedModel<'file> {
             .run_decode_loop_observed_seeded(
                 suffix,
                 max_tokens,
-                serving_config,
+                &effective_serving_config,
                 &mut runtime,
                 None,
                 &mut LogitsSink::Discard,
@@ -4526,47 +6098,79 @@ impl<'file> LoadedModel<'file> {
             .map(|_| Qwen35DenseAttentionPadScratch::new())
             .collect();
 
-        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let ssm_state_input_nodes: Vec<Option<NodeId>> = cache_names
-            .iter()
-            .map(|names| match names {
-                LayerCacheNames::Ssm { state, .. } => self
-                    .program
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, op)| match op {
-                        Op::Input {
-                            name: Some(name), ..
-                        } if name == state => Some(NodeId(index as u32)),
-                        _ => None,
-                    }),
-                _ => None,
-            })
-            .collect();
+        // DynaExq observes the real routed expert ids produced by the graph.
+        // The fixed matrix keeps policy state bounded and is enabled only
+        // when the model owns a low-codec sidecar and the caller supplies a
+        // high-precision residency budget.
+        let residency_budget = std::env::var("PROXIMA_QWEN35MOE_RESIDENCY_BUDGET_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let mut qwen35moe_residency = if self
+            .architecture_impl
+            .is_some_and(|architecture| architecture.name() == "qwen35moe")
+            && self.expert_sidecar.is_some()
+            && residency_budget > 0
+        {
+            Some(crate::residency::ExpertResidency::<40, 256>::new(
+                crate::residency::ResidencyConfig {
+                    budget_bytes: residency_budget,
+                    high_bytes_per_expert: self.expert_sidecar.as_ref().map_or(
+                        0,
+                        crate::expert_sidecar::MappedExpertSidecar::high_bytes_per_expert,
+                    ),
+                    ..crate::residency::ResidencyConfig::default()
+                },
+            ))
+        } else {
+            None
+        };
+
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let ssm_placement_enabled = std::env::var("PROXIMA_METAL_SSM_PLACEMENT")
-            .is_ok_and(|value| value == "1" || value == "true");
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let ssm_placement_max_layer = std::env::var("PROXIMA_METAL_SSM_PLACEMENT_MAX_LAYER")
             .ok()
             .and_then(|value| value.parse::<usize>().ok());
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let ssm_state_input_nodes: Vec<Option<NodeId>> = cache_names
+            .iter()
+            .map(|names| match names {
+                LayerCacheNames::Ssm { state, .. } => {
+                    self.program
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, op)| match op {
+                            Op::Input {
+                                name: Some(name), ..
+                            } if name == state => Some(NodeId(index as u32)),
+                            _ => None,
+                        })
+                }
+                _ => None,
+            })
+            .collect();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let ssm_state_buffers: Vec<Option<(PlacedBuffer, PlacedBuffer)>> = layer_row_widths
             .iter()
-            .map(|widths| {
-                if !ssm_placement_enabled {
-                    return Ok::<Option<(PlacedBuffer, PlacedBuffer)>, InteropError>(None);
-                }
-                match widths {
-                    LayerPadRowWidths::Ssm { state_len, .. } => {
-                        let byte_length = state_len * core::mem::size_of::<f32>();
-                        let input = allocate_placed_buffer(byte_length)?;
-                        let output = allocate_placed_buffer(byte_length)?;
-                        Ok(Some((input, output)))
+            .map(
+                |widths| -> Result<Option<(PlacedBuffer, PlacedBuffer)>, InteropError> {
+                    if !ssm_placement_enabled {
+                        return Ok(None);
                     }
-                    _ => Ok(None),
-                }
-            })
+                    match widths {
+                        LayerPadRowWidths::Ssm { state_len, .. } => {
+                            let byte_length = state_len * core::mem::size_of::<f32>();
+                            let input = allocate_placed_buffer(byte_length)?;
+                            let output = allocate_placed_buffer(byte_length)?;
+                            Ok(Some((input, output)))
+                        }
+                        _ => Ok(None),
+                    }
+                },
+            )
             .collect::<Result<_, _>>()?;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         for (buffer, widths) in ssm_state_buffers.iter().zip(&layer_row_widths) {
@@ -4598,35 +6202,17 @@ impl<'file> LoadedModel<'file> {
         // doc) -- cleared, never reallocated from scratch, at the top of
         // each closure invocation below.
         let mut step_input_scratch: Vec<StepInput> = Vec::new();
+        // qwen35 GDN prefill is necessarily sequential by position, but its
+        // routed graph partitions are invariant throughout a KV bucket.
+        // Reuse them across prompt positions instead of repeating partition,
+        // topological-order, and shape-inference work for every token.
+        let mut qwen35moe_pre_gather_plan: Option<Qwen35MoePreGatherPlan> = None;
 
         let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
             &self.vocab,
             max_tokens,
             prompt_token_count,
             |_step| {
-                // Marks the whole step -- prefill included -- as in progress
-                // BEFORE `architecture_impl.step_inputs` runs below, so a
-                // residency policy that (incorrectly) calls
-                // `self.page_expert`/`self.evict_expert` from inside its own
-                // `step_inputs` override is rejected with
-                // `InteropError::ExpertSwapDuringStep` rather than mutating
-                // bytes this step's own `expert_sources` snapshot already
-                // borrowed. `_end_step_on_drop` closes the window on every
-                // exit from this closure body, including an early `?`
-                // return -- an explicit `end_step()` call placed only after
-                // `evaluate` would leak `step_in_progress = true` forever on
-                // any earlier error path in this closure.
-                lock_expert_slab(&self.expert_slab).begin_step();
-                let _end_step_on_drop = EndStepOnDrop {
-                    slab: &self.expert_slab,
-                };
-                // Dropped at the end of this closure, before `_end_step_on_drop`
-                // (reverse declaration order) -- see that type's own doc. The
-                // `begin_step` lock above already released (a temporary,
-                // dropped at the end of its own statement), so re-acquiring
-                // here never deadlocks against it.
-                let expert_slab_guard = lock_expert_slab(&self.expert_slab);
-
                 // ROW 130's own fix, built: every counter this step's
                 // `evaluate_ms` decomposition reads is zeroed HERE, at step
                 // start, and read back after `evaluate_ticks` below is computed
@@ -4650,18 +6236,16 @@ impl<'file> LoadedModel<'file> {
                 // pre-existing single-call path) for every dense/decode
                 // caller and for a qwen35 step that already carries exactly
                 // one position (ordinary decode, or a one-token prompt).
-                let step_batches: Vec<Vec<u32>> = if self.single_position_step && next_ids.len() > 1
-                {
-                    next_ids
-                        .iter()
-                        .map(|&position_id| alloc::vec![position_id])
-                        .collect()
-                } else {
-                    alloc::vec![next_ids.clone()]
-                };
-                let last_batch_index = step_batches.len() - 1;
+                let split_prefill = self.single_position_step && next_ids.len() > 1;
+                let batch_count = if split_prefill { next_ids.len() } else { 1 };
+                let last_batch_index = batch_count - 1;
                 let mut token_id: u32 = 0;
-                for (batch_index, ids_for_step) in step_batches.iter().enumerate() {
+                for batch_index in 0..batch_count {
+                    let ids_for_step: &[u32] = if split_prefill {
+                        core::slice::from_ref(&next_ids[batch_index])
+                    } else {
+                        next_ids.as_slice()
+                    };
                     let is_last_step_batch = batch_index == last_batch_index;
                     #[cfg(feature = "instrument")]
                     proxima_tensor::instrument::reset_step();
@@ -4802,7 +6386,9 @@ impl<'file> LoadedModel<'file> {
                     let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
 
                     let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.layer_roots.len() * 3);
-                    roots.push(self.logits_root);
+                    if step_batch_needs_logits(split_prefill, is_last_step_batch) {
+                        roots.push(self.logits_root);
+                    }
                     roots.extend_from_slice(node_values_sink.nodes());
                     for roots_for_layer in &self.layer_roots {
                         match roots_for_layer {
@@ -4848,29 +6434,44 @@ impl<'file> LoadedModel<'file> {
                         }
                     }
 
-                    if let Some(name) = missing_program_input(&self.program, &named_blocks) {
+                    if let Some(name) =
+                        missing_program_input(&self.program, &named_blocks).filter(|name| {
+                            !(serving_config.qwen35moe_pre_gather
+                                && self
+                                    .architecture_impl
+                                    .is_some_and(|architecture| architecture.name() == "qwen35moe")
+                                && name.contains("_exps.weight"))
+                        })
+                    {
                         return Err(InteropError::MissingStepInput { name });
                     }
 
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    let mut ssm_input_placements: Vec<(NodeId, &PlacedBuffer, usize)> =
-                        Vec::new();
+                    let mut ssm_input_placements: Vec<(
+                        NodeId,
+                        &PlacedBuffer,
+                        usize,
+                    )> = Vec::new();
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    let mut ssm_output_placements: Vec<(NodeId, &PlacedBuffer, usize)> =
-                        Vec::new();
+                    let mut ssm_output_placements: Vec<(
+                        NodeId,
+                        &PlacedBuffer,
+                        usize,
+                    )> = Vec::new();
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     for (layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
                         if ssm_placement_enabled
                             && ssm_placement_max_layer.is_none_or(|maximum| layer <= maximum)
                             && let (
-                            Qwen35LayerRoots::Ssm { state_out, .. },
-                            Some(state_input),
-                            Some((input_buffer, output_buffer)),
-                        ) = (
-                            roots_for_layer,
-                            ssm_state_input_nodes[layer],
-                            ssm_state_buffers[layer].as_ref(),
-                        ) {
+                                Qwen35LayerRoots::Ssm { state_out, .. },
+                                Some(state_input),
+                                Some((input_buffer, output_buffer)),
+                            ) = (
+                                roots_for_layer,
+                                ssm_state_input_nodes[layer],
+                                ssm_state_buffers[layer].as_ref(),
+                            )
+                        {
                             let (input_buffer, output_buffer) = if cached_len % 2 == 0 {
                                 (input_buffer, output_buffer)
                             } else {
@@ -4881,8 +6482,26 @@ impl<'file> LoadedModel<'file> {
                         }
                     }
 
-                    // This step's own [`proxima_tensor::cpu::ExpertSource`]
-                    // snapshot -- built AFTER `begin_step` above and read by
+                    // Keep the residency boundary mutable through graph-input
+                    // preparation. Freeze it only immediately before the
+                    // evaluator borrows the expert-source table.
+                    let _end_step_on_drop = begin_expert_gather_phase(&self.expert_slab);
+                    // Dropped before `_end_step_on_drop` (reverse declaration
+                    // order), so the source borrows end before the boundary is
+                    // reopened even on an early `?` return.
+                    let mut expert_slab_guard = lock_expert_slab(&self.expert_slab);
+
+                    let pre_gather = serving_config.qwen35moe_pre_gather
+                        && self
+                            .architecture_impl
+                            .is_some_and(|architecture| architecture.name() == "qwen35moe")
+                        && (self.expert_sidecar.is_some() || !runtime.uses_gpu());
+                    if pre_gather {
+                        expert_slab_guard.clear_selected_experts_for_step();
+                    }
+
+                    // This gather's own [`proxima_tensor::cpu::ExpertSource`]
+                    // snapshot -- built after the residency boundary and read by
                     // `run_reduce_with_quantized_weights` under the SAME weight
                     // `NodeId` [`crate::bind::build_expert_slab`] bound it under,
                     // so a dense checkpoint's empty slab costs one `BTreeMap`
@@ -4892,19 +6511,113 @@ impl<'file> LoadedModel<'file> {
                         Vec<proxima_tensor::cpu::ExpertEntry<'_>>,
                     )> = Vec::new();
                     let expert_sources =
-                        expert_slab_guard.sources_for_step(&mut expert_entries_scratch);
+                        expert_slab_guard.sources_for_step(&mut expert_entries_scratch)?;
 
+                    // The packed checkpoint views carry the expert input's
+                    // shape and codec through plan resolution. They remain
+                    // borrowed mmap ranges: Metal's expert-source executor
+                    // excludes every substituted node from ordinary uploads,
+                    // then binds only the routed payload and descriptor tables.
+                    if std::env::var_os("PROXIMA_DEBUG_QWEN35_SEGMENTS").is_some() {
+                        eprintln!(
+                            "qwen35 pre_gather_enabled={pre_gather} sidecar={} gpu={}",
+                            self.expert_sidecar.is_some(),
+                            runtime.uses_gpu()
+                        );
+                    }
+                    if pre_gather
+                        && qwen35moe_pre_gather_plan
+                            .as_ref()
+                            .is_none_or(|plan| plan.symbols != symbols)
+                    {
+                        qwen35moe_pre_gather_plan = Some(self.qwen35moe_pre_gather_plan(&symbols)?);
+                    }
                     // The pristine table aliases the named checkpoint stack and
                     // needs no substitution. Once a policy pages or evicts any
                     // expert, pass the table across omega's backend boundary;
                     // CPU consumes it and Metal fails closed until its packed
                     // gather has a per-expert address-table binding.
                     #[cfg(feature = "metal")]
-                    let expert_source_substitutions = expert_slab_guard
-                        .first_modified_layer()
-                        .map(|_| &expert_sources);
+                    let expert_source_substitutions = if runtime.uses_gpu() {
+                        None
+                    } else {
+                        Some(&expert_sources)
+                    };
                     #[cfg(not(feature = "metal"))]
                     let expert_source_substitutions = Some(&expert_sources);
+
+                    let mut before_qwen35moe_gather =
+                        |layer: usize,
+                         position: u64,
+                         routes: &[crate::residency::RoutedExpert],
+                         expert_slab: &mut crate::expert_slab::ExpertSlab<'file>|
+                         -> Result<(), InteropError> {
+                            let mut selected_experts = [0_u32; 16];
+                            if routes.len() > selected_experts.len() {
+                                return Err(InteropError::PreGatherExecutionUnsupported {
+                                    architecture: String::from("qwen35moe"),
+                                    reason: String::from(
+                                        "router selected more experts than the fixed staging bound",
+                                    ),
+                                });
+                            }
+                            for (index, route) in routes.iter().enumerate() {
+                                selected_experts[index] = route.expert as u32;
+                            }
+                            if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
+                                eprintln!(
+                                    "qwen35 route layer={} position={} experts={:?}",
+                                    layer,
+                                    position,
+                                    &selected_experts[..routes.len()]
+                                );
+                            }
+                            expert_slab
+                                .add_selected_experts(layer, &selected_experts[..routes.len()]);
+                            if let Some(policy) = qwen35moe_residency.as_mut() {
+                                // Observe the complete route set before one
+                                // reconciliation. Paging once per expert
+                                // made one gather pay the FSM transition cost
+                                // repeatedly and could churn the same slab
+                                // entries before the kernel began.
+                                for route in routes {
+                                    policy.observe(position, layer, [*route]).map_err(|error| {
+                                        InteropError::PreGatherExecutionUnsupported {
+                                            architecture: String::from("qwen35moe"),
+                                            reason: error.to_string(),
+                                        }
+                                    })?;
+                                }
+                                let actions = policy.reconcile::<256>().map_err(|error| {
+                                    InteropError::PreGatherExecutionUnsupported {
+                                        architecture: String::from("qwen35moe"),
+                                        reason: error.to_string(),
+                                    }
+                                })?;
+                                let sidecar = self.expert_sidecar.as_ref().ok_or_else(|| {
+                                    InteropError::PreGatherExecutionUnsupported {
+                                        architecture: String::from("qwen35moe"),
+                                        reason: String::from("no expert sidecar is attached"),
+                                    }
+                                })?;
+                                policy.apply_actions_at_boundary(
+                                    expert_slab,
+                                    &actions,
+                                    |slab, action| {
+                                        sidecar.apply_action(slab, self.checkpoint_mapping, action)
+                                    },
+                                )?;
+                                if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
+                                    eprintln!(
+                                        "qwen35 residency boundary layer={} position={} actions={:?}",
+                                        layer,
+                                        position,
+                                        actions.as_slice()
+                                    );
+                                }
+                            }
+                            Ok(())
+                        };
 
                     #[cfg(feature = "instrument")]
                     let evaluate_started = read_ticks();
@@ -4953,7 +6666,34 @@ impl<'file> LoadedModel<'file> {
                         )?,
                     };
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    let evaluated = if !ssm_input_placements.is_empty() {
+                    let evaluated = if pre_gather {
+                        let pre_gather_plan =
+                            qwen35moe_pre_gather_plan.as_ref().ok_or_else(|| {
+                                InteropError::PreGatherExecutionUnsupported {
+                                    architecture: String::from("qwen35moe"),
+                                    reason: String::from(
+                                        "the routed segment plan was not prepared",
+                                    ),
+                                }
+                            })?;
+                        self.evaluate_qwen35moe_pre_gather(
+                            runtime,
+                            pre_gather_plan,
+                            &symbols,
+                            // planning still needs the original expert input
+                            // metadata; execution replaces those bindings
+                            // with the selected source table before staging.
+                            &named_blocks,
+                            &roots,
+                            &resident_names,
+                            &mut expert_slab_guard,
+                            cached_len,
+                            &mut before_qwen35moe_gather,
+                        )?
+                    } else if use_metal_output_placements(
+                        !ssm_input_placements.is_empty(),
+                        expert_source_substitutions.is_some(),
+                    ) {
                         runtime.evaluate_with_placements(
                             &self.program,
                             &symbols,
@@ -4974,14 +6714,39 @@ impl<'file> LoadedModel<'file> {
                         )?
                     };
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
-                    let evaluated = runtime.evaluate(
-                        &self.program,
-                        &symbols,
-                        &named_blocks,
-                        &roots,
-                        &resident_names,
-                        expert_source_substitutions,
-                    )?;
+                    let evaluated = if pre_gather {
+                        let pre_gather_plan =
+                            qwen35moe_pre_gather_plan.as_ref().ok_or_else(|| {
+                                InteropError::PreGatherExecutionUnsupported {
+                                    architecture: String::from("qwen35moe"),
+                                    reason: String::from(
+                                        "the routed segment plan was not prepared",
+                                    ),
+                                }
+                            })?;
+                        self.evaluate_qwen35moe_pre_gather(
+                            runtime,
+                            pre_gather_plan,
+                            &symbols,
+                            // planning needs the original expert descriptors;
+                            // execution substitutes the selected source table.
+                            &named_blocks,
+                            &roots,
+                            &resident_names,
+                            &mut expert_slab_guard,
+                            cached_len,
+                            &mut before_qwen35moe_gather,
+                        )?
+                    } else {
+                        runtime.evaluate(
+                            &self.program,
+                            &symbols,
+                            &named_blocks,
+                            &roots,
+                            &resident_names,
+                            expert_source_substitutions,
+                        )?
+                    };
                     #[cfg(feature = "instrument")]
                     let evaluate_ticks = elapsed_ticks(evaluate_started);
                     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -5123,9 +6888,15 @@ impl<'file> LoadedModel<'file> {
                                 let (qkv_mixed_data, _) = evaluated.get(*qkv_mixed).ok_or(
                                     InteropError::MissingEvaluatedNode { node: *qkv_mixed },
                                 )?;
-                                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                                #[cfg(all(
+                                    feature = "metal-output-placement",
+                                    target_os = "macos"
+                                ))]
                                 let state_is_placed = !ssm_input_placements.is_empty();
-                                #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+                                #[cfg(not(all(
+                                    feature = "metal-output-placement",
+                                    target_os = "macos"
+                                )))]
                                 let state_is_placed = false;
                                 let state_out_data = if state_is_placed {
                                     None
@@ -5146,7 +6917,8 @@ impl<'file> LoadedModel<'file> {
                                     debug!(
                                         layer = layer as u64,
                                         qkv_mixed_elements = qkv_mixed_data.len() as u64,
-                                        state_elements = state_out_data.map_or(0, |data| data.len() as u64),
+                                        state_elements =
+                                            state_out_data.map_or(0, |data| data.len() as u64),
                                         state_bytes = state_out_data.map_or(0, |data| {
                                             (data.len() * core::mem::size_of::<f32>()) as u64
                                         }),
@@ -6139,14 +7911,32 @@ impl<'file> LoadedModel<'file> {
         // `run_reduce_with_quantized_weights` always has: `None` here is
         // not "experts disabled", it is "no per-step snapshot applies to a
         // call outside the decode loop".
-        let evaluated = runtime.evaluate(
-            &self.program,
-            &symbols,
-            &named_blocks,
-            node_ids,
-            &resident_names,
-            None,
-        )?;
+        // The qwen35moe diagnostic can request an interior routed node, so
+        // keep it on the partition-isolated seam. Other one-shot forwards
+        // retain the ordinary evaluator and its normal cache bookkeeping.
+        let evaluated = if self
+            .architecture_impl
+            .as_ref()
+            .is_some_and(|architecture| architecture.name() == "qwen35moe")
+        {
+            runtime.evaluate_segment(
+                &self.program,
+                &symbols,
+                &named_blocks,
+                node_ids,
+                &resident_names,
+                None,
+            )?
+        } else {
+            runtime.evaluate(
+                &self.program,
+                &symbols,
+                &named_blocks,
+                node_ids,
+                &resident_names,
+                None,
+            )?
+        };
 
         node_ids
             .iter()
@@ -6257,23 +8047,217 @@ impl<'file> LoadedModel<'file> {
     }
 }
 
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+fn use_metal_output_placements(
+    has_recurrent_state: bool,
+    has_expert_source_substitutions: bool,
+) -> bool {
+    has_recurrent_state && !has_expert_source_substitutions
+}
+
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{SsmLayerCache, kv_extent};
+    use super::{
+        SsmLayerCache, begin_expert_gather_phase, kv_extent, lock_expert_slab,
+        step_batch_needs_logits, visit_qwen35moe_router_boundary,
+        visit_qwen35moe_router_selections,
+    };
     use alloc::string::String;
     use alloc::vec::Vec;
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
+    use alloc::collections::BTreeSet;
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_gguf::value::MetadataArray;
     use proxima_gguf::value::MetadataValue as Value;
     use proxima_gguf::{GgmlType as WireType, GgufModel, TensorPayload, write_complete};
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use proxima_tensor::cpu::QuantizedBlock;
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use proxima_tensor::{DType, Extent, NodeId, Op};
     use proxima_tokenizer::Vocab;
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::{BackendRuntime, LoadedModel};
-    use super::{Control, Phase, TokenEvent, build_position_inputs, decode_until_stop_or_budget};
+    use super::{
+        Control, DecodeMetrics, Phase, TokenEvent, build_position_inputs,
+        decode_until_stop_or_budget,
+    };
     use crate::bind::architecture_from_metadata;
+
+    #[test]
+    fn residency_mutation_closes_only_for_the_expert_gather_phase() {
+        let checkpoint_expert = [0_u8; 144];
+        let routed_expert = [7_u8; 144];
+        let slab = std::sync::Mutex::new(crate::expert_slab::ExpertSlab::new());
+        lock_expert_slab(&slab)
+            .bind_layer_stack(
+                0,
+                proxima_tensor::op::NodeId(1),
+                crate::bind::PackedOwnedKind::Q4K,
+                &checkpoint_expert,
+                1,
+                32,
+                32,
+            )
+            .expect("the routed layer binds before evaluation");
+
+        lock_expert_slab(&slab)
+            .page_expert(
+                0,
+                0,
+                crate::bind::PackedOwnedKind::Q4K,
+                &routed_expert,
+                32,
+                32,
+            )
+            .expect("the current route may change residency before gather");
+
+        let gather_phase = begin_expert_gather_phase(&slab);
+        let during_gather = lock_expert_slab(&slab).page_expert(
+            0,
+            0,
+            crate::bind::PackedOwnedKind::Q4K,
+            &checkpoint_expert,
+            32,
+            32,
+        );
+        assert!(matches!(
+            during_gather,
+            Err(crate::InteropError::ExpertSwapDuringStep {
+                layer: 0,
+                expert: 0
+            })
+        ));
+
+        drop(gather_phase);
+        lock_expert_slab(&slab)
+            .page_expert(
+                0,
+                0,
+                crate::bind::PackedOwnedKind::Q4K,
+                &checkpoint_expert,
+                32,
+                32,
+            )
+            .expect("the next router boundary reopens after gather");
+    }
+
+    #[test]
+    fn router_segment_visits_current_top_k_before_the_gather_boundary() {
+        let logits = [0.5_f32, 7.0, 7.0, -1.0, 9.0, 1.0, 2.0, 8.0];
+        let mut route_scratch = Vec::with_capacity(2);
+        let mut visited = Vec::new();
+
+        visit_qwen35moe_router_selections(
+            3,
+            41,
+            &logits,
+            &[2, 4],
+            4,
+            2,
+            &mut route_scratch,
+            &mut |layer, position, routes| {
+                visited.push((
+                    layer,
+                    position,
+                    routes.iter().map(|route| route.expert).collect::<Vec<_>>(),
+                ));
+                Ok(())
+            },
+        )
+        .expect("the two real router rows expose their top-2 routes");
+
+        assert_eq!(
+            visited,
+            [(3, 41, vec![1, 2]), (3, 42, vec![0, 3])],
+            "the callback receives lower-index tie breaking and every position before its gather"
+        );
+        assert_eq!(
+            route_scratch.capacity(),
+            2,
+            "the fixed top-k scratch does not grow while visiting router rows"
+        );
+    }
+
+    #[test]
+    fn router_boundary_pages_before_refreshing_the_gather_source() {
+        let checkpoint_expert = [0_u8; 144];
+        let routed_expert = [7_u8; 144];
+        let weight_node = proxima_tensor::op::NodeId(1);
+        let mut slab = crate::expert_slab::ExpertSlab::new();
+        slab.bind_layer_stack(
+            0,
+            weight_node,
+            crate::bind::PackedOwnedKind::Q4K,
+            &checkpoint_expert,
+            1,
+            32,
+            32,
+        )
+        .expect("the routed layer binds before evaluation");
+        slab.begin_step();
+        let mut route_scratch = Vec::with_capacity(1);
+
+        visit_qwen35moe_router_boundary(
+            0,
+            9,
+            &[3.0],
+            &[1, 1],
+            1,
+            1,
+            &mut route_scratch,
+            &mut slab,
+            &mut |layer, position, routes, slab| {
+                assert_eq!((layer, position), (0, 9));
+                assert_eq!(routes[0].expert, 0);
+                slab.page_expert(
+                    layer,
+                    routes[0].expert,
+                    crate::bind::PackedOwnedKind::Q4K,
+                    &routed_expert,
+                    32,
+                    32,
+                )?;
+                Ok(())
+            },
+        )
+        .expect("the residency callback runs while the gather boundary is open");
+
+        let mutation_after_boundary = slab.page_expert(
+            0,
+            0,
+            crate::bind::PackedOwnedKind::Q4K,
+            &checkpoint_expert,
+            32,
+            32,
+        );
+        assert!(matches!(
+            mutation_after_boundary,
+            Err(crate::InteropError::ExpertSwapDuringStep {
+                layer: 0,
+                expert: 0
+            })
+        ));
+
+        let mut entries = Vec::new();
+        let sources = slab
+            .sources_for_step(&mut entries)
+            .expect("the post-boundary gather source is complete");
+        let source = sources
+            .get(&weight_node)
+            .expect("the routed layer has a refreshed source");
+        let entry = source
+            .entries()
+            .first()
+            .expect("the selected expert remains at its stable index");
+        assert_eq!(entry.epoch, 1, "the gather sees the boundary page");
+        assert!(matches!(
+            entry.block,
+            proxima_tensor::cpu::QuantizedBlock::Q4K(bytes) if bytes == routed_expert
+        ));
+    }
 
     #[test]
     fn kv_bucket_extent_includes_the_new_position() {
@@ -6288,6 +8272,125 @@ mod tests {
             kv_extent(cached_len, usize::MAX, 32),
             0,
             "the pre-step cache length is not a valid attention extent"
+        );
+    }
+
+    #[test]
+    fn intermediate_split_prefill_batch_does_not_request_logits() {
+        assert!(step_batch_needs_logits(false, false));
+        assert!(step_batch_needs_logits(false, true));
+        assert!(!step_batch_needs_logits(true, false));
+        assert!(step_batch_needs_logits(true, true));
+    }
+
+    #[test]
+    fn router_selection_callback_runs_before_gather() {
+        let mut scratch = Vec::new();
+        let mut observed = Vec::new();
+        super::visit_qwen35moe_router_selections(
+            2,
+            11,
+            &[0.1, 0.9, 0.2, 0.8],
+            &[1, 4],
+            4,
+            2,
+            &mut scratch,
+            &mut |layer, position, routes| {
+                observed.push((layer, position, routes[0].expert, routes[1].expert));
+                Ok(())
+            },
+        )
+        .expect("router callback receives one deterministic top-k row");
+        assert_eq!(observed, vec![(2, 11, 1, 3)]);
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn metal_router_segment_readback_reaches_the_residency_boundary() {
+        let config = super::supported_serving_config(GPU_LAYERS_ALL, omega::MathMode::default());
+        let mut runtime = BackendRuntime::new(&config);
+        let router = NodeId(0);
+        let program = [Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(1), Extent::Static(4)],
+            name: Some(String::from("router_logits")),
+        }];
+        let logits = [0.1_f32, 0.9, 0.2, 0.8];
+        let named = [("router_logits", QuantizedBlock::Float32(&logits))];
+        let evaluated = runtime
+            .evaluate_segment(&program, &[1, 1], &named, &[router], &BTreeSet::new(), None)
+            .expect("metal returns the requested router tensor to the host boundary");
+        let (readback, shape) = evaluated
+            .get(router)
+            .expect("the requested router tensor is present after metal execution");
+        let mut scratch = Vec::new();
+        let mut observed = Vec::new();
+
+        visit_qwen35moe_router_selections(
+            2,
+            11,
+            readback,
+            shape,
+            4,
+            2,
+            &mut scratch,
+            &mut |layer, position, routes| {
+                observed.push((layer, position, routes[0].expert, routes[1].expert));
+                Ok(())
+            },
+        )
+        .expect("the metal router readback drives the typed residency callback");
+
+        assert_eq!(observed, vec![(2, 11, 1, 3)]);
+    }
+
+    #[test]
+    fn decode_metrics_uses_cumulative_token_event_time() {
+        let events = [
+            TokenEvent {
+                token_id: 1,
+                text_piece: "",
+                phase: Phase::Prefill { prompt_tokens: 7 },
+                step: 0,
+                elapsed_ms: 400,
+            },
+            TokenEvent {
+                token_id: 1,
+                text_piece: "a",
+                phase: Phase::Token,
+                step: 0,
+                elapsed_ms: 400,
+            },
+            TokenEvent {
+                token_id: 2,
+                text_piece: "b",
+                phase: Phase::Token,
+                step: 1,
+                elapsed_ms: 900,
+            },
+        ];
+        let metrics = DecodeMetrics::from_events(&events, 3_500, 42.5, 1, 0.125);
+
+        assert_eq!(metrics.prompt_tokens, 7);
+        assert_eq!(metrics.generated_tokens, 2);
+        assert_eq!(metrics.elapsed_ms, 900);
+        assert!((metrics.tokens_per_second - (2.0 / 0.9)).abs() < f64::EPSILON);
+        assert!((metrics.per_token_latency_ms - 450.0).abs() < f64::EPSILON);
+        assert_eq!(metrics.peak_rss_bytes, 3_500);
+        assert_eq!(metrics.cpu_percent, 42.5);
+        assert_eq!(metrics.error_count, 1);
+        assert_eq!(metrics.covariance, 0.125);
+    }
+
+    #[test]
+    fn decode_metrics_keeps_provenance_labels_explicit() {
+        let metrics = DecodeMetrics::from_events(&[], 0, 0.0, 0, 0.0);
+
+        assert_eq!(metrics.timing_source, "TokenEvent::elapsed_ms");
+        assert_eq!(metrics.memory_source, "caller_peak_rss_bytes");
+        assert_eq!(
+            metrics.resource_source,
+            "caller_cpu_percent_and_error_count"
         );
     }
 
@@ -7977,6 +10080,7 @@ mod memory_fit_gate_tests {
             feed_forward: 1,
             query_heads: 1,
             kv_heads: 2,
+            kv_heads_by_layer: vec![2; 2],
             head_dim: 64,
             block_count: 2,
             expert_count: 0,
@@ -8012,11 +10116,14 @@ mod memory_fit_gate_tests {
             logits_root: proxima_tensor::op::NodeId(0),
             hidden_root: None,
             layer_roots: Vec::new(),
+            qwen35moe_layer_diagnostics: Vec::new(),
+            router_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
             single_position_step: false,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range: None,
             expert_slab: std::sync::Mutex::new(crate::expert_slab::ExpertSlab::new()),
+            expert_sidecar: None,
         }
     }
 
@@ -8480,6 +10587,8 @@ mod memory_fit_gate_tests {
 
         /// Proves the prefill mechanism with a COUNT, not a read of the
         /// source (guiding-principle 18): `run_decode_loop_observed_seeded`
+        /// on architectures that accept batched positions. Qwen35's
+        /// single-position GDN path intentionally takes a different branch.
         /// with `max_tokens: 1` runs the `decode_until_stop_or_budget`
         /// `for step in 0..1` loop exactly once, and that single step's own
         /// closure calls `BackendRuntime::evaluate` exactly once regardless

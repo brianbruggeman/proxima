@@ -301,8 +301,11 @@ mod tests {
             context_length,
             ARENA_ALLOWANCE_BYTES,
         );
-        let expected_kv_cache_bytes =
-            u64::from(KV_HEADS) * u64::from(HEAD_DIM) * 8 * u64::from(BLOCK_COUNT) * u64::from(context_length);
+        let expected_kv_cache_bytes = u64::from(KV_HEADS)
+            * u64::from(HEAD_DIM)
+            * 8
+            * u64::from(BLOCK_COUNT)
+            * u64::from(context_length);
         assert_eq!(budget.dense_weights_bytes, weights.dense_bytes);
         assert_eq!(budget.expert_weights_bytes, weights.expert_bytes);
         assert_eq!(budget.table_weights_bytes, weights.table_bytes);

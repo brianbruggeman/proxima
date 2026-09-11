@@ -187,6 +187,10 @@ pub struct ServingConfig<'model> {
     /// `false` to opt back out, the same explicit-override shape every
     /// other knob on this struct already has.
     pub gpu_memory_fit: bool,
+    /// Optional hard ceiling for model-serving memory. `None` uses the
+    /// device-reported working-set limit; `Some(bytes)` applies the smaller
+    /// of this value and that limit before any Metal plan can allocate.
+    pub gpu_memory_limit_bytes: Option<u64>,
     /// `--no-kv-offload` inverted: `true` allows the KV cache to live on
     /// the GPU, `false` (the owner's `--no-kv-offload`) keeps it resident
     /// on the host.
@@ -316,6 +320,12 @@ pub struct ServingConfig<'model> {
     /// bind time as `crate::error::InteropError::UnsupportedWeightPrecisionTarget`
     /// (`std`-gated) instead.
     pub weight_precision: &'model [WeightPrecisionRule<'model>],
+    /// Requests the routed qwen35moe execution seam that runs the router,
+    /// residency transition, and expert gather as separate phases. The
+    /// current Metal evaluator still accepts only the full graph, so the
+    /// decode boundary rejects this request instead of silently evaluating
+    /// the full expert stack and bypassing HOBBIT/DynaExq.
+    pub qwen35moe_pre_gather: bool,
 }
 
 impl<'model> ServingConfig<'model> {
@@ -360,6 +370,7 @@ impl Default for ServingConfig<'static> {
             ubatch_size: 32,
             gpu_layers: GPU_LAYERS_ALL,
             gpu_memory_fit: true,
+            gpu_memory_limit_bytes: None,
             kv_offload: false,
             multimodal_projector: false,
             reasoning_budget: 1024,
@@ -383,6 +394,7 @@ impl Default for ServingConfig<'static> {
             dispatch_type: DispatchType::Concurrent,
             exact_activations: false,
             weight_precision: &[],
+            qwen35moe_pre_gather: false,
         }
     }
 }
@@ -638,6 +650,7 @@ mod tests {
             ubatch_size: 0,
             gpu_layers: 0,
             gpu_memory_fit: false,
+            gpu_memory_limit_bytes: None,
             kv_offload: false,
             multimodal_projector: false,
             reasoning_budget: 0,
@@ -658,6 +671,7 @@ mod tests {
             dispatch_type: DispatchType::Concurrent,
             exact_activations: false,
             weight_precision: &[],
+            qwen35moe_pre_gather: false,
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -776,6 +790,7 @@ mod tests {
             ubatch_size: 32,
             gpu_layers: GPU_LAYERS_ALL,
             gpu_memory_fit: true,
+            gpu_memory_limit_bytes: None,
             kv_offload: false,
             multimodal_projector: false,
             reasoning_budget: 1024,
@@ -796,6 +811,7 @@ mod tests {
             dispatch_type: DispatchType::Concurrent,
             exact_activations: false,
             weight_precision: &[],
+            qwen35moe_pre_gather: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -842,6 +858,7 @@ mod tests {
             ubatch_size: 32,
             gpu_layers: GPU_LAYERS_ALL,
             gpu_memory_fit: true,
+            gpu_memory_limit_bytes: None,
             kv_offload: false,
             multimodal_projector: false,
             reasoning_budget: 1024,
@@ -862,9 +879,13 @@ mod tests {
             dispatch_type: DispatchType::Concurrent,
             exact_activations: false,
             weight_precision: &[],
+            qwen35moe_pre_gather: false,
         };
         assert_eq!(via_default_override, via_full_literal);
-        assert_eq!(via_default_override.numeric_policy, NumericPolicy::bit_exact());
+        assert_eq!(
+            via_default_override.numeric_policy,
+            NumericPolicy::bit_exact()
+        );
     }
 
     /// `exact_activations` defaults to `false` -- today's shipping
@@ -895,6 +916,7 @@ mod tests {
             ubatch_size: 32,
             gpu_layers: GPU_LAYERS_ALL,
             gpu_memory_fit: true,
+            gpu_memory_limit_bytes: None,
             kv_offload: false,
             multimodal_projector: false,
             reasoning_budget: 1024,
@@ -915,6 +937,7 @@ mod tests {
             dispatch_type: DispatchType::Concurrent,
             exact_activations: true,
             weight_precision: &[],
+            qwen35moe_pre_gather: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);

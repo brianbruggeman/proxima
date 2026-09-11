@@ -106,7 +106,10 @@ fn masked_fma_q4k_matvec_matches_the_dequantized_f32_cpu_path_across_every_sub_b
     // already takes for exactly this reason.
     let in_dim = IN_DIM;
     let blocks_per_row = in_dim / QK_K;
-    assert_eq!(blocks_per_row, 1, "fixture must be exactly one super-block per row");
+    assert_eq!(
+        blocks_per_row, 1,
+        "fixture must be exactly one super-block per row"
+    );
     let row_bytes = blocks_per_row * BLOCK_BYTES;
     let mut packed = vec![0u8; OUT_DIM * row_bytes];
     for (row, row_packed) in rows.iter().zip(packed.chunks_exact_mut(row_bytes)) {
@@ -141,12 +144,19 @@ fn masked_fma_q4k_matvec_matches_the_dequantized_f32_cpu_path_across_every_sub_b
 
     let actual = metal.root();
     let expected = cpu.root();
-    assert_eq!(actual.len(), OUT_DIM, "degenerate gate: no outputs compared");
+    assert_eq!(
+        actual.len(),
+        OUT_DIM,
+        "degenerate gate: no outputs compared"
+    );
     assert_eq!(actual.len(), expected.len());
 
     let mut max_diff = 0.0f32;
     for (&got, &want) in actual.iter().zip(expected.iter()) {
-        assert!(got.is_finite(), "masked-fma kernel produced a non-finite value: {got}");
+        assert!(
+            got.is_finite(),
+            "masked-fma kernel produced a non-finite value: {got}"
+        );
         max_diff = max_diff.max((got - want).abs());
     }
     // batch-peak normalization, not per-row relative error: a per-row

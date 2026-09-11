@@ -147,11 +147,21 @@ pub fn dequantize_block(block: &[u8], output: &mut [f32]) {
         let mut shift = 0u32;
         for _ in 0..4 {
             let (scale_lo, min_lo) = unpack_scale_min(sub_block, &scales);
-            plan[sub_block] = (d * f32::from(scale_lo), dmin * f32::from(min_lo), shift, low_half);
+            plan[sub_block] = (
+                d * f32::from(scale_lo),
+                dmin * f32::from(min_lo),
+                shift,
+                low_half,
+            );
             sub_block += 1;
 
             let (scale_hi, min_hi) = unpack_scale_min(sub_block, &scales);
-            plan[sub_block] = (d * f32::from(scale_hi), dmin * f32::from(min_hi), shift, high_half);
+            plan[sub_block] = (
+                d * f32::from(scale_hi),
+                dmin * f32::from(min_hi),
+                shift,
+                high_half,
+            );
             sub_block += 1;
 
             shift += 2;
@@ -326,8 +336,16 @@ fn quantize_block(x: &[f32], output: &mut [u8]) {
     let max_scale = scales.iter().copied().fold(0.0f32, f32::max);
     let max_min = mins.iter().copied().fold(0.0f32, f32::max);
     const Q4SCALE: f32 = 15.0;
-    let scale_step = if max_scale > 0.0 { Q4SCALE / max_scale } else { 0.0 };
-    let min_step = if max_min > 0.0 { Q4SCALE / max_min } else { 0.0 };
+    let scale_step = if max_scale > 0.0 {
+        Q4SCALE / max_scale
+    } else {
+        0.0
+    };
+    let min_step = if max_min > 0.0 {
+        Q4SCALE / max_min
+    } else {
+        0.0
+    };
 
     let mut packed_scales = [0u8; SCALES_BYTES];
     for sub_block in 0..SUB_BLOCKS {
@@ -772,7 +790,8 @@ mod tests {
                 GgmlType::Q4_K => {
                     let blocks_wanted = elements_wanted / q4_k::QK_K;
                     let bytes_wanted = (blocks_wanted * q4_k::BLOCK_BYTES) as u64;
-                    let packed = read_range(&mut file, full_range.start..full_range.start + bytes_wanted);
+                    let packed =
+                        read_range(&mut file, full_range.start..full_range.start + bytes_wanted);
                     let mut decoded = vec![0.0f32; blocks_wanted * q4_k::QK_K];
                     q4_k::dequantize(&packed, &mut decoded).expect("decode real Q4_K super-blocks");
                     decoded
@@ -780,7 +799,8 @@ mod tests {
                 GgmlType::Q6_K => {
                     let blocks_wanted = elements_wanted / q6_k::QK_K;
                     let bytes_wanted = (blocks_wanted * q6_k::BLOCK_BYTES) as u64;
-                    let packed = read_range(&mut file, full_range.start..full_range.start + bytes_wanted);
+                    let packed =
+                        read_range(&mut file, full_range.start..full_range.start + bytes_wanted);
                     let mut decoded = vec![0.0f32; blocks_wanted * q6_k::QK_K];
                     q6_k::dequantize(&packed, &mut decoded).expect("decode real Q6_K super-blocks");
                     decoded

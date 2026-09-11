@@ -21,8 +21,8 @@
 #![allow(dead_code)]
 
 use proxima_tensor::spec::{
-    DuplicateHeadPosition, mistral_cached_forward_program, mistral_single_range_cached_forward_program,
-    qwen3_cached_forward_program,
+    DuplicateHeadPosition, mistral_cached_forward_program,
+    mistral_single_range_cached_forward_program, qwen3_cached_forward_program,
 };
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NodeId, NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};

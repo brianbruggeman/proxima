@@ -31,7 +31,11 @@ fn filled(seed: u64, len: usize) -> Vec<f32> {
 /// bit-for-bit against an independently computed dequantize-then-index f32
 /// reference -- guiding-principle 14: the dequantize-then-lookup reference is
 /// correct by construction, not this fix checked against itself.
-fn assert_quantized_gather_matches_reference(embedding: u32, table_block: QuantizedBlock<'_>, table_f32: &[f32]) {
+fn assert_quantized_gather_matches_reference(
+    embedding: u32,
+    table_block: QuantizedBlock<'_>,
+    table_f32: &[f32],
+) {
     let vocab = 3u32;
     let tokens = 2usize;
 
@@ -51,8 +55,13 @@ fn assert_quantized_gather_matches_reference(embedding: u32, table_block: Quanti
         ("token_embd.weight", table_block),
     ];
 
-    let evaluated = proxima_tensor::cpu::evaluate_quantized_named(&program, &[tokens as u64], &named, &[embedded])
-        .expect("a quantized table used only as an embedding gather lowers");
+    let evaluated = proxima_tensor::cpu::evaluate_quantized_named(
+        &program,
+        &[tokens as u64],
+        &named,
+        &[embedded],
+    )
+    .expect("a quantized table used only as an embedding gather lowers");
     let (values, shape) = evaluated
         .get(embedded)
         .expect("embedding gather output present");
@@ -60,7 +69,8 @@ fn assert_quantized_gather_matches_reference(embedding: u32, table_block: Quanti
 
     for (token, row) in ids_data.iter().zip(values.chunks_exact(embedding as usize)) {
         let vocab_row = *token as usize;
-        let expected = &table_f32[vocab_row * embedding as usize..(vocab_row + 1) * embedding as usize];
+        let expected =
+            &table_f32[vocab_row * embedding as usize..(vocab_row + 1) * embedding as usize];
         for (actual, expected) in row.iter().zip(expected.iter()) {
             assert!(
                 (actual - expected).abs() < 5e-2,
@@ -79,7 +89,11 @@ fn quantized_embedding_gather_matches_dequantized_reference_q8_0() {
     let mut table_bytes = vec![0u8; (table_f32.len() / QK8_0) * BLOCK_BYTES];
     quantize(&table_f32, &mut table_bytes).expect("quantize fixture to q8_0");
 
-    assert_quantized_gather_matches_reference(embedding, QuantizedBlock::Q8_0(&table_bytes), &table_f32);
+    assert_quantized_gather_matches_reference(
+        embedding,
+        QuantizedBlock::Q8_0(&table_bytes),
+        &table_f32,
+    );
 }
 
 #[test]
@@ -91,5 +105,9 @@ fn quantized_embedding_gather_matches_dequantized_reference_q4_k() {
     let mut table_bytes = vec![0u8; (table_f32.len() / QK_K) * BLOCK_BYTES];
     quantize(&table_f32, &mut table_bytes).expect("quantize fixture to q4_k");
 
-    assert_quantized_gather_matches_reference(embedding, QuantizedBlock::Q4K(&table_bytes), &table_f32);
+    assert_quantized_gather_matches_reference(
+        embedding,
+        QuantizedBlock::Q4K(&table_bytes),
+        &table_f32,
+    );
 }

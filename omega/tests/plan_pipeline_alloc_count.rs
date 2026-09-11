@@ -11,8 +11,8 @@
 #![cfg(all(feature = "alloc-count", feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_test::alloc_count::{CountingAllocator, allocations, recorded_sizes, reset};
 use proxima_tensor::{DType, Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
+use proxima_test::alloc_count::{CountingAllocator, allocations, recorded_sizes, reset};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
@@ -74,17 +74,35 @@ fn a_warm_plan_hit_allocates_the_same_amount_every_call() {
     // Cold: builds `resolved_steps` from empty, compiles both kernels'
     // pipelines for the first time -- allocation-heavy by construction, not
     // part of this test's own claim.
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("first (cold) call warms the plan's pipeline cache");
+    omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("first (cold) call warms the plan's pipeline cache");
 
     let before_second = allocations();
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("second (warm) call");
+    omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("second (warm) call");
     let second_call_allocations = allocations() - before_second;
 
     let before_third = allocations();
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("third (warm) call");
+    omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("third (warm) call");
     let third_call_allocations = allocations() - before_third;
 
     eprintln!(
@@ -149,19 +167,43 @@ fn a_warm_call_s_allocation_count_does_not_grow_with_extra_steps() {
     .expect("plans the two-op chain");
 
     // warm both plans' pipeline caches before measuring either.
-    omega::execute_plan_with_placements(&one_op_plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("warms the one-op plan");
-    omega::execute_plan_with_placements(&two_op_plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("warms the two-op plan");
+    omega::execute_plan_with_placements(
+        &one_op_plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("warms the one-op plan");
+    omega::execute_plan_with_placements(
+        &two_op_plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("warms the two-op plan");
 
     let before_one_op = allocations();
-    omega::execute_plan_with_placements(&one_op_plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("warm one-op call");
+    omega::execute_plan_with_placements(
+        &one_op_plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("warm one-op call");
     let one_op_allocations = allocations() - before_one_op;
 
     let before_two_op = allocations();
-    omega::execute_plan_with_placements(&two_op_plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("warm two-op call");
+    omega::execute_plan_with_placements(
+        &two_op_plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("warm two-op call");
     let two_op_allocations = allocations() - before_two_op;
 
     eprintln!("one_op_allocations={one_op_allocations} two_op_allocations={two_op_allocations}");
@@ -225,9 +267,7 @@ fn a_warm_plan_hit_s_allocations_are_named_by_size() {
     let third_call_sizes = recorded_sizes();
     third.into_scratch(&mut recycle_pool);
 
-    eprintln!(
-        "warm_call_allocations={warm_call_allocations} warm_call_sizes={warm_call_sizes:?}"
-    );
+    eprintln!("warm_call_allocations={warm_call_allocations} warm_call_sizes={warm_call_sizes:?}");
     eprintln!(
         "third_call_allocations={third_call_allocations} third_call_sizes={third_call_sizes:?}"
     );
@@ -314,8 +354,14 @@ fn a_warm_plan_hit_reuses_a_resident_block_s_device_buffer() {
         .expect("plans the one-op resident chain");
     plan.mark_resident(&std::collections::BTreeSet::from(["weight"]));
 
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("first (cold) call warms the plan's pipeline cache and uploads the resident block");
+    omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("first (cold) call warms the plan's pipeline cache and uploads the resident block");
 
     reset();
     let reused = omega::execute_plan_with_placements(
@@ -345,12 +391,18 @@ fn a_warm_plan_hit_reuses_a_resident_block_s_device_buffer() {
 
     eprintln!("reused_allocations={reused_allocations} rebuilt_allocations={rebuilt_allocations}");
     assert_eq!(
-        reused.get(identity).expect("identity node is the sole output").0,
+        reused
+            .get(identity)
+            .expect("identity node is the sole output")
+            .0,
         &block,
         "the reused device buffer must still read back the correct content"
     );
     assert_eq!(
-        rebuilt.get(identity).expect("identity node is the sole output").0,
+        rebuilt
+            .get(identity)
+            .expect("identity node is the sole output")
+            .0,
         &moved_block,
         "an address-moved, forced-rebuild call must read back the NEW content, not a stale \
          buffer left over from the reused call"
@@ -385,14 +437,32 @@ fn a_numeric_policy_change_that_leaves_math_mode_unchanged_still_re_resolves() {
         .expect("plans the two-step identity chain");
 
     plan.set_numeric_policy(proxima_tensor::NumericPolicy::FusedNoReassociation);
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("cold call resolves under FusedNoReassociation");
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("first warm call under FusedNoReassociation");
+    omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("cold call resolves under FusedNoReassociation");
+    omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("first warm call under FusedNoReassociation");
 
     let before_warm_baseline = allocations();
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("second warm call establishes the steady-state floor");
+    omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("second warm call establishes the steady-state floor");
     let warm_baseline_allocations = allocations() - before_warm_baseline;
 
     assert_eq!(
@@ -410,8 +480,14 @@ fn a_numeric_policy_change_that_leaves_math_mode_unchanged_still_re_resolves() {
     );
 
     let before_transition = allocations();
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("first call after the numeric-policy change");
+    omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("first call after the numeric-policy change");
     let transition_call_allocations = allocations() - before_transition;
 
     eprintln!(
@@ -427,8 +503,14 @@ fn a_numeric_policy_change_that_leaves_math_mode_unchanged_still_re_resolves() {
     );
 
     let before_second_warm = allocations();
-    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[], &mut Vec::new())
-        .expect("second call after the policy change, steady-state again");
+    omega::execute_plan_with_placements(
+        &plan,
+        &[QuantizedBlock::Float32(&block)],
+        &[],
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("second call after the policy change, steady-state again");
     let second_warm_allocations = allocations() - before_second_warm;
 
     assert_eq!(

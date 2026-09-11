@@ -298,7 +298,6 @@ fn fsm_produces_identical_results_across_arbitrary_chunk_boundaries() {
     }
 }
 
-
 fn parse_via_generic_driver(bytes: &[u8], chunk_size: usize) -> Result<ParsedGguf, GgufError> {
     use proxima_primitives::pipe::sans_io::drive_to_completion;
 
@@ -308,19 +307,23 @@ fn parse_via_generic_driver(bytes: &[u8], chunk_size: usize) -> Result<ParsedGgu
     let mut tensors = Vec::new();
     let mut completion = None;
 
-    drive_to_completion(&mut parser, bytes.chunks(chunk_size.max(1)), |event| match event {
-        GgufEvent::Header {
-            version,
-            tensor_count,
-            kv_count,
-        } => header = Some((version, tensor_count, kv_count)),
-        GgufEvent::Metadata { key, value } => metadata.push((key, value)),
-        GgufEvent::Tensor(tensor) => tensors.push(tensor),
-        GgufEvent::Complete {
-            data_offset,
-            alignment,
-        } => completion = Some((data_offset, alignment)),
-    })?;
+    drive_to_completion(
+        &mut parser,
+        bytes.chunks(chunk_size.max(1)),
+        |event| match event {
+            GgufEvent::Header {
+                version,
+                tensor_count,
+                kv_count,
+            } => header = Some((version, tensor_count, kv_count)),
+            GgufEvent::Metadata { key, value } => metadata.push((key, value)),
+            GgufEvent::Tensor(tensor) => tensors.push(tensor),
+            GgufEvent::Complete {
+                data_offset,
+                alignment,
+            } => completion = Some((data_offset, alignment)),
+        },
+    )?;
 
     let (version, tensor_count, kv_count) = header.ok_or(GgufError::TruncatedInput)?;
     let (data_offset, alignment) = completion.ok_or(GgufError::TruncatedInput)?;
@@ -1400,7 +1403,9 @@ mod real_file {
             // false-positive assertion here would be exactly the shortcut
             // principle 6 rules out.
             assert!(
-                q_range.start < q_range.end && k_range.start < k_range.end && v_range.start < v_range.end,
+                q_range.start < q_range.end
+                    && k_range.start < k_range.end
+                    && v_range.start < v_range.end,
                 "layer {layer}: every tensor's declared byte range must be non-empty"
             );
         }

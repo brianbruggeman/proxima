@@ -266,8 +266,11 @@ mod tests {
 
     #[test]
     fn reassociating_rewrite_rejected_under_bit_exact_policy() {
-        let error = admit(NumericPolicy::bit_exact(), NumericRewrite::ContextChunkMerge)
-            .expect_err("context-chunk merge reassociates and needs the reassociation permission");
+        let error = admit(
+            NumericPolicy::bit_exact(),
+            NumericRewrite::ContextChunkMerge,
+        )
+        .expect_err("context-chunk merge reassociates and needs the reassociation permission");
         assert_eq!(
             error,
             TensorError::NumericPolicyTooStrict {
@@ -299,8 +302,11 @@ mod tests {
     /// with the identical shape.
     #[test]
     fn context_split_merge_rejected_under_bit_exact_policy() {
-        let error = admit(NumericPolicy::bit_exact(), NumericRewrite::ContextSplitMerge)
-            .expect_err("a cross-threadgroup online-softmax merge reassociates the fold");
+        let error = admit(
+            NumericPolicy::bit_exact(),
+            NumericRewrite::ContextSplitMerge,
+        )
+        .expect_err("a cross-threadgroup online-softmax merge reassociates the fold");
         assert_eq!(
             error,
             TensorError::NumericPolicyTooStrict {

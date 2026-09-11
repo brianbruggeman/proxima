@@ -117,7 +117,11 @@ pub trait ByteStreamParser {
 ///
 /// The first [`ByteStreamParser::Error`] any `feed`d chunk's `poll` or the
 /// final `finish` call surfaces.
-pub fn drive_to_completion<P, I, F>(parser: &mut P, chunks: I, mut on_event: F) -> Result<(), P::Error>
+pub fn drive_to_completion<P, I, F>(
+    parser: &mut P,
+    chunks: I,
+    mut on_event: F,
+) -> Result<(), P::Error>
 where
     P: ByteStreamParser,
     I: IntoIterator,

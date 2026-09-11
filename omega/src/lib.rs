@@ -61,8 +61,9 @@ pub use cuda::{CudaGridSpec, CudaKernel, WARP_SIZE, emit_cuda};
 pub use error::EmitError;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use metal::{
-    DispatchType, MathMode, MetalError, Plan, execute, execute_plan, execute_plan_named,
-    page_size, plan, plan_named,
+    DispatchType, MathMode, MetalError, Plan, checkpoint_mmap_resident_pages,
+    discard_checkpoint_mmap_range, discard_checkpoint_mmap_range_immediate, execute, execute_plan,
+    execute_plan_named, page_size, plan, plan_named,
 };
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 pub use metal::{
@@ -81,10 +82,11 @@ pub use metal::{
 #[cfg(feature = "alloc")]
 pub use msl::{
     BF16_UNPACK_MSL, BFLOAT16_BLOCK_BYTES, BFLOAT16_BLOCK_ELEMENTS, Binding, FLOAT16_BLOCK_BYTES,
-    FLOAT16_BLOCK_ELEMENTS, GridSpec, Kernel, PackedCodec, PackedOperands, Q3K_BLOCK_BYTES,
-    Q3K_PAIR_DOT_MSL, Q3K_UNPACK_MSL, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS, Q4_0_UNPACK_MSL,
-    Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, Q4K_UNPACK_MSL, Q5K_BLOCK_BYTES, Q5K_UNPACK_MSL,
-    Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, Q8_0_UNPACK_MSL, emit,
+    FLOAT16_BLOCK_ELEMENTS, GridSpec, Kernel, PackedCodec, PackedOperands, Q2K_BLOCK_BYTES,
+    Q2K_BLOCK_ELEMENTS, Q2K_UNPACK_MSL, Q3K_BLOCK_BYTES, Q3K_PAIR_DOT_MSL, Q3K_UNPACK_MSL,
+    Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS, Q4_0_UNPACK_MSL, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS,
+    Q4K_UNPACK_MSL, Q5K_BLOCK_BYTES, Q5K_UNPACK_MSL, Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL,
+    Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, Q8_0_UNPACK_MSL, emit,
 };
 #[cfg(feature = "wgpu-backend")]
 pub use wgpu_driver::{

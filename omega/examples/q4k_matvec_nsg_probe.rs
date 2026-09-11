@@ -163,7 +163,12 @@ fn run() {
     // `expected_output`. The bisection in this file's module doc proved
     // this, not `cpu::evaluate_quantized`, is the trustworthy reference at
     // these row counts.
-    fn independent_reference(packed: &[u8], in_dim: usize, out_dim: usize, activation: &[f32]) -> Vec<f32> {
+    fn independent_reference(
+        packed: &[u8],
+        in_dim: usize,
+        out_dim: usize,
+        activation: &[f32],
+    ) -> Vec<f32> {
         let blocks_per_row = in_dim / QK_K;
         let mut expected = Vec::with_capacity(out_dim);
         for row_packed in packed.chunks_exact(blocks_per_row * BLOCK_BYTES) {
@@ -177,8 +182,11 @@ fn run() {
 
     fn mean_stddev(samples: &[f64]) -> (f64, f64) {
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-        let variance =
-            samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
         (mean, variance.sqrt())
     }
 
@@ -230,15 +238,24 @@ fn run() {
         let metal = omega::execute_plan(&plan, &blocks).expect("metal executes");
         let cpu_root = cpu.root();
         let metal_root = metal.root();
-        assert_eq!(cpu_root.len(), rows as usize, "{label}: cpu produced no output");
-        assert_eq!(metal_root.len(), rows as usize, "{label}: metal produced no output");
+        assert_eq!(
+            cpu_root.len(),
+            rows as usize,
+            "{label}: cpu produced no output"
+        );
+        assert_eq!(
+            metal_root.len(),
+            rows as usize,
+            "{label}: metal produced no output"
+        );
         let mut max_metal_relative = 0.0f32;
         let mut max_cpu_relative = 0.0f32;
         for ((&cpu_value, &metal_value), &reference_value) in
             cpu_root.iter().zip(metal_root.iter()).zip(reference.iter())
         {
             let scale = reference_value.abs().max(f32::MIN_POSITIVE);
-            max_metal_relative = max_metal_relative.max((reference_value - metal_value).abs() / scale);
+            max_metal_relative =
+                max_metal_relative.max((reference_value - metal_value).abs() / scale);
             max_cpu_relative = max_cpu_relative.max((reference_value - cpu_value).abs() / scale);
         }
         // epsilon widens with `k` the same way `metal_vs_cpu.rs`'s own
@@ -280,7 +297,8 @@ fn run() {
             let _ = omega::metal::GPU_EXEC_CALLS.snapshot_and_reset();
             let _ = omega::metal::GPU_EXEC_TICKS.snapshot_and_reset();
             omega::execute_plan(&plan, &blocks).expect("diag executes");
-            let block_upload_ms = ticks_to_nanos(omega::metal::BLOCK_UPLOAD_TICKS.get()) as f64 / 1e6;
+            let block_upload_ms =
+                ticks_to_nanos(omega::metal::BLOCK_UPLOAD_TICKS.get()) as f64 / 1e6;
             let gpu_exec_ms = ticks_to_nanos(omega::metal::GPU_EXEC_TICKS.get()) as f64 / 1e6;
             println!(
                 "  per-call phase: block_upload_ms={block_upload_ms:.4} gpu_exec_ms={gpu_exec_ms:.4} \

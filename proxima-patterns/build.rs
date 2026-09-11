@@ -9,7 +9,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use proxima_build::sizing::{require_nonzero, SizingSource};
+use proxima_build::sizing::{SizingSource, require_nonzero};
 
 fn require_pow2(name: &str, value: usize) -> usize {
     assert!(
@@ -20,7 +20,9 @@ fn require_pow2(name: &str, value: usize) -> usize {
 }
 
 fn resolve(source: &SizingSource, section: &str, key: &str) -> i64 {
-    source.resolve_int(section, key).unwrap_or_else(|err| panic!("{err}"))
+    source
+        .resolve_int(section, key)
+        .unwrap_or_else(|err| panic!("{err}"))
 }
 
 #[allow(clippy::expect_used)]
@@ -34,14 +36,23 @@ fn main() {
     let source = SizingSource::load(&manifest_dir, "proxima-notify.toml", "PROXIMA_NOTIFY")
         .unwrap_or_else(|err| panic!("{err}"));
 
-    let label_key_max = require_nonzero("alert.label_key_max", resolve(&source, "alert", "label_key_max"));
-    let label_val_max = require_nonzero("alert.label_val_max", resolve(&source, "alert", "label_val_max"));
+    let label_key_max = require_nonzero(
+        "alert.label_key_max",
+        resolve(&source, "alert", "label_key_max"),
+    );
+    let label_val_max = require_nonzero(
+        "alert.label_val_max",
+        resolve(&source, "alert", "label_val_max"),
+    );
     let labels_max = require_pow2(
         "alert.labels_max",
         require_nonzero("alert.labels_max", resolve(&source, "alert", "labels_max")),
     );
     let kind_max = require_nonzero("alert.kind_max", resolve(&source, "alert", "kind_max"));
-    let payload_max = require_nonzero("alert.payload_max", resolve(&source, "alert", "payload_max"));
+    let payload_max = require_nonzero(
+        "alert.payload_max",
+        resolve(&source, "alert", "payload_max"),
+    );
 
     let question_max = require_nonzero(
         "guidance.question_max",

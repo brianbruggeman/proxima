@@ -130,7 +130,14 @@ mod probe {
         }
     }
 
-    fn report(label: &str, shape: &str, m: usize, macs_per_pass: f64, triad_bytes: f64, timed: &Timed) {
+    fn report(
+        label: &str,
+        shape: &str,
+        m: usize,
+        macs_per_pass: f64,
+        triad_bytes: f64,
+        timed: &Timed,
+    ) {
         let gmac_s = macs_per_pass / (timed.mean_ns / 1e9) / 1e9;
         let gb_s = triad_bytes / (timed.mean_ns / 1e9) / 1e9;
         let range = if timed.cov_pct > 5.0 {
@@ -161,9 +168,10 @@ mod probe {
         let (packed_b, col_tiles) = pack_panels(&b_full, k_total, n, tile_cols);
         let row_tiles = m / ROWS;
         let macs_per_pass = (ROWS * VECS * 4 * k_total * row_tiles * col_tiles) as f64;
-        let triad_bytes =
-            ((k_total * tile_cols * col_tiles) + (m * k_total) + (row_tiles * ROWS * tile_cols * col_tiles)) as f64
-                * 4.0;
+        let triad_bytes = ((k_total * tile_cols * col_tiles)
+            + (m * k_total)
+            + (row_tiles * ROWS * tile_cols * col_tiles)) as f64
+            * 4.0;
         let a_needed = &a_full[..row_tiles * ROWS * k_total];
         let timed = time_calls(|_index| {
             run_shape_pass::<ROWS, VECS>(a_needed, k_total, row_tiles, &packed_b, col_tiles);
@@ -191,9 +199,10 @@ mod probe {
             .collect();
         let col_tiles = buffers[0].1;
         let macs_per_pass = (ROWS * VECS * 4 * k_total * row_tiles * col_tiles) as f64;
-        let triad_bytes =
-            ((k_total * tile_cols * col_tiles) + (m * k_total) + (row_tiles * ROWS * tile_cols * col_tiles)) as f64
-                * 4.0;
+        let triad_bytes = ((k_total * tile_cols * col_tiles)
+            + (m * k_total)
+            + (row_tiles * ROWS * tile_cols * col_tiles)) as f64
+            * 4.0;
 
         // untimed warm-up over the WHOLE rotation set -- forces first-touch
         // page faults without leaving any single buffer resident, since
@@ -283,7 +292,9 @@ mod probe {
 
         let sentences: Vec<Vec<SentenceNode>> = (0..SENTENCE_ROTATION)
             .map(|sentence_index| {
-                build_sentence(0x5000_0000u32.wrapping_add((sentence_index as u32).wrapping_mul(0x9e37_79b9)))
+                build_sentence(
+                    0x5000_0000u32.wrapping_add((sentence_index as u32).wrapping_mul(0x9e37_79b9)),
+                )
             })
             .collect();
 
@@ -292,7 +303,9 @@ mod probe {
         for node in &sentences[0] {
             let row_tiles = M_FIXED / ROWS;
             let macs = (ROWS * VECS * 4 * node.k_total * row_tiles * node.col_tiles) as f64;
-            let bytes = ((node.k_total * VECS * 4 * node.col_tiles) + (M_FIXED * node.k_total)) as f64 * 4.0;
+            let bytes = ((node.k_total * VECS * 4 * node.col_tiles) + (M_FIXED * node.k_total))
+                as f64
+                * 4.0;
             macs_per_sentence += macs;
             bytes_per_sentence += bytes;
         }
@@ -369,8 +382,7 @@ mod probe {
 
 #[cfg(target_arch = "aarch64")]
 fn main() {
-    let gate_state =
-        std::env::var("LAT_GATE_STATE").unwrap_or_else(|_| "unlabeled".to_string());
+    let gate_state = std::env::var("LAT_GATE_STATE").unwrap_or_else(|_| "unlabeled".to_string());
     probe::run(&gate_state);
 }
 

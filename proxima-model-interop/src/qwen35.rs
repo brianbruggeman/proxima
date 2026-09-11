@@ -17,17 +17,17 @@
 //! interleaving [`Qwen35LayerKind::Attention`]/[`Qwen35LayerKind::Ssm`]
 //! layers per that same per-layer marker.
 
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_tensor::op::{Extent, NodeId, Op};
-use proxima_tensor::spec::{embedding_lookup, input_leaf};
-use proxima_tensor::DType;
+use proxima_gguf::value::{MetadataArray, MetadataValue};
+use proxima_tensor::op::{NodeId, Op};
 
 use crate::bind::{
-    BoundWeights, bind_dense, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as, find_tensor,
-    metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or,
+    BoundWeights, bind_dense, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as,
+    find_tensor, metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or,
     vocab_from_token_embedding,
 };
 use crate::error::InteropError;
@@ -171,7 +171,8 @@ pub fn qwen35_architecture_from_metadata(
     let embedding = metadata_u32(parsed, &format!("{architecture}.embedding_length"))?;
     let feed_forward = metadata_u32(parsed, &format!("{architecture}.feed_forward_length"))?;
     let query_heads = metadata_u32(parsed, &format!("{architecture}.attention.head_count"))?;
-    let kv_heads = metadata_u32(parsed, &format!("{architecture}.attention.head_count_kv"))?;
+    let kv_heads =
+        metadata_u32_nonzero_uniform(parsed, &format!("{architecture}.attention.head_count_kv"))?;
     let block_count = metadata_u32(parsed, &format!("{architecture}.block_count"))?;
     let head_dim = metadata_u32_optional_or(
         parsed,
@@ -195,8 +196,7 @@ pub fn qwen35_architecture_from_metadata(
     let ssm_conv_kernel = metadata_u32(parsed, &format!("{architecture}.ssm.conv_kernel"))?;
     let ssm_state_size = metadata_u32(parsed, &format!("{architecture}.ssm.state_size"))?;
     let ssm_group_count = metadata_u32(parsed, &format!("{architecture}.ssm.group_count"))?;
-    let ssm_time_step_rank =
-        metadata_u32(parsed, &format!("{architecture}.ssm.time_step_rank"))?;
+    let ssm_time_step_rank = metadata_u32(parsed, &format!("{architecture}.ssm.time_step_rank"))?;
     let ssm_inner_size = metadata_u32(parsed, &format!("{architecture}.ssm.inner_size"))?;
 
     let layer_kinds = (0..block_count)
@@ -222,6 +222,41 @@ pub fn qwen35_architecture_from_metadata(
         ssm_inner_size,
         layer_kinds,
     })
+}
+
+fn metadata_u32_nonzero_uniform(parsed: &ParsedGguf, key: &str) -> Result<u32, InteropError> {
+    let mut values = BTreeSet::new();
+    match parsed.metadata_value(key) {
+        Some(MetadataValue::U32(value)) => return Ok(*value),
+        Some(MetadataValue::I32(value)) => {
+            let value = u32::try_from(*value)
+                .map_err(|_| InteropError::MissingMetadataKey { key: key.into() })?;
+            if value != 0 {
+                values.insert(value);
+            }
+        }
+        Some(MetadataValue::Array(MetadataArray::U32(array))) => {
+            values.extend(array.iter().copied().filter(|value| *value != 0));
+        }
+        Some(MetadataValue::Array(MetadataArray::I32(array))) => {
+            for value in array {
+                let value = u32::try_from(*value)
+                    .map_err(|_| InteropError::MissingMetadataKey { key: key.into() })?;
+                if value != 0 {
+                    values.insert(value);
+                }
+            }
+        }
+        _ => return Err(InteropError::MissingMetadataKey { key: key.into() }),
+    }
+    match values.len() {
+        1 => Ok(values.into_iter().next().unwrap_or(0)),
+        0 => Err(InteropError::MissingMetadataKey { key: key.into() }),
+        distinct_values => Err(InteropError::HeterogeneousNonzeroMetadataArray {
+            key: key.into(),
+            distinct_values,
+        }),
+    }
 }
 
 /// Runs [`crate::bind::bind_dense`]/[`bind_matmul_weight`]
@@ -367,7 +402,12 @@ pub fn bind_qwen35_weights<'file>(
                     format!("blk.{layer}.ssm_beta.weight"),
                     &mut state,
                 )?;
-                for suffix in ["ssm_a", "ssm_conv1d.weight", "ssm_norm.weight", "ssm_out.weight"] {
+                for suffix in [
+                    "ssm_a",
+                    "ssm_conv1d.weight",
+                    "ssm_norm.weight",
+                    "ssm_out.weight",
+                ] {
                     bind_dense(
                         parsed,
                         file_bytes,
@@ -560,34 +600,25 @@ pub fn qwen35_ssm_state_bytes(shape: Qwen35SsmShape, block_count: u32) -> u64 {
 pub fn qwen35_forward_program(
     architecture: &Qwen35Architecture,
 ) -> Result<(Vec<Op>, NodeId, Vec<proxima_tensor::spec::Qwen35LayerRoots>), InteropError> {
-    let (mut program, logits_root, layer_roots) = proxima_tensor::spec::qwen35_forward_program(
-        architecture.vocab,
-        architecture.embedding,
-        architecture.feed_forward,
-        architecture.query_heads,
-        architecture.kv_heads,
-        architecture.head_dim,
-        architecture.attn_head_dim,
-        architecture.block_count,
-        architecture.full_attention_interval,
-        architecture.ssm_state_size,
-        architecture.ssm_time_step_rank,
-        architecture.ssm_group_count,
-        architecture.ssm_inner_size,
-        architecture.ssm_conv_kernel,
-        architecture.rms_epsilon,
-    )?;
-    // `proxima_tensor::spec::qwen35_forward_program`'s own doc/test: its
-    // `logits` root is always `[tokens, vocab]`, never gathered -- unlike
-    // the dense path's `last_row_only` flag (`crate::dense::DenseArch`'s
-    // own doc), this function has no equivalent knob, so every registry
-    // consumer of `BoundProgram::logits_root` (that field's own doc:
-    // exactly one row) gets it gathered here instead, off the same
-    // host-supplied `lm_head_row` leaf (`crate::generate`'s decode loop
-    // feeds it `new_count - 1` unconditionally, every step, every
-    // architecture) the dense path's own gather already reads.
-    let lm_head_row = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Static(1)], "lm_head_row");
-    let logits_root = embedding_lookup(&mut program, logits_root, lm_head_row);
+    let (program, logits_root, layer_roots) =
+        proxima_tensor::spec::qwen35_forward_program_with_last_row(
+            architecture.vocab,
+            architecture.embedding,
+            architecture.feed_forward,
+            architecture.query_heads,
+            architecture.kv_heads,
+            architecture.head_dim,
+            architecture.attn_head_dim,
+            architecture.block_count,
+            architecture.full_attention_interval,
+            architecture.ssm_state_size,
+            architecture.ssm_time_step_rank,
+            architecture.ssm_group_count,
+            architecture.ssm_inner_size,
+            architecture.ssm_conv_kernel,
+            architecture.rms_epsilon,
+            true,
+        )?;
     Ok((program, logits_root, layer_roots))
 }
 
@@ -627,6 +658,10 @@ impl crate::architecture::Architecture for Qwen35Arch {
             feed_forward: qwen_architecture.feed_forward,
             query_heads: qwen_architecture.query_heads,
             kv_heads: qwen_architecture.kv_heads,
+            kv_heads_by_layer: vec![
+                qwen_architecture.kv_heads;
+                qwen_architecture.block_count as usize
+            ],
             head_dim: qwen_architecture.head_dim,
             block_count: qwen_architecture.block_count,
             // Qwen3.5 never routes FFN through experts
@@ -647,6 +682,8 @@ impl crate::architecture::Architecture for Qwen35Arch {
             logits_root,
             hidden_root: None,
             layer_roots,
+            qwen35moe_layer_diagnostics: Vec::new(),
+            router_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
             // gated-DeltaNet's `s`-axis reduce sums positions instead of
             // stepping through them (`BoundProgram::single_position_step`'s

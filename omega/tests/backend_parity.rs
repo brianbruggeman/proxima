@@ -12,6 +12,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
+#[cfg(feature = "instrument")]
+use omega::metal::metal_stage_totals;
 use proxima_tensor::NumericPolicy;
 
 mod support;
@@ -24,8 +26,16 @@ fn the_wrapper_agrees_with_itself_across_cpu_and_metal() {
     let (program, symbols, roots, owned) = real_forward_fixture();
     let named = as_named_blocks(&owned);
 
-    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &symbols, &named, &roots, NumericPolicy::default())
-        .expect("omega::backend plans the real forward on cpu");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the real forward on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
         .expect("omega::backend runs the real forward on cpu");
 
@@ -81,8 +91,16 @@ fn the_same_process_runs_one_plan_on_cpu_and_the_next_on_metal() {
     let (program, symbols, roots, owned) = real_forward_fixture();
     let named = as_named_blocks(&owned);
 
-    let mut cpu_plan =
-        plan_named(Engine::Cpu, None, &program, &symbols, &named, &roots, NumericPolicy::default()).expect("cpu plans first");
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("cpu plans first");
     let _cpu = execute_plan_named(&mut cpu_plan, &named).expect("cpu executes first");
 
     let mut metal_plan = plan_named(
@@ -97,4 +115,57 @@ fn the_same_process_runs_one_plan_on_cpu_and_the_next_on_metal() {
     .expect("metal plans immediately after, same process");
     let _metal =
         execute_plan_named(&mut metal_plan, &named).expect("metal executes immediately after");
+}
+
+#[cfg(feature = "instrument")]
+#[test]
+fn metal_wrapper_reuses_resolved_dispatches_and_output_storage() {
+    let (program, symbols, roots, owned) = real_forward_fixture();
+    let named = as_named_blocks(&owned);
+
+    let raw_plan =
+        omega::metal::plan_named(&program, &symbols, &named, &roots, NumericPolicy::default())
+            .expect("raw Metal plan resolves the real forward");
+    let _ = metal_stage_totals();
+    let raw = omega::metal::execute_plan_named(&raw_plan, &named)
+        .expect("the unplaced executor runs the real forward");
+    let raw_totals = metal_stage_totals();
+
+    let mut stable_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Metal),
+        &program,
+        &symbols,
+        &named,
+        &roots,
+        NumericPolicy::default(),
+    )
+    .expect("backend wrapper plans the same real forward");
+    let _ = metal_stage_totals();
+    let first = execute_plan_named(&mut stable_plan, &named)
+        .expect("the stable executor runs the first step");
+    let first_totals = metal_stage_totals();
+    let second = execute_plan_named(&mut stable_plan, &named)
+        .expect("the stable executor runs the second step");
+    let second_totals = metal_stage_totals();
+
+    assert_eq!(first.root(), raw.root());
+    assert_eq!(second.root(), raw.root());
+    assert!(
+        raw_totals.emit_calls > 0,
+        "degenerate gate: the old unplaced executor must emit each resolved op"
+    );
+    assert_eq!(first_totals.emit_calls, 0);
+    assert_eq!(second_totals.emit_calls, 0);
+    assert!(
+        first_totals.output_buffer_allocations > 0,
+        "the first stable execution must build its plan-owned arena"
+    );
+    assert!(
+        second_totals.output_buffer_allocations < raw_totals.output_buffer_allocations,
+        "the second execution must reuse plan-owned output buffers; remaining allocations \
+         are per-call gather fault buffers (raw={} stable={})",
+        raw_totals.output_buffer_allocations,
+        second_totals.output_buffer_allocations,
+    );
 }

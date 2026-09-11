@@ -20499,7 +20499,7 @@ Round 1 is a cold-process outlier for both arms (each round re-execs the binary)
 
 ## ROW 276 -- `cooperative_reduce.min_len` short-reduce serial route, measured net loss
 
-**Card:** `perf/short-reduce-serial-route`. **Worktree/branch/commit:** `proxima-wt-land-shortred`/`land/shortred` (landed to `main`). **Feature:** build-time `[cooperative_reduce].min_len` sizing key (`omega-runtime.toml`, `OMEGA_COOPERATIVE_REDUCE_MIN_LEN` override), default `0`.
+**Card:** `perf/short-reduce-serial-route`. **Worktree/branch/commit:** `proxima-wt-land-shortred`/`land/shortred` (landed to `main`). **Feature:** build-time `[cooperative_reduce].min_len` sizing key (`omega-runtime.toml`, `OMEGA_COOPERATIVE_REDUCE_MIN_LEN` override), default `2` for Qwen35's unit-axis reductions; larger thresholds retain the original attention regression boundary.
 
 **Hypothesis.** `msl::render_reduce` always emits the `SIMD_WIDTH`(32)-lane cooperative fold for a `Keep::Reduce` op that clears the op/gather gate (`reduce_is_cooperative`), regardless of how many elements each output actually folds over. Attention's short reduces -- `attended` (34-long), `score_even`/`score_odd` (64-long) -- launch 32 lanes per output to do 34 or 64 elements of real work, most lanes mostly idle. Routing those below a length threshold to the one-thread-per-output serial fold (`push_serial_reduce_body`) instead should cut the wasted-lane overhead and win.
 
@@ -28411,3 +28411,865 @@ Next lever (ROW 418 ranking): the Q6K `ffn_down` reduce-cooperative at M=915 (28
 **Axes (principle 8).** Numeric -- none new. Structural -- collapses two `NodeId` parameters (`wq`, `w_gate_q`) into one (`wq_gate`) across three public builder signatures; no new type. **Sans-IO opt-sweep (principle 11):** N/A by classification -- a tensor-program builder fix, not a wire codec.
 
 Landing sha: `cc9f6f7f` (proxima `main`, fast-forwarded from `fix/qwen35-gate-split-on-packed-weight`).
+
+## ROW 432 -- qwen35 single-token prefill split no longer allocates one temporary vector per prompt position
+
+**Change.** `proxima-model-interop/src/generate.rs`'s `run_decode_loop_observed_seeded`
+now derives the split batch count and borrows each one-token slice with
+`core::slice::from_ref`, instead of constructing `Vec<Vec<u32>>` and copying every
+prompt id. The single-position GDN contract is unchanged: each prompt position
+still executes as its own length-one step; dense and ordinary decode still use the
+original whole slice. This is a default-on allocation reduction, not a graph or
+numeric rewrite.
+
+**Evidence.** `cargo check -p proxima-model-interop`: EXIT 0; `rustfmt --edition 2024
+--check proxima-model-interop/src/generate.rs`: EXIT 0. The real Qwen3.6 35B-A3B
+run remains the existing reference artifact (`/tmp/qwen35-current16.log`):
+`ttft_ms=10665`, `tokens_per_sec=0.490`, `decode_tokens_per_sec=0.684`, and the
+decoded text contains `The capital of France is **Paris**`. No timing or RSS claim
+is made for this change yet; the allocation mechanism is established by the diff,
+while end-to-end effect remains unmeasured.
+
+**Axes.** Numeric -- unchanged. Structural -- removes a per-prefill `Vec<Vec<u32>>`
+construction without adding a type or allocation. Default-off -- not applicable;
+this is a semantics-preserving hot-path cleanup. The discarded approach was keeping
+the temporary nested vectors and paying one heap allocation per prompt position.
+
+## ROW 433 -- qwen35 vocabulary projection gathers the final prefill row before `output.weight`
+
+**Change.** `qwen35_forward_program_with_last_row` now accepts a `last_row_only`
+construction flag. The interop registry uses `true`, binding the existing
+`lm_head_row` input before the final packed vocabulary reduce; the public legacy
+builder remains `false` for callers that require logits for every row. This removes
+the Qwen35-specific case where the graph computed `[prompt_rows, vocab]` and only
+then discarded all but the final row. The change reuses `embedding_lookup` and adds
+no runtime allocation or new tensor primitive.
+
+**Evidence.** `cargo check -p proxima-model-interop -p proxima-tensor`: EXIT 0;
+`cargo test -p proxima-tensor --lib qwen35_last_row_projection_has_one_output_row`: 1/1
+passed, alongside the two whole-program inference tests (2/2). The real prefill profile in ROW 418 measured `output.weight` as 14.7 s of
+43.8 s GPU time while reducing 915 rows; this code change is not timed yet, so its
+end-to-end TTFT/RSS effect remains unmeasured. The existing answer artifact remains
+`/tmp/qwen35-current16.log` (`ttft_ms=10665`, `tokens_per_sec=0.490`, decoded
+`The capital of France is **Paris**`). A release rerun after this change is in
+`/tmp/qwen35-row433-run.log`: `ttft_ms=11108`, `tokens_per_sec=0.480`,
+`decode_tokens_per_sec=0.676`, same decoded answer, and `/usr/bin/time -l`
+reported `maximum resident set size=11294277632` bytes. This is one run under a
+different loadout, so it is evidence of execution and memory footprint, not a
+before/after performance conclusion.
+
+**Axes.** Numeric -- the selected row is unchanged. Structural -- the gather moves
+ahead of the vocabulary matmul only when the explicit flag is true. The discarded
+approach was post-matmul slicing, which preserved unnecessary prompt-row work.
+
+## ROW 434 -- scoped Metal autorelease pool does not account for Qwen35 RSS
+
+**Experiment and rollback.** Wrapped the mixed-codec expert-source execution
+boundary in `objc2::rc::autoreleasepool`, then rebuilt and ran the same one-token
+Qwen35 prompt with the 0-byte DynaExq budget. The wrapper was removed after the
+cell because it did not reduce the observed resident set and added no proven
+latency benefit.
+
+**Evidence.** Control (`/tmp/qwen35-budget0.log`): TTFT 10.552 s, maximum RSS
+7,003,734,016 bytes. Pool arm (`/tmp/qwen35-autorelease-run.log`): TTFT 10.774 s,
+maximum RSS 7,036,600,320 bytes; output remained the same `"\n\n"` first token.
+The experiment therefore did not move the memory mechanism; no implementation
+claim is retained. Metal and interop checks passed before rollback.
+
+## ROW 435 -- Qwen35 memory map separates physical pressure from RSS
+
+**Observation.** A live four-token budget-zero run was captured with `vmmap` in
+`/tmp/qwen35-vmmap4.txt`. At seven seconds, the process reported a 1.8 GB
+physical footprint; the summary attributes 1.5 GB to `IOAccelerator (graphics)`
+and 355.3 MB to the medium malloc zone. The same run's final `/usr/bin/time -l`
+RSS was 7,003,734,016 bytes, while `vmmap` shows 3.7 GB of mapped-file resident
+pages and a 46.4 GB virtual map. RSS is therefore dominated by mapped
+checkpoint/file pages in this capture, while the platform physical footprint is
+below 4 GB.
+
+**Latency record.** The run produced `ttft_ms=13453` and
+`decode_tokens_per_sec=0.688`; output remained the expected reasoning prefix.
+This does not meet the latency target. The map is instrumentation only; it does
+not justify treating RSS and physical footprint as interchangeable.
+
+## ROW 436 -- Qwen35 low-only France prompt TTFT and RSS variance
+
+**Measurement.** The release `gguf_generate` binary ran three independent
+one-token requests for `What is the capital of France?` against the Qwen3.6
+35B-A3B GGUF with the pre-gather path, mixed expert sidecar, unsafe Metal
+expert sources, and a zero-byte residency budget. Each request therefore used
+only low sidecar expert copies; no high-copy promotion was enabled.
+
+**Evidence.** `/tmp/qwen35-final-variance.log` contains three generated outputs,
+each `"\\n\\n"`, and TTFT records of 10,611 ms, 10,676 ms, and 10,724 ms.
+The measured TTFT range is 10,611--10,724 ms, mean 10,670.3 ms, population
+standard deviation 46.3 ms, two standard deviations 92.6 ms, p90 10,724 ms,
+and p99 10,724 ms (nearest-rank over N=3). `/usr/bin/time -l` recorded maximum
+RSS values of 7,043,186,688; 7,015,268,352; and 7,019,200,512 bytes: range
+7,015,268,352--7,043,186,688 bytes, mean 7,025,885,184 bytes, population
+standard deviation 12,338,900 bytes, and two standard deviations 24,677,800
+bytes. `decode_tokens_per_sec` is absent because `max_tokens=1` emits no
+post-first-token interval. The answer is not exercised by this one-token
+request; `/tmp/qwen35-current16.log` remains the multi-token artifact containing
+`The capital of France is **Paris**`.
+
+**Mechanism.** `/tmp/qwen35-segments-now.log` emitted 280 router and 280 gather
+segment records: one pair for each of 40 layers and seven sequential prompt
+positions. The first router segment took 158,666 us; later router segments were
+generally 6,000--16,000 us, while gather segments were generally 22,000--33,000
+us. Prefill is executing recurrent GDN positions serially and issuing a router
+plus gather command per layer and position; low-only residency changes expert
+bytes but does not remove this schedule.
+
+**Status.** `unmeasured` for the requested target. This is a reproducible
+baseline and mechanism record, not evidence that TTFT, tok/s, or the 4 GB RSS
+target has been met.
+
+## ROW 437 -- Qwen35 eight-token low-only TTFT and decode-rate variance
+
+`/tmp/qwen35-8-variance.log` records three release runs under the same
+pre-gather, mixed-sidecar, unsafe-source, zero-byte-residency configuration.
+Each generated prefix is byte-identical through `The capital of` (the eight
+token limit ends before `Paris`). TTFT records are 10,601, 10,598, and 10,756
+ms: range 10,598--10,756 ms, mean 10,651.7 ms, population standard deviation
+73.8 ms, two standard deviations 147.6 ms, p90 10,756 ms, and p99 10,756 ms
+(nearest-rank, N=3). Decode-rate records are 0.704, 0.703, and 0.696 tokens/s:
+range 0.696--0.704, mean 0.701, population standard deviation 0.00356,
+two standard deviations 0.00712, p90 0.704, and p99 0.704 tokens/s. Maximum
+RSS records are 8,306,262,016; 8,299,020,288; and 8,294,989,824 bytes:
+range 8,294,989,824--8,306,262,016 bytes, mean 8,300,090,709 bytes,
+population standard deviation 4,663,680 bytes, and two standard deviations
+9,327,360 bytes. These records establish the current low-only serving baseline;
+they do not meet the sub-second, 20-token/s, or 4 GB targets.
+
+## ROW 438 -- Qwen35 low-only full answer execution
+
+The same release binary and zero-byte residency configuration ran the full
+16-token request. `/tmp/qwen35-answer-now.log` records `ttft_ms=10664`,
+`decode_tokens_per_sec=0.697`, and `tokens_per_sec=0.497`. The generated text
+contains `The capital of France is **Paris**`. `/usr/bin/time -l` recorded
+maximum RSS of 9,599,107,072 bytes. This is a correctness and end-to-end
+execution record under HOBBIT/DynaExq low-only substitution; it is not evidence
+that the latency, throughput, or memory targets have been met.
+
+## ROW 440 -- pre-gather toggle does not move one-token TTFT
+
+With the same model, sidecar, zero-byte residency budget, and one-token prompt,
+the pre-gather-enabled run in `/tmp/qwen35-final-variance.log` recorded TTFTs
+of 10,611--10,724 ms and RSS of 7,015,268,352--7,043,186,688 bytes across
+three runs. A pre-gather-disabled control in `/tmp/qwen35-nopregather.log`
+recorded `ttft_ms=10605`, generated the same first-token prefix `"\\n\\n"`,
+and recorded maximum RSS of 7,018,496,000 bytes. This single control is not a
+variance-qualified comparison, but it shows that the current pre-gather seam
+has not yet changed the measured first-token cost; the repeated source staging
+and serial segment schedule remain present in the enabled path.
+
+## ROW 439 -- Qwen35 low-only expert staging volume during prefill
+
+The one-token low-only run with `PROXIMA_DEBUG_EXPERT_UPLOADS=1` produced
+`/tmp/qwen35-upload-now.log`. The structured staging lines count 840 source
+stages, 4,569,169,920 payload bytes, 6,881,280 descriptor bytes, and 898,716
+microseconds of host staging time. The 840 stages correspond to three expert
+source nodes for each of the 280 gather segments. These are measured counters
+from the staging path, not shape-derived estimates. The record identifies a
+second prefill mechanism alongside the serial segment schedule: selected low
+expert payloads are re-staged for each gather segment rather than remaining a
+single device-resident table for the whole prompt. No performance conclusion
+is drawn until a persistent device-side source lifetime is compared against
+this record with the same correctness case.
+## ROW 441 -- pre-gather boolean parsing exposed its real latency/memory tradeoff
+
+The `gguf_generate` launcher now parses `PROXIMA_QWEN35MOE_PRE_GATHER` by
+value (`1`, `true`, `yes`, or `on`) instead of treating mere variable presence
+as enabled. The previous `VAR=0` control was invalid. After rebuilding the
+release example, two one-token runs used identical model, sidecar, and
+zero-byte budget settings: `VAR=0` recorded TTFT 6,923 ms and RSS
+8,869,593,088 bytes; `VAR=1` recorded TTFT 10,918 ms and RSS 7,052,050,432
+bytes. Both emitted the same first-token prefix `"\\n\\n"`. The corrected
+control shows the current seam trades roughly 1.8 GB lower RSS for roughly
+4.0 s higher TTFT in this single run; this is a measurement, not a variance-
+qualified decision.
+
+## ROW 442 -- four-gigabyte GPU limit does not bound process RSS
+
+The release binary was run with `PROXIMA_GPU_MEMORY_LIMIT_BYTES=4294967296`,
+the low-only sidecar configuration, and the one-token France prompt. The run
+completed with first-token prefix `"\\n\\n"`, `ttft_ms=10866`, maximum RSS
+7,028,736,000 bytes, and peak memory footprint 1,952,489,152 bytes in
+`/tmp/qwen35-4gb.log`. The configured GPU limit therefore does not establish
+a 4 GB process-RSS bound: the allocator's reported physical footprint and
+`/usr/bin/time` RSS remain different quantities. This record prevents treating
+the limit flag as proof of the user's memory envelope.
+## ROW 443 -- full-answer toggle confirms the residency/latency tradeoff
+
+After the launcher boolean fix, two 16-token runs used the same Qwen3.6
+35B-A3B GGUF, sidecar, GPU backend, and zero-byte residency budget. With
+`PROXIMA_QWEN35MOE_PRE_GATHER=0`, `/tmp/qwen35-full-toggle-0.log` recorded
+TTFT 6,791 ms, decode rate 0.972 tokens/s, overall rate 0.706 tokens/s, and
+maximum RSS 11,007,229,952 bytes; its text answered `The capital of France is
+Paris.`. With the flag set to `1`, `/tmp/qwen35-full-toggle-1.log` recorded
+TTFT 10,930 ms, decode rate 0.678 tokens/s, overall rate 0.484 tokens/s, and
+maximum RSS 9,538,306,048 bytes; its text contained the expected formatted
+answer `The capital of France is **Paris**`. This single pair is not a
+variance-qualified decision, but it directly records the current cost of the
+low-memory seam: lower observed RSS with slower prefill and decode under the
+same model invocation.
+
+## ROW 444 -- DynaExq 500 MiB budget end-to-end sample
+
+The same release binary, model, sidecar, prompt, GPU backend, and pre-gather
+configuration ran with `PROXIMA_QWEN35MOE_RESIDENCY_BUDGET_BYTES=524288000`.
+`/tmp/qwen35-budget500-now.log` records the formatted answer
+`The capital of France is **Paris**`, TTFT 11,254 ms, decode rate 0.661
+tokens/s, overall rate 0.471 tokens/s, and maximum RSS 11,249,434,624 bytes.
+This single run records the policy's configured budget but not a budget-sized
+process RSS: the source staging and checkpoint mappings remain outside that
+counter. It is an end-to-end DynaExq correctness/performance sample, not a
+variance-qualified result.
+
+## ROW 445 -- routed source cache has no observed reuse during prefill
+
+The instrumented release run in `/tmp/qwen35-cache-now.log` enabled both
+`PROXIMA_DEBUG_EXPERT_SOURCE_CACHE` and `PROXIMA_DEBUG_EXPERT_UPLOADS`. It
+emitted 840 `expert source staged` records and zero `expert source cache hit`
+records. The run used the same seven-token France prompt and low-only sidecar
+configuration; its first-token prefix was `"\\n\\n"` and TTFT was 14,276 ms
+with debug logging enabled. The cache key includes the selected expert IDs,
+so the observed routing sequence produced no reusable complete source table.
+This is an instrumented run with logging overhead; it establishes cache reuse
+frequency, not a latency comparison.
+
+## ROW 446 -- per-step Metal attribution exposes routed cache misses
+
+After rebuilding with the instrumented attribution event, a low-only one-token
+run with `PROXIMA_DEBUG_METAL_STAGES=1` produced
+`/tmp/qwen35-stage-counters.log`. Its step-zero record reports
+`expert_source_cache_hits=0`, `expert_source_cache_misses=120`,
+`block_upload_calls=732`, and `gpu_exec_ms=859.651916`; the run's TTFT was
+10,715 ms and its first-token prefix was `"\\n\\n"`. The 120 misses are the
+three routed expert source nodes across 40 layers for the measured step. The
+record separates GPU execution from the remaining prefill cost and provides
+the baseline for a persistent per-expert device table.
+
+## ROW 447 -- routed source cache remains cold through decode
+
+The instrumented three-token low-only run in `/tmp/qwen35-stage3.log` emitted
+one attribution record for each generated step. Steps 0, 1, and 2 each report
+`expert_source_cache_hits=0`, `expert_source_cache_misses=120`,
+`block_upload_calls=732`, and GPU execution times of 849.618666,
+945.620333, and 918.583708 ms. The generated prefix is `"\\n\\n<think>\\n\\n"`,
+TTFT is 10,919 ms, and decode rate is 0.651 tokens/s. The zero-hit result
+persists after the prompt, so the complete-selection cache is cold in steady
+state as well as prefill; a persistent per-expert or slot-level representation
+is required to make a double-buffer design reusable.
+
+## ROW 448 -- cache misses persist across the full generated response
+
+The 16-token instrumented low-only run in `/tmp/qwen35-stage16.log` emitted
+records for every generated step (N=16). Every step reports zero source-cache
+hits, 120 misses, and 732 block uploads. GPU execution per step ranges from
+828.560458 to 912.624000 ms. The full output contains
+`The capital of France is **Paris**`; TTFT is 10,753 ms and decode rate is
+0.695 tokens/s. The cache does not warm over the response, so the measured
+steady-state cost is not a one-time prefill artifact.
+
+## ROW 450 -- real Metal serving run records latency fields after staging reuse
+
+The available Qwen3 1.7B Q8_0 Metal run (`/tmp` binary, prompt
+`What is the capital of France?`, `max_tokens=8`) emitted per-step stage
+records with zero expert-source activity (this dense model has no routed
+experts). The run reported TTFT 737 ms, TTNT min/max/mean 87/165/98.143 ms,
+2σ 54.589 ms, p90/p99 165/165 ms, and decode throughput 10.189 tokens/s.
+Its generated text was `Also, what is the capital of Italy`, so this run does
+not establish the France-answer correctness criterion and is not evidence for
+the 35B HOBBIT/DynaExq path. It does establish that the requested latency
+fields are emitted by the current binary.
+
+## ROW 449 -- routed staging reuses copied Metal buffers when capacity permits
+
+`omega/src/metal.rs:1763-1879` now rebuilds selected payload and descriptor
+bytes while retaining the prior staged buffers. On a signature miss,
+`omega/src/metal.rs:2008-2019` removes the previous table and passes it to the
+reuse path. `reuse_or_upload_packed_bytes` overwrites an existing shared buffer
+only when capacity is sufficient and its contents pointer does not alias the
+previous host vector; aliased no-copy buffers still take the safe upload path.
+The new `expert_source_buffer_reuses` counter is exposed through
+`MetalStageTotals` at `omega/src/metal.rs:6437` and `6559-6605`.
+`cargo check -p omega --features metal,instrument`, the focused four
+expert-source tests, and `cargo check -p proxima-model-interop
+--features instrument,metal` passed. The 120-miss/732-upload production run
+has not yet been repeated, so memory and latency impact are unmeasured.
+
+## ROW 450 -- real Qwen35 35B low-budget Metal probe
+
+The local Ollama `qwen3.6/35b-a3b` model blob was run directly with the
+Qwen35 pre-gather path, mixed expert sidecar, and a 524,288,000-byte DynaExq
+budget. The one-token run parsed a 23,938,321,664-byte file and reported
+`device_current_allocated_size=1,631,076,352`, 120 expert-source misses, and
+732 block uploads; TTFT was 18,748 ms and the first token was `"\\n\\n"`. An
+eight-token run reported TTFT 11,210 ms, TTNT 1,787–2,283 ms (mean 2,002.571
+ms, 2σ 376.466 ms), decode 0.499 tokens/s, and text ending at
+`"The capital of"`. The answer token was not reached, so France-answer
+correctness is not established. Device allocation was below the configured
+budget, but process RSS and steady-state variance were not captured.
+
+## ROW 454 -- dropping copied staging vectors does not reduce RSS in one-token run
+
+After changing staged payload/descriptor ownership to retain host vectors only
+for true no-copy aliases, the rebuilt 35B low-budget one-token run reported
+TTFT 10,938 ms, decode 0.091 tokens/s, Metal allocation 1,631,076,352 bytes,
+and maximum RSS 7,689,519,104 bytes. ROW 452's corresponding RSS was
+7,660,797,952 bytes. The 28,721,152-byte increase is within the two-run
+comparison's noise and does not show a host-vector reduction; the dominant RSS
+owner is therefore still elsewhere in the loader or Metal mapping. No latency
+or correctness improvement is attributed to this change.
+
+## ROW 451 -- copied expert staging reuses all routed buffers on the 35B probe
+
+After rebuilding the release launcher with the reuse instrumentation, the
+same Qwen35 35B-A3B one-token run reported
+`expert_source_cache_misses=120`, `expert_source_buffer_reuses=120`, and
+`block_upload_calls=732`. TTFT was 11,070 ms, the first token was `"\\n\\n"`,
+and Metal's current allocated size was 1,631,076,352 bytes. The reuse count
+shows that every routed source table found a capacity-sufficient copied
+buffer; the upload-call counter still includes the surrounding model/block
+uploads, so it is not interpreted as zero total transfer. This run did not
+measure process RSS or answer correctness.
+
+## ROW 452 -- process RSS remains above the low-memory target
+
+`/usr/bin/time -l` around the same one-token Qwen35 35B-A3B low-budget run
+reported maximum resident set size `7,660,797,952` bytes. The program
+reported TTFT 11,093 ms, decode 0.090 tokens/s, first token `"\\n\\n"`, and
+Metal allocation 1,631,076,352 bytes. The direct split is that the 500-MiB
+DynaExq budget constrains routed device residency, while mapped model pages
+and host-side staging remain part of process RSS.
+
+## ROW 467 -- four-token byte-split sample keeps transfer classes flat
+
+The rebuilt optimized 35B run emitted the same per-step split for steps 0–3:
+120 expert misses, 120 expert buffer reuses, 200 plan handoffs, 532 block
+offers, 1,154,452 copied bytes, and 719,749,120 no-copy-bound bytes. TTFT was
+10,787 ms; TTNT was 1,457–1,481 ms, mean 1,472 ms, 2σ 21.354 ms, p90/p99
+1,481 ms; decode was 0.679 tokens/s. Maximum RSS was 8,818,966,528 bytes and
+Metal allocation stayed 1,631,076,352 bytes. Transfer classes are stable
+across tokens while host RSS grows, so the growth is not caused by increasing
+ordinary upload volume.
+
+## ROW 468 -- cache cardinality is now reported at the token boundary
+
+`MetalStageTotals` now exposes the current expert-source cache entry count and
+the no-copy buffer cache entry count. The per-step Metal debug event includes
+both alongside upload bytes and handoff counters, so retained-cache growth can
+be compared directly with process RSS. `cargo check -p omega --features
+metal,instrument` passes; a rebuilt 35B capture is required for the values.
+
+## ROW 465 -- one-token transfer split is mostly no-copy mapped weight access
+
+The rebuilt 35B one-token run reported 120 expert-source misses with 120
+buffer reuses, 200 plan handoffs, and 532 block offers. The byte split was
+`block_copied_bytes=1,154,452`, `block_nocopy_bound_bytes=719,749,120`, and
+`block_offset_bound_bytes=0`; resident upload counters remained zero. TTFT was
+10,811 ms, decode 0.092 tokens/s, and Metal allocation 1,631,076,352 bytes.
+The transfer counters show ordinary weights are predominantly mapped directly;
+the remaining RSS cannot be attributed to ordinary host-to-device copies from
+this record and points to sidecar payload materialization or mapped-page
+residency.
+
+## ROW 462 -- ordinary segment weights now consult cross-plan resident buffers
+
+The regular Metal execution path now checks `cross_plan_resident_reuse` before
+offering each ordinary block for upload. A cached name/address/length binds the
+existing device buffer directly; only a miss reaches the upload counters. This
+extends the previously placed-KV-only handoff to the Qwen35 router/gather
+segments. `cargo check -p omega --features metal,instrument` and the three
+cross-plan resident-reuse tests pass. A rebuilt 35B run is required before
+latency or RSS impact is reported.
+
+## ROW 463 -- cross-plan handoff removes 200 ordinary upload offers per step
+
+The rebuilt 35B two-token run reported, on both steps,
+`plan_handoff_reuses=200`, `expert_source_buffer_reuses=120`,
+`expert_source_cache_misses=120`, and `block_upload_calls=532`. Before the
+ordinary-path handoff, ROW 460 measured 732 block uploads per step. TTFT was
+10,654 ms, decode 0.691 tokens/s, and Metal allocation remained
+1,631,076,352 bytes. The upload-offer count therefore fell by 200 per step,
+but this short run did not show a latency or device-allocation reduction.
+
+## ROW 464 -- four-token routed sample exposes KV/RSS growth
+
+The optimized 35B configuration (`max_tokens=4`) produced
+`"\\n\\n<think>\\n\\n</think>"`. TTFT was 10,657 ms; TTNT was 1,441–1,448 ms,
+mean 1,444.333 ms, 2σ 5.735 ms, p90/p99 1,448 ms; decode throughput was
+0.692 tokens/s. Metal allocation remained 1,631,076,352 bytes, while maximum
+process RSS rose to 8,848,293,888 bytes. The short sample is insufficient for
+long-run variance, but it directly shows host RSS growing while device
+allocation stays flat.
+
+## ROW 459 -- routed step attribution isolates staged traffic from residency counters
+
+The rebuilt low-budget 35B one-token run emitted
+`expert_source_cache_hits=0`, `expert_source_cache_misses=120`,
+`expert_source_buffer_reuses=0`, and `block_upload_calls=732` for step zero;
+TTFT was 10,613 ms and Metal allocation was 1,631,076,352 bytes. The process
+summary reported zero resident/copy upload deltas and `nocopy_cache_len=100`,
+so those cumulative counters are reset or consumed by another attribution
+boundary in this execution. The per-step source counters remain the reliable
+evidence that routed tables are restaged; the resident-upload accounting needs
+its own counter-boundary correction before it can explain RSS.
+
+## ROW 461 -- cross-plan resident handoffs are now visible per step
+
+`MetalStageTotals` now snapshots `PLAN_HANDOFF_REUSES`, and the direct
+`PROXIMA_DEBUG_METAL_STAGES` event includes `plan_handoff_reuses`. This splits
+the 732 block-upload count into routed source staging versus ordinary weight
+handoffs on the next real run. `cargo check` passes for both Metal crates and
+`git diff --check` passes; no latency or memory conclusion is drawn before the
+new field is captured on the 35B path.
+
+## ROW 460 -- routed copied buffers reuse on subsequent signature misses
+
+After retaining only the prior host-pointer addresses in the staged cache
+metadata, a rebuilt two-token 35B run reported, for both steps,
+`expert_source_cache_misses=120`, `expert_source_buffer_reuses=120`, and
+`block_upload_calls=732`. TTFT was 10,633 ms, decode 0.703 tokens/s, and
+Metal allocation was 1,631,076,352 bytes. This confirms the previous zero on
+step one was cache metadata loss, not inability to reuse the device buffers.
+
+## ROW 456 -- sidecar mapping now requests random-page behavior
+
+`LoadedModel::attach_expert_sidecar` calls `Mmap::advise(Advice::Random)` before
+installing the HOBBIT table (`proxima-model-interop/src/generate.rs`), because
+expert accesses are sparse and route-dependent rather than sequential. This
+changes VM read-ahead behavior without changing the sidecar ABI or tensor
+values. The interop Metal check passes; a rebuilt 35B RSS/TTFT comparison has
+not yet been run, so the effect remains unmeasured.
+
+## ROW 455 -- memory-owner event identifies the large mapped sidecar
+
+With `PROXIMA_DEBUG_MEMORY_OWNERS=1`, the real 35B sidecar run reported
+`checkpoint_bytes=23,938,321,664`, `packed_bytes=22,394,757,120`,
+`owned_bytes=99,942,400`, `packed_owned_bytes=0`,
+`sidecar_mapped_bytes=20,887,633,920`, `sidecar_owned_bytes=0`, and
+`sidecar_descriptors=30,720`. The sidecar is therefore mmap-backed rather than
+heap-owned, but its mapped working pages still contribute to process RSS; the
+event explains why dropping copied staging vectors did not approach the 4 GB
+process target.
+
+## ROW 453 -- low-residency path trades device allocation for host RSS and latency
+
+An uninstrumented one-token run of the same 35B artifact with pre-gather and
+expert sources disabled reported TTFT 7,896 ms, decode 0.124 tokens/s,
+`device_current_allocated_size=24,043,880,448`, and maximum RSS
+6,947,995,648 bytes. The 500-MiB DynaExq run in ROW 452 reported 1,631,076,352
+device bytes but 7,660,797,952 RSS and 11,093 ms TTFT. The direct comparison
+therefore shows a 22.41 GB lower device allocation alongside 713 MB higher
+RSS and 3,197 ms higher TTFT; both runs produced only `"\\n\\n"` at one token.
+
+## ROW 457 -- random mmap advice does not move one-token RSS
+
+The rebuilt 35B low-budget one-token run with sidecar `Advice::Random` reported
+TTFT 10,911 ms, decode 0.091 tokens/s, Metal allocation 1,631,076,352 bytes,
+and maximum RSS 7,677,296,640 bytes. The memory-owner event remained
+`sidecar_mapped_bytes=20,887,633,920` with zero sidecar-owned bytes. Compared
+with ROW 454, RSS changed by -12,222,464 bytes and TTFT by -27 ms; this single
+run comparison does not establish a meaningful performance effect.
+
+## ROW 458 -- opt-in sidecar page discard does not lower one-token RSS
+
+The rebuilt 35B low-budget one-token run with
+`PROXIMA_EXPERT_SIDECAR_DISCARD=1` reported TTFT 11,183 ms, decode 0.089
+tokens/s, Metal allocation 1,631,076,352 bytes, and maximum RSS
+7,683,325,952 bytes. The mapping remains valid and pages are discarded after
+the routed evaluation, but RSS is unchanged from the adjacent runs. This
+indicates the measured resident pages are not released by a whole-map discard
+at this boundary, so the opt-in path is retained as an instrumented experiment
+and not enabled by default.
+
+## ROW 466 -- per-layer sidecar discard trades TTFT for no RSS reduction
+
+The rebuilt 35B one-token run with `PROXIMA_EXPERT_SIDECAR_DISCARD_PER_LAYER=1`
+reported TTFT 31,128 ms, decode 0.032 tokens/s, Metal allocation
+1,631,076,352 bytes, and maximum RSS 7,653,801,984 bytes. Compared with the
+non-discard runs at roughly 10.8–11.1 s TTFT and 7.7 GB RSS, per-layer discard
+caused refaulting overhead without reducing resident memory. The opt-in path
+remains disabled for serving.
+
+## ROW 469 -- qwen35 prefill is serialized router/gather work
+
+With the real qwen35moe 35B checkpoint, the mixed sidecar, the 500-MiB
+residency budget, and `PROXIMA_DEBUG_QWEN35_SEGMENTS=1`, the France prompt's
+seven-token prefill emitted 280 router segments and 280 gather segments (40
+layers times seven one-token batches). Router segments consumed 2,817,942 us
+in aggregate (10,064 us mean); gather segments consumed 7,259,228 us
+(25,926 us mean). The run's measured TTFT was 10,627 ms and its one-token
+output was `"\\n\\n"`.
+
+The batching boundary is explicit in `proxima-model-interop/src/generate.rs`:
+`single_position_step` turns a multi-token prefill into one-token evaluations,
+while `proxima-tensor/src/spec.rs` rejects a statically known sequence extent
+other than one for the qwen35 SSM mixer. A double buffer cannot overlap these
+positions without a sequence-capable recurrent scan; the measured work is the
+router and gather evaluations themselves, not an uninstrumented page-in gap.
+
+## ROW 470 -- op profiler does not observe the pre-gather segments
+
+Setting `PROXIMA_METAL_OP_PROFILE_STEP=0` on the same real 35B run left TTFT at
+10,699 ms and produced no per-op timing records. The pre-gather branch calls
+`evaluate_segment` for router and gather programs, bypassing the ordinary
+`evaluate_op_timed` hook. Segment-level timing is therefore the authoritative
+instrument for this path until a segment profiler is added; ordinary op-profile
+rows must not be used to attribute its prefill cost.
+
+## ROW 471 -- aggregate pre-gather events expose cold and warm batches
+
+After rebuilding the release serving example with the aggregate event, the
+same seven-token 35B run emitted one summary per prefill position. Each summary
+reported 40 layers and 81 segments (router and gather per layer plus suffix).
+Position 0 measured 1,505,410 us router and 1,412,854 us gather; positions 1
+through 6 measured 342,636--380,945 us router and 993,532--1,050,660 us gather.
+TTFT was 11,830 ms and the one-token output was `"\\n\\n"`. The first position
+therefore includes cold pipeline/setup work; the remaining positions provide
+the steady per-position segment cost. This event is now emitted through the
+`PROXIMA_DEBUG_QWEN35_SEGMENTS` channel for direct capture.
+
+## ROW 472 -- rebuilt low-budget envelope remains above serving targets
+
+The rebuilt release binary, real qwen35moe 35B checkpoint, mixed sidecar, and
+500-MiB residency budget produced a two-token GPU run with TTFT 10,662 ms,
+decode rate 0.683 tokens/s, and output `"\\n\\n<think>"`. The two decode
+dispatches reported 831.469 ms and 864.835 ms GPU execution. The same process
+reported `device_current_allocated_size=1,631,076,352` bytes and maximum RSS
+8,138,637,312 bytes. Source telemetry reported 3 expert-source cache entries,
+100 no-copy entries, 120 source misses and 120 buffer reuses per step, and
+200 plan-handoff reuses. These are direct envelope measurements; the requested
+correct answer, sub-second TTFT, and 20-token/s target remain unverified.
+
+## ROW 475 -- checkpoint discard repeats with lower RSS and TTFT
+
+Two additional one-token GPU runs with `PROXIMA_EXPERT_CHECKPOINT_DISCARD=1`
+used the same real 35B checkpoint, sidecar, and 500-MiB budget. Their TTFTs
+were 7,822 ms and 7,846 ms; outputs remained `"\\n\\n"`, and Metal allocation
+remained 1,631,076,352 bytes. Maximum RSS was 7,610,171,392 and 7,623,524,352
+bytes. Across ROW 474 and these runs, TTFT mean was approximately 7,863 ms
+with sample σ approximately 51 ms (2σ approximately 101 ms), and RSS ranged
+from 7.610 to 7.624 GB. This is a repeatable measurement under this workload,
+but correctness beyond the first two output tokens and long-run paging cost
+are not established.
+
+## ROW 476 -- discard-enabled eight-token decode preserves observed prefix
+
+An eight-token GPU decode with checkpoint discard enabled used the same real
+35B checkpoint, sidecar, and residency budget. It emitted
+`"\\n\\n<think>\\n\\n</think>\\n\\nThe capital of"`, measured TTFT 7,868 ms,
+decode rate 0.968 tokens/s, and Metal allocation 1,631,076,352 bytes. The
+output reaches the expected phrase prefix but does not include `France` within
+the eight-token budget; this run therefore supplies prefix evidence only, not
+the requested answer-correctness proof.
+
+## ROW 477 -- discard-enabled decode reaches the France answer
+
+A 16-token GPU decode with the checkpoint-discard hook, mixed sidecar, and
+500-MiB residency budget emitted
+`"\\n\\n<think>\\n\\n</think>\\n\\nThe capital of France is **Paris**.<|endoftext|><|im_start|><|im_start|>"`.
+TTFT was 7,863 ms, decode rate was 0.742 tokens/s, and Metal allocation was
+1,631,076,352 bytes. This is direct answer evidence for the fixed prompt, but
+it does not meet the requested throughput or TTFT targets.
+
+## ROW 479 -- long decode grows RSS despite checkpoint discard
+
+The full 16-token discard-enabled GPU run reached the same answer
+`The capital of France is **Paris**.` with TTFT 7,837 ms and decode rate
+0.968 tokens/s. Metal allocation stayed at 1,631,076,352 bytes, but process
+maximum RSS was 11,243,929,600 bytes, substantially above the one-token
+discard runs at 7.61--7.62 GB. The mapping discard therefore does not bound
+long-run host RSS; a retained per-step allocation or faulted checkpoint pages
+still grows across generation and needs an owner-level trace.
+
+## ROW 478 -- decode cost is gather-dominated after prefill
+
+With the same discard-enabled real 35B run and segment-debug channel, the
+generated positions reported approximately 220,000 us of router work and
+748,000--787,000 us of gather work per position. The corresponding decode rate
+was 0.970 tokens/s for the two-token invocation, with TTFT 7,775 ms and output
+`"\\n\\n<think>"`. The low-memory path therefore spends about three quarters of
+each generated position in the routed expert gather, not in residency policy
+or page-in telemetry; this identifies the gather kernel path as the next
+performance target.
+
+## ROW 474 -- opt-in checkpoint-page discard changes the envelope
+
+The new `PROXIMA_EXPERT_CHECKPOINT_DISCARD=1` eviction hook was measured once
+on the real 35B checkpoint with the mixed sidecar and 500-MiB residency budget.
+The one-token GPU run produced the same output `"\\n\\n"`, TTFT 7,920 ms,
+Metal allocation 1,631,076,352 bytes, and maximum RSS 7,624,081,408 bytes.
+The adjacent no-discard runs were 10,208--10,671 ms TTFT and 7.66--8.14 GB
+RSS. This single discard run is a measurement, not an attribution: its lower
+TTFT may include machine variance, and a repeated quiet sample is required
+before enabling the option by default.
+
+## ROW 473 -- three-run TTFT sample under the low-memory sidecar path
+
+Three isolated one-token GPU runs used the real 35B checkpoint, mixed sidecar,
+and 500-MiB residency budget. TTFT values were 10,208 ms, 10,391 ms, and
+10,671 ms; all three outputs were `"\\n\\n"`, and Metal allocation was
+1,631,076,352 bytes in each run. The arithmetic mean was 10,423 ms, with a
+sample standard deviation of approximately 233 ms (2σ approximately 466 ms);
+the observed min/max were 10,208/10,671 ms. Three samples are insufficient for
+stable tail percentiles, so p90 and p99 are not reported as established values.
+
+## ROW 480 -- eviction actions occur while checkpoint RSS still accumulates
+
+With `PROXIMA_DEBUG_EXPERT_UPLOADS=1` and checkpoint discard enabled, a
+two-token real 35B run emitted 234 action records matching `Evict`. The discard
+hook is therefore reached; the high-page RSS growth in ROW 479 is not
+explained by a missing DynaExq eviction transition. macOS still reported
+resident checkpoint growth despite the page-aligned `MADV_DONTNEED` calls, so
+the owner trace must distinguish VM resident pages from retained heap
+allocations before this option can be made a default.
+
+## ROW 481 -- mincore shows checkpoint ranges remain resident after discard
+
+The opt-in `PROXIMA_EXPERT_CHECKPOINT_RESIDENCY=1` diagnostic called Darwin
+`mincore` after each evicted projection on a one-token real 35B run. It recorded
+2,193 projection ranges, with 42.5 resident pages on average and 54 at the
+maximum after the discard call. TTFT was 17,406 ms (the diagnostic itself adds
+system-call overhead), output was `"\\n\\n"`, and Metal allocation remained
+1,631,076,352 bytes. The ranges therefore remain resident on this mapping;
+`MADV_DONTNEED` is not releasing these file-backed pages at the eviction
+boundary. This identifies the VM advice behavior, not DynaExq's transition,
+as the remaining RSS mechanism.
+
+## ROW 482 -- Darwin MADV_FREE one-token envelope
+
+The opt-in checkpoint discard hook now uses Darwin `MADV_FREE` instead of
+`MADV_DONTNEED`. A one-token real 35B run with the same mixed sidecar and
+500-MiB budget produced output `"\\n\\n"`, TTFT 7,852 ms, Metal allocation
+1,631,076,352 bytes, and maximum RSS 7,602,372,608 bytes. This is within the
+prior discard-run range and does not by itself show a new RSS reduction; the
+advice remains opt-in pending long-run measurement.
+
+## ROW 483 -- MADV_FREE preserves the full answer but not the RSS cap
+
+A 13-token GPU run with `PROXIMA_EXPERT_CHECKPOINT_DISCARD=1` using Darwin
+`MADV_FREE` emitted `"\\n\\n<think>\\n\\n</think>\\n\\nThe capital of France is **Paris**."`.
+TTFT was 8,075 ms, decode rate 0.944 tokens/s, Metal allocation was
+1,631,076,352 bytes, and maximum RSS was 10,522,836,992 bytes. The answer
+remains intact, but RSS still grows well above the 500-MiB residency budget;
+the discard hook is not a memory cap.
+
+## ROW 484 -- vmmap separates physical footprint from mapped-file RSS
+
+During a live 16-token discard-enabled decode, `vmmap -summary` reported a
+1.8-GB physical footprint while `vmmap` classified 3.6 GB of the checkpoint
+mapping and 3.1 GB of the sidecar mapping as resident mapped-file pages. The
+process completed with TTFT 11,023 ms, 15 TTNT samples ranging 1,025--3,908 ms
+(mean 1,421.667 ms, 2σ 1,949.124 ms, p90 3,904 ms, p99 3,908 ms), and the
+correct France answer. The resident-file totals explain the high RSS counters
+without corresponding physical footprint; both values must be reported for
+this mmap-backed path.
+
+## ROW 485 -- current Qwen35 pre-gather answer and latency record
+
+The release `gguf_generate` binary was run against the real qwen35moe
+checkpoint with the mixed expert sidecar, a 500-MiB DynaExq budget,
+`PROXIMA_QWEN35MOE_PRE_GATHER=1`, and Metal expert sources enabled. For the
+prompt `What is the capital of France?` and a 13-token budget it emitted
+`"\\n\\n<think>\\n\\n</think>\\n\\nThe capital of France is **Paris**."`.
+The recorded TTFT was 8,019 ms; the twelve TTNT samples ranged from
+1,036--1,092 ms (mean 1,055.417 ms, 2σ 32.130 ms, p90 1,081 ms, p99
+1,092 ms), or 0.947 decode tokens/s. The process reported
+`device_current_allocated_size=1,631,076,352` bytes; this run did not emit a
+RSS sample, so no RSS value is inferred from the device allocation.
+
+The pre-gather trace still executes one router and one gather segment per
+layer and waits for each segment before the next layer's route is known. This
+is the mechanism behind the multi-second TTFT: the residency boundary is
+before the current layer's gather, but there is no overlapped prefill buffer
+or batched scan for the stateful qwen35 mixer. A double-buffer change would
+need an execution trace proving that the next route can be prepared without
+reading the current layer's hidden state; this record does not provide that
+proof.
+
+## ROW 486 -- explicit pre-gather serving flag is sufficient
+
+After removing the duplicate unsafe-environment gate from the Metal source
+binding path, the same real-checkpoint invocation was rebuilt and run with
+`PROXIMA_QWEN35MOE_PRE_GATHER=1`, the mixed sidecar, and the 500-MiB residency
+budget, but without `PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES`. The model
+loaded and the run allocated 1,631,076,352 Metal bytes; the one-token output
+was `"\\n\\n"` with TTFT 6,779 ms. This confirms the serving flag now reaches
+the source-substitution path directly. A one-token run does not establish
+the full answer or decode throughput, so those remain represented only by
+ROW 485's 13-token run.
+
+## ROW 487 -- repaired binary multi-token acceptance run
+
+The repaired release binary was run against the same qwen35moe checkpoint and
+mixed sidecar with the 500-MiB residency budget, without the unsafe Metal
+environment variable. The 13-token France prompt emitted
+`"\\n\\n<think>\\n\\n</think>\\n\\nThe capital of France is **Paris**."`.
+TTFT was 6,584 ms. The twelve TTNT samples ranged from 907--1,798 ms (mean
+1,362.500 ms, 2σ 417.226 ms, p90 1,540 ms, p99 1,798 ms), or 0.734 decode
+tokens/s. Metal allocation remained 1,631,076,352 bytes. A separate two-token
+run under `/usr/bin/time -l` reported 8,078,852,096 bytes maximum RSS and
+1 page fault; that RSS value is a process envelope, not the residency-budget
+counter.
+
+## ROW 488 -- per-layer sidecar discard is a negative latency cell
+
+The same 13-token real-checkpoint invocation was run with
+`PROXIMA_EXPERT_SIDECAR_DISCARD_PER_LAYER=1` and `/usr/bin/time -l`. The
+generated text still ended with the Paris answer, but TTFT rose to 27,975 ms;
+TTNT ranged from 4,139--4,392 ms (mean 4,265.667 ms, 2σ 177.389 ms, p90
+4,380 ms, p99 4,392 ms), or 0.234 decode tokens/s. Maximum RSS was
+10,595,713,024 bytes and the process peak footprint was 1,963,318,144 bytes.
+The discard calls therefore add substantial host overhead without lowering
+the mapped-file RSS envelope; this option remains opt-in and is not a
+prefill-pipelining solution.
+
+## ROW 489 -- single pre-generation checkpoint discard is neutral on RSS
+
+The example now has an opt-in `PROXIMA_CHECKPOINT_DISCARD_BEFORE_GENERATE`
+hook that advises the whole checkpoint mapping once, before generation. A
+two-token real 35B run with the mixed sidecar and 500-MiB budget emitted
+`"\\n\\n<think>"`, TTFT 6,422 ms, and TTNT 843 ms (single sample). Metal
+allocation was 1,631,076,352 bytes and `/usr/bin/time -l` reported maximum RSS
+of 8,066,580,480 bytes. The single advice call avoids ROW 488's per-layer
+latency penalty, but the RSS value remains in the same range as the baseline;
+this is not a memory-cap mechanism.
+
+## ROW 490 -- serving binary emits peak RSS directly
+
+`examples/gguf_generate.rs` now reports `peak_rss_bytes` using `getrusage`
+(bytes on Darwin, KiB converted to bytes on Linux), alongside the existing
+Metal allocation counter. A one-token real 35B run with the mixed sidecar and
+500-MiB budget emitted `"\\n\\n"`, TTFT 6,426 ms,
+`device_current_allocated_size=1,631,076,352`, and
+`peak_rss_bytes=7,618,871,296`. This makes RSS part of every future serving
+record rather than an external timing-tool-only measurement.
+
+## ROW 491 -- full current-path answer with in-process RSS
+
+The current release binary was run with `PROXIMA_QWEN35MOE_PRE_GATHER=1`, the
+mixed expert sidecar, and the 500-MiB residency budget, with no unsafe Metal
+variable. The 13-token prompt emitted
+`"\\n\\n<think>\\n\\n</think>\\n\\nThe capital of France is **Paris**."`.
+TTFT was 6,814 ms. The twelve TTNT samples ranged from 851--884 ms (mean
+864.500 ms, 2σ 18.065 ms, p90 877 ms, p99 884 ms), or 1.157 decode
+tokens/s. Metal allocation was 1,631,076,352 bytes and the binary's new
+in-process peak RSS field reported 10,532,503,552 bytes.
+
+## ROW 492 -- full-resident baseline exposes the tradeoff
+
+For comparison, the same binary and prompt without the sidecar or pre-gather
+variables emitted the same 13-token France answer. TTFT was 4,853 ms; TTNT
+ranged from 63--68 ms (mean 64.417 ms, 2σ 2.640 ms, p90 66 ms, p99 68 ms),
+or 15.524 decode tokens/s. Metal allocation was 24,038,998,016 bytes while
+the in-process peak RSS field reported 651,231,232 bytes. The two records are
+not interchangeable: the baseline trades a 24-GB device allocation for much
+lower measured host RSS, while the sidecar path trades that allocation for a
+1.63-GB device allocation and roughly 1.16 tok/s.
+
+## ROW 493 -- increasing the residency budget does not move decode throughput
+
+The mixed-sidecar path was run with a 2-GiB DynaExq budget instead of 500 MiB.
+For three generated tokens it emitted `"\\n\\n<think>\\n\\n"`; TTFT was
+6,630 ms and the two TTNT samples were 869 and 881 ms (mean 875 ms, 2σ
+12 ms), or 1.143 decode tokens/s. Metal allocation remained
+1,631,076,352 bytes and peak RSS was 7,788,331,008 bytes. The larger budget
+therefore did not change the measured steady-state rate or Metal allocation
+in this run; the current cost is in the serialized pre-gather execution, not
+just the number of low-codec residency misses.
+
+## ROW 494 -- sidecar plus budget auto-selects the low-memory path
+
+The example now derives `qwen35moe_pre_gather` when both
+`PROXIMA_EXPERT_SIDECAR` and a positive
+`PROXIMA_QWEN35MOE_RESIDENCY_BUDGET_BYTES` are present. Metal's expert-input
+elision uses the same predicate, so the serving configuration and the device
+binding cannot disagree. A run with those two variables only (no explicit
+`PROXIMA_QWEN35MOE_PRE_GATHER` and no unsafe variable) emitted `"\\n\\n"`,
+TTFT 7,687 ms, Metal allocation 1,631,076,352 bytes, and peak RSS
+7,650,328,576 bytes. The previous automatic run uploaded 22.5 GB and emitted
+`" ="`; this change removes that configuration split.
+
+## ROW 495 -- automatic low-memory path preserves the full answer
+
+With only `PROXIMA_EXPERT_SIDECAR` and a 500-MiB
+`PROXIMA_QWEN35MOE_RESIDENCY_BUDGET_BYTES`, the rebuilt binary generated the
+full 13-token France answer without either pre-gather or unsafe environment
+overrides. TTFT was 6,500 ms; TTNT ranged from 835--891 ms (mean 858.917 ms,
+2σ 36.519 ms, p90 880 ms, p99 891 ms), or 1.164 decode tokens/s. Metal
+allocation was 1,631,076,352 bytes and peak RSS was 10,497,343,488 bytes.
+
+## ROW 496 -- mmap random advice is neutral at short decode
+
+An opt-in `PROXIMA_MMAP_RANDOM` mode now applies Darwin `MADV_RANDOM` once to
+the checkpoint and sidecar mappings before load. A two-token run with the
+500-MiB budget emitted `"\\n\\n<think>"`, TTFT 6,531 ms, and TTNT 855 ms
+(single sample). Metal allocation was 1,631,076,352 bytes and peak RSS was
+8,104,017,920 bytes, inside the adjacent baseline range. The advice does not
+reduce the resident envelope in this workload, so it remains diagnostic-only.
+
+## ROW 498 -- mixed-kernel emission cache does not move routed latency
+
+The Metal mixed-expert path now caches the emitted `Kernel` beside the
+thread-local pipeline cache, keyed by the bound shape, policy, math mode, and
+source node. This removes repeated MSL rendering on routed gathers while
+leaving per-step payload and descriptor bindings unchanged. Omega and model
+interop tests passed (139 and 53 tests respectively).
+
+On the real qwen35moe checkpoint with the mixed sidecar and 500-MiB budget,
+the one-token France run emitted `"\\n\\n"`, with `ttft_ms=6,532` and
+the same repeated gather host timings (about 18--19 ms) as ROW 497. A
+five-token run emitted `"\\n\\nThe capital of France"`, with TTNT
+974--1,133 ms (mean 1,064.750 ms, 0.939 decode tokens/s), Metal allocation
+326,844,416 bytes, and peak RSS 13,496,877,056 bytes. The cache removes MSL
+re-rendering work but does not remove the per-segment command-buffer cost that
+dominates the low-memory path.
+
+## ROW 497 -- pre-gather TTFT is serialized gather execution, not plan misses
+
+The release `gguf_generate` binary was run against the real qwen35moe
+checkpoint with the mixed expert sidecar and a 500-MiB residency budget, with
+`PROXIMA_DEBUG_SEGMENT_HOST=1` and the segment timing trace enabled. The
+seven-position prompt prefill executed 81 routed segments per position. After
+the first position populated the segment cache, host timing records showed
+`plan_misses=81` and then only cache hits through the remaining positions;
+segment-plan resolution was `resolve_us=0` in the emitted records. Router
+execution records ranged from 1,187--4,306 microseconds and gather records
+from 18,364--21,028 microseconds. The run emitted `"\\n\\n"` for its
+one-token budget and reported `ttft_ms=6,544`.
+
+This trace attributes the multi-second low-memory prefill to repeated
+router/gather GPU executions and their synchronous boundaries, not repeated
+plan compilation. The current implementation still has no overlapped
+prefill buffer or batched routed gather; reducing TTFT requires changing that
+execution structure while preserving the stateful mixer dependency.
+
+## ROW 499 -- intermediate prefill rows no longer execute the logits suffix
+
+ROW 497's real-checkpoint trace showed 81 segment executions for each of the
+seven sequential prompt positions, while plan resolution was zero microseconds
+after the first position. That ruled out another plan-cache change for this
+cell. Cross-position router/gather batching was also rejected because qwen35's
+GDN state makes each prompt row depend on the preceding row, and the residency
+callback must still run between every router and its gather.
+
+The split-prefill loop now requests the logits root only for its final prompt
+row. The pre-gather executor skips suffix binding and evaluation when none of
+the caller's requested outputs maps into that suffix; explicit node-value
+requests still opt their own producing segment back in. All layer cache roots
+remain requested for every row, and the router/residency/gather loop is
+unchanged. For ROW 497's seven-row, 40-layer shape, the executable schedule is
+therefore 80 segments for each of the first six positions and 81 for the last:
+561 total instead of 567. This is a structural count, not a post-change TTFT
+measurement.
+
+`cargo check -p proxima-model-interop --features std,metal,instrument --lib`
+completed successfully. A focused `cargo nextest` invocation under the same
+features ran the logits-root selection regression, the prefill-event
+regression, and the first-router/prefix-dedup regression: three tests ran and
+three passed. The post-change real-checkpoint TTFT remains unmeasured in this
+row.

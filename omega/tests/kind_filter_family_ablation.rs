@@ -19,7 +19,11 @@
 //! buffer holds instead -- `0.0`, never [`IN_DIM`] -- which is what proves a
 //! dispatch was actually removed, not just that the filter parsed.
 
-#![cfg(all(feature = "metal-output-placement", feature = "instrument", target_os = "macos"))]
+#![cfg(all(
+    feature = "metal-output-placement",
+    feature = "instrument",
+    target_os = "macos"
+))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::{
@@ -126,22 +130,23 @@ fn ran_flags(
         .map(|values| QuantizedBlock::Float32(values.as_slice()))
         .collect();
     let output_nodes: Vec<NodeId> = outputs.iter().map(|(node, _)| *node).collect();
-    let plan =
-        omega::plan(
-            &program,
-            &[],
-            &quantized,
-            &output_nodes,
-            NumericPolicy::default(),
-        )
-        .expect("plans the named family program");
+    let plan = omega::plan(
+        &program,
+        &[],
+        &quantized,
+        &output_nodes,
+        NumericPolicy::default(),
+    )
+    .expect("plans the named family program");
 
     // `ENV_SERIAL` covers the whole set/run/clear span: `PROXIMA_METAL_KIND_FILTER`
     // is process-global, and this file's tests race it under a
     // multi-threaded runner otherwise (`cargo nextest run`'s
     // one-process-per-test isolation would not need this, but this file
     // does not assume its own runner).
-    let _guard = ENV_SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ENV_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match env_value {
         // SAFETY: no other thread touches this process's environment while
         // `_guard` is held.

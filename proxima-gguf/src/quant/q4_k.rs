@@ -622,7 +622,10 @@ mod tests {
             .map(|(got, want)| (got - want).abs())
             .fold(0.0f32, f32::max);
         debug!(max_error, "quant.q4_k single-outlier round trip");
-        assert!(max_error < 0.6, "max_error={max_error} exceeds loose sanity bound");
+        assert!(
+            max_error < 0.6,
+            "max_error={max_error} exceeds loose sanity bound"
+        );
     }
 
     /// Alternating-sign super-block at constant magnitude.
@@ -641,7 +644,10 @@ mod tests {
             .map(|(got, want)| (got - want).abs())
             .fold(0.0f32, f32::max);
         debug!(max_error, "quant.q4_k alternating-sign round trip");
-        assert!(max_error < 0.6, "max_error={max_error} exceeds loose sanity bound");
+        assert!(
+            max_error < 0.6,
+            "max_error={max_error} exceeds loose sanity bound"
+        );
     }
 
     /// Encoding the same input twice must yield byte-identical output.
@@ -697,9 +703,18 @@ mod tests {
             sum_sq_error += f64::from(diff) * f64::from(diff);
         }
         let rms_error = (sum_sq_error / input.len() as f64).sqrt();
-        debug!(max_error, rms_error, "quant.q4_k real-qwen3-weights round trip");
-        assert!(max_error < 0.6, "max_error={max_error} exceeds loose sanity bound");
-        assert!(rms_error < 0.2, "rms_error={rms_error} exceeds loose sanity bound");
+        debug!(
+            max_error,
+            rms_error, "quant.q4_k real-qwen3-weights round trip"
+        );
+        assert!(
+            max_error < 0.6,
+            "max_error={max_error} exceeds loose sanity bound"
+        );
+        assert!(
+            rms_error < 0.2,
+            "rms_error={rms_error} exceeds loose sanity bound"
+        );
     }
 
     #[test]
