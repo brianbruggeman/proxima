@@ -151,7 +151,7 @@ use omega::execute_plan_named_with_placements_op_timed;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use omega::{
     PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
-    plan_named as plan_named_placed,
+    execute_plan_named_with_placements_and_expert_sources, plan_named as plan_named_placed,
 };
 #[cfg(feature = "instrument")]
 use proxima_telemetry::{debug, info};
@@ -1619,6 +1619,9 @@ impl<'file> LoadedModel<'file> {
         resident_names: &BTreeSet<&str>,
         expert_slab: &mut crate::expert_slab::ExpertSlab<'file>,
         position_offset: usize,
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))] ssm_placement: Option<
+            &Qwen35SsmPlacement<'_>,
+        >,
         mut before_gather: BeforeGather,
     ) -> Result<Evaluated, InteropError>
     where
@@ -1743,6 +1746,40 @@ impl<'file> LoadedModel<'file> {
                     segment_output,
                 );
                 let mut requested_nodes: Vec<NodeId> = requested.keys().copied().collect();
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                let mut segment_input_placements = Vec::new();
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                let mut segment_output_placements = Vec::new();
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                if let Some(placement) = ssm_placement
+                    && placement
+                        .maximum_layer
+                        .is_none_or(|maximum| layer <= maximum)
+                    && let (
+                        Qwen35LayerRoots::Ssm { state_out, .. },
+                        Some(state_input),
+                        Some((first_buffer, second_buffer)),
+                    ) = (
+                        &self.layer_roots[layer],
+                        placement.input_nodes[layer],
+                        placement.buffers[layer].as_ref(),
+                    )
+                {
+                    let (input_buffer, output_buffer) = if placement.use_second_as_input {
+                        (second_buffer, first_buffer)
+                    } else {
+                        (first_buffer, second_buffer)
+                    };
+                    if let Some(mapped_input) = mapping.get(&state_input).copied() {
+                        segment_input_placements.push((mapped_input, input_buffer, 0));
+                    }
+                    if let Some(mapped_output) = mapping.get(state_out).copied() {
+                        segment_output_placements.push((mapped_output, output_buffer, 0));
+                        requested_nodes.push(mapped_output);
+                    }
+                }
+                requested_nodes.sort_unstable_by_key(|node| node.0);
+                requested_nodes.dedup();
                 if std::env::var_os("PROXIMA_DEBUG_QWEN35_REQUESTS").is_some() {
                     eprintln!(
                         "qwen35 segment requests phase={} layer={} program_ops={} named_inputs={} requested_nodes={} future_cuts={} global_cuts={} outputs={}",
@@ -1777,6 +1814,34 @@ impl<'file> LoadedModel<'file> {
                 }
                 let evaluated = if is_router {
                     let segment_started = std::time::Instant::now();
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let result = if segment_input_placements.is_empty()
+                        && segment_output_placements.is_empty()
+                    {
+                        runtime.evaluate_segment(
+                            program,
+                            symbols,
+                            &segment_named,
+                            &requested_nodes,
+                            resident_names,
+                            None,
+                        )
+                    } else {
+                        let empty_expert_sources = BTreeMap::new();
+                        runtime.evaluate_segment_with_placements_and_expert_sources(
+                            program,
+                            symbols,
+                            &segment_named,
+                            &requested_nodes,
+                            resident_names,
+                            &SegmentMetalBindings {
+                                input_placements: &segment_input_placements,
+                                output_placements: &segment_output_placements,
+                                expert_sources: &empty_expert_sources,
+                            },
+                        )
+                    };
+                    #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                     let result = runtime.evaluate_segment(
                         program,
                         symbols,
@@ -1821,6 +1886,33 @@ impl<'file> LoadedModel<'file> {
                         );
                     }
                     let segment_started = std::time::Instant::now();
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let result = if segment_input_placements.is_empty()
+                        && segment_output_placements.is_empty()
+                    {
+                        runtime.evaluate_segment(
+                            program,
+                            symbols,
+                            &segment_named,
+                            &requested_nodes,
+                            resident_names,
+                            Some(&mapped_expert_sources),
+                        )
+                    } else {
+                        runtime.evaluate_segment_with_placements_and_expert_sources(
+                            program,
+                            symbols,
+                            &segment_named,
+                            &requested_nodes,
+                            resident_names,
+                            &SegmentMetalBindings {
+                                input_placements: &segment_input_placements,
+                                output_placements: &segment_output_placements,
+                                expert_sources: &mapped_expert_sources,
+                            },
+                        )
+                    };
+                    #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                     let result = runtime.evaluate_segment(
                         program,
                         symbols,
@@ -1849,16 +1941,15 @@ impl<'file> LoadedModel<'file> {
                             .map(NodeId);
                         let parity_node = debug_local_node
                             .and_then(|local| {
-                                mapping
-                                    .iter()
-                                    .find_map(|(original, mapped)| (*mapped == local).then_some(*original))
+                                mapping.iter().find_map(|(original, mapped)| {
+                                    (*mapped == local).then_some(*original)
+                                })
                             })
                             .unwrap_or(segment_output);
-                        let mapped_output = mapping.get(&parity_node).copied().ok_or(
-                            InteropError::MissingEvaluatedNode {
-                                node: parity_node,
-                            },
-                        )?;
+                        let mapped_output = mapping
+                            .get(&parity_node)
+                            .copied()
+                            .ok_or(InteropError::MissingEvaluatedNode { node: parity_node })?;
                         if let (Ok(actual), Some((expected_values, _))) =
                             (&result, expected.get(mapped_output))
                             && let Some((actual_values, _)) = actual.get(mapped_output)
@@ -1875,18 +1966,21 @@ impl<'file> LoadedModel<'file> {
                             eprintln!(
                                 "qwen35 gather parity layer={layer} node={} original_op={:?} max_abs={maximum} index={index} metal={} cpu={}",
                                 parity_node.0,
-                                self.program.get(parity_node.0 as usize).map(|operation| operation.name()),
+                                self.program
+                                    .get(parity_node.0 as usize)
+                                    .map(|operation| operation.name()),
                                 actual_values.get(index).copied().unwrap_or_default(),
                                 expected_values.get(index).copied().unwrap_or_default(),
                             );
                         }
                         if let Ok(actual) = &result {
                             if std::env::var_os("PROXIMA_DEBUG_EXPERT_GATHER_GRAPH").is_some() {
-                                let graph_root = std::env::var("PROXIMA_DEBUG_EXPERT_GATHER_GRAPH_NODE")
-                                    .ok()
-                                    .and_then(|value| value.parse::<u32>().ok())
-                                    .map(NodeId)
-                                    .unwrap_or(parity_node);
+                                let graph_root =
+                                    std::env::var("PROXIMA_DEBUG_EXPERT_GATHER_GRAPH_NODE")
+                                        .ok()
+                                        .and_then(|value| value.parse::<u32>().ok())
+                                        .map(NodeId)
+                                        .unwrap_or(parity_node);
                                 let mut pending = vec![graph_root];
                                 let mut visited = BTreeSet::new();
                                 while let Some(node) = pending.pop() {
@@ -1898,12 +1992,20 @@ impl<'file> LoadedModel<'file> {
                                     };
                                     match operation {
                                         proxima_tensor::op::Op::Input { name, .. } => {
-                                            eprintln!("qwen35 gather graph input node={node:?} name={name:?}");
+                                            eprintln!(
+                                                "qwen35 gather graph input node={node:?} name={name:?}"
+                                            );
                                         }
-                                        proxima_tensor::op::Op::Elementwise { operands, .. } => {
-                                            pending.extend(operands.iter().map(|(operand, _)| *operand));
+                                        proxima_tensor::op::Op::Elementwise {
+                                            operands, ..
+                                        } => {
+                                            pending.extend(
+                                                operands.iter().map(|(operand, _)| *operand),
+                                            );
                                         }
-                                        proxima_tensor::op::Op::Reduce(reduce) => pending.push(reduce.operand),
+                                        proxima_tensor::op::Op::Reduce(reduce) => {
+                                            pending.push(reduce.operand)
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -1926,15 +2028,24 @@ impl<'file> LoadedModel<'file> {
                                         program[node.0 as usize].name(),
                                         program[node.0 as usize],
                                     );
-                                    if let proxima_tensor::op::Op::Elementwise { operands, .. } = &program[node.0 as usize] {
-                                        for (operand_index, (operand, _)) in operands.iter().enumerate() {
-                                            if let (Some((actual_operand, _)), Some((expected_operand, _))) =
-                                                (actual.get(*operand), expected.get(*operand))
+                                    if let proxima_tensor::op::Op::Elementwise {
+                                        operands, ..
+                                    } = &program[node.0 as usize]
+                                    {
+                                        for (operand_index, (operand, _)) in
+                                            operands.iter().enumerate()
+                                        {
+                                            if let (
+                                                Some((actual_operand, _)),
+                                                Some((expected_operand, _)),
+                                            ) = (actual.get(*operand), expected.get(*operand))
                                             {
                                                 let operand_maximum = actual_operand
                                                     .iter()
                                                     .zip(expected_operand)
-                                                    .map(|(actual, expected)| (actual - expected).abs())
+                                                    .map(|(actual, expected)| {
+                                                        (actual - expected).abs()
+                                                    })
                                                     .fold(0.0_f32, f32::max);
                                                 eprintln!(
                                                     "qwen35 gather operand node={operand:?} index={operand_index} max_abs={operand_maximum}"
@@ -3716,6 +3827,22 @@ struct PlanNumerics {
     dispatch_type: omega::metal::DispatchType,
 }
 
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+struct SegmentMetalBindings<'buffers, 'source> {
+    input_placements: &'buffers [(NodeId, &'buffers PlacedBuffer, usize)],
+    output_placements: &'buffers [(NodeId, &'buffers PlacedBuffer, usize)],
+    expert_sources:
+        &'buffers alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'source>>,
+}
+
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+struct Qwen35SsmPlacement<'buffers> {
+    input_nodes: &'buffers [Option<NodeId>],
+    buffers: &'buffers [Option<(PlacedBuffer, PlacedBuffer)>],
+    maximum_layer: Option<usize>,
+    use_second_as_input: bool,
+}
+
 #[cfg(feature = "metal")]
 pub(crate) struct BackendRuntime {
     engine: Engine,
@@ -3784,6 +3911,8 @@ pub(crate) struct BackendRuntime {
     /// single-range plan satisfy a two-range lookup by coincidence of key.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     placed_plans: alloc::collections::BTreeMap<(usize, usize), omega::metal::Plan>,
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    placed_segment_plans: alloc::collections::BTreeMap<(usize, usize, usize), omega::metal::Plan>,
     pub(crate) plan_hits: usize,
     pub(crate) plan_misses: usize,
     /// `ServingConfig::exact_activations`, read once at construction --
@@ -3811,6 +3940,8 @@ impl BackendRuntime {
             dispatch_type: config.dispatch_type,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             placed_plans: alloc::collections::BTreeMap::new(),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            placed_segment_plans: alloc::collections::BTreeMap::new(),
             plan_hits: 0,
             plan_misses: 0,
             exact_activations: config.exact_activations,
@@ -3989,6 +4120,40 @@ impl BackendRuntime {
             }
         }
         result
+    }
+
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    fn evaluate_segment_with_placements_and_expert_sources(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        bindings: &SegmentMetalBindings<'_, '_>,
+    ) -> Result<Evaluated, InteropError> {
+        let program_key = program.as_ptr() as usize;
+        let new_count = symbols.first().copied().unwrap_or_default() as usize;
+        let kv_bound_extent = symbols.get(1).copied().unwrap_or_default() as usize;
+        let numerics = PlanNumerics {
+            math_mode: self.math_mode,
+            numeric_policy: self.numeric_policy,
+            dispatch_type: omega::metal::DispatchType::Serial,
+        };
+        let plan = Self::resolve_segment_plan(
+            &mut self.placed_segment_plans,
+            &mut self.plan_hits,
+            &mut self.plan_misses,
+            (program_key, new_count, kv_bound_extent),
+            || Self::build_placed_plan(program, symbols, named, outputs, resident_names, &numerics),
+        )?;
+        Ok(execute_plan_named_with_placements_and_expert_sources(
+            plan,
+            named,
+            bindings.input_placements,
+            bindings.output_placements,
+            bindings.expert_sources,
+        )?)
     }
 
     /// [`Self::evaluate`]'s placed-KV counterpart: same `(new_count,
@@ -6135,10 +6300,10 @@ impl<'file> LoadedModel<'file> {
         };
 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let ssm_placement_enabled = !serving_config.qwen35moe_pre_gather
+        let ssm_placement_enabled = runtime.is_metal()
             && std::env::var("PROXIMA_METAL_SSM_PLACEMENT")
-            .ok()
-            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+                .ok()
+                .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let ssm_placement_max_layer = std::env::var("PROXIMA_METAL_SSM_PLACEMENT_MAX_LAYER")
             .ok()
@@ -6399,7 +6564,7 @@ impl<'file> LoadedModel<'file> {
                         roots.push(self.logits_root);
                     }
                     roots.extend_from_slice(node_values_sink.nodes());
-                    for roots_for_layer in &self.layer_roots {
+                    for (layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
                         match roots_for_layer {
                             Qwen35LayerRoots::Attention((even, odd, value)) => {
                                 roots.push(*even);
@@ -6417,7 +6582,22 @@ impl<'file> LoadedModel<'file> {
                                 state_out,
                             } => {
                                 roots.push(*qkv_mixed);
-                                roots.push(*state_out);
+                                #[cfg(all(
+                                    feature = "metal-output-placement",
+                                    target_os = "macos"
+                                ))]
+                                let state_is_placed = ssm_placement_enabled
+                                    && ssm_placement_max_layer
+                                        .is_none_or(|maximum| layer <= maximum)
+                                    && ssm_state_buffers[layer].is_some();
+                                #[cfg(not(all(
+                                    feature = "metal-output-placement",
+                                    target_os = "macos"
+                                )))]
+                                let state_is_placed = false;
+                                if !state_is_placed {
+                                    roots.push(*state_out);
+                                }
                             }
                         }
                     }
@@ -6697,6 +6877,13 @@ impl<'file> LoadedModel<'file> {
                             &resident_names,
                             &mut expert_slab_guard,
                             cached_len,
+                            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                            Some(&Qwen35SsmPlacement {
+                                input_nodes: &ssm_state_input_nodes,
+                                buffers: &ssm_state_buffers,
+                                maximum_layer: ssm_placement_max_layer,
+                                use_second_as_input: cached_len % 2 != 0,
+                            }),
                             &mut before_qwen35moe_gather,
                         )?
                     } else if use_metal_output_placements(
@@ -6901,7 +7088,9 @@ impl<'file> LoadedModel<'file> {
                                     feature = "metal-output-placement",
                                     target_os = "macos"
                                 ))]
-                                let state_is_placed = !ssm_input_placements.is_empty();
+                                let state_is_placed = ssm_output_placements
+                                    .iter()
+                                    .any(|(node, _, _)| node == state_out);
                                 #[cfg(not(all(
                                     feature = "metal-output-placement",
                                     target_os = "macos"

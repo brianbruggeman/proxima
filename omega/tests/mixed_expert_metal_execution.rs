@@ -316,6 +316,144 @@ fn mixed_q2k_q4k_expert_source_executes_on_metal() {
     }
 }
 
+#[cfg(feature = "metal-output-placement")]
+#[test]
+fn mixed_expert_source_and_recurrent_state_placement_share_one_execution() {
+    const STATE_ELEMENTS: usize = 8;
+
+    let (mut program, expert_output) = gathered_expert_program();
+    let state_input = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(STATE_ELEMENTS as u32)],
+            name: Some("state".into()),
+        },
+    );
+    let state_output = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: vec![(state_input, IndexMap::Affine(map::projection(1, &[0])))],
+            name: Some("state_out".into()),
+        },
+    );
+
+    let low = pack_q2k(&expert_weights(1));
+    let high = pack_q4k(&expert_weights(2));
+    let placeholder = [high.as_slice(), high.as_slice(), high.as_slice()].concat();
+    let routes = [2.0_f32, 0.0_f32];
+    let activations = activation();
+    let state_placeholder = [0.0_f32; STATE_ELEMENTS];
+    let named = [
+        ("weight", QuantizedBlock::Q4K(&placeholder)),
+        ("route", QuantizedBlock::Float32(&routes)),
+        ("activation", QuantizedBlock::Float32(&activations)),
+        ("state", QuantizedBlock::Float32(&state_placeholder)),
+    ];
+    let plan = omega::plan_named(
+        &program,
+        &[],
+        &named,
+        &[expert_output, state_output],
+        NumericPolicy::default(),
+    )
+    .expect("the combined expert and recurrent-state program plans");
+
+    let entries = [
+        ExpertEntry {
+            block: QuantizedBlock::Q2K(&low),
+            out_dim: ROWS as u32,
+            in_dim: WIDTH as u32,
+            epoch: 3,
+        },
+        ExpertEntry {
+            block: QuantizedBlock::Q4K(&high),
+            out_dim: ROWS as u32,
+            in_dim: WIDTH as u32,
+            epoch: 4,
+        },
+        ExpertEntry {
+            block: QuantizedBlock::Q4K(&high),
+            out_dim: ROWS as u32,
+            in_dim: WIDTH as u32,
+            epoch: 5,
+        },
+    ];
+    let selected = [0_u32, 2_u32];
+    let source = ExpertSource::with_selected_expert_ids(&entries, &selected);
+    let sources = BTreeMap::from([(NodeId(0), source)]);
+
+    let input_buffer = omega::allocate_placed_buffer(STATE_ELEMENTS * size_of::<f32>())
+        .expect("allocates the recurrent input buffer");
+    let output_buffer = omega::allocate_placed_buffer(STATE_ELEMENTS * size_of::<f32>())
+        .expect("allocates the recurrent output buffer");
+    let state: Vec<f32> = (0..STATE_ELEMENTS)
+        .map(|index| index as f32 + 0.25)
+        .collect();
+    let (seed_program, seed_output) = {
+        let mut seed_program = Vec::new();
+        let seed_input = append(
+            &mut seed_program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(STATE_ELEMENTS as u32)],
+                name: None,
+            },
+        );
+        let seed_output = append(
+            &mut seed_program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: vec![(seed_input, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+        (seed_program, seed_output)
+    };
+    let seed_plan = omega::plan(
+        &seed_program,
+        &[],
+        &[QuantizedBlock::Float32(&state)],
+        &[seed_output],
+        NumericPolicy::default(),
+    )
+    .expect("the recurrent-state seed plans");
+    omega::execute_plan_with_placements(
+        &seed_plan,
+        &[QuantizedBlock::Float32(&state)],
+        &[],
+        &[(seed_output, &input_buffer, 0)],
+        &mut Vec::new(),
+    )
+    .expect("seeds the recurrent input buffer");
+
+    let evaluated = omega::execute_plan_named_with_placements_and_expert_sources(
+        &plan,
+        &named,
+        &[(state_input, &input_buffer, 0)],
+        &[(state_output, &output_buffer, 0)],
+        &sources,
+    )
+    .expect("one Metal execution accepts both HOBBIT sources and placed state");
+
+    assert!(
+        evaluated.get(expert_output).is_some(),
+        "the mixed expert reduction must execute while state is placed"
+    );
+    assert!(
+        evaluated.get(state_output).is_none(),
+        "a placed state output must not also be copied back through Evaluated"
+    );
+    assert_eq!(
+        omega::read_placed_buffer_f32(&output_buffer, 0, STATE_ELEMENTS),
+        state,
+        "the recurrent state must survive the mixed-codec expert execution"
+    );
+}
+
 #[test]
 fn mixed_kernel_cache_keeps_each_route_index_binding() {
     let (program, first, second) = two_route_program();
@@ -379,8 +517,12 @@ fn mixed_kernel_cache_keeps_each_route_index_binding() {
         .expect("both route-index bindings execute through Metal");
 
     for node in [first, second] {
-        let (actual, _) = evaluated.get(node).expect("Metal retained the requested route output");
-        let (expected, _) = expected.get(node).expect("CPU retained the requested route output");
+        let (actual, _) = evaluated
+            .get(node)
+            .expect("Metal retained the requested route output");
+        let (expected, _) = expected
+            .get(node)
+            .expect("CPU retained the requested route output");
         for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
             assert!(
                 (actual - expected).abs() <= 1.0e-4,

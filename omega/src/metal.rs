@@ -1513,16 +1513,14 @@ fn execute_plan_inner(
             counter!(BLOCK_OFFERED_BYTES, block_byte_len(&block) as u64);
         }
         let buffer = match block {
-            QuantizedBlock::Float32(data) => {
-                upload_block(
-                    &device,
-                    data,
-                    node,
-                    dtype,
-                    plan.program[node.0 as usize].name(),
-                    resident_name,
-                )?
-            }
+            QuantizedBlock::Float32(data) => upload_block(
+                &device,
+                data,
+                node,
+                dtype,
+                plan.program[node.0 as usize].name(),
+                resident_name,
+            )?,
             QuantizedBlock::Int32(data) => {
                 upload_block_int32_as_float(&device, data, resident_name)?
             }
@@ -2101,6 +2099,15 @@ pub fn execute_plan_with_expert_sources(
     if expert_sources.is_empty() {
         return execute_plan(plan, blocks);
     }
+    let buffers = stage_expert_sources(plan, blocks, expert_sources)?;
+    execute_plan_inner(plan, blocks, &buffers)
+}
+
+fn stage_expert_sources(
+    plan: &Plan,
+    blocks: &[QuantizedBlock<'_>],
+    expert_sources: &BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+) -> Result<BTreeMap<NodeId, ExpertSourceBuffers>, MetalError> {
     for (node, source) in expert_sources {
         let block_position = plan
             .prepared
@@ -2169,7 +2176,7 @@ pub fn execute_plan_with_expert_sources(
             Ok(())
         })?;
     }
-    execute_plan_inner(plan, blocks, &buffers)
+    Ok(buffers)
 }
 
 /// Named-block counterpart used by `omega::backend`.
@@ -2757,8 +2764,40 @@ pub fn execute_plan_with_placements(
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
     recycle: &mut Vec<Vec<f32>>,
 ) -> Result<Evaluated, MetalError> {
+    execute_plan_with_placements_inner(
+        plan,
+        blocks,
+        input_placements,
+        output_placements,
+        recycle,
+        &BTreeMap::new(),
+    )
+}
+
+#[cfg(feature = "metal-output-placement")]
+fn execute_plan_with_placements_inner(
+    plan: &Plan,
+    blocks: &[QuantizedBlock<'_>],
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    output_placements: &[(NodeId, &PlacedBuffer, usize)],
+    recycle: &mut Vec<Vec<f32>>,
+    expert_buffers: &BTreeMap<NodeId, ExpertSourceBuffers>,
+) -> Result<Evaluated, MetalError> {
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
+    let mut effective_expert_buffers = expert_buffers.clone();
+    for (source_node, buffers) in expert_buffers {
+        let Some(source_name) = plan.program[source_node.0 as usize].name() else {
+            continue;
+        };
+        for (position, operation) in plan.program.iter().enumerate() {
+            if operation.name() == Some(source_name) {
+                effective_expert_buffers
+                    .entry(NodeId(position as u32))
+                    .or_insert_with(|| buffers.clone());
+            }
+        }
+    }
     let input_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = input_placements
         .iter()
         .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
@@ -2784,6 +2823,9 @@ pub fn execute_plan_with_placements(
     // still written fresh every call exactly as before, only the map's own
     // heap nodes now outlive one call instead of being dropped with it.
     let mut device_buffers = plan.device_buffers.borrow_mut();
+    for (node, buffers) in &effective_expert_buffers {
+        device_buffers.insert(*node, (buffers.payloads.clone(), 0));
+    }
     let mut block_identity = plan.block_identity.borrow_mut();
     if block_identity.len() != prepared.block_nodes.len() {
         block_identity.resize(prepared.block_nodes.len(), None);
@@ -2795,6 +2837,10 @@ pub fn execute_plan_with_placements(
         .zip(plan.block_dtypes.iter())
         .enumerate()
     {
+        if effective_expert_buffers.contains_key(node) {
+            block_identity[index] = None;
+            continue;
+        }
         // an input-placed node skips the host round trip entirely: its
         // buffer is already on the device, owned by the caller, and this
         // call's own `block` entry for it (still required, positionally, to
@@ -2868,16 +2914,14 @@ pub fn execute_plan_with_placements(
             counter!(BLOCK_OFFERED_BYTES, block_byte_len(block) as u64);
         }
         let buffer = match block {
-            QuantizedBlock::Float32(data) => {
-                upload_block(
-                    &device,
-                    data,
-                    *node,
-                    *dtype,
-                    plan.program[node.0 as usize].name(),
-                    resident_name,
-                )?
-            }
+            QuantizedBlock::Float32(data) => upload_block(
+                &device,
+                data,
+                *node,
+                *dtype,
+                plan.program[node.0 as usize].name(),
+                resident_name,
+            )?,
             QuantizedBlock::Int32(data) => {
                 upload_block_int32_as_float(&device, data, resident_name)?
             }
@@ -3097,6 +3141,7 @@ pub fn execute_plan_with_placements(
             // free, the same reason `resolved_output` above is `None` there.
             let hazard =
                 (dispatch_type == DispatchType::Concurrent).then_some(&mut hazard_state.tracker);
+            let bound_expert_buffers = expert_buffers_for(bound, &effective_expert_buffers)?;
             let fault = encode_op(
                 &device,
                 &encoder,
@@ -3110,7 +3155,7 @@ pub fn execute_plan_with_placements(
                 resolved_step,
                 attention_scratch,
                 hazard,
-                None,
+                bound_expert_buffers,
             )?;
             if let Some((fault_buffer, gathers)) = fault {
                 pending_faults.push((bound, fault_buffer, gathers));
@@ -3226,6 +3271,33 @@ pub fn execute_plan_named_with_placements(
     )
 }
 
+/// Executes a named plan with both caller-owned buffers and per-step expert
+/// substitutions. Routed recurrent models need both capabilities in the same
+/// command buffer: placement keeps recurrent state on the device while the
+/// expert table selects the codec and address for the current route.
+///
+/// # Errors
+/// Propagates name resolution, expert-source validation, and Metal failures.
+#[cfg(feature = "metal-output-placement")]
+pub fn execute_plan_named_with_placements_and_expert_sources(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    output_placements: &[(NodeId, &PlacedBuffer, usize)],
+    expert_sources: &BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+) -> Result<Evaluated, MetalError> {
+    let blocks = resolve_named_blocks(&plan.program, named)?;
+    let expert_buffers = stage_expert_sources(plan, &blocks, expert_sources)?;
+    execute_plan_with_placements_inner(
+        plan,
+        &blocks,
+        input_placements,
+        output_placements,
+        &mut Vec::new(),
+        &expert_buffers,
+    )
+}
+
 /// [`execute_plan`] with the WHOLE program's own single command buffer's
 /// `GPUStartTime`/`GPUEndTime` read back once, instead of
 /// [`execute_plan_op_timed`]'s one-command-buffer-per-op attribution. ROW
@@ -3260,16 +3332,14 @@ pub fn execute_plan_timed(
     {
         let resident_name = resident_name(plan, *node);
         let buffer = match block {
-            QuantizedBlock::Float32(data) => {
-                upload_block(
-                    &device,
-                    data,
-                    *node,
-                    *dtype,
-                    plan.program[node.0 as usize].name(),
-                    resident_name,
-                )?
-            }
+            QuantizedBlock::Float32(data) => upload_block(
+                &device,
+                data,
+                *node,
+                *dtype,
+                plan.program[node.0 as usize].name(),
+                resident_name,
+            )?,
             QuantizedBlock::Int32(data) => {
                 upload_block_int32_as_float(&device, data, resident_name)?
             }
@@ -3720,16 +3790,14 @@ pub fn execute_plan_op_timed(
     {
         let resident_name = resident_name(plan, *node);
         let buffer = match block {
-            QuantizedBlock::Float32(data) => {
-                upload_block(
-                    &device,
-                    data,
-                    *node,
-                    *dtype,
-                    plan.program[node.0 as usize].name(),
-                    resident_name,
-                )?
-            }
+            QuantizedBlock::Float32(data) => upload_block(
+                &device,
+                data,
+                *node,
+                *dtype,
+                plan.program[node.0 as usize].name(),
+                resident_name,
+            )?,
             QuantizedBlock::Int32(data) => upload_block_int32_as_float(&device, data, None)?,
             // `Float16`/`BFloat16` upload their bytes UNCHANGED, same as
             // every packed codec above -- there is no host-side narrowing
@@ -3869,16 +3937,14 @@ pub fn execute_plan_with_placements_op_timed(
         }
         let resident_name = resident_name(plan, *node);
         let buffer = match block {
-            QuantizedBlock::Float32(data) => {
-                upload_block(
-                    &device,
-                    data,
-                    *node,
-                    *dtype,
-                    plan.program[node.0 as usize].name(),
-                    resident_name,
-                )?
-            }
+            QuantizedBlock::Float32(data) => upload_block(
+                &device,
+                data,
+                *node,
+                *dtype,
+                plan.program[node.0 as usize].name(),
+                resident_name,
+            )?,
             QuantizedBlock::Int32(data) => upload_block_int32_as_float(&device, data, None)?,
             // `Q3_K` uploads its raw super-block bytes unchanged, same as
             // every other packed codec below -- `msl::PackedCodec::Q3K`'s
@@ -4091,16 +4157,14 @@ pub fn execute_plan_with_placements_dispatch_timed(
         }
         let resident_name = resident_name(plan, *node);
         let buffer = match block {
-            QuantizedBlock::Float32(data) => {
-                upload_block(
-                    &device,
-                    data,
-                    *node,
-                    *dtype,
-                    plan.program[node.0 as usize].name(),
-                    resident_name,
-                )?
-            }
+            QuantizedBlock::Float32(data) => upload_block(
+                &device,
+                data,
+                *node,
+                *dtype,
+                plan.program[node.0 as usize].name(),
+                resident_name,
+            )?,
             QuantizedBlock::Int32(data) => upload_block_int32_as_float(&device, data, None)?,
             QuantizedBlock::Q3K(bytes)
             | QuantizedBlock::Q4K(bytes)
@@ -7078,10 +7142,14 @@ pub fn discard_checkpoint_mmap_range_immediate(bytes: &[u8]) -> Result<(), Metal
         .checked_add(bytes.len())
         .and_then(|value| value.checked_add(page - 1))
         .map(|value| value & !(page - 1))
-        .ok_or(MetalError::CheckpointMmapDiscardFailed { errno: libc::EINVAL })?;
+        .ok_or(MetalError::CheckpointMmapDiscardFailed {
+            errno: libc::EINVAL,
+        })?;
     let length = end
         .checked_sub(start)
-        .ok_or(MetalError::CheckpointMmapDiscardFailed { errno: libc::EINVAL })?;
+        .ok_or(MetalError::CheckpointMmapDiscardFailed {
+            errno: libc::EINVAL,
+        })?;
     let result = unsafe { libc::madvise(start as *mut libc::c_void, length, libc::MADV_DONTNEED) };
     if result == 0 {
         Ok(())
@@ -8469,20 +8537,15 @@ fn bind_buffers(
     let (output_buffer, output_offset) = output;
     for (index, binding) in bindings.iter().enumerate() {
         let (buffer, offset) = match binding {
-            Binding::Input(node)
-                if expert_source_node.is_some_and(|source| source == *node) =>
-            {
-                (
-                    expert_payloads
-                        .cloned()
-                        .ok_or_else(|| MetalError::CompileFailed {
-                            log:
-                                "kernel replaces an expert input but no payload buffer was supplied"
-                                    .to_string(),
-                        })?,
-                    0,
-                )
-            }
+            Binding::Input(node) if expert_source_node.is_some_and(|source| source == *node) => (
+                expert_payloads
+                    .cloned()
+                    .ok_or_else(|| MetalError::CompileFailed {
+                        log: "kernel replaces an expert input but no payload buffer was supplied"
+                            .to_string(),
+                    })?,
+                0,
+            ),
             Binding::Input(node) | Binding::Indices(node) => {
                 if std::env::var_os("PROXIMA_DEBUG_SEGMENT_HOST").is_some()
                     && !device_buffers.contains_key(node)
@@ -9158,99 +9221,99 @@ fn encode_op(
     let emit_started = read_ticks();
     let owned_bindings: Vec<Binding>;
     let owned_merge: Option<ResolvedMergeStep>;
-    let (pipeline, bindings, grid, merge) =
-        if let Some(step) = resolved.filter(|_| expert_buffers.is_none()) {
-            (
-                step.pipeline.clone(),
-                step.bindings.as_slice(),
-                step.grid,
-                step.merge.as_ref(),
-            )
-        } else if let Some(source_node) = expert_source_node {
-            let mut cache_key = kernel_cache_key(bound, packed_operands, numeric_policy)?;
-            cache_key.push(math_mode.cache_token());
-            cache_key.push_str("_mixed_expert");
-            let (binding_identity, _) =
-                kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
-            cache_key.push_str(&format!("_{binding_identity:?}"));
-            let kernel = MIXED_KERNEL_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());
-            let kernel = match kernel {
-                Some(kernel) => kernel,
-                None => {
-                    let kernel = crate::msl::emit_with_expert_sources(
-                        bound,
-                        packed_operands,
-                        numeric_policy,
-                        source_node,
-                    )?;
-                    MIXED_KERNEL_CACHE.with(|cache| {
-                        cache.borrow_mut().insert(cache_key.clone(), kernel.clone());
-                    });
-                    kernel
-                }
-            };
-            let pipeline = pipeline_for_kernel(device, &kernel, &cache_key, math_mode)?;
-            owned_bindings = kernel.bindings;
-            (pipeline, owned_bindings.as_slice(), kernel.grid, None)
-        } else {
-            // `kernel_cache_key`/`kernel_dispatch_shape` are the cheap halves of
-            // `emit`'s work -- structural fingerprint, bindings, grid -- with no
-            // MSL body text rendered. On a pipeline-cache HIT (the steady-decode
-            // case, `plan_hits`/`gpu_exec`'s own row) `emit` itself is never
-            // called; only a genuine miss inside `pipeline_for` pays for the
-            // full render + compile.
-            let mut cache_key = kernel_cache_key(bound, packed_operands, numeric_policy)?;
-            cache_key.push(math_mode.cache_token());
-            let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
-            #[cfg(feature = "instrument")]
-            {
-                counter!(EMIT_CALLS, 1);
-                counter!(EMIT_TICKS, elapsed_ticks(emit_started));
+    let (pipeline, bindings, grid, merge) = if let Some(step) =
+        resolved.filter(|_| expert_buffers.is_none())
+    {
+        (
+            step.pipeline.clone(),
+            step.bindings.as_slice(),
+            step.grid,
+            step.merge.as_ref(),
+        )
+    } else if let Some(source_node) = expert_source_node {
+        let mut cache_key = kernel_cache_key(bound, packed_operands, numeric_policy)?;
+        cache_key.push(math_mode.cache_token());
+        cache_key.push_str("_mixed_expert");
+        let (binding_identity, _) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
+        cache_key.push_str(&format!("_{binding_identity:?}"));
+        let kernel = MIXED_KERNEL_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());
+        let kernel = match kernel {
+            Some(kernel) => kernel,
+            None => {
+                let kernel = crate::msl::emit_with_expert_sources(
+                    bound,
+                    packed_operands,
+                    numeric_policy,
+                    source_node,
+                )?;
+                MIXED_KERNEL_CACHE.with(|cache| {
+                    cache.borrow_mut().insert(cache_key.clone(), kernel.clone());
+                });
+                kernel
             }
-            #[cfg(feature = "instrument")]
-            let pipeline_started = read_ticks();
-            let pipeline = pipeline_for(
-                device,
-                bound,
-                packed_operands,
-                &cache_key,
-                math_mode,
-                numeric_policy,
-            )?;
-            #[cfg(feature = "instrument")]
-            {
-                counter!(PIPELINE_LOOKUP_CALLS, 1);
-                counter!(PIPELINE_LOOKUP_TICKS, elapsed_ticks(pipeline_started));
-            }
-            // This cold path (`resolved: None`: `execute_plan`, the
-            // `*_op_timed` diagnostics) has no `Plan` to own a scratch buffer
-            // or a resolved merge pipeline -- it resolves both itself, here,
-            // exactly like `pipeline_for`/`kernel_dispatch_shape` just above,
-            // rather than caching them plan-side. `None` (every non-
-            // `CachedAttention` op, or a `CachedAttention` op under a policy
-            // that withholds `ContextSplitMerge`) costs nothing extra: `emit_
-            // cached_attention_merge` returns `None` before rendering anything.
-            owned_merge = match crate::msl::emit_cached_attention_merge(bound, numeric_policy)? {
-                Some(merge_kernel) => {
-                    let merge_cache_key = format!("{cache_key}_merge");
-                    let merge_pipeline =
-                        pipeline_for_kernel(device, &merge_kernel, &merge_cache_key, math_mode)?;
-                    Some(ResolvedMergeStep {
-                        pipeline: merge_pipeline,
-                        bindings: merge_kernel.bindings,
-                        grid: merge_kernel.grid,
-                    })
-                }
-                None => None,
-            };
-            owned_bindings = bindings;
-            (
-                pipeline,
-                owned_bindings.as_slice(),
-                grid,
-                owned_merge.as_ref(),
-            )
         };
+        let pipeline = pipeline_for_kernel(device, &kernel, &cache_key, math_mode)?;
+        owned_bindings = kernel.bindings;
+        (pipeline, owned_bindings.as_slice(), kernel.grid, None)
+    } else {
+        // `kernel_cache_key`/`kernel_dispatch_shape` are the cheap halves of
+        // `emit`'s work -- structural fingerprint, bindings, grid -- with no
+        // MSL body text rendered. On a pipeline-cache HIT (the steady-decode
+        // case, `plan_hits`/`gpu_exec`'s own row) `emit` itself is never
+        // called; only a genuine miss inside `pipeline_for` pays for the
+        // full render + compile.
+        let mut cache_key = kernel_cache_key(bound, packed_operands, numeric_policy)?;
+        cache_key.push(math_mode.cache_token());
+        let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
+        #[cfg(feature = "instrument")]
+        {
+            counter!(EMIT_CALLS, 1);
+            counter!(EMIT_TICKS, elapsed_ticks(emit_started));
+        }
+        #[cfg(feature = "instrument")]
+        let pipeline_started = read_ticks();
+        let pipeline = pipeline_for(
+            device,
+            bound,
+            packed_operands,
+            &cache_key,
+            math_mode,
+            numeric_policy,
+        )?;
+        #[cfg(feature = "instrument")]
+        {
+            counter!(PIPELINE_LOOKUP_CALLS, 1);
+            counter!(PIPELINE_LOOKUP_TICKS, elapsed_ticks(pipeline_started));
+        }
+        // This cold path (`resolved: None`: `execute_plan`, the
+        // `*_op_timed` diagnostics) has no `Plan` to own a scratch buffer
+        // or a resolved merge pipeline -- it resolves both itself, here,
+        // exactly like `pipeline_for`/`kernel_dispatch_shape` just above,
+        // rather than caching them plan-side. `None` (every non-
+        // `CachedAttention` op, or a `CachedAttention` op under a policy
+        // that withholds `ContextSplitMerge`) costs nothing extra: `emit_
+        // cached_attention_merge` returns `None` before rendering anything.
+        owned_merge = match crate::msl::emit_cached_attention_merge(bound, numeric_policy)? {
+            Some(merge_kernel) => {
+                let merge_cache_key = format!("{cache_key}_merge");
+                let merge_pipeline =
+                    pipeline_for_kernel(device, &merge_kernel, &merge_cache_key, math_mode)?;
+                Some(ResolvedMergeStep {
+                    pipeline: merge_pipeline,
+                    bindings: merge_kernel.bindings,
+                    grid: merge_kernel.grid,
+                })
+            }
+            None => None,
+        };
+        owned_bindings = bindings;
+        (
+            pipeline,
+            owned_bindings.as_slice(),
+            grid,
+            owned_merge.as_ref(),
+        )
+    };
     #[cfg(feature = "instrument")]
     let op_setup_started = read_ticks();
     let (output, output_offset) = match placement {
