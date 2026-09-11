@@ -1660,6 +1660,22 @@ impl<'file> LoadedModel<'file> {
         let mut router_readback_bytes = 0_u64;
         #[cfg(feature = "instrument")]
         let mut gather_readback_bytes = 0_u64;
+        if std::env::var_os("PROXIMA_DEBUG_QWEN35_ROOTS").is_some() {
+            eprintln!(
+                "qwen35 pre-gather roots nodes={:?}",
+                outputs
+                    .iter()
+                    .map(|node| {
+                        (
+                            node.0,
+                            self.program
+                                .get(node.0 as usize)
+                                .and_then(|operation| operation.name()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
         for (index, operation) in self.program.iter().enumerate() {
             if let proxima_tensor::op::Op::Constant { value, .. } = operation {
                 carried.insert(NodeId(index as u32), (Vec::new(), vec![*value]));
