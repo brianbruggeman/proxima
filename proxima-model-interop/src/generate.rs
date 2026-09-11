@@ -6713,7 +6713,7 @@ impl<'file> LoadedModel<'file> {
                         &mut qwen35_dense_pad_scratch,
                         &mut step_input_scratch,
                         &mut named_blocks,
-                        self.single_position_step && !gdn_prefill_scan_enabled,
+                        self.single_position_step,
                     )?;
                     #[cfg(feature = "instrument")]
                     let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
