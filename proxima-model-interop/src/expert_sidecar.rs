@@ -147,12 +147,12 @@ impl MappedExpertSidecar {
                 self.mapping.len(),
                 descriptor.target_codec,
             )?;
-            omega::discard_checkpoint_mmap_range_immediate(&self.mapping[range]).map_err(|error| {
-                InteropError::PreGatherExecutionUnsupported {
+            omega::discard_checkpoint_mmap_range_immediate(&self.mapping[range]).map_err(
+                |error| InteropError::PreGatherExecutionUnsupported {
                     architecture: String::from("qwen35moe"),
                     reason: error.to_string(),
-                }
-            })?;
+                },
+            )?;
         }
         Ok(())
     }
