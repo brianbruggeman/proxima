@@ -2366,6 +2366,14 @@ impl<'file> LoadedModel<'file> {
         // only a non-qwen35 checkpoint with a flag set falls through to
         // the narrow inline path below.
         let general_architecture = crate::bind::metadata_str(parsed, "general.architecture")?;
+        if std::env::var_os("PROXIMA_DEBUG_ARCH_ROUTE").is_some() {
+            eprintln!(
+                "architecture route value={general_architecture:?} qwen35moe={} flags=({}, {})",
+                general_architecture == "qwen35moe",
+                paired_gate_up_reduce,
+                fused_qkv_reduce,
+            );
+        }
         if matches!(general_architecture, "qwen35" | "qwen35moe")
             || (!paired_gate_up_reduce && !fused_qkv_reduce)
         {

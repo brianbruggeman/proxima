@@ -52,6 +52,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use proxima_gguf::pipe::parse_complete;
+use proxima_model_interop::ArchitectureRegistry;
 use proxima_model_interop::Control;
 use proxima_model_interop::GPU_LAYERS_ALL;
 use proxima_model_interop::LoadedModel;
@@ -378,7 +379,8 @@ fn main() {
     print_architecture_metadata(&parsed);
 
     let load_started = Instant::now();
-    let mut model = match LoadedModel::load(&parsed, file_bytes) {
+    let registry = ArchitectureRegistry::with_builtin();
+    let mut model = match LoadedModel::load_with_registry(&parsed, file_bytes, &registry) {
         Ok(model) => model,
         Err(error) => {
             println!("WEIGHT LOAD FAILED: {error}");
