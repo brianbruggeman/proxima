@@ -899,6 +899,17 @@ mod tests {
         assert_eq!(layer_roots.len(), 2, "one cache root per layer");
         assert_eq!(moe_sites.0.len(), 2, "one router site per layer");
         assert_eq!(diagnostics.len(), 2, "one diagnostic record per layer");
+        let gdn_taps = diagnostics[0]
+            .ssm_taps
+            .expect("the first synthetic layer is the gdn layer");
+        assert!(
+            gdn_taps.query_sequence.0 < gdn_taps.state_out.0
+                && gdn_taps.key_sequence.0 < gdn_taps.state_out.0
+                && gdn_taps.value_sequence.0 < gdn_taps.state_out.0
+                && gdn_taps.gate_sequence.0 < gdn_taps.state_out.0
+                && gdn_taps.beta_sequence.0 < gdn_taps.state_out.0,
+            "batched recurrence inputs must precede the state transition"
+        );
         assert_ne!(
             roots.logits, roots.hidden,
             "logits follow the output projection"
