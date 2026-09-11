@@ -1514,7 +1514,14 @@ fn execute_plan_inner(
         }
         let buffer = match block {
             QuantizedBlock::Float32(data) => {
-                upload_block(&device, data, node, dtype, resident_name)?
+                upload_block(
+                    &device,
+                    data,
+                    node,
+                    dtype,
+                    plan.program[node.0 as usize].name(),
+                    resident_name,
+                )?
             }
             QuantizedBlock::Int32(data) => {
                 upload_block_int32_as_float(&device, data, resident_name)?
@@ -2862,7 +2869,14 @@ pub fn execute_plan_with_placements(
         }
         let buffer = match block {
             QuantizedBlock::Float32(data) => {
-                upload_block(&device, data, *node, *dtype, resident_name)?
+                upload_block(
+                    &device,
+                    data,
+                    *node,
+                    *dtype,
+                    plan.program[node.0 as usize].name(),
+                    resident_name,
+                )?
             }
             QuantizedBlock::Int32(data) => {
                 upload_block_int32_as_float(&device, data, resident_name)?
@@ -3247,7 +3261,14 @@ pub fn execute_plan_timed(
         let resident_name = resident_name(plan, *node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => {
-                upload_block(&device, data, *node, *dtype, resident_name)?
+                upload_block(
+                    &device,
+                    data,
+                    *node,
+                    *dtype,
+                    plan.program[node.0 as usize].name(),
+                    resident_name,
+                )?
             }
             QuantizedBlock::Int32(data) => {
                 upload_block_int32_as_float(&device, data, resident_name)?
@@ -3700,7 +3721,14 @@ pub fn execute_plan_op_timed(
         let resident_name = resident_name(plan, *node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => {
-                upload_block(&device, data, *node, *dtype, resident_name)?
+                upload_block(
+                    &device,
+                    data,
+                    *node,
+                    *dtype,
+                    plan.program[node.0 as usize].name(),
+                    resident_name,
+                )?
             }
             QuantizedBlock::Int32(data) => upload_block_int32_as_float(&device, data, None)?,
             // `Float16`/`BFloat16` upload their bytes UNCHANGED, same as
@@ -3842,7 +3870,14 @@ pub fn execute_plan_with_placements_op_timed(
         let resident_name = resident_name(plan, *node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => {
-                upload_block(&device, data, *node, *dtype, resident_name)?
+                upload_block(
+                    &device,
+                    data,
+                    *node,
+                    *dtype,
+                    plan.program[node.0 as usize].name(),
+                    resident_name,
+                )?
             }
             QuantizedBlock::Int32(data) => upload_block_int32_as_float(&device, data, None)?,
             // `Q3_K` uploads its raw super-block bytes unchanged, same as
@@ -4057,7 +4092,14 @@ pub fn execute_plan_with_placements_dispatch_timed(
         let resident_name = resident_name(plan, *node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => {
-                upload_block(&device, data, *node, *dtype, resident_name)?
+                upload_block(
+                    &device,
+                    data,
+                    *node,
+                    *dtype,
+                    plan.program[node.0 as usize].name(),
+                    resident_name,
+                )?
             }
             QuantizedBlock::Int32(data) => upload_block_int32_as_float(&device, data, None)?,
             QuantizedBlock::Q3K(bytes)
@@ -6810,11 +6852,12 @@ fn upload_block(
     data: &[f32],
     node: NodeId,
     dtype: DType,
+    block_name: Option<&str>,
     resident_name: Option<&str>,
 ) -> Result<(MetalBuffer, usize), MetalError> {
     if std::env::var_os("PROXIMA_DEBUG_BLOCK_UPLOADS").is_some() && !data.is_empty() {
         eprintln!(
-            "metal block upload node={node:?} dtype={dtype:?} bytes={} resident={resident_name:?}",
+            "metal block upload node={node:?} name={block_name:?} dtype={dtype:?} bytes={} resident={resident_name:?}",
             size_of_val(data),
         );
     }
