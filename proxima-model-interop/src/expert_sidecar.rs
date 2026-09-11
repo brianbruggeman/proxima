@@ -5,7 +5,9 @@
 //! bytes are written. The sidecar therefore never constructs a packed
 //! whole-model buffer; its descriptor table is the only metadata allocation.
 
-use std::io::{Seek, Write};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::sync::Arc;
 
 use memmap2::Mmap;
@@ -67,6 +69,7 @@ pub struct ExpertSidecar {
 pub struct MappedExpertSidecar {
     sidecar: ExpertSidecar,
     mapping: Arc<Mmap>,
+    source_file: Option<Arc<File>>,
     expert_count: usize,
     descriptor_indices: Vec<[Option<usize>; 3]>,
     high_bytes_per_expert: u64,
@@ -75,6 +78,14 @@ pub struct MappedExpertSidecar {
 impl MappedExpertSidecar {
     /// Parses a complete sidecar while retaining its mmap owner.
     pub fn new(mapping: Arc<Mmap>) -> Result<Self, InteropError> {
+        Self::new_with_source_file(mapping, None)
+    }
+
+    /// Parses a sidecar while retaining an optional file for bounded reads.
+    pub fn new_with_source_file(
+        mapping: Arc<Mmap>,
+        source_file: Option<Arc<File>>,
+    ) -> Result<Self, InteropError> {
         let sidecar = ExpertSidecar::from_bytes(&mapping)?;
         let expert_count = sidecar
             .descriptors
@@ -113,10 +124,28 @@ impl MappedExpertSidecar {
         Ok(Self {
             sidecar,
             mapping,
+            source_file,
             expert_count,
             descriptor_indices,
             high_bytes_per_expert,
         })
+    }
+
+    /// Reads a range through the source file when available, avoiding mmap
+    /// page faults for sparse expert payloads.
+    pub fn read_range(&self, range: Range<usize>) -> Result<Vec<u8>, InteropError> {
+        let Some(source_file) = &self.source_file else {
+            return Ok(self.mapping[range].to_vec());
+        };
+        let mut bytes = vec![0_u8; range.len()];
+        let mut reader = source_file.try_clone().map_err(InteropError::SidecarIo)?;
+        reader
+            .seek(SeekFrom::Start(range.start as u64))
+            .map_err(InteropError::SidecarIo)?;
+        reader
+            .read_exact(&mut bytes)
+            .map_err(InteropError::SidecarIo)?;
+        Ok(bytes)
     }
 
     /// Releases resident file pages after a step has finished consuming them.
