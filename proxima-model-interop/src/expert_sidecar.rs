@@ -344,27 +344,15 @@ impl MappedExpertSidecar {
                 descriptor.target_codec,
             )?;
             let site = slab.projection_site(address.layer, projection)?;
-            if self.source_file.is_some() {
-                let bytes = self.read_range(range)?;
-                slab.page_expert(
-                    address.layer,
-                    address.expert,
-                    descriptor.target_codec,
-                    &bytes,
-                    descriptor.out_dim,
-                    descriptor.in_dim,
-                )?;
-            } else {
-                slab.page_expert_mapped(
-                    site,
-                    address.expert,
-                    descriptor.target_codec,
-                    Arc::clone(&self.mapping),
-                    range,
-                    descriptor.out_dim,
-                    descriptor.in_dim,
-                )?;
-            }
+            slab.page_expert_mapped(
+                site,
+                address.expert,
+                descriptor.target_codec,
+                Arc::clone(&self.mapping),
+                range,
+                descriptor.out_dim,
+                descriptor.in_dim,
+            )?;
         }
         Ok(())
     }

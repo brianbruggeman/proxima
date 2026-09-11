@@ -5543,13 +5543,7 @@ impl<'file> LoadedModel<'file> {
         // read-ahead prevents the VM from faulting adjacent sidecar pages that
         // the residency policy will never touch in this step.
         mapping.advise(Advice::Random)?;
-        let source_file = std::env::var_os("PROXIMA_EXPERT_SIDECAR")
-            .and_then(|path| std::fs::File::open(path).ok())
-            .map(Arc::new);
-        let sidecar = crate::expert_sidecar::MappedExpertSidecar::new_with_source_file(
-            mapping,
-            source_file,
-        )?;
+        let sidecar = crate::expert_sidecar::MappedExpertSidecar::new(mapping)?;
         sidecar.install_low_copies(
             &mut lock_expert_slab(&self.expert_slab),
             self.architecture.block_count as usize,
