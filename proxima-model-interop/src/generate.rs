@@ -6591,7 +6591,7 @@ impl<'file> LoadedModel<'file> {
                         roots.push(self.logits_root);
                     }
                     roots.extend_from_slice(node_values_sink.nodes());
-                    for (layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
+                    for (_layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
                         match roots_for_layer {
                             Qwen35LayerRoots::Attention((even, odd, value)) => {
                                 roots.push(*even);
@@ -6615,8 +6615,8 @@ impl<'file> LoadedModel<'file> {
                                 ))]
                                 let state_is_placed = ssm_placement_enabled
                                     && ssm_placement_max_layer
-                                        .is_none_or(|maximum| layer <= maximum)
-                                    && ssm_state_buffers[layer].is_some();
+                                        .is_none_or(|maximum| _layer <= maximum)
+                                    && ssm_state_buffers[_layer].is_some();
                                 #[cfg(not(all(
                                     feature = "metal-output-placement",
                                     target_os = "macos"
