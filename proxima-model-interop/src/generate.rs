@@ -1853,6 +1853,29 @@ impl<'file> LoadedModel<'file> {
                     let result = if segment_input_placements.is_empty()
                         && segment_output_placements.is_empty()
                     {
+                        #[cfg(feature = "instrument")]
+                        if routed_segment_profile_selected(layer, "router") {
+                            let (evaluated, timings) = runtime.evaluate_segment_op_timed(
+                                program,
+                                symbols,
+                                &segment_named,
+                                &requested_nodes,
+                                resident_names,
+                                &BTreeMap::new(),
+                            )?;
+                            report_op_timings(position_offset, &timings, program);
+                            Ok(evaluated)
+                        } else {
+                            runtime.evaluate_segment(
+                                program,
+                                symbols,
+                                &segment_named,
+                                &requested_nodes,
+                                resident_names,
+                                None,
+                            )
+                        }
+                        #[cfg(not(feature = "instrument"))]
                         runtime.evaluate_segment(
                             program,
                             symbols,
