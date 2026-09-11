@@ -7764,8 +7764,12 @@ pub enum GdnOutputGate {
 /// intermediate a caller needs to bisect the mixer's tail against an
 /// independent reference, in the order the builder computes them
 /// (`spec.rs:6608-6928`). `qkv_mixed` is the fused `wqkv` projection
-/// (Q/K/V still concatenated, pre-conv); `state_out` is the delta-net
-/// recurrence's carried state; `delta_out` is the delta-net read-out
+/// (Q/K/V still concatenated, pre-conv). `query`/`key`/`value`/`gate`/
+/// `beta` are the sequence-axis-free inputs to
+/// [`append_qwen35_delta_net_step`]; exposing those existing roots gives an
+/// executor a typed cut at which it can batch the projections and then drive
+/// the matrix-state recurrence position by position. `state_out` is the
+/// delta-net recurrence's carried state; `delta_out` is the delta-net read-out
 /// (`jug` layout, pre-norm); `z` is the raw output-gate projection
 /// BEFORE [`GdnOutputGate`]'s silu/sigmoid split, so a caller can apply
 /// either nonlinearity independently of which one this program's own
@@ -7778,6 +7782,11 @@ pub enum GdnOutputGate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SsmMixerTaps {
     pub qkv_mixed: NodeId,
+    pub query: NodeId,
+    pub key: NodeId,
+    pub value: NodeId,
+    pub gate: NodeId,
+    pub beta: NodeId,
     pub state_out: NodeId,
     pub delta_out: NodeId,
     pub z: NodeId,
@@ -8409,6 +8418,11 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
 
     let taps = SsmMixerTaps {
         qkv_mixed,
+        query,
+        key,
+        value,
+        gate,
+        beta,
         state_out,
         delta_out,
         z,
@@ -18496,7 +18510,7 @@ value = 1.0
     /// [`append_qwen35_conv_branch`]'s own test already exploits.
     fn build_ssm_mixer_test_program(
         output_gate: GdnOutputGate,
-    ) -> (Vec<Op>, NodeId, NodeId, NodeId) {
+    ) -> (Vec<Op>, NodeId, SsmMixerTaps) {
         let mut program = Vec::new();
         let key_dim = 1u32;
         let value_dim = 2u32;
@@ -18605,7 +18619,7 @@ value = 1.0
             "state_in",
         );
 
-        let (mixer_out, qkv_mixed, state_out) = append_qwen35_ssm_mixer(
+        let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps(
             &mut program,
             x,
             inv_dim,
@@ -18635,7 +18649,31 @@ value = 1.0
         )
         .expect("ssm mixer lowers");
 
-        (program, mixer_out, qkv_mixed, state_out)
+        (program, mixer_out, taps)
+    }
+
+    /// The recurrent prefill boundary is made from values the graph already
+    /// computes, rather than a second projection path. Their shapes are the
+    /// exact one-position contract [`append_qwen35_delta_net_step`] consumes;
+    /// an executor may therefore cut immediately before `query` through
+    /// `beta`, batch the prefix, and thread only `state_out` sequentially.
+    #[test]
+    fn qwen35_ssm_taps_expose_the_existing_delta_net_step_inputs() {
+        let (program, _mixer_out, taps) =
+            build_ssm_mixer_test_program(GdnOutputGate::Silu);
+        let shapes = crate::shape::infer(&program, &[1]).expect("mixer shapes infer");
+
+        assert_eq!(shapes.of(taps.query), &[1, 1, 2]);
+        assert_eq!(shapes.of(taps.key), &[1, 1, 2]);
+        assert_eq!(shapes.of(taps.value), &[1, 1, 2]);
+        assert_eq!(shapes.of(taps.gate), &[1, 2]);
+        assert_eq!(shapes.of(taps.beta), &[1, 2]);
+        assert!(
+            [taps.query, taps.key, taps.value, taps.gate, taps.beta]
+                .into_iter()
+                .all(|input| input.0 < taps.state_out.0),
+            "every recurrence input must precede the state output in SSA order"
+        );
     }
 
     /// Builds one call into [`append_qwen35_dense_attention_layer`] at the
@@ -19300,7 +19338,7 @@ value = 1.0
     /// -4.98530547`, `mixer_out = x + cur = -3.98530547`.
     #[proxima::test]
     async fn qwen35_ssm_mixer_matches_a_hand_computed_decode_step() {
-        let (program, mixer_out, qkv_mixed, state_out) =
+        let (program, mixer_out, taps) =
             build_ssm_mixer_test_program(GdnOutputGate::Silu);
 
         let x_data = [1.0f32];
@@ -19339,13 +19377,17 @@ value = 1.0
                 ("ssm_out", &ssm_out_data),
                 ("state_in", &state_in_data),
             ],
-            &[mixer_out, qkv_mixed, state_out],
+            &[mixer_out, taps.qkv_mixed, taps.state_out],
         )
         .expect("ssm mixer evaluates");
 
         let (mixer_out_values, _) = evaluated.get(mixer_out).expect("mixer_out present");
-        let (qkv_mixed_values, _) = evaluated.get(qkv_mixed).expect("qkv_mixed present");
-        let (state_out_values, _) = evaluated.get(state_out).expect("state_out present");
+        let (qkv_mixed_values, _) = evaluated
+            .get(taps.qkv_mixed)
+            .expect("qkv_mixed present");
+        let (state_out_values, _) = evaluated
+            .get(taps.state_out)
+            .expect("state_out present");
 
         assert!(
             (mixer_out_values[0] - (-3.985_305_5)).abs() < 1e-4,
@@ -19378,7 +19420,7 @@ value = 1.0
     /// `-3.985_305_5`.
     #[proxima::test]
     async fn qwen35_ssm_mixer_sigmoid_gate_moves_the_output_away_from_silu() {
-        let (program, mixer_out, _, _) = build_ssm_mixer_test_program(GdnOutputGate::Sigmoid);
+        let (program, mixer_out, _) = build_ssm_mixer_test_program(GdnOutputGate::Sigmoid);
 
         let x_data = [1.0f32];
         let eps_data = [0.0f32];
@@ -19438,7 +19480,7 @@ value = 1.0
     /// never silently absorbed.
     #[proxima::test]
     async fn qwen35_ssm_mixer_hand_computed_check_actually_detects_a_wrong_history_value() {
-        let (program, mixer_out, _, _) = build_ssm_mixer_test_program(GdnOutputGate::Silu);
+        let (program, mixer_out, _) = build_ssm_mixer_test_program(GdnOutputGate::Silu);
 
         let x_data = [1.0f32];
         let eps_data = [0.0f32];
