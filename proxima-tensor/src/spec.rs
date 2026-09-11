@@ -7792,6 +7792,8 @@ pub struct SsmMixerTaps {
     pub value: NodeId,
     pub gate: NodeId,
     pub beta: NodeId,
+    pub state_in: NodeId,
+    pub z_head: NodeId,
     pub state_out: NodeId,
     pub delta_out: NodeId,
     pub z: NodeId,
@@ -8433,6 +8435,8 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
         value,
         gate,
         beta,
+        state_in,
+        z_head,
         state_out,
         delta_out,
         z,
@@ -19511,7 +19515,17 @@ value = 1.0
                 ("ssm_out", &ssm_out_data),
                 ("state_in", &state_in_data),
             ],
-            &[mixer_out, taps.qkv_mixed, taps.state_out],
+            &[
+                mixer_out,
+                taps.qkv_mixed,
+                taps.query,
+                taps.key,
+                taps.value,
+                taps.gate,
+                taps.beta,
+                taps.delta_out,
+                taps.state_out,
+            ],
         )
         .expect("ssm mixer evaluates");
 
@@ -19522,6 +19536,28 @@ value = 1.0
         let (state_out_values, _) = evaluated
             .get(taps.state_out)
             .expect("state_out present");
+        let mut scanned_state = state_in_data;
+        let mut scanned_output = [0.0_f32; 2];
+        crate::cpu::run_gdn_prefill_scan(crate::cpu::GdnPrefillScan {
+            shape: crate::cpu::GdnPrefillShape {
+                positions: 1,
+                key_dim: 1,
+                value_dim: 1,
+                heads: 2,
+            },
+            query: evaluated.get(taps.query).expect("query tap present").0,
+            key: evaluated.get(taps.key).expect("key tap present").0,
+            value: evaluated.get(taps.value).expect("value tap present").0,
+            gate: evaluated.get(taps.gate).expect("gate tap present").0,
+            beta: evaluated.get(taps.beta).expect("beta tap present").0,
+            inv_sqrt_key_dim: 1.0,
+            state: &mut scanned_state,
+            output: &mut scanned_output,
+        })
+        .expect("production prefill scan evaluates the tapped recurrence");
+        let (delta_out_values, _) = evaluated
+            .get(taps.delta_out)
+            .expect("delta_out present");
 
         assert!(
             (mixer_out_values[0] - (-3.985_305_5)).abs() < 1e-4,
@@ -19542,6 +19578,16 @@ value = 1.0
             (state_out_values[1] - (-0.880_797_1)).abs() < 1e-4,
             "got {}",
             state_out_values[1]
+        );
+        assert_eq!(
+            scanned_output.as_slice(),
+            delta_out_values,
+            "the production scan substitution must preserve the graph recurrence output"
+        );
+        assert_eq!(
+            scanned_state.as_slice(),
+            state_out_values,
+            "the production scan substitution must preserve the carried graph state"
         );
     }
 
