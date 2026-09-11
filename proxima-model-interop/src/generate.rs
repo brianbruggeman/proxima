@@ -1656,6 +1656,10 @@ impl<'file> LoadedModel<'file> {
         let mut router_elapsed_us = 0_u64;
         #[cfg(feature = "instrument")]
         let mut gather_elapsed_us = 0_u64;
+        #[cfg(feature = "instrument")]
+        let mut router_readback_bytes = 0_u64;
+        #[cfg(feature = "instrument")]
+        let mut gather_readback_bytes = 0_u64;
         for (index, operation) in self.program.iter().enumerate() {
             if let proxima_tensor::op::Op::Constant { value, .. } = operation {
                 carried.insert(NodeId(index as u32), (Vec::new(), vec![*value]));
@@ -2162,6 +2166,23 @@ impl<'file> LoadedModel<'file> {
                 #[cfg(feature = "instrument")]
                 {
                     segment_execution_count += 1;
+                    let readback_bytes = requested_nodes
+                        .iter()
+                        .filter_map(|node| evaluated.get(*node))
+                        .map(|(values, _)| values.len() as u64 * core::mem::size_of::<f32>() as u64)
+                        .sum::<u64>();
+                    if is_router {
+                        router_readback_bytes += readback_bytes;
+                    } else {
+                        gather_readback_bytes += readback_bytes;
+                    }
+                    debug!(
+                        layer = layer as u64,
+                        phase = if is_router { "router" } else { "gather" },
+                        requested_nodes = requested_nodes.len() as u64,
+                        readback_bytes,
+                        "qwen35moe segment returned requested payload bytes"
+                    );
                 }
                 if is_router {
                     let mapped_router = mapping.get(&diagnostic.router_logits).copied().ok_or(
@@ -2362,6 +2383,8 @@ impl<'file> LoadedModel<'file> {
                 suffix_executed,
                 router_elapsed_us,
                 gather_elapsed_us,
+                router_readback_bytes,
+                gather_readback_bytes,
                 "qwen35moe pre-gather segment census recorded after requested outputs completed"
             );
             if std::env::var_os("PROXIMA_DEBUG_QWEN35_SEGMENTS").is_some() {
