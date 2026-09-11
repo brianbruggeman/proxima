@@ -1107,12 +1107,7 @@ struct Qwen35MoeLayerSegments {
 #[derive(Clone)]
 struct Qwen35MoeGdnScanSegment {
     producer: crate::qwen35moe::execution::MappedLayerSegment,
-    tail: crate::qwen35moe::execution::MappedLayerSegment,
     taps: proxima_tensor::spec::SsmMixerTaps,
-    prefill: crate::qwen35moe::Qwen35MoeGdnPrefillTaps,
-    post_mixer_residual: NodeId,
-    post_attention_norm_output: NodeId,
-    router_logits: NodeId,
 }
 
 /// Releases every device buffer this checkpoint's own load caused: the
@@ -1502,43 +1497,24 @@ impl<'file> LoadedModel<'file> {
         let mut prefix_required_nodes = BTreeSet::new();
         let mut previous_output = None;
         for diagnostic in &self.qwen35moe_layer_diagnostics {
-            let (router, gdn_scan) = if let (Some(taps), Some(prefill)) =
-                (diagnostic.ssm_taps, diagnostic.gdn_prefill)
+            let (router, gdn_scan) = if let Some(taps) = diagnostic.ssm_taps
                 && gdn_scan_enabled
             {
                 let producer = crate::qwen35moe::execution::split_mapped_layer_segment(
                     &self.program,
                     symbols,
                     previous_output,
-                    taps.value_sequence,
-                )
-                .map_err(InteropError::from)?;
-                let tail = crate::qwen35moe::execution::split_mapped_layer_segment(
-                    &self.program,
-                    symbols,
-                    Some(prefill.delta_out_input),
-                    prefill.router_logits,
+                    taps.z_head,
                 )
                 .map_err(InteropError::from)?;
                 let router = crate::qwen35moe::execution::split_mapped_layer_segment(
                     &self.program,
                     symbols,
-                    Some(diagnostic.post_mixer_residual),
+                    Some(taps.delta_out),
                     diagnostic.router_logits,
                 )
                 .map_err(InteropError::from)?;
-                (
-                    router,
-                    Some(Qwen35MoeGdnScanSegment {
-                        producer,
-                        tail,
-                        taps,
-                        prefill,
-                        post_mixer_residual: diagnostic.post_mixer_residual,
-                        post_attention_norm_output: diagnostic.post_attention_norm_output,
-                        router_logits: diagnostic.router_logits,
-                    }),
-                )
+                (router, Some(Qwen35MoeGdnScanSegment { producer, taps }))
             } else {
                 (
                     crate::qwen35moe::execution::split_mapped_layer_segment(
@@ -1631,13 +1607,11 @@ impl<'file> LoadedModel<'file> {
         }
 
         for (layer, segments) in layers.iter().enumerate() {
-            let scan_programs = segments.gdn_scan.as_ref().into_iter().flat_map(|scan| {
-                [
-                    ("gdn-scan-producer", &scan.producer.0),
-                    ("gdn-scan-tail", &scan.tail.0),
-                ]
-            });
-            for (phase, program) in scan_programs.chain([
+            let programs = segments
+                .gdn_scan
+                .as_ref()
+                .map(|scan| ("gdn-scan-producer", &scan.producer.0));
+            for (phase, program) in programs.into_iter().chain([
                 ("router", &segments.router.0),
                 ("gather", &segments.gather.0),
             ]) {
@@ -1705,6 +1679,7 @@ impl<'file> LoadedModel<'file> {
         &self,
         runtime: &mut BackendRuntime,
         scan: &Qwen35MoeGdnScanSegment,
+        router_cuts: &[(NodeId, String)],
         symbols: &[u64],
         named: &[(&str, QuantizedBlock<'_>)],
         resident_names: &BTreeSet<&str>,
@@ -1749,7 +1724,7 @@ impl<'file> LoadedModel<'file> {
             taps.state_in,
         ];
         let mut requested = BTreeMap::new();
-        for original in scan.tail.1.iter().map(|(node, _)| *node).chain(scan_inputs) {
+        for original in router_cuts.iter().map(|(node, _)| *node).chain(scan_inputs) {
             if let Some(mapped) = mapping.get(&original).copied() {
                 requested.insert(mapped, original);
             }
@@ -1863,70 +1838,8 @@ impl<'file> LoadedModel<'file> {
             state: &mut state,
             output: &mut output,
         })?;
+        carried.insert(taps.delta_out, (value_shape[1..].to_vec(), output));
         carried.insert(taps.state_out, (state_shape, state));
-
-        let (tail_program, tail_cuts, tail_mapping) = &scan.tail;
-        let mut tail_named: Vec<(&str, QuantizedBlock<'_>)> = named
-            .iter()
-            .copied()
-            .filter(|(name, _)| {
-                tail_program
-                    .iter()
-                    .any(|operation| operation.name() == Some(*name))
-            })
-            .collect();
-        for (node, name) in tail_cuts {
-            if tail_named.iter().any(|(candidate, _)| *candidate == name) {
-                continue;
-            }
-            if *node == scan.prefill.delta_out_input {
-                tail_named.push((name.as_str(), QuantizedBlock::Float32(output.as_slice())));
-                continue;
-            }
-            let (_, values) = carried.get(node).ok_or_else(|| {
-                InteropError::PreGatherExecutionUnsupported {
-                    architecture: String::from("qwen35moe"),
-                    reason: alloc::format!("gdn sequence tail missing cut node {node:?} ({name})"),
-                }
-            })?;
-            tail_named.push((name.as_str(), QuantizedBlock::Float32(values)));
-        }
-        let tail_outputs = [
-            scan.prefill.post_mixer_residual,
-            scan.prefill.post_attention_norm_output,
-            scan.prefill.router_logits,
-        ];
-        let requested_tail: Vec<NodeId> = tail_outputs
-            .iter()
-            .map(|node| {
-                tail_mapping
-                    .get(node)
-                    .copied()
-                    .ok_or(InteropError::MissingEvaluatedNode { node: *node })
-            })
-            .collect::<Result<_, _>>()?;
-        let tail_evaluated = runtime.evaluate_segment(
-            tail_program,
-            symbols,
-            &tail_named,
-            &requested_tail,
-            resident_names,
-            None,
-        )?;
-        for (prefill_node, existing_node) in tail_outputs.into_iter().zip([
-            scan.post_mixer_residual,
-            scan.post_attention_norm_output,
-            scan.router_logits,
-        ]) {
-            let mapped = tail_mapping
-                .get(&prefill_node)
-                .copied()
-                .ok_or(InteropError::MissingEvaluatedNode { node: prefill_node })?;
-            let (values, shape) = tail_evaluated
-                .get(mapped)
-                .ok_or(InteropError::MissingEvaluatedNode { node: prefill_node })?;
-            carried.insert(existing_node, (shape.to_vec(), values.to_vec()));
-        }
         Ok(())
     }
 
@@ -1981,6 +1894,7 @@ impl<'file> LoadedModel<'file> {
                 self.evaluate_qwen35moe_gdn_scan_segment(
                     runtime,
                     scan,
+                    &segments.router.1,
                     symbols,
                     named,
                     resident_names,
@@ -2013,9 +1927,6 @@ impl<'file> LoadedModel<'file> {
                     diagnostic.block_output,
                 ),
             ] {
-                if is_router && segments.gdn_scan.is_some() {
-                    continue;
-                }
                 let mut segment_named: Vec<(&str, QuantizedBlock<'_>)> = named
                     .iter()
                     .copied()

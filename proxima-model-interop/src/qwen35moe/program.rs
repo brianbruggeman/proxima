@@ -46,8 +46,7 @@
 
 use proxima_tensor::spec::{
     ExpertGatingFunc, ForwardRoots, GdnOutputGate, MoeSite, MoeSites, Qwen35DenseAttentionTaps,
-    Qwen35GdnSequenceTail, Qwen35LayerRoots, SsmMixerTaps, append_moe_ffn,
-    append_qwen35_dense_attention_only_with_taps, append_qwen35_gdn_sequence_tail,
+    Qwen35LayerRoots, SsmMixerTaps, append_moe_ffn, append_qwen35_dense_attention_only_with_taps,
     append_qwen35_ssm_mixer_with_taps_and_layout, causal_mask, elementwise, embedding_lookup,
     input_leaf, reduce, rmsnorm, scalar_constant, symbolic_leaf,
 };
@@ -56,39 +55,6 @@ use proxima_tensor::{DType, Extent, NodeId, Op, ReduceInit, ScalarOp};
 use super::hparams::{Architecture, LayerKind};
 use super::shared_expert::append_sigmoid_gated_shared_expert;
 use crate::error::InteropError;
-
-fn append_qwen35moe_router(
-    program: &mut Vec<Op>,
-    mixer_out: NodeId,
-    post_attention_norm_weight: NodeId,
-    inv_dim: NodeId,
-    eps: NodeId,
-    gate_inp: NodeId,
-) -> Result<(NodeId, NodeId), proxima_tensor::TensorError> {
-    let normed = rmsnorm(
-        program,
-        mixer_out,
-        post_attention_norm_weight,
-        inv_dim,
-        eps,
-    )?;
-    let gate_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed, "sd->sde"), (gate_inp, "de->sde")],
-    )?;
-    let router_logits = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        gate_product,
-        "sde->sde",
-        "se->sde",
-    )?;
-    Ok((normed, router_logits))
-}
 
 /// Runs `x`'s post-attention-norm hidden state through the routed
 /// [`append_moe_ffn`] plus the gated shared expert, and adds the result back
@@ -114,15 +80,29 @@ fn append_qwen35moe_ffn(
     up_shexp: NodeId,
     down_shexp: NodeId,
 ) -> Result<(NodeId, MoeSite, NodeId, NodeId, NodeId, NodeId), proxima_tensor::TensorError> {
-    // `append_moe_ffn`'s own leading two ops, shared with the batched GDN
-    // prefill route so both paths select experts from the same algebra.
-    let (normed, router_logits) = append_qwen35moe_router(
+    let normed = rmsnorm(program, mixer_out, post_attention_norm_weight, inv_dim, eps)?;
+
+    // `append_moe_ffn`'s own leading two ops (`spec.rs:1623-1637`, the
+    // `gate_product`/`logits` pair), reused verbatim so the diagnostic
+    // `router_logits` root this function now also returns is bit-identical
+    // to what the routed FFN actually selects on -- never a re-derivation,
+    // never a proxima change (`append_moe_ffn` itself is untouched; this
+    // just repeats its first two ops on the same inputs it already
+    // receives below).
+    let gate_product = elementwise(
         program,
-        mixer_out,
-        post_attention_norm_weight,
-        inv_dim,
-        eps,
-        gate_inp,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "sd->sde"), (gate_inp, "de->sde")],
+    )?;
+    let router_logits = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gate_product,
+        "sde->sde",
+        "se->sde",
     )?;
 
     let (routed_out, moe_site) = append_moe_ffn(
@@ -198,16 +178,6 @@ pub struct Qwen35MoeLayerDiagnostics {
     pub routed_output: NodeId,
     pub shared_output: NodeId,
     pub block_output: NodeId,
-    pub gdn_prefill: Option<Qwen35MoeGdnPrefillTaps>,
-}
-
-/// Sequence-preserving roots used by the caller-driven GDN prefill scan.
-#[derive(Debug, Clone, Copy)]
-pub struct Qwen35MoeGdnPrefillTaps {
-    pub delta_out_input: NodeId,
-    pub post_mixer_residual: NodeId,
-    pub post_attention_norm_output: NodeId,
-    pub router_logits: NodeId,
 }
 
 /// Builds `qwen35moe`'s whole-model forward program -- see the module doc
@@ -317,23 +287,8 @@ pub fn qwen35moe_forward_program(
             vec![Extent::Static(embedding)],
             &format!("blk.{layer}.post_attention_norm.weight"),
         );
-        let gate_inp = input_leaf(
-            &mut program,
-            DType::Float32,
-            vec![
-                Extent::Static(embedding),
-                Extent::Static(architecture.expert_count),
-            ],
-            &format!("blk.{layer}.ffn_gate_inp.weight"),
-        );
 
-        let (
-            mixer_out,
-            ssm_taps,
-            dense_attention_taps,
-            mixer_output_pre_residual,
-            gdn_prefill,
-        ) = match kind {
+        let (mixer_out, ssm_taps, dense_attention_taps, mixer_output_pre_residual) = match kind {
             LayerKind::Attention => {
                 let kv_heads = architecture.kv_heads_by_layer[layer as usize];
                 let group = architecture.query_heads / kv_heads.max(1);
@@ -588,7 +543,7 @@ pub fn qwen35moe_forward_program(
                     dense_taps.v_new,
                 )));
                 let o_proj_out = dense_taps.o_proj_out;
-                (residual1, None, Some(dense_taps), o_proj_out, None)
+                (residual1, None, Some(dense_taps), o_proj_out)
             }
             LayerKind::Gdn => {
                 let qkv_dim = 2 * ssm_key_dim + architecture.ssm_inner_size;
@@ -720,56 +675,20 @@ pub fn qwen35moe_forward_program(
                     qkv_mixed: taps.qkv_mixed,
                     state_out: taps.state_out,
                 });
-                let delta_out_input = input_leaf(
-                    &mut program,
-                    DType::Float32,
-                    vec![
-                        Extent::Symbolic(0),
-                        Extent::Static(head_v_dim),
-                        Extent::Static(architecture.ssm_group_count),
-                        Extent::Static(ssm_group),
-                    ],
-                    &format!("gdn_prefill.{layer}.delta_out"),
-                );
-                let prefill_mixer_out = append_qwen35_gdn_sequence_tail(
-                    &mut program,
-                    Qwen35GdnSequenceTail {
-                        x,
-                        delta_out: delta_out_input,
-                        z: taps.z_sequence,
-                        head_eps,
-                        inv_head_v_dim,
-                        norm_weight: ssm_norm_weight,
-                        out_weight: ssm_out,
-                        head_v_dim,
-                        kv_heads: architecture.ssm_group_count,
-                        group: ssm_group,
-                    },
-                )?;
-                let (prefill_normed, prefill_router_logits) = append_qwen35moe_router(
-                    &mut program,
-                    prefill_mixer_out,
-                    post_attention_norm_weight,
-                    inv_dim,
-                    eps,
-                    gate_inp,
-                )?;
                 let ssm_out_result = taps.ssm_out_result;
-                (
-                    mixer_out,
-                    Some(taps),
-                    None,
-                    ssm_out_result,
-                    Some(Qwen35MoeGdnPrefillTaps {
-                        delta_out_input,
-                        post_mixer_residual: prefill_mixer_out,
-                        post_attention_norm_output: prefill_normed,
-                        router_logits: prefill_router_logits,
-                    }),
-                )
+                (mixer_out, Some(taps), None, ssm_out_result)
             }
         };
 
+        let gate_inp = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(embedding),
+                Extent::Static(architecture.expert_count),
+            ],
+            &format!("blk.{layer}.ffn_gate_inp.weight"),
+        );
         let expert_w_gate = input_leaf(
             &mut program,
             DType::Float32,
@@ -871,7 +790,6 @@ pub fn qwen35moe_forward_program(
             routed_output,
             shared_output,
             block_output: residual,
-            gdn_prefill,
         });
         x = residual;
         moe_sites.push(moe_site);
