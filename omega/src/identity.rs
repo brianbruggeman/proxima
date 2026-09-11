@@ -83,7 +83,7 @@ impl KernelLanguage {
 /// values across the module boundary into the one function that renders
 /// them into text, so `metal::pipeline_for`'s own `format!` fold (see its
 /// doc) has nothing left to do.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct MetalOnlyExtras {
     /// `tiled_gemm_threadgroup_width`'s return for this op — bakes literally
     /// into `render_reduce`'s lane-index/stride/tail-fold source text, so
@@ -107,6 +107,11 @@ pub(crate) struct MetalOnlyExtras {
     /// non-unit render different literals baked into the row-base source
     /// text and must never share a cache entry.
     pub packed_row_block_direct_axis: Option<u16>,
+    /// The elementwise address specialization rendered by Metal: coordinate
+    /// width and decoded axes plus one dense/strided bit per operand. Metal
+    /// omits div/mod work for dense operands, so two stride layouts may emit
+    /// different source even when every backend-neutral axis above agrees.
+    pub elementwise_addressing: Option<String>,
     /// [`numeric_policy_cache_token`] for the `Plan` compiling this op —
     /// folded in here instead of `MathMode::cache_token()` (what this field
     /// held before): `NumericPolicy` is a 5-bit independent permission set,
@@ -467,6 +472,9 @@ pub(crate) fn kernel_identity(
     if let Some(axis) = metal.packed_row_block_direct_axis {
         identity.push_str("_da");
         identity.push_str(&axis.to_string());
+    }
+    if let Some(addressing) = metal.elementwise_addressing {
+        identity.push_str(&addressing);
     }
     if let Some(width) = metal.cooperative_width {
         identity.push_str("_w");

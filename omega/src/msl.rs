@@ -11,12 +11,12 @@
 //! as literal numbers. What *does* vary the source is the node's STRUCTURE:
 //! rank (operand and output coordinate arity), operand count, which
 //! [`ScalarOp`]s the body and (if present) the reduction use, and whether a
-//! reduction is present at all and which [`Keep`] it is. Two `BoundOp`
-//! nodes that agree on structure but differ in concrete extents, strides, or
-//! which buffers they bind therefore emit byte-identical source — see
-//! `same_structure_different_extents_yield_identical_source` below for the
-//! proof. This is what makes a kernel cacheable (and an `MTLLibrary`
-//! reusable) by structure rather than by node identity.
+//! reduction is present at all and which [`Keep`] it is. Concrete extent and
+//! stride values remain uniforms. Elementwise kernels additionally specialize
+//! on the stride layout's dense/strided addressing class so dense operands can
+//! skip coordinate decoding; [`elementwise_addressing_cache_token`] records
+//! that class in the pipeline identity. This makes a kernel cacheable by the
+//! exact source it emits rather than by node identity.
 //!
 //! # Execution model (v1: correctness parity with `cpu.rs`, not peak speed)
 //!
@@ -1743,6 +1743,7 @@ pub(crate) fn kernel_cache_key(
         packed_row_block_shape: Some(packed_row_block_shape_token(resolved, &quantized)),
         packed_row_block_stride_is_one: packed_row_block_stride_is_one(resolved, &quantized),
         packed_row_block_direct_axis: packed_row_block_direct_axis(resolved, &quantized),
+        elementwise_addressing: elementwise_addressing_cache_token(resolved),
         numeric_policy_token: Some(crate::identity::numeric_policy_cache_token(numeric_policy)),
     };
     Ok(crate::identity::kernel_identity(
@@ -4303,9 +4304,6 @@ fn render_elementwise(
     let gather_slots = gather_slots(resolved);
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let coordinate_dims = elementwise_coordinate_dims(resolved, gather_count);
-    let coordinate_type = (resolved.extents.iter().product::<u64>() <= u32::MAX as u64)
-        .then_some("uint")
-        .unwrap_or("ulong");
 
     let mut source = String::new();
     preamble(&mut source);
@@ -4332,6 +4330,7 @@ fn render_elementwise(
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
 
     if !coordinate_dims.is_empty() {
+        let coordinate_type = elementwise_coordinate_type(resolved);
         source.push_str(&format!("    {coordinate_type} coord[{rank_len}];\n"));
         source.push_str(&format!(
             "    {coordinate_type} remaining = ({coordinate_type})gid;\n"
@@ -4407,6 +4406,47 @@ fn elementwise_coordinate_dims(resolved: &BoundOp, gather_count: usize) -> Vec<u
     coordinate_dims.sort_unstable();
     coordinate_dims.dedup();
     coordinate_dims
+}
+
+fn elementwise_coordinate_type(resolved: &BoundOp) -> &'static str {
+    if resolved.extents.iter().product::<u64>() <= u32::MAX as u64 {
+        "uint"
+    } else {
+        "ulong"
+    }
+}
+
+/// The exact stride-layout decisions [`render_elementwise`] bakes into MSL:
+/// coordinate integer width, which axes it decodes, and which operands take
+/// the dense `base + gid` path. Concrete stride values remain uniforms.
+fn elementwise_addressing_cache_token(resolved: &BoundOp) -> Option<String> {
+    if !matches!(resolved.kind, BoundOpKind::Elementwise { .. }) {
+        return None;
+    }
+
+    let coordinate_dims = elementwise_coordinate_dims(resolved, gather_count(resolved));
+    let mut token = String::from("_ea");
+    token.push(if coordinate_dims.is_empty() {
+        'n'
+    } else if elementwise_coordinate_type(resolved) == "uint" {
+        '4'
+    } else {
+        '8'
+    });
+    token.push('c');
+    for dimension in coordinate_dims {
+        token.push('_');
+        token.push_str(&dimension.to_string());
+    }
+    token.push_str("_d");
+    for (_, layout, _) in resolved.operands() {
+        token.push(if dense_layout(layout, &resolved.extents) {
+            '1'
+        } else {
+            '0'
+        });
+    }
+    Some(token)
 }
 
 fn dense_layout(layout: &Layout, extents: &[u64]) -> bool {
