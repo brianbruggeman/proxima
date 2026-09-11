@@ -443,9 +443,12 @@ fn mixed_expert_source_and_recurrent_state_placement_share_one_execution() {
         evaluated.get(expert_output).is_some(),
         "the mixed expert reduction must execute while state is placed"
     );
-    assert!(
-        evaluated.get(state_output).is_none(),
-        "a placed state output must not also be copied back through Evaluated"
+    let (returned_state, _) = evaluated
+        .get(state_output)
+        .expect("the last program node remains Evaluated's root even when it is placed");
+    assert_eq!(
+        returned_state, state,
+        "the placed root readback must carry the same recurrent state as its caller-owned buffer"
     );
     assert_eq!(
         omega::read_placed_buffer_f32(&output_buffer, 0, STATE_ELEMENTS),
