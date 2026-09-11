@@ -7160,11 +7160,10 @@ impl<'file> LoadedModel<'file> {
                     // reopened even on an early `?` return.
                     let mut expert_slab_guard = lock_expert_slab(&self.expert_slab);
 
-                    let pre_gather = serving_config.qwen35moe_pre_gather
-                        && self
-                            .architecture_impl
-                            .is_some_and(|architecture| architecture.name() == "qwen35moe")
-                        && (self.expert_sidecar.is_some() || !runtime.uses_gpu());
+                    let pre_gather = qwen35moe_pre_gather_enabled(
+                        serving_config.qwen35moe_pre_gather,
+                        self.architecture_impl.map(|architecture| architecture.name()),
+                    );
                     let gdn_prefill_scan = pre_gather
                         && gdn_prefill_scan_enabled
                         && new_count > 1;
@@ -7205,11 +7204,10 @@ impl<'file> LoadedModel<'file> {
                         qwen35moe_pre_gather_plan =
                             Some(self.qwen35moe_pre_gather_plan(&symbols, gdn_prefill_scan)?);
                     }
-                    // The pristine table aliases the named checkpoint stack and
-                    // needs no substitution. Once a policy pages or evicts any
-                    // expert, pass the table across omega's backend boundary;
-                    // CPU consumes it and Metal fails closed until its packed
-                    // gather has a per-expert address-table binding.
+                    // The full-graph path must not substitute a whole expert
+                    // table on Metal. Qwen35's pre-gather segments hand the
+                    // routed subset to omega after the router boundary below;
+                    // every other Metal path keeps the named checkpoint stack.
                     #[cfg(feature = "metal")]
                     let expert_source_substitutions = if runtime.uses_gpu() {
                         None
@@ -8738,12 +8736,16 @@ fn use_metal_output_placements(
     has_recurrent_state && !has_expert_source_substitutions
 }
 
+fn qwen35moe_pre_gather_enabled(configured: bool, architecture_name: Option<&str>) -> bool {
+    configured && architecture_name == Some("qwen35moe")
+}
+
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
         SsmLayerCache, begin_expert_gather_phase, kv_extent, lock_expert_slab,
-        step_batch_needs_logits, visit_qwen35moe_router_boundary,
+        qwen35moe_pre_gather_enabled, step_batch_needs_logits, visit_qwen35moe_router_boundary,
         visit_qwen35moe_router_selections,
     };
     use alloc::string::String;
@@ -8763,6 +8765,14 @@ mod tests {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_tensor::{DType, Extent, NodeId, Op};
     use proxima_tokenizer::Vocab;
+
+    #[test]
+    fn qwen35moe_pre_gather_admission_depends_only_on_config_and_architecture() {
+        assert!(qwen35moe_pre_gather_enabled(true, Some("qwen35moe")));
+        assert!(!qwen35moe_pre_gather_enabled(false, Some("qwen35moe")));
+        assert!(!qwen35moe_pre_gather_enabled(true, Some("qwen3")));
+        assert!(!qwen35moe_pre_gather_enabled(true, None));
+    }
 
     #[cfg(feature = "metal")]
     #[test]
