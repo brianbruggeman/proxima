@@ -51,7 +51,7 @@ use proxima_gguf::types::GgmlType;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_gguf::writer::{GgufModel, TensorPayload, write_complete};
 
-const OUTPUT_PATH: &str = "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6e203711-bd50-48cc-9ade-409668bdafdd/scratchpad/synth-qwen38-27b.gguf";
+const OUTPUT_PATH: &str = "/tmp/proxima-synth-qwen35.gguf";
 
 // DOCUMENTED (`qwen35.rs:136-137`'s own worked example: "5120 / 24 = 213.33"
 // proves embedding=5120, query_heads=24 on the real 27B checkpoint).
