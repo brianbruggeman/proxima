@@ -1,6 +1,8 @@
 #![cfg(all(feature = "alloc-count", feature = "metal", target_os = "macos"))]
 #![allow(clippy::expect_used)]
 
+use std::collections::BTreeMap;
+
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append,
     projection,
@@ -49,12 +51,24 @@ fn a_named_placed_input_does_not_allocate_a_tensor_sized_placeholder() {
     let state_buffer = omega::allocate_placed_buffer(STATE_BYTES)
         .expect("allocates the recurrent-state placement");
 
-    omega::execute_plan_named_with_placements(&plan, &[], &[(state_input, &state_buffer, 0)], &[])
-        .expect("cold execution resolves the placed-input plan");
+    omega::execute_plan_named_with_placements_and_expert_sources(
+        &plan,
+        &[],
+        &[(state_input, &state_buffer, 0)],
+        &[],
+        &BTreeMap::new(),
+    )
+    .expect("cold execution resolves the placed-input plan");
 
     reset();
-    omega::execute_plan_named_with_placements(&plan, &[], &[(state_input, &state_buffer, 0)], &[])
-        .expect("warm execution accepts the placed input without host data");
+    omega::execute_plan_named_with_placements_and_expert_sources(
+        &plan,
+        &[],
+        &[(state_input, &state_buffer, 0)],
+        &[],
+        &BTreeMap::new(),
+    )
+    .expect("warm execution accepts the placed input without host data");
     let warm_sizes = recorded_sizes();
 
     assert!(
