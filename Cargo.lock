@@ -259,7 +259,7 @@ version = "0.38.0+1.3.281"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1216,6 +1216,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
 dependencies = [
  "cmov",
+]
+
+[[package]]
+name = "cudarc"
+version = "0.19.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "804764d10e844da09765a7b2ca9641a0851523d1702efb0d7299d73e31b86e80"
+dependencies = [
+ "libloading 0.9.0",
 ]
 
 [[package]]
@@ -2629,6 +2638,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3157,6 +3176,7 @@ dependencies = [
  "bytemuck",
  "conflaguration",
  "criterion",
+ "cudarc",
  "half",
  "libc",
  "objc2",
@@ -3174,6 +3194,7 @@ dependencies = [
  "proxima-test",
  "rayon",
  "rustix",
+ "serde",
  "tempfile",
  "thiserror 2.0.19",
  "toml 0.8.23",
@@ -4529,6 +4550,7 @@ dependencies = [
  "arrayvec",
  "fastrand",
  "half",
+ "libc",
  "memmap2",
  "omega",
  "prime",
@@ -7144,7 +7166,7 @@ dependencies = [
  "gpu-allocator",
  "hashbrown 0.17.1",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "log",
  "naga",
  "naga-types",

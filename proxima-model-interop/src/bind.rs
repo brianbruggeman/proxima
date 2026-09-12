@@ -32,8 +32,12 @@ use proxima_gguf::MetadataValue;
 use proxima_gguf::pipe::ParsedGguf;
 #[cfg(feature = "std")]
 use proxima_gguf::quant::QuantError;
+use proxima_gguf::quant::dispatch;
 #[cfg(feature = "std")]
-use proxima_gguf::quant::{bf16, f16, q2_k, q4_0};
+use proxima_gguf::quant::{bf16, f16};
+#[cfg(feature = "std")]
+use proxima_gguf::quant::{q2_k, q4_0};
+#[cfg(feature = "std")]
 use proxima_gguf::quant::{q3_k, q4_k, q5_k, q6_k, q8_0};
 #[cfg(feature = "std")]
 use proxima_gguf::restack::{discover_experts, plan_stack, restack_into};
@@ -74,19 +78,30 @@ pub fn gguf_tensor_as_f32(
 
     match tensor.ggml_type {
         GgmlType::F32 => Ok(reinterpret_f32(data)),
-        GgmlType::Q4_K => dequantize(data, element_count, q4_k::dequantize),
-        GgmlType::Q5_K => dequantize(data, element_count, q5_k::dequantize),
-        GgmlType::Q3_K => dequantize(data, element_count, q3_k::dequantize),
-        GgmlType::Q6_K => dequantize(data, element_count, q6_k::dequantize),
-        GgmlType::Q8_0 => dequantize(data, element_count, q8_0::dequantize),
+        other if other.is_quantized() => {
+            let mut output = vec![0.0f32; element_count];
+            dispatch::dequantize(other, data, &mut output).map_err(|error| match error {
+                proxima_gguf::quant::QuantError::UnsupportedCodec { .. } => {
+                    InteropError::UnrepresentableGgmlType {
+                        tensor: tensor.name.clone(),
+                        ggml_type: other,
+                    }
+                }
+                other => InteropError::Quant(other),
+            })?;
+            Ok(output)
+        }
         // The quantize pipe's `Bf16` preset (`crate::quantize`) writes real
         // GGUF tensors at these two types -- unreachable from a real
         // llama.cpp-produced checkpoint (this module's own doc, "no GGUF
         // checkpoint this crate has evaluated stores F16/Bf16 weights"),
         // but a genuinely valid GGUF byte layout this reader must not
         // reject just because no prior fixture happened to exercise it.
-        GgmlType::F16 => dequantize(data, element_count, proxima_gguf::quant::f16::dequantize),
-        GgmlType::Bf16 => dequantize(data, element_count, proxima_gguf::quant::bf16::dequantize),
+        GgmlType::F16 | GgmlType::Bf16 => {
+            let mut output = vec![0.0f32; element_count];
+            dispatch::dequantize(tensor.ggml_type, data, &mut output)?;
+            Ok(output)
+        }
         other => Err(InteropError::UnrepresentableGgmlType {
             tensor: tensor.name.clone(),
             ggml_type: other,
@@ -179,10 +194,16 @@ pub fn gguf_tensor_as_packed_block<'a>(
                 tensor: tensor.name.clone(),
             }),
         GgmlType::Q4_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q4K(bytes)),
+        GgmlType::Q2_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q2K(bytes)),
+        GgmlType::Q4_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Q4_0(bytes)),
+        GgmlType::Q5_1 => Ok(proxima_tensor::cpu::QuantizedBlock::Q5_1(bytes)),
         GgmlType::Q5_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q5K(bytes)),
         GgmlType::Q3_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q3K(bytes)),
         GgmlType::Q6_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q6K(bytes)),
         GgmlType::Q8_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes)),
+        GgmlType::Iq2Xs => Ok(proxima_tensor::cpu::QuantizedBlock::Iq2Xs(bytes)),
+        GgmlType::Iq3Xxs => Ok(proxima_tensor::cpu::QuantizedBlock::Iq3Xxs(bytes)),
+        GgmlType::Iq4Nl => Ok(proxima_tensor::cpu::QuantizedBlock::Iq4Nl(bytes)),
         GgmlType::F16 => Ok(proxima_tensor::cpu::QuantizedBlock::Float16(bytes)),
         GgmlType::Bf16 => Ok(proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes)),
         other => Err(InteropError::UnrepresentableGgmlType {
@@ -232,6 +253,50 @@ pub fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> Result<&'a TensorI
         .ok_or_else(|| InteropError::UnknownTensor { name: name.into() })
 }
 
+/// Validate and detect the learned Q/K/V projection bias family consumed by
+/// the dense cached-attention graph. Architectures without projection biases
+/// keep the old graph and do not receive synthetic zero inputs. A partial or
+/// wrongly shaped family is rejected before binding, because dropping one
+/// bias would produce a plausible but semantically incorrect model.
+pub(crate) fn checkpoint_qkv_biases(
+    parsed: &ParsedGguf,
+    architecture: &ModelArchitecture,
+) -> Result<bool, InteropError> {
+    let mut any = false;
+    for layer in 0..architecture.block_count {
+        let names = [
+            ("attn_q.bias", architecture.query_heads * architecture.head_dim),
+            ("attn_k.bias", architecture.kv_heads * architecture.head_dim),
+            ("attn_v.bias", architecture.kv_heads * architecture.head_dim),
+        ];
+        let mut missing = Vec::new();
+        let mut layer_any = false;
+        for (projection, expected) in names {
+            let name = alloc::format!("blk.{layer}.{projection}");
+            match parsed.tensors.iter().find(|tensor| tensor.name == name) {
+                Some(tensor) => {
+                    layer_any = true;
+                    any = true;
+                    let elements = tensor.element_count() as usize;
+                    if elements != expected as usize {
+                        return Err(InteropError::QkvBiasShapeMismatch {
+                            layer,
+                            projection: projection.into(),
+                            elements,
+                            expected: expected as usize,
+                        });
+                    }
+                }
+                None => missing.push(name),
+            }
+        }
+        if !missing.is_empty() && layer_any {
+            return Err(InteropError::QkvBiasFamilyIncomplete { layer, missing });
+        }
+    }
+    Ok(any)
+}
+
 pub(crate) fn reinterpret_f32(data: &[u8]) -> Vec<f32> {
     data.as_chunks::<4>()
         .0
@@ -240,6 +305,7 @@ pub(crate) fn reinterpret_f32(data: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+#[cfg(feature = "std")]
 pub(crate) fn dequantize(
     data: &[u8],
     element_count: usize,
@@ -445,7 +511,7 @@ pub(crate) fn checkpoint_has_qk_norm(parsed: &ParsedGguf) -> bool {
 // `generate.rs`'s `load_inner` is this function's only caller, itself only
 // reachable from the metal-gated load-time memory-fit gate -- a plain
 // `--features std` build with no metal has no call site at all.
-#[cfg(all(feature = "metal", target_os = "macos"))]
+#[cfg(feature = "metal")]
 #[must_use]
 pub(crate) fn tensor_bytes_by_class(parsed: &ParsedGguf) -> (u64, u64, u64) {
     let mut dense_bytes = 0u64;
@@ -986,6 +1052,12 @@ pub fn bind_dense_as<'file>(
     target_name: alloc::string::String,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
+    if std::env::var_os("PROXIMA_FORCE_F32_WEIGHTS").is_some() {
+        let decoded = gguf_tensor_as_f32(parsed, file_bytes, source_name)?;
+        state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
+        state.owned.push((target_name, decoded));
+        return Ok(());
+    }
     if let Some(target) = precision_target_for(state, parsed, source_name)? {
         return recode_tensor(
             parsed,
@@ -1138,6 +1210,13 @@ pub fn bind_matmul_weight_as<'file>(
     in_dim: usize,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
+    if std::env::var_os("PROXIMA_FORCE_F32_WEIGHTS").is_some() {
+        let decoded = gguf_tensor_as_f32(parsed, file_bytes, source_name)?;
+        let transposed = transpose_out_in_to_in_out(&decoded, source_name, out_dim, in_dim)?;
+        state.resident_bytes += transposed.len() * core::mem::size_of::<f32>();
+        state.owned.push((target_name, transposed));
+        return Ok(());
+    }
     if let Some(target) = precision_target_for(state, parsed, source_name)? {
         return recode_tensor(
             parsed,
@@ -1910,6 +1989,7 @@ pub(crate) fn bind_all_weights<'file>(
     let feed_forward = architecture.feed_forward as usize;
     let vocab = architecture.vocab as usize;
     let qk_norm = checkpoint_has_qk_norm(parsed);
+    let qkv_biases = checkpoint_qkv_biases(parsed, architecture)?;
 
     bind_dense(parsed, file_bytes, "token_embd.weight".into(), &mut state)?;
 
@@ -1959,6 +2039,26 @@ pub(crate) fn bind_all_weights<'file>(
                 alloc::format!("blk.{layer}.attn_v.weight"),
                 kv_dim,
                 embedding,
+                &mut state,
+            )?;
+        }
+        if qkv_biases {
+            bind_dense(
+                parsed,
+                file_bytes,
+                alloc::format!("blk.{layer}.attn_q.bias"),
+                &mut state,
+            )?;
+            bind_dense(
+                parsed,
+                file_bytes,
+                alloc::format!("blk.{layer}.attn_k.bias"),
+                &mut state,
+            )?;
+            bind_dense(
+                parsed,
+                file_bytes,
+                alloc::format!("blk.{layer}.attn_v.bias"),
                 &mut state,
             )?;
         }
@@ -2909,19 +3009,19 @@ mod tests {
 
     #[test]
     fn unrepresentable_ggml_type_errors_instead_of_misreading_bytes() {
-        let data = [0u8; 18]; // one Q4_0 block
+        let data = [0u8; 17]; // one MXFP4 block; registered, but no decoder is implemented
         let model = GgufModel {
             version: 3,
             metadata: Vec::new(),
             tensors: vec![TensorPayload {
                 name: "blk.0.attn_q.weight".to_string(),
                 dims: dims(&[32]),
-                ggml_type: WireType::Q4_0,
+                ggml_type: WireType::Mxfp4,
                 data: &data,
             }],
         };
-        let file_bytes = write_complete(&model).expect("writes q4_0 gguf");
-        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses q4_0 gguf");
+        let file_bytes = write_complete(&model).expect("writes mxfp4 gguf");
+        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses mxfp4 gguf");
 
         let outcome = gguf_tensor_as_f32(&parsed, &file_bytes, "blk.0.attn_q.weight");
         assert!(matches!(
@@ -5673,6 +5773,7 @@ mod real_openchat_file {
                 architecture.expert_count,
                 architecture.expert_used_count,
                 qk_norm,
+                checkpoint_qkv_biases(&parsed, &architecture).expect("validate qkv biases"),
                 false,
                 false,
                 false,

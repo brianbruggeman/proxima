@@ -79,6 +79,8 @@ use proxima_tensor::cpu::{
 #[cfg(feature = "cpu")]
 use proxima_tensor::resolve_named_blocks;
 
+#[cfg(feature = "cuda-driver")]
+use crate::cuda_driver::CudaDriverError;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use crate::metal::{self, MetalError};
 #[cfg(feature = "wgpu-backend")]
@@ -169,6 +171,8 @@ impl Engine {
 pub enum GpuDriver {
     Metal,
     Wgpu,
+    #[cfg(feature = "cuda-driver")]
+    Cuda,
 }
 
 impl GpuDriver {
@@ -182,6 +186,15 @@ impl GpuDriver {
             Some(Self::Metal)
         } else if cfg!(feature = "wgpu-backend") {
             Some(Self::Wgpu)
+        } else if cfg!(feature = "cuda-driver") {
+            #[cfg(feature = "cuda-driver")]
+            {
+                Some(Self::Cuda)
+            }
+            #[cfg(not(feature = "cuda-driver"))]
+            {
+                None
+            }
         } else {
             None
         }
@@ -192,6 +205,8 @@ impl GpuDriver {
         match self {
             GpuDriver::Metal => "metal",
             GpuDriver::Wgpu => "wgpu",
+            #[cfg(feature = "cuda-driver")]
+            GpuDriver::Cuda => "cuda",
         }
     }
 }
@@ -287,6 +302,10 @@ pub enum BackendError {
     #[cfg(feature = "wgpu-backend")]
     #[error(transparent)]
     Wgpu(#[from] WgpuError),
+
+    #[cfg(feature = "cuda-driver")]
+    #[error(transparent)]
+    Cuda(#[from] CudaDriverError),
 }
 
 /// [`Plan::Metal`]'s own payload type. Boxed only under
@@ -322,6 +341,8 @@ pub enum Plan {
     Metal(MetalPlanHandle),
     #[cfg(feature = "wgpu-backend")]
     Wgpu(wgpu_driver::WgpuPlan),
+    #[cfg(feature = "cuda-driver")]
+    Cuda(crate::cuda_driver::CudaPlan),
 }
 
 /// The CPU arm's plan state. `proxima_tensor::cpu` has no persistent
@@ -414,7 +435,13 @@ pub fn plan_named(
                 GpuDriver::Wgpu => {
                     #[cfg(feature = "wgpu-backend")]
                     {
-                        plan_named_wgpu(_program, _symbols, _named, _outputs)
+                        plan_named_wgpu(
+                            _program,
+                            _symbols,
+                            _named,
+                            _outputs,
+                            _numeric_policy,
+                        )
                     }
                     #[cfg(not(feature = "wgpu-backend"))]
                     {
@@ -423,6 +450,10 @@ pub fn plan_named(
                             feature: "wgpu-backend",
                         })
                     }
+                }
+                #[cfg(feature = "cuda-driver")]
+                GpuDriver::Cuda => {
+                    plan_named_cuda(_program, _symbols, _named, _outputs, _numeric_policy)
                 }
             }
         }
@@ -476,6 +507,11 @@ pub fn execute_plan_named_with_expert_sources(
             reject_gpu_expert_sources("wgpu", expert_sources)?;
             execute_plan_named_wgpu(wgpu_plan, _named)
         }
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(cuda_plan) => {
+            reject_gpu_expert_sources("cuda", expert_sources)?;
+            Ok(cuda_plan.execute_named(_named)?)
+        }
         // `Plan` is uninhabited with every backend feature off; `*plan {}`
         // is the never-pattern proof of that rather than a runtime `todo!`.
         #[cfg(not(any(
@@ -487,7 +523,12 @@ pub fn execute_plan_named_with_expert_sources(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(
+    feature = "wgpu-backend",
+    feature = "cuda-driver",
+    all(feature = "metal", target_os = "macos"),
+    test
+))]
 fn reject_gpu_expert_sources(
     backend: &'static str,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
@@ -533,6 +574,8 @@ pub fn mark_resident(plan: &mut Plan, resident_names: &std::collections::BTreeSe
         // caching is out of v1 scope.
         #[cfg(feature = "wgpu-backend")]
         Plan::Wgpu(_) => {}
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(_) => {}
         // `Plan` is uninhabited with every backend feature off; `*plan {}`
         // is the never-pattern proof of that rather than a runtime `todo!`.
         #[cfg(not(any(
@@ -806,8 +849,15 @@ fn plan_named_wgpu(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'_>)],
     outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
 ) -> Result<Plan, BackendError> {
-    let plan = wgpu_driver::plan_named(program, symbols, named, outputs)?;
+    let plan = wgpu_driver::plan_named_with_policy(
+        program,
+        symbols,
+        named,
+        outputs,
+        numeric_policy,
+    )?;
     Ok(Plan::Wgpu(plan))
 }
 
@@ -818,6 +868,24 @@ fn execute_plan_named_wgpu(
 ) -> Result<Evaluated, BackendError> {
     let evaluated = wgpu_driver::execute_plan_named(plan, named)?;
     Ok(evaluated)
+}
+
+#[cfg(feature = "cuda-driver")]
+fn plan_named_cuda(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
+) -> Result<Plan, BackendError> {
+    let driver = crate::cuda_driver::CudaDriver::new(0)?;
+    Ok(Plan::Cuda(driver.plan(
+        program,
+        symbols,
+        outputs,
+        numeric_policy,
+        named,
+    )?))
 }
 
 /// Diagnostic counterpart of [`execute_plan_named`], reachable only when a
@@ -1011,7 +1079,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
-                NumericPolicy::default(),
+                proxima_tensor::NumericPolicy::default(),
             ),
             "cpu engine must not be selectable when its feature is off",
         );
@@ -1035,6 +1103,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                proxima_tensor::NumericPolicy::default(),
             ),
             "metal driver must not be selectable when its feature is off",
         );
@@ -1093,11 +1162,23 @@ mod tests {
         assert_eq!(engine, super::Engine::default_compiled());
     }
 
-    #[cfg(not(any(all(feature = "metal", target_os = "macos"), feature = "wgpu-backend")))]
+    #[cfg(not(any(
+        all(feature = "metal", target_os = "macos"),
+        feature = "wgpu-backend",
+        feature = "cuda-driver"
+    )))]
     #[test]
     fn requesting_gpu_with_no_compiled_driver_never_falls_back_to_cpu() {
         let error = expect_plan_err(
-            super::plan_named(Engine::Gpu, None, &[], &[], &[], &[]),
+            super::plan_named(
+                Engine::Gpu,
+                None,
+                &[],
+                &[],
+                &[],
+                &[],
+                proxima_tensor::NumericPolicy::default(),
+            ),
             "gpu with no driver compiled must never silently run on cpu",
         );
         assert!(matches!(error, BackendError::NoGpuDriver));

@@ -39,8 +39,12 @@ extern crate alloc;
 
 #[cfg(feature = "std")]
 pub mod backend;
+#[cfg(feature = "std")]
+pub mod config;
 #[cfg(feature = "cuda")]
 pub mod cuda;
+#[cfg(feature = "cuda-driver")]
+pub mod cuda_driver;
 #[cfg(feature = "alloc")]
 mod epilogue;
 pub mod error;
@@ -57,7 +61,13 @@ pub mod wgpu_driver;
 pub mod wgsl;
 
 #[cfg(feature = "cuda")]
-pub use cuda::{CudaGridSpec, CudaKernel, WARP_SIZE, emit_cuda};
+pub use cuda::{CudaGridSpec, CudaKernel, WARP_SIZE, emit_cuda, emit_cuda_with_policy};
+#[cfg(feature = "cuda-driver")]
+pub use cuda_driver::CudaF32Arena;
+#[cfg(feature = "cuda-driver")]
+pub use cuda_driver::CudaPlan;
+#[cfg(feature = "cuda-driver")]
+pub use cuda_driver::{CudaDriver, CudaDriverError};
 pub use error::EmitError;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use metal::{
@@ -91,9 +101,9 @@ pub use msl::{
 };
 #[cfg(feature = "wgpu-backend")]
 pub use wgpu_driver::{
-    WgpuError, WgpuPlan, execute_plan as execute_plan_wgpu,
+    WgpuDeviceInfo, WgpuError, WgpuPlan, execute_plan as execute_plan_wgpu,
     execute_plan_named as execute_plan_named_wgpu, plan as plan_wgpu,
-    plan_named as plan_named_wgpu,
+    plan_named as plan_named_wgpu, probe as probe_wgpu,
 };
 #[cfg(feature = "wgpu-backend")]
 pub use wgsl::{WORKGROUP_SIZE, WgslCaps, WgslKernel, emit_wgsl};

@@ -49,21 +49,19 @@ mod loader;
 pub mod qwen35moe;
 #[cfg(feature = "std")]
 pub mod residency;
-// no `feature = "std"` gate: the module is pure alloc/core arithmetic
-// (its own doc), but every consumer -- `generate.rs`'s
-// `checkpoint_weight_bytes` field and its metal-gated `apply_memory_fit_gate`
-// -- is metal-only, so a plain `--features std` build with no metal has no
-// call site at all and every pub item reads as dead code under
-// `warnings = "deny"`. `cfg(test)` keeps the module (and its own unit
-// tests, which exercise every item directly) compiled under every feature
-// set nextest runs.
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+// The arithmetic is pure, but its production consumer is the std+metal
+// serving path (including CUDA/Vulkan builds, which inherit the metal feature
+// bundle). Keep `cfg(test)` so its unit tests remain available in a bare
+// alloc-tier test build without making a plain `--features std` library carry
+// an unreachable module under `warnings = "deny"`.
+#[cfg(any(test, all(feature = "std", feature = "metal")))]
 mod memory_fit;
 #[cfg(feature = "std")]
 mod quality;
 #[cfg(feature = "std")]
 mod qwen35;
 mod serving;
+pub mod task;
 #[cfg(all(test, feature = "std"))]
 mod test_support;
 mod transform;
@@ -124,4 +122,5 @@ pub use serving::{
     DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, NamePattern, REASONING_BUDGET_UNBOUNDED, ServingConfig,
     WeightPrecisionRule, apply_serving_config,
 };
+pub use task::{ModelTask, TaskProfile, classify_task};
 pub use transform::{gguf_to_safetensors, safetensors_to_gguf};

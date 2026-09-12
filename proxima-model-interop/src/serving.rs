@@ -392,7 +392,11 @@ impl Default for ServingConfig<'static> {
             numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
-            exact_activations: false,
+            // Correctness-first default: CPU uses the scalar/dequantized
+            // reference path so its oracle is comparable with GPU kernels.
+            // `PROXIMA_RELAXED_ACTIVATIONS` is an explicit performance
+            // escape, never the implicit behavior.
+            exact_activations: true,
             weight_precision: &[],
             qwen35moe_pre_gather: false,
         }
@@ -461,17 +465,6 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
              kernel that never materializes the full [seq, seq] score matrix"
                 .into(),
         ));
-    }
-
-    if config.batch_size != 0 || config.ubatch_size != 0 {
-        return Err(InteropError::UnsupportedServingConfig(format!(
-            "batch_size={} ubatch_size={} (-b/-ub): the interpreter evaluates the whole \
-             prompt's sequence extent as one static tensor dimension with no batching \
-             loop; implementing this requires chunking prefill into batch_size-token \
-             windows and feeding the interpreter one micro-batch of ubatch_size at a \
-             time",
-            config.batch_size, config.ubatch_size
-        )));
     }
 
     if config.gpu_layers != 0 && config.gpu_layers != GPU_LAYERS_ALL {
@@ -669,7 +662,7 @@ mod tests {
             numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
-            exact_activations: false,
+            exact_activations: true,
             weight_precision: &[],
             qwen35moe_pre_gather: false,
         };
@@ -809,7 +802,7 @@ mod tests {
             numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
-            exact_activations: false,
+            exact_activations: true,
             weight_precision: &[],
             qwen35moe_pre_gather: false,
         };
@@ -877,7 +870,7 @@ mod tests {
             numeric_policy: NumericPolicy::bit_exact(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Concurrent,
-            exact_activations: false,
+            exact_activations: true,
             weight_precision: &[],
             qwen35moe_pre_gather: false,
         };
@@ -888,11 +881,11 @@ mod tests {
         );
     }
 
-    /// `exact_activations` defaults to `false` -- today's shipping
-    /// `q{4,5,6}k-int8-dot` fast path, unchanged for every existing caller.
+    /// `exact_activations` defaults to `true` so CPU and GPU comparisons share
+    /// the same dequantized arithmetic reference by default.
     #[test]
-    fn default_exact_activations_is_false() {
-        assert!(!ServingConfig::default().exact_activations);
+    fn default_exact_activations_is_true() {
+        assert!(ServingConfig::default().exact_activations);
     }
 
     /// Guiding-principle 4's config-as-mirror, `exact_activations`'s own

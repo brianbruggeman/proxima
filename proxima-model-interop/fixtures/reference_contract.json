@@ -1,0 +1,37 @@
+{
+  "checkpoint": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+  "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+  "runtime": "ollama",
+  "template": "raw prompt (no chat wrapper)",
+  "add_bos": false,
+  "architecture": {
+    "name": "qwen2",
+    "embedding_length": 896,
+    "query_heads": 14,
+    "kv_heads": 2,
+    "head_dim": 64,
+    "rope_freq_base": 1000000.0,
+    "rms_epsilon": 0.000001
+  },
+  "cases": [
+    {
+      "id": "france",
+      "prompt": "What is the capital of France?",
+      "prompt_ids": [3838, 374, 279, 6722, 315, 9625, 30],
+      "first_output_id": 576,
+      "first_output_piece": " The",
+      "semantic_required": "Paris"
+    },
+    {
+      "id": "hamlet",
+      "prompt": "Continue with the first five lines of Hamlet's To be, or not to be soliloquy.",
+      "expected_lines": [
+        "To be, or not to be, that is the question:",
+        "Whether 'tis nobler in the mind to suffer",
+        "The slings and arrows of outrageous fortune,",
+        "Or to take arms against a sea of troubles,",
+        "And by opposing end them."
+      ]
+    }
+  ]
+}

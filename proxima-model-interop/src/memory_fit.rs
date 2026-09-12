@@ -373,6 +373,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn eight_gib_gpu_ceiling_reduces_context_before_upload() {
+        let gib = 1024u64 * 1024 * 1024;
+        let weights = weights(4 * gib);
+        let limit = HostMemoryLimit {
+            limit_bytes: 8 * gib,
+            os_headroom_bytes: 0,
+        };
+        let (context_length, outcome) =
+            fit_context_length(weights, 32, 8, 128, 131_072, 64 * 1024 * 1024, limit)
+                .expect("a four-GiB checkpoint must fit some context inside an eight-GiB ceiling");
+        assert!(context_length > 0 && context_length < 131_072);
+        assert!(matches!(
+            outcome,
+            FitOutcome::ReducedContext { from: 131_072, .. }
+        ));
+        let budget = MemoryBudget::derive(weights, 32, 8, 128, context_length, 64 * 1024 * 1024);
+        assert!(budget.total_bytes() <= limit.available_bytes());
+    }
+
     /// (c) weights alone exceed the limit -- typed error carrying every
     /// class and number.
     #[test]

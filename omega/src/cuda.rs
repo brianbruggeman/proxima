@@ -61,7 +61,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp,
+    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
+    ReduceInit, ScalarOp,
 };
 
 use crate::error::EmitError;
@@ -109,7 +110,7 @@ pub struct CudaGridSpec {
 ///
 /// # Errors
 /// [`EmitError::UnsupportedDType`] for anything but `Float32`/`Float16`,
-/// [`EmitError::CudaUnsupportedOpKind`] for `Iota`/`Constant`,
+/// [`EmitError::CudaUnsupportedOpKind`] for `CachedAttention`,
 /// [`EmitError::ArityMismatch`]/[`EmitError::ReductionBodyIsSelect`]/
 /// [`EmitError::EmptyScan`] for the same structural failures
 /// [`crate::msl::emit`] rejects.
@@ -150,34 +151,27 @@ pub fn emit_cuda(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
 ) -> Result<CudaKernel, EmitError> {
+    emit_cuda_with_policy(resolved, packed_operands, NumericPolicy::default())
+}
+
+pub fn emit_cuda_with_policy(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> Result<CudaKernel, EmitError> {
     validate(resolved)?;
     let entry = entry_name(resolved, packed_operands);
     let quantized = operand_codecs(resolved, packed_operands);
-    if quantized.contains(&Some(PackedCodec::Q3K)) {
-        return Err(EmitError::CudaUnsupportedPackedCodec {
-            node: resolved.node,
-        });
-    }
     let source = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized)?,
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => render_reduce(resolved, &entry, &quantized)?,
+        } => render_reduce(resolved, &entry, &quantized, numeric_policy)?,
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(resolved, &entry, &quantized)?,
-        BoundOpKind::Iota => {
-            return Err(EmitError::CudaUnsupportedOpKind {
-                node: resolved.node,
-                kind: "iota",
-            });
-        }
-        BoundOpKind::Constant { .. } => {
-            return Err(EmitError::CudaUnsupportedOpKind {
-                node: resolved.node,
-                kind: "constant",
-            });
-        }
+        BoundOpKind::Iota => render_leaf(resolved, &entry, None)?,
+        BoundOpKind::Constant { value } => render_leaf(resolved, &entry, Some(*value))?,
         BoundOpKind::CachedAttention { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
@@ -190,10 +184,244 @@ pub fn emit_cuda(
         entry,
         bindings: bindings(resolved),
         grid: CudaGridSpec {
-            threads: grid_threads(resolved),
-            block_width: reduce_is_cooperative(resolved).then_some(WARP_SIZE),
+            threads: grid_threads(
+                resolved,
+                reduce_is_cooperative(resolved, &quantized, numeric_policy),
+            ),
+            block_width: reduce_is_cooperative(resolved, &quantized, numeric_policy)
+                .then_some(WARP_SIZE),
         },
     })
+}
+
+/// Packs the runtime ABI for the f32 elementwise CUDA kernels.
+///
+/// CUDA's emitted `Uniforms` uses native-width `long` fields, so this is
+/// deliberately separate from the wgpu i32 packer. Keeping the packer beside
+/// the emitter makes the source layout and the host layout one contract.
+pub(crate) fn pack_elementwise_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitError> {
+    if !matches!(resolved.kind, BoundOpKind::Elementwise { .. }) {
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "elementwise",
+            found: resolved.kind.name(),
+        });
+    }
+    let rank_len = resolved.extents.len().max(1);
+    let mut bytes = Vec::new();
+    let push_i64 = |bytes: &mut Vec<u8>, value: i64| bytes.extend_from_slice(&value.to_ne_bytes());
+    push_i64(&mut bytes, resolved.extents.iter().product::<u64>() as i64);
+    for slot in 0..rank_len {
+        push_i64(
+            &mut bytes,
+            resolved.extents.get(slot).copied().unwrap_or(0) as i64,
+        );
+    }
+    for (_, layout, _) in resolved.operands() {
+        push_i64(&mut bytes, layout.base);
+    }
+    for (_, layout, _) in resolved.operands() {
+        for slot in 0..rank_len {
+            push_i64(&mut bytes, layout.strides.get(slot).copied().unwrap_or(0));
+        }
+    }
+    push_cuda_gather_uniforms(&mut bytes, resolved, rank_len);
+    Ok(bytes)
+}
+
+fn push_cuda_i64(bytes: &mut Vec<u8>, value: i64) {
+    bytes.extend_from_slice(&value.to_ne_bytes());
+}
+
+fn push_cuda_i64_row(bytes: &mut Vec<u8>, values: &[i64], width: usize) {
+    for slot in 0..width {
+        push_cuda_i64(bytes, values.get(slot).copied().unwrap_or(0));
+    }
+}
+
+fn push_cuda_extents(bytes: &mut Vec<u8>, extents: &[u64], width: usize) {
+    for slot in 0..width {
+        push_cuda_i64(bytes, extents.get(slot).copied().unwrap_or(0) as i64);
+    }
+}
+
+fn contiguous_strides(extents: &[u64]) -> Vec<i64> {
+    let mut strides = vec![0_i64; extents.len()];
+    let mut stride = 1_i64;
+    for (index, extent) in extents.iter().enumerate().rev() {
+        strides[index] = stride;
+        stride = stride.saturating_mul(*extent as i64);
+    }
+    strides
+}
+
+fn push_cuda_gather_uniforms(bytes: &mut Vec<u8>, bound: &BoundOp, rank_len: usize) {
+    let gathers: Vec<&Lookup> = bound
+        .operands()
+        .iter()
+        .filter_map(|(_, _, lookup)| lookup.as_ref())
+        .collect();
+    for lookup in &gathers {
+        push_cuda_i64(bytes, lookup.index_layout.base);
+    }
+    for lookup in &gathers {
+        push_cuda_i64_row(bytes, &lookup.index_layout.strides, rank_len);
+    }
+    for lookup in &gathers {
+        push_cuda_i64(bytes, lookup.element_stride);
+    }
+    for lookup in &gathers {
+        push_cuda_i64(bytes, lookup.extent as i64);
+    }
+}
+
+/// Packs every non-attention CUDA graph ABI currently emitted by this module.
+/// The field order mirrors the `Uniforms` declarations in the three renderers;
+/// all fields are `long`, so the host representation is fixed at i64 words.
+pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitError> {
+    let rank_len = resolved.extents.len().max(1);
+    let mut bytes = Vec::new();
+    match &resolved.kind {
+        BoundOpKind::Elementwise { .. } => return pack_elementwise_uniforms(resolved),
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            output_axes,
+            out_layout,
+            epilogue_operands,
+            epilogue_broadcast_axes,
+            ..
+        } => {
+            let reduce_axes = reduction_dims(resolved, output_axes);
+            let is_broadcast_epilogue = !epilogue_broadcast_axes.is_empty();
+            let output_rank_len = if is_broadcast_epilogue {
+                rank_len
+            } else {
+                output_axes.len().max(1)
+            };
+            let reduce_rank_len = reduce_axes.len().max(1);
+            push_cuda_i64(
+                &mut bytes,
+                output_axes
+                    .iter()
+                    .map(|axis| resolved.extents[*axis as usize])
+                    .product::<u64>() as i64,
+            );
+            push_cuda_i64(
+                &mut bytes,
+                reduce_axes
+                    .iter()
+                    .map(|axis| resolved.extents[*axis as usize])
+                    .product::<u64>() as i64,
+            );
+            let output_extents: Vec<i64> = if is_broadcast_epilogue {
+                resolved
+                    .extents
+                    .iter()
+                    .map(|extent| *extent as i64)
+                    .collect()
+            } else {
+                output_axes
+                    .iter()
+                    .map(|axis| resolved.extents[*axis as usize] as i64)
+                    .collect()
+            };
+            let reduction_extents: Vec<i64> = reduce_axes
+                .iter()
+                .map(|axis| resolved.extents[*axis as usize] as i64)
+                .collect();
+            push_cuda_i64_row(&mut bytes, &output_extents, output_rank_len);
+            push_cuda_i64_row(&mut bytes, &reduction_extents, reduce_rank_len);
+            for (_, layout, _) in resolved.operands() {
+                push_cuda_i64(&mut bytes, layout.base);
+            }
+            for (_, layout, _) in resolved.operands() {
+                push_cuda_i64_row(&mut bytes, &layout.strides, rank_len);
+            }
+            push_cuda_i64(&mut bytes, out_layout.base);
+            push_cuda_i64_row(&mut bytes, &out_layout.strides, rank_len);
+            if !epilogue_operands.is_empty() {
+                for (_, layout, _) in epilogue_operands {
+                    push_cuda_i64(&mut bytes, layout.base);
+                }
+                for (_, layout, _) in epilogue_operands {
+                    push_cuda_i64_row(&mut bytes, &layout.strides, output_rank_len);
+                }
+            }
+            if is_broadcast_epilogue {
+                push_cuda_i64_row(&mut bytes, &contiguous_strides(&resolved.extents), rank_len);
+            }
+            push_cuda_gather_uniforms(&mut bytes, resolved, rank_len);
+        }
+        BoundOpKind::Reduce {
+            keep: Keep::Scan,
+            out_layout,
+            ..
+        } => {
+            let outer_rank = resolved.extents.len().saturating_sub(1);
+            let outer_rank_len = outer_rank.max(1);
+            push_cuda_i64(
+                &mut bytes,
+                resolved.extents[..outer_rank].iter().product::<u64>() as i64,
+            );
+            push_cuda_i64(
+                &mut bytes,
+                resolved.extents.last().copied().unwrap_or(1) as i64,
+            );
+            push_cuda_extents(&mut bytes, &resolved.extents[..outer_rank], outer_rank_len);
+            for (_, layout, _) in resolved.operands() {
+                push_cuda_i64(&mut bytes, layout.base);
+            }
+            for (_, layout, _) in resolved.operands() {
+                push_cuda_i64_row(&mut bytes, &layout.strides, rank_len);
+            }
+            push_cuda_i64(&mut bytes, out_layout.base);
+            push_cuda_i64_row(&mut bytes, &out_layout.strides, rank_len);
+        }
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } => {
+            push_cuda_i64(&mut bytes, resolved.extents.iter().product::<u64>() as i64);
+        }
+        BoundOpKind::CachedAttention { .. } => {
+            return Err(EmitError::CudaUnsupportedOpKind {
+                node: resolved.node,
+                kind: resolved.kind.name(),
+            });
+        }
+    }
+    Ok(bytes)
+}
+
+fn render_leaf(
+    resolved: &BoundOp,
+    entry: &str,
+    constant: Option<f32>,
+) -> Result<String, EmitError> {
+    let element_type = type_token(resolved.node, resolved.dtype)?;
+    let mut source = String::new();
+    preamble(&mut source, element_type == "__half");
+    source.push_str("struct Uniforms { long total_elements; };\n\n");
+    kernel_signature(&mut source, &[], 0, 0, entry, element_type);
+    source.push_str("    if (gid >= u.total_elements) { return; }\n");
+    match constant {
+        Some(value) => source.push_str(&format!(
+            "    out[gid] = ({element_type}){};\n",
+            cuda_float_literal(value)
+        )),
+        None => source.push_str(&format!("    out[gid] = ({element_type})gid;\n")),
+    }
+    source.push_str("}\n");
+    Ok(source)
+}
+
+fn cuda_float_literal(value: f32) -> String {
+    if value.is_nan() {
+        "NAN".to_string()
+    } else if value == f32::INFINITY {
+        "__int_as_float(0x7f800000)".to_string()
+    } else if value == f32::NEG_INFINITY {
+        "-__int_as_float(0x7f800000)".to_string()
+    } else {
+        format!("{value:?}f")
+    }
 }
 
 fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
@@ -327,7 +555,7 @@ fn bindings(resolved: &BoundOp) -> Vec<Binding> {
     bindings
 }
 
-fn grid_threads(resolved: &BoundOp) -> u64 {
+fn grid_threads(resolved: &BoundOp, cooperative: bool) -> u64 {
     match &resolved.kind {
         BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
         BoundOpKind::Reduce {
@@ -339,7 +567,7 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
                 .iter()
                 .map(|dim| resolved.extents[*dim as usize])
                 .product();
-            if reduce_is_cooperative(resolved) {
+            if cooperative {
                 output_total * WARP_SIZE
             } else {
                 output_total
@@ -356,9 +584,8 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
         // `EmitError::CudaUnsupportedOpKind` for it before `grid_threads` is
         // ever called. Grouped with `Iota`/`Constant` only to satisfy
         // exhaustiveness with a harmless value, never a real dispatch shape.
-        BoundOpKind::Iota | BoundOpKind::Constant { .. } | BoundOpKind::CachedAttention { .. } => {
-            resolved.extents.iter().product()
-        }
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } => resolved.extents.iter().product(),
+        BoundOpKind::CachedAttention { .. } => resolved.extents.iter().product(),
     }
 }
 
@@ -367,13 +594,26 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
 /// `crate::msl::reduce_is_cooperative` picks for a SIMD-group cooperative
 /// fold, ported unchanged: `Subtract`/`Divide` are not associative, so
 /// reordering their combination across lanes is wrong, not merely imprecise.
-fn reduce_is_cooperative(resolved: &BoundOp) -> bool {
+fn reduce_is_cooperative(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+    numeric_policy: NumericPolicy,
+) -> bool {
     match &resolved.kind {
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
             reduce_op,
             ..
-        } => gather_count(resolved) == 0 && is_cooperative_reduce_op(*reduce_op),
+        } => {
+            // Quantized dot products must retain the reference accumulation
+            // order until a codec-specific error bound proves warp folding
+            // equivalent. The packed decode itself is not associative in
+            // floating point, so a reordered warp sum is a correctness risk.
+            numeric_policy.reassociation
+                && quantized.iter().all(Option::is_none)
+                && gather_count(resolved) == 0
+                && is_cooperative_reduce_op(*reduce_op)
+        }
         _ => false,
     }
 }
@@ -466,16 +706,14 @@ fn scalar_op_expr(op: ScalarOp, args: &[&str]) -> String {
 }
 
 /// `(init expression, seeded-from-the-start)` — ports
-/// `crate::msl::fold_init_tokens`. `NegativeInfinity`/`PositiveInfinity` use
-/// `-INFINITY`/`INFINITY`, which `<math.h>`'s CUDA-provided
-/// `<cuda_runtime.h>` guarantees as IEEE-754 infinities, unlike WGSL's base
-/// spec.
+/// `crate::msl::fold_init_tokens`. The infinity values use CUDA's bit-cast
+/// builtin rather than relying on an `INFINITY` macro in NVRTC headers.
 fn fold_init_tokens(init: ReduceInit) -> (&'static str, &'static str) {
     match init {
         ReduceInit::Zero => ("0.0f", "true"),
         ReduceInit::One => ("1.0f", "true"),
-        ReduceInit::NegativeInfinity => ("-INFINITY", "true"),
-        ReduceInit::PositiveInfinity => ("INFINITY", "true"),
+        ReduceInit::NegativeInfinity => ("-__int_as_float(0x7f800000)", "true"),
+        ReduceInit::PositiveInfinity => ("__int_as_float(0x7f800000)", "true"),
         ReduceInit::FirstElement => ("0.0f", "false"),
     }
 }
@@ -489,8 +727,8 @@ fn cooperative_identity_token(node: NodeId, op: ScalarOp) -> Result<&'static str
     match op {
         ScalarOp::Add => Ok("0.0f"),
         ScalarOp::Multiply => Ok("1.0f"),
-        ScalarOp::Maximum => Ok("-INFINITY"),
-        ScalarOp::Minimum => Ok("INFINITY"),
+        ScalarOp::Maximum => Ok("-__int_as_float(0x7f800000)"),
+        ScalarOp::Minimum => Ok("__int_as_float(0x7f800000)"),
         ScalarOp::Identity
         | ScalarOp::Subtract
         | ScalarOp::Divide
@@ -624,11 +862,19 @@ __device__ __forceinline__ float proxima_erf(float x) {
 
 fn preamble(source: &mut String, needs_half: bool) {
     source.push_str("#include <cuda_runtime.h>\n");
-    if needs_half {
-        source.push_str("#include <cuda_fp16.h>\n");
-    }
+    // The packed-codec helpers use CUDA's half bit-conversion intrinsics even
+    // when the graph's materialized element type is f32.  Keeping this header
+    // unconditional makes the emitted translation unit self-contained for
+    // NVRTC; `needs_half` remains part of the call contract for source-shape
+    // compatibility with the f16 path.
+    let _ = needs_half;
+    source.push_str("#include <cuda_fp16.h>\n");
     source.push('\n');
     source.push_str(PROXIMA_ERF_FN_CUDA);
+    source.push('\n');
+    source.push_str(Q2K_UNPACK_CUDA);
+    source.push('\n');
+    source.push_str(Q3K_UNPACK_CUDA);
     source.push('\n');
     source.push_str(Q4K_UNPACK_CUDA);
     source.push('\n');
@@ -643,6 +889,65 @@ fn preamble(source: &mut String, needs_half: bool) {
     source.push_str(BF16_UNPACK_CUDA);
     source.push('\n');
 }
+
+const Q2K_UNPACK_CUDA: &str = r#"
+__device__ __forceinline__ float q2k_element(const unsigned char *block, unsigned int index) {
+    const unsigned char *scales = block;
+    const unsigned char *qs = block + 16;
+    unsigned short d_bits = (unsigned short)((unsigned int)block[80] | ((unsigned int)block[81] << 8));
+    unsigned short dmin_bits = (unsigned short)((unsigned int)block[82] | ((unsigned int)block[83] << 8));
+    float d = __half2float(__ushort_as_half(d_bits));
+    float dmin = __half2float(__ushort_as_half(dmin_bits));
+    unsigned int chunk = index / 128u;
+    unsigned int within = index % 128u;
+    unsigned int group = within / 32u;
+    unsigned int local = within % 32u;
+    unsigned int sub_block = chunk * 8u + group * 2u + (local >= 16u ? 1u : 0u);
+    unsigned char scale_min = scales[sub_block];
+    float scale = d * (float)(scale_min & 0x0Fu);
+    float minimum = dmin * (float)(scale_min >> 4u);
+    unsigned char level = (qs[chunk * 32u + local] >> (2u * group)) & 0x03u;
+    return scale * (float)level - minimum;
+}
+"#;
+
+const Q3K_UNPACK_CUDA: &str = r#"
+__device__ __forceinline__ int q3k_unpack_scale(const unsigned char *scales, unsigned int sub_block) {
+    unsigned char low = (sub_block < 8u) ? (scales[sub_block] & 0x0Fu) : (scales[sub_block - 8u] >> 4u);
+    unsigned char high = (scales[8u + sub_block % 4u] >> (2u * (sub_block / 4u))) & 0x03u;
+    return (int)(low | (high << 4u)) - 32;
+}
+struct q3k_header_cuda { float scale; unsigned char mask; };
+__device__ __forceinline__ q3k_header_cuda q3k_header_for(const unsigned char *block, unsigned int index) {
+    const unsigned char *scales = block + 96;
+    unsigned short d_bits = (unsigned short)((unsigned int)block[108] | ((unsigned int)block[109] << 8));
+    float d = __half2float(__ushort_as_half(d_bits));
+    unsigned int chunk = index / 128u;
+    unsigned int rem = index % 128u;
+    unsigned int j = rem / 32u;
+    unsigned int local32 = rem % 32u;
+    q3k_header_cuda header;
+    header.scale = d * (float)q3k_unpack_scale(scales, 8u * chunk + 2u * j + (local32 < 16u ? 0u : 1u));
+    header.mask = (unsigned char)(1u << (4u * chunk + j));
+    return header;
+}
+__device__ __forceinline__ float q3k_element(const unsigned char *block, unsigned int index) {
+    q3k_header_cuda header = q3k_header_for(block, index);
+    const unsigned char *qs = block + 32;
+    unsigned int chunk = index / 128u;
+    unsigned int rem = index % 128u;
+    unsigned int j = rem / 32u;
+    unsigned int local32 = rem % 32u;
+    unsigned char level = (qs[chunk * 32u + local32] >> (2u * j)) & 0x03u;
+    float correction = (block[local32] & header.mask) != 0u ? 0.0f : 4.0f;
+    return header.scale * ((float)level - correction);
+}
+"#;
+
+const Q2K_BLOCK_BYTES: usize = proxima_gguf::quant::q2_k::BLOCK_BYTES;
+const Q2K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q2_k::QK_K;
+const Q3K_BLOCK_BYTES: usize = proxima_gguf::quant::q3_k::BLOCK_BYTES;
+const Q3K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q3_k::QK_K;
 
 fn kernel_signature(
     source: &mut String,
@@ -708,13 +1013,12 @@ fn push_gather_uniform_fields(source: &mut String, gather_count: usize, rank_len
 /// Emits the out-of-range check for one just-fetched, not-yet-clamped
 /// `fetched{operand_index}`: when it falls outside
 /// `[0, u.gather_extent[gather_slot])`, sets that gathered operand's `fault`
-/// flag via `atomicOr` — unlike `crate::msl::push_gather_fault_check`'s
-/// `atomic_fetch_max` (which records the offending value), this records only
-/// that a fault occurred: CUDA's `atomicOr` on `unsigned int` composes
-/// losslessly across concurrent threads (the OR of any set of nonzero flags
-/// is still nonzero) without needing a value-carrying atomic, and the driver
-/// only needs to know a fault occurred to build a
-/// `TensorError::GatherIndexOutOfRange` the way it already does for Metal.
+/// flag via `atomicExch`. The nonzero payload records the offending signed
+/// index (the driver decodes the bits after synchronization), which is
+/// required to distinguish malformed index data from a uniform-layout bug.
+/// Multiple concurrent faults are diagnostic-only: any one recorded index is
+/// sufficient to prove the bounds violation, while the zero sentinel means
+/// no lane reported a fault.
 fn push_gather_fault_check(
     source: &mut String,
     operand_index: usize,
@@ -725,7 +1029,7 @@ fn push_gather_fault_check(
         "{indent}if (fetched{operand_index} < 0 || fetched{operand_index} >= u.gather_extent[{gather_slot}]) {{\n"
     ));
     source.push_str(&format!(
-        "{indent}    atomicOr(&fault[{gather_slot}], 1u);\n"
+        "{indent}    atomicExch(&fault[{gather_slot}], (unsigned int)fetched{operand_index});\n"
     ));
     source.push_str(&format!("{indent}}}\n"));
 }
@@ -763,14 +1067,19 @@ fn push_gather_fetch(
 /// `crate::msl::operand_read`, same per-element-only scope (no row-blocked
 /// header amortization; see the module doc).
 fn operand_read(
-    node: NodeId,
+    _node: NodeId,
     index: usize,
     offset: &str,
     codec: Option<PackedCodec>,
 ) -> Result<String, EmitError> {
     match codec {
         None => Ok(format!("in{index}[{offset}]")),
-        Some(PackedCodec::Q3K) => Err(EmitError::CudaUnsupportedPackedCodec { node }),
+        Some(PackedCodec::Q2K) => Ok(format!(
+            "q2k_element(in{index} + ({offset} / {Q2K_BLOCK_ELEMENTS}) * {Q2K_BLOCK_BYTES}, (unsigned int)({offset} % {Q2K_BLOCK_ELEMENTS}))"
+        )),
+        Some(PackedCodec::Q3K) => Ok(format!(
+            "q3k_element(in{index} + ({offset} / {Q3K_BLOCK_ELEMENTS}) * {Q3K_BLOCK_BYTES}, (unsigned int)({offset} % {Q3K_BLOCK_ELEMENTS}))"
+        )),
         Some(PackedCodec::Q4K) => Ok(format!(
             "q4k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES}, (unsigned int)({offset} % {Q4K_BLOCK_ELEMENTS}))"
         )),
@@ -870,6 +1179,48 @@ fn render_elementwise(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Emit the packed weight address used by the CPU quantized-matmul lowering.
+/// A quantized reduce's weight operand is a contiguous row-major `[rows, k]`
+/// slab even when its logical graph layout is a transposed/interleaved view.
+/// Using the logical layout offset directly would turn a stride such as
+/// `[0, 64, 1, 128]` into a packed address and read only every fourth Q8_0
+/// block. The CPU path first flattens the varying output axes into a row;
+/// CUDA must use the same physical contract.
+fn push_packed_matmul_offset(
+    source: &mut String,
+    index: usize,
+    layout: &Layout,
+    output_axes: &[u16],
+    resolved: &BoundOp,
+    indent: &str,
+) {
+    #[cfg(feature = "std")]
+    if std::env::var_os("PROXIMA_CUDA_LOGICAL_PACKED_ADDRESS").is_some() {
+        source.push_str(&format!(
+            "{indent}long off{index} = u.operand_base[{index}];\n"
+        ));
+        for dim in 0..resolved.extents.len() {
+            source.push_str(&format!(
+                "{indent}off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+            ));
+        }
+        return;
+    }
+    source.push_str(&format!("{indent}long packed_row{index} = 0;\n"));
+    for axis in output_axes {
+        let axis_usize = *axis as usize;
+        if layout.stride(*axis) != 0 {
+            source.push_str(&format!(
+                "{indent}packed_row{index} = packed_row{index} * {} + full_coord[{axis_usize}];\n",
+                resolved.extents[axis_usize]
+            ));
+        }
+    }
+    source.push_str(&format!(
+        "{indent}long off{index} = u.operand_base[{index}] + packed_row{index} * u.reduction_total + r;\n"
+    ));
+}
+
 fn push_serial_reduce_body(
     source: &mut String,
     resolved: &BoundOp,
@@ -935,13 +1286,19 @@ fn push_serial_reduce_body(
     }
 
     for (index, gather_slot) in gather_slots.iter().enumerate() {
-        source.push_str(&format!(
-            "        long off{index} = u.operand_base[{index}];\n"
-        ));
-        for dim in 0..rank {
+        if let Some(codec) = quantized[index] {
+            let (_, layout, _) = &resolved.operands()[index];
+            push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
+            let _ = codec;
+        } else {
             source.push_str(&format!(
-                "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                "        long off{index} = u.operand_base[{index}];\n"
             ));
+            for dim in 0..rank {
+                source.push_str(&format!(
+                    "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                ));
+            }
         }
         if let Some(slot) = gather_slot {
             push_gather_fetch(
@@ -1020,6 +1377,7 @@ fn push_cooperative_reduce_body(
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    is_broadcast_epilogue: bool,
 ) -> Result<(), EmitError> {
     let rank_len = rank.max(1);
     let output_rank = output_axes.len();
@@ -1043,9 +1401,14 @@ fn push_cooperative_reduce_body(
         source.push_str(&format!("    long output_coord[{output_rank_len}];\n"));
         source.push_str("    long remaining = output_index;\n");
         for index in (0..output_rank).rev() {
+            let extent_slot = if is_broadcast_epilogue {
+                output_axes[index] as usize
+            } else {
+                index
+            };
             source.push_str(&format!(
-                "    output_coord[{index}] = remaining % u.output_extents[{index}]; \
-                 remaining /= u.output_extents[{index}];\n"
+                "    output_coord[{index}] = remaining % u.output_extents[{extent_slot}]; \
+                 remaining /= u.output_extents[{extent_slot}];\n"
             ));
         }
         for (index, dim) in output_axes.iter().enumerate() {
@@ -1087,15 +1450,20 @@ fn push_cooperative_reduce_body(
     }
 
     for (index, &codec) in quantized.iter().enumerate() {
-        source.push_str(&format!(
-            "        long off{index} = u.operand_base[{index}];\n"
-        ));
-        for dim in 0..rank {
+        if let Some(codec) = codec {
+            let (_, layout, _) = &resolved.operands()[index];
+            push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
+            let _ = codec;
+        } else {
             source.push_str(&format!(
-                "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                "        long off{index} = u.operand_base[{index}];\n"
             ));
+            for dim in 0..rank {
+                source.push_str(&format!(
+                    "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                ));
+            }
         }
-        let _ = codec;
     }
     source.push_str(&format!(
         "        {element_type} scratch[{}];\n",
@@ -1128,6 +1496,66 @@ fn push_cooperative_reduce_body(
     source.push_str(&format!("        accumulator = {shuffle_expr};\n"));
     source.push_str("    }\n");
 
+    if is_broadcast_epilogue {
+        // Every lane participates in the broadcast write below. The
+        // down-shuffle tree leaves the complete reduction only in lane 0;
+        // without this broadcast, lanes 1..31 reuse their partial sums as
+        // if they were the norm, corrupting every other output coordinate.
+        source.push_str("    accumulator = __shfl_sync(0xffffffffu, accumulator, 0);\n");
+        // Recreate the non-reduction coordinate after the fold, whose loop
+        // leaves `full_coord` holding its last reduction coordinate. Each
+        // lane then owns a strided share of the full output row.
+        for dim in 0..rank {
+            source.push_str(&format!("    full_coord[{dim}] = 0;\n"));
+        }
+        for (index, dim) in output_axes.iter().enumerate() {
+            source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));
+        }
+        source.push_str(&format!(
+            "    for (long r = (long)lane; r < u.reduction_total; r += {WARP_SIZE}) {{\n"
+        ));
+        if reduce_rank > 0 {
+            source.push_str(&format!(
+                "        long broadcast_reduce_coord[{reduce_rank_len}];\n"
+            ));
+            source.push_str("        long broadcast_remaining = r;\n");
+            for index in (0..reduce_rank).rev() {
+                source.push_str(&format!(
+                    "        broadcast_reduce_coord[{index}] = broadcast_remaining % u.reduction_extents[{index}]; broadcast_remaining /= u.reduction_extents[{index}];\n"
+                ));
+            }
+            source.push_str(&format!("        long broadcast_full_coord[{rank_len}];\n"));
+            for dim in 0..rank {
+                source.push_str(&format!(
+                    "        broadcast_full_coord[{dim}] = full_coord[{dim}];\n"
+                ));
+            }
+            for (index, dim) in reduce_dims.iter().enumerate() {
+                source.push_str(&format!(
+                    "        broadcast_full_coord[{dim}] = broadcast_reduce_coord[{index}];\n"
+                ));
+            }
+            source.push_str("        long broadcast_out_offset = u.out_base;\n");
+            for dim in 0..rank {
+                source.push_str(&format!(
+                    "        broadcast_out_offset += broadcast_full_coord[{dim}] * u.broadcast_out_strides[{dim}];\n"
+                ));
+            }
+            push_reduce_epilogue_write(
+                source,
+                epilogue_body,
+                epilogue_operands,
+                rank,
+                element_type,
+                "        ",
+                |dim| format!("broadcast_full_coord[{dim}]"),
+                "accumulator",
+                "broadcast_out_offset",
+            );
+        }
+        source.push_str("    }\n");
+        return Ok(());
+    }
     source.push_str("    if (lane != 0u) { return; }\n");
     source.push_str("    long out_offset = u.out_base;\n");
     for dim in 0..rank {
@@ -1159,6 +1587,7 @@ fn render_reduce(
     resolved: &BoundOp,
     entry: &str,
     quantized: &[Option<PackedCodec>],
+    numeric_policy: NumericPolicy,
 ) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -1176,25 +1605,15 @@ fn render_reduce(
             found: resolved.kind.name(),
         });
     };
-    // `omega::msl::render_reduce`'s own doc: a non-empty `epilogue_broadcast_
-    // axes` (`bind::BoundOpKind::Reduce::epilogue_broadcast_axes`'s own doc,
-    // the RMSNorm-shaped `x * inv_rms` "broadcast-reduce" epilogue) needs
-    // `epilogue_operand_strides`/the output write widened to the FULL
-    // pre-reduction rank -- this renderer still declares/addresses that
-    // uniform at `output_rank` alone below, so reject at bind time rather
-    // than emit a kernel that reads or writes the wrong element count, the
-    // same "no renderer, reject" contract Metal used before its own
-    // broadcast-reduce write landed.
-    if !epilogue_broadcast_axes.is_empty() {
-        return Err(EmitError::EpilogueNotSupported {
-            node: resolved.node,
-            reason: "the broadcast-reduce epilogue (epilogue_broadcast_axes) has no CUDA renderer yet",
-        });
-    }
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
-    let output_rank = output_axes.len();
+    let is_broadcast_epilogue = !epilogue_broadcast_axes.is_empty();
+    let output_rank = if is_broadcast_epilogue {
+        rank
+    } else {
+        output_axes.len()
+    };
     let output_rank_len = output_rank.max(1);
     let reduce_dims = reduction_dims(resolved, output_axes);
     let reduce_rank = reduce_dims.len();
@@ -1226,6 +1645,9 @@ fn render_reduce(
             "    long epilogue_operand_strides[{epilogue_operand_count}][{output_rank_len}];\n"
         ));
     }
+    if is_broadcast_epilogue {
+        source.push_str(&format!("    long broadcast_out_strides[{rank_len}];\n"));
+    }
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
@@ -1238,7 +1660,7 @@ fn render_reduce(
         element_type,
     );
 
-    if reduce_is_cooperative(resolved) {
+    if reduce_is_cooperative(resolved, quantized, numeric_policy) {
         push_cooperative_reduce_body(
             &mut source,
             resolved,
@@ -1251,6 +1673,7 @@ fn render_reduce(
             element_type,
             epilogue_body,
             epilogue_operands,
+            is_broadcast_epilogue,
         )?;
     } else {
         push_serial_reduce_body(
@@ -1656,6 +2079,40 @@ mod tests {
     }
 
     #[test]
+    fn leaf_iota_and_constant_emit_a_uniform_fill_kernel() {
+        for leaf in [
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(8),
+            },
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(8)],
+                value: 0.25,
+            },
+        ] {
+            let program = vec![leaf];
+            let shapes = infer(&program, &[]).expect("leaf shape inference succeeds");
+            let bound = bind(
+                &program,
+                &shapes,
+                &[NodeId(0)],
+                proxima_tensor::NumericPolicy::default(),
+            )
+            .expect("leaf binding succeeds")
+            .pop()
+            .expect("one leaf bound op");
+            let kernel = emit_cuda(&bound, &no_packed()).expect("leaf emits");
+            assert_eq!(
+                kernel.bindings,
+                vec![Binding::Output(NodeId(0)), Binding::Uniforms]
+            );
+            assert!(kernel.source.contains("u.total_elements"));
+            assert_eq!(pack_cuda_uniforms(&bound).expect("leaf packs").len(), 8);
+        }
+    }
+
+    #[test]
     fn same_structure_different_extents_yield_identical_source() {
         let small = emit_cuda(&elementwise_tanh_op(4), &no_packed()).expect("emit succeeds");
         let large = emit_cuda(&elementwise_tanh_op(4096), &no_packed()).expect("emit succeeds");
@@ -1700,7 +2157,12 @@ mod tests {
     #[test]
     fn associative_reduce_emits_warp_shuffle_cooperative_kernel() {
         let bound = matmul_reduce_op(4, 4096, ScalarOp::Add);
-        let kernel = emit_cuda(&bound, &no_packed()).expect("emit succeeds");
+        let kernel = emit_cuda_with_policy(
+            &bound,
+            &no_packed(),
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("emit succeeds");
         assert!(kernel.source.contains("__shfl_down_sync"));
         assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
         assert_eq!(kernel.grid.threads, 4 * WARP_SIZE);
@@ -1815,10 +2277,14 @@ mod tests {
     }
 
     #[test]
-    fn gather_emits_fault_buffer_and_atomic_or_check() {
+    fn gather_emits_fault_buffer_and_atomic_exchange_check() {
         let bound = embedding_lookup_op(50_000, 8, 4);
         let kernel = emit_cuda(&bound, &no_packed()).expect("emit succeeds");
-        assert!(kernel.source.contains("atomicOr(&fault[0], 1u);"));
+        assert!(
+            kernel
+                .source
+                .contains("atomicExch(&fault[0], (unsigned int)fetched0);")
+        );
         assert_eq!(
             kernel.bindings,
             vec![
@@ -1835,6 +2301,19 @@ mod tests {
                 Binding::Fault,
             ]
         );
+    }
+
+    #[test]
+    fn q2k_and_q3k_emit_distinct_cuda_unpack_paths() {
+        let (q2_bound, q2_packed) =
+            packed_elementwise_op(PackedCodec::Q2K, Q2K_BLOCK_BYTES, Q2K_BLOCK_ELEMENTS);
+        let (q3_bound, q3_packed) =
+            packed_elementwise_op(PackedCodec::Q3K, Q3K_BLOCK_BYTES, Q3K_BLOCK_ELEMENTS);
+        let q2 = emit_cuda(&q2_bound, &q2_packed).expect("q2k emits");
+        let q3 = emit_cuda(&q3_bound, &q3_packed).expect("q3k emits");
+        assert!(q2.source.contains("q2k_element"));
+        assert!(q3.source.contains("q3k_element"));
+        assert_ne!(q2.entry, q3.entry);
     }
 
     fn packed_elementwise_op(
@@ -2009,7 +2488,7 @@ mod tests {
     #[test]
     fn render_reduce_rejects_an_elementwise_bound_op() {
         let bound = elementwise_tanh_op(8);
-        let error = render_reduce(&bound, "entry", &[None])
+        let error = render_reduce(&bound, "entry", &[None], NumericPolicy::bit_exact())
             .expect_err("an elementwise chain is not a Reduce fold");
         assert!(matches!(
             error,
@@ -2024,13 +2503,10 @@ mod tests {
     /// `bind::BoundOpKind::Reduce::epilogue_broadcast_axes`'s own doc: a
     /// non-empty value is the RMSNorm-shaped "broadcast-reduce" epilogue
     /// (`x * inv_rms`, re-broadcasting the fold's scalar back over the
-    /// reduced axis) -- this renderer's `epilogue_operand_strides` uniform
-    /// is still declared at `output_rank` alone, so it must reject with a
-    /// typed error rather than emit a kernel that reads or writes the wrong
-    /// element count, the same contract Metal's `render_reduce` held before
-    /// its own broadcast-reduce write landed.
+    /// reduced axis). CUDA now widens the epilogue/output ABI to full rank
+    /// and emits the per-lane broadcast write loop.
     #[test]
-    fn render_reduce_rejects_a_broadcast_reduce_epilogue() {
+    fn render_reduce_emits_a_broadcast_reduce_epilogue() {
         let mut bound = matmul_reduce_op(4, 8, ScalarOp::Add);
         let BoundOpKind::Reduce {
             epilogue_broadcast_axes,
@@ -2041,12 +2517,11 @@ mod tests {
         };
         epilogue_broadcast_axes.push(1);
 
-        let error = render_reduce(&bound, "entry", &[None])
-            .expect_err("a broadcast-reduce epilogue has no CUDA renderer yet");
-        assert!(
-            matches!(error, EmitError::EpilogueNotSupported { .. }),
-            "{error}"
-        );
+        let source = render_reduce(&bound, "entry", &[None], NumericPolicy::bit_exact())
+            .expect("broadcast emits");
+        assert!(source.contains("broadcast_out_strides[2]"));
+        assert!(source.contains("broadcast_full_coord[1]"));
+        assert!(source.contains("__shfl_sync(0xffffffffu, accumulator, 0)"));
     }
 
     #[test]
@@ -2214,6 +2689,13 @@ mod tests {
 
         let kernel_q4k = emit_cuda(&bound, &q4k).expect("q4k emits");
         let kernel_q5k = emit_cuda(&bound, &q5k).expect("q5k emits");
+
+        assert!(kernel_q4k.source.contains("packed_row0"));
+        assert!(
+            kernel_q4k
+                .source
+                .contains("u.operand_base[0] + packed_row0 * u.reduction_total + r")
+        );
 
         assert_ne!(
             kernel_q4k.source, kernel_q5k.source,

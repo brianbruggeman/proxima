@@ -70,7 +70,7 @@ config-free to keep one concept in focus.
 - **new-platform** — bring up a new target (os/arch/board): a `PROXIMA_PROFILE` + a `build.rs` that reads it via `conflaguration`/`proxima_build` and emits per-platform `pub const`s — config baked at build, no runtime. The porting workflow. *(config, no-std)*
 - **wasm** — proxima at the edge. *(transform)*
 - **dpdk** — kernel-bypass **networking**: userspace NIC rx/tx rings, poll-mode. *(runtime-select)*
-- **nvme** — kernel-bypass **storage**: userspace NVMe, a sans-IO SQE/CQE codec + ring FSM, with the queue pair itself a `Pipe`. Pure Rust — there is no SPDK dependency, which is why this rung is not called "spdk". *(dpdk)*
+- **nvme** — kernel-bypass **storage**: userspace NVMe, a sans-IO SQE/CQE codec + ring FSM, with the queue pair itself a `Pipe`; `proxima-storage --features spdk` also provides a callback ABI for an external local SPDK qpair. *(dpdk)*
 - **pmem** — **persistent memory**: byte-addressable, crash-consistent cells, no block layer. *(transform)*
 
 ## Extend it

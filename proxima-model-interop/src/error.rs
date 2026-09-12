@@ -2,6 +2,7 @@
 //! underlying reader/writer surfaces.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use proxima_gguf::GgmlType;
 use proxima_tensor::DType;
@@ -276,6 +277,25 @@ pub enum InteropError {
         expected: usize,
     },
 
+    /// A checkpoint declared only part of a layer's Q/K/V bias family, or a
+    /// bias vector whose element count disagrees with the checkpoint's head
+    /// geometry.  Biases are a semantic model parameter; silently dropping a
+    /// partial family would make the model executable but incorrect.
+    #[error(
+        "layer {layer} QKV bias {projection:?} has {elements} elements, expected {expected}"
+    )]
+    QkvBiasShapeMismatch {
+        layer: u32,
+        projection: String,
+        elements: usize,
+        expected: usize,
+    },
+
+    /// One or more members of a layer's Q/K/V bias family were absent while
+    /// another member was present.
+    #[error("layer {layer} QKV bias family is incomplete; missing {missing:?}")]
+    QkvBiasFamilyIncomplete { layer: u32, missing: Vec<String> },
+
     /// [`crate::hf_config::parse_hf_config`]'s `config.json` bytes were not
     /// valid JSON, or were missing/mis-typing one of [`crate::hf_config::HfConfig`]'s
     /// required fields (`hidden_size`, `num_attention_heads`,
@@ -404,7 +424,7 @@ pub enum InteropError {
     // constructs must be reachable there too -- `feature = "std"` alone
     // left this variant absent under a bare `cargo nextest run` with no
     // features, breaking the module that names it in its own doc comment.
-    #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+    #[cfg(any(test, all(feature = "std", feature = "metal")))]
     #[error(
         "load-time memory budget exceeded: dense_weights_bytes={dense_weights_bytes} \
          expert_weights_bytes={expert_weights_bytes} table_weights_bytes={table_weights_bytes} \

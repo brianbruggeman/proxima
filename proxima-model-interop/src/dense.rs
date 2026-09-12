@@ -27,8 +27,11 @@ use proxima_tensor::spec::{
 };
 
 use crate::architecture::{Architecture, BoundProgram};
-use crate::bind::{architecture_from_metadata, bind_all_weights, checkpoint_has_qk_norm};
+use crate::bind::{
+    architecture_from_metadata, bind_all_weights, checkpoint_has_qk_norm, checkpoint_qkv_biases,
+};
 use crate::error::InteropError;
+use crate::task::{ModelTask, classify_task};
 
 /// The registered fallback architecture -- see [`Architecture::name`]'s own
 /// doc for why "dense" is a label, not a `general.architecture` value this
@@ -61,13 +64,19 @@ impl Architecture for DenseArch {
         // inline call.
         let weights = bind_all_weights(parsed, file_bytes, &architecture, false, false, &[])?;
         let qk_norm = checkpoint_has_qk_norm(parsed);
-        // `last_row_only: true` -- the decode loop
+        // Encoder-style tasks consume the full hidden sequence for pooling or
+        // a task head. Decoder generation only needs the final row, so keep
+        // the expensive vocab projection narrow there. The task classifier
+        // runs before this bind and prevents a non-generation checkpoint from
+        // being mistaken for a decoder by the caller.
+        let last_row_only = !matches!(classify_task(parsed).task, ModelTask::Embedding);
+        // `last_row_only` -- the decode loop
         // (`crate::generate::LoadedModel`'s own decode step) only ever
         // samples the LAST row's logits, greedy or not; see
         // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
         // own doc on that flag and `proxima-tensor/docs/discipline.md`
         // ROW 418/421 for the measured cost of computing every row instead.
-        let (program, roots, cache_roots, _layer_residuals, moe_sites) =
+        let (program, roots, cache_roots, layer_residuals, moe_sites) =
             mistral_cached_forward_program_with_experts_and_layer_taps(
                 architecture.vocab,
                 architecture.embedding,
@@ -79,9 +88,10 @@ impl Architecture for DenseArch {
                 architecture.expert_count,
                 architecture.expert_used_count,
                 qk_norm,
+                checkpoint_qkv_biases(parsed, &architecture)?,
                 false,
                 false,
-                true,
+                last_row_only,
             )?;
         Ok(BoundProgram {
             weights,
@@ -89,6 +99,7 @@ impl Architecture for DenseArch {
             program,
             logits_root: roots.logits,
             hidden_root: Some(roots.hidden),
+            residual_roots: layer_residuals,
             layer_roots: cache_roots
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)

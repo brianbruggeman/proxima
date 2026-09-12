@@ -16,7 +16,7 @@ readme.workspace = true
 # nextest's "0 skipped" reads exactly like "everything passed". They sat
 # broken and uncompiled behind that flag.
 default = ["std", "metal", "cpu"]
-std = ["alloc", "thiserror/std", "proxima-tensor/std"]
+std = ["alloc", "thiserror/std", "proxima-tensor/std", "dep:conflaguration", "dep:serde"]
 alloc = []
 cached-attention-streaming = ["proxima-tensor/cached-attention-streaming"]
 # Default-off passthrough to `proxima-tensor/reduce-epilogue-fusion` (the
@@ -137,7 +137,6 @@ metal = [
     "metal-output-placement",
     "metal-wide-cooperative-reduce",
     "metal-plan-stable-buffers",
-    "cached-attention-streaming",
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
     "metal-q4k-ggml-port",
@@ -153,14 +152,27 @@ metal = [
 # reduce) — dependency-free, pure string generation, so it builds and its
 # tests run on any host including this crate's macOS CI gate with no NVIDIA
 # GPU present. `cuda` names no `Engine`/`GpuDriver` variant: this is the
-# source EMITTER only, and has no DRIVER (no `cudarc`/`cust`, no
-# `cuModuleLoad`/`cuLaunchKernel`), so nothing here can actually dispatch a
-# kernel to a device — only emit the source a future driver would compile and
-# launch. Needs `alloc`: `cuda.rs` is pure string generation (`String`/`Vec`/
+# source emitter. `cuda-driver` adds the optional cudarc driver/NVRTC bridge;
+# it is separate because CUDA headers/toolchains are not needed by the
+# emitter-only build. Needs `alloc`: `cuda.rs` is pure string generation (`String`/`Vec`/
 # `format!`), the same alloc-tier shape `msl.rs` takes, and had no floor of
 # its own before this -- `--no-default-features --features cuda` failed to
 # resolve `alloc::string::String` until this line named the real dependency.
 cuda = ["alloc"]
+# Real CUDA driver boundary: NVRTC compiles emitted CUDA C to PTX and cudarc
+# loads/launches it through the CUDA Driver API. The model graph still needs
+# a binding/argument packer before it can use this for full inference; the
+# feature nevertheless makes device initialization and kernel dispatch a real,
+# typed capability rather than leaving CUDA as source text only.
+cuda-driver = [
+    "std",
+    "cuda",
+    "dep:cudarc",
+    "cudarc/driver",
+    "cudarc/nvrtc",
+    "cudarc/fallback-dynamic-loading",
+    "cudarc/cuda-13030",
+]
 # Per-token wall-clock attribution for the Metal decode path (split-4019
 # initiative): tick counters over prepare (infer+bind), MSL emit, pipeline
 # cache hit/miss, block upload, per-op setup, GPU execute, and readback --
@@ -298,7 +310,16 @@ metal-packed-row-nsg2 = ["metal"]
 # (WGSL instead of MSL) and different device API (wgpu instead of objc2-metal).
 # Non-default and std-only: `wgpu`'s `Instance`/`Device`/`Queue` are platform
 # objects, not something an alloc-tier build can construct.
-wgpu-backend = ["std", "dep:wgpu", "dep:pollster", "dep:bytemuck", "proxima-tensor/std"]
+wgpu-backend = [
+    "std",
+    "dep:wgpu",
+    "dep:pollster",
+    "dep:bytemuck",
+    "dep:proxima-telemetry",
+    "proxima-telemetry/std",
+    "proxima-telemetry/emit",
+    "proxima-tensor/std",
+]
 # Lets a caller hand `execute_plan_with_placements` a buffer IT owns and a
 # byte offset, so one op's output lands directly in that buffer instead of a
 # fresh `allocate_buffer` every dispatch (`metal.rs`'s own module doc,
@@ -340,12 +361,19 @@ kv-capacity-bucket = ["proxima-tensor/kv-capacity-bucket"]
 metal-q4k-ggml-port = ["metal"]
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+cudarc = { version = "0.19.9", default-features = false, features = ["std"], optional = true }
 pollster = { version = "1.0.1", optional = true }
+# backend selection warnings are emitted by the shared backend wrapper on
+# every std target, including wgpu/Vulkan hosts; keep telemetry outside the
+# macOS-only Metal dependency table.
+proxima-telemetry = { workspace = true, optional = true }
 # per-codec block byte/element geometry `msl.rs`'s `PackedCodec` reads --
 # the one place those numbers are defined; alloc-tier only, `msl.rs` never
 # needs proxima-gguf's std-only parser/config surface.
 proxima-gguf = { path = "../proxima-gguf", default-features = false, features = ["alloc"] }
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
+serde = { workspace = true, features = ["derive"], optional = true }
 thiserror = { workspace = true, default-features = false }
 # `wgsl`: this crate emits WGSL, never SPIR-V/HLSL text, so no other shader
 # frontend is needed. `metal`: the backend this box actually dispatches
@@ -422,13 +450,6 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 # this macOS-only section because `src/metal.rs`, its only caller, is itself
 # `target_os = "macos"`-gated.
 half = { version = "2.7.1", default-features = false, optional = true }
-# proxima-telemetry: the `Counter` instrument `upload_block` increments to
-# report which real calls took the no-copy path vs the copying one — see
-# the module doc's "Host buffer upload" section. Default features (implies
-# `alloc`) are enough for `metric::Counter`/`counter!`; no OTLP/export
-# machinery is needed since this driver only ever reads the counter back
-# in-process (its own test suite).
-proxima-telemetry = { workspace = true, optional = true }
 # libc: `sysconf(_SC_PAGESIZE)` for `page_size` — the alignment unit
 # `newBufferWithBytesNoCopy` requires, queried from the host rather than
 # hard-coded (macOS's `libc` has no `getpagesize()` binding, unlike Linux's).
@@ -448,6 +469,14 @@ proxima-build.workspace = true
 
 [lints]
 workspace = true
+
+[[example]]
+name = "cuda_smoke"
+required-features = ["cuda-driver"]
+
+[[example]]
+name = "wgpu_smoke"
+required-features = ["wgpu-backend"]
 
 [dev-dependencies]
 conflaguration = { workspace = true, features = ["toml"] }

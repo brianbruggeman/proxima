@@ -14,6 +14,7 @@ default = []
 std = []
 nvme = ["dep:proxima-protocols", "proxima-protocols/nvme", "dep:proxima-primitives"]
 nvme-uio = ["nvme", "std", "dep:rustix"]
+spdk = ["nvme", "std"]
 dax = ["std", "dep:rustix", "dep:bon", "dep:conflaguration", "dep:serde"]
 
 [dependencies]
