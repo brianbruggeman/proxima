@@ -9,6 +9,10 @@
 //! callback timestamps are wall-clock observations from the same client call:
 //! TTFT is the prefill event boundary and TTNT is the mean interval between
 //! generated-token events.  No derived number is presented as device time.
+//!
+//! Set `PROXIMA_VERIFY_GPU=1` to run the same prompt through CPU after the
+//! measured GPU call and fail if greedy token IDs differ. This is an explicit
+//! correctness gate, not part of the reported GPU timing.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -238,6 +242,22 @@ fn main() {
             Control::Continue
         });
     let (ids, text, stopped_by_eos) = result.expect("local generation");
+    let verification = if backend != "cpu" && env::var_os("PROXIMA_VERIFY_GPU").is_some() {
+        let cpu_config = ServingConfig {
+            gpu_layers: 0,
+            ..serving_config
+        };
+        let (cpu_ids, _cpu_text, _cpu_stopped_by_eos) = loaded_model
+            .generate_streaming(&prompt, max_tokens, cpu_config, &mut |_| Control::Continue)
+            .expect("CPU verification generation");
+        let matches = ids == cpu_ids;
+        eprintln!(
+            "bench_local: gpu_cpu_verification match={matches} gpu_ids={ids:?} cpu_ids={cpu_ids:?}"
+        );
+        Some((matches, cpu_ids))
+    } else {
+        None
+    };
     let gpu_memory_after = if backend == "cuda" {
         cuda_memory_kib()
     } else {
@@ -273,7 +293,7 @@ fn main() {
          \"batch_size\":{},\"ubatch_size\":{},\"cpu_percent\":{},\
          \"generated_tokens\":{},\"ttft_ms\":{},\"ttnt_ms\":{ttnt_ms:.3},\
          \"total_ms\":{total_ms:.3},\"events\":{events},\"stopped_by_eos\":{},\
-         \"ids\":{ids:?},\"text\":{text:?}}}",
+         \"ids\":{ids:?},\"text\":{text:?},\"verification\":{}}}",
         file_bytes.len(),
         rss_before_load_kib.unwrap_or(0),
         rss_after_load_kib.unwrap_or(0),
@@ -286,5 +306,12 @@ fn main() {
         ids.len(),
         ttft_ms.map_or(0.0, |(_, elapsed)| elapsed),
         stopped_by_eos,
+        verification.as_ref().map_or_else(
+            || "null".to_owned(),
+            |(matches, cpu_ids)| format!("{{\"matches\":{matches},\"cpu_ids\":{cpu_ids:?}}}"),
+        ),
     );
+    if verification.is_some_and(|(matches, _)| !matches) {
+        std::process::exit(4);
+    }
 }
