@@ -24,11 +24,13 @@
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
     Qwen35LayerRoots, mistral_cached_forward_program_with_experts_and_layer_taps,
+    qwen2_cached_forward_program_with_experts_and_layer_taps,
 };
 
 use crate::architecture::{Architecture, BoundProgram};
 use crate::bind::{
     architecture_from_metadata, bind_all_weights, checkpoint_has_qk_norm, checkpoint_qkv_biases,
+    metadata_str,
 };
 use crate::error::InteropError;
 use crate::task::{ModelTask, classify_task};
@@ -57,6 +59,7 @@ impl Architecture for DenseArch {
         // do not silently select a representative value for this uniform
         // program.
         architecture.uniform_kv_heads()?;
+        let architecture_name = metadata_str(parsed, "general.architecture")?;
         // `&[]`: this entry point takes no `ServingConfig`, so there is no
         // `weight_precision` rule set to thread here yet --
         // `crate::bind::bind_all_weights`'s own doc names this as the
@@ -76,7 +79,25 @@ impl Architecture for DenseArch {
         // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
         // own doc on that flag and `proxima-tensor/docs/discipline.md`
         // ROW 418/421 for the measured cost of computing every row instead.
-        let (program, roots, cache_roots, layer_residuals, moe_sites) =
+        let (program, roots, cache_roots, layer_residuals, moe_sites) = if architecture_name
+            == "qwen2"
+        {
+            qwen2_cached_forward_program_with_experts_and_layer_taps(
+                architecture.vocab,
+                architecture.embedding,
+                architecture.feed_forward,
+                architecture.query_heads,
+                architecture.kv_heads,
+                architecture.head_dim,
+                architecture.block_count,
+                architecture.expert_count,
+                architecture.expert_used_count,
+                checkpoint_qkv_biases(parsed, &architecture)?,
+                false,
+                false,
+                last_row_only,
+            )?
+        } else {
             mistral_cached_forward_program_with_experts_and_layer_taps(
                 architecture.vocab,
                 architecture.embedding,
@@ -92,7 +113,8 @@ impl Architecture for DenseArch {
                 false,
                 false,
                 last_row_only,
-            )?;
+            )?
+        };
         Ok(BoundProgram {
             weights,
             architecture,

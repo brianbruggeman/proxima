@@ -3149,6 +3149,7 @@ pub fn append_mistral_cached_layer(
     v_bias: Option<NodeId>,
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
+    rope_pairing: RopePairing,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
     let kv_heads = query_heads / group;
@@ -3339,42 +3340,22 @@ pub fn append_mistral_cached_layer(
     };
     let v_new = v_new?;
 
-    // Two incompatible RoPE pairings live behind `qk_norm.is_some()`, not a
-    // separate flag: llama.cpp's own GGUF converter permutes a "normal"
-    // (interleaved, `(2*i, 2*i+1)`) architecture's on-disk Q/K rows into
-    // that pairing at conversion time (Mistral/LLaMA), but never touches a
-    // NEOX-style architecture's rows (Qwen -- `LLM_ARCH_QWEN3`'s own
-    // `rope_type = LLAMA_ROPE_TYPE_NEOX`), which stay in HF's native
-    // split-half layout (`x[..half]`/`x[half..]`) on disk. Every checkpoint
-    // this crate has bound with `attn_q_norm.weight` present is exactly the
-    // NEOX family, so the same presence check that gates QK-norm also
-    // selects the matching RoPE pairing -- see
-    // [`append_qwen35_dense_attention_layer`]'s own split-half section,
-    // which this mirrors at `pass_dim = 0` (Qwen3's rotary width equals its
-    // full head width, so there is no untouched remainder).
+    // The pairing is an architecture property, not a proxy for whether the
+    // checkpoint carries QK-norm weights: Qwen2 uses NEOX split-half RoPE
+    // without QK-norm, while ordinary LLaMA/Mistral checkpoints use the
+    // converter's interleaved layout.
     // `q`/`k_new` are real, fully materialized `[s,h,d]`/`[s,u,d]` nodes
     // under BOTH `QkvSource` variants (the `Multiply`-by-shape-constant
     // extract above already re-materializes them under `Fused`), so every
     // op below reads them exactly as the split path always has -- zero
     // further changes needed downstream of this point.
-    let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match qk_norm {
-        Some(_) => {
-            let pairs = head_dim / 2;
+    let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match rope_pairing {
+        RopePairing::SplitHalf { .. } => {
             let (rotated_q_first, rotated_q_second) = fused_rope_pair(
-                program,
-                q,
-                'h',
-                cos_new,
-                sin_new,
-                RopePairing::SplitHalf { pairs },
+                program, q, 'h', cos_new, sin_new, rope_pairing,
             )?;
             let (rotated_k_first, rotated_k_second) = fused_rope_pair(
-                program,
-                k_new,
-                'u',
-                cos_new,
-                sin_new,
-                RopePairing::SplitHalf { pairs },
+                program, k_new, 'u', cos_new, sin_new, rope_pairing,
             )?;
 
             (
@@ -3384,16 +3365,11 @@ pub fn append_mistral_cached_layer(
                 rotated_k_second,
             )
         }
-        None => {
+        RopePairing::Interleaved => {
             let (rotated_q_even, rotated_q_odd) =
-                fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::Interleaved)?;
+                fused_rope_pair(program, q, 'h', cos_new, sin_new, rope_pairing)?;
             let (rotated_k_new_even, rotated_k_new_odd) = fused_rope_pair(
-                program,
-                k_new,
-                'u',
-                cos_new,
-                sin_new,
-                RopePairing::Interleaved,
+                program, k_new, 'u', cos_new, sin_new, rope_pairing,
             )?;
 
             (
@@ -9565,6 +9541,90 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
     fused_qkv_reduce: bool,
     last_row_only: bool,
 ) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
+    let rope_pairing = if qk_norm {
+        RopePairing::SplitHalf {
+            pairs: head_dim / 2,
+        }
+    } else {
+        RopePairing::Interleaved
+    };
+    mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
+        vocab,
+        embedding,
+        feed_forward,
+        query_heads,
+        kv_heads,
+        head_dim,
+        block_count,
+        expert_count,
+        expert_used_count,
+        qk_norm,
+        qkv_biases,
+        paired_gate_up_reduce,
+        fused_qkv_reduce,
+        last_row_only,
+        rope_pairing,
+    )
+}
+
+/// Qwen2's dense/MoE graph variant. Qwen2 uses split-half (NEOX) RoPE even
+/// though it has no QK-norm weights, so its pairing must be selected from the
+/// architecture name rather than inferred from the presence of norm tensors.
+#[allow(clippy::too_many_arguments)]
+pub fn qwen2_cached_forward_program_with_experts_and_layer_taps(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    block_count: u32,
+    expert_count: u32,
+    expert_used_count: u32,
+    qkv_biases: bool,
+    paired_gate_up_reduce: bool,
+    fused_qkv_reduce: bool,
+    last_row_only: bool,
+) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
+    mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
+        vocab,
+        embedding,
+        feed_forward,
+        query_heads,
+        kv_heads,
+        head_dim,
+        block_count,
+        expert_count,
+        expert_used_count,
+        false,
+        qkv_biases,
+        paired_gate_up_reduce,
+        fused_qkv_reduce,
+        last_row_only,
+        RopePairing::SplitHalf {
+            pairs: head_dim / 2,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    block_count: u32,
+    expert_count: u32,
+    expert_used_count: u32,
+    qk_norm: bool,
+    qkv_biases: bool,
+    paired_gate_up_reduce: bool,
+    fused_qkv_reduce: bool,
+    last_row_only: bool,
+    rope_pairing: RopePairing,
+) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
 
@@ -9872,6 +9932,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
                 v_bias,
                 paired_gate_up_reduce,
                 fused_qkv_reduce,
+                rope_pairing,
             )?
         } else {
             let gate_inp = input_leaf(
@@ -11493,6 +11554,26 @@ mod tests {
             "a Qwen3-MoE-shaped forward program (expert_count > 0) must grow when qk_norm \
              flips on -- an unchanged length means the MoE layer builder is still dropping \
              attn_q_norm/attn_k_norm on the floor"
+        );
+    }
+
+    /// Qwen2 is NEOX split-half RoPE even without QK-norm tensors. Keep this
+    /// architecture choice explicit so a future generic-path refactor cannot
+    /// regress to using QK-norm presence as a pairing proxy.
+    #[test]
+    fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
+        let (qwen2_program, _, _, _, _) = qwen2_cached_forward_program_with_experts_and_layer_taps(
+            32_000, 256, 128, 4, 2, 64, 1, 0, 0, false, false, false, false,
+        )
+        .expect("qwen2 program lowers");
+        let (generic_program, _, _, _, _) =
+            mistral_cached_forward_program_with_experts_and_layer_taps(
+                32_000, 256, 128, 4, 2, 64, 1, 0, 0, false, false, false, false, false,
+            )
+            .expect("generic program lowers");
+        assert!(
+            qwen2_program != generic_program,
+            "Qwen2's explicit split-half graph must differ from the generic interleaved graph"
         );
     }
 
