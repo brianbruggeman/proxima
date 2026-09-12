@@ -73,6 +73,7 @@ pub struct CudaDriver {
 #[derive(Debug, Default)]
 pub struct CudaF32Arena {
     buffers: BTreeMap<NodeId, CudaGraphBuffer>,
+    uniforms: BTreeMap<NodeId, CudaSlice<u8>>,
     allocations: u64,
 }
 
@@ -314,6 +315,28 @@ impl CudaDriver {
         Ok(())
     }
 
+    /// Uploads one node's launch metadata while retaining its device
+    /// allocation across evaluations.  Uniforms are small, but allocating a
+    /// fresh device buffer for every node on every token turns the persistent
+    /// graph into an allocation-heavy path and prevents safe graph capture.
+    fn upload_uniform(
+        &self,
+        arena: &mut CudaF32Arena,
+        node: NodeId,
+        values: &[u8],
+    ) -> Result<(), CudaDriverError> {
+        if let Some(buffer) = arena.uniforms.get_mut(&node) {
+            if buffer.len() == values.len() {
+                self.stream.memcpy_htod(values, buffer)?;
+                return Ok(());
+            }
+        }
+        let buffer = self.stream.clone_htod(values)?;
+        arena.uniforms.insert(node, buffer);
+        arena.allocations += 1;
+        Ok(())
+    }
+
     /// Launches a minimal device computation through the complete runtime
     /// path and returns its result. This is a smoke oracle for the future
     /// graph argument packer, not a model inference shortcut.
@@ -531,7 +554,11 @@ impl CudaDriver {
             return Err(CudaDriverError::BindingContract);
         }
         let function = self.function_for(kernel)?;
-        let device_uniforms = self.stream.clone_htod(uniforms)?;
+        self.upload_uniform(arena, output_node, uniforms)?;
+        let device_uniforms = arena
+            .uniforms
+            .get(&output_node)
+            .ok_or(CudaDriverError::BindingContract)?;
         let mut device_output = match arena.buffers.remove(&output_node) {
             Some(CudaGraphBuffer::F32(buffer)) => buffer,
             Some(CudaGraphBuffer::Bytes(_)) => return Err(CudaDriverError::BindingContract),
@@ -594,7 +621,7 @@ impl CudaDriver {
         args.arg(&mut device_output);
         for binding in &kernel.bindings[output_index + 1..] {
             match binding {
-                Binding::Uniforms => args.arg(&device_uniforms),
+                Binding::Uniforms => args.arg(device_uniforms),
                 Binding::Fault => args.arg(
                     fault_buffer
                         .as_ref()
