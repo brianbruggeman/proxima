@@ -596,7 +596,7 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> u64 {
 /// reordering their combination across lanes is wrong, not merely imprecise.
 fn reduce_is_cooperative(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    _quantized: &[Option<PackedCodec>],
     numeric_policy: NumericPolicy,
 ) -> bool {
     match &resolved.kind {
@@ -605,12 +605,12 @@ fn reduce_is_cooperative(
             reduce_op,
             ..
         } => {
-            // Quantized dot products must retain the reference accumulation
-            // order until a codec-specific error bound proves warp folding
-            // equivalent. The packed decode itself is not associative in
-            // floating point, so a reordered warp sum is a correctness risk.
+            // Bit-exact mode retains the reference accumulation order for
+            // packed dots. Relaxed mode explicitly permits the warp fold;
+            // the packed decode is still deterministic, but its reordered
+            // f32 accumulation is a numeric-policy decision rather than an
+            // unconditional backend rewrite.
             numeric_policy.reassociation
-                && quantized.iter().all(Option::is_none)
                 && gather_count(resolved) == 0
                 && is_cooperative_reduce_op(*reduce_op)
         }
