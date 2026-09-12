@@ -7,9 +7,10 @@ and by the same method: talk to the device's queues directly from userspace,
 and never make a syscall on the hot path.
 
 **A note on the name.** You will see this rung called "spdk" in older notes.
-SPDK is Intel's C storage-bypass framework, and proxima does not use it — there
-is no SPDK dependency and no C linked at all. What proxima ships is its own
-pure-Rust NVMe queue-pair engine, so `nvme` is what this chapter is called.
+SPDK is Intel's C storage-bypass framework. Proxima does not link it as a
+dependency; it ships its own pure-Rust NVMe queue-pair engine and, behind the
+`spdk` feature, a callback ABI for an embedding SPDK qpair. `nvme` remains the
+name of the pure-Rust path because the external SPDK reactor is optional.
 
 ## the shape
 

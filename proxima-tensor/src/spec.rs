@@ -3144,6 +3144,9 @@ pub fn append_mistral_cached_layer(
     k_odd_cache: NodeId,
     v_cache: NodeId,
     qk_norm: Option<(NodeId, NodeId, NodeId)>,
+    q_bias: Option<NodeId>,
+    k_bias: Option<NodeId>,
+    v_bias: Option<NodeId>,
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
@@ -3192,8 +3195,24 @@ pub fn append_mistral_cached_layer(
             ],
         )?;
         (
-            q_raw,
-            k_new_raw,
+            q_bias
+                .map_or(Ok(q_raw), |bias| {
+                    elementwise(
+                        program,
+                        DType::Float32,
+                        ScalarOp::Add,
+                        &[(q_raw, "shd->shd"), (bias, "hd->shd")],
+                    )
+                })?,
+            k_bias
+                .map_or(Ok(k_new_raw), |bias| {
+                    elementwise(
+                        program,
+                        DType::Float32,
+                        ScalarOp::Add,
+                        &[(k_new_raw, "sud->sud"), (bias, "ud->sud")],
+                    )
+                })?,
             QkvSource::Fused {
                 node: qkv_reduced,
                 v_offset: (query_heads + kv_heads) * head_dim,
@@ -3232,7 +3251,27 @@ pub fn append_mistral_cached_layer(
             "sudi->sudi",
             "sud->sudi",
         )?;
-        (q_raw, k_new_raw, QkvSource::Split)
+        (
+            q_bias
+                .map_or(Ok(q_raw), |bias| {
+                    elementwise(
+                        program,
+                        DType::Float32,
+                        ScalarOp::Add,
+                        &[(q_raw, "shd->shd"), (bias, "hd->shd")],
+                    )
+                })?,
+            k_bias
+                .map_or(Ok(k_new_raw), |bias| {
+                    elementwise(
+                        program,
+                        DType::Float32,
+                        ScalarOp::Add,
+                        &[(k_new_raw, "sud->sud"), (bias, "ud->sud")],
+                    )
+                })?,
+            QkvSource::Split,
+        )
     };
 
     let (q, k_new) = match qk_norm {
@@ -3250,18 +3289,28 @@ pub fn append_mistral_cached_layer(
             node,
             v_offset,
             head_dim,
-        } => elementwise(
-            program,
-            DType::Float32,
-            ScalarOp::Multiply,
-            &[
-                (
-                    node,
-                    alloc::format!("s,{head_dim}*u+d+{v_offset}->sud").as_str(),
-                ),
-                (kv_head_shape_ones, "ud->sud"),
-            ],
-        )?,
+        } => {
+            let v_raw = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[
+                    (
+                        node,
+                        alloc::format!("s,{head_dim}*u+d+{v_offset}->sud").as_str(),
+                    ),
+                    (kv_head_shape_ones, "ud->sud"),
+                ],
+            )?;
+            v_bias.map_or(Ok(v_raw), |bias| {
+                elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(v_raw, "sud->sud"), (bias, "ud->sud")],
+                )
+            })
+        }
         QkvSource::Split => {
             let v_product = elementwise(
                 program,
@@ -3269,7 +3318,7 @@ pub fn append_mistral_cached_layer(
                 ScalarOp::Multiply,
                 &[(normed, "si->sudi"), (wv, "iud->sudi")],
             )?;
-            reduce(
+            let v_raw = reduce(
                 program,
                 DType::Float32,
                 ScalarOp::Add,
@@ -3277,9 +3326,18 @@ pub fn append_mistral_cached_layer(
                 v_product,
                 "sudi->sudi",
                 "sud->sudi",
-            )?
+            )?;
+            v_bias.map_or(Ok(v_raw), |bias| {
+                elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(v_raw, "sud->sud"), (bias, "ud->sud")],
+                )
+            })
         }
     };
+    let v_new = v_new?;
 
     // Two incompatible RoPE pairings live behind `qk_norm.is_some()`, not a
     // separate flag: llama.cpp's own GGUF converter permutes a "normal"
@@ -3418,7 +3476,6 @@ pub fn append_mistral_cached_layer(
         ScalarOp::Multiply,
         &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
-
     // new block: query `s` against this call's own freshly rotated key `w`
     // (symbol 0's extent, same range as `s`) -- causal within the block,
     // reusing `is_future` unchanged since it is already `[s, w]`-shaped.
@@ -5443,6 +5500,49 @@ pub fn append_mistral_single_range_cached_layer(
     qk_norm: Option<(NodeId, NodeId, NodeId)>,
     gate_before_up: bool,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
+    append_mistral_single_range_cached_layer_with_biases(
+        program, x, inv_dim, eps, ones, inv_sqrt_head_dim, cos_new, sin_new,
+        group_ones, is_future, group, head_dim, attn_norm_weight,
+        ffn_norm_weight, wq, wk, wv, wo, w_gate, w_up, w_down, k_even_cache,
+        k_odd_cache, v_cache, qk_norm, None, gate_before_up,
+    )
+}
+
+/// Bias-aware single-range dense layer builder. The optional tuple contains
+/// Q/K/V projection biases, in the same shapes and order as the two-range
+/// builder. Keeping the compatibility wrapper above preserves every existing
+/// bias-disabled fixture while allowing checkpoint-driven callers to express
+/// the complete projection semantics.
+#[allow(clippy::too_many_arguments)]
+pub fn append_mistral_single_range_cached_layer_with_biases(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    ones: NodeId,
+    inv_sqrt_head_dim: NodeId,
+    cos_new: NodeId,
+    sin_new: NodeId,
+    group_ones: NodeId,
+    is_future: NodeId,
+    group: u32,
+    head_dim: u32,
+    attn_norm_weight: NodeId,
+    ffn_norm_weight: NodeId,
+    wq: NodeId,
+    wk: NodeId,
+    wv: NodeId,
+    wo: NodeId,
+    w_gate: NodeId,
+    w_up: NodeId,
+    w_down: NodeId,
+    k_even_cache: NodeId,
+    k_odd_cache: NodeId,
+    v_cache: NodeId,
+    qk_norm: Option<(NodeId, NodeId, NodeId)>,
+    qkv_biases: Option<(NodeId, NodeId, NodeId)>,
+    gate_before_up: bool,
+) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     // Same architecture inputs as `append_mistral_cached_layer`'s own
     // `qk_norm: Option<(NodeId, NodeId, NodeId)>` (q-norm weight, k-norm
     // weight, `inv_head_dim`) -- ROW 373's typed rejection here was a class
@@ -5500,6 +5600,18 @@ pub fn append_mistral_single_range_cached_layer(
         "sudi->sudi",
         "sud->sudi",
     )?;
+
+    let (q_raw, k_new_raw, v_new) = match qkv_biases {
+        Some((q_bias, k_bias, v_bias)) => (
+            elementwise(program, DType::Float32, ScalarOp::Add,
+                &[(q_raw, "shd->shd"), (q_bias, "hd->shd")])?,
+            elementwise(program, DType::Float32, ScalarOp::Add,
+                &[(k_new_raw, "sud->sud"), (k_bias, "ud->sud")])?,
+            elementwise(program, DType::Float32, ScalarOp::Add,
+                &[(v_new, "sud->sud"), (v_bias, "ud->sud")])?,
+        ),
+        None => (q_raw, k_new_raw, v_new),
+    };
 
     let (q, k_new) = match qk_norm {
         Some((q_norm_weight, k_norm_weight, inv_head_dim)) => {
@@ -5899,6 +6011,29 @@ pub fn mistral_single_range_cached_forward_program(
     duplicate_head: DuplicateHeadPosition,
     last_row_only: bool,
 ) -> Result<SingleRangeForwardProgram, TensorError> {
+    mistral_single_range_cached_forward_program_with_biases(
+        vocab, embedding, feed_forward, query_heads, kv_heads, head_dim,
+        block_count, qk_norm, false, duplicate_head, last_row_only,
+    )
+}
+
+/// Bias-aware counterpart of [`mistral_single_range_cached_forward_program`].
+/// `qkv_biases` is a graph capability selected by checkpoint metadata; when
+/// false, the legacy graph is retained exactly.
+#[allow(clippy::too_many_arguments)]
+pub fn mistral_single_range_cached_forward_program_with_biases(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    block_count: u32,
+    qk_norm: bool,
+    qkv_biases: bool,
+    duplicate_head: DuplicateHeadPosition,
+    last_row_only: bool,
+) -> Result<SingleRangeForwardProgram, TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
 
@@ -6092,8 +6227,29 @@ pub fn mistral_single_range_cached_forward_program(
             );
             (q_norm_weight, k_norm_weight, inv_head_dim)
         });
+        let qkv_bias_weights = qkv_biases.then(|| {
+            let q_bias = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(query_heads), Extent::Static(head_dim)],
+                &alloc::format!("blk.{layer}.attn_q.bias"),
+            );
+            let k_bias = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
+                &alloc::format!("blk.{layer}.attn_k.bias"),
+            );
+            let v_bias = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
+                &alloc::format!("blk.{layer}.attn_v.bias"),
+            );
+            (q_bias, k_bias, v_bias)
+        });
 
-        let (x_next, layer_roots) = append_mistral_single_range_cached_layer(
+        let (x_next, layer_roots) = append_mistral_single_range_cached_layer_with_biases(
             &mut program,
             x,
             inv_dim,
@@ -6119,6 +6275,7 @@ pub fn mistral_single_range_cached_forward_program(
             k_odd_cache,
             v_cache,
             qk_norm_weights,
+            qkv_bias_weights,
             true,
         )?;
         x = x_next;
@@ -6423,7 +6580,7 @@ pub fn append_mistral_cached_moe_layer(
         ScalarOp::Multiply,
         &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
-
+    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
     let score_new_even_product = elementwise(
         program,
         DType::Float32,
@@ -6475,7 +6632,6 @@ pub fn append_mistral_cached_moe_layer(
         ScalarOp::Multiply,
         &[(score_new, "swug->swug"), (inv_sqrt_head_dim, "->swug")],
     )?;
-    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
     let score_new_masked = elementwise(
         program,
         DType::Float32,
@@ -9262,6 +9418,7 @@ pub fn mistral_cached_forward_program(
         false,
         false,
         false,
+        false,
     )
     .map(|(program, roots, cache_roots, _moe_sites)| (program, roots.logits, cache_roots))
 }
@@ -9296,6 +9453,7 @@ pub fn qwen3_cached_forward_program(
         0,
         0,
         true,
+        false,
         false,
         false,
     )
@@ -9343,6 +9501,7 @@ pub fn mistral_cached_forward_program_with_experts(
     expert_count: u32,
     expert_used_count: u32,
     qk_norm: bool,
+    qkv_biases: bool,
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
 ) -> Result<(Vec<Op>, ForwardRoots, Vec<CachedLayerRoots>, MoeSites), TensorError> {
@@ -9358,6 +9517,7 @@ pub fn mistral_cached_forward_program_with_experts(
             expert_count,
             expert_used_count,
             qk_norm,
+            qkv_biases,
             paired_gate_up_reduce,
             fused_qkv_reduce,
             false,
@@ -9400,6 +9560,7 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
     expert_count: u32,
     expert_used_count: u32,
     qk_norm: bool,
+    qkv_biases: bool,
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
     last_row_only: bool,
@@ -9561,6 +9722,30 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
             );
             (wq, wk, wv)
         };
+        let q_bias = qkv_biases.then(|| {
+            input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(query_heads), Extent::Static(head_dim)],
+                &alloc::format!("blk.{layer}.attn_q.bias"),
+            )
+        });
+        let k_bias = qkv_biases.then(|| {
+            input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
+                &alloc::format!("blk.{layer}.attn_k.bias"),
+            )
+        });
+        let v_bias = qkv_biases.then(|| {
+            input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
+                &alloc::format!("blk.{layer}.attn_v.bias"),
+            )
+        });
         let wo = input_leaf(
             &mut program,
             DType::Float32,
@@ -9682,6 +9867,9 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
                 k_odd_cache,
                 v_cache,
                 qk_norm_weights,
+                q_bias,
+                k_bias,
+                v_bias,
                 paired_gate_up_reduce,
                 fused_qkv_reduce,
             )?
@@ -11291,11 +11479,11 @@ mod tests {
     #[test]
     fn mistral_cached_forward_program_with_experts_qk_norm_changes_the_moe_program() {
         let (qk_norm_off, _, _, _) = mistral_cached_forward_program_with_experts(
-            32_000, 256, 128, 4, 2, 64, 1, 4, 1, false, false, false,
+            32_000, 256, 128, 4, 2, 64, 1, 4, 1, false, false, false, false,
         )
         .expect("moe program without qk_norm lowers");
         let (qk_norm_on, _, _, _) = mistral_cached_forward_program_with_experts(
-            32_000, 256, 128, 4, 2, 64, 1, 4, 1, true, false, false,
+            32_000, 256, 128, 4, 2, 64, 1, 4, 1, true, false, false, false,
         )
         .expect("moe program with qk_norm lowers");
 
@@ -11319,12 +11507,12 @@ mod tests {
     fn layer_taps_variant_matches_the_plain_program_and_returns_one_tap_per_layer() {
         let (plain_program, plain_roots, plain_cache_roots, _plain_moe_sites) =
             mistral_cached_forward_program_with_experts(
-                32_000, 256, 128, 4, 2, 64, 3, 4, 1, true, false, false,
+                32_000, 256, 128, 4, 2, 64, 3, 4, 1, true, false, false, false,
             )
             .expect("plain moe program lowers");
         let (taps_program, taps_roots, taps_cache_roots, layer_residuals, _taps_moe_sites) =
             mistral_cached_forward_program_with_experts_and_layer_taps(
-                32_000, 256, 128, 4, 2, 64, 3, 4, 1, true, false, false, false,
+                32_000, 256, 128, 4, 2, 64, 3, 4, 1, true, false, false, false, false,
             )
             .expect("taps moe program lowers");
 
@@ -11361,7 +11549,7 @@ mod tests {
     fn forward_roots_hidden_is_an_operand_of_the_lm_head_product() {
         let (program, roots, _cache_roots, _moe_sites) =
             mistral_cached_forward_program_with_experts(
-                32_002, 4096, 14336, 32, 8, 128, 2, 0, 0, false, false, false,
+                32_002, 4096, 14336, 32, 8, 128, 2, 0, 0, false, false, false, false,
             )
             .expect("the dense cached forward pass lowers to a program");
 
@@ -17434,7 +17622,7 @@ value = 1.0
 
         let (paired_program, paired_roots_bundle, paired_roots, _paired_moe_sites) =
             mistral_cached_forward_program_with_experts(
-                32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, true, false,
+                32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, false, true, false,
             )
             .expect("the paired cached forward pass lowers to a program");
         let paired_logits = paired_roots_bundle.logits;
@@ -17580,7 +17768,7 @@ value = 1.0
 
         let (fused_program, fused_roots_bundle, fused_roots, _fused_moe_sites) =
             mistral_cached_forward_program_with_experts(
-                32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, false, true,
+                32_002, 4096, 14336, 32, 8, 128, 32, 0, 0, false, false, false, true,
             )
             .expect("the fused-qkv cached forward pass lowers to a program");
         let fused_logits = fused_roots_bundle.logits;

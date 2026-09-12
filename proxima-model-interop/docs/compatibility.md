@@ -28,6 +28,7 @@ Generated from `src/capability.rs`'s own tables by `examples/generate_compatibil
 
 | packed codec | cpu kernel | metal emitter | wgsl emitter | cuda emitter |
 | --- | --- | --- | --- | --- |
+| Q2_K | supported | supported | supported | supported |
 | Q3_K | supported | supported | unsupported | unsupported |
 | Q4_K | supported | supported | supported | supported |
 | Q5_K | supported | supported | supported | supported |

@@ -410,7 +410,6 @@ fn prepare<'block>(
         NumericPolicy::bit_exact(),
     )?;
     let retires = node_retirement(&resolved, &effective_outputs);
-
     Ok(Prepared {
         root,
         shapes,
@@ -4744,12 +4743,21 @@ fn evaluate_quantized_with_scratch_impl(
     // the SAME plan by its own `fire_position` value, so the main loop can
     // ask "does anything fire here" in O(1) per position instead of
     // scanning the whole plan every iteration.
-    let (epilogue_fuse_plan, layer_norm_cluster_plan, rewrite_fires) = run_rewrite_worklist(
+    let (mut epilogue_fuse_plan, mut layer_norm_cluster_plan, rewrite_fires) = run_rewrite_worklist(
         &resolved,
         program.len(),
         &effective_outputs,
         &quantized_weights,
     );
+    #[cfg(feature = "std")]
+    if std::env::var_os("PROXIMA_DISABLE_LAYER_NORM_CLUSTER").is_some() {
+        layer_norm_cluster_plan.clear();
+    }
+    #[cfg(feature = "std")]
+    if std::env::var_os("PROXIMA_DISABLE_REWRITE_ENGINE").is_some() {
+        epilogue_fuse_plan.clear();
+        layer_norm_cluster_plan.clear();
+    }
     record_rewrite_engine_fires(&rewrite_fires);
     let epilogue_fuse_skip: BTreeSet<NodeId> = epilogue_fuse_plan
         .values()
@@ -4950,6 +4958,40 @@ fn evaluate_quantized_with_scratch_impl(
             #[cfg(feature = "instrument")]
             let bookkeeping_started = instrument::read_ticks();
             buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
+            #[cfg(feature = "std")]
+            if std::env::var_os("PROXIMA_CPU_TRACE_COMPUTE").is_some()
+                && matches!(
+                    computed.node,
+                    NodeId(20)
+                        | NodeId(25)
+                        | NodeId(85)
+                        | NodeId(88)
+                        | NodeId(96)
+                        | NodeId(98)
+                        | NodeId(106)
+                        | NodeId(109)
+                )
+            {
+                let values = buffers[computed.node.0 as usize].as_deref().unwrap_or(&[]);
+                eprintln!(
+                    "cpu_trace_compute node={:?} position={} len={} checksum={} operands={:?}",
+                    computed.node,
+                    position,
+                    values.len(),
+                    values.iter().copied().sum::<f32>(),
+                    computed
+                        .operands()
+                        .iter()
+                        .map(|(node, _, _)| {
+                            let buffer = buffers[node.0 as usize].as_deref();
+                            (
+                                *node,
+                                buffer.map(|v| (v.len(), v.iter().copied().sum::<f32>())),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                );
+            }
             // `computed.node` is written exactly once (this position, in
             // program order), so this is always a `None` -> `Some` transition --
             // `live_now += 1` is the O(1) replacement for rescanning `buffers`.
@@ -5087,6 +5129,31 @@ fn evaluate_quantized_with_scratch_impl(
             }
         }
         position += 1;
+    }
+    #[cfg(feature = "std")]
+    if std::env::var_os("PROXIMA_CPU_TRACE_OUTPUTS").is_some() {
+        eprintln!(
+            "cpu_trace_outputs output_count={} outputs={effective_outputs:?}",
+            effective_outputs.len()
+        );
+        let mut traced = effective_outputs.clone();
+        for node in [NodeId(26), NodeId(88), NodeId(106), NodeId(109)] {
+            if !traced.contains(&node) {
+                traced.push(node);
+            }
+        }
+        for output in &traced {
+            let resolved_position = resolved.iter().position(|bound| bound.node == *output);
+            let retirement_position = retires.iter().position(|nodes| nodes.contains(output));
+            let buffer = buffers[output.0 as usize].as_deref();
+            let checksum = buffer.map(|values| values.iter().copied().sum::<f32>());
+            let kind = resolved_position.map(|position| format!("{:?}", resolved[position].kind));
+            eprintln!(
+                "cpu_trace_output node={output:?} output_count={} resolved_position={resolved_position:?} retirement_position={retirement_position:?} buffer_len={} checksum={checksum:?} kind={kind:?}",
+                effective_outputs.len(),
+                buffer.map_or(0, <[f32]>::len)
+            );
+        }
     }
     #[cfg(feature = "instrument")]
     let finish_started = instrument::read_ticks();

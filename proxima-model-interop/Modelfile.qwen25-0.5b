@@ -1,0 +1,5 @@
+FROM /home/bix/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+
+TEMPLATE "{{ .Prompt }}"
+PARAMETER temperature 0
+PARAMETER num_predict 4

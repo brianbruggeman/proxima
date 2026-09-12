@@ -138,6 +138,14 @@ pub enum GgmlType {
     Bf16,
     Tq10,
     Tq20,
+    /// Microscaling FP4: one E8M0 scale shared by 32 E2M1 values.
+    Mxfp4,
+    /// NVIDIA FP4: four E4M3 sub-block scales over 64 E2M1 values.
+    Nvfp4,
+    /// Legacy scalar 1-bit and 2-bit formats with layouts distinct from the
+    /// K-quant family.
+    Q1_0,
+    Q2_0,
 }
 
 /// Per-type block shape: `block_elements` values are packed into
@@ -154,8 +162,111 @@ pub struct BlockLayout {
 }
 
 impl GgmlType {
-    /// Decode the raw `ggml_type` wire tag (`enum ggml_type`, `ggml.h:352-391`).
-    /// `None` for a value outside `[0, GGML_TYPE_COUNT)` (39, `ggml.h:391`)
+    /// Every non-retired type in the current ggml wire enum. Keeping this
+    /// inventory beside the wire decoder makes format coverage auditable and
+    /// gives transforms a single source of truth instead of scattered
+    /// `match` lists.
+    pub const CURRENT: &'static [Self] = &[
+        Self::F32,
+        Self::F16,
+        Self::Q4_0,
+        Self::Q4_1,
+        Self::Q5_0,
+        Self::Q5_1,
+        Self::Q8_0,
+        Self::Q8_1,
+        Self::Q2_K,
+        Self::Q3_K,
+        Self::Q4_K,
+        Self::Q5_K,
+        Self::Q6_K,
+        Self::Q8_K,
+        Self::Iq2Xxs,
+        Self::Iq2Xs,
+        Self::Iq3Xxs,
+        Self::Iq1S,
+        Self::Iq4Nl,
+        Self::Iq3S,
+        Self::Iq2S,
+        Self::Iq4Xs,
+        Self::I8,
+        Self::I16,
+        Self::I32,
+        Self::I64,
+        Self::F64,
+        Self::Iq1M,
+        Self::Bf16,
+        Self::Tq10,
+        Self::Tq20,
+        Self::Mxfp4,
+        Self::Nvfp4,
+        Self::Q1_0,
+        Self::Q2_0,
+    ];
+
+    /// Whether this type uses a packed block representation rather than one
+    /// scalar per element. This is deliberately format-level, not backend
+    /// capability-level: a registered type may still need a decoder/kernel.
+    #[must_use]
+    pub const fn is_quantized(self) -> bool {
+        !matches!(
+            self,
+            Self::F32
+                | Self::F16
+                | Self::I8
+                | Self::I16
+                | Self::I32
+                | Self::I64
+                | Self::F64
+                | Self::Bf16
+        )
+    }
+
+    /// Stable lower-case spelling used by GGUF tools and capability reports.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F16 => "f16",
+            Self::Q4_0 => "q4_0",
+            Self::Q4_1 => "q4_1",
+            Self::Q5_0 => "q5_0",
+            Self::Q5_1 => "q5_1",
+            Self::Q8_0 => "q8_0",
+            Self::Q8_1 => "q8_1",
+            Self::Q2_K => "q2_k",
+            Self::Q3_K => "q3_k",
+            Self::Q4_K => "q4_k",
+            Self::Q5_K => "q5_k",
+            Self::Q6_K => "q6_k",
+            Self::Q8_K => "q8_k",
+            Self::Iq2Xxs => "iq2_xxs",
+            Self::Iq2Xs => "iq2_xs",
+            Self::Iq3Xxs => "iq3_xxs",
+            Self::Iq1S => "iq1_s",
+            Self::Iq4Nl => "iq4_nl",
+            Self::Iq3S => "iq3_s",
+            Self::Iq2S => "iq2_s",
+            Self::Iq4Xs => "iq4_xs",
+            Self::I8 => "i8",
+            Self::I16 => "i16",
+            Self::I32 => "i32",
+            Self::I64 => "i64",
+            Self::F64 => "f64",
+            Self::Iq1M => "iq1_m",
+            Self::Bf16 => "bf16",
+            Self::Tq10 => "tq1_0",
+            Self::Tq20 => "tq2_0",
+            Self::Mxfp4 => "mxfp4",
+            Self::Nvfp4 => "nvfp4",
+            Self::Q1_0 => "q1_0",
+            Self::Q2_0 => "q2_0",
+        }
+    }
+
+    /// Decode the raw `ggml_type` wire tag (`enum ggml_type`, `ggml.h`).
+    /// `None` for a value outside the current `GGML_TYPE_COUNT` (43) or one
+    /// of the retired gap values.
     /// or one of the retired gap values (4, 5, 31, 32, 33, 36, 37, 38).
     #[must_use]
     pub fn from_wire(raw: i32) -> Option<Self> {
@@ -191,6 +302,10 @@ impl GgmlType {
             30 => Self::Bf16,
             34 => Self::Tq10,
             35 => Self::Tq20,
+            39 => Self::Mxfp4,
+            40 => Self::Nvfp4,
+            41 => Self::Q1_0,
+            42 => Self::Q2_0,
             _ => return None,
         };
         Some(value)
@@ -234,6 +349,10 @@ impl GgmlType {
             Self::Bf16 => 30,
             Self::Tq10 => 34,
             Self::Tq20 => 35,
+            Self::Mxfp4 => 39,
+            Self::Nvfp4 => 40,
+            Self::Q1_0 => 41,
+            Self::Q2_0 => 42,
         }
     }
 
@@ -278,6 +397,10 @@ impl GgmlType {
             Self::Iq1M => layout(256, 56),
             Self::Tq10 => layout(256, 54),
             Self::Tq20 => layout(256, 66),
+            Self::Mxfp4 => layout(32, 17),
+            Self::Nvfp4 => layout(64, 36),
+            Self::Q1_0 => layout(128, 18),
+            Self::Q2_0 => layout(64, 18),
         }
     }
 }
@@ -296,7 +419,7 @@ mod tests {
 
     #[test]
     fn ggml_type_rejects_retired_gap_values() {
-        for raw in [4, 5, 31, 32, 33, 36, 37, 38, 39, -1] {
+        for raw in [4, 5, 31, 32, 33, 36, 37, 38, 43, -1] {
             assert_eq!(GgmlType::from_wire(raw), None, "raw={raw}");
         }
     }
@@ -305,11 +428,20 @@ mod tests {
     fn ggml_type_to_wire_round_trips_through_from_wire() {
         for raw in [
             0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-            26, 27, 28, 29, 30, 34, 35,
+            26, 27, 28, 29, 30, 34, 35, 39, 40, 41, 42,
         ] {
             let decoded =
                 GgmlType::from_wire(raw).unwrap_or_else(|| panic!("raw={raw} should decode"));
             assert_eq!(decoded.to_wire(), raw, "raw={raw}");
+        }
+    }
+
+    #[test]
+    fn current_inventory_round_trips_without_gaps() {
+        assert_eq!(GgmlType::CURRENT.len(), 35);
+        for &kind in GgmlType::CURRENT {
+            assert_eq!(GgmlType::from_wire(kind.to_wire()), Some(kind));
+            assert!(!kind.name().is_empty());
         }
     }
 

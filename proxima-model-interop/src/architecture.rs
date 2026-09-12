@@ -137,6 +137,10 @@ pub struct BoundProgram<'file> {
     /// bare `logits` root with no named hidden-state counterpart yet)
     /// leaves it `None`. See [`crate::generate::LoadedModel::hidden_root`].
     pub hidden_root: Option<NodeId>,
+    /// One post-layer residual root per dense layer, when the forward builder
+    /// exposes them. This is a correctness seam for comparing CPU/CUDA/wgpu
+    /// at the first divergent layer without guessing NodeId arithmetic.
+    pub residual_roots: Vec<NodeId>,
     pub layer_roots: Vec<Qwen35LayerRoots>,
     /// One graph-level diagnostic boundary per qwen35moe layer, in layer
     /// order. Other architectures leave this empty.
@@ -486,6 +490,7 @@ mod tests {
                 program: Vec::new(),
                 logits_root: NodeId(0),
                 hidden_root: None,
+                residual_roots: Vec::new(),
                 layer_roots: Vec::new(),
                 qwen35moe_layer_diagnostics: Vec::new(),
                 router_roots: Vec::new(),

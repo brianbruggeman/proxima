@@ -3269,6 +3269,29 @@ pub fn bind(
     bind_with_fusion(program, shapes, outputs, true, numeric_policy)
 }
 
+/// Binds the graph with cached-attention/chain fusion but leaves reduction
+/// epilogues as separate operations for backends whose lowering does not yet
+/// support broadcast epilogue operands. This is a capability boundary, not a
+/// numerical relaxation: the returned graph is the unfused correct form.
+pub fn bind_without_reduce_epilogue_fusion(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    fuse_cached_attention: bool,
+    numeric_policy: NumericPolicy,
+) -> Result<Vec<BoundOp>, TensorError> {
+    admit(numeric_policy, NumericRewrite::IdentityElimination)?;
+    admit(numeric_policy, NumericRewrite::ChainFusion)?;
+    let built = bind_cached_attention_fusion(
+        program,
+        shapes,
+        outputs,
+        fuse_cached_attention,
+        numeric_policy,
+    )?;
+    Ok(built)
+}
+
 /// Same as [`bind`], but `fuse_cached_attention` states whether the caller's
 /// backend can render [`BoundOpKind::CachedAttention`] at all. `cpu.rs` and
 /// `omega/src/metal.rs` render the fused kind, so they (via [`bind`]) pass
@@ -3310,6 +3333,9 @@ pub fn bind_with_fusion(
     // `is_associative` has no such caller today).
     admit(numeric_policy, NumericRewrite::IdentityElimination)?;
     admit(numeric_policy, NumericRewrite::ChainFusion)?;
+    #[cfg(feature = "std")]
+    let fuse_cached_attention = fuse_cached_attention
+        && std::env::var_os("PROXIMA_DISABLE_CACHED_ATTENTION_FUSION").is_none();
     let built = bind_cached_attention_fusion(
         program,
         shapes,
@@ -3320,6 +3346,10 @@ pub fn bind_with_fusion(
     #[cfg(feature = "reduce-epilogue-fusion")]
     {
         admit(numeric_policy, NumericRewrite::ReduceEpilogueFusion)?;
+        #[cfg(feature = "std")]
+        if std::env::var_os("PROXIMA_DISABLE_REDUCE_EPILOGUE_FUSION").is_some() {
+            return Ok(built);
+        }
         reduce_epilogue_fusion(built, outputs, numeric_policy)
     }
     #[cfg(not(feature = "reduce-epilogue-fusion"))]

@@ -260,6 +260,7 @@ impl ArchitectureTrait for Qwen35MoeArch {
             program,
             logits_root: roots.logits,
             hidden_root: Some(roots.hidden),
+            residual_roots: Vec::new(),
             layer_roots,
             qwen35moe_layer_diagnostics: diagnostics.clone(),
             router_roots: diagnostics

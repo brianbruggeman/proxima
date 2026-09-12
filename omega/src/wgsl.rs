@@ -100,7 +100,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, ScalarOp,
+    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
+    ScalarOp,
 };
 
 use crate::error::EmitError;
@@ -160,6 +161,11 @@ pub struct WgslCaps {
     /// `Keep::Reduce` fold on the portable one-thread-per-output serial
     /// path — never a silent guess at a width the device did not confirm.
     pub subgroup_size: Option<u32>,
+    /// Correctness diagnostic: disable subgroup reassociation and use the
+    /// one-thread serial reduction renderer even when a fixed subgroup exists.
+    /// This is default-off and is selected by the WGPU driver from
+    /// `PROXIMA_WGPU_SERIAL_REDUCE`.
+    pub force_serial_reductions: bool,
 }
 
 /// Emits a WGSL kernel from a bound [`BoundOp`] — see the module doc for
@@ -177,6 +183,21 @@ pub fn emit_wgsl(
     caps: WgslCaps,
     packed_operands: &PackedOperands,
 ) -> Result<WgslKernel, EmitError> {
+    emit_wgsl_with_policy(
+        resolved,
+        caps,
+        packed_operands,
+        NumericPolicy::default(),
+    )
+}
+
+/// Emits one bound operation with explicit numerical permissions.
+pub fn emit_wgsl_with_policy(
+    resolved: &BoundOp,
+    caps: WgslCaps,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> Result<WgslKernel, EmitError> {
     validate(resolved, packed_operands)?;
     let entry = entry_name(resolved, packed_operands);
     let element_type = type_token(resolved.node, resolved.dtype, caps)?;
@@ -189,7 +210,7 @@ pub fn emit_wgsl(
     // `reduce_is_cooperative` is true only when `caps.subgroup_size` is
     // `Some`, but re-deriving that rather than `.expect()`-ing it keeps this
     // call site panic-free.
-    let cooperative_width = if reduce_is_cooperative(resolved, caps) {
+    let cooperative_width = if reduce_is_cooperative(resolved, caps, numeric_policy) {
         caps.subgroup_size
     } else {
         None
@@ -246,24 +267,40 @@ fn is_cooperative_reduce_op(op: ScalarOp) -> bool {
 /// fault-slot contribution, which this pass does not implement — default to
 /// serial when unsure), AND the device confirmed a fixed subgroup width
 /// (`caps.subgroup_size`).
-fn reduce_is_cooperative(resolved: &BoundOp, caps: WgslCaps) -> bool {
+fn reduce_is_cooperative(
+    resolved: &BoundOp,
+    caps: WgslCaps,
+    numeric_policy: NumericPolicy,
+) -> bool {
     caps.subgroup_size.is_some()
         && match &resolved.kind {
             BoundOpKind::Reduce {
                 keep: Keep::Reduce,
                 reduce_op,
+                epilogue_broadcast_axes,
                 ..
-            } => gather_count(resolved) == 0 && is_cooperative_reduce_op(*reduce_op),
+            } => {
+                numeric_policy.reassociation
+                    && !caps.force_serial_reductions
+                    && epilogue_broadcast_axes.is_empty()
+                    && gather_count(resolved) == 0
+                    && is_cooperative_reduce_op(*reduce_op)
+            }
             _ => false,
         }
 }
 
 /// The WGSL subgroup builtin that combines one lane's private accumulator
 /// across the whole subgroup — the counterpart of `crate::msl::simd_combine_fn`.
-/// Only called for an [`is_cooperative_reduce_op`] body.
+/// Add is emitted as an explicit shuffle tree in `render_reduce_cooperative`
+/// so its floating-point order matches the CUDA lowering; only the remaining
+/// associative operations use their native subgroup combiner here.
 fn subgroup_combine_fn(node: NodeId, op: ScalarOp) -> Result<&'static str, EmitError> {
     match op {
-        ScalarOp::Add => Ok("subgroupAdd"),
+        ScalarOp::Add => Err(EmitError::NonCooperativeReduceOp {
+            node,
+            op: op_token(op),
+        }),
         ScalarOp::Multiply => Ok("subgroupMul"),
         ScalarOp::Maximum => Ok("subgroupMax"),
         ScalarOp::Minimum => Ok("subgroupMin"),
@@ -461,11 +498,18 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
             output_axes,
+            epilogue_broadcast_axes,
             ..
-        } => output_axes
-            .iter()
-            .map(|dim| resolved.extents[*dim as usize])
-            .product(),
+        } => {
+            if epilogue_broadcast_axes.is_empty() {
+                output_axes
+                    .iter()
+                    .map(|dim| resolved.extents[*dim as usize])
+                    .product()
+            } else {
+                resolved.extents.iter().product()
+            }
+        }
         // exactly one thread -- see `render_scan`'s own doc on why a scan's
         // accumulator persists across every outer line rather than resetting
         // per line, which rules out one thread per line.
@@ -949,9 +993,12 @@ fn push_gather_fetch(
 fn kernel_signature(source: &mut String, entry: &str) {
     source.push_str(&format!("@compute @workgroup_size({WORKGROUP_SIZE})\n"));
     source.push_str(&format!(
-        "fn {entry}(@builtin(global_invocation_id) global_id: vec3<u32>) {{\n"
+        "fn {entry}(@builtin(global_invocation_id) global_id: vec3<u32>, \
+         @builtin(num_workgroups) num_workgroups: vec3<u32>) {{\n"
     ));
-    source.push_str("    let gid: i32 = i32(global_id.x);\n");
+    source.push_str(&format!(
+        "    let gid: i32 = i32(global_id.x + global_id.y * num_workgroups.x * {WORKGROUP_SIZE}u);\n"
+    ));
 }
 
 /// [`kernel_signature`]'s cooperative-reduce counterpart: dispatched at
@@ -963,9 +1010,12 @@ fn cooperative_kernel_signature(source: &mut String, entry: &str, width: u32) {
     source.push_str(&format!("@compute @workgroup_size({width})\n"));
     source.push_str(&format!(
         "fn {entry}(@builtin(global_invocation_id) global_id: vec3<u32>, \
+         @builtin(num_workgroups) num_workgroups: vec3<u32>, \
          @builtin(subgroup_invocation_id) lane: u32) {{\n"
     ));
-    source.push_str("    let gid: i32 = i32(global_id.x);\n");
+    source.push_str(&format!(
+        "    let gid: i32 = i32(global_id.x + global_id.y * num_workgroups.x * {width}u);\n"
+    ));
 }
 
 fn codec_function_name(node: NodeId, codec: PackedCodec) -> Result<&'static str, EmitError> {
@@ -1325,6 +1375,7 @@ fn render_reduce_cooperative(
         output_axes,
         epilogue_body,
         epilogue_operands,
+        epilogue_broadcast_axes,
         ..
     } = &resolved.kind
     else {
@@ -1337,7 +1388,12 @@ fn render_reduce_cooperative(
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
-    let output_rank = output_axes.len();
+    let is_broadcast_epilogue = !epilogue_broadcast_axes.is_empty();
+    let output_rank = if is_broadcast_epilogue {
+        rank
+    } else {
+        output_axes.len()
+    };
     let output_rank_len = output_rank.max(1);
     let reduce_dims = reduction_dims(resolved, output_axes);
     let reduce_rank = reduce_dims.len();
@@ -1392,7 +1448,15 @@ fn render_reduce_cooperative(
         source.push_str(&format!("    full_coord[{dim}] = 0;\n"));
     }
 
-    if output_rank > 0 {
+    if is_broadcast_epilogue {
+        source.push_str("    var remaining: i32 = output_index;\n");
+        for index in (0..rank).rev() {
+            source.push_str(&format!(
+                "    full_coord[{index}] = remaining % u.output_extents[{index}]; \
+                 remaining = remaining / u.output_extents[{index}];\n"
+            ));
+        }
+    } else if output_rank > 0 {
         source.push_str(&format!(
             "    var output_coord: array<i32, {output_rank_len}>;\n"
         ));
@@ -1434,10 +1498,21 @@ fn render_reduce_cooperative(
                  remaining_r = remaining_r / u.reduction_extents[{index}];\n"
             ));
         }
-        for (index, dim) in reduce_dims.iter().enumerate() {
+        if is_broadcast_epilogue {
             source.push_str(&format!(
-                "        full_coord[{dim}] = reduction_coord[{index}];\n"
+                "        var reduce_full_coord: array<i32, {rank_len}> = full_coord;\n"
             ));
+            for (index, dim) in reduce_dims.iter().enumerate() {
+                source.push_str(&format!(
+                    "        reduce_full_coord[{dim}] = reduction_coord[{index}];\n"
+                ));
+            }
+        } else {
+            for (index, dim) in reduce_dims.iter().enumerate() {
+                source.push_str(&format!(
+                    "        full_coord[{dim}] = reduction_coord[{index}];\n"
+                ));
+            }
         }
     }
 
@@ -1446,8 +1521,13 @@ fn render_reduce_cooperative(
             "        var off{index}: i32 = u.operand_base[{index}];\n"
         ));
         for dim in 0..rank {
+            let coordinate = if is_broadcast_epilogue {
+                "reduce_full_coord"
+            } else {
+                "full_coord"
+            };
             source.push_str(&format!(
-                "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                "        off{index} += {coordinate}[{dim}] * u.operand_strides[{index}][{dim}];\n"
             ));
         }
     }
@@ -1477,10 +1557,26 @@ fn render_reduce_cooperative(
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
-    let combine_fn = subgroup_combine_fn(resolved.node, *reduce_op)?;
-    source.push_str(&format!(
-        "    let reduced: {element_type} = {combine_fn}(accumulator);\n"
-    ));
+    if *reduce_op == ScalarOp::Add {
+        let mut shift = width / 2;
+        while shift > 0 {
+            source.push_str(&format!(
+                "    let shuffled_{shift}: {element_type} = subgroupShuffleDown(accumulator, {shift}u);\n"
+            ));
+            source.push_str(&format!(
+                "    accumulator = accumulator + shuffled_{shift};\n"
+            ));
+            shift /= 2;
+        }
+        source.push_str(&format!(
+            "    let reduced: {element_type} = accumulator;\n"
+        ));
+    } else {
+        let combine_fn = subgroup_combine_fn(resolved.node, *reduce_op)?;
+        source.push_str(&format!(
+            "    let reduced: {element_type} = {combine_fn}(accumulator);\n"
+        ));
+    }
     source.push_str("    if (lane == 0u) {\n");
     source.push_str("        var out_offset: i32 = u.out_base;\n");
     for dim in 0..rank {
@@ -1496,7 +1592,9 @@ fn render_reduce_cooperative(
         element_type,
         "        ",
         |dim| {
-            if output_rank > 0 {
+            if is_broadcast_epilogue {
+                format!("full_coord[{dim}]")
+            } else if output_rank > 0 {
                 format!("output_coord[{dim}]")
             } else {
                 "0".to_string()
@@ -1984,18 +2082,37 @@ mod tests {
             subgroup_size: Some(32),
             ..WgslCaps::default()
         };
-        let kernel =
-            emit_wgsl(&bound, caps, &PackedOperands::new()).expect("cooperative reduce emits");
+        let kernel = emit_wgsl_with_policy(
+            &bound,
+            caps,
+            &PackedOperands::new(),
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("cooperative reduce emits");
         assert!(kernel.source.contains("@workgroup_size(32)"));
         assert!(
             kernel
                 .source
                 .contains("@builtin(subgroup_invocation_id) lane: u32")
         );
-        assert!(kernel.source.contains("subgroupAdd(accumulator)"));
+        assert!(kernel
+            .source
+            .contains("subgroupShuffleDown(accumulator, 16u)"));
+        assert!(kernel.source.contains("shuffled_1"));
+        assert!(!kernel.source.contains("subgroupAdd"));
         assert_eq!(kernel.workgroup_size, 32);
         // one whole subgroup dispatched per output element (m * n = 12).
         assert_eq!(kernel.threads, 12 * 32);
+
+        let exact = emit_wgsl_with_policy(
+            &bound,
+            caps,
+            &PackedOperands::new(),
+            NumericPolicy::bit_exact(),
+        )
+        .expect("bit-exact reduce emits");
+        assert!(!exact.source.contains("subgroupShuffleDown"));
+        assert_eq!(exact.workgroup_size, WORKGROUP_SIZE);
     }
 
     #[test]

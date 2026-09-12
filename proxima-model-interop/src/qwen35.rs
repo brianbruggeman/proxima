@@ -681,6 +681,7 @@ impl crate::architecture::Architecture for Qwen35Arch {
             program,
             logits_root,
             hidden_root: None,
+            residual_roots: Vec::new(),
             layer_roots,
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),

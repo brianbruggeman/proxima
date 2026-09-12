@@ -2049,6 +2049,7 @@ fn split_bindings_with_scratch(resolved: &BoundOp) -> Vec<Binding> {
 /// output, and needs its own (smaller) `Uniforms` blob -- no operand inputs,
 /// no gather, no fault buffer, since the merge is pure scratch-to-output
 /// rescale-and-copy.
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 fn merge_bindings(resolved: &BoundOp) -> Vec<Binding> {
     alloc::vec![
         Binding::Scratch,
@@ -2069,7 +2070,7 @@ fn merge_bindings(resolved: &BoundOp) -> Vec<Binding> {
 /// updated to match. Walking `bindings` itself makes that drift impossible:
 /// there is only one list, and both the encoder bind loop and the hazard
 /// walk read the same one.
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) fn hazard_read_nodes(bindings: &[Binding]) -> impl Iterator<Item = NodeId> + '_ {
     bindings.iter().filter_map(|binding| match binding {
         Binding::Input(node) | Binding::Indices(node) => Some(*node),
@@ -2087,7 +2088,7 @@ pub(crate) fn hazard_read_nodes(bindings: &[Binding]) -> impl Iterator<Item = No
 /// `bindings` list always has exactly one `Binding::Output`. `None` only if
 /// `bindings` is malformed (a validation bug upstream, not a runtime case a
 /// caller should expect to hit).
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) fn hazard_write_node(bindings: &[Binding]) -> Option<NodeId> {
     bindings.iter().find_map(|binding| match binding {
         Binding::Output(node) => Some(*node),
@@ -4214,6 +4215,7 @@ fn render_cached_attention(
 /// `u.splits == 1` this reduces to exactly the prior forced-`split = 0`
 /// copy-and-normalize, since the single live lane's rescale weight is
 /// always `1.0` (or `0.0` under the all-`-INFINITY`/empty-context corner).
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 fn render_cached_attention_merge(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention { head_dim, .. } = &resolved.kind else {
         return Err(EmitError::RenderKindMismatch {
@@ -4258,6 +4260,7 @@ fn render_cached_attention_merge(resolved: &BoundOp, entry: &str) -> Result<Stri
 /// `crate::metal`'s plan-resolution path calls this alongside `emit` for
 /// every position, exactly as it already calls `kernel_dispatch_shape`
 /// alongside `emit`.
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(crate) fn emit_cached_attention_merge(
     resolved: &BoundOp,
     numeric_policy: NumericPolicy,

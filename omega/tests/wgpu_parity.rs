@@ -241,12 +241,12 @@ fn the_two_layer_mlp_runs_on_wgpu_at_cpu_parity() {
 /// `omega/tests/metal_parity.rs::embedding_lookup_program` runs against
 /// Metal, now exercising [`crate::wgsl`]'s gather bindings (`Indices`/
 /// `Fault`) through the portable wgpu driver.
-fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Op> {
+fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32, table_dtype: DType) -> Vec<Op> {
     let mut program = Vec::new();
     let table = append(
         &mut program,
         Op::Input {
-            dtype: DType::Float32,
+            dtype: table_dtype,
             shape: vec![Extent::Static(vocab), Extent::Static(dim)],
             name: Some("table".into()),
         },
@@ -290,7 +290,7 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Op> {
 #[test]
 fn embedding_lookup_runs_on_wgpu_at_cpu_parity_for_integer_valued_inputs() {
     let (vocab, dim, seq) = (256usize, 8usize, 4usize);
-    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32, DType::Float32);
     let table_data: Vec<f32> = (0..vocab * dim).map(|value| (value % 97) as f32).collect();
     let ids_data = [3.0f32, 255.0, 12.0, 0.0];
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
@@ -340,9 +340,61 @@ fn embedding_lookup_runs_on_wgpu_at_cpu_parity_for_integer_valued_inputs() {
 }
 
 #[test]
+fn packed_q4k_embedding_lookup_runs_on_wgpu_at_cpu_parity() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+    let (vocab, dim, seq) = (256usize, QK_K, 4usize);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32, DType::UInt8);
+    let mut packed = vec![0u8; vocab * BLOCK_BYTES];
+    for (row, bytes) in (0..vocab).zip(packed.chunks_exact_mut(BLOCK_BYTES)) {
+        let values: Vec<f32> = (0..dim)
+            .map(|index| ((row * 17 + index * 3) % 101) as f32 - 50.0)
+            .collect();
+        quantize(&values, bytes).expect("one Q4_K block per embedding row");
+    }
+    let ids_data = [3.0f32, 255.0, 12.0, 0.0];
+    let named = vec![
+        ("table", QuantizedBlock::Q4K(packed.as_slice())),
+        ("ids", QuantizedBlock::Float32(&ids_data)),
+    ];
+
+    let mut cpu_plan = plan_named(
+        Engine::Cpu,
+        None,
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("cpu plans packed gather");
+    let cpu = execute_plan_named(&mut cpu_plan, &named).expect("cpu executes packed gather");
+    let mut wgpu_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Wgpu),
+        &program,
+        &[],
+        &named,
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("wgpu plans packed gather");
+    let wgpu = execute_plan_named(&mut wgpu_plan, &named).expect("wgpu executes packed gather");
+
+    let max_diff = cpu
+        .root()
+        .iter()
+        .zip(wgpu.root())
+        .map(|(cpu_value, wgpu_value)| (cpu_value - wgpu_value).abs())
+        .fold(0.0f32, f32::max);
+    eprintln!("wgpu packed gather parity: max_diff={max_diff}");
+    assert!(max_diff < 1.0e-5, "packed gather mismatch: {max_diff}");
+}
+
+#[test]
 fn an_out_of_range_gather_index_faults_on_wgpu_the_same_way_it_faults_on_cpu() {
     let (vocab, dim, seq) = (16usize, 4usize, 2usize);
-    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32, DType::Float32);
     let table_data: Vec<f32> = (0..vocab * dim).map(|value| value as f32).collect();
     let ids_data = [0.0f32, 999.0];
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![

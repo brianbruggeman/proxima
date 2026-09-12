@@ -105,11 +105,20 @@ metal = [
     "metal-wide-cooperative-reduce",
     "kv-capacity-bucket",
     "metal-plan-stable-buffers",
-    "cached-attention-streaming",
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
     "metal-q4k-ggml-port",
 ]
+# Cross-platform GPU serving through omega's wgpu driver.  The existing
+# serving/runtime code is intentionally shared with the Metal path; on Linux
+# omega resolves `Engine::Gpu` to wgpu, whose Vulkan backend is selected by
+# wgpu at adapter discovery time.  Keeping this as an explicit feature makes
+# the hardware boundary visible instead of silently turning a CPU build into
+# a GPU build.
+vulkan = ["metal", "omega?/wgpu-backend"]
+# CUDA serving uses the same backend-agnostic model path as Vulkan, but
+# selects omega's cudarc/NVRTC driver when no wgpu driver is requested.
+cuda = ["metal", "omega?/cuda-driver"]
 # cached-attention physical step for the real serving/decode harness; folded
 # into `metal`'s default shape per ROW 282 but kept individually selectable
 # so a caller can build without `metal` and still exercise the fused path on
@@ -203,6 +212,7 @@ thiserror.workspace = true
 workspace = true
 
 [dev-dependencies]
+libc.workspace = true
 half = { version = "2.7.1", default-features = false }
 proxima-tensor = { path = "../proxima-tensor", features = ["config", "std", "test-support"] }
 rustix.workspace = true
@@ -276,4 +286,12 @@ required-features = ["std"]
 # build has no `LoadedModel` in the crate root, so this needs the same gate.
 [[example]]
 name = "synth_qwen35_decode"
+required-features = ["std"]
+
+[[example]]
+name = "bench_local"
+required-features = ["std"]
+
+[[example]]
+name = "compare_local"
 required-features = ["std"]

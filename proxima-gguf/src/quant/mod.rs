@@ -14,19 +14,26 @@
 //! a widening convert composed from the existing `half` crate dependency.
 
 pub mod bf16;
+pub mod dispatch;
 pub mod f16;
 pub mod iq2_xs;
 pub mod iq3_xxs;
 pub mod iq4_nl;
 pub mod policy;
+pub mod q1_0;
+pub mod q2_0;
 pub mod q2_k;
 pub mod q3_k;
 pub mod q4_0;
+pub mod q4_1;
 pub mod q4_k;
+pub mod q5_0;
 pub mod q5_1;
 pub mod q5_k;
 pub mod q6_k;
 pub mod q8_0;
+pub mod q8_1;
+pub mod q8_k;
 pub mod tables;
 
 use thiserror::Error;
@@ -38,6 +45,8 @@ use thiserror::Error;
 /// codec raised it, so the rendered message still names it.
 #[derive(Debug, Error, PartialEq, Eq, Clone, Copy)]
 pub enum QuantError {
+    #[error("no dequantizer is registered for GGML codec {codec}")]
+    UnsupportedCodec { codec: &'static str },
     #[error("input length {found} bytes is not a multiple of the {codec} block size {block_bytes}")]
     InputNotBlockMultiple {
         codec: &'static str,
