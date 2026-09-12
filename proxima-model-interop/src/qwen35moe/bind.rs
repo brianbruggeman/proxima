@@ -56,7 +56,7 @@ pub fn qwen35moe_tensor_names(architecture: &Architecture) -> Vec<String> {
                     "attn_qkv.weight",
                     "attn_gate.weight",
                     "ssm_conv1d.weight",
-                    "ssm_dt.bias",
+                    "ssm_dt",
                     "ssm_a",
                     "ssm_beta.weight",
                     "ssm_alpha.weight",
