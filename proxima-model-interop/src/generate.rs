@@ -4138,10 +4138,12 @@ pub(crate) fn supported_serving_config(
         ubatch_size: 0,
         gpu_layers,
         reasoning_budget: 0,
-        numeric_policy: if std::env::var_os("PROXIMA_BIT_EXACT").is_some() {
+        numeric_policy: if std::env::var_os("PROXIMA_BIT_EXACT").is_some()
+            || std::env::var_os("PROXIMA_RELAXED_NUMERICS").is_none()
+        {
             proxima_tensor::NumericPolicy::bit_exact()
         } else {
-            proxima_tensor::NumericPolicy::default()
+            proxima_tensor::NumericPolicy::llama_relaxed()
         },
         // Correctness-first parity gate: exact activation arithmetic is the
         // normal path. The relaxed route is an explicit performance escape,
