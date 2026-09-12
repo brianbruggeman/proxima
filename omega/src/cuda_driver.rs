@@ -451,6 +451,42 @@ impl CudaDriver {
         uniforms: &[u8],
         output_len: usize,
     ) -> Result<(), CudaDriverError> {
+        self.launch_f32_persistent_sized_with_sync(arena, kernel, uniforms, output_len, true)
+    }
+
+    /// Enqueues a kernel on the driver's stream without synchronizing.
+    ///
+    /// CUDA stream order already preserves the graph's dependency order. The
+    /// graph plan uses this form for ordinary kernels and performs one stream
+    /// synchronization after the whole evaluation, avoiding a host/device
+    /// round trip after every node. Fault-buffer kernels remain on the
+    /// synchronous path because their diagnostic readback must be observed
+    /// before the next operation can be trusted.
+    pub fn launch_f32_persistent_sized_async(
+        &self,
+        arena: &mut CudaF32Arena,
+        kernel: &CudaKernel,
+        uniforms: &[u8],
+        output_len: usize,
+    ) -> Result<(), CudaDriverError> {
+        if kernel
+            .bindings
+            .iter()
+            .any(|binding| matches!(binding, Binding::Fault))
+        {
+            return Err(CudaDriverError::BindingContract);
+        }
+        self.launch_f32_persistent_sized_with_sync(arena, kernel, uniforms, output_len, false)
+    }
+
+    fn launch_f32_persistent_sized_with_sync(
+        &self,
+        arena: &mut CudaF32Arena,
+        kernel: &CudaKernel,
+        uniforms: &[u8],
+        output_len: usize,
+        synchronize: bool,
+    ) -> Result<(), CudaDriverError> {
         let Some((output_index, Binding::Output(output_node))) = kernel
             .bindings
             .iter()
@@ -574,24 +610,26 @@ impl CudaDriver {
                 .insert(output_node, CudaGraphBuffer::F32(device_output));
             return Err(error.into());
         }
-        if let Err(error) = self.stream.synchronize() {
-            arena
-                .buffers
-                .insert(output_node, CudaGraphBuffer::F32(device_output));
-            return Err(error.into());
-        }
-        if let Some(fault_buffer) = fault_buffer.take() {
-            let faults = self.stream.clone_dtoh(&fault_buffer)?;
-            if let Some(slot) = faults.iter().position(|value| *value != 0) {
-                let index = i32::from_ne_bytes(faults[slot].to_ne_bytes()) as i64;
+        if synchronize {
+            if let Err(error) = self.stream.synchronize() {
                 arena
                     .buffers
                     .insert(output_node, CudaGraphBuffer::F32(device_output));
-                return Err(CudaDriverError::GatherIndexOutOfRange {
-                    node: output_node,
-                    slot,
-                    index,
-                });
+                return Err(error.into());
+            }
+            if let Some(fault_buffer) = fault_buffer.take() {
+                let faults = self.stream.clone_dtoh(&fault_buffer)?;
+                if let Some(slot) = faults.iter().position(|value| *value != 0) {
+                    let index = i32::from_ne_bytes(faults[slot].to_ne_bytes()) as i64;
+                    arena
+                        .buffers
+                        .insert(output_node, CudaGraphBuffer::F32(device_output));
+                    return Err(CudaDriverError::GatherIndexOutOfRange {
+                        node: output_node,
+                        slot,
+                        index,
+                    });
+                }
             }
         }
         arena
@@ -795,12 +833,29 @@ impl CudaPlan {
                     );
                 }
             } else {
-                self.driver
-                    .launch_f32_persistent_sized(&mut self.arena, &kernel, &uniforms, output_len)
-                    .map_err(|error| CudaDriverError::Execute {
-                        node: bound.node,
-                        error: error.to_string(),
-                    })?;
+                let launch = if kernel
+                    .bindings
+                    .iter()
+                    .any(|binding| matches!(binding, Binding::Fault))
+                {
+                    self.driver.launch_f32_persistent_sized(
+                        &mut self.arena,
+                        &kernel,
+                        &uniforms,
+                        output_len,
+                    )
+                } else {
+                    self.driver.launch_f32_persistent_sized_async(
+                        &mut self.arena,
+                        &kernel,
+                        &uniforms,
+                        output_len,
+                    )
+                };
+                launch.map_err(|error| CudaDriverError::Execute {
+                    node: bound.node,
+                    error: error.to_string(),
+                })?;
             }
             if trace_outputs && self.outputs.contains(&bound.node) {
                 let values = self.driver.read_f32(&self.arena, bound.node)?;
@@ -818,6 +873,7 @@ impl CudaPlan {
                 eprintln!("cuda_trace: node={:?} complete", bound.node);
             }
         }
+        self.driver.stream.synchronize()?;
         let mut results = Vec::with_capacity(self.outputs.len());
         for node in &self.outputs {
             if trace_outputs {
