@@ -1081,6 +1081,66 @@ struct Qwen35MoePreGatherPlan {
     router_cut_placements: BTreeMap<NodeId, PlacedBuffer>,
 }
 
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+struct Qwen35DenseAttentionBuffers {
+    k_first: PlacedBuffer,
+    k_second: PlacedBuffer,
+    k_pass: PlacedBuffer,
+    value: PlacedBuffer,
+    even_odd_row_bytes: usize,
+    pass_row_bytes: usize,
+    value_row_bytes: usize,
+}
+
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+struct Qwen35DenseAttentionPlacement<'buffers> {
+    input_nodes: &'buffers [Option<(NodeId, NodeId, NodeId, NodeId)>],
+    buffers: &'buffers [Option<Qwen35DenseAttentionBuffers>],
+}
+
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+fn qwen35_dense_attention_placement_enabled(
+    pre_gather: bool,
+    is_metal: bool,
+    force_two_range: bool,
+    seed_cached_len: usize,
+    requested: bool,
+) -> bool {
+    pre_gather && is_metal && !force_two_range && seed_cached_len == 0 && requested
+}
+
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+fn qwen35_dense_attention_placed_byte_length(
+    positions: usize,
+    row_elements: usize,
+    layer: usize,
+    leaf: &'static str,
+) -> Result<usize, InteropError> {
+    positions
+        .checked_mul(row_elements)
+        .and_then(|elements| elements.checked_mul(core::mem::size_of::<f32>()))
+        .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
+            architecture: String::from("qwen35moe"),
+            reason: alloc::format!(
+                "layer {layer} dense-attention {leaf} placed buffer size overflowed"
+            ),
+        })
+}
+
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+fn retain_qwen35_segment_readbacks<RouterPlacement>(
+    requested: &mut BTreeMap<NodeId, NodeId>,
+    router_cut_placements: &BTreeMap<NodeId, RouterPlacement>,
+    placed_dense_roots: Option<(NodeId, NodeId, NodeId, NodeId)>,
+    is_router: bool,
+) {
+    requested.retain(|_, original| {
+        !placed_dense_roots
+            .is_some_and(|roots| [roots.0, roots.1, roots.2, roots.3].contains(original))
+            && (!is_router || !router_cut_placements.contains_key(original))
+    });
+}
+
 struct Qwen35MoeLayerSegments {
     router: crate::qwen35moe::execution::MappedLayerSegment,
     gather: crate::qwen35moe::execution::MappedLayerSegment,
@@ -2250,6 +2310,8 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))] ssm_placement: Option<
             &Qwen35SsmPlacement<'_>,
         >,
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        dense_attention_placement: Option<&Qwen35DenseAttentionPlacement<'_>>,
         mut before_gather: BeforeGather,
     ) -> Result<Evaluated, InteropError>
     where
@@ -2477,10 +2539,19 @@ impl<'file> LoadedModel<'file> {
                     segment_output,
                 );
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                if is_router {
-                    requested
-                        .retain(|_, original| !plan.router_cut_placements.contains_key(original));
-                }
+                let placed_dense_roots = dense_attention_placement
+                    .and_then(|placement| placement.buffers[layer].as_ref())
+                    .and_then(|_| match self.layer_roots[layer] {
+                        Qwen35LayerRoots::DenseAttention(roots) => Some(roots),
+                        _ => None,
+                    });
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                retain_qwen35_segment_readbacks(
+                    &mut requested,
+                    &plan.router_cut_placements,
+                    placed_dense_roots,
+                    is_router,
+                );
                 let mut requested_nodes: Vec<NodeId> = requested.keys().copied().collect();
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 let mut segment_input_placements = Vec::new();
@@ -2503,6 +2574,62 @@ impl<'file> LoadedModel<'file> {
                         } else {
                             segment_input_placements.push((mapped, buffer, 0));
                         }
+                    }
+                }
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                if is_router
+                    && let Some(placement) = dense_attention_placement
+                    && let (
+                        Qwen35LayerRoots::DenseAttention(roots),
+                        Some(input_nodes),
+                        Some(buffers),
+                    ) = (
+                        self.layer_roots[layer],
+                        placement.input_nodes[layer],
+                        placement.buffers[layer].as_ref(),
+                    )
+                {
+                    for (node, buffer) in [
+                        (input_nodes.0, &buffers.k_first),
+                        (input_nodes.1, &buffers.k_second),
+                        (input_nodes.2, &buffers.k_pass),
+                        (input_nodes.3, &buffers.value),
+                    ] {
+                        let mapped = mapping.get(&node).copied().ok_or_else(|| {
+                            InteropError::PreGatherExecutionUnsupported {
+                                architecture: String::from("qwen35moe"),
+                                reason: alloc::format!(
+                                    "layer {layer} dense-attention cache input {node:?} is absent from the router segment"
+                                ),
+                            }
+                        })?;
+                        segment_input_placements.push((mapped, buffer, 0));
+                    }
+                    for (node, buffer, row_bytes) in [
+                        (roots.0, &buffers.k_first, buffers.even_odd_row_bytes),
+                        (roots.1, &buffers.k_second, buffers.even_odd_row_bytes),
+                        (roots.2, &buffers.k_pass, buffers.pass_row_bytes),
+                        (roots.3, &buffers.value, buffers.value_row_bytes),
+                    ] {
+                        let mapped = mapping.get(&node).copied().ok_or_else(|| {
+                            InteropError::PreGatherExecutionUnsupported {
+                                architecture: String::from("qwen35moe"),
+                                reason: alloc::format!(
+                                    "layer {layer} dense-attention cache root {node:?} is absent from the router segment"
+                                ),
+                            }
+                        })?;
+                        let byte_offset =
+                            position_offset.checked_mul(row_bytes).ok_or_else(|| {
+                                InteropError::PreGatherExecutionUnsupported {
+                                    architecture: String::from("qwen35moe"),
+                                    reason: alloc::format!(
+                                        "layer {layer} dense-attention cache offset overflowed"
+                                    ),
+                                }
+                            })?;
+                        segment_output_placements.push((mapped, buffer, byte_offset));
+                        requested_nodes.push(mapped);
                     }
                 }
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -7489,6 +7616,94 @@ impl<'file> LoadedModel<'file> {
             .map(|_| Qwen35DenseAttentionPadScratch::new())
             .collect();
 
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let dense_attention_placement_enabled = qwen35_dense_attention_placement_enabled(
+            qwen35moe_pre_gather_enabled(
+                serving_config.qwen35moe_pre_gather,
+                self.architecture_impl
+                    .map(|architecture| architecture.name()),
+            ),
+            runtime.is_metal(),
+            force_two_range,
+            seed_cached_len,
+            std::env::var_os("PROXIMA_METAL_DENSE_ATTENTION_PLACEMENT").is_some(),
+        );
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let dense_attention_input_nodes: Vec<Option<(NodeId, NodeId, NodeId, NodeId)>> =
+            cache_names
+                .iter()
+                .map(|names| match names {
+                    LayerCacheNames::DenseAttention {
+                        k_first,
+                        k_second,
+                        k_pass,
+                        v,
+                    } if dense_attention_placement_enabled => Ok(Some((
+                        find_input_node(&self.program, k_first)?,
+                        find_input_node(&self.program, k_second)?,
+                        find_input_node(&self.program, k_pass)?,
+                        find_input_node(&self.program, v)?,
+                    ))),
+                    _ => Ok(None),
+                })
+                .collect::<Result<_, InteropError>>()?;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let dense_attention_positions = kv_extent(
+            (seed_cached_len + ids.len() + max_tokens).min(serving_config.context_length as usize),
+            serving_config.context_length as usize,
+            serving_config.kv_bucket_tokens,
+        );
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let dense_attention_buffers: Vec<Option<Qwen35DenseAttentionBuffers>> = layer_row_widths
+            .iter()
+            .enumerate()
+            .map(|(layer, widths)| -> Result<_, InteropError> {
+                let LayerPadRowWidths::DenseAttention {
+                    even_odd_row,
+                    pass_row,
+                    v_row,
+                } = widths
+                else {
+                    return Ok(None);
+                };
+                if !dense_attention_placement_enabled {
+                    return Ok(None);
+                }
+                let even_odd_byte_length = qwen35_dense_attention_placed_byte_length(
+                    dense_attention_positions,
+                    *even_odd_row,
+                    layer,
+                    "rotary key",
+                )?;
+                let pass_byte_length = qwen35_dense_attention_placed_byte_length(
+                    dense_attention_positions,
+                    *pass_row,
+                    layer,
+                    "pass-through key",
+                )?;
+                let value_byte_length = qwen35_dense_attention_placed_byte_length(
+                    dense_attention_positions,
+                    *v_row,
+                    layer,
+                    "value",
+                )?;
+                let buffers = Qwen35DenseAttentionBuffers {
+                    k_first: allocate_placed_buffer(even_odd_byte_length)?,
+                    k_second: allocate_placed_buffer(even_odd_byte_length)?,
+                    k_pass: allocate_placed_buffer(pass_byte_length)?,
+                    value: allocate_placed_buffer(value_byte_length)?,
+                    even_odd_row_bytes: even_odd_row * core::mem::size_of::<f32>(),
+                    pass_row_bytes: pass_row * core::mem::size_of::<f32>(),
+                    value_row_bytes: v_row * core::mem::size_of::<f32>(),
+                };
+                omega::metal::zero_placed_buffer(&buffers.k_first, even_odd_byte_length);
+                omega::metal::zero_placed_buffer(&buffers.k_second, even_odd_byte_length);
+                omega::metal::zero_placed_buffer(&buffers.k_pass, pass_byte_length);
+                omega::metal::zero_placed_buffer(&buffers.value, value_byte_length);
+                Ok(Some(buffers))
+            })
+            .collect::<Result<_, _>>()?;
+
         // DynaExq observes the real routed expert ids produced by the graph.
         // The fixed matrix keeps policy state bounded and is enabled only
         // when the model owns a low-codec sidecar and the caller supplies a
@@ -7855,10 +8070,23 @@ impl<'file> LoadedModel<'file> {
                                 roots.push(*value);
                             }
                             Qwen35LayerRoots::DenseAttention((first, second, pass, value)) => {
-                                roots.push(*first);
-                                roots.push(*second);
-                                roots.push(*pass);
-                                roots.push(*value);
+                                #[cfg(all(
+                                    feature = "metal-output-placement",
+                                    target_os = "macos"
+                                ))]
+                                let dense_attention_is_placed =
+                                    dense_attention_buffers[_layer].as_ref().is_some();
+                                #[cfg(not(all(
+                                    feature = "metal-output-placement",
+                                    target_os = "macos"
+                                )))]
+                                let dense_attention_is_placed = false;
+                                if !dense_attention_is_placed {
+                                    roots.push(*first);
+                                    roots.push(*second);
+                                    roots.push(*pass);
+                                    roots.push(*value);
+                                }
                             }
                             Qwen35LayerRoots::Ssm {
                                 qkv_mixed,
@@ -8307,6 +8535,11 @@ impl<'file> LoadedModel<'file> {
                                 maximum_layer: ssm_placement_max_layer,
                                 use_second_as_input: cached_len % 2 != 0,
                             }),
+                            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                            Some(&Qwen35DenseAttentionPlacement {
+                                input_nodes: &dense_attention_input_nodes,
+                                buffers: &dense_attention_buffers,
+                            }),
                             &mut before_qwen35moe_gather,
                         )?
                     } else if use_metal_output_placements(
@@ -8642,6 +8875,20 @@ impl<'file> LoadedModel<'file> {
                                 Qwen35LayerRoots::DenseAttention((first, second, pass, value)),
                                 LayerCacheState::DenseAttention(cache),
                             ) => {
+                                #[cfg(all(
+                                    feature = "metal-output-placement",
+                                    target_os = "macos"
+                                ))]
+                                let dense_attention_is_placed =
+                                    dense_attention_buffers[layer].as_ref().is_some();
+                                #[cfg(not(all(
+                                    feature = "metal-output-placement",
+                                    target_os = "macos"
+                                )))]
+                                let dense_attention_is_placed = false;
+                                if dense_attention_is_placed {
+                                    continue;
+                                }
                                 let (first_data, _) = evaluated
                                     .get(*first)
                                     .ok_or(InteropError::MissingEvaluatedNode { node: *first })?;
@@ -9938,10 +10185,15 @@ mod tests {
     };
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::{map_expert_sources_to_segment, use_metal_output_placements};
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    use super::{
+        qwen35_dense_attention_placed_byte_length, qwen35_dense_attention_placement_enabled,
+        retain_qwen35_segment_readbacks,
+    };
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    #[cfg(feature = "metal")]
+    #[cfg(any(feature = "metal", feature = "metal-output-placement"))]
     use alloc::collections::BTreeMap;
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -10014,6 +10266,82 @@ mod tests {
         assert!(!use_metal_output_placements(false, true, false));
         assert!(use_metal_output_placements(true, false, false));
         assert!(use_metal_output_placements(false, true, true));
+    }
+
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[test]
+    fn qwen35_dense_attention_placement_is_pre_gather_metal_only() {
+        assert!(qwen35_dense_attention_placement_enabled(
+            true, true, false, 0, true
+        ));
+        assert!(!qwen35_dense_attention_placement_enabled(
+            false, true, false, 0, true
+        ));
+        assert!(!qwen35_dense_attention_placement_enabled(
+            true, false, false, 0, true
+        ));
+        assert!(!qwen35_dense_attention_placement_enabled(
+            true, true, true, 0, true
+        ));
+        assert!(!qwen35_dense_attention_placement_enabled(
+            true, true, false, 1, true
+        ));
+        assert!(!qwen35_dense_attention_placement_enabled(
+            true, true, false, 0, false
+        ));
+    }
+
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[test]
+    fn qwen35_segment_readback_omits_only_placed_values() {
+        let dense_roots = (NodeId(10), NodeId(11), NodeId(12), NodeId(13));
+        let router_cut_placements = BTreeMap::from([(NodeId(20), ())]);
+        let original = BTreeMap::from([
+            (NodeId(1), NodeId(10)),
+            (NodeId(2), NodeId(20)),
+            (NodeId(3), NodeId(30)),
+        ]);
+
+        let mut router_requested = original.clone();
+        retain_qwen35_segment_readbacks(
+            &mut router_requested,
+            &router_cut_placements,
+            Some(dense_roots),
+            true,
+        );
+        assert_eq!(router_requested, BTreeMap::from([(NodeId(3), NodeId(30))]));
+
+        let mut gather_requested = original.clone();
+        retain_qwen35_segment_readbacks(
+            &mut gather_requested,
+            &router_cut_placements,
+            Some(dense_roots),
+            false,
+        );
+        assert_eq!(
+            gather_requested,
+            BTreeMap::from([(NodeId(2), NodeId(20)), (NodeId(3), NodeId(30))])
+        );
+
+        let mut unplaced_requested = original.clone();
+        retain_qwen35_segment_readbacks(
+            &mut unplaced_requested,
+            &BTreeMap::<NodeId, ()>::new(),
+            None,
+            true,
+        );
+        assert_eq!(unplaced_requested, original);
+    }
+
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[test]
+    fn qwen35_dense_attention_placed_size_is_checked() {
+        assert_eq!(
+            qwen35_dense_attention_placed_byte_length(32, 128, 3, "value")
+                .expect("a normal cache extent fits"),
+            16_384
+        );
+        assert!(qwen35_dense_attention_placed_byte_length(usize::MAX, 2, 3, "value").is_err());
     }
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
