@@ -29273,3 +29273,29 @@ features ran the logits-root selection regression, the prefill-event
 regression, and the first-router/prefix-dedup regression: three tests ran and
 three passed. The post-change real-checkpoint TTFT remains unmeasured in this
 row.
+
+## ROW 500 -- monolithic all-low Metal arm aliases the sidecar mapping
+
+Hypothesis: the per-layer pre-gather command-buffer boundary can be isolated
+from expert payload staging by binding all low-codec expert descriptors once
+to the existing whole-model graph. Refutation condition: any all-low entry is
+copied into a selected arena, any descriptor points outside its sidecar mmap
+slice, or the arm runs when its environment request is absent.
+
+The diagnostic is default-off behind
+`PROXIMA_QWEN35MOE_MONOLITHIC_ALL_LOW` and is admitted only when Qwen35MoE
+pre-gather and Metal execution are also active. It constructs dense
+per-projection `ExpertSource` tables over the sidecar mapping, uses the
+whole-mapping Metal no-copy buffer plus each arena's byte offset, and clears
+cached expert buffers before an expert mapping is replaced or unmapped. The
+existing selected-expert pread/segment path remains the unset-variable
+baseline. A mixed low/high slab is rejected with the typed
+`ExpertAllLowSourceRequired` error; this arm does not promote experts.
+
+Focused debug checks observed two tensor arena-validation tests, one sidecar
+alias-and-promotion-rejection test, one Metal descriptor-offset test, one
+Metal mmap-offset lifecycle test, and one admission truth-table test pass.
+`cargo check -p proxima-model-interop --features metal,instrument`, formatting,
+and diff whitespace checks also exited zero. No real-checkpoint latency,
+resident-memory, or generated-text measurement was run for this row, so the
+performance and output effects remain unmeasured.

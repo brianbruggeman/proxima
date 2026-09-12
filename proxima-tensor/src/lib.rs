@@ -262,8 +262,9 @@ pub use convert::{Convert, SimdConvert};
 pub use cpu::QuantDot;
 #[cfg(feature = "std")]
 pub use cpu::{
-    Evaluated, Interpreter, QuantizedBlock, TypedBuffer, evaluate, evaluate_parallel,
-    evaluate_typed, evaluate_with_scratch, resolve_named_blocks, resolve_named_blocks_with_experts,
+    Evaluated, Interpreter, QuantizedBlock, TypedBuffer, evaluate, evaluate_bound_f32_into,
+    evaluate_parallel, evaluate_typed, evaluate_with_scratch, resolve_named_blocks,
+    resolve_named_blocks_with_experts,
 };
 pub use dtype::DType;
 #[cfg(any(feature = "std", feature = "alloc"))]

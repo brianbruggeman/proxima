@@ -61,6 +61,12 @@ pub enum TensorError {
     #[error("node {node} cannot be bound to an executable op: {reason}")]
     NotLowerable { node: NodeId, reason: &'static str },
 
+    #[error("bound f32 node {node} cannot read packed operand {operand}")]
+    BoundF32PackedOperand { node: NodeId, operand: NodeId },
+
+    #[error("bound f32 node {node} cannot evaluate gathered operand {operand}")]
+    BoundF32GatherOperand { node: NodeId, operand: NodeId },
+
     #[error("output {0} does not name a node in the program")]
     UnknownOutput(NodeId),
 
@@ -249,6 +255,9 @@ pub enum TensorError {
         expert_count: u32,
         expert_used_count: u32,
     },
+
+    #[error("expert payload arena is invalid: {reason}")]
+    InvalidExpertPayloadArena { reason: &'static str },
 
     /// [`crate::align::AlignedBuffer::new`]'s requested element count does
     /// not fit a `usize` byte length, or the caller-supplied `page_size` is

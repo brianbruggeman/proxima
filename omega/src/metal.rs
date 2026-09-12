@@ -264,6 +264,62 @@ struct EncoderGuard {
     finished: bool,
 }
 
+#[cfg(all(test, feature = "instrument"))]
+mod bounded_compare_tests {
+    use super::{MetalError, compare_bound_f32};
+    use proxima_tensor::op::NodeId;
+
+    #[test]
+    fn finite_equal_is_not_a_mismatch() {
+        assert!(
+            compare_bound_f32(NodeId(1), &[1.0, -2.0], &[1.0, -2.0])
+                .expect("equal lengths")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn finite_difference_reports_first_element_and_maximum_relative_error() {
+        let mismatch = compare_bound_f32(NodeId(1), &[2.0, 4.0], &[1.0, 2.0])
+            .expect("equal lengths")
+            .expect("difference");
+        assert_eq!(mismatch.0, 0);
+        assert_eq!(mismatch.1, 2.0);
+        assert_eq!(mismatch.2, 1.0);
+        assert_eq!(mismatch.3, 1.0);
+        assert_eq!(mismatch.4, 1.0);
+    }
+
+    #[test]
+    fn nonfinite_difference_cannot_evade_tolerance() {
+        let mismatch = compare_bound_f32(NodeId(1), &[f32::NAN], &[1.0])
+            .expect("equal lengths")
+            .expect("nonfinite difference");
+        assert!(mismatch.3.is_infinite());
+    }
+
+    #[test]
+    fn cpu_nonfinite_difference_is_reported() {
+        let mismatch = compare_bound_f32(NodeId(1), &[1.0], &[f32::NAN])
+            .expect("equal lengths")
+            .expect("nonfinite difference");
+        assert!(mismatch.3.is_infinite());
+    }
+
+    #[test]
+    fn length_mismatch_is_typed() {
+        let error = compare_bound_f32(NodeId(9), &[1.0], &[]).expect_err("length mismatch");
+        assert!(matches!(
+            error,
+            MetalError::CpuBoundComparisonLengthMismatch {
+                node: NodeId(9),
+                metal_len: 1,
+                cpu_len: 0,
+            }
+        ));
+    }
+}
+
 impl EncoderGuard {
     fn new(encoder: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) -> Self {
         Self {
@@ -423,6 +479,25 @@ pub enum MetalError {
         kind: String,
         max_rel_diff: f32,
     },
+    #[cfg(feature = "instrument")]
+    #[error("cpu_compare: bound node {node} needs {bytes} snapshot bytes, above cap {cap_bytes}")]
+    CpuBoundComparisonOverCap {
+        node: NodeId,
+        bytes: usize,
+        cap_bytes: usize,
+    },
+    #[cfg(feature = "instrument")]
+    #[error(
+        "cpu_compare: bound node {node} output length differs (metal={metal_len}, cpu={cpu_len})"
+    )]
+    CpuBoundComparisonLengthMismatch {
+        node: NodeId,
+        metal_len: usize,
+        cpu_len: usize,
+    },
+    #[cfg(feature = "instrument")]
+    #[error("cpu_compare: selected bound node {node} is not present in this resolved plan")]
+    CpuBoundComparisonNodeNotFound { node: NodeId },
     #[error(
         "plan bound under {bound:?}, caller requested {requested:?} -- rebuild via plan()/plan_named()"
     )]
@@ -460,7 +535,9 @@ pub struct ExpertPayloadDescriptor {
 struct ExpertSourceBuffers {
     node: NodeId,
     payloads: MetalBuffer,
+    payload_offset: usize,
     descriptors: MetalBuffer,
+    descriptor_records: Vec<ExpertPayloadDescriptor>,
 }
 
 /// Host staging that keeps a no-copy upload's borrowed bytes alive through
@@ -473,6 +550,7 @@ struct StagedExpertSource {
     descriptor_alias_address: usize,
     buffers: ExpertSourceBuffers,
 }
+
 /// This thread's Metal device paired with its command queue — both created
 /// once per thread rather than per [`execute`] call.
 type DeviceAndQueue = (
@@ -516,6 +594,7 @@ thread_local! {
     /// is not free, and nothing about either depends on the program being
     /// run.
     static DEVICE_AND_QUEUE: RefCell<Option<DeviceAndQueue>> = const { RefCell::new(None) };
+
 }
 
 /// This thread's `MTLDevice::currentAllocatedSize` -- Metal's own count of
@@ -1183,12 +1262,13 @@ pub fn expert_payload_descriptors(
     for entry in source.entries() {
         let codec = match entry.block {
             QuantizedBlock::Q2K(_) => PackedCodec::Q2K,
+            QuantizedBlock::Q3K(_) => PackedCodec::Q3K,
             QuantizedBlock::Q4K(_) => PackedCodec::Q4K,
             QuantizedBlock::Q6K(_) => PackedCodec::Q6K,
             _ => {
                 return Err(MetalError::ExpertSourceUnsupported {
                     node,
-                    reason: "mixed expert lowering only has Q2_K, Q4_K, and Q6_K decoders",
+                    reason: "mixed expert lowering only has Q2_K, Q3_K, Q4_K, and Q6_K decoders",
                 });
             }
         };
@@ -1245,12 +1325,13 @@ pub fn selected_expert_payloads(
     for (expert_index, entry) in source.entries().iter().enumerate() {
         let codec = match entry.block {
             QuantizedBlock::Q2K(_) => PackedCodec::Q2K,
+            QuantizedBlock::Q3K(_) => PackedCodec::Q3K,
             QuantizedBlock::Q4K(_) => PackedCodec::Q4K,
             QuantizedBlock::Q6K(_) => PackedCodec::Q6K,
             _ => {
                 return Err(MetalError::ExpertSourceUnsupported {
                     node,
-                    reason: "mixed expert lowering only has Q2_K, Q4_K, and Q6_K decoders",
+                    reason: "mixed expert lowering only has Q2_K, Q3_K, Q4_K, and Q6_K decoders",
                 });
             }
         };
@@ -1301,6 +1382,79 @@ pub fn selected_expert_payloads(
     Ok((payload_bytes, descriptors))
 }
 
+fn selected_expert_arena_descriptors(
+    node: NodeId,
+    source: &proxima_tensor::cpu::ExpertSource<'_>,
+    arena: proxima_tensor::cpu::ExpertPayloadArena<'_>,
+) -> Result<Vec<ExpertPayloadDescriptor>, MetalError> {
+    let selected_ids = source.selected_expert_ids();
+    let spans = arena.spans();
+    let mut descriptors = Vec::with_capacity(source.entries().len());
+    for (expert_index, entry) in source.entries().iter().enumerate() {
+        let codec = match entry.block {
+            QuantizedBlock::Q2K(_) => PackedCodec::Q2K,
+            QuantizedBlock::Q3K(_) => PackedCodec::Q3K,
+            QuantizedBlock::Q4K(_) => PackedCodec::Q4K,
+            QuantizedBlock::Q6K(_) => PackedCodec::Q6K,
+            _ => {
+                return Err(MetalError::ExpertSourceUnsupported {
+                    node,
+                    reason: "mixed expert lowering only has Q2_K, Q3_K, Q4_K, and Q6_K decoders",
+                });
+            }
+        };
+        let selected = selected_ids.is_none_or(|ids| {
+            ids.iter()
+                .any(|id| *id == u32::try_from(expert_index).unwrap_or(u32::MAX))
+        });
+        let span = spans.get(expert_index).and_then(|span| *span);
+        let (byte_offset, byte_length) = if selected {
+            let span = span.ok_or(MetalError::ExpertSourceUnsupported {
+                node,
+                reason: "selected expert has no arena span",
+            })?;
+            let end = usize::try_from(span.offset)
+                .ok()
+                .and_then(|offset| {
+                    usize::try_from(span.length)
+                        .ok()
+                        .and_then(|length| offset.checked_add(length))
+                })
+                .ok_or(MetalError::ExpertSourceUnsupported {
+                    node,
+                    reason: "expert arena span endpoint overflowed",
+                })?;
+            if end > arena.bytes().len() {
+                return Err(MetalError::ExpertSourceUnsupported {
+                    node,
+                    reason: "expert arena span exceeds payload bytes",
+                });
+            }
+            (
+                usize::try_from(span.offset).unwrap_or(usize::MAX),
+                usize::try_from(span.length).unwrap_or(usize::MAX),
+            )
+        } else {
+            (0, 0)
+        };
+        descriptors.push(ExpertPayloadDescriptor {
+            expert_index: u32::try_from(expert_index).map_err(|_| {
+                MetalError::ExpertSourceUnsupported {
+                    node,
+                    reason: "expert index exceeds the Metal descriptor ABI",
+                }
+            })?,
+            codec,
+            byte_offset,
+            byte_length,
+            out_dim: entry.out_dim,
+            in_dim: entry.in_dim,
+            epoch: entry.epoch,
+        });
+    }
+    Ok(descriptors)
+}
+
 /// Packs descriptor records into the byte layout consumed by the MSL
 /// `ExpertPayloadDescriptor` struct. The caller owns the returned bytes and
 /// may upload them beside the borrowed payload arena without touching the
@@ -1313,6 +1467,7 @@ pub fn pack_expert_payload_descriptors(
     for descriptor in descriptors {
         let codec_tag: u32 = match descriptor.codec {
             PackedCodec::Q2K => 1,
+            PackedCodec::Q3K => 4,
             PackedCodec::Q4K => 2,
             PackedCodec::Q6K => 3,
             _ => {
@@ -1876,7 +2031,24 @@ fn stage_expert_source_reusing(
     #[cfg(feature = "instrument")]
     let stage_ticks_started = read_ticks();
     let stage_started = Instant::now();
-    let (payload_bytes, descriptors) = selected_expert_payloads(node, source)?;
+    let packed_arena = source.packed_arena();
+    let (owned_payload_bytes, descriptors) = match packed_arena {
+        Some(arena) => (
+            None,
+            selected_expert_arena_descriptors(node, source, arena)?,
+        ),
+        None => {
+            let (payload, descriptors) = selected_expert_payloads(node, source)?;
+            (Some(payload), descriptors)
+        }
+    };
+    let payload_bytes = owned_payload_bytes
+        .as_deref()
+        .or_else(|| packed_arena.map(|arena| arena.bytes()))
+        .ok_or(MetalError::ExpertSourceUnsupported {
+            node,
+            reason: "expert source produced no payload bytes",
+        })?;
     let descriptor_records = descriptors;
     if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
         eprintln!(
@@ -1892,21 +2064,33 @@ fn stage_expert_source_reusing(
             for expert in selected {
                 if let Some(descriptor) = descriptor_records.get(*expert as usize) {
                     eprintln!(
-                        "metal selected descriptor expert={} offset={} length={}",
-                        descriptor.expert_index, descriptor.byte_offset, descriptor.byte_length
+                        "metal selected descriptor expert={} codec={:?} epoch={} offset={} length={}",
+                        descriptor.expert_index,
+                        descriptor.codec,
+                        descriptor.epoch,
+                        descriptor.byte_offset,
+                        descriptor.byte_length
                     );
                 }
             }
         }
     }
     let descriptor_bytes = pack_expert_payload_descriptors(node, &descriptor_records)?;
-    let (payloads, _) = reuse_or_upload_packed_bytes(
-        device,
-        &payload_bytes,
-        previous
-            .as_ref()
-            .map(|staged| (&staged.buffers.payloads, staged.payload_alias_address)),
-    )?;
+    let previous_payload = previous
+        .as_ref()
+        .map(|staged| (&staged.buffers.payloads, staged.payload_alias_address));
+    let all_expert_arena = packed_arena.is_some() && source.selected_expert_ids().is_none();
+    if all_expert_arena && !expert_mapping_contains(payload_bytes) {
+        return Err(MetalError::ExpertSourceUnsupported {
+            node,
+            reason: "all-expert arena is not contained in the registered expert mmap",
+        });
+    }
+    let (payloads, payload_offset) = if all_expert_arena {
+        upload_packed_bytes(device, payload_bytes, None)?
+    } else {
+        reuse_or_upload_packed_bytes(device, payload_bytes, previous_payload)?
+    };
     let (descriptors, _) = reuse_or_upload_packed_bytes(
         device,
         &descriptor_bytes,
@@ -1945,12 +2129,16 @@ fn stage_expert_source_reusing(
     Ok(StagedExpertSource {
         payload_alias_address: payload_alias_address(&payload_bytes),
         descriptor_alias_address: payload_alias_address(&descriptor_bytes),
-        _payload_bytes: host_bytes_if_aliased(payload_bytes, &payloads),
+        _payload_bytes: owned_payload_bytes
+            .map(|payload| host_bytes_if_aliased(payload, &payloads))
+            .flatten(),
         _descriptor_bytes: host_bytes_if_aliased(descriptor_bytes, &descriptors),
         buffers: ExpertSourceBuffers {
             node,
             payloads,
+            payload_offset,
             descriptors,
+            descriptor_records: descriptor_records.to_vec(),
         },
     })
 }
@@ -1998,9 +2186,10 @@ fn expert_source_signature(source: &proxima_tensor::cpu::ExpertSource<'_>) -> u6
     for entry in source.entries() {
         let codec = match entry.block {
             QuantizedBlock::Q2K(_) => 1_u64,
-            QuantizedBlock::Q4K(_) => 2,
-            QuantizedBlock::Q5K(_) => 3,
-            QuantizedBlock::Q6K(_) => 4,
+            QuantizedBlock::Q3K(_) => 2_u64,
+            QuantizedBlock::Q4K(_) => 3_u64,
+            QuantizedBlock::Q5K(_) => 4_u64,
+            QuantizedBlock::Q6K(_) => 5_u64,
             _ => 0,
         };
         mix(codec);
@@ -2074,7 +2263,10 @@ fn reject_non_reducing_expert_staging(
             )
         })?,
     };
-    if source.selected_expert_ids().is_none() && staged_bytes >= original_bytes {
+    if source.selected_expert_ids().is_none()
+        && source.packed_arena().is_none()
+        && staged_bytes >= original_bytes
+    {
         return Err(MetalError::ExpertSourceUnsupported {
             node,
             reason: "transient expert staging must reduce checkpoint-resident bytes",
@@ -2099,7 +2291,18 @@ pub fn execute_plan_with_expert_sources(
     if expert_sources.is_empty() {
         return execute_plan(plan, blocks);
     }
+    #[cfg(feature = "instrument")]
+    let expert_stage_started = std::time::Instant::now();
     let buffers = stage_expert_sources(plan, blocks, expert_sources)?;
+    #[cfg(feature = "instrument")]
+    if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+        eprintln!(
+            "expert_source_stage_ms={} source_nodes={} staged_nodes={}",
+            expert_stage_started.elapsed().as_secs_f64() * 1e3,
+            expert_sources.len(),
+            buffers.len(),
+        );
+    }
     execute_plan_inner(plan, blocks, &buffers)
 }
 
@@ -2136,43 +2339,57 @@ fn stage_expert_sources(
         })?;
         let signature = expert_source_signature(source);
         EXPERT_SOURCE_CACHE.with(|cache| -> Result<(), MetalError> {
-            let mut cache =
-                cache
-                    .try_borrow_mut()
-                    .map_err(|_| MetalError::ExpertSourceUnsupported {
-                        node: *node,
-                        reason: "expert source cache is already borrowed",
-                    })?;
-            let needs_stage = cache
-                .get(node)
-                .is_none_or(|(cached_signature, _)| *cached_signature != signature);
-            if needs_stage {
-                #[cfg(feature = "instrument")]
-                counter!(EXPERT_SOURCE_CACHE_MISSES, 1);
-                let previous = cache.remove(node).map(|(_, staged)| staged);
-                let staged = stage_expert_source_reusing(&device, *node, source, previous)?;
-                cache.insert(*node, (signature, staged));
-            } else {
-                #[cfg(feature = "instrument")]
-                counter!(EXPERT_SOURCE_CACHE_HITS, 1);
-                if std::env::var_os("PROXIMA_DEBUG_EXPERT_SOURCE_CACHE").is_some() {
-                    eprintln!("metal expert source cache hit node={node:?}");
+            let mut cache = cache.try_borrow_mut().map_err(|_| {
+                MetalError::ExpertSourceUnsupported {
+                    node: *node,
+                    reason: "expert source cache is already borrowed",
                 }
+            })?;
+        let needs_stage = cache
+            .get(node)
+            .is_none_or(|(cached_signature, _)| *cached_signature != signature);
+        if needs_stage {
+            #[cfg(feature = "instrument")]
+            counter!(EXPERT_SOURCE_CACHE_MISSES, 1);
+            let previous = cache.remove(node).map(|(_, staged)| staged);
+            let staged = stage_expert_source_reusing(&device, *node, source, previous)?;
+            cache.insert(*node, (signature, staged));
+            if std::env::var_os("PROXIMA_DEBUG_EXPERT_SOURCE_CACHE").is_some() {
+                eprintln!(
+                    "metal expert source cache miss node={node:?} signature={signature} payload_bytes={}",
+                    cache
+                        .get(node)
+                        .map_or(0, |(_, staged)| staged.buffers.payloads.length())
+                );
             }
-            let Some((_, staged)) = cache.get(node) else {
-                return Err(MetalError::ExpertSourceUnsupported {
-                    node: *node,
-                    reason: "expert source cache insertion did not produce a table",
-                });
-            };
-            buffers.insert(
-                *node,
-                ExpertSourceBuffers {
-                    node: *node,
-                    payloads: staged.buffers.payloads.clone(),
-                    descriptors: staged.buffers.descriptors.clone(),
-                },
-            );
+        } else {
+            #[cfg(feature = "instrument")]
+            counter!(EXPERT_SOURCE_CACHE_HITS, 1);
+            if std::env::var_os("PROXIMA_DEBUG_EXPERT_SOURCE_CACHE").is_some() {
+                eprintln!(
+                    "metal expert source cache hit node={node:?} signature={signature} payload_bytes={}",
+                    cache
+                        .get(node)
+                        .map_or(0, |(_, staged)| staged.buffers.payloads.length())
+                );
+            }
+        }
+        let Some((_, staged)) = cache.get(node) else {
+            return Err(MetalError::ExpertSourceUnsupported {
+                node: *node,
+                reason: "expert source cache insertion did not produce a table",
+            });
+        };
+        buffers.insert(
+            *node,
+            ExpertSourceBuffers {
+                node: *node,
+                payloads: staged.buffers.payloads.clone(),
+                payload_offset: staged.buffers.payload_offset,
+                descriptors: staged.buffers.descriptors.clone(),
+                descriptor_records: staged.buffers.descriptor_records.clone(),
+            },
+        );
             Ok(())
         })?;
     }
@@ -2802,6 +3019,13 @@ fn execute_plan_with_placements_inner(
         .iter()
         .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
         .collect();
+    if std::env::var_os("PROXIMA_DEBUG_PLACEMENT_KEYS").is_some() {
+        eprintln!(
+            "metal placement keys inputs={:?} blocks={:?}",
+            input_placed.keys().collect::<Vec<_>>(),
+            prepared.block_nodes,
+        );
+    }
     let output_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = output_placements
         .iter()
         .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
@@ -2824,7 +3048,7 @@ fn execute_plan_with_placements_inner(
     // heap nodes now outlive one call instead of being dropped with it.
     let mut device_buffers = plan.device_buffers.borrow_mut();
     for (node, buffers) in &effective_expert_buffers {
-        device_buffers.insert(*node, (buffers.payloads.clone(), 0));
+        device_buffers.insert(*node, (buffers.payloads.clone(), buffers.payload_offset));
     }
     let mut block_identity = plan.block_identity.borrow_mut();
     if block_identity.len() != prepared.block_nodes.len() {
@@ -3259,7 +3483,36 @@ pub fn execute_plan_named_with_placements(
     input_placements: &[(NodeId, &PlacedBuffer, usize)],
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
 ) -> Result<Evaluated, MetalError> {
-    let blocks = resolve_named_blocks(&plan.program, named)?;
+    let block_nodes = block_node_ids(&plan.program);
+    let placed_inputs: BTreeSet<NodeId> =
+        input_placements.iter().map(|(node, _, _)| *node).collect();
+    let mut placeholders = Vec::new();
+    let mut placeholder_nodes = BTreeMap::new();
+    for node in &block_nodes {
+        if named.iter().any(|(candidate, _)| {
+            *candidate == plan.program[node.0 as usize].name().unwrap_or_default()
+        }) {
+            continue;
+        }
+        if placed_inputs.contains(node) {
+            let placeholder_index = placeholders.len();
+            placeholders.push(vec![0.0_f32; element_count(plan.prepared.shapes.of(*node))]);
+            placeholder_nodes.insert(*node, placeholder_index);
+        }
+    }
+    let mut blocks = Vec::with_capacity(block_nodes.len());
+    for node in &block_nodes {
+        let name = plan.program[node.0 as usize]
+            .name()
+            .ok_or(TensorError::UnnamedInput(*node))?;
+        if let Some(block) = named.iter().find(|(candidate, _)| *candidate == name) {
+            blocks.push(block.1);
+        } else if let Some(index) = placeholder_nodes.get(node) {
+            blocks.push(QuantizedBlock::Float32(placeholders[*index].as_slice()));
+        } else {
+            return Err(TensorError::UnboundInputName(String::from(name)).into());
+        }
+    }
     // no scratch pool for this name-keyed convenience wrapper -- a caller
     // wanting the recycle path calls `execute_plan_with_placements` directly.
     execute_plan_with_placements(
@@ -3286,8 +3539,49 @@ pub fn execute_plan_named_with_placements_and_expert_sources(
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
     expert_sources: &BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
 ) -> Result<Evaluated, MetalError> {
-    let blocks = resolve_named_blocks(&plan.program, named)?;
+    let block_nodes = block_node_ids(&plan.program);
+    let placed_inputs: BTreeSet<NodeId> =
+        input_placements.iter().map(|(node, _, _)| *node).collect();
+    let mut placeholders = Vec::new();
+    let mut placeholder_nodes = BTreeMap::new();
+    for node in &block_nodes {
+        let name = plan.program[node.0 as usize]
+            .name()
+            .ok_or(TensorError::UnnamedInput(*node))?;
+        if named.iter().any(|(candidate, _)| *candidate == name) {
+            continue;
+        }
+        if placed_inputs.contains(node) {
+            let placeholder_index = placeholders.len();
+            placeholders.push(vec![0.0_f32; element_count(plan.prepared.shapes.of(*node))]);
+            placeholder_nodes.insert(*node, placeholder_index);
+        }
+    }
+    let mut blocks = Vec::with_capacity(block_nodes.len());
+    for node in &block_nodes {
+        let name = plan.program[node.0 as usize]
+            .name()
+            .ok_or(TensorError::UnnamedInput(*node))?;
+        if let Some(block) = named.iter().find(|(candidate, _)| *candidate == name) {
+            blocks.push(block.1);
+        } else if let Some(index) = placeholder_nodes.get(node) {
+            blocks.push(QuantizedBlock::Float32(placeholders[*index].as_slice()));
+        } else {
+            return Err(TensorError::UnboundInputName(String::from(name)).into());
+        }
+    }
+    #[cfg(feature = "instrument")]
+    let expert_stage_started = std::time::Instant::now();
     let expert_buffers = stage_expert_sources(plan, &blocks, expert_sources)?;
+    #[cfg(feature = "instrument")]
+    if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
+        eprintln!(
+            "expert_source_stage_ms={} source_nodes={} staged_nodes={}",
+            expert_stage_started.elapsed().as_secs_f64() * 1e3,
+            expert_sources.len(),
+            expert_buffers.len(),
+        );
+    }
     execute_plan_with_placements_inner(
         plan,
         &blocks,
@@ -3514,17 +3808,20 @@ fn check_op_output_finite(
     program: &[Op],
     node: NodeId,
     kind: &str,
-) -> Result<bool, MetalError> {
+) -> Result<Option<(usize, Vec<u64>, alloc::vec::Vec<f32>)>, MetalError> {
     let Some((buffer, offset)) = device_buffers.get(&node) else {
-        return Ok(false);
+        return Ok(None);
     };
     let shape = prepared.shapes.of(node).to_vec();
     let dtype = gpu_dtype(program, &prepared.index_nodes, node);
     let data = read_back(buffer, *offset, element_count(&shape), node, dtype)?;
     let nan_count = data.iter().filter(|value| value.is_nan()).count();
     if nan_count == 0 {
-        return Ok(false);
+        return Ok(None);
     }
+    let Some(first_index) = data.iter().position(|value| value.is_nan()) else {
+        return Ok(None);
+    };
     let first_values: alloc::vec::Vec<f32> = data.iter().copied().take(8).collect();
     let kind_owned = kind.to_string();
     debug!(
@@ -3536,7 +3833,7 @@ fn check_op_output_finite(
         total_count = data.len() as u64,
         "nan_check: first nan op output found"
     );
-    Ok(true)
+    Ok(Some((first_index, shape, data)))
 }
 
 /// `PROXIMA_METAL_COMPARE_CPU`-gated per-node parity probe, called from
@@ -3596,6 +3893,272 @@ fn compare_op_output_to_cpu(
     Ok(Some(max_rel_diff))
 }
 
+#[cfg(feature = "instrument")]
+const CPU_BOUND_COMPARE_CAP_BYTES: usize = 64 * 1024 * 1024;
+
+#[cfg(feature = "instrument")]
+fn validate_selected_expert_routes(
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    prepared: &Prepared,
+    program: &[Op],
+    bound: &BoundOp,
+    expert_buffers: Option<&ExpertSourceBuffers>,
+) -> Result<(), MetalError> {
+    let Some(selected) = std::env::var("PROXIMA_METAL_COMPARE_BOUND_NODE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .map(NodeId)
+    else {
+        return Ok(());
+    };
+    if selected != bound.node {
+        return Ok(());
+    }
+    let Some(expert_buffers) = expert_buffers else {
+        eprintln!("metal_expert_routes_missing_buffers node={:?}", bound.node);
+        return Ok(());
+    };
+    eprintln!(
+        "metal_expert_routes_begin node={:?} source_node={:?}",
+        bound.node, expert_buffers.node
+    );
+    for (source, _, lookup) in bound.all_read_sources() {
+        if *source != expert_buffers.node {
+            continue;
+        }
+        let Some(lookup) = lookup else {
+            continue;
+        };
+        let Some((lookup_buffer, lookup_offset)) = device_buffers.get(&lookup.indices) else {
+            return Err(MetalError::UnresolvedHazardOperand {
+                node: lookup.indices,
+            });
+        };
+        let lookup_values = read_back(
+            lookup_buffer,
+            *lookup_offset,
+            element_count(prepared.shapes.of(lookup.indices)),
+            lookup.indices,
+            gpu_dtype(program, &prepared.index_nodes, lookup.indices),
+        )?;
+        eprintln!(
+            "metal_expert_lookup node={:?} values={:?}",
+            lookup.indices, lookup_values
+        );
+        let mut seen = Vec::new();
+        for value in lookup_values {
+            let expert = value as u32;
+            if value < 0.0 || value.fract() != 0.0 {
+                return Err(MetalError::ExpertSourceUnsupported {
+                    node: bound.node,
+                    reason: "route index was not a non-negative integer",
+                });
+            }
+            let Some(descriptor) = expert_buffers.descriptor_records.get(expert as usize) else {
+                return Err(MetalError::ExpertSourceUnsupported {
+                    node: bound.node,
+                    reason: "route index exceeded the descriptor table",
+                });
+            };
+            if descriptor.expert_index != expert
+                || descriptor.byte_length == 0
+                || descriptor.out_dim == 0
+                || descriptor.in_dim == 0
+            {
+                eprintln!(
+                    "metal_expert_route_invalid node={:?} expert={} descriptor={descriptor:?}",
+                    bound.node, expert
+                );
+                return Err(MetalError::ExpertSourceUnsupported {
+                    node: bound.node,
+                    reason: "route selected an invalid expert descriptor",
+                });
+            }
+            let descriptor_summary = (
+                expert,
+                descriptor.codec,
+                descriptor.byte_offset,
+                descriptor.byte_length,
+            );
+            if !seen.contains(&descriptor_summary) {
+                seen.push(descriptor_summary);
+            }
+        }
+        eprintln!(
+            "metal_expert_routes node={:?} lookup={:?} routes={seen:?}",
+            bound.node, lookup.indices
+        );
+    }
+    Ok(())
+}
+
+/// Captures only the already-live dense operands of the selected bound op.
+/// The snapshot happens before that op is encoded, so the CPU interpreter
+/// receives the same payload the Metal kernel is about to read without
+/// retaining or recursively evaluating any other graph node.
+#[cfg(feature = "instrument")]
+fn evaluate_selected_bound_cpu(
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    prepared: &Prepared,
+    packed_operands: &PackedOperands,
+    program: &[Op],
+    bound: &BoundOp,
+) -> Result<Option<alloc::vec::Vec<f32>>, MetalError> {
+    let selected = std::env::var("PROXIMA_METAL_COMPARE_BOUND_NODE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .map(NodeId);
+    if selected != Some(bound.node) {
+        return Ok(None);
+    }
+
+    for (source, _, lookup) in bound.all_read_sources() {
+        if lookup.is_some() {
+            return Err(TensorError::BoundF32GatherOperand {
+                node: bound.node,
+                operand: *source,
+            }
+            .into());
+        }
+        if packed_operands.contains_key(source) {
+            return Err(TensorError::BoundF32PackedOperand {
+                node: bound.node,
+                operand: *source,
+            }
+            .into());
+        }
+    }
+
+    let sources: BTreeSet<NodeId> = bound
+        .all_read_sources()
+        .map(|(source, _, _)| *source)
+        .collect();
+    let output_elements = element_count(prepared.shapes.of(bound.node));
+    let snapshot_elements = sources.iter().try_fold(output_elements, |total, source| {
+        total.checked_add(element_count(prepared.shapes.of(*source)))
+    });
+    let snapshot_bytes = snapshot_elements
+        .and_then(|elements| elements.checked_mul(core::mem::size_of::<f32>()))
+        .unwrap_or(usize::MAX);
+    if snapshot_bytes > CPU_BOUND_COMPARE_CAP_BYTES {
+        return Err(MetalError::CpuBoundComparisonOverCap {
+            node: bound.node,
+            bytes: snapshot_bytes,
+            cap_bytes: CPU_BOUND_COMPARE_CAP_BYTES,
+        });
+    }
+
+    let mut owned_buffers: alloc::vec::Vec<Option<alloc::vec::Vec<f32>>> =
+        alloc::vec![None; program.len()];
+    for source in sources {
+        let (buffer, offset) = device_buffers
+            .get(&source)
+            .ok_or(MetalError::UnresolvedHazardOperand { node: source })?;
+        let shape = prepared.shapes.of(source);
+        let dtype = gpu_dtype(program, &prepared.index_nodes, source);
+        owned_buffers[source.0 as usize] = Some(read_back(
+            buffer,
+            *offset,
+            element_count(shape),
+            source,
+            dtype,
+        )?);
+    }
+    let borrowed_buffers: alloc::vec::Vec<Option<&[f32]>> = owned_buffers
+        .iter()
+        .map(|buffer| buffer.as_deref())
+        .collect();
+    let mut output = alloc::vec![0.0; output_elements];
+    let packed_nodes: alloc::vec::Vec<NodeId> = packed_operands.keys().copied().collect();
+    proxima_tensor::evaluate_bound_f32_into(bound, &borrowed_buffers, &packed_nodes, &mut output)?;
+    Ok(Some(output))
+}
+
+#[cfg(feature = "instrument")]
+fn compare_bound_f32(
+    node: NodeId,
+    metal_values: &[f32],
+    cpu_values: &[f32],
+) -> Result<Option<(usize, f32, f32, f32, f32)>, MetalError> {
+    if metal_values.len() != cpu_values.len() {
+        return Err(MetalError::CpuBoundComparisonLengthMismatch {
+            node,
+            metal_len: metal_values.len(),
+            cpu_len: cpu_values.len(),
+        });
+    }
+    let mut max_relative = 0.0_f32;
+    let mut first_mismatch = None;
+    for (element, (metal_value, cpu_value)) in metal_values.iter().zip(cpu_values).enumerate() {
+        let finite = metal_value.is_finite() && cpu_value.is_finite();
+        let absolute = (metal_value - cpu_value).abs();
+        let relative = if finite {
+            absolute / cpu_value.abs().max(1e-6)
+        } else {
+            f32::INFINITY
+        };
+        max_relative = max_relative.max(relative);
+        if (!finite || relative > 1e-2) && first_mismatch.is_none() {
+            first_mismatch = Some((element, *metal_value, *cpu_value, relative));
+        }
+    }
+    Ok(first_mismatch.map(|(element, metal, cpu, relative)| {
+        (element, metal, cpu, relative, max_relative.max(relative))
+    }))
+}
+
+#[cfg(feature = "instrument")]
+fn report_bound_operands(
+    bound: &BoundOp,
+    prepared: &Prepared,
+    packed_operands: &PackedOperands,
+    program: &[Op],
+    expert_buffers: Option<&ExpertSourceBuffers>,
+    device_buffers: Option<&BTreeMap<NodeId, DeviceBuffer>>,
+    sample_element: Option<usize>,
+) {
+    let sample_coordinate = sample_element.map(|mut element| {
+        let mut coordinate = alloc::vec![0_u64; prepared.shapes.of(bound.node).len()];
+        for axis in (0..coordinate.len()).rev() {
+            let extent = prepared.shapes.of(bound.node)[axis] as usize;
+            coordinate[axis] = (element % extent) as u64;
+            element /= extent;
+        }
+        coordinate
+    });
+    for (operand_index, (source, layout, lookup)) in bound.all_read_sources().enumerate() {
+        eprintln!(
+            "metal_bound_operand node={:?} operand={} source={source:?} source_name={:?} source_shape={:?} layout={layout:?} lookup={lookup:?} packed_codec={:?} expert_source={}",
+            bound.node,
+            operand_index,
+            program[source.0 as usize].name(),
+            prepared.shapes.of(*source),
+            packed_operands.get(source),
+            expert_buffers.is_some_and(|buffers| buffers.node == *source),
+        );
+        if let (Some(device_buffers), Some(coordinate)) =
+            (device_buffers, sample_coordinate.as_deref())
+            && let Some((buffer, offset)) = device_buffers.get(source)
+            && let Ok(values) = read_back(
+                buffer,
+                *offset,
+                element_count(prepared.shapes.of(*source)),
+                *source,
+                gpu_dtype(program, &prepared.index_nodes, *source),
+            )
+        {
+            let source_offset = layout.offset_of(coordinate);
+            let source_value = usize::try_from(source_offset)
+                .ok()
+                .and_then(|index| values.get(index).copied());
+            eprintln!(
+                "metal_bound_operand_sample node={:?} operand={} coordinate={coordinate:?} source_offset={source_offset} value={source_value:?}",
+                bound.node, operand_index
+            );
+        }
+    }
+}
+
 /// Shared per-op timing dispatch: [`execute_plan_op_timed`] and
 /// [`execute_plan_with_placements_op_timed`] both need to encode ONE
 /// `BoundOp` on its own command buffer, commit, wait, and read back
@@ -3629,6 +4192,9 @@ fn execute_op_timed(
     expert_buffers: Option<&ExpertSourceBuffers>,
     cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
 ) -> Result<OpGpuTiming, MetalError> {
+    validate_selected_expert_routes(device_buffers, prepared, program, bound, expert_buffers)?;
+    let bounded_cpu =
+        evaluate_selected_bound_cpu(device_buffers, prepared, packed_operands, program, bound)?;
     // this operand's own TENSOR bytes, not the shared buffer's `length()` --
     // see `operand_tensor_bytes`'s own doc: a checkpoint-mapping-offset bind
     // shares ONE buffer across every packed weight, so `buffer.length()`
@@ -3704,12 +4270,70 @@ fn execute_op_timed(
         check_gather_fault(bound, &fault_buffer, gathers)?;
     }
     if std::env::var_os("PROXIMA_METAL_NAN_CHECK").is_some()
-        && check_op_output_finite(device_buffers, prepared, program, bound.node, kind)?
+        && let Some((first_index, shape, metal_values)) =
+            check_op_output_finite(device_buffers, prepared, program, bound.node, kind)?
     {
+        let cpu_value = bounded_cpu
+            .as_ref()
+            .or_else(|| cpu_reference.and_then(|reference| reference.get(&bound.node)))
+            .and_then(|values| values.get(first_index))
+            .copied();
+        eprintln!(
+            "metal_nan_bound node={:?} name={:?} kind={kind} element={first_index} metal={} cpu={cpu_value:?} shape={shape:?} bound={bound:?}",
+            bound.node,
+            program[bound.node.0 as usize].name(),
+            metal_values[first_index],
+        );
+        report_bound_operands(
+            bound,
+            prepared,
+            packed_operands,
+            program,
+            expert_buffers,
+            Some(device_buffers),
+            Some(first_index),
+        );
         return Err(MetalError::NonFiniteOpOutput {
             node: bound.node,
             kind: kind.to_string(),
         });
+    }
+    if let Some(cpu_values) = bounded_cpu {
+        let Some((buffer, offset)) = device_buffers.get(&bound.node) else {
+            return Err(MetalError::UnresolvedHazardOperand { node: bound.node });
+        };
+        let shape = prepared.shapes.of(bound.node).to_vec();
+        let dtype = gpu_dtype(program, &prepared.index_nodes, bound.node);
+        let metal_values = read_back(buffer, *offset, element_count(&shape), bound.node, dtype)?;
+        let first_mismatch = compare_bound_f32(bound.node, &metal_values, &cpu_values)?;
+        if let Some((element, metal_value, cpu_value, relative, max_rel_diff)) = first_mismatch {
+            let absolute = (metal_value - cpu_value).abs();
+            eprintln!(
+                "metal_bound_compare node={:?} name={:?} kind={kind} element={element} metal={metal_value} cpu={cpu_value} abs={absolute} rel={relative} max_rel={max_rel_diff} shape={shape:?} bound={bound:?}",
+                bound.node,
+                program[bound.node.0 as usize].name(),
+            );
+            report_bound_operands(
+                bound,
+                prepared,
+                packed_operands,
+                program,
+                expert_buffers,
+                Some(device_buffers),
+                Some(element),
+            );
+            return Err(MetalError::CpuMetalDivergence {
+                node: bound.node,
+                kind: kind.to_string(),
+                max_rel_diff,
+            });
+        }
+        eprintln!(
+            "metal_bound_compare node={:?} name={:?} kind={kind} result=within_tolerance elements={} shape={shape:?}",
+            bound.node,
+            program[bound.node.0 as usize].name(),
+            metal_values.len(),
+        );
     }
     if let Some(cpu_reference) = cpu_reference
         && let Some(max_rel_diff) = compare_op_output_to_cpu(
@@ -3810,6 +4434,23 @@ fn execute_plan_op_timed_inner(
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
+    let selected_bound = std::env::var("PROXIMA_METAL_COMPARE_BOUND_NODE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .map(NodeId);
+    if let Some(node) = selected_bound
+        && !prepared.resolved.iter().any(|bound| bound.node == node)
+    {
+        eprintln!(
+            "metal_bound_compare_missing node={node:?} available={:?}",
+            prepared
+                .resolved
+                .iter()
+                .map(|bound| (bound.node, bound.kind.name()))
+                .collect::<Vec<_>>()
+        );
+        return Err(MetalError::CpuBoundComparisonNodeNotFound { node });
+    }
 
     let mut effective_expert_buffers = expert_buffers.clone();
     for (source_node, buffers) in expert_buffers {
@@ -3835,7 +4476,7 @@ fn execute_plan_op_timed_inner(
         .zip(plan.block_dtypes.iter())
     {
         if let Some(buffers) = effective_expert_buffers.get(node) {
-            device_buffers.insert(*node, (buffers.payloads.clone(), 0));
+            device_buffers.insert(*node, (buffers.payloads.clone(), buffers.payload_offset));
             continue;
         }
         let resident_name = resident_name(plan, *node);
@@ -6509,6 +7150,14 @@ fn pipeline_for(
     #[cfg(feature = "instrument")]
     let compile_started = read_ticks();
     let kernel = emit(bound, packed_operands, numeric_policy)?;
+    if std::env::var_os("PROXIMA_DEBUG_METAL_SOURCE").is_some()
+        && std::env::var("PROXIMA_METAL_COMPARE_BOUND_NODE").ok() == Some(bound.node.0.to_string())
+    {
+        eprintln!(
+            "metal_bound_source node={:?}\n{}",
+            bound.node, kernel.source
+        );
+    }
     let pipeline = compile_pipeline(device, &kernel, math_mode)?;
     #[cfg(feature = "instrument")]
     {
@@ -6556,6 +7205,7 @@ fn allocate_buffer(
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
     let byte_length = element_count.max(1) * dtype.size_bytes();
     counter!(OUTPUT_BUFFER_ALLOCATIONS, 1);
+    counter!(OUTPUT_BUFFER_ALLOCATED_BYTES, byte_length as u64);
     device
         .newBufferWithLength_options(byte_length, MTLResourceOptions::StorageModeShared)
         .ok_or_else(|| MetalError::CompileFailed {
@@ -6588,6 +7238,7 @@ fn allocate_buffer(
         return Ok(buffer);
     }
     counter!(OUTPUT_BUFFER_ALLOCATIONS, 1);
+    counter!(OUTPUT_BUFFER_ALLOCATED_BYTES, bucket as u64);
     device
         .newBufferWithLength_options(bucket, MTLResourceOptions::StorageModeShared)
         .ok_or_else(|| MetalError::CompileFailed {
@@ -6855,6 +7506,8 @@ pub struct MetalStageTotals {
     /// only on the step that builds a plan (a plan-cache miss) and 0 on
     /// every following plan-cache-hit step with it on.
     pub output_buffer_allocations: u64,
+    /// Device bytes requested by those fresh output-buffer allocations.
+    pub output_buffer_allocated_bytes: u64,
     /// [`PLAN_UNIFORM_WRITES`]'s own per-step delta -- `op_count` on the
     /// first execution that initializes a stable plan's uniforms and zero
     /// on every warm execution of that plan.
@@ -6908,6 +7561,7 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         resident_reuses: RESIDENT_BUFFER_REUSES.snapshot_and_reset(),
         mapping_offset_uploads: MAPPING_OFFSET_UPLOADS.snapshot_and_reset(),
         output_buffer_allocations: OUTPUT_BUFFER_ALLOCATIONS.snapshot_and_reset(),
+        output_buffer_allocated_bytes: OUTPUT_BUFFER_ALLOCATED_BYTES.snapshot_and_reset(),
         plan_uniform_writes: PLAN_UNIFORM_WRITES.snapshot_and_reset(),
         barriers_emitted: BARRIERS_EMITTED.snapshot_and_reset(),
         expert_source_cache_hits: EXPERT_SOURCE_CACHE_HITS.snapshot_and_reset(),
@@ -7059,6 +7713,9 @@ fn upload_block_as_float(
     if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
         return result;
     }
+    if let Some(result) = expert_mapping_offset(device, pointer, byte_length) {
+        return result;
+    }
     if let Some(name) = resident_name {
         return upload_resident_copy(device, name, pointer, byte_length).map(|buffer| (buffer, 0));
     }
@@ -7115,6 +7772,9 @@ fn upload_packed_bytes(
     if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
         return result;
     }
+    if let Some(result) = expert_mapping_offset(device, pointer, byte_length) {
+        return result;
+    }
     if let Some(name) = resident_name {
         return upload_resident_copy(device, name, pointer, byte_length).map(|buffer| (buffer, 0));
     }
@@ -7130,6 +7790,63 @@ thread_local! {
     /// range falls entirely inside this span never needs its own device
     /// buffer: see [`checkpoint_mapping_offset`].
     static CHECKPOINT_MAPPING: RefCell<Option<(usize, usize)>> = const { RefCell::new(None) };
+    static EXPERT_MAPPING: RefCell<Option<(usize, usize)>> = const { RefCell::new(None) };
+}
+
+pub fn register_expert_mapping(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let identity = (bytes.as_ptr() as usize, bytes.len());
+    let changed = EXPERT_MAPPING.with(|mapping| {
+        let mut mapping = mapping.borrow_mut();
+        if *mapping == Some(identity) {
+            false
+        } else {
+            *mapping = Some(identity);
+            true
+        }
+    });
+    if changed {
+        EXPERT_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
+        NOCOPY_BUFFERS.with(|cache| {
+            cache.borrow_mut().remove(EXPERT_MAPPING_NOCOPY_NAME);
+        });
+    }
+}
+
+pub fn unregister_expert_mapping(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let identity = (bytes.as_ptr() as usize, bytes.len());
+    let matched = EXPERT_MAPPING.with(|mapping| {
+        let mut mapping = mapping.borrow_mut();
+        if *mapping == Some(identity) {
+            *mapping = None;
+            true
+        } else {
+            false
+        }
+    });
+    if matched {
+        EXPERT_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
+        NOCOPY_BUFFERS.with(|cache| {
+            cache.borrow_mut().remove(EXPERT_MAPPING_NOCOPY_NAME);
+        });
+    }
+}
+
+fn expert_mapping_contains(bytes: &[u8]) -> bool {
+    let address = bytes.as_ptr() as usize;
+    EXPERT_MAPPING.with(|mapping| {
+        mapping.borrow().is_some_and(|(base, mapping_length)| {
+            address >= base
+                && address
+                    .checked_add(bytes.len())
+                    .is_some_and(|end| end <= base.saturating_add(mapping_length))
+        })
+    })
 }
 
 /// Registers the whole-checkpoint memory mapping backing every packed
@@ -7352,6 +8069,32 @@ fn checkpoint_mapping_offset(
     )
 }
 
+fn expert_mapping_offset(
+    device: &ProtocolObject<dyn MTLDevice>,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Option<Result<(MetalBuffer, usize), MetalError>> {
+    let (base, mapping_length) = EXPERT_MAPPING.with(|mapping| *mapping.borrow())?;
+    let address = pointer as usize;
+    let end = address.checked_add(byte_length)?;
+    let mapping_end = base.checked_add(mapping_length)?;
+    if address < base || end > mapping_end {
+        return None;
+    }
+    let rounded_length = mapping_length.div_ceil(page_size()) * page_size();
+    counter!(MAPPING_OFFSET_UPLOADS, 1);
+    counter!(BLOCK_OFFSET_BOUND_BYTES, byte_length as u64);
+    Some(
+        upload_block_no_copy(
+            device,
+            EXPERT_MAPPING_NOCOPY_NAME,
+            base as *const c_void,
+            rounded_length,
+        )
+        .map(|buffer| (buffer, address - base)),
+    )
+}
+
 /// The single [`NOCOPY_BUFFERS`] identity [`checkpoint_mapping_offset`]
 /// caches under -- sound because [`CHECKPOINT_MAPPING`] itself is a single
 /// thread-local slot (never more than one registration live at a time), so
@@ -7361,6 +8104,7 @@ fn checkpoint_mapping_offset(
 /// a re-registration is a deliberate cache invalidation, never a
 /// [`MetalError::ResidentNameRebound`].
 const CHECKPOINT_MAPPING_NOCOPY_NAME: &str = "__checkpoint_mapping__";
+const EXPERT_MAPPING_NOCOPY_NAME: &str = "__expert_mapping__";
 
 /// Test-only reset -- the default std test harness reuses threads across
 /// tests in the same binary (see [`reset_nocopy_cache_for_test`]'s own
@@ -7369,8 +8113,10 @@ const CHECKPOINT_MAPPING_NOCOPY_NAME: &str = "__checkpoint_mapping__";
 #[cfg(test)]
 fn reset_checkpoint_mapping_for_test() {
     CHECKPOINT_MAPPING.with(|mapping| *mapping.borrow_mut() = None);
+    EXPERT_MAPPING.with(|mapping| *mapping.borrow_mut() = None);
     NOCOPY_BUFFERS.with(|cache| {
         cache.borrow_mut().remove(CHECKPOINT_MAPPING_NOCOPY_NAME);
+        cache.borrow_mut().remove(EXPERT_MAPPING_NOCOPY_NAME);
     });
 }
 
@@ -7380,8 +8126,10 @@ mod checkpoint_mapping_release_tests {
     use proxima_tensor::AlignedBuffer;
 
     use super::{
-        checkpoint_mapping_offset, device_and_queue, page_size, register_checkpoint_mapping,
-        reset_checkpoint_mapping_for_test, unregister_checkpoint_mapping,
+        checkpoint_mapping_offset, device_and_queue, expert_mapping_offset,
+        mapping_buffer_allocated_bytes, page_size, register_checkpoint_mapping,
+        register_expert_mapping, reset_checkpoint_mapping_for_test, unregister_checkpoint_mapping,
+        unregister_expert_mapping,
     };
 
     /// The exact drop-ordering hazard `LoadedModel::drop` is written
@@ -7430,6 +8178,35 @@ mod checkpoint_mapping_release_tests {
             checkpoint_mapping_offset(&device, model_b_bytes.as_ptr().cast(), model_b_bytes.len())
                 .is_none(),
             "releasing the CURRENTLY registered identity must actually clear it"
+        );
+    }
+
+    #[test]
+    fn expert_mapping_resolves_a_misaligned_arena_slice_and_unregisters() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_checkpoint_mapping_for_test();
+
+        let page = page_size();
+        let mapping = AlignedBuffer::new(page / core::mem::size_of::<f32>(), page)
+            .expect("page-aligned fixture for an expert sidecar mapping");
+        let mapping_bytes =
+            unsafe { core::slice::from_raw_parts(mapping.as_ptr().cast::<u8>(), page) };
+        let arena = &mapping_bytes[17..101];
+
+        register_expert_mapping(mapping_bytes);
+        let (_buffer, offset) = expert_mapping_offset(&device, arena.as_ptr().cast(), arena.len())
+            .expect("the arena lies inside the registered expert mapping")
+            .expect("the whole expert mapping binds without copying");
+        assert_eq!(offset, 17);
+        assert_eq!(mapping_buffer_allocated_bytes(), (0, page as u64));
+
+        unregister_expert_mapping(mapping_bytes);
+        assert_eq!(mapping_buffer_allocated_bytes(), (0, 0));
+        assert!(
+            expert_mapping_offset(&device, arena.as_ptr().cast(), arena.len()).is_none(),
+            "unregistering the current expert mapping removes the offset alias"
         );
     }
 }
@@ -7574,6 +8351,25 @@ fn cross_plan_resident_reuse(
 #[must_use]
 pub fn nocopy_cache_len() -> usize {
     NOCOPY_BUFFERS.with(|cache| cache.borrow().len())
+}
+
+/// metal-visible byte lengths of the whole-file checkpoint and expert mmap
+/// wrappers currently retained by the no-copy cache. these are the driver's
+/// actual `MTLBuffer::length()` values, not tensor-shape estimates.
+#[must_use]
+pub fn mapping_buffer_allocated_bytes() -> (u64, u64) {
+    NOCOPY_BUFFERS.with(|cache| {
+        let cache = cache.borrow();
+        let buffer_length = |name: &str| {
+            cache
+                .get(name)
+                .map_or(0, |(_, _, buffer)| buffer.length() as u64)
+        };
+        (
+            buffer_length(CHECKPOINT_MAPPING_NOCOPY_NAME),
+            buffer_length(EXPERT_MAPPING_NOCOPY_NAME),
+        )
+    })
 }
 
 /// Counts the no-copy wrappers this thread reused instead of recreating —
@@ -8446,6 +9242,8 @@ pub static UNIFORM_BUFFER_REUSES: Counter = Counter::new("omega.metal.uniforms.r
 /// builds the arena) and 0 on every following plan-cache-hit step with it on.
 pub static OUTPUT_BUFFER_ALLOCATIONS: Counter =
     Counter::new("omega.metal.output_buffer.allocations");
+pub static OUTPUT_BUFFER_ALLOCATED_BYTES: Counter =
+    Counter::new("omega.metal.output_buffer.allocated_bytes");
 
 /// Every initialization write into a plan-owned uniform buffer. These bytes
 /// are immutable for the plan's life; a warm stable execution therefore
@@ -8599,21 +9397,20 @@ fn bind_buffers(
     uniforms: &Retained<ProtocolObject<dyn MTLBuffer>>,
     fault: Option<&Retained<ProtocolObject<dyn MTLBuffer>>>,
     expert_source_node: Option<NodeId>,
-    expert_payloads: Option<&MetalBuffer>,
+    expert_payloads: Option<(&MetalBuffer, usize)>,
     expert_descriptors: Option<&MetalBuffer>,
 ) -> Result<(), MetalError> {
     let (output_buffer, output_offset) = output;
     for (index, binding) in bindings.iter().enumerate() {
         let (buffer, offset) = match binding {
-            Binding::Input(node) if expert_source_node.is_some_and(|source| source == *node) => (
+            Binding::Input(node) if expert_source_node.is_some_and(|source| source == *node) => {
                 expert_payloads
-                    .cloned()
+                    .map(|(buffer, offset)| (buffer.clone(), offset))
                     .ok_or_else(|| MetalError::CompileFailed {
                         log: "kernel replaces an expert input but no payload buffer was supplied"
                             .to_string(),
-                    })?,
-                0,
-            ),
+                    })?
+            }
             Binding::Input(node) | Binding::Indices(node) => {
                 if std::env::var_os("PROXIMA_DEBUG_SEGMENT_HOST").is_some()
                     && !device_buffers.contains_key(node)
@@ -8622,14 +9419,11 @@ fn bind_buffers(
                 }
                 buffer_for(device_buffers, *node)?
             }
-            Binding::ExpertPayloads(_) => (
-                expert_payloads
-                    .cloned()
-                    .ok_or_else(|| MetalError::CompileFailed {
-                        log: "kernel binds expert payloads but none were supplied".to_string(),
-                    })?,
-                0,
-            ),
+            Binding::ExpertPayloads(_) => expert_payloads
+                .map(|(buffer, offset)| (buffer.clone(), offset))
+                .ok_or_else(|| MetalError::CompileFailed {
+                    log: "kernel binds expert payloads but none were supplied".to_string(),
+                })?,
             Binding::ExpertDescriptors(_) => (
                 expert_descriptors
                     .cloned()
@@ -9301,19 +10095,51 @@ fn encode_op(
     } else if let Some(source_node) = expert_source_node {
         let mut cache_key = kernel_cache_key(bound, packed_operands, numeric_policy)?;
         cache_key.push(math_mode.cache_token());
-        cache_key.push_str("_mixed_expert");
+        let uniform_codec = expert_buffers.and_then(|buffers| {
+            let mut codecs = buffers
+                .descriptor_records
+                .iter()
+                .filter(|descriptor| descriptor.byte_length != 0)
+                .map(|descriptor| descriptor.codec);
+            let first = codecs.next()?;
+            (packed_operands.get(&source_node) == Some(&first)
+                && codecs.all(|codec| codec == first))
+            .then_some(first)
+        });
+        if let Some(codec) = uniform_codec {
+            cache_key.push_str("_uniform_expert_");
+            cache_key.push_str(codec.cache_token());
+            if std::env::var_os("PROXIMA_DEBUG_EXPERT_EMIT").is_some() {
+                eprintln!("expert lowering mode=uniform codec={codec:?} node={source_node:?}");
+            }
+        } else {
+            cache_key.push_str("_mixed_expert");
+            if std::env::var_os("PROXIMA_DEBUG_EXPERT_EMIT").is_some() {
+                eprintln!("expert lowering mode=mixed node={source_node:?}");
+            }
+        }
         let (binding_identity, _) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
         cache_key.push_str(&format!("_{binding_identity:?}"));
         let kernel = MIXED_KERNEL_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());
         let kernel = match kernel {
             Some(kernel) => kernel,
             None => {
-                let kernel = crate::msl::emit_with_expert_sources(
-                    bound,
-                    packed_operands,
-                    numeric_policy,
-                    source_node,
-                )?;
+                let kernel = if let Some(codec) = uniform_codec {
+                    crate::msl::emit_with_uniform_expert_source(
+                        bound,
+                        packed_operands,
+                        numeric_policy,
+                        source_node,
+                        codec,
+                    )?
+                } else {
+                    crate::msl::emit_with_expert_sources(
+                        bound,
+                        packed_operands,
+                        numeric_policy,
+                        source_node,
+                    )?
+                };
                 MIXED_KERNEL_CACHE.with(|cache| {
                     cache.borrow_mut().insert(cache_key.clone(), kernel.clone());
                 });
@@ -9444,7 +10270,7 @@ fn encode_op(
         &uniforms,
         fault.as_ref(),
         expert_source_node,
-        expert_buffers.map(|buffers| &buffers.payloads),
+        expert_buffers.map(|buffers| (&buffers.payloads, buffers.payload_offset)),
         expert_buffers.map(|buffers| &buffers.descriptors),
     ) {
         debug!(
@@ -11367,9 +12193,10 @@ mod expert_payload_descriptor_tests {
     use super::{
         ExpertPayloadDescriptor, MetalError, PackedCodec, expert_payload_descriptors,
         ordinary_block_uploads, pack_expert_payload_descriptors,
-        reject_non_reducing_expert_staging, selected_expert_payloads,
+        reject_non_reducing_expert_staging, selected_expert_arena_descriptors,
+        selected_expert_payloads,
     };
-    use proxima_tensor::cpu::{ExpertEntry, ExpertSource, QuantizedBlock};
+    use proxima_tensor::cpu::{ExpertEntry, ExpertPayloadSpan, ExpertSource, QuantizedBlock};
     use proxima_tensor::{DType, NodeId};
 
     #[test]
@@ -11516,6 +12343,52 @@ mod expert_payload_descriptor_tests {
     }
 
     #[test]
+    fn all_expert_arena_descriptors_keep_mmap_relative_offsets() {
+        let arena = [0_u8; 256];
+        let entries = [
+            ExpertEntry {
+                block: QuantizedBlock::Q2K(&arena[7..91]),
+                out_dim: 256,
+                in_dim: 256,
+                epoch: 3,
+            },
+            ExpertEntry {
+                block: QuantizedBlock::Q2K(&arena[139..223]),
+                out_dim: 256,
+                in_dim: 256,
+                epoch: 4,
+            },
+        ];
+        let spans = [
+            Some(ExpertPayloadSpan {
+                offset: 7,
+                length: 84,
+            }),
+            Some(ExpertPayloadSpan {
+                offset: 139,
+                length: 84,
+            }),
+        ];
+        let source = ExpertSource::with_all_expert_arena(&entries, &arena, &spans)
+            .expect("the dense packed arena validates");
+
+        let descriptors = selected_expert_arena_descriptors(
+            NodeId(13),
+            &source,
+            source.packed_arena().expect("the source carries its arena"),
+        )
+        .expect("all expert spans lower without a selected route list");
+
+        assert_eq!(descriptors.len(), 2);
+        assert_eq!(descriptors[0].expert_index, 0);
+        assert_eq!(descriptors[0].byte_offset, 7);
+        assert_eq!(descriptors[0].byte_length, 84);
+        assert_eq!(descriptors[1].expert_index, 1);
+        assert_eq!(descriptors[1].byte_offset, 139);
+        assert_eq!(descriptors[1].byte_length, 84);
+    }
+
+    #[test]
     fn selected_hobbit_preserves_sparse_original_expert_indices() {
         let first = [1_u8; 144];
         let second = [2_u8; 144];
@@ -11554,8 +12427,8 @@ mod expert_payload_descriptor_tests {
     }
 
     #[test]
-    fn mixed_hobbit_entries_reject_codecs_without_a_runtime_decoder() {
-        let q3_bytes = [0_u8; 1];
+    fn mixed_hobbit_entries_accept_q3k_runtime_decoder() {
+        let q3_bytes = [0_u8; 110];
         let entries = [ExpertEntry {
             block: QuantizedBlock::Q3K(&q3_bytes),
             out_dim: 256,
@@ -11564,15 +12437,13 @@ mod expert_payload_descriptor_tests {
         }];
         let source = ExpertSource::new(&entries);
 
-        let error = expert_payload_descriptors(NodeId(9), &source)
-            .expect_err("Q3_K has no mixed-expert MSL decoder");
-        assert!(matches!(
-            error,
-            MetalError::ExpertSourceUnsupported {
-                node: NodeId(9),
-                reason: "mixed expert lowering only has Q2_K, Q4_K, and Q6_K decoders",
-            }
-        ));
+        let descriptors = expert_payload_descriptors(NodeId(9), &source)
+            .expect("Q3_K has a mixed-expert MSL decoder");
+        assert_eq!(descriptors[0].codec, PackedCodec::Q3K);
+        assert_eq!(descriptors[0].byte_length, q3_bytes.len());
+        let packed = pack_expert_payload_descriptors(NodeId(9), &descriptors)
+            .expect("Q3_K descriptor fits the Metal ABI");
+        assert_eq!(&packed[4..8], &4u32.to_ne_bytes());
     }
 
     #[test]
