@@ -63,8 +63,14 @@ impl From<DriverError> for CudaDriverError {
 pub struct CudaDriver {
     context: Arc<CudaContext>,
     stream: Arc<CudaStream>,
-    modules: Arc<std::sync::Mutex<BTreeMap<String, Arc<CudaModule>>>>,
+    modules: Arc<std::sync::Mutex<BTreeMap<String, CachedCudaModule>>>,
     kernel_compilations: Arc<AtomicU64>,
+}
+
+#[derive(Debug)]
+struct CachedCudaModule {
+    source: String,
+    module: Arc<CudaModule>,
 }
 
 /// Persistent f32 storage for a graph's named inputs and intermediate nodes.
@@ -152,7 +158,8 @@ impl CudaDriver {
             .lock()
             .map_err(|_| CudaDriverError::Driver("CUDA module cache poisoned".into()))?
             .get(&kernel.entry)
-            .cloned();
+            .filter(|cached| cached.source == kernel.source)
+            .map(|cached| cached.module.clone());
         let module = match cached {
             Some(module) => module,
             None => {
@@ -162,7 +169,13 @@ impl CudaDriver {
                 self.modules
                     .lock()
                     .map_err(|_| CudaDriverError::Driver("CUDA module cache poisoned".into()))?
-                    .insert(kernel.entry.clone(), module.clone());
+                    .insert(
+                        kernel.entry.clone(),
+                        CachedCudaModule {
+                            source: kernel.source.clone(),
+                            module: module.clone(),
+                        },
+                    );
                 self.kernel_compilations.fetch_add(1, Ordering::Relaxed);
                 module
             }
@@ -188,7 +201,8 @@ impl CudaDriver {
             .lock()
             .map_err(|_| CudaDriverError::Driver("CUDA module cache poisoned".into()))?
             .get(&cache_key)
-            .cloned();
+            .filter(|cached| cached.source == ptx_source)
+            .map(|cached| cached.module.clone());
         let module = match cached {
             Some(module) => module,
             None => {
@@ -196,7 +210,13 @@ impl CudaDriver {
                 self.modules
                     .lock()
                     .map_err(|_| CudaDriverError::Driver("CUDA module cache poisoned".into()))?
-                    .insert(cache_key, module.clone());
+                    .insert(
+                        cache_key,
+                        CachedCudaModule {
+                            source: ptx_source.to_owned(),
+                            module: module.clone(),
+                        },
+                    );
                 self.kernel_compilations.fetch_add(1, Ordering::Relaxed);
                 module
             }
