@@ -731,6 +731,8 @@ impl CudaPlan {
             }
         }
         let trace = std::env::var_os("PROXIMA_CUDA_TRACE").is_some();
+        let timing = std::env::var_os("PROXIMA_CUDA_TIMING").is_some();
+        let mut timing_rows: Vec<(NodeId, u128, usize)> = Vec::new();
         let trace_outputs = std::env::var_os("PROXIMA_CUDA_TRACE_OUTPUTS").is_some();
         let trace_values: Vec<NodeId> = std::env::var("PROXIMA_CUDA_TRACE_VALUES")
             .ok()
@@ -753,6 +755,7 @@ impl CudaPlan {
             );
         }
         for bound in &self.resolved {
+            let node_started = timing.then(std::time::Instant::now);
             let kernel = crate::emit_cuda_with_policy(
                 bound,
                 &self.packed_operands,
@@ -833,7 +836,8 @@ impl CudaPlan {
                     );
                 }
             } else {
-                let launch = if kernel
+                let launch = if timing
+                    || kernel
                     .bindings
                     .iter()
                     .any(|binding| matches!(binding, Binding::Fault))
@@ -856,6 +860,9 @@ impl CudaPlan {
                     node: bound.node,
                     error: error.to_string(),
                 })?;
+                if let Some(started) = node_started {
+                    timing_rows.push((bound.node, started.elapsed().as_micros(), output_len));
+                }
             }
             if trace_outputs && self.outputs.contains(&bound.node) {
                 let values = self.driver.read_f32(&self.arena, bound.node)?;
@@ -874,7 +881,25 @@ impl CudaPlan {
             }
         }
         self.driver.stream.synchronize()?;
+        if timing {
+            timing_rows.sort_by_key(|row| std::cmp::Reverse(row.1));
+            eprintln!(
+                "cuda_timing: nodes={} total_sync_ms={:.3}",
+                timing_rows.len(),
+                timing_rows.iter().map(|row| row.1).sum::<u128>() as f64 / 1000.0
+            );
+            for (rank, (node, micros, output_len)) in timing_rows.iter().take(12).enumerate() {
+                eprintln!(
+                    "cuda_timing_top rank={} node={:?} elapsed_ms={:.3} output_len={}",
+                    rank + 1,
+                    node,
+                    *micros as f64 / 1000.0,
+                    output_len
+                );
+            }
+        }
         let mut results = Vec::with_capacity(self.outputs.len());
+        let readback_started = timing.then(std::time::Instant::now);
         for node in &self.outputs {
             if trace_outputs {
                 let length = self.arena.buffers.get(node).map(|buffer| match buffer {
@@ -888,6 +913,13 @@ impl CudaPlan {
                 self.shapes.of(*node).to_vec(),
                 self.driver.read_f32(&self.arena, *node)?,
             ));
+        }
+        if let Some(started) = readback_started {
+            eprintln!(
+                "cuda_timing_readback: outputs={} elapsed_ms={:.3}",
+                self.outputs.len(),
+                started.elapsed().as_secs_f64() * 1_000.0
+            );
         }
         Ok(Evaluated::from_parts(
             self.program
