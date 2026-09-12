@@ -5244,7 +5244,7 @@ impl BackendRuntime {
                     // must preserve that ordering: the concurrent hazard
                     // schedule is proven only for the placed single-range
                     // program, not hybrid recurrent graphs.
-                    set_dispatch_type(&mut plan, omega::metal::DispatchType::Serial);
+                    set_dispatch_type(&mut plan, self.dispatch_type);
                 }
                 Ok(plan)
             },
