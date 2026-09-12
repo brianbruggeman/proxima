@@ -1,10 +1,10 @@
 //! Loads `synth_qwen35_gguf`'s fixture through
 //! [`proxima_model_interop::LoadedModel::load`]'s `qwen35` hybrid path and
 //! greedy-decodes 8 tokens on CPU and (when built with `--features metal`)
-//! on Metal. Garbage text is expected -- the weights are LCG bytes, not a
+//! on CUDA or Metal. Garbage text is expected -- the weights are LCG bytes, not a
 //! trained checkpoint (`synth_qwen35_gguf`'s own doc) -- this only asserts
 //! that both engines run the hybrid attention+state-space graph end to end
-//! and reports the CPU-vs-Metal top-1 token agreement as a sanity number,
+//! and reports the CPU-vs-GPU top-1 token agreement as a sanity number,
 //! never as a correctness claim.
 //!
 //! Owner directive (binding, mid-task): compute the derived device budget
@@ -165,26 +165,31 @@ fn main() {
 
     let cpu_ids = decode(&parsed, &file_bytes, 0, "cpu");
 
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    let metal_ids = decode(&parsed, &file_bytes, GPU_LAYERS_ALL, "metal");
-    #[cfg(not(all(feature = "metal", target_os = "macos")))]
-    let metal_ids: Vec<u32> = {
+    #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+    let gpu_ids = decode(&parsed, &file_bytes, GPU_LAYERS_ALL, "cuda");
+    #[cfg(all(feature = "metal", target_os = "macos", not(feature = "cuda")))]
+    let gpu_ids = decode(&parsed, &file_bytes, GPU_LAYERS_ALL, "metal");
+    #[cfg(not(any(
+        all(feature = "cuda", not(target_os = "macos")),
+        all(feature = "metal", target_os = "macos", not(feature = "cuda"))
+    )))]
+    let gpu_ids: Vec<u32> = {
         let _ = GPU_LAYERS_ALL;
-        println!("metal: skipped, build without --features metal");
+        println!("gpu: skipped, build without a supported GPU backend");
         Vec::new()
     };
 
     print_vm_stat("after");
 
-    if !cpu_ids.is_empty() && !metal_ids.is_empty() {
+    if !cpu_ids.is_empty() && !gpu_ids.is_empty() {
         let agree = cpu_ids
             .iter()
-            .zip(metal_ids.iter())
-            .filter(|(cpu_token, metal_token)| cpu_token == metal_token)
+            .zip(gpu_ids.iter())
+            .filter(|(cpu_token, gpu_token)| cpu_token == gpu_token)
             .count();
-        let denominator = cpu_ids.len().min(metal_ids.len());
+        let denominator = cpu_ids.len().min(gpu_ids.len());
         println!(
-            "cpu_vs_metal top1 agreement: {agree}/{denominator} ({:.1}%)",
+            "cpu_vs_gpu top1 agreement: {agree}/{denominator} ({:.1}%)",
             100.0 * agree as f64 / denominator.max(1) as f64
         );
     }
