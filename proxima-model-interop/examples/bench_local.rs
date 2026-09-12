@@ -221,6 +221,7 @@ fn main() {
         ubatch_size: ubatch_size.unwrap_or_else(|| ServingConfig::default().ubatch_size),
         gpu_layers: if backend != "cpu" { GPU_LAYERS_ALL } else { 0 },
         gpu_memory_limit_bytes,
+        gpu_correctness_fallback: env::var_os("PROXIMA_GPU_CORRECTNESS_FALLBACK").is_some(),
         ..ServingConfig::default()
     };
 

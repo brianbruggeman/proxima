@@ -4334,8 +4334,13 @@ pub(crate) struct BackendRuntime {
 #[cfg(feature = "metal")]
 impl BackendRuntime {
     pub(crate) fn new(config: &ServingConfig) -> Self {
+        let engine = if config.gpu_correctness_fallback && cfg!(feature = "vulkan") {
+            Engine::Cpu
+        } else {
+            select_backend(config)
+        };
         Self {
-            engine: select_backend(config),
+            engine,
             plans: alloc::collections::BTreeMap::new(),
             segment_plans: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal", target_os = "macos"))]

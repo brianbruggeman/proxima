@@ -326,6 +326,12 @@ pub struct ServingConfig<'model> {
     /// decode boundary rejects this request instead of silently evaluating
     /// the full expert stack and bypassing HOBBIT/DynaExq.
     pub qwen35moe_pre_gather: bool,
+    /// When enabled in a build with the WGPU/Vulkan driver, run the serving
+    /// graph through the CPU oracle even when `gpu_layers` requests the GPU.
+    /// This is an explicit correctness escape hatch for models whose GPU
+    /// f32 trajectory is not token-equivalent; the default keeps the GPU
+    /// path selected so its performance remains measurable.
+    pub gpu_correctness_fallback: bool,
 }
 
 impl<'model> ServingConfig<'model> {
@@ -399,6 +405,7 @@ impl Default for ServingConfig<'static> {
             exact_activations: true,
             weight_precision: &[],
             qwen35moe_pre_gather: false,
+            gpu_correctness_fallback: false,
         }
     }
 }
@@ -665,6 +672,7 @@ mod tests {
             exact_activations: true,
             weight_precision: &[],
             qwen35moe_pre_gather: false,
+            gpu_correctness_fallback: false,
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -805,6 +813,7 @@ mod tests {
             exact_activations: true,
             weight_precision: &[],
             qwen35moe_pre_gather: false,
+            gpu_correctness_fallback: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -873,6 +882,7 @@ mod tests {
             exact_activations: true,
             weight_precision: &[],
             qwen35moe_pre_gather: false,
+            gpu_correctness_fallback: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(
@@ -931,6 +941,7 @@ mod tests {
             exact_activations: true,
             weight_precision: &[],
             qwen35moe_pre_gather: false,
+            gpu_correctness_fallback: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);
