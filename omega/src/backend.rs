@@ -66,7 +66,9 @@
 //! so a wrapper would relocate the impl without enabling any composition. The
 //! free-function pair stays.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "cuda-driver")]
+use std::sync::OnceLock;
 
 use proxima_tensor::cpu::ExpertSource;
 use proxima_tensor::{Evaluated, NodeId, NumericPolicy, Op, QuantizedBlock, TensorError};
@@ -476,7 +478,7 @@ pub fn execute_plan_named(
     plan: &mut Plan,
     _named: &[(&str, QuantizedBlock<'_>)],
 ) -> Result<Evaluated, BackendError> {
-    execute_plan_named_with_expert_sources(plan, _named, None)
+    execute_plan_named_with_resident_names(plan, _named, None, None)
 }
 
 /// Executes a named plan with a per-step expert substitution table. CPU
@@ -490,6 +492,18 @@ pub fn execute_plan_named(
 pub fn execute_plan_named_with_expert_sources(
     plan: &mut Plan,
     _named: &[(&str, QuantizedBlock<'_>)],
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+) -> Result<Evaluated, BackendError> {
+    execute_plan_named_with_resident_names(plan, _named, None, expert_sources)
+}
+
+/// Executes a named plan while allowing immutable model inputs to remain on
+/// the device between calls. `resident_names` contains only caller-owned bytes
+/// whose contents are immutable for the plan's lifetime.
+pub fn execute_plan_named_with_resident_names(
+    plan: &mut Plan,
+    _named: &[(&str, QuantizedBlock<'_>)],
+    _resident_names: Option<&BTreeSet<&str>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, BackendError> {
     match plan {
@@ -510,7 +524,7 @@ pub fn execute_plan_named_with_expert_sources(
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(cuda_plan) => {
             reject_gpu_expert_sources("cuda", expert_sources)?;
-            Ok(cuda_plan.execute_named(_named)?)
+            Ok(cuda_plan.execute_named(_named, _resident_names)?)
         }
         // `Plan` is uninhabited with every backend feature off; `*plan {}`
         // is the never-pattern proof of that rather than a runtime `todo!`.
@@ -878,7 +892,15 @@ fn plan_named_cuda(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
 ) -> Result<Plan, BackendError> {
-    let driver = crate::cuda_driver::CudaDriver::new(0)?;
+    static DRIVER: OnceLock<Result<crate::cuda_driver::CudaDriver, String>> = OnceLock::new();
+    let driver = match DRIVER.get_or_init(|| {
+        crate::cuda_driver::CudaDriver::new(0).map_err(|error| error.to_string())
+    }) {
+        Ok(driver) => driver,
+        Err(error) => {
+            return Err(BackendError::Cuda(CudaDriverError::Driver(error.clone())));
+        }
+    };
     Ok(Plan::Cuda(driver.plan(
         program,
         symbols,

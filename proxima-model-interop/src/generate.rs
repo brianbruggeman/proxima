@@ -113,8 +113,8 @@ use omega::backend::execute_plan_named_metal_op_timed;
 use omega::backend::execute_plan_named_metal_op_timed_with_expert_sources;
 #[cfg(feature = "metal")]
 use omega::backend::{
-    Engine, Plan, execute_plan_named_with_expert_sources, mark_resident, plan_named,
-    plan_named_exact, release_resident_names, unregister_checkpoint_mapping,
+    Engine, Plan, execute_plan_named_with_resident_names, mark_resident, plan_named, plan_named_exact,
+    release_resident_names, unregister_checkpoint_mapping,
 };
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same
@@ -4459,9 +4459,10 @@ impl BackendRuntime {
                 Ok(plan)
             },
         )?;
-        Ok(execute_plan_named_with_expert_sources(
+        Ok(execute_plan_named_with_resident_names(
             plan,
             &gpu_named,
+            Some(resident_names),
             expert_sources,
         )?)
     }
@@ -4543,7 +4544,12 @@ impl BackendRuntime {
         )?;
         let resolve_elapsed_us = resolve_started.elapsed().as_micros();
         let execute_started = std::time::Instant::now();
-        let result = execute_plan_named_with_expert_sources(plan, &gpu_named, expert_sources)
+        let result = execute_plan_named_with_resident_names(
+            plan,
+            &gpu_named,
+            Some(resident_names),
+            expert_sources,
+        )
             .map_err(InteropError::from);
         if host_timing {
             eprintln!(

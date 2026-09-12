@@ -2535,7 +2535,7 @@ mod tests {
         };
         epilogue_broadcast_axes.push(1);
 
-        let source = render_reduce(&bound, "entry", &[None], NumericPolicy::bit_exact())
+        let source = render_reduce(&bound, "entry", &[None], NumericPolicy::llama_relaxed())
             .expect("broadcast emits");
         assert!(source.contains("broadcast_out_strides[2]"));
         assert!(source.contains("broadcast_full_coord[1]"));
