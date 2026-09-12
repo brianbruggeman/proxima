@@ -299,13 +299,15 @@ pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitErro
                 output_axes.len().max(1)
             };
             let reduce_rank_len = reduce_axes.len().max(1);
-            push_cuda_i64(
-                &mut bytes,
+            let output_total = if is_broadcast_epilogue {
+                resolved.extents.iter().product::<u64>()
+            } else {
                 output_axes
                     .iter()
                     .map(|axis| resolved.extents[*axis as usize])
-                    .product::<u64>() as i64,
-            );
+                    .product::<u64>()
+            };
+            push_cuda_i64(&mut bytes, output_total as i64);
             push_cuda_i64(
                 &mut bytes,
                 reduce_axes
@@ -560,13 +562,18 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> u64 {
         BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
         BoundOpKind::Reduce {
             output_axes,
+            epilogue_broadcast_axes,
             keep: Keep::Reduce,
             ..
         } => {
-            let output_total: u64 = output_axes
-                .iter()
-                .map(|dim| resolved.extents[*dim as usize])
-                .product();
+            let output_total: u64 = if epilogue_broadcast_axes.is_empty() {
+                output_axes
+                    .iter()
+                    .map(|dim| resolved.extents[*dim as usize])
+                    .product()
+            } else {
+                resolved.extents.iter().product()
+            };
             if cooperative {
                 output_total * WARP_SIZE
             } else {
@@ -1240,6 +1247,7 @@ fn push_serial_reduce_body(
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    is_broadcast_epilogue: bool,
 ) -> Result<(), EmitError> {
     source.push_str("    if (gid >= u.output_total) { return; }\n");
 
@@ -1257,8 +1265,14 @@ fn push_serial_reduce_body(
                  remaining /= u.output_extents[{index}];\n"
             ));
         }
-        for (index, dim) in output_axes.iter().enumerate() {
-            source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));
+        if is_broadcast_epilogue {
+            for dim in 0..rank {
+                source.push_str(&format!("    full_coord[{dim}] = output_coord[{dim}];\n"));
+            }
+        } else {
+            for (index, dim) in output_axes.iter().enumerate() {
+                source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));
+            }
         }
     }
 
@@ -1330,6 +1344,56 @@ fn push_serial_reduce_body(
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
+    if is_broadcast_epilogue {
+        // The reduction produces one value per output coordinate, while the
+        // broadcast epilogue must write that value over every reduced axis.
+        // Rebuild each full coordinate after the fold; the fold loop leaves
+        // `full_coord` at its final reduction coordinate.
+        source.push_str("    long broadcast_full_coord[");
+        source.push_str(&format!("{rank_len}];\n"));
+        for dim in 0..rank {
+            source.push_str(&format!(
+                "    broadcast_full_coord[{dim}] = output_coord[{dim}];\n"
+            ));
+        }
+        source.push_str(
+            "    for (long broadcast_r = 0; broadcast_r < u.reduction_total; broadcast_r++) {\n",
+        );
+        if reduce_rank > 0 {
+            source.push_str(&format!(
+                "        long broadcast_remaining = broadcast_r;\n"
+            ));
+            for index in (0..reduce_rank).rev() {
+                source.push_str(&format!(
+                    "        long broadcast_coord_{index} = broadcast_remaining % u.reduction_extents[{index}]; broadcast_remaining /= u.reduction_extents[{index}];\n"
+                ));
+            }
+            for (index, dim) in reduce_dims.iter().enumerate() {
+                source.push_str(&format!(
+                    "        broadcast_full_coord[{dim}] = broadcast_coord_{index};\n"
+                ));
+            }
+        }
+        source.push_str("        long broadcast_out_offset = u.out_base;\n");
+        for dim in 0..rank {
+            source.push_str(&format!(
+                "        broadcast_out_offset += broadcast_full_coord[{dim}] * u.broadcast_out_strides[{dim}];\n"
+            ));
+        }
+        push_reduce_epilogue_write(
+            source,
+            epilogue_body,
+            epilogue_operands,
+            rank,
+            element_type,
+            "        ",
+            |dim| format!("broadcast_full_coord[{dim}]"),
+            "accumulator",
+            "broadcast_out_offset",
+        );
+        source.push_str("    }\n");
+        return Ok(());
+    }
     source.push_str("    long out_offset = u.out_base;\n");
     for dim in 0..rank {
         source.push_str(&format!(
@@ -1713,6 +1777,7 @@ fn render_reduce(
             element_type,
             epilogue_body,
             epilogue_operands,
+            is_broadcast_epilogue,
         )?;
     }
     source.push_str("}\n");
@@ -2540,6 +2605,16 @@ mod tests {
         assert!(source.contains("broadcast_out_strides[2]"));
         assert!(source.contains("broadcast_full_coord[1]"));
         assert!(source.contains("__shfl_sync(0xffffffffu, accumulator, 0)"));
+
+        let kernel = emit_cuda_with_policy(
+            &bound,
+            &no_packed(),
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("broadcast kernel emits");
+        assert_eq!(kernel.grid.threads, 4 * 8 * WARP_SIZE);
+        let uniforms = pack_cuda_uniforms(&bound).expect("broadcast uniforms pack");
+        assert_eq!(i64::from_ne_bytes(uniforms[..8].try_into().expect("i64 output total")), 32);
     }
 
     #[test]
