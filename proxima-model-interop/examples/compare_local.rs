@@ -113,9 +113,11 @@ fn main() {
             }
             match first_bad {
                 Some((node, max_abs, max_index, cpu_value, gpu_value, elements)) => println!(
-                    "{{\"first_divergent_node\":{node},\"kind\":{:?},\"name\":{:?},\"elements\":{elements},\"max_abs\":{max_abs},\"max_index\":{max_index},\"cpu\":{cpu_value},\"gpu\":{gpu_value}}}",
+                    "{{\"first_divergent_node\":{node},\"kind\":{:?},\"name\":{:?},\"description\":{:?},\"dependencies\":{:?},\"elements\":{elements},\"max_abs\":{max_abs},\"max_index\":{max_index},\"cpu\":{cpu_value},\"gpu\":{gpu_value}}}",
                     model.node_kind(proxima_tensor::NodeId(node)),
-                    model.node_name(proxima_tensor::NodeId(node))
+                    model.node_name(proxima_tensor::NodeId(node)),
+                    model.node_description(proxima_tensor::NodeId(node)),
+                    model.node_dependencies(proxima_tensor::NodeId(node))
                 ),
                 None => println!("{{\"first_divergent_node\":null}}"),
             }
