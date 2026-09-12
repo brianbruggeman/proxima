@@ -376,6 +376,34 @@ impl CudaDriver {
         Ok(())
     }
 
+    /// Materializes a plan-constant directly into the persistent arena. A
+    /// constant has no data dependency and never needs a CUDA launch; keeping
+    /// its device buffer alive also means repeated token evaluations do not
+    /// re-upload it.
+    fn materialize_constant(
+        &self,
+        arena: &mut CudaF32Arena,
+        node: NodeId,
+        value: f32,
+        output_len: usize,
+    ) -> Result<(), CudaDriverError> {
+        if matches!(
+            arena.buffers.get(&node),
+            Some(CudaGraphBuffer::F32(buffer)) if buffer.len() == output_len
+        ) {
+            return Ok(());
+        }
+        let buffer = if output_len == 0 {
+            self.stream.alloc_zeros::<f32>(0)?
+        } else {
+            let values = vec![value; output_len];
+            self.stream.clone_htod(&values)?
+        };
+        arena.buffers.insert(node, CudaGraphBuffer::F32(buffer));
+        arena.allocations += 1;
+        Ok(())
+    }
+
     /// Launches a minimal device computation through the complete runtime
     /// path and returns its result. This is a smoke oracle for the future
     /// graph argument packer, not a model inference shortcut.
@@ -889,6 +917,13 @@ impl CudaPlan {
                         CudaGraphBuffer::F32(self.driver.stream.alloc_zeros::<f32>(0)?),
                     );
                 }
+            } else if let proxima_tensor::BoundOpKind::Constant { value } = bound.kind {
+                self.driver.materialize_constant(
+                    &mut self.arena,
+                    bound.node,
+                    value,
+                    output_len,
+                )?;
             } else {
                 let launch = if timing
                     || kernel
