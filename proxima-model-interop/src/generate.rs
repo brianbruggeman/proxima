@@ -7795,10 +7795,22 @@ impl<'file> LoadedModel<'file> {
                     let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
 
                     let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.layer_roots.len() * 3);
+                    let monolithic_prefill_requested =
+                        qwen35moe_pre_gather_enabled(
+                            serving_config.qwen35moe_pre_gather,
+                            self.architecture_impl
+                                .map(|architecture| architecture.name()),
+                        ) && runtime.uses_gpu()
+                            && _step == 0
+                            && std::env::var_os("PROXIMA_QWEN35MOE_MONOLITHIC_ALL_LOW")
+                                .is_some();
                     if step_batch_needs_logits(split_prefill, is_last_step_batch) {
                         roots.push(self.logits_root);
                     }
                     roots.extend_from_slice(node_values_sink.nodes());
+                    if monolithic_prefill_requested {
+                        roots.extend(self.router_roots.iter().copied());
+                    }
                     for (_layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
                         match roots_for_layer {
                             Qwen35LayerRoots::Attention((even, odd, value)) => {
@@ -7971,6 +7983,7 @@ impl<'file> LoadedModel<'file> {
                         pre_gather,
                         runtime.uses_gpu(),
                         std::env::var_os("PROXIMA_QWEN35MOE_MONOLITHIC_ALL_LOW").is_some(),
+                        _step,
                     );
                     #[cfg(not(feature = "metal"))]
                     let monolithic_all_low = false;
@@ -8381,6 +8394,40 @@ impl<'file> LoadedModel<'file> {
                     }
 
                     node_values_sink.observe(&evaluated)?;
+
+                    if monolithic_all_low {
+                        let mut router_scratch = Vec::with_capacity(
+                            self.architecture.expert_used_count as usize,
+                        );
+                        for (layer, router_root) in self.router_roots.iter().copied().enumerate() {
+                            let Some((logits, shape)) = evaluated.get(router_root) else {
+                                continue;
+                            };
+                            visit_qwen35moe_router_selections(
+                                layer,
+                                cached_len,
+                                logits,
+                                shape,
+                                self.architecture.expert_count as usize,
+                                self.architecture.expert_used_count as usize,
+                                &mut router_scratch,
+                                &mut |layer, position, routes| {
+                                    if let Some(policy) = qwen35moe_residency.as_mut() {
+                                        for route in routes {
+                                            policy.observe(position, layer, [*route])
+                                                .map_err(|error| {
+                                                    InteropError::PreGatherExecutionUnsupported {
+                                                        architecture: String::from("qwen35moe"),
+                                                        reason: error.to_string(),
+                                                    }
+                                                })?;
+                                        }
+                                    }
+                                    Ok(())
+                                },
+                            )?;
+                        }
+                    }
 
                     if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_OUTPUT").is_some()
                         && let Some(target_layer) = std::env::var("PROXIMA_DEBUG_GDN_LAYER")
@@ -9780,8 +9827,13 @@ fn qwen35moe_pre_gather_enabled(configured: bool, architecture_name: Option<&str
     configured && architecture_name == Some("qwen35moe")
 }
 
-fn qwen35moe_monolithic_all_low_enabled(pre_gather: bool, uses_gpu: bool, requested: bool) -> bool {
-    pre_gather && uses_gpu && requested
+fn qwen35moe_monolithic_all_low_enabled(
+    pre_gather: bool,
+    uses_gpu: bool,
+    requested: bool,
+    step: usize,
+) -> bool {
+    pre_gather && uses_gpu && requested && step == 0
 }
 
 fn map_expert_sources_to_segment<'source>(
@@ -9883,10 +9935,11 @@ mod tests {
 
     #[test]
     fn qwen35moe_monolithic_all_low_is_default_off_and_gpu_only() {
-        assert!(!qwen35moe_monolithic_all_low_enabled(true, true, false));
-        assert!(!qwen35moe_monolithic_all_low_enabled(false, true, true));
-        assert!(!qwen35moe_monolithic_all_low_enabled(true, false, true));
-        assert!(qwen35moe_monolithic_all_low_enabled(true, true, true));
+        assert!(!qwen35moe_monolithic_all_low_enabled(true, true, false, 0));
+        assert!(!qwen35moe_monolithic_all_low_enabled(false, true, true, 0));
+        assert!(!qwen35moe_monolithic_all_low_enabled(true, false, true, 0));
+        assert!(qwen35moe_monolithic_all_low_enabled(true, true, true, 0));
+        assert!(!qwen35moe_monolithic_all_low_enabled(true, true, true, 1));
     }
 
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

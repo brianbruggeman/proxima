@@ -4715,6 +4715,7 @@ mod real_qwen3moe_file {
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod real_openchat_file {
+    use super::checkpoint_qkv_biases;
     use core::ffi::c_void;
     use core::future::Future;
     use core::pin::pin;
