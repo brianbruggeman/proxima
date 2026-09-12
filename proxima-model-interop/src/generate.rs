@@ -2324,6 +2324,7 @@ impl<'file> LoadedModel<'file> {
     {
         let mut carried: BTreeMap<NodeId, (Vec<u64>, Vec<f32>)> = BTreeMap::new();
         let mut results: BTreeMap<NodeId, (Vec<u64>, Vec<f32>)> = BTreeMap::new();
+        let mut placed_results = BTreeSet::new();
         let mut routed_experts = Vec::with_capacity(self.architecture.expert_used_count as usize);
         #[cfg(feature = "instrument")]
         let mut segment_execution_count = 0_u64;
@@ -2736,6 +2737,35 @@ impl<'file> LoadedModel<'file> {
                         )
                     } else {
                         let empty_expert_sources = BTreeMap::new();
+                        #[cfg(feature = "instrument")]
+                        if routed_segment_profile_selected(layer, "router") {
+                            let (evaluated, timings) =
+                                runtime.evaluate_segment_op_timed_with_placements(
+                                    program,
+                                    symbols,
+                                    &segment_named,
+                                    &requested_nodes,
+                                    resident_names,
+                                    &segment_input_placements,
+                                    &segment_output_placements,
+                                )?;
+                            report_op_timings(position_offset, &timings, program);
+                            Ok(evaluated)
+                        } else {
+                            runtime.evaluate_segment_with_placements_and_expert_sources(
+                                program,
+                                symbols,
+                                &segment_named,
+                                &requested_nodes,
+                                resident_names,
+                                &SegmentMetalBindings {
+                                    input_placements: &segment_input_placements,
+                                    output_placements: &segment_output_placements,
+                                    expert_sources: &empty_expert_sources,
+                                },
+                            )
+                        }
+                        #[cfg(not(feature = "instrument"))]
                         runtime.evaluate_segment_with_placements_and_expert_sources(
                             program,
                             symbols,
@@ -3231,6 +3261,13 @@ impl<'file> LoadedModel<'file> {
                     if plan.router_cut_placements.contains_key(&original) {
                         continue;
                     }
+                    if evaluated.is_placed(mapped) {
+                        // `finish` deliberately omits caller-owned output buffers from
+                        // `Evaluated`; retain the original graph identity so the
+                        // aggregate result preserves that placement contract.
+                        placed_results.insert(original);
+                        continue;
+                    }
                     let (values, shape) = evaluated.get(mapped).ok_or_else(|| {
                         if std::env::var_os("PROXIMA_DEBUG_QWEN35_MISSING_NODE").is_some() {
                             eprintln!(
@@ -3477,6 +3514,7 @@ impl<'file> LoadedModel<'file> {
 
         let ordered_results = outputs
             .iter()
+            .filter(|node| !placed_results.contains(node))
             .map(|node| {
                 results
                     .remove(node)
@@ -3493,10 +3531,11 @@ impl<'file> LoadedModel<'file> {
         {
             sidecar.discard_resident_pages()?;
         }
-        Ok(Evaluated::from_parts(
+        Ok(Evaluated::from_parts_with_placed(
             self.logits_root,
             ordered_results,
             None,
+            placed_results,
         ))
     }
 
@@ -5470,6 +5509,43 @@ impl BackendRuntime {
             bindings.input_placements,
             bindings.output_placements,
             bindings.expert_sources,
+        )?)
+    }
+
+    #[cfg(all(feature = "instrument", target_os = "macos"))]
+    fn evaluate_segment_op_timed_with_placements(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        input_placements: &[(NodeId, &PlacedBuffer, usize)],
+        output_placements: &[(NodeId, &PlacedBuffer, usize)],
+    ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
+        let shape = (
+            program.as_ptr() as usize,
+            symbols.first().copied().unwrap_or_default() as usize,
+            symbols.get(1).copied().unwrap_or_default() as usize,
+            outputs.to_vec(),
+        );
+        let numerics = PlanNumerics {
+            math_mode: self.math_mode,
+            numeric_policy: self.numeric_policy,
+            dispatch_type: omega::metal::DispatchType::Serial,
+        };
+        let plan = Self::resolve_segment_plan(
+            &mut self.placed_segment_plans,
+            &mut self.plan_hits,
+            &mut self.plan_misses,
+            shape,
+            || Self::build_placed_plan(program, symbols, named, outputs, resident_names, &numerics),
+        )?;
+        Ok(execute_plan_named_with_placements_op_timed(
+            plan,
+            named,
+            input_placements,
+            output_placements,
         )?)
     }
 
