@@ -12,6 +12,8 @@ use proxima_gguf::parse_complete;
 use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel};
 
 #[cfg(feature = "metal")]
+use proxima_gguf::{MetadataValue, ParsedGguf};
+#[cfg(feature = "metal")]
 use omega::backend::{Engine, GpuDriver};
 #[cfg(feature = "metal")]
 use proxima_tensor::{DType, Extent, IndexMap, NodeId, Op, ScalarOp, append, projection};
