@@ -7261,7 +7261,10 @@ impl<'file> LoadedModel<'file> {
                 &mut warmup_callback,
             );
             runtime.retain_monolithic_prefill_sources = false;
-            warmup_result?;
+            if let Err(error) = warmup_result {
+                clear_expert_source_cache();
+                return Err(error);
+            }
         }
         self.run_decode_loop_observed(
             prompt,
