@@ -432,12 +432,25 @@ impl MappedExpertSidecar {
     }
 
     /// Reads routed low or high ranges into reusable bounded storage.
+    #[cfg(test)]
     pub(crate) fn read_selected(
         &self,
         layer: usize,
         experts: &[u32],
         slab: &ExpertSlab<'_>,
         scratch: &mut ExpertSidecarReadScratch,
+    ) -> Result<(), InteropError> {
+        self.read_selected_with_checkpoint(layer, experts, slab, scratch, None)
+    }
+
+    /// Reads selected ranges, borrowing checkpoint bytes when supplied.
+    pub(crate) fn read_selected_with_checkpoint(
+        &self,
+        layer: usize,
+        experts: &[u32],
+        slab: &ExpertSlab<'_>,
+        scratch: &mut ExpertSidecarReadScratch,
+        checkpoint_mapping: Option<&[u8]>,
     ) -> Result<(), InteropError> {
         scratch.used_buffers = 0;
         scratch.arena_used = [0; 3];
@@ -533,30 +546,43 @@ impl MappedExpertSidecar {
                                 .map_err(|_| InteropError::SidecarSizeOverflow)?,
                         });
                 } else {
-                    let checkpoint_file = self.checkpoint_file.as_ref().ok_or_else(|| {
-                        InteropError::PreGatherExecutionUnsupported {
-                            architecture: String::from("qwen35moe"),
-                            reason: String::from(
-                                "high expert staging needs a checkpoint file for bounded reads",
-                            ),
-                        }
-                    })?;
-                    let start =
-                        usize::try_from(offset).map_err(|_| InteropError::SidecarSizeOverflow)?;
-                    let byte_length =
-                        usize::try_from(length).map_err(|_| InteropError::SidecarSizeOverflow)?;
-                    let end = start
-                        .checked_add(byte_length)
-                        .ok_or(InteropError::SidecarSizeOverflow)?;
-                    let file_length = checkpoint_file
-                        .metadata()
-                        .map_err(InteropError::SidecarIo)?
-                        .len();
-                    if u64::try_from(end).unwrap_or(u64::MAX) > file_length {
+                    let (start, byte_length, end, file_length) =
+                        if let Some(bytes) = checkpoint_mapping {
+                            let range = Self::checked_range(
+                                descriptor,
+                                offset,
+                                length,
+                                bytes.len(),
+                                descriptor.source_codec,
+                            )?;
+                            (range.start, range.len(), range.end, bytes.len())
+                        } else {
+                            let start = usize::try_from(offset)
+                                .map_err(|_| InteropError::SidecarSizeOverflow)?;
+                            let byte_length = usize::try_from(length)
+                                .map_err(|_| InteropError::SidecarSizeOverflow)?;
+                            let end = start
+                                .checked_add(byte_length)
+                                .ok_or(InteropError::SidecarSizeOverflow)?;
+                            let checkpoint_file = self.checkpoint_file.as_ref().ok_or_else(|| {
+                                InteropError::PreGatherExecutionUnsupported {
+                                    architecture: String::from("qwen35moe"),
+                                    reason: String::from(
+                                        "high expert staging needs a checkpoint file for bounded reads",
+                                    ),
+                                }
+                            })?;
+                            let file_length = checkpoint_file
+                                .metadata()
+                                .map_err(InteropError::SidecarIo)?
+                                .len() as usize;
+                            (start, byte_length, end, file_length)
+                        };
+                    if end > file_length {
                         return Err(InteropError::ExpertMappedRangeOutOfBounds {
                             start,
                             end,
-                            mapping_len: usize::try_from(file_length).unwrap_or(usize::MAX),
+                            mapping_len: file_length,
                         });
                     }
                     let cached = scratch.high_cache.iter().find(|entry| {
@@ -572,16 +598,28 @@ impl MappedExpertSidecar {
                         scratch.buffers[buffer_index].extend_from_slice(&cached.bytes);
                     } else {
                         scratch.high_cache_misses += 1;
-                        let mut reader = checkpoint_file
-                            .try_clone()
-                            .map_err(InteropError::SidecarIo)?;
-                        reader
-                            .seek(SeekFrom::Start(offset))
-                            .map_err(InteropError::SidecarIo)?;
                         scratch.buffers[buffer_index].resize(byte_length, 0);
-                        reader
-                            .read_exact(&mut scratch.buffers[buffer_index])
-                            .map_err(InteropError::SidecarIo)?;
+                        if let Some(bytes) = checkpoint_mapping {
+                            scratch.buffers[buffer_index].copy_from_slice(&bytes[start..end]);
+                        } else {
+                            let checkpoint_file = self.checkpoint_file.as_ref().ok_or_else(|| {
+                                InteropError::PreGatherExecutionUnsupported {
+                                    architecture: String::from("qwen35moe"),
+                                    reason: String::from(
+                                        "high expert staging needs a checkpoint file for bounded reads",
+                                    ),
+                                }
+                            })?;
+                            let mut reader = checkpoint_file
+                                .try_clone()
+                                .map_err(InteropError::SidecarIo)?;
+                            reader
+                                .seek(SeekFrom::Start(offset))
+                                .map_err(InteropError::SidecarIo)?;
+                            reader
+                                .read_exact(&mut scratch.buffers[buffer_index])
+                                .map_err(InteropError::SidecarIo)?;
+                        }
                         if byte_length <= scratch.high_cache_limit {
                             while scratch.high_cache_bytes + byte_length > scratch.high_cache_limit
                             {

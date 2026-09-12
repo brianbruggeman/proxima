@@ -2690,11 +2690,12 @@ impl<'file> LoadedModel<'file> {
                     {
                         #[cfg(feature = "instrument")]
                         let sidecar_read_started = read_ticks();
-                        sidecar.read_selected(
+                        sidecar.read_selected_with_checkpoint(
                             layer,
                             expert_slab.selected_experts(layer),
                             expert_slab,
                             &mut *sidecar_read_scratch,
+                            Some(self.checkpoint_mapping),
                         )?;
                         if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
                             #[cfg(feature = "instrument")]
@@ -8372,7 +8373,6 @@ impl<'file> LoadedModel<'file> {
                     let evaluate_ticks = elapsed_ticks(evaluate_started);
                     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                     let metal_stage = metal_stage_totals();
-
                     if std::env::var_os("PROXIMA_DEBUG_PREFILL_BATCHES").is_some()
                         && _step == 0
                         && split_prefill
@@ -9933,8 +9933,7 @@ mod tests {
         SsmLayerCache, begin_expert_gather_phase, first_nonfinite_node_value, kv_extent,
         lock_expert_slab, qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
         should_release_monolithic_prefill_sources, step_batch_needs_logits,
-        visit_qwen35moe_router_boundary,
-        visit_qwen35moe_router_selections,
+        visit_qwen35moe_router_boundary, visit_qwen35moe_router_selections,
     };
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::{map_expert_sources_to_segment, use_metal_output_placements};
@@ -9997,8 +9996,12 @@ mod tests {
 
     #[test]
     fn monolithic_prefill_sources_release_only_after_real_prefill() {
-        assert!(!should_release_monolithic_prefill_sources(false, true, false));
-        assert!(!should_release_monolithic_prefill_sources(true, false, false));
+        assert!(!should_release_monolithic_prefill_sources(
+            false, true, false
+        ));
+        assert!(!should_release_monolithic_prefill_sources(
+            true, false, false
+        ));
         assert!(!should_release_monolithic_prefill_sources(true, true, true));
         assert!(should_release_monolithic_prefill_sources(true, true, false));
     }
