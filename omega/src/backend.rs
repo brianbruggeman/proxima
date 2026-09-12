@@ -541,7 +541,6 @@ pub fn execute_plan_named_with_resident_names(
 #[cfg(any(
     feature = "wgpu-backend",
     feature = "cuda-driver",
-    all(feature = "metal", target_os = "macos"),
     test
 ))]
 fn reject_gpu_expert_sources(
