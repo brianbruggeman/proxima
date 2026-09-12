@@ -4559,6 +4559,7 @@ dependencies = [
  "proxima-gguf",
  "proxima-primitives",
  "proxima-safetensors",
+ "proxima-storage",
  "proxima-telemetry",
  "proxima-tensor",
  "proxima-tokenizer",
