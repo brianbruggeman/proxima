@@ -531,7 +531,8 @@ pub fn execute_plan_named_with_resident_names(
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
-            feature = "wgpu-backend"
+            feature = "wgpu-backend",
+            feature = "cuda-driver"
         )))]
         _ => match *plan {},
     }
@@ -595,7 +596,8 @@ pub fn mark_resident(plan: &mut Plan, resident_names: &std::collections::BTreeSe
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
-            feature = "wgpu-backend"
+            feature = "wgpu-backend",
+            feature = "cuda-driver"
         )))]
         _ => match *plan {},
     }
