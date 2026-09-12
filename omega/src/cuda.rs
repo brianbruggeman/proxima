@@ -1385,6 +1385,12 @@ fn push_cooperative_reduce_body(
     let reduce_rank = reduce_dims.len();
     let reduce_rank_len = reduce_rank.max(1);
     let operand_count = resolved.operands().len();
+    // Packed cooperative reductions are already gated by the caller's
+    // reassociation permission.  Give each lane a contiguous small chunk so
+    // neighboring lanes read neighboring quantized bytes; the prior
+    // lane-strided walk made a warp touch 32 separated elements before
+    // returning to the same quantization block.
+    let packed_chunked = quantized.iter().any(Option::is_some);
 
     source.push_str(&format!("    long output_index = gid / {WARP_SIZE};\n"));
     source.push_str("    if (output_index >= u.output_total) { return; }\n");
@@ -1428,9 +1434,18 @@ fn push_cooperative_reduce_body(
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
-    source.push_str(&format!(
-        "    for (long r = (long)lane; r < u.reduction_total; r += {WARP_SIZE}) {{\n"
-    ));
+    if packed_chunked {
+        source.push_str(&format!(
+            "    for (long chunk = (long)lane * 8; chunk < u.reduction_total; chunk += {} * 8) {{\n",
+            WARP_SIZE
+        ));
+        source.push_str("        for (long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n");
+        source.push_str("            long r = chunk + inner;\n");
+    } else {
+        source.push_str(&format!(
+            "    for (long r = (long)lane; r < u.reduction_total; r += {WARP_SIZE}) {{\n"
+        ));
+    }
     if reduce_rank > 0 {
         source.push_str(&format!(
             "        long reduction_coord[{reduce_rank_len}];\n"
@@ -1483,6 +1498,9 @@ fn push_cooperative_reduce_body(
     ));
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
+    if packed_chunked {
+        source.push_str("    }\n");
+    }
 
     source.push_str("    #pragma unroll\n");
     source.push_str(&format!(
