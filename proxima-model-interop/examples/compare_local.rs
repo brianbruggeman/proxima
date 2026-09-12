@@ -45,7 +45,11 @@ fn main() {
                 .and_then(|value| value.parse::<u32>().ok())
                 .map(proxima_tensor::NodeId)
                 .unwrap_or(layer_roots[0]);
-            model.computed_node_ids_through(through)
+            if env::var_os("PROXIMA_COMPARE_ONLY_NODE").is_some() {
+                vec![through]
+            } else {
+                model.computed_node_ids_through(through)
+            }
         } else if env::var_os("PROXIMA_FIRST_LAYER_ONLY").is_some() {
             layer_roots[..1].to_vec()
         } else {
@@ -121,14 +125,23 @@ fn main() {
                 if let Some(index) = requested_roots.iter().position(|node| *node == target) {
                     let cpu_target = &cpu_layers[index];
                     let gpu_target = &gpu_layers[index];
-                    let (max_abs, max_index) = cpu_target
+                    if cpu_target.is_empty() {
+                        println!(
+                            "{{\"target_node\":{},\"kind\":{:?},\"name\":{:?},\"empty\":true,\"dependencies\":{:?}}}",
+                            target.0,
+                            model.node_kind(target),
+                            model.node_name(target),
+                            model.node_dependencies(target)
+                        );
+                    } else {
+                        let (max_abs, max_index) = cpu_target
                         .iter()
                         .zip(gpu_target)
                         .enumerate()
                         .map(|(index, (left, right))| (f64::from((left - right).abs()), index))
                         .max_by(|left, right| left.0.total_cmp(&right.0))
-                        .expect("target reduction is nonempty");
-                    println!(
+                        .expect("nonempty target after explicit empty check");
+                        println!(
                         "{{\"target_node\":{},\"kind\":{:?},\"name\":{:?},\"description\":{:?},\"max_abs\":{max_abs},\"max_index\":{max_index},\"cpu\":{},\"gpu\":{},\"dependencies\":{:?}}}",
                         target.0,
                         model.node_kind(target),
@@ -137,8 +150,8 @@ fn main() {
                         cpu_target[max_index],
                         gpu_target[max_index],
                         model.node_dependencies(target)
-                    );
-                    if target.0 == 35 {
+                        );
+                        if target.0 == 35 {
                         let reciprocal_index = env::var("PROXIMA_COMPARE_INDEX")
                             .ok()
                             .and_then(|value| value.parse::<usize>().ok())
@@ -158,8 +171,8 @@ fn main() {
                             (gpu_output - host_gpu_reciprocal).abs(),
                             (gpu_output - host_cpu_reciprocal).abs()
                         );
-                    }
-                    for dependency in model.node_dependencies(target) {
+                        }
+                        for dependency in model.node_dependencies(target) {
                         if let Some(dep_index) = requested_roots
                             .iter()
                             .position(|node| *node == dependency)
@@ -184,6 +197,7 @@ fn main() {
                                 cpu_dep[dep_max_index],
                                 gpu_dep[dep_max_index]
                             );
+                        }
                         }
                     }
                 }
