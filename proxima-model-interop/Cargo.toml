@@ -179,6 +179,7 @@ kv-capacity-bucket = [
 # passthrough to `omega/metal-q4k-ggml-port` so the decode harness can measure that arm.
 metal-q4k-ggml-port = ["omega?/metal-q4k-ggml-port"]
 memmap2 = ["dep:memmap2"]
+proxima-storage = ["dep:proxima-storage", "proxima-storage/dax"]
 
 [dependencies]
 arrayvec.workspace = true
@@ -192,6 +193,7 @@ proxima-core = { workspace = true, features = ["alloc"], optional = true }
 proxima-gguf = { path = "../proxima-gguf", default-features = false }
 proxima-primitives = { workspace = true, default-features = false }
 proxima-safetensors = { path = "../proxima-safetensors", default-features = false, features = ["alloc"] }
+proxima-storage = { version = "0.1.0", path = "../proxima-storage", optional = true }
 proxima-telemetry = { workspace = true, optional = true }
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
 # `gguf` implies its own `std`, which is exactly the tier `generate::LoadedModel`

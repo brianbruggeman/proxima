@@ -58,6 +58,8 @@ pub mod residency;
 mod memory_fit;
 #[cfg(feature = "std")]
 mod quality;
+#[cfg(all(feature = "std", feature = "proxima-storage"))]
+mod source;
 #[cfg(feature = "std")]
 mod qwen35;
 mod serving;
@@ -107,6 +109,8 @@ pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
 pub use quality::print_quality_report;
 #[cfg(feature = "std")]
 pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, quality_report};
+#[cfg(all(feature = "std", feature = "proxima-storage"))]
+pub use source::{CheckpointMapping, CheckpointSourceError};
 #[cfg(feature = "std")]
 pub use qwen35::{
     Qwen35Arch, Qwen35Architecture, Qwen35LayerKind, Qwen35SsmShape, bind_qwen35_checkpoint,
