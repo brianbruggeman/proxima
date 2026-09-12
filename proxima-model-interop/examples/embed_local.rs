@@ -77,8 +77,17 @@ fn main() {
     let model = LoadedModel::load(&parsed, &mapping).expect("bind embedding checkpoint");
     let hidden_root = model.hidden_root().expect("embedding graph hidden root");
     let compare_layers = backend != "cpu" && env::var_os("PROXIMA_COMPARE_LAYERS").is_some();
-    let mut requested_nodes = vec![hidden_root];
-    if compare_layers {
+    let compare_through = env::var("PROXIMA_COMPARE_THROUGH")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .map(proxima_tensor::NodeId);
+    let compare_nodes = compare_through.is_some();
+    let mut requested_nodes = if let Some(node) = compare_through {
+        model.computed_node_ids_through(node)
+    } else {
+        vec![hidden_root]
+    };
+    if compare_layers && !compare_nodes {
         requested_nodes.extend_from_slice(model.layer_residual_roots());
     }
 
@@ -90,7 +99,6 @@ fn main() {
             if backend == "cpu" { 0 } else { GPU_LAYERS_ALL },
         )
         .expect("run embedding forward");
-    let mut hidden = gpu_values.remove(0);
     let forward_ms = started.elapsed().as_secs_f64() * 1_000.0;
     let cpu_values = if backend != "cpu" {
         Some(
@@ -101,6 +109,35 @@ fn main() {
     } else {
         None
     };
+    if compare_nodes {
+        let cpu_values = cpu_values.as_ref().expect("CPU node comparison reference");
+        let threshold = env::var("PROXIMA_COMPARE_NODE_THRESHOLD")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(1.0e-3);
+        for (node, (actual, expected)) in requested_nodes
+            .iter()
+            .zip(gpu_values.iter().zip(cpu_values))
+        {
+            let diff = actual
+                .iter()
+                .zip(expected)
+                .map(|(actual, expected)| f32::abs(*actual - *expected))
+                .fold(0.0, f32::max);
+            if diff > threshold {
+                eprintln!(
+                    "embed_local: first_node_difference node={} kind={:?} max_abs_diff={diff:.7} description={:?} dependencies={:?}",
+                    node.0,
+                    model.node_kind(*node),
+                    model.node_description(*node),
+                    model.node_dependencies(*node),
+                );
+                break;
+            }
+        }
+        return;
+    }
+    let mut hidden = gpu_values.remove(0);
     let cpu_max_abs_diff = if let Some(cpu_values) = &cpu_values {
         let cpu_hidden = &cpu_values[0];
         if compare_layers {
