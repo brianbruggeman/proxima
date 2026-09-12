@@ -176,7 +176,7 @@ fn layer_tensors(layer: u32, is_attention: bool, seed: u64) -> Vec<TensorPayload
             seed + 25,
         ));
         tensors.push(vector_tensor(
-            &format!("blk.{layer}.ssm_dt"),
+            &format!("blk.{layer}.ssm_dt.bias"),
             SSM_TIME_STEP_RANK,
             seed + 26,
         ));

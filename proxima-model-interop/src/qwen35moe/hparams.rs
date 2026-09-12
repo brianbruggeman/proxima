@@ -4,7 +4,9 @@ use alloc::vec::Vec;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 
-use crate::bind::{metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or};
+use crate::bind::{
+    find_tensor, metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or,
+};
 use crate::error::InteropError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +16,15 @@ pub enum LayerKind {
 }
 
 impl LayerKind {
+    #[must_use]
+    pub fn from_kv_heads(kv_heads: u32) -> Self {
+        if kv_heads == 0 {
+            Self::Gdn
+        } else {
+            Self::Attention
+        }
+    }
+
     #[must_use]
     pub fn from_interval(layer: u32, interval: u32) -> Self {
         if interval != 0 && (layer + 1).is_multiple_of(interval) {
@@ -88,8 +99,22 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<Architecture, InteropError> 
     let block_count = metadata_u32(parsed, &prefix("block_count"))?;
     let interval = metadata_u32(parsed, &prefix("full_attention_interval"))?;
     let kv_heads_by_layer = per_layer_kv(parsed, &prefix("attention.head_count_kv"), block_count)?;
+    // The tensor directory is the authoritative layer-kind declaration.  The
+    // interval is only a useful hint: current Qwen3.5 headers contain an
+    // irregular final attention layer (`blk.40`) that the interval alone
+    // misclassifies.  `attn_q.weight` is present only on attention layers;
+    // GDN layers instead carry `attn_qkv.weight`, so this remains correct for
+    // future schedules without baking another architecture exception into
+    // the parser.
     let layer_kinds = (0..block_count)
-        .map(|layer| LayerKind::from_interval(layer, interval))
+        .map(|layer| {
+            let attention_name = format!("blk.{layer}.attn_q.weight");
+            if find_tensor(parsed, &attention_name).is_ok() {
+                LayerKind::Attention
+            } else {
+                LayerKind::Gdn
+            }
+        })
         .collect();
     let v_head_reordered = match parsed.metadata_value(&prefix("ssm.v_head_reordered")) {
         Some(MetadataValue::Bool(value)) => *value,

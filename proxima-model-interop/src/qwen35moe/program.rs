@@ -602,7 +602,7 @@ pub fn qwen35moe_forward_program(
                     &mut program,
                     DType::Float32,
                     vec![Extent::Static(architecture.ssm_time_step_rank)],
-                    &format!("blk.{layer}.ssm_dt"),
+                    &format!("blk.{layer}.ssm_dt.bias"),
                 );
                 let ssm_a = input_leaf(
                     &mut program,
