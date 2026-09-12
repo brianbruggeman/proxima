@@ -40,7 +40,12 @@ fn main() {
             // each intermediate alive, allowing this example to identify the
             // first divergent operation instead of only reporting the layer
             // aggregate.
-            model.computed_node_ids_through(layer_roots[0])
+            let through = env::var("PROXIMA_COMPARE_NODE")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .map(proxima_tensor::NodeId)
+                .unwrap_or(layer_roots[0]);
+            model.computed_node_ids_through(through)
         } else if env::var_os("PROXIMA_FIRST_LAYER_ONLY").is_some() {
             layer_roots[..1].to_vec()
         } else {
@@ -57,6 +62,7 @@ fn main() {
         {
             let threshold = 1e-3_f64;
             let mut first_bad = None;
+            let sweep = env::var_os("PROXIMA_COMPARE_SWEEP").is_some();
             for (node_id, (cpu_node, gpu_node)) in requested_roots
                 .iter()
                 .zip(cpu_layers.iter().zip(&gpu_layers))
@@ -79,6 +85,14 @@ fn main() {
                     .map(|(index, (left, right))| (f64::from((left - right).abs()), index))
                     .max_by(|left, right| left.0.total_cmp(&right.0))
                     .expect("nonempty intermediate");
+                if sweep {
+                    println!(
+                        "{{\"sweep_node\":{},\"kind\":{:?},\"elements\":{},\"max_abs\":{max_abs},\"max_index\":{max_index}}}",
+                        node_id.0,
+                        model.node_kind(*node_id),
+                        cpu_node.len()
+                    );
+                }
                 if max_abs > threshold {
                     first_bad = Some((
                         node_id.0,
