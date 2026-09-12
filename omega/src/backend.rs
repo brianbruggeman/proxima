@@ -679,6 +679,14 @@ pub fn register_expert_mapping(bytes: &[u8]) {
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
 pub fn register_expert_mapping(_bytes: &[u8]) {}
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub fn clear_expert_source_cache() {
+    metal::clear_expert_source_cache();
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+pub fn clear_expert_source_cache() {}
+
 /// Evicts a dropped checkpoint's own resident weight names from the Metal
 /// driver's device-buffer caches -- see [`metal::release_resident_names`]'s
 /// own doc for the mechanism and why it evicts by name rather than

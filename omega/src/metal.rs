@@ -608,6 +608,18 @@ pub fn current_allocated_size() -> Option<u64> {
     Some(device.currentAllocatedSize() as u64)
 }
 
+/// Drops staged HOBBIT payload buffers after an all-expert prefill has handed
+/// routing observations to the next segmented step. The command buffer has
+/// completed before the evaluator returns, so releasing these wrappers cannot
+/// invalidate an in-flight kernel; keeping them would retain the entire
+/// low-codec expert table while the bounded DynaExq table takes over.
+pub fn clear_expert_source_cache() {
+    EXPERT_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
+    NOCOPY_BUFFERS.with(|cache| {
+        cache.borrow_mut().remove(EXPERT_MAPPING_NOCOPY_NAME);
+    });
+}
+
 /// A plain record of the facts a load-time budget decision needs about this
 /// host and its Metal device -- no policy, no threshold, just what the
 /// device and the OS report right now (guiding-principles principle 1:
@@ -3432,7 +3444,20 @@ fn execute_plan_with_placements_inner(
     }
 
     let placed_output_nodes: BTreeSet<NodeId> = output_placed.keys().copied().collect();
-    finish(plan, &device_buffers, &placed_output_nodes, recycle.pop())
+    let evaluated = finish(plan, &device_buffers, &placed_output_nodes, recycle.pop())?;
+
+    // Expert buffers are a per-step source snapshot, not plan-resident
+    // weights. `finish` has already read every requested output, so retaining
+    // these entries in the plan would keep the all-expert prefill arena alive
+    // while the bounded DynaExq table takes over for decode.
+    drop(device_buffers);
+    {
+        let mut plan_buffers = plan.device_buffers.borrow_mut();
+        for node in effective_expert_buffers.keys() {
+            plan_buffers.remove(node);
+        }
+    }
+    Ok(evaluated)
 }
 
 /// [`plan`] against a name-keyed block set — the shape a model binds its
@@ -8126,7 +8151,8 @@ mod checkpoint_mapping_release_tests {
     use proxima_tensor::AlignedBuffer;
 
     use super::{
-        checkpoint_mapping_offset, device_and_queue, expert_mapping_offset,
+        checkpoint_mapping_offset, clear_expert_source_cache, device_and_queue,
+        expert_mapping_offset,
         mapping_buffer_allocated_bytes, page_size, register_checkpoint_mapping,
         register_expert_mapping, reset_checkpoint_mapping_for_test, unregister_checkpoint_mapping,
         unregister_expert_mapping,
@@ -8201,6 +8227,13 @@ mod checkpoint_mapping_release_tests {
             .expect("the whole expert mapping binds without copying");
         assert_eq!(offset, 17);
         assert_eq!(mapping_buffer_allocated_bytes(), (0, page as u64));
+
+        clear_expert_source_cache();
+        assert_eq!(mapping_buffer_allocated_bytes(), (0, 0));
+        assert!(
+            expert_mapping_offset(&device, arena.as_ptr().cast(), arena.len()).is_some(),
+            "clearing staged sources must preserve the registered expert mapping"
+        );
 
         unregister_expert_mapping(mapping_bytes);
         assert_eq!(mapping_buffer_allocated_bytes(), (0, 0));

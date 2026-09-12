@@ -98,7 +98,7 @@ use omega::backend::execute_plan_named_metal_op_timed_with_expert_sources;
 use omega::backend::{
     Engine, Plan, execute_plan_named_with_expert_sources, mark_resident, plan_named,
     plan_named_exact, register_expert_mapping, release_resident_names,
-    unregister_checkpoint_mapping, unregister_expert_mapping,
+    unregister_checkpoint_mapping, unregister_expert_mapping, clear_expert_source_cache,
 };
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same
@@ -8427,6 +8427,11 @@ impl<'file> LoadedModel<'file> {
                                 },
                             )?;
                         }
+                    }
+
+                    #[cfg(all(feature = "metal", target_os = "macos"))]
+                    if monolithic_all_low && is_last_step_batch {
+                        clear_expert_source_cache();
                     }
 
                     if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_OUTPUT").is_some()
