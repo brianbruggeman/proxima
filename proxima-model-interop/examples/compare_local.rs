@@ -8,7 +8,7 @@ use std::env;
 use std::fs::File;
 
 use memmap2::{Mmap, MmapOptions};
-use proxima_gguf::{MetadataValue, ParsedGguf, parse_complete};
+use proxima_gguf::parse_complete;
 use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel};
 
 #[cfg(feature = "metal")]
