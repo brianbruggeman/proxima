@@ -224,6 +224,11 @@ fn main() {
         gpu_correctness_fallback: env::var_os("PROXIMA_GPU_CORRECTNESS_FALLBACK").is_some(),
         ..ServingConfig::default()
     };
+    let execution_backend = if serving_config.gpu_correctness_fallback && backend == "vulkan" {
+        "cpu-fallback"
+    } else {
+        backend.as_str()
+    };
 
     let started = Instant::now();
     let cpu_before = process_cpu_seconds();
@@ -289,6 +294,7 @@ fn main() {
     let cpu_percent = cpu_percent.map_or_else(|| "null".to_owned(), |value| format!("{value:.2}"));
     println!(
         "{{\"model\":{model_path:?},\"model_bytes\":{},\"backend\":{backend:?},\
+         \"execution_backend\":{execution_backend:?},\
          \"rss_before_load_kib\":{},\"rss_after_load_kib\":{},\"prompt_tokens\":{},\
          \"gpu_memory_before\":{},\"gpu_memory_after\":{},\
          \"batch_size\":{},\"ubatch_size\":{},\"cpu_percent\":{},\
