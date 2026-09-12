@@ -116,6 +116,9 @@ fn main() {
                 if diff > 1.0e-3 && first_bad.is_none() {
                     first_bad = Some((layer, diff));
                 }
+                if env::var_os("PROXIMA_COMPARE_LAYER_ERRORS").is_some() {
+                    eprintln!("embed_local: layer={layer} max_abs_diff={diff:.7}");
+                }
             }
             eprintln!("embed_local: first_layer_difference={first_bad:?}");
         }
