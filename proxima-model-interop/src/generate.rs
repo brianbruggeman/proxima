@@ -8386,6 +8386,7 @@ impl<'file> LoadedModel<'file> {
                             metal_stage.gpu_exec_calls,
                             ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
                         );
+                        #[cfg(feature = "instrument")]
                         eprintln!(
                             "prefill_batch_stages batch_index={} prepare_ms={:.3} emit_ms={:.3} pipeline_lookup_ms={:.3} pipeline_misses={} pipeline_compile_ms={:.3} op_setup_ms={:.3} block_upload_ms={:.3} readback_ms={:.3}",
                             batch_index,
