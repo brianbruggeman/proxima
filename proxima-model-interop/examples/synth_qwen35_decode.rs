@@ -17,7 +17,7 @@
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig};
 
-const FIXTURE_PATH: &str = "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6e203711-bd50-48cc-9ade-409668bdafdd/scratchpad/synth-qwen38-27b.gguf";
+const FIXTURE_PATH: &str = "/tmp/proxima-synth-qwen35.gguf";
 
 // Mirrors `synth_qwen35_gguf.rs`'s own constants -- kept in sync by hand
 // since the two examples don't share a lib target; the budget check below
