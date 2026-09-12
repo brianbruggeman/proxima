@@ -16,6 +16,7 @@
 pub mod backend;
 pub mod engine;
 pub mod error;
+pub mod read;
 
 #[cfg(feature = "spdk")]
 pub mod spdk;
@@ -29,5 +30,6 @@ pub mod uio;
 pub use backend::QueueBackend;
 pub use engine::{Completion, QueuePair};
 pub use error::NvmeError;
+pub use read::{ReadRequest, ReadRequestError};
 #[cfg(feature = "spdk")]
 pub use spdk::{SpdkCallbacks, SpdkQueueBackend};
