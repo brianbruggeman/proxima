@@ -245,7 +245,27 @@ fn supported_serving_config(model_path: &str, gpu_layers: i32) -> ServingConfig<
         .ok()
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
         || (env::var_os("PROXIMA_EXPERT_SIDECAR").is_some() && residency_budget_bytes > 0);
-    ServingConfig {
+    let qwen35moe_monolithic_all_low =
+        env::var_os("PROXIMA_QWEN35MOE_MONOLITHIC_ALL_LOW").is_some();
+    let kv_bucket_tokens = env::var("PROXIMA_KV_BUCKET_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0);
+    #[cfg(target_os = "macos")]
+    let requested_dispatch_type = match env::var("PROXIMA_DISPATCH").as_deref() {
+        Ok("serial") => omega::DispatchType::Serial,
+        Ok("concurrent") | Err(_) => omega::DispatchType::Concurrent,
+        Ok(other) => panic!("PROXIMA_DISPATCH={other}: expected serial or concurrent"),
+    };
+    // Full-graph low-codec expert substitution is not yet safe under Metal's
+    // concurrent encoder: serial is the correctness-preserving boundary until
+    // the missing source-table hazard edge is proven in omega.
+    let dispatch_type = if qwen35moe_monolithic_all_low {
+        omega::DispatchType::Serial
+    } else {
+        requested_dispatch_type
+    };
+    let mut serving_config = ServingConfig {
         model_path,
         kv_cache_key_quant: proxima_gguf::types::GgmlType::F32,
         kv_cache_value_quant: proxima_gguf::types::GgmlType::F32,
@@ -258,9 +278,17 @@ fn supported_serving_config(model_path: &str, gpu_layers: i32) -> ServingConfig<
         gpu_layers,
         gpu_memory_limit_bytes,
         qwen35moe_pre_gather,
+        #[cfg(target_os = "macos")]
+        dispatch_type,
+        exact_activations: env::var_os("PROXIMA_DEBUG_EXACT_ACTIVATIONS").is_some(),
         reasoning_budget: 0,
         ..ServingConfig::default()
+    };
+    if let Some(kv_bucket_tokens) = kv_bucket_tokens {
+        serving_config.kv_bucket_tokens = kv_bucket_tokens;
+        println!("kv_bucket_tokens_override = {kv_bucket_tokens}");
     }
+    serving_config
 }
 
 #[derive(Clone, Copy)]
@@ -404,14 +432,34 @@ fn main() {
         let attach_result = if use_mmap {
             // SAFETY: the sidecar is read-only for the lifetime of the model.
             match unsafe { memmap2::Mmap::map(&sidecar_file) } {
-                Ok(mapping) => model.attach_expert_sidecar(Arc::new(mapping)),
+                Ok(mapping) => gguf_file
+                    .try_clone()
+                    .map_err(|error| error.to_string())
+                    .and_then(|checkpoint_file| {
+                        model
+                            .attach_expert_sidecar_with_checkpoint_file(
+                                Arc::new(mapping),
+                                checkpoint_file,
+                            )
+                            .map_err(|error| error.to_string())
+                    }),
                 Err(error) => {
                     eprintln!("mmap expert sidecar: {error}");
                     return;
                 }
             }
         } else {
-            model.attach_expert_sidecar_file(sidecar_file)
+            gguf_file
+                .try_clone()
+                .map_err(|error| error.to_string())
+                .and_then(|checkpoint_file| {
+                    model
+                        .attach_expert_sidecar_file_with_checkpoint_file(
+                            sidecar_file,
+                            checkpoint_file,
+                        )
+                        .map_err(|error| error.to_string())
+                })
         };
         match attach_result {
             Ok(()) => println!(

@@ -487,8 +487,7 @@ pub struct GdnPrefillScan<'buffer> {
 }
 
 fn checked_gdn_product(left: usize, right: usize) -> Result<usize, TensorError> {
-    left
-        .checked_mul(right)
+    left.checked_mul(right)
         .ok_or(TensorError::InvalidGdnPrefillShape {
             reason: "dimension product overflowed usize",
         })
@@ -4015,6 +4014,30 @@ pub struct ExpertEntry<'a> {
     pub epoch: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpertPayloadSpan {
+    pub offset: u32,
+    pub length: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExpertPayloadArena<'a> {
+    bytes: &'a [u8],
+    spans: &'a [Option<ExpertPayloadSpan>],
+}
+
+impl<'a> ExpertPayloadArena<'a> {
+    #[must_use]
+    pub const fn bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+
+    #[must_use]
+    pub const fn spans(self) -> &'a [Option<ExpertPayloadSpan>] {
+        self.spans
+    }
+}
+
 /// A per-expert weight table for `run_reduce_quantized`'s gathered-reduce
 /// read path, standing in for one contiguous [`QuantizedBlock`] stack
 /// (`proxima-gguf::restack`'s own byte-concatenation contract) when a
@@ -4042,6 +4065,7 @@ pub struct ExpertEntry<'a> {
 pub struct ExpertSource<'a> {
     entries: &'a [ExpertEntry<'a>],
     selected_expert_ids: Option<&'a [u32]>,
+    packed_arena: Option<ExpertPayloadArena<'a>>,
 }
 
 impl<'a> ExpertSource<'a> {
@@ -4054,6 +4078,7 @@ impl<'a> ExpertSource<'a> {
         Self {
             entries,
             selected_expert_ids: None,
+            packed_arena: None,
         }
     }
 
@@ -4068,7 +4093,93 @@ impl<'a> ExpertSource<'a> {
         Self {
             entries,
             selected_expert_ids: Some(selected_expert_ids),
+            packed_arena: None,
         }
+    }
+
+    pub fn with_selected_expert_arena(
+        entries: &'a [ExpertEntry<'a>],
+        selected_expert_ids: &'a [u32],
+        bytes: &'a [u8],
+        spans: &'a [Option<ExpertPayloadSpan>],
+    ) -> Result<Self, TensorError> {
+        Self::with_expert_arena(entries, Some(selected_expert_ids), bytes, spans)
+    }
+
+    /// Borrows one mmap-backed arena containing every expert payload. The
+    /// descriptor table remains dense in route space, so the Metal backend can
+    /// bind the arena before routing without staging selected bytes first.
+    pub fn with_all_expert_arena(
+        entries: &'a [ExpertEntry<'a>],
+        bytes: &'a [u8],
+        spans: &'a [Option<ExpertPayloadSpan>],
+    ) -> Result<Self, TensorError> {
+        if spans.len() != entries.len() {
+            return Err(TensorError::InvalidExpertPayloadArena {
+                reason: "all-expert arena span count does not match the expert table",
+            });
+        }
+        for (entry, span) in entries.iter().zip(spans) {
+            let span = span.ok_or(TensorError::InvalidExpertPayloadArena {
+                reason: "all-expert arena is missing an expert payload span",
+            })?;
+            let packed_bytes =
+                entry
+                    .block
+                    .packed_bytes()
+                    .ok_or(TensorError::InvalidExpertPayloadArena {
+                        reason: "all-expert arena entries must use packed bytes",
+                    })?;
+            if usize::try_from(span.length).ok() != Some(packed_bytes.len()) {
+                return Err(TensorError::InvalidExpertPayloadArena {
+                    reason: "all-expert arena span length does not match its expert payload",
+                });
+            }
+        }
+        Self::with_expert_arena(entries, None, bytes, spans)
+    }
+
+    fn with_expert_arena(
+        entries: &'a [ExpertEntry<'a>],
+        selected_expert_ids: Option<&'a [u32]>,
+        bytes: &'a [u8],
+        spans: &'a [Option<ExpertPayloadSpan>],
+    ) -> Result<Self, TensorError> {
+        if spans.len() < entries.len() {
+            return Err(TensorError::InvalidExpertPayloadArena {
+                reason: "arena span table is shorter than the expert table",
+            });
+        }
+        let mut present = Vec::new();
+        for span in spans.iter().flatten() {
+            let end = usize::try_from(span.offset)
+                .ok()
+                .and_then(|offset| {
+                    usize::try_from(span.length)
+                        .ok()
+                        .and_then(|length| offset.checked_add(length))
+                })
+                .ok_or(TensorError::InvalidExpertPayloadArena {
+                    reason: "arena span endpoint overflowed",
+                })?;
+            if end > bytes.len() {
+                return Err(TensorError::InvalidExpertPayloadArena {
+                    reason: "arena span exceeds arena bytes",
+                });
+            }
+            present.push((usize::try_from(span.offset).unwrap_or(usize::MAX), end));
+        }
+        present.sort_unstable();
+        if present.windows(2).any(|window| window[1].0 < window[0].1) {
+            return Err(TensorError::InvalidExpertPayloadArena {
+                reason: "arena spans overlap",
+            });
+        }
+        Ok(Self {
+            entries,
+            selected_expert_ids,
+            packed_arena: Some(ExpertPayloadArena { bytes, spans }),
+        })
     }
 
     /// Returns the immutable per-expert snapshot so a device backend can
@@ -4084,6 +4195,11 @@ impl<'a> ExpertSource<'a> {
     #[must_use]
     pub const fn selected_expert_ids(&self) -> Option<&'a [u32]> {
         self.selected_expert_ids
+    }
+
+    #[must_use]
+    pub const fn packed_arena(&self) -> Option<ExpertPayloadArena<'a>> {
+        self.packed_arena
     }
 
     /// Resolves expert `index`'s own entry, rejecting a shape that
@@ -6472,6 +6588,46 @@ fn run_node(resolved: &BoundOp, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>
     Ok(output)
 }
 
+/// Evaluates one already-bound dense operation against caller-supplied f32
+/// operand snapshots. This is the narrow CPU oracle used by device
+/// diagnostics: it executes the exact [`BoundOp`] the device encoded without
+/// rebinding the graph or retaining unrelated intermediates.
+///
+/// # Errors
+/// Rejects packed and gathered operands explicitly because their device
+/// buffers are not dense f32 tensors. Also rejects an output slice whose
+/// length differs from the bound operation's resolved output length.
+pub fn evaluate_bound_f32_into(
+    resolved: &BoundOp,
+    buffers: &[Option<&[f32]>],
+    packed_operands: &[NodeId],
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    for (operand, _, lookup) in resolved.all_read_sources() {
+        if lookup.is_some() {
+            return Err(TensorError::BoundF32GatherOperand {
+                node: resolved.node,
+                operand: *operand,
+            });
+        }
+        if packed_operands.contains(operand) {
+            return Err(TensorError::BoundF32PackedOperand {
+                node: resolved.node,
+                operand: *operand,
+            });
+        }
+    }
+    let expected = node_output_len(resolved);
+    if output.len() != expected {
+        return Err(TensorError::InputSizeMismatch {
+            node: resolved.node,
+            expected,
+            found: output.len(),
+        });
+    }
+    run_node_into(resolved, buffers, None, None, None, true, output)
+}
+
 /// Runs `resolved`, writing its output into a caller-provided slice instead
 /// of allocating one. This is the primitive [`run_node`] (sequential) and
 /// [`evaluate_parallel`] (one call per chunk, each writing a disjoint
@@ -8849,6 +9005,22 @@ fn build_matmul_stage_plan<'weights>(
     let rows = usize::try_from(rows_total).map_err(|_| shape_error())?;
     let leading_total = usize::try_from(leading_total_u64).map_err(|_| shape_error())?;
 
+    if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
+        && (resolved.extents.len() == 5 || activation.len() == 7 * 4096)
+    {
+        eprintln!(
+            "gdn_projection reduce={} activation={} k={} rows={} leading={} extents={:?} output_axes={:?} weight_layout={weight_layout:?} activation_layout={activation_layout:?} activation_first={:?}",
+            resolved.node.0,
+            activation_node.0,
+            k,
+            rows,
+            leading_total,
+            resolved.extents,
+            output_axes,
+            &activation[..activation.len().min(8)],
+        );
+    }
+
     let (weights, block_bytes, block_elements): (&[u8], usize, usize) = match weight_block {
         QuantizedBlock::Int32(_) => {
             unreachable!("integer index blocks never enter quantized matmul")
@@ -9615,6 +9787,22 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     }
     let rows = usize::try_from(rows_total).map_err(|_| shape_error())?;
     let leading_total = usize::try_from(leading_total_u64).map_err(|_| shape_error())?;
+
+    if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
+        && (resolved.extents.len() == 5 || activation.len() == 7 * 4096)
+    {
+        eprintln!(
+            "gdn_projection_run reduce={} activation={} k={} rows={} leading={} extents={:?} output_axes={:?} weight_layout={weight_layout:?} activation_layout={activation_layout:?} activation_first={:?}",
+            resolved.node.0,
+            activation_node.0,
+            k,
+            rows,
+            leading_total,
+            resolved.extents,
+            output_axes,
+            &activation[..activation.len().min(8)],
+        );
+    }
 
     // Every K-quant weight codec this crate packs shares `Q4K_BLOCK_ELEMENTS`
     // (256) elements per super-block (`q5_k`/`q6_k`'s own module docs: same
@@ -22942,6 +23130,82 @@ mod tests {
         }
     }
 
+    fn bound_f32_identity(lookup: Option<bind::Lookup>) -> BoundOp {
+        BoundOp {
+            node: NodeId(1),
+            dtype: DType::Float32,
+            extents: vec![3],
+            kind: BoundOpKind::Elementwise {
+                body: ComposedBody::leaf(ScalarOp::Identity),
+                operands: vec![(
+                    NodeId(0),
+                    bind::Layout {
+                        base: 0,
+                        strides: smallvec::smallvec![1],
+                    },
+                    lookup,
+                )],
+            },
+        }
+    }
+
+    #[test]
+    fn evaluate_bound_f32_into_runs_only_the_supplied_dense_bound_op() {
+        let input = [1.25f32, -2.5, 4.0];
+        let buffers = [Some(input.as_slice()), None];
+        let mut output = [0.0f32; 3];
+
+        evaluate_bound_f32_into(&bound_f32_identity(None), &buffers, &[], &mut output)
+            .expect("dense bound identity evaluates from the supplied snapshot");
+
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn evaluate_bound_f32_into_rejects_packed_and_gathered_operands() {
+        let input = [1.25f32, -2.5, 4.0];
+        let buffers = [Some(input.as_slice()), None];
+        let mut output = [0.0f32; 3];
+        let packed_error = evaluate_bound_f32_into(
+            &bound_f32_identity(None),
+            &buffers,
+            &[NodeId(0)],
+            &mut output,
+        )
+        .expect_err("a packed operand is not a dense f32 snapshot");
+        assert!(matches!(
+            packed_error,
+            TensorError::BoundF32PackedOperand {
+                node: NodeId(1),
+                operand: NodeId(0),
+            }
+        ));
+
+        let lookup = bind::Lookup {
+            indices: NodeId(2),
+            index_layout: bind::Layout {
+                base: 0,
+                strides: smallvec::smallvec![1],
+            },
+            element_stride: 1,
+            extent: 3,
+        };
+        let gathered_error = evaluate_bound_f32_into(
+            &bound_f32_identity(Some(lookup)),
+            &buffers,
+            &[],
+            &mut output,
+        )
+        .expect_err("a gathered operand needs its index payload and is rejected");
+        assert!(matches!(
+            gathered_error,
+            TensorError::BoundF32GatherOperand {
+                node: NodeId(1),
+                operand: NodeId(0),
+            }
+        ));
+    }
+
     /// A synthetic instance of the 6-step SwiGLU chain named in
     /// `proxima-tensor/docs/discipline.md` ROW 5
     /// (`[Negate, Exponential, Add, Reciprocal, Multiply, Multiply]`):
@@ -30977,6 +31241,117 @@ mod tests {
         }
     }
 
+    #[test]
+    fn qwen35_batched_packed_ssm_projection_matches_repeated_rows() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        const POSITIONS: u32 = 2;
+        const GROUP: u32 = 2;
+        const KV_HEADS: u32 = 2;
+        const HEAD_DIM: u32 = 64;
+        const EMBED: u32 = 3;
+        const CONTRACTION: u32 = GROUP * KV_HEADS * HEAD_DIM;
+        assert_eq!(CONTRACTION as usize, QK_K);
+
+        let activation: Vec<f32> = random_vec(61, (POSITIONS * CONTRACTION) as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let weight_f32: Vec<f32> = random_vec(67, (EMBED * CONTRACTION) as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let mut weight_blocks = vec![0_u8; EMBED as usize * BLOCK_BYTES];
+        for (row, packed) in weight_f32
+            .chunks_exact(CONTRACTION as usize)
+            .zip(weight_blocks.chunks_exact_mut(BLOCK_BYTES))
+        {
+            quantize(row, packed).expect("one complete q4_k block per row");
+        }
+
+        let build = |positions: u32| {
+            let mut program = Vec::new();
+            let weight = block(
+                &mut program,
+                DType::UInt8,
+                &[Extent::Static(EMBED), Extent::Static(CONTRACTION)],
+            );
+            let activation = f32_block(
+                &mut program,
+                &[
+                    Extent::Static(positions),
+                    Extent::Static(GROUP),
+                    Extent::Static(KV_HEADS),
+                    Extent::Static(HEAD_DIM),
+                ],
+            );
+            let row_terms = [
+                AxisTerm::scaled(3, i32::try_from(KV_HEADS * GROUP).expect("fits")),
+                AxisTerm::scaled(2, i32::try_from(GROUP).expect("fits")),
+                AxisTerm::scaled(1, 1),
+            ];
+            let weight_map = IndexMap::Affine(map::affine(
+                5,
+                &[(&[AxisTerm::scaled(4, 1)], 0), (&row_terms, 0)],
+            ));
+            let product = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![
+                        (weight, weight_map),
+                        (
+                            activation,
+                            IndexMap::Affine(map::projection(5, &[0, 1, 2, 3]))
+                        ),
+                    ],
+                    name: None,
+                },
+            );
+            let sum = append(
+                &mut program,
+                Op::Reduce(Reduce {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: product,
+                    in_map: IndexMap::Affine(map::projection(5, &[0, 1, 2, 3, 4])),
+                    out_map: IndexMap::Affine(map::projection(5, &[0, 4])),
+                    keep: Keep::Reduce,
+                    name: Some("qwen35_batched_ssm_projection".into()),
+                }),
+            );
+            (program, sum)
+        };
+
+        let (batched_program, batched_sum) = build(POSITIONS);
+        let batched_blocks = [
+            QuantizedBlock::Q4K(weight_blocks.as_slice()),
+            QuantizedBlock::Float32(activation.as_slice()),
+        ];
+        let batched =
+            evaluate_quantized_exact(&batched_program, &[], &batched_blocks, &[batched_sum])
+                .expect("batched projection evaluates")
+                .root()
+                .to_vec();
+
+        let (single_program, single_sum) = build(1);
+        let mut repeated = Vec::new();
+        for row in activation.chunks_exact(CONTRACTION as usize) {
+            let blocks = [
+                QuantizedBlock::Q4K(weight_blocks.as_slice()),
+                QuantizedBlock::Float32(row),
+            ];
+            repeated.extend_from_slice(
+                evaluate_quantized_exact(&single_program, &[], &blocks, &[single_sum])
+                    .expect("single projection evaluates")
+                    .root(),
+            );
+        }
+        assert_eq!(batched, repeated);
+    }
+
     /// [`evaluate_quantized_exact`] run end to end on the same program as
     /// [`evaluate_quantized_matmul_matches_dequantize_then_f32_evaluate`]
     /// above, held to a tighter absolute float-noise-floor bound instead of
@@ -31666,6 +32041,87 @@ mod tests {
             "the second evaluation must read the SWAPPED entry's own codec exactly, not a \
              stale Q4_K read left over from the first evaluation's table"
         );
+    }
+
+    #[test]
+    fn all_expert_arena_requires_one_exact_span_per_packed_entry() {
+        let first = [11_u8, 12, 13];
+        let second = [21_u8, 22];
+        let arena = [0_u8, 11, 12, 13, 0, 21, 22];
+        let entries = [
+            ExpertEntry {
+                block: QuantizedBlock::Q2K(&first),
+                out_dim: 1,
+                in_dim: 1,
+                epoch: 0,
+            },
+            ExpertEntry {
+                block: QuantizedBlock::Q2K(&second),
+                out_dim: 1,
+                in_dim: 1,
+                epoch: 0,
+            },
+        ];
+        let spans = [
+            Some(ExpertPayloadSpan {
+                offset: 1,
+                length: 3,
+            }),
+            Some(ExpertPayloadSpan {
+                offset: 5,
+                length: 2,
+            }),
+        ];
+
+        let source = ExpertSource::with_all_expert_arena(&entries, &arena, &spans)
+            .expect("every expert has one exact non-overlapping arena span");
+
+        assert_eq!(source.selected_expert_ids(), None);
+        assert_eq!(
+            source
+                .packed_arena()
+                .expect("the all-expert constructor retains its arena")
+                .spans(),
+            &spans,
+        );
+    }
+
+    #[test]
+    fn all_expert_arena_rejects_a_missing_expert_span() {
+        let first = [11_u8, 12, 13];
+        let second = [21_u8, 22];
+        let arena = [11_u8, 12, 13, 21, 22];
+        let entries = [
+            ExpertEntry {
+                block: QuantizedBlock::Q2K(&first),
+                out_dim: 1,
+                in_dim: 1,
+                epoch: 0,
+            },
+            ExpertEntry {
+                block: QuantizedBlock::Q2K(&second),
+                out_dim: 1,
+                in_dim: 1,
+                epoch: 0,
+            },
+        ];
+        let spans = [
+            Some(ExpertPayloadSpan {
+                offset: 0,
+                length: 3,
+            }),
+            None,
+        ];
+
+        let error = ExpertSource::with_all_expert_arena(&entries, &arena, &spans)
+            .expect_err("an all-expert arena cannot omit one descriptor");
+
+        assert!(matches!(
+            error,
+            TensorError::InvalidExpertPayloadArena {
+                reason: "all-expert arena is missing an expert payload span"
+            }
+        ));
     }
 
     /// [`ExpertSource::entry`]'s own shape guard: an entry declaring a

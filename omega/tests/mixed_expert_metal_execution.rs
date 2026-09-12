@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use proxima_gguf::quant::{q2_k, q4_k};
+use proxima_gguf::quant::{q2_k, q3_k, q4_k};
 use proxima_tensor::cpu::{
     ExpertEntry, ExpertSource, QuantizedBlock,
     evaluate_quantized_named_exact_with_scratch_and_experts,
@@ -30,13 +30,17 @@ const WIDTH: usize = 8 * q2_k::QK_K;
 const SEQUENCE: usize = 2;
 
 fn gathered_expert_program() -> (Vec<Op>, NodeId) {
+    gathered_expert_program_for(EXPERTS, SEQUENCE)
+}
+
+fn gathered_expert_program_for(experts: usize, sequence: usize) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
         Op::Input {
             dtype: DType::UInt8,
             shape: vec![
-                Extent::Static(EXPERTS as u32),
+                Extent::Static(experts as u32),
                 Extent::Static(ROWS as u32),
                 Extent::Static(WIDTH as u32),
             ],
@@ -47,7 +51,7 @@ fn gathered_expert_program() -> (Vec<Op>, NodeId) {
         &mut program,
         Op::Input {
             dtype: DType::Int32,
-            shape: vec![Extent::Static(SEQUENCE as u32)],
+            shape: vec![Extent::Static(sequence as u32)],
             name: Some("route".into()),
         },
     );
@@ -56,7 +60,7 @@ fn gathered_expert_program() -> (Vec<Op>, NodeId) {
         Op::Input {
             dtype: DType::Float32,
             shape: vec![
-                Extent::Static(SEQUENCE as u32),
+                Extent::Static(sequence as u32),
                 Extent::Static(WIDTH as u32),
             ],
             name: Some("activation".into()),
@@ -238,6 +242,12 @@ fn pack_q4k(values: &[f32]) -> Vec<u8> {
     packed
 }
 
+fn pack_q3k(values: &[f32]) -> Vec<u8> {
+    let mut packed = vec![0_u8; ROWS * (WIDTH / q3_k::QK_K) * q3_k::BLOCK_BYTES];
+    q3_k::quantize(values, &mut packed).expect("the Q3_K fixture has whole super-block rows");
+    packed
+}
+
 fn activation() -> Vec<f32> {
     (0..SEQUENCE * WIDTH)
         .map(|index| ((index * 17 % 97) as f32 - 48.0) * 0.02)
@@ -312,6 +322,65 @@ fn mixed_q2k_q4k_expert_source_executes_on_metal() {
         assert!(
             (actual - expected).abs() <= 1.0e-4,
             "mixed expert output {index} differs: metal={actual} cpu={expected}"
+        );
+    }
+}
+
+#[test]
+fn q3k_q4k_seven_rows_route_distinct_high_experts_matches_cpu() {
+    const EXPERT_COUNT: usize = 256;
+    const ROW_COUNT: usize = 7;
+    let (program, output) = gathered_expert_program_for(EXPERT_COUNT, ROW_COUNT);
+    let q3_values = expert_weights(7);
+    let q3_bytes = pack_q3k(&q3_values);
+    let q4_bytes = pack_q4k(&expert_weights(11));
+    let placeholder =
+        vec![q4_bytes[0]; EXPERT_COUNT * ROWS * (WIDTH / q4_k::QK_K) * q4_k::BLOCK_BYTES];
+    let route_ids = [0_u32, 31, 63, 127, 191, 223, 255];
+    let route_values: Vec<f32> = route_ids.iter().map(|value| *value as f32).collect();
+    let activations: Vec<f32> = (0..ROW_COUNT * WIDTH)
+        .map(|index| ((index * 29 % 101) as f32 - 50.0) * 0.015)
+        .collect();
+    let named = [
+        ("weight", QuantizedBlock::Q4K(&placeholder)),
+        ("route", QuantizedBlock::Float32(&route_values)),
+        ("activation", QuantizedBlock::Float32(&activations)),
+    ];
+    let plan = omega::plan_named(&program, &[], &named, &[output], NumericPolicy::default())
+        .expect("the Q3_K placeholder supplies the plan shape");
+    let entries: Vec<ExpertEntry<'_>> = (0..EXPERT_COUNT)
+        .map(|expert| ExpertEntry {
+            block: if expert % 2 == 0 {
+                QuantizedBlock::Q3K(&q3_bytes)
+            } else {
+                QuantizedBlock::Q4K(&q4_bytes)
+            },
+            out_dim: ROWS as u32,
+            in_dim: WIDTH as u32,
+            epoch: expert as u64,
+        })
+        .collect();
+    let source = ExpertSource::with_selected_expert_ids(&entries, &route_ids);
+    let sources = BTreeMap::from([(NodeId(0), source)]);
+    let mut cpu_scratch = Vec::new();
+    let mut validated_weight_nodes = None;
+    let expected = evaluate_quantized_named_exact_with_scratch_and_experts(
+        &program,
+        &[],
+        &named,
+        &[output],
+        &mut cpu_scratch,
+        &mut validated_weight_nodes,
+        Some(&sources),
+    )
+    .expect("the CPU evaluator supplies the Q3_K reference");
+    let evaluated = omega::metal::execute_plan_named_with_expert_sources(&plan, &named, &sources)
+        .expect("the seven-row Q3_K source table executes on Metal");
+    assert!(evaluated.root().iter().all(|value| value.is_finite()));
+    for (actual, reference) in evaluated.root().iter().zip(expected.root()) {
+        assert!(
+            (actual - reference).abs() <= 1.0e-4,
+            "Q3_K multi-row mismatch: metal={actual} cpu={reference}"
         );
     }
 }
@@ -554,9 +623,9 @@ fn mixed_expert_source_rejects_unsupported_codec_before_device_execution() {
     ];
     let plan = omega::plan_named(&program, &[], &named, &[output], NumericPolicy::default())
         .expect("the placeholder has a valid gathered Q4_K shape");
-    let unsupported = [0_u8; 1];
+    let unsupported = [0_u8; 176];
     let entries = [ExpertEntry {
-        block: QuantizedBlock::Q3K(&unsupported),
+        block: QuantizedBlock::Q5K(&unsupported),
         out_dim: ROWS as u32,
         in_dim: WIDTH as u32,
         epoch: 0,
@@ -564,12 +633,12 @@ fn mixed_expert_source_rejects_unsupported_codec_before_device_execution() {
     let sources = BTreeMap::from([(NodeId(0), ExpertSource::new(&entries))]);
 
     let error = omega::metal::execute_plan_named_with_expert_sources(&plan, &named, &sources)
-        .expect_err("a Q3_K expert source must have a typed mixed-codec rejection");
+        .expect_err("a Q5_K expert source must have a typed mixed-codec rejection");
     assert!(matches!(
         error,
         omega::MetalError::ExpertSourceUnsupported {
             node: NodeId(0),
-            reason: "mixed expert lowering only has Q2_K, Q4_K, and Q6_K decoders",
+            reason: "mixed expert lowering only has Q2_K, Q3_K, Q4_K, and Q6_K decoders",
         }
     ));
 }

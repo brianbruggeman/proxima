@@ -142,6 +142,9 @@ static inline float mixed_expert_element(device const uchar *payload,
     if (selected.codec == 3u) {
         return q6k_element(block + (element / 256u) * 210u, element % 256u);
     }
+    if (selected.codec == 4u) {
+        return q3k_element(block + (element / 256u) * 110u, element % 256u);
+    }
     return 0.0f;
 }
 static inline float mixed_expert_element_from_offset(
@@ -149,25 +152,110 @@ static inline float mixed_expert_element_from_offset(
         device const ExpertPayloadDescriptor *descriptor,
         uint expert,
         long full_offset,
-    long expert_stride) {
+        long expert_stride,
+        uint codec) {
     long local = full_offset - (long)expert * expert_stride;
-    ExpertPayloadDescriptor selected = descriptor[expert];
-    if (selected.codec == 1u) {
-        device const uchar *block = payload + selected.byte_offset +
+    if (codec == 1u) {
+        device const uchar *block = payload + descriptor[expert].byte_offset +
             (uint)(local / 256l) * 84u;
         return q2k_element(block, (uint)(local % 256l));
     }
-    if (selected.codec == 2u) {
-        device const uchar *block = payload + selected.byte_offset +
+    if (codec == 2u) {
+        device const uchar *block = payload + descriptor[expert].byte_offset +
             (uint)(local / 256l) * 144u;
         return q4k_element(block, (uint)(local % 256l));
     }
-    if (selected.codec == 3u) {
-        device const uchar *block = payload + selected.byte_offset +
+    if (codec == 3u) {
+        device const uchar *block = payload + descriptor[expert].byte_offset +
             (uint)(local / 256l) * 210u;
         return q6k_element(block, (uint)(local % 256l));
     }
+    if (codec == 4u) {
+        device const uchar *block = payload + descriptor[expert].byte_offset +
+            (uint)(local / 256l) * 110u;
+        return q3k_element(block, (uint)(local % 256l));
+    }
     return 0.0f;
+}
+static inline float mixed_expert_element_from_local(
+        device const uchar *base,
+        uint codec,
+        long local) {
+    if (codec == 1u) {
+        return q2k_element(base + (uint)(local / 256l) * 84u, (uint)(local % 256l));
+    }
+    if (codec == 2u) {
+        return q4k_element(base + (uint)(local / 256l) * 144u, (uint)(local % 256l));
+    }
+    if (codec == 3u) {
+        return q6k_element(base + (uint)(local / 256l) * 210u, (uint)(local % 256l));
+    }
+    if (codec == 4u) {
+        return q3k_element(base + (uint)(local / 256l) * 110u, (uint)(local % 256l));
+    }
+    return 0.0f;
+}
+"#;
+
+/// Codec-specialized descriptor reads used by the packed row kernels.  The
+/// descriptor still supplies the selected expert's offset, but the decoder is
+/// fixed in the generated body so a uniform sidecar codec keeps the same
+/// block-level work sharing as the ordinary packed path.
+pub const UNIFORM_EXPERT_READ_MSL: &str = r#"
+static inline float uniform_expert_element_from_offset_q2k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 84u;
+    return q2k_element(block, (uint)(local % 256l));
+}
+static inline float uniform_expert_element_from_offset_q3k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 110u;
+    return q3k_element(block, (uint)(local % 256l));
+}
+static inline float uniform_expert_element_from_offset_q4k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 144u;
+    return q4k_element(block, (uint)(local % 256l));
+}
+static inline float uniform_expert_element_from_offset_q5k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 176u;
+    return q5k_element(block, (uint)(local % 256l));
+}
+static inline float uniform_expert_element_from_offset_q6k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 210u;
+    return q6k_element(block, (uint)(local % 256l));
 }
 "#;
 
@@ -1250,6 +1338,20 @@ pub enum PackedCodec {
 }
 
 impl PackedCodec {
+    pub(crate) const fn cache_token(self) -> &'static str {
+        match self {
+            PackedCodec::Q2K => "q2k",
+            PackedCodec::Q3K => "q3k",
+            PackedCodec::Q4K => "q4k",
+            PackedCodec::Q5K => "q5k",
+            PackedCodec::Q6K => "q6k",
+            PackedCodec::Q8_0 => "q8_0",
+            PackedCodec::Q4_0 => "q4_0",
+            PackedCodec::Float16 => "f16",
+            PackedCodec::BFloat16 => "bf16",
+        }
+    }
+
     /// Bytes one block of this codec occupies — the multiplier
     /// [`operand_read`] and the row-blocked path need to step between
     /// blocks. Element count per block is shared ([`Q4K_BLOCK_ELEMENTS`])
@@ -1409,15 +1511,53 @@ pub fn emit_with_expert_sources(
     numeric_policy: NumericPolicy,
     source_node: NodeId,
 ) -> Result<Kernel, EmitError> {
+    emit_with_expert_sources_mode(resolved, packed_operands, numeric_policy, source_node, None)
+}
+
+/// Emits a substituted expert kernel while retaining the bound operand's
+/// packed decoder. This is valid only when every selected descriptor uses the
+/// same codec; mixed selections must use [`emit_with_expert_sources`].
+pub fn emit_with_uniform_expert_source(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    source_node: NodeId,
+    codec: PackedCodec,
+) -> Result<Kernel, EmitError> {
+    emit_with_expert_sources_mode(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        source_node,
+        Some(codec),
+    )
+}
+
+fn emit_with_expert_sources_mode(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    source_node: NodeId,
+    uniform_codec: Option<PackedCodec>,
+) -> Result<Kernel, EmitError> {
     // A substituted expert source may select a different codec for every
     // routed expert. Do not specialize this operand to the checkpoint's
     // original codec: the packed-row bodies bake one decoder into the kernel
     // and would interpret a low-copy Q2_K expert as Q4_K. Rendering the source
     // operand as scalar first leaves every read visible to the descriptor-aware
     // replacement below, whose codec tag selects the decoder at runtime.
-    let mut mixed_packed_operands = packed_operands.clone();
-    mixed_packed_operands.remove(&source_node);
-    let mut kernel = emit_inner(resolved, &mixed_packed_operands, numeric_policy, true)?;
+    let mut source_packed_operands = packed_operands.clone();
+    if let Some(codec) = uniform_codec {
+        source_packed_operands.insert(source_node, codec);
+    } else {
+        source_packed_operands.remove(&source_node);
+    }
+    let mut kernel = emit_inner(
+        resolved,
+        &source_packed_operands,
+        numeric_policy,
+        uniform_codec.is_none(),
+    )?;
     // Replace the gathered weight read with the descriptor-aware form. The
     // ordinary emitter remains unchanged; this opt-in path is selected only
     // when a residency table is supplied for this operand.
@@ -1455,10 +1595,26 @@ pub fn emit_with_expert_sources(
                     format!("u.gather_element_stride[{gather_slot}]")
                 };
                 let old = operand_read(weight_index, offset_name, codec);
-                let replacement = format!(
-                    "mixed_expert_element_from_offset(expert_payloads, expert_descriptors, (uint)fetched{weight_index}, {offset_name}, {})",
-                    expert_stride,
-                );
+                let replacement = if offset_name == format!("walk{weight_index}") {
+                    format!(
+                        "mixed_expert_element_from_local(expert_base{weight_index}, expert_codec{weight_index}, {offset_name})"
+                    )
+                } else {
+                    format!(
+                        "mixed_expert_element_from_offset(expert_payloads, expert_descriptors, (uint)fetched{weight_index}, {offset_name}, {}, expert_codec{weight_index})",
+                        expert_stride,
+                    )
+                };
+                let replacement = if let Some(codec) = uniform_codec {
+                    format!(
+                        "uniform_expert_element_from_offset_{}(expert_payloads, expert_descriptors, (uint)fetched{}, {offset_name}, {})",
+                        codec.cache_token(),
+                        weight_index,
+                        expert_stride,
+                    )
+                } else {
+                    replacement
+                };
                 kernel.source = kernel.source.replace(&old, &replacement);
             }
         }
@@ -1513,10 +1669,18 @@ pub fn emit_with_expert_sources(
                                 "(expert_row_base[q] - u.operand_base[{weight_index}] - expert_route_index[q] * u.gather_element_stride[{gather_slot}])"
                             ),
                         )
-                } else if row_block_source && line.contains(&format!(
+                } else if line.contains(&format!(
                     "fetched{weight_index} = (long)simd_broadcast_first"
                 )) {
-                    format!("{line}\n        expert_route_index[q] = fetched{weight_index};")
+                    if row_block_source {
+                        format!(
+                            "{line}\n        uint expert_codec{weight_index} = expert_descriptors[(uint)fetched{weight_index}].codec;\n        device const uchar *expert_base{weight_index} = expert_payloads + expert_descriptors[(uint)fetched{weight_index}].byte_offset;\n        expert_route_index[q] = fetched{weight_index};"
+                        )
+                    } else {
+                        format!(
+                            "{line}\n    uint expert_codec{weight_index} = expert_descriptors[(uint)fetched{weight_index}].codec;\n    device const uchar *expert_base{weight_index} = expert_payloads + expert_descriptors[(uint)fetched{weight_index}].byte_offset;"
+                        )
+                    }
                 } else if !row_block_source
                     && (line.contains(&packed_block_marker)
                         || line.contains(&packed_block_marker_compact))
@@ -1547,6 +1711,10 @@ pub fn emit_with_expert_sources(
                         ),
                         1,
                     )
+                } else if line.contains(&format!("int walk{weight_index} = (int)off{weight_index};")) {
+                    format!(
+                        "{line}\n        walk{weight_index} -= fetched{weight_index} * u.gather_element_stride[{gather_slot}];"
+                    )
                 } else if line.trim() == "weight_base[q] = wb;" {
                     format!("{line}\n        expert_row_base[q] = wb;")
                 } else if line.trim().starts_with("weight_base[q] += fetched") {
@@ -1563,7 +1731,7 @@ pub fn emit_with_expert_sources(
                     || line.contains("walk0")
                     || line.contains("base0")
             }) {
-                eprintln!("qwen35 mixed msl: {line}");
+                eprintln!("qwen35 expert msl: {line}");
             }
         }
     }
@@ -3471,6 +3639,8 @@ fn preamble(source: &mut String) {
     // so it follows all three declarations in the generated translation unit.
     source.push_str(MIXED_EXPERT_READ_MSL);
     source.push('\n');
+    source.push_str(UNIFORM_EXPERT_READ_MSL);
+    source.push('\n');
     source.push_str(Q8_0_UNPACK_MSL);
     source.push('\n');
     source.push_str(Q4_0_UNPACK_MSL);
@@ -4335,9 +4505,14 @@ fn render_elementwise(
         source.push_str(&format!(
             "    {coordinate_type} remaining = ({coordinate_type})gid;\n"
         ));
-        for &dim in coordinate_dims.iter().rev() {
+        for dim in (0..resolved.extents.len()).rev() {
+            if coordinate_dims.contains(&dim) {
+                source.push_str(&format!(
+                    "    coord[{dim}] = remaining % ({coordinate_type})u.extents[{dim}];\n"
+                ));
+            }
             source.push_str(&format!(
-                "    coord[{dim}] = remaining % ({coordinate_type})u.extents[{dim}]; remaining /= ({coordinate_type})u.extents[{dim}];\n"
+                "    remaining /= ({coordinate_type})u.extents[{dim}];\n"
             ));
         }
     }
@@ -8558,6 +8733,50 @@ mod tests {
         assert!(!dense_layout(&broadcast, &[2, 2, 4]));
     }
 
+    #[test]
+    fn elementwise_broadcast_decodes_omitted_axes_before_selected_axes() {
+        let mut program = Vec::new();
+        let matrix = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(7), Extent::Static(256)],
+                name: None,
+            },
+        );
+        let row = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(7)],
+                name: None,
+            },
+        );
+        let equal = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Equal,
+                operands: vec![
+                    (matrix, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (row, IndexMap::Affine(map::projection(2, &[0]))),
+                ],
+                name: None,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("broadcast elementwise infers");
+        let bound = bind(&program, &shapes, &[], NumericPolicy::default())
+            .expect("broadcast elementwise lowers")
+            .into_iter()
+            .find(|candidate| candidate.node == equal)
+            .expect("broadcast elementwise bound op");
+        let source = render_elementwise(&bound, "broadcast_test", &[None, None])
+            .expect("broadcast elementwise renders");
+        let divide_axis_one = "remaining /= (uint)u.extents[1];";
+        let assign_axis_zero = "coord[0] = remaining % (uint)u.extents[0];";
+        assert!(source.find(divide_axis_one) < source.find(assign_axis_zero));
+    }
+
     fn elementwise_tanh_op(extent: u32) -> BoundOp {
         let mut program = Vec::new();
         let source = append(
@@ -9092,10 +9311,10 @@ mod tests {
             .expect("emits expert source kernel");
         assert!(kernel.source.contains("mixed_expert_element_from_offset"));
         assert!(
-            kernel.source.contains(
-                "mixed_expert_element_from_offset(expert_payloads, expert_descriptors, (uint)fetched0"
-            ),
-            "the selected descriptor must choose the decoder at runtime:\n{}",
+            kernel
+                .source
+                .contains("mixed_expert_element_from_local(expert_base0, expert_codec0, walk0)"),
+            "the selected descriptor must be hoisted into the hot loop:\n{}",
             kernel.source
         );
         assert!(
@@ -9108,6 +9327,36 @@ mod tests {
         if std::env::var_os("PROXIMA_DUMP_EXPERT_TEST_SOURCE").is_some() {
             eprintln!("{}", kernel.source);
         }
+    }
+
+    #[test]
+    fn uniform_expert_source_retains_packed_row_decoder() {
+        let bound = gathered_matmul_op(1, 3, 4, 256);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+        let kernel = emit_with_uniform_expert_source(
+            &bound,
+            &q4k,
+            NumericPolicy::default(),
+            weight_node,
+            PackedCodec::Q4K,
+        )
+        .expect("emits uniform expert source kernel");
+        assert!(kernel.source.contains("q4k_pair_dot("));
+        assert_eq!(
+            kernel
+                .source
+                .matches("mixed_expert_element_from_offset(")
+                .count(),
+            1,
+            "uniform lowering keeps only the shared helper declaration"
+        );
+        assert!(
+            kernel
+                .source
+                .contains("expert_descriptors[expert_route_index[q]]")
+        );
     }
 
     #[test]
@@ -9833,6 +10082,7 @@ mod tests {
         assert!(source.contains("selected.codec == 1u"));
         assert!(source.contains("selected.codec == 2u"));
         assert!(source.contains("selected.codec == 3u"));
+        assert!(source.contains("selected.codec == 4u"));
     }
 
     #[test]

@@ -31,10 +31,18 @@ use std::sync::Arc;
 
 use proxima_gguf::quant::{bf16, f16, q2_k, q3_k, q4_0, q4_k, q5_k, q6_k, q8_0};
 use proxima_tensor::NodeId;
-use proxima_tensor::cpu::{ExpertEntry, ExpertSource};
+use proxima_tensor::cpu::{ExpertEntry, ExpertPayloadSpan, ExpertSource};
 
 use crate::bind::{PackedOwnedKind, quantize_to_kind};
 use crate::error::InteropError;
+
+pub(crate) type AllLowExpertSourceScratch<'mapping> = Vec<(
+    NodeId,
+    ExpertProjection,
+    Range<usize>,
+    Vec<ExpertEntry<'mapping>>,
+    Vec<Option<ExpertPayloadSpan>>,
+)>;
 
 /// One routed FFN projection belonging to a model layer.
 ///
@@ -458,6 +466,27 @@ impl<'file> ExpertSlab<'file> {
             })
     }
 
+    /// Returns whether a routed projection still uses its mapped low copy.
+    /// High promotions borrow checkpoint bytes, so a caller can skip a
+    /// redundant low-sidecar read before constructing the source snapshot.
+    pub(crate) fn uses_mapped_low(
+        &self,
+        model_layer: usize,
+        expert: usize,
+        projection: ExpertProjection,
+    ) -> Result<bool, InteropError> {
+        let site = self.projection_site(model_layer, projection)?;
+        let copy = self
+            .layers
+            .get(site)
+            .and_then(|layer| layer.experts.get(expert))
+            .ok_or(InteropError::ExpertSlabIndexOutOfRange {
+                layer: model_layer,
+                expert,
+            })?;
+        Ok(copy.as_ref().is_some_and(|value| value.bytes.is_mapped()))
+    }
+
     /// Marks a decode step as started -- [`Self::page_expert`]/
     /// [`Self::evict_expert`] reject any call until the matching
     /// [`Self::end_step`] runs, so a paging call from inside a
@@ -764,19 +793,50 @@ impl<'file> ExpertSlab<'file> {
     /// Snapshots exactly one layer's expert tables. Segment-local Qwen35
     /// programs reuse small node IDs across layers, so a whole-model map
     /// would overwrite one layer's source with another's.
-    pub fn sources_for_layer<'scratch>(
+    #[cfg(test)]
+    pub(crate) fn sources_for_layer<'scratch>(
         &'scratch self,
         layer: usize,
         entries: &'scratch mut Vec<(NodeId, Vec<ExpertEntry<'scratch>>)>,
     ) -> Result<BTreeMap<NodeId, ExpertSource<'scratch>>, InteropError> {
-        self.sources_for_layer_with_sidecar(layer, None, entries)
+        entries.clear();
+        for (_site, layer_slab) in self
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.model_layer == Some(layer))
+        {
+            let Some(weight_node) = layer_slab.weight_node else {
+                continue;
+            };
+            let layer_entries = layer_slab
+                .experts
+                .iter()
+                .filter_map(|expert| expert.as_ref().map(ExpertCopy::entry))
+                .collect();
+            entries.push((weight_node, layer_entries));
+        }
+        Ok(entries
+            .iter()
+            .map(|(weight_node, layer_entries)| {
+                let source = self
+                    .selected_experts
+                    .get(layer)
+                    .filter(|experts| !experts.is_empty())
+                    .map_or_else(
+                        || ExpertSource::new(layer_entries),
+                        |experts| ExpertSource::with_selected_expert_ids(layer_entries, experts),
+                    );
+                (*weight_node, source)
+            })
+            .collect())
     }
 
     pub(crate) fn sources_for_layer_with_sidecar<'scratch>(
         &'scratch self,
         layer: usize,
         sidecar: Option<&'scratch crate::expert_sidecar::ExpertSidecarReadScratch>,
-        entries: &'scratch mut Vec<(NodeId, Vec<ExpertEntry<'scratch>>)>,
+        entries: &'scratch mut Vec<(NodeId, ExpertProjection, Vec<ExpertEntry<'scratch>>)>,
     ) -> Result<BTreeMap<NodeId, ExpertSource<'scratch>>, InteropError> {
         entries.clear();
         if !self
@@ -814,27 +874,114 @@ impl<'file> ExpertSlab<'file> {
                                 projection
                                     .and_then(|projection| scratch.bytes(expert_index, projection))
                             })
-                            .filter(|_| expert.bytes.is_mapped())
                             .map_or_else(|| expert.entry(), |bytes| expert.entry_with_bytes(bytes))
                     })
                 })
                 .collect();
-            entries.push((weight_node, layer_entries));
+            let projection = projection
+                .ok_or_else(|| InteropError::ExpertSlabIndexOutOfRange { layer, expert: 0 })?;
+            entries.push((weight_node, projection, layer_entries));
         }
-        Ok(entries
+        entries
             .iter()
-            .map(|(weight_node, layer_entries)| {
-                let source = self
+            .map(|(weight_node, projection, layer_entries)| {
+                let selected = self
                     .selected_experts
                     .get(layer)
-                    .filter(|experts| !experts.is_empty())
-                    .map_or_else(
-                        || ExpertSource::new(layer_entries),
-                        |experts| ExpertSource::with_selected_expert_ids(layer_entries, experts),
-                    );
-                (*weight_node, source)
+                    .filter(|experts| !experts.is_empty());
+                let source = if let (Some(scratch), Some(selected)) = (sidecar, selected) {
+                    let arena = scratch.arena(*projection).filter(|(_, spans)| {
+                        selected.iter().all(|expert| {
+                            usize::try_from(*expert)
+                                .ok()
+                                .and_then(|index| spans.get(index))
+                                .is_some_and(Option::is_some)
+                        })
+                    });
+                    if let Some((bytes, spans)) = arena {
+                        ExpertSource::with_selected_expert_arena(
+                            layer_entries,
+                            selected,
+                            bytes,
+                            spans,
+                        )
+                        .map_err(|error| {
+                            InteropError::PreGatherExecutionUnsupported {
+                                architecture: String::from("qwen35moe"),
+                                reason: error.to_string(),
+                            }
+                        })?
+                    } else {
+                        ExpertSource::with_selected_expert_ids(layer_entries, selected)
+                    }
+                } else if let Some(selected) = selected {
+                    ExpertSource::with_selected_expert_ids(layer_entries, selected)
+                } else {
+                    ExpertSource::new(layer_entries)
+                };
+                Ok((*weight_node, source))
             })
-            .collect())
+            .collect()
+    }
+
+    pub(crate) fn all_low_sources_for_step<'mapping, 'scratch>(
+        &self,
+        sidecar: &'mapping crate::expert_sidecar::MappedExpertSidecar,
+        scratch: &'scratch mut AllLowExpertSourceScratch<'mapping>,
+    ) -> Result<BTreeMap<NodeId, ExpertSource<'scratch>>, InteropError>
+    where
+        'mapping: 'scratch,
+    {
+        scratch.clear();
+        for (site, layer_slab) in self.layers.iter().enumerate() {
+            let (Some(weight_node), Some(model_layer)) =
+                (layer_slab.weight_node, layer_slab.model_layer)
+            else {
+                continue;
+            };
+            let projection = self
+                .model_layer_sites
+                .get(model_layer)
+                .and_then(|sites| sites.iter().position(|candidate| *candidate == Some(site)))
+                .and_then(|index| ExpertProjection::ALL.get(index).copied())
+                .ok_or(InteropError::ExpertSlabIndexOutOfRange {
+                    layer: model_layer,
+                    expert: 0,
+                })?;
+            for expert in 0..layer_slab.experts.len() {
+                if !self.uses_mapped_low(model_layer, expert, projection)? {
+                    return Err(InteropError::ExpertAllLowSourceRequired {
+                        layer: model_layer,
+                        expert,
+                        projection: projection.name(),
+                    });
+                }
+            }
+            let mut entries = Vec::new();
+            let mut spans = Vec::new();
+            let arena = sidecar.populate_all_low_source(
+                model_layer,
+                projection,
+                &mut entries,
+                &mut spans,
+            )?;
+            scratch.push((weight_node, projection, arena, entries, spans));
+        }
+        scratch
+            .iter()
+            .map(|(weight_node, _projection, arena, entries, spans)| {
+                ExpertSource::with_all_expert_arena(
+                    entries,
+                    &sidecar.mapping_bytes()[arena.clone()],
+                    spans,
+                )
+                .map(|source| (*weight_node, source))
+                .map_err(|error| InteropError::PreGatherExecutionUnsupported {
+                    architecture: String::from("qwen35moe"),
+                    reason: error.to_string(),
+                })
+            })
+            .collect()
     }
 }
 

@@ -672,6 +672,14 @@ pub fn register_checkpoint_mapping(bytes: &[u8]) {
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
 pub fn register_checkpoint_mapping(_bytes: &[u8]) {}
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub fn register_expert_mapping(bytes: &[u8]) {
+    metal::register_expert_mapping(bytes);
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+pub fn register_expert_mapping(_bytes: &[u8]) {}
+
 /// Evicts a dropped checkpoint's own resident weight names from the Metal
 /// driver's device-buffer caches -- see [`metal::release_resident_names`]'s
 /// own doc for the mechanism and why it evicts by name rather than
@@ -699,6 +707,14 @@ pub fn unregister_checkpoint_mapping(bytes: &[u8]) {
 
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
 pub fn unregister_checkpoint_mapping(_bytes: &[u8]) {}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub fn unregister_expert_mapping(bytes: &[u8]) {
+    metal::unregister_expert_mapping(bytes);
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+pub fn unregister_expert_mapping(_bytes: &[u8]) {}
 
 #[cfg(feature = "cpu")]
 fn plan_named_cpu(
@@ -955,13 +971,11 @@ pub fn execute_plan_named_metal_op_timed_with_expert_sources(
     expert_sources: &std::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
 ) -> Result<(Evaluated, Vec<metal::OpGpuTiming>), BackendError> {
     match plan {
-        Plan::Metal(metal_plan) => Ok(
-            metal::execute_plan_named_op_timed_with_expert_sources(
-                metal_plan,
-                named,
-                expert_sources,
-            )?,
-        ),
+        Plan::Metal(metal_plan) => Ok(metal::execute_plan_named_op_timed_with_expert_sources(
+            metal_plan,
+            named,
+            expert_sources,
+        )?),
         #[cfg(feature = "cpu")]
         Plan::Cpu(_) => Err(BackendError::NotImplemented { backend: "cpu" }),
         #[cfg(feature = "wgpu-backend")]

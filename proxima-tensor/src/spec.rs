@@ -7720,6 +7720,32 @@ pub fn append_qwen35_conv_branch(
     value_dim: u32,
     l_cache: u32,
 ) -> Result<(NodeId, NodeId, NodeId), TensorError> {
+    let (q_raw, k_raw, v_conv) = append_qwen35_conv_raw(
+        program,
+        qkv_mixed,
+        conv_weight,
+        one,
+        key_dim,
+        value_dim,
+        l_cache,
+    )?;
+
+    let q_conv = l2norm(program, q_raw, eps, "sw->sw", "s->sw")?;
+    let k_conv = l2norm(program, k_raw, eps, "sw->sw", "s->sw")?;
+
+    Ok((q_conv, k_conv, v_conv))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_qwen35_conv_raw(
+    program: &mut Vec<Op>,
+    qkv_mixed: NodeId,
+    conv_weight: NodeId,
+    one: NodeId,
+    key_dim: u32,
+    value_dim: u32,
+    l_cache: u32,
+) -> Result<(NodeId, NodeId, NodeId), TensorError> {
     let qkv_dim = 2 * key_dim + value_dim;
     let convolved = causal_conv1d(program, qkv_mixed, conv_weight, l_cache)?;
     let activated = silu(program, convolved, one, "sd->sd")?;
@@ -7728,10 +7754,7 @@ pub fn append_qwen35_conv_branch(
     let k_raw = channel_slice(program, activated, qkv_dim, key_dim, key_dim)?;
     let v_conv = channel_slice(program, activated, qkv_dim, 2 * key_dim, value_dim)?;
 
-    let q_conv = l2norm(program, q_raw, eps, "sw->sw", "s->sw")?;
-    let k_conv = l2norm(program, k_raw, eps, "sw->sw", "s->sw")?;
-
-    Ok((q_conv, k_conv, v_conv))
+    Ok((q_raw, k_raw, v_conv))
 }
 
 /// The GQA head repeat `q_conv`/`k_conv` need before
@@ -7955,6 +7978,13 @@ pub struct Qwen35GdnSequenceTail {
     pub group: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Qwen35GdnSequenceTailTaps {
+    pub gated_value: NodeId,
+    pub projected: NodeId,
+    pub output: NodeId,
+}
+
 /// Appends the row-preserving algebra after a caller-driven GDN prefill scan.
 ///
 /// This composes the existing elementwise and reduction primitives; it adds
@@ -7965,6 +7995,13 @@ pub fn append_qwen35_gdn_sequence_tail(
     program: &mut Vec<Op>,
     tail: Qwen35GdnSequenceTail,
 ) -> Result<NodeId, TensorError> {
+    Ok(append_qwen35_gdn_sequence_tail_with_taps(program, tail)?.output)
+}
+
+pub fn append_qwen35_gdn_sequence_tail_with_taps(
+    program: &mut Vec<Op>,
+    tail: Qwen35GdnSequenceTail,
+) -> Result<Qwen35GdnSequenceTailTaps, TensorError> {
     let squared = elementwise(
         program,
         DType::Float32,
@@ -8066,12 +8103,17 @@ pub fn append_qwen35_gdn_sequence_tail(
         "sgujd->sgujd",
         "sd->sgujd",
     )?;
-    elementwise(
+    let output = elementwise(
         program,
         DType::Float32,
         ScalarOp::Add,
         &[(tail.x, "sd->sd"), (projected, "sd->sd")],
-    )
+    )?;
+    Ok(Qwen35GdnSequenceTailTaps {
+        gated_value: gated,
+        projected,
+        output,
+    })
 }
 
 /// The GDN (gated delta-net) mixer [`qwen35_forward_program`] calls once
@@ -8500,11 +8542,10 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
     // a multi-position prefill. Keep a separate, root-pruned causal branch
     // for the opt-in prefill executor: with an empty cache it gives every
     // sequence tap the same causal window repeated one-position decode would.
-    let (query_prefill, key_prefill, value_prefill) = append_qwen35_conv_branch(
+    let (query_prefill_raw, key_prefill_raw, value_prefill) = append_qwen35_conv_raw(
         program,
         qkv_mixed,
         conv_weight,
-        eps,
         one,
         key_dim,
         value_dim,
@@ -8515,7 +8556,7 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
         DType::Float32,
         ScalarOp::Multiply,
         &[
-            (query_prefill, q_split_map.as_str()),
+            (query_prefill_raw, q_split_map.as_str()),
             (key_head_ones, "ui->sui"),
         ],
     )?;
@@ -8524,12 +8565,28 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
         DType::Float32,
         ScalarOp::Multiply,
         &[
-            (key_prefill, q_split_map.as_str()),
+            (key_prefill_raw, q_split_map.as_str()),
             (key_head_ones, "ui->sui"),
         ],
     )?;
-    let query_prefill_repeated = repeat_kv_heads(program, query_prefill_split, kv_heads, group)?;
-    let key_prefill_repeated = repeat_kv_heads(program, key_prefill_split, kv_heads, group)?;
+    let query_prefill = l2norm_with_eps_map(
+        program,
+        query_prefill_split,
+        eps,
+        "sui->sui",
+        "su->sui",
+        "s->su",
+    )?;
+    let key_prefill = l2norm_with_eps_map(
+        program,
+        key_prefill_split,
+        eps,
+        "sui->sui",
+        "su->sui",
+        "s->su",
+    )?;
+    let query_prefill_repeated = repeat_kv_heads(program, query_prefill, kv_heads, group)?;
+    let key_prefill_repeated = repeat_kv_heads(program, key_prefill, kv_heads, group)?;
     let value_prefill_split = elementwise(
         program,
         DType::Float32,
@@ -19291,6 +19348,343 @@ value = 1.0
                 .all(|input| input.0 < taps.state_out.0),
             "every recurrence input must precede the state output in SSA order"
         );
+    }
+
+    #[proxima::test]
+    async fn qwen35_prefill_sequence_taps_match_repeated_cached_conv_steps() {
+        let (program, _mixer_out, taps) = build_ssm_mixer_test_program(GdnOutputGate::Silu);
+
+        let x_data = [1.0_f32, -1.0];
+        let eps_data = [0.0_f32, 0.0];
+        let head_eps_data = [0.0_f32, 0.0];
+        let attn_norm_weight_data = [1.0_f32];
+        let wqkv_data = [1.0_f32, 2.0, 3.0, 4.0];
+        let wqkv_gate_data = [0.5_f32, -0.25];
+        let conv_weight_data = [
+            0.5_f32, 1.0, // q
+            -0.25, 0.75, // k
+            1.5, -0.5, // v0
+            0.25, 2.0, // v1
+        ];
+        let ssm_beta_data = [0.25_f32, -0.5];
+        let ssm_alpha_data = [0.75_f32, 0.125];
+        let ssm_dt_bias_data = [0.1_f32, -0.2];
+        let ssm_a_data = [-0.5_f32, -0.25];
+        let ssm_norm_weight_data = [1.0_f32];
+        let ssm_out_data = [1.0_f32, 1.0];
+        let state_in_data = [0.0_f32, 0.0];
+        let initial_history = [0.0_f32; 4];
+
+        let sequence = crate::cpu::evaluate_named(
+            &program,
+            &[2],
+            &[
+                ("x", &x_data),
+                ("eps", &eps_data),
+                ("head_eps", &head_eps_data),
+                ("attn_norm_weight", &attn_norm_weight_data),
+                ("wqkv", &wqkv_data),
+                ("wqkv_gate", &wqkv_gate_data),
+                ("conv_weight", &conv_weight_data),
+                ("conv_history_in", &initial_history),
+                ("ssm_beta", &ssm_beta_data),
+                ("ssm_alpha", &ssm_alpha_data),
+                ("ssm_dt_bias", &ssm_dt_bias_data),
+                ("ssm_a", &ssm_a_data),
+                ("ssm_norm_weight", &ssm_norm_weight_data),
+                ("ssm_out", &ssm_out_data),
+                ("state_in", &state_in_data),
+            ],
+            &[
+                taps.query_sequence,
+                taps.key_sequence,
+                taps.value_sequence,
+                taps.gate_sequence,
+                taps.beta_sequence,
+            ],
+        )
+        .expect("sequence taps evaluate");
+
+        let mut history = initial_history;
+        let mut repeated_query = Vec::new();
+        let mut repeated_key = Vec::new();
+        let mut repeated_value = Vec::new();
+        let mut repeated_gate = Vec::new();
+        let mut repeated_beta = Vec::new();
+        for position in 0..2 {
+            let evaluated = crate::cpu::evaluate_named(
+                &program,
+                &[1],
+                &[
+                    ("x", &x_data[position..position + 1]),
+                    ("eps", &eps_data[position..position + 1]),
+                    ("head_eps", &head_eps_data),
+                    ("attn_norm_weight", &attn_norm_weight_data),
+                    ("wqkv", &wqkv_data),
+                    ("wqkv_gate", &wqkv_gate_data),
+                    ("conv_weight", &conv_weight_data),
+                    ("conv_history_in", &history),
+                    ("ssm_beta", &ssm_beta_data),
+                    ("ssm_alpha", &ssm_alpha_data),
+                    ("ssm_dt_bias", &ssm_dt_bias_data),
+                    ("ssm_a", &ssm_a_data),
+                    ("ssm_norm_weight", &ssm_norm_weight_data),
+                    ("ssm_out", &ssm_out_data),
+                    ("state_in", &state_in_data),
+                ],
+                &[
+                    taps.qkv_mixed,
+                    taps.query,
+                    taps.key,
+                    taps.value,
+                    taps.gate,
+                    taps.beta,
+                ],
+            )
+            .expect("one cached-conv step evaluates");
+            repeated_query.extend_from_slice(evaluated.get(taps.query).expect("query").0);
+            repeated_key.extend_from_slice(evaluated.get(taps.key).expect("key").0);
+            repeated_value.extend_from_slice(evaluated.get(taps.value).expect("value").0);
+            repeated_gate.extend_from_slice(evaluated.get(taps.gate).expect("gate").0);
+            repeated_beta.extend_from_slice(evaluated.get(taps.beta).expect("beta").0);
+            history.copy_from_slice(evaluated.get(taps.qkv_mixed).expect("qkv mixed").0);
+        }
+
+        for (sequence_node, repeated, label) in [
+            (taps.query_sequence, repeated_query.as_slice(), "query"),
+            (taps.key_sequence, repeated_key.as_slice(), "key"),
+            (taps.value_sequence, repeated_value.as_slice(), "value"),
+            (taps.gate_sequence, repeated_gate.as_slice(), "gate"),
+            (taps.beta_sequence, repeated_beta.as_slice(), "beta"),
+        ] {
+            let sequence_values = sequence.get(sequence_node).expect(label).0;
+            assert_eq!(
+                sequence_values.len(),
+                repeated.len(),
+                "{label} lengths must agree"
+            );
+            for (index, (found, expected)) in
+                sequence_values.iter().zip(repeated.iter()).enumerate()
+            {
+                assert!(
+                    (found - expected).abs() < 1e-6,
+                    "{label}[{index}] differs: sequence={found} repeated={expected}"
+                );
+            }
+        }
+    }
+
+    #[proxima::test]
+    async fn qwen35_prefill_scan_and_tail_match_repeated_mixer_steps() {
+        let (program, mixer_out, taps) = build_ssm_mixer_test_program(GdnOutputGate::Silu);
+
+        let x_data = [1.0_f32, -1.0];
+        let eps_data = [0.0_f32, 0.0];
+        let head_eps_data = [0.0_f32, 0.0];
+        let attn_norm_weight_data = [1.0_f32];
+        let wqkv_data = [1.0_f32, 2.0, 3.0, 4.0];
+        let wqkv_gate_data = [0.5_f32, -0.25];
+        let conv_weight_data = [
+            0.5_f32, 1.0, // q
+            -0.25, 0.75, // k
+            1.5, -0.5, // v0
+            0.25, 2.0, // v1
+        ];
+        let ssm_beta_data = [0.25_f32, -0.5];
+        let ssm_alpha_data = [0.75_f32, 0.125];
+        let ssm_dt_bias_data = [0.1_f32, -0.2];
+        let ssm_a_data = [-0.5_f32, -0.25];
+        let ssm_norm_weight_data = [1.0_f32];
+        let ssm_out_data = [0.75_f32, -0.5];
+        let initial_state = [0.0_f32, 0.0];
+        let initial_history = [0.0_f32; 4];
+
+        let sequence = crate::cpu::evaluate_named(
+            &program,
+            &[2],
+            &[
+                ("x", &x_data),
+                ("eps", &eps_data),
+                ("head_eps", &head_eps_data),
+                ("attn_norm_weight", &attn_norm_weight_data),
+                ("wqkv", &wqkv_data),
+                ("wqkv_gate", &wqkv_gate_data),
+                ("conv_weight", &conv_weight_data),
+                ("conv_history_in", &initial_history),
+                ("ssm_beta", &ssm_beta_data),
+                ("ssm_alpha", &ssm_alpha_data),
+                ("ssm_dt_bias", &ssm_dt_bias_data),
+                ("ssm_a", &ssm_a_data),
+                ("ssm_norm_weight", &ssm_norm_weight_data),
+                ("ssm_out", &ssm_out_data),
+                ("state_in", &initial_state),
+            ],
+            &[
+                taps.query_sequence,
+                taps.key_sequence,
+                taps.value_sequence,
+                taps.gate_sequence,
+                taps.beta_sequence,
+                taps.z_sequence,
+            ],
+        )
+        .expect("sequence taps evaluate");
+
+        let mut scanned_state = initial_state;
+        let mut scanned_delta = [0.0_f32; 4];
+        crate::cpu::run_gdn_prefill_scan(crate::cpu::GdnPrefillScan {
+            shape: crate::cpu::GdnPrefillShape {
+                positions: 2,
+                key_dim: 1,
+                value_dim: 1,
+                heads: 2,
+            },
+            query: sequence.get(taps.query_sequence).expect("query sequence").0,
+            key: sequence.get(taps.key_sequence).expect("key sequence").0,
+            value: sequence.get(taps.value_sequence).expect("value sequence").0,
+            gate: sequence.get(taps.gate_sequence).expect("gate sequence").0,
+            beta: sequence.get(taps.beta_sequence).expect("beta sequence").0,
+            inv_sqrt_key_dim: 1.0,
+            state: &mut scanned_state,
+            output: &mut scanned_delta,
+        })
+        .expect("prefill scan evaluates");
+
+        let mut tail_program = Vec::new();
+        let tail_x = input_leaf(
+            &mut tail_program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(1)],
+            "tail_x",
+        );
+        let tail_delta = input_leaf(
+            &mut tail_program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(1),
+                Extent::Static(1),
+                Extent::Static(2),
+            ],
+            "tail_delta",
+        );
+        let tail_z = input_leaf(
+            &mut tail_program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(1),
+                Extent::Static(2),
+                Extent::Static(1),
+            ],
+            "tail_z",
+        );
+        let tail_head_eps = input_leaf(
+            &mut tail_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1), Extent::Static(2)],
+            "tail_head_eps",
+        );
+        let tail_inv_head_v_dim = scalar_constant(&mut tail_program, 1.0);
+        let tail_norm_weight = input_leaf(
+            &mut tail_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1)],
+            "tail_norm_weight",
+        );
+        let tail_out_weight = input_leaf(
+            &mut tail_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(2), Extent::Static(1)],
+            "tail_out_weight",
+        );
+        let tail_mixer_out = append_qwen35_gdn_sequence_tail(
+            &mut tail_program,
+            Qwen35GdnSequenceTail {
+                x: tail_x,
+                delta_out: tail_delta,
+                z: tail_z,
+                head_eps: tail_head_eps,
+                inv_head_v_dim: tail_inv_head_v_dim,
+                norm_weight: tail_norm_weight,
+                out_weight: tail_out_weight,
+                head_v_dim: 1,
+                kv_heads: 1,
+                group: 2,
+            },
+        )
+        .expect("sequence tail lowers");
+        let tail = crate::cpu::evaluate_named(
+            &tail_program,
+            &[2],
+            &[
+                ("tail_x", &x_data),
+                ("tail_delta", &scanned_delta),
+                (
+                    "tail_z",
+                    sequence.get(taps.z_sequence).expect("z sequence").0,
+                ),
+                ("tail_head_eps", &head_eps_data),
+                ("tail_norm_weight", &ssm_norm_weight_data),
+                ("tail_out_weight", &ssm_out_data),
+            ],
+            &[tail_mixer_out],
+        )
+        .expect("sequence tail evaluates");
+
+        let mut history = initial_history;
+        let mut state = initial_state;
+        let mut repeated_delta = Vec::new();
+        let mut repeated_mixer = Vec::new();
+        for position in 0..2 {
+            let evaluated = crate::cpu::evaluate_named(
+                &program,
+                &[1],
+                &[
+                    ("x", &x_data[position..position + 1]),
+                    ("eps", &eps_data[position..position + 1]),
+                    ("head_eps", &head_eps_data),
+                    ("attn_norm_weight", &attn_norm_weight_data),
+                    ("wqkv", &wqkv_data),
+                    ("wqkv_gate", &wqkv_gate_data),
+                    ("conv_weight", &conv_weight_data),
+                    ("conv_history_in", &history),
+                    ("ssm_beta", &ssm_beta_data),
+                    ("ssm_alpha", &ssm_alpha_data),
+                    ("ssm_dt_bias", &ssm_dt_bias_data),
+                    ("ssm_a", &ssm_a_data),
+                    ("ssm_norm_weight", &ssm_norm_weight_data),
+                    ("ssm_out", &ssm_out_data),
+                    ("state_in", &state),
+                ],
+                &[mixer_out, taps.qkv_mixed, taps.delta_out, taps.state_out],
+            )
+            .expect("one mixer step evaluates");
+            repeated_mixer.extend_from_slice(evaluated.get(mixer_out).expect("mixer out").0);
+            repeated_delta.extend_from_slice(evaluated.get(taps.delta_out).expect("delta out").0);
+            history.copy_from_slice(evaluated.get(taps.qkv_mixed).expect("qkv mixed").0);
+            state.copy_from_slice(evaluated.get(taps.state_out).expect("state out").0);
+        }
+
+        for (label, found, expected) in [
+            ("delta", scanned_delta.as_slice(), repeated_delta.as_slice()),
+            ("state", scanned_state.as_slice(), state.as_slice()),
+            (
+                "mixer",
+                tail.get(tail_mixer_out).expect("tail mixer out").0,
+                repeated_mixer.as_slice(),
+            ),
+        ] {
+            assert_eq!(found.len(), expected.len(), "{label} lengths must agree");
+            for (index, (found_value, expected_value)) in
+                found.iter().zip(expected.iter()).enumerate()
+            {
+                assert!(
+                    (found_value - expected_value).abs() < 1e-5,
+                    "{label}[{index}] differs: scan={found_value} repeated={expected_value}"
+                );
+            }
+        }
     }
 
     /// Builds one call into [`append_qwen35_dense_attention_layer`] at the

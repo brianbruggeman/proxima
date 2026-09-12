@@ -76,9 +76,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         "blk.0.ffn_up_exps.weight",
         "blk.0.ffn_down_exps.weight",
         "blk.0.ffn_gate_inp.weight",
+        "blk.0.ssm_out.weight",
     ] {
         print_tensor(&parsed, name);
     }
+
+    let mut expert_bytes = 0_u64;
+    let mut dense_bytes = 0_u64;
+    for tensor in &parsed.tensors {
+        let range = parsed.tensor_data_range(tensor, mmap.len() as u64)?;
+        if tensor.name.contains("_exps.weight") {
+            expert_bytes += (range.end - range.start) as u64;
+        } else {
+            dense_bytes += (range.end - range.start) as u64;
+        }
+    }
+    println!("checkpoint_expert_payload_bytes = {expert_bytes}");
+    println!("checkpoint_nonexpert_payload_bytes = {dense_bytes}");
 
     Ok(())
 }

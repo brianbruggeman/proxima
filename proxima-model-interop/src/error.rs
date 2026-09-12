@@ -566,6 +566,19 @@ pub enum InteropError {
     #[error("expert {expert} of layer {layer} is out of range for this checkpoint's expert slab")]
     ExpertSlabIndexOutOfRange { layer: usize, expert: usize },
 
+    /// The monolithic all-low diagnostic was requested after a residency
+    /// transition replaced one sidecar-backed low projection. That arm binds
+    /// the complete low table before routing and therefore cannot mix a high
+    /// checkpoint entry into the same snapshot.
+    #[error(
+        "monolithic all-low expert source requires sidecar bytes for layer {layer} expert {expert} projection {projection}"
+    )]
+    ExpertAllLowSourceRequired {
+        layer: usize,
+        expert: usize,
+        projection: &'static str,
+    },
+
     /// `crate::expert_slab::ExpertSlab::page_expert_mapped` received a byte
     /// range that does not fit its supplied mmap. The range is rejected
     /// before the slab records the mapping, so no later evaluation can slice
