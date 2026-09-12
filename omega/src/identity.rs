@@ -136,6 +136,10 @@ pub(crate) struct MetalOnlyExtras {
 /// ([`MetalOnlyExtras::numeric_policy_token`]'s own doc explains why this
 /// replaced the coarser `MathMode` token).
 #[must_use]
+#[allow(
+    dead_code,
+    reason = "the shared cache-key helper is only reachable from renderer-specific builds"
+)]
 pub(crate) const fn numeric_policy_cache_token(policy: NumericPolicy) -> [u8; 2] {
     const HEX: [u8; 16] = *b"0123456789abcdef";
     let mut bits: u8 = 0;
@@ -476,7 +480,7 @@ pub(crate) fn kernel_identity(
     identity
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod numeric_policy_cache_token_tests {
     //! [`super::MetalOnlyExtras::numeric_policy_token`]'s cache-key fold

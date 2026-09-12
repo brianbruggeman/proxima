@@ -46,6 +46,8 @@ pub enum CudaDriverError {
     },
     #[error("CUDA graph path rejected node {node:?}: {reason}")]
     UnsupportedGraph { node: NodeId, reason: &'static str },
+    #[error("CUDA graph node {node:?} has unsupported output dtype {dtype:?}")]
+    UnsupportedDtype { node: NodeId, dtype: DType },
     #[error("CUDA graph node {node:?} could not be emitted: {error}")]
     Emit { node: NodeId, error: String },
     #[error("CUDA graph node {node:?} failed during execution: {error}")]
@@ -267,12 +269,7 @@ impl CudaDriver {
             outputs,
         );
         for bound in &resolved {
-            if bound.dtype != DType::Float32 {
-                return Err(CudaDriverError::UnsupportedGraph {
-                    node: bound.node,
-                    reason: "non-f32 output",
-                });
-            }
+            validate_cuda_dtype(bound)?;
             if !matches!(
                 bound.kind,
                 proxima_tensor::BoundOpKind::Elementwise { .. }
@@ -753,6 +750,16 @@ impl CudaDriver {
     }
 }
 
+fn validate_cuda_dtype(bound: &BoundOp) -> Result<(), CudaDriverError> {
+    if bound.dtype != DType::Float32 {
+        return Err(CudaDriverError::UnsupportedDtype {
+            node: bound.node,
+            dtype: bound.dtype,
+        });
+    }
+    Ok(())
+}
+
 /// Compiles generated CUDA C with an explicit header search path when the
 /// runtime distribution does not install headers in NVRTC's default search
 /// list.  `PROXIMA_CUDA_INCLUDE_PATH` is the deployment escape hatch for
@@ -1231,3 +1238,28 @@ $DONE:
     ret;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::{CudaDriverError, validate_cuda_dtype};
+    use proxima_tensor::{BoundOp, BoundOpKind, DType, NodeId};
+
+    #[test]
+    fn non_f32_bound_op_reports_node_and_dtype() {
+        let bound = BoundOp {
+            node: NodeId(157),
+            dtype: DType::Int32,
+            extents: vec![1],
+            kind: BoundOpKind::Constant { value: 0.0 },
+        };
+
+        let error = validate_cuda_dtype(&bound).expect_err("integer output must be rejected");
+        assert!(matches!(
+            error,
+            CudaDriverError::UnsupportedDtype {
+                node: NodeId(157),
+                dtype: DType::Int32,
+            }
+        ));
+    }
+}
