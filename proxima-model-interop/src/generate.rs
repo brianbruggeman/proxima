@@ -96,9 +96,9 @@ use omega::backend::execute_plan_named_metal_op_timed;
 use omega::backend::execute_plan_named_metal_op_timed_with_expert_sources;
 #[cfg(feature = "metal")]
 use omega::backend::{
-    Engine, Plan, execute_plan_named_with_expert_sources, mark_resident, plan_named,
-    plan_named_exact, register_expert_mapping, release_resident_names,
-    unregister_checkpoint_mapping, unregister_expert_mapping, clear_expert_source_cache,
+    Engine, Plan, clear_expert_source_cache, execute_plan_named_with_expert_sources, mark_resident,
+    plan_named, plan_named_exact, register_expert_mapping, release_resident_names,
+    unregister_checkpoint_mapping, unregister_expert_mapping,
 };
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same
@@ -4933,6 +4933,11 @@ struct Qwen35SsmPlacement<'buffers> {
 #[cfg(feature = "metal")]
 pub(crate) struct BackendRuntime {
     engine: Engine,
+    /// Warmup deliberately retains the monolithic all-low source snapshot so
+    /// the timed prefill can reuse its plans and Metal bindings. The real
+    /// prefill flips this off before its first batch; the release boundary
+    /// then hands ownership to the bounded DynaExq sources.
+    retain_monolithic_prefill_sources: bool,
     /// Keyed by `(new_count, kv_bound_extent)` -- the two symbols
     /// `mistral_cached_forward_program`'s cached-attention read extent
     /// resolves against (`Extent::Symbolic(1) == kv_bound_extent`). A
@@ -5019,6 +5024,7 @@ impl BackendRuntime {
     pub(crate) fn new(config: &ServingConfig) -> Self {
         Self {
             engine: select_backend(config),
+            retain_monolithic_prefill_sources: false,
             plans: alloc::collections::BTreeMap::new(),
             segment_plans: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -5240,11 +5246,36 @@ impl BackendRuntime {
         let new_count = symbols.first().copied().unwrap_or_default() as usize;
         let kv_bound_extent = symbols.get(1).copied().unwrap_or_default() as usize;
         let exact_activations = self.exact_activations;
+        let mut profile_outputs = outputs.to_vec();
+        for selected in [
+            "PROXIMA_METAL_COMPARE_BOUND_NODE",
+            "PROXIMA_METAL_MATERIALIZE_BOUND_NODE",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .map(NodeId)
+        }) {
+            if program
+                .get(selected.0 as usize)
+                .is_some_and(|operation| !matches!(operation, Op::Input { .. }))
+                && !profile_outputs.contains(&selected)
+            {
+                profile_outputs.push(selected);
+            }
+        }
         let plan = Self::resolve_segment_plan(
             &mut self.segment_plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
-            (program_key, new_count, kv_bound_extent, outputs.to_vec()),
+            (
+                program_key,
+                new_count,
+                kv_bound_extent,
+                profile_outputs.clone(),
+            ),
             || {
                 let mut plan = if exact_activations {
                     plan_named_exact(
@@ -5253,7 +5284,7 @@ impl BackendRuntime {
                         program,
                         symbols,
                         named,
-                        outputs,
+                        &profile_outputs,
                         self.numeric_policy,
                     )?
                 } else {
@@ -5263,7 +5294,7 @@ impl BackendRuntime {
                         program,
                         symbols,
                         named,
-                        outputs,
+                        &profile_outputs,
                         self.numeric_policy,
                     )?
                 };
@@ -7219,7 +7250,8 @@ impl<'file> LoadedModel<'file> {
         let mut runtime = BackendRuntime::new(&serving_config);
         if std::env::var_os("PROXIMA_WARMUP_BEFORE_GENERATE").is_some() {
             let mut warmup_callback = |_event: TokenEvent<'_>| Control::Continue;
-            self.run_decode_loop_observed(
+            runtime.retain_monolithic_prefill_sources = true;
+            let warmup_result = self.run_decode_loop_observed(
                 prompt,
                 1,
                 &serving_config,
@@ -7227,7 +7259,9 @@ impl<'file> LoadedModel<'file> {
                 None,
                 &mut LogitsSink::Discard,
                 &mut warmup_callback,
-            )?;
+            );
+            runtime.retain_monolithic_prefill_sources = false;
+            warmup_result?;
         }
         self.run_decode_loop_observed(
             prompt,
@@ -7795,15 +7829,13 @@ impl<'file> LoadedModel<'file> {
                     let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
 
                     let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.layer_roots.len() * 3);
-                    let monolithic_prefill_requested =
-                        qwen35moe_pre_gather_enabled(
-                            serving_config.qwen35moe_pre_gather,
-                            self.architecture_impl
-                                .map(|architecture| architecture.name()),
-                        ) && runtime.uses_gpu()
-                            && _step == 0
-                            && std::env::var_os("PROXIMA_QWEN35MOE_MONOLITHIC_ALL_LOW")
-                                .is_some();
+                    let monolithic_prefill_requested = qwen35moe_pre_gather_enabled(
+                        serving_config.qwen35moe_pre_gather,
+                        self.architecture_impl
+                            .map(|architecture| architecture.name()),
+                    ) && runtime.uses_gpu()
+                        && _step == 0
+                        && std::env::var_os("PROXIMA_QWEN35MOE_MONOLITHIC_ALL_LOW").is_some();
                     if step_batch_needs_logits(split_prefill, is_last_step_batch) {
                         roots.push(self.logits_root);
                     }
@@ -8396,9 +8428,8 @@ impl<'file> LoadedModel<'file> {
                     node_values_sink.observe(&evaluated)?;
 
                     if monolithic_all_low {
-                        let mut router_scratch = Vec::with_capacity(
-                            self.architecture.expert_used_count as usize,
-                        );
+                        let mut router_scratch =
+                            Vec::with_capacity(self.architecture.expert_used_count as usize);
                         for (layer, router_root) in self.router_roots.iter().copied().enumerate() {
                             let Some((logits, shape)) = evaluated.get(router_root) else {
                                 continue;
@@ -8414,13 +8445,14 @@ impl<'file> LoadedModel<'file> {
                                 &mut |layer, position, routes| {
                                     if let Some(policy) = qwen35moe_residency.as_mut() {
                                         for route in routes {
-                                            policy.observe(position, layer, [*route])
-                                                .map_err(|error| {
+                                            policy.observe(position, layer, [*route]).map_err(
+                                                |error| {
                                                     InteropError::PreGatherExecutionUnsupported {
                                                         architecture: String::from("qwen35moe"),
                                                         reason: error.to_string(),
                                                     }
-                                                })?;
+                                                },
+                                            )?;
                                         }
                                     }
                                     Ok(())
@@ -8430,7 +8462,11 @@ impl<'file> LoadedModel<'file> {
                     }
 
                     #[cfg(all(feature = "metal", target_os = "macos"))]
-                    if monolithic_all_low && is_last_step_batch {
+                    if should_release_monolithic_prefill_sources(
+                        monolithic_all_low,
+                        is_last_step_batch,
+                        runtime.retain_monolithic_prefill_sources,
+                    ) {
                         clear_expert_source_cache();
                     }
 
@@ -9841,6 +9877,14 @@ fn qwen35moe_monolithic_all_low_enabled(
     pre_gather && uses_gpu && requested && step == 0
 }
 
+fn should_release_monolithic_prefill_sources(
+    monolithic_all_low: bool,
+    is_last_step_batch: bool,
+    retain_for_warmup: bool,
+) -> bool {
+    monolithic_all_low && is_last_step_batch && !retain_for_warmup
+}
+
 fn map_expert_sources_to_segment<'source>(
     layer: usize,
     source_program: &[Op],
@@ -9885,7 +9929,8 @@ mod tests {
     use super::{
         SsmLayerCache, begin_expert_gather_phase, first_nonfinite_node_value, kv_extent,
         lock_expert_slab, qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
-        step_batch_needs_logits, visit_qwen35moe_router_boundary,
+        should_release_monolithic_prefill_sources, step_batch_needs_logits,
+        visit_qwen35moe_router_boundary,
         visit_qwen35moe_router_selections,
     };
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -9945,6 +9990,14 @@ mod tests {
         assert!(!qwen35moe_monolithic_all_low_enabled(true, false, true, 0));
         assert!(qwen35moe_monolithic_all_low_enabled(true, true, true, 0));
         assert!(!qwen35moe_monolithic_all_low_enabled(true, true, true, 1));
+    }
+
+    #[test]
+    fn monolithic_prefill_sources_release_only_after_real_prefill() {
+        assert!(!should_release_monolithic_prefill_sources(false, true, false));
+        assert!(!should_release_monolithic_prefill_sources(true, false, false));
+        assert!(!should_release_monolithic_prefill_sources(true, true, true));
+        assert!(should_release_monolithic_prefill_sources(true, true, false));
     }
 
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
