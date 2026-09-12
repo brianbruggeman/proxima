@@ -8106,9 +8106,15 @@ impl<'file> LoadedModel<'file> {
                                     target_os = "macos"
                                 )))]
                                 let state_is_placed = false;
-                                if !state_is_placed {
-                                    roots.push(*state_out);
-                                }
+                                // A placed state still has to be a requested
+                                // graph output: otherwise `prune_dead` drops
+                                // its producer before the output-placement
+                                // binding can write the caller-owned buffer.
+                                // The host readback path below remains gated
+                                // by `state_is_placed`, so this requests the
+                                // device write without restoring the copy.
+                                let _ = state_is_placed;
+                                roots.push(*state_out);
                             }
                         }
                     }
