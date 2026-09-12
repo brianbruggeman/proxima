@@ -92,11 +92,12 @@ pub struct CudaPlan {
     program: Vec<Op>,
     shapes: Shapes,
     resolved: Vec<BoundOp>,
+    kernels: Vec<CudaKernel>,
+    uniforms: Vec<Vec<u8>>,
     block_nodes: Vec<NodeId>,
     outputs: Vec<NodeId>,
     arena: CudaF32Arena,
     packed_operands: PackedOperands,
-    numeric_policy: NumericPolicy,
 }
 
 impl CudaF32Arena {
@@ -262,16 +263,34 @@ impl CudaDriver {
                 });
             }
         }
+        let mut kernels = Vec::with_capacity(resolved.len());
+        let mut uniforms = Vec::with_capacity(resolved.len());
+        for bound in &resolved {
+            let kernel = crate::emit_cuda_with_policy(bound, &packed_operands, numeric_policy)
+                .map_err(|error| CudaDriverError::Emit {
+                    node: bound.node,
+                    error: error.to_string(),
+                })?;
+            let packed_uniforms = crate::cuda::pack_cuda_uniforms(bound).map_err(|error| {
+                CudaDriverError::Emit {
+                    node: bound.node,
+                    error: error.to_string(),
+                }
+            })?;
+            kernels.push(kernel);
+            uniforms.push(packed_uniforms);
+        }
         Ok(CudaPlan {
             driver: self.clone(),
             program: program.to_vec(),
             shapes,
             resolved,
+            kernels,
+            uniforms,
             block_nodes,
             outputs: outputs.to_vec(),
             arena: self.new_arena(),
             packed_operands,
-            numeric_policy,
         })
     }
 
@@ -781,24 +800,12 @@ impl CudaPlan {
                 self.resolved.last().map(|bound| bound.node)
             );
         }
-        for bound in &self.resolved {
+        for (bound, (kernel, uniforms)) in self
+            .resolved
+            .iter()
+            .zip(self.kernels.iter().zip(self.uniforms.iter()))
+        {
             let node_started = timing.then(std::time::Instant::now);
-            let kernel = crate::emit_cuda_with_policy(
-                bound,
-                &self.packed_operands,
-                self.numeric_policy,
-            )
-            .map_err(|error| {
-                CudaDriverError::Emit {
-                    node: bound.node,
-                    error: error.to_string(),
-                }
-            })?;
-            let uniforms =
-                crate::cuda::pack_cuda_uniforms(bound).map_err(|error| CudaDriverError::Emit {
-                    node: bound.node,
-                    error: error.to_string(),
-                })?;
             if trace_node == Some(bound.node) {
                 eprintln!(
                     "cuda_trace_source_begin node={:?}\n{}\ncuda_trace_source_end",
