@@ -69,7 +69,10 @@ fn main() {
                 assert_eq!(chained, [3.0, 4.0, 5.0]);
                 assert_eq!(allocations, 3);
                 let evaluated = plan
-                    .execute_named(&[("x", QuantizedBlock::Float32(&[1.0, 2.0, 3.0, 4.0]))])
+                    .execute_named(
+                        &[("x", QuantizedBlock::Float32(&[1.0, 2.0, 3.0, 4.0]))],
+                        None,
+                    )
                     .expect("planned CUDA graph should execute");
                 let (values, shape) = evaluated
                     .get(NodeId(output_node.0))

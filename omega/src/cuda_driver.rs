@@ -64,6 +64,7 @@ pub struct CudaDriver {
     context: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     modules: Arc<std::sync::Mutex<BTreeMap<String, CachedCudaModule>>>,
+    resident_buffers: Arc<std::sync::Mutex<BTreeMap<NodeId, ((usize, usize), CudaGraphBuffer)>>>,
     kernel_compilations: Arc<AtomicU64>,
 }
 
@@ -80,10 +81,11 @@ struct CachedCudaModule {
 pub struct CudaF32Arena {
     buffers: BTreeMap<NodeId, CudaGraphBuffer>,
     uniforms: BTreeMap<NodeId, CudaSlice<u8>>,
+    resident_sources: BTreeMap<NodeId, (usize, usize)>,
     allocations: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum CudaGraphBuffer {
     F32(CudaSlice<f32>),
     Bytes(CudaSlice<u8>),
@@ -127,6 +129,7 @@ impl CudaDriver {
             context,
             stream,
             modules: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            resident_buffers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             kernel_compilations: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -780,7 +783,12 @@ impl CudaPlan {
     pub fn execute_named(
         &mut self,
         named: &[(&str, QuantizedBlock<'_>)],
+        resident_names: Option<&std::collections::BTreeSet<&str>>,
     ) -> Result<Evaluated, CudaDriverError> {
+        let host_timing = std::env::var_os("PROXIMA_CUDA_HOST_TIMING").is_some();
+        let upload_started = host_timing.then(std::time::Instant::now);
+        let mut resident_hits = 0usize;
+        let mut resident_misses = 0usize;
         let blocks = resolve_named_blocks(&self.program, named).map_err(|_| {
             CudaDriverError::UnsupportedGraph {
                 node: NodeId(0),
@@ -794,6 +802,35 @@ impl CudaPlan {
             });
         }
         for (node, block) in self.block_nodes.iter().copied().zip(blocks.iter()) {
+            let name = match self.program.get(node.0 as usize) {
+                Some(Op::Input { name: Some(name), .. }) => name.as_str(),
+                _ => "",
+            };
+            let source = (block_address(block), block_length(block));
+            let resident = resident_names.is_some_and(|names| names.contains(name));
+            if resident && self.arena.resident_sources.get(&node) == Some(&source) {
+                resident_hits += 1;
+                continue;
+            }
+            if resident {
+                let cached = self
+                    .driver
+                    .resident_buffers
+                    .lock()
+                    .map_err(|_| CudaDriverError::Driver("CUDA resident cache poisoned".into()))?
+                    .get(&node)
+                    .filter(|(cached_source, _)| *cached_source == source)
+                    .map(|(_, buffer)| buffer.clone());
+                if let Some(buffer) = cached {
+                    self.arena.buffers.insert(node, buffer);
+                    self.arena.resident_sources.insert(node, source);
+                    resident_hits += 1;
+                    continue;
+                }
+            }
+            if resident {
+                resident_misses += 1;
+            }
             match block {
                 QuantizedBlock::Float32(values) => {
                     if values.is_empty() {
@@ -823,6 +860,26 @@ impl CudaPlan {
                         .upload_bytes(&mut self.arena, node, packed_bytes(other))?;
                 }
             }
+            if resident {
+                self.arena.resident_sources.insert(node, source);
+                if let Some(buffer) = self.arena.buffers.get(&node).cloned() {
+                    self.driver
+                        .resident_buffers
+                        .lock()
+                        .map_err(|_| CudaDriverError::Driver("CUDA resident cache poisoned".into()))?
+                        .insert(node, (source, buffer));
+                }
+            } else {
+                self.arena.resident_sources.remove(&node);
+            }
+        }
+        if let Some(started) = upload_started {
+            eprintln!(
+                "cuda_host_timing: phase=upload_ms value={:.3} resident_hits={} resident_misses={}",
+                started.elapsed().as_secs_f64() * 1_000.0,
+                resident_hits,
+                resident_misses
+            );
         }
         let trace = std::env::var_os("PROXIMA_CUDA_TRACE").is_some();
         let timing = std::env::var_os("PROXIMA_CUDA_TIMING").is_some();
@@ -848,6 +905,7 @@ impl CudaPlan {
                 self.resolved.last().map(|bound| bound.node)
             );
         }
+        let dispatch_started = host_timing.then(std::time::Instant::now);
         for (bound, (kernel, uniforms)) in self
             .resolved
             .iter()
@@ -969,7 +1027,21 @@ impl CudaPlan {
                 eprintln!("cuda_trace: node={:?} complete", bound.node);
             }
         }
+        if let Some(started) = dispatch_started {
+            eprintln!(
+                "cuda_host_timing: phase=submit_ms value={:.3} nodes={}",
+                started.elapsed().as_secs_f64() * 1_000.0,
+                self.resolved.len()
+            );
+        }
+        let sync_started = host_timing.then(std::time::Instant::now);
         self.driver.stream.synchronize()?;
+        if let Some(started) = sync_started {
+            eprintln!(
+                "cuda_host_timing: phase=sync_ms value={:.3}",
+                started.elapsed().as_secs_f64() * 1_000.0
+            );
+        }
         if timing {
             timing_rows.sort_by_key(|row| std::cmp::Reverse(row.1));
             eprintln!(
@@ -987,6 +1059,7 @@ impl CudaPlan {
                 );
             }
         }
+        let host_readback_started = host_timing.then(std::time::Instant::now);
         let mut results = Vec::with_capacity(self.outputs.len());
         let readback_started = timing.then(std::time::Instant::now);
         for node in &self.outputs {
@@ -1002,6 +1075,13 @@ impl CudaPlan {
                 self.shapes.of(*node).to_vec(),
                 self.driver.read_f32(&self.arena, *node)?,
             ));
+        }
+        if let Some(started) = host_readback_started {
+            eprintln!(
+                "cuda_host_timing: phase=readback_ms value={:.3} outputs={}",
+                started.elapsed().as_secs_f64() * 1_000.0,
+                self.outputs.len()
+            );
         }
         if let Some(started) = readback_started {
             eprintln!(
@@ -1064,6 +1144,22 @@ fn packed_bytes<'a>(block: &QuantizedBlock<'a>) -> &'a [u8] {
         | QuantizedBlock::Iq4Nl(_)
         | QuantizedBlock::Iq2Xs(_)
         | QuantizedBlock::Iq3Xxs(_) => &[],
+    }
+}
+
+fn block_address(block: &QuantizedBlock<'_>) -> usize {
+    match block {
+        QuantizedBlock::Float32(values) => values.as_ptr() as usize,
+        QuantizedBlock::Int32(values) => values.as_ptr() as usize,
+        _ => packed_bytes(block).as_ptr() as usize,
+    }
+}
+
+fn block_length(block: &QuantizedBlock<'_>) -> usize {
+    match block {
+        QuantizedBlock::Float32(values) => values.len() * core::mem::size_of::<f32>(),
+        QuantizedBlock::Int32(values) => values.len() * core::mem::size_of::<i32>(),
+        _ => packed_bytes(block).len(),
     }
 }
 
