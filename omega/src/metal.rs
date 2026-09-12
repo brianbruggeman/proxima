@@ -3508,36 +3508,7 @@ pub fn execute_plan_named_with_placements(
     input_placements: &[(NodeId, &PlacedBuffer, usize)],
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
 ) -> Result<Evaluated, MetalError> {
-    let block_nodes = block_node_ids(&plan.program);
-    let placed_inputs: BTreeSet<NodeId> =
-        input_placements.iter().map(|(node, _, _)| *node).collect();
-    let mut placeholders = Vec::new();
-    let mut placeholder_nodes = BTreeMap::new();
-    for node in &block_nodes {
-        if named.iter().any(|(candidate, _)| {
-            *candidate == plan.program[node.0 as usize].name().unwrap_or_default()
-        }) {
-            continue;
-        }
-        if placed_inputs.contains(node) {
-            let placeholder_index = placeholders.len();
-            placeholders.push(vec![0.0_f32; element_count(plan.prepared.shapes.of(*node))]);
-            placeholder_nodes.insert(*node, placeholder_index);
-        }
-    }
-    let mut blocks = Vec::with_capacity(block_nodes.len());
-    for node in &block_nodes {
-        let name = plan.program[node.0 as usize]
-            .name()
-            .ok_or(TensorError::UnnamedInput(*node))?;
-        if let Some(block) = named.iter().find(|(candidate, _)| *candidate == name) {
-            blocks.push(block.1);
-        } else if let Some(index) = placeholder_nodes.get(node) {
-            blocks.push(QuantizedBlock::Float32(placeholders[*index].as_slice()));
-        } else {
-            return Err(TensorError::UnboundInputName(String::from(name)).into());
-        }
-    }
+    let blocks = resolve_named_blocks_with_placed_inputs(plan, named, input_placements)?;
     // no scratch pool for this name-keyed convenience wrapper -- a caller
     // wanting the recycle path calls `execute_plan_with_placements` directly.
     execute_plan_with_placements(
@@ -3564,37 +3535,7 @@ pub fn execute_plan_named_with_placements_and_expert_sources(
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
     expert_sources: &BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
 ) -> Result<Evaluated, MetalError> {
-    let block_nodes = block_node_ids(&plan.program);
-    let placed_inputs: BTreeSet<NodeId> =
-        input_placements.iter().map(|(node, _, _)| *node).collect();
-    let mut placeholders = Vec::new();
-    let mut placeholder_nodes = BTreeMap::new();
-    for node in &block_nodes {
-        let name = plan.program[node.0 as usize]
-            .name()
-            .ok_or(TensorError::UnnamedInput(*node))?;
-        if named.iter().any(|(candidate, _)| *candidate == name) {
-            continue;
-        }
-        if placed_inputs.contains(node) {
-            let placeholder_index = placeholders.len();
-            placeholders.push(vec![0.0_f32; element_count(plan.prepared.shapes.of(*node))]);
-            placeholder_nodes.insert(*node, placeholder_index);
-        }
-    }
-    let mut blocks = Vec::with_capacity(block_nodes.len());
-    for node in &block_nodes {
-        let name = plan.program[node.0 as usize]
-            .name()
-            .ok_or(TensorError::UnnamedInput(*node))?;
-        if let Some(block) = named.iter().find(|(candidate, _)| *candidate == name) {
-            blocks.push(block.1);
-        } else if let Some(index) = placeholder_nodes.get(node) {
-            blocks.push(QuantizedBlock::Float32(placeholders[*index].as_slice()));
-        } else {
-            return Err(TensorError::UnboundInputName(String::from(name)).into());
-        }
-    }
+    let blocks = resolve_named_blocks_with_placed_inputs(plan, named, input_placements)?;
     #[cfg(feature = "instrument")]
     let expert_stage_started = std::time::Instant::now();
     let expert_buffers = stage_expert_sources(plan, &blocks, expert_sources)?;
@@ -3615,6 +3556,28 @@ pub fn execute_plan_named_with_placements_and_expert_sources(
         &mut Vec::new(),
         &expert_buffers,
     )
+}
+
+fn resolve_named_blocks_with_placed_inputs<'blocks>(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'blocks>)],
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+) -> Result<Vec<QuantizedBlock<'blocks>>, MetalError> {
+    let block_nodes = block_node_ids(&plan.program);
+    let mut blocks = Vec::with_capacity(block_nodes.len());
+    for node in &block_nodes {
+        let name = plan.program[node.0 as usize]
+            .name()
+            .ok_or(TensorError::UnnamedInput(*node))?;
+        if let Some(block) = named.iter().find(|(candidate, _)| *candidate == name) {
+            blocks.push(block.1);
+        } else if input_placements.iter().any(|(placed, _, _)| placed == node) {
+            blocks.push(QuantizedBlock::Float32(&[]));
+        } else {
+            return Err(TensorError::UnboundInputName(String::from(name)).into());
+        }
+    }
+    Ok(blocks)
 }
 
 /// [`execute_plan`] with the WHOLE program's own single command buffer's
@@ -8152,10 +8115,9 @@ mod checkpoint_mapping_release_tests {
 
     use super::{
         checkpoint_mapping_offset, clear_expert_source_cache, device_and_queue,
-        expert_mapping_offset,
-        mapping_buffer_allocated_bytes, page_size, register_checkpoint_mapping,
-        register_expert_mapping, reset_checkpoint_mapping_for_test, unregister_checkpoint_mapping,
-        unregister_expert_mapping,
+        expert_mapping_offset, mapping_buffer_allocated_bytes, page_size,
+        register_checkpoint_mapping, register_expert_mapping, reset_checkpoint_mapping_for_test,
+        unregister_checkpoint_mapping, unregister_expert_mapping,
     };
 
     /// The exact drop-ordering hazard `LoadedModel::drop` is written
