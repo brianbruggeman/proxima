@@ -341,6 +341,7 @@ fn running_a_growing_extent_through_the_pool_keeps_retained_buffers_bounded() {
             &symbols,
             &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)],
             &[sum],
+            NumericPolicy::default(),
         )
         .unwrap_or_else(|error| panic!("metal executes the growing matmul at m={m}: {error}"));
         assert_eq!(
