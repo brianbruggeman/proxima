@@ -290,10 +290,10 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
         let mut target = [[false; EXPERTS]; LAYERS];
         let mut resident_count = 0usize;
 
-        for layer in 0..LAYERS {
-            for expert in 0..EXPERTS {
+        for (layer, target_row) in target.iter_mut().enumerate() {
+            for (expert, target_cell) in target_row.iter_mut().enumerate() {
                 if self.states[layer][expert].resident {
-                    target[layer][expert] = true;
+                    *target_cell = true;
                     resident_count += 1;
                 }
             }
@@ -315,10 +315,7 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
             resident_count += 1;
         }
 
-        loop {
-            let Some(candidate) = self.hottest_not_target(&target) else {
-                break;
-            };
+        while let Some(candidate) = self.hottest_not_target(&target) {
             let Some(victim) = self.coldest_target(&target) else {
                 break;
             };
@@ -335,18 +332,18 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
         }
 
         let mut actions = ResidencyActions::new();
-        for layer in 0..LAYERS {
-            for expert in 0..EXPERTS {
+        for (layer, target_row) in target.iter().enumerate() {
+            for (expert, is_targeted) in target_row.iter().enumerate() {
                 let address = ExpertAddress { layer, expert };
-                if self.states[layer][expert].resident && !target[layer][expert] {
+                if self.states[layer][expert].resident && !is_targeted {
                     actions.push(ResidencyAction::Evict(address))?;
                 }
             }
         }
-        for layer in 0..LAYERS {
-            for expert in 0..EXPERTS {
+        for (layer, target_row) in target.iter().enumerate() {
+            for (expert, is_targeted) in target_row.iter().enumerate() {
                 let address = ExpertAddress { layer, expert };
-                if !self.states[layer][expert].resident && target[layer][expert] {
+                if !self.states[layer][expert].resident && *is_targeted {
                     actions.push(ResidencyAction::Page(address))?;
                 }
             }
@@ -420,12 +417,13 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
     }
 
     fn capacity(&self) -> usize {
-        if self.config.high_bytes_per_expert == 0 {
-            LAYERS.saturating_mul(EXPERTS)
-        } else {
-            (self.config.budget_bytes / self.config.high_bytes_per_expert)
-                .min(LAYERS.saturating_mul(EXPERTS) as u64) as usize
-        }
+        let all_experts = LAYERS.saturating_mul(EXPERTS);
+        self.config
+            .budget_bytes
+            .checked_div(self.config.high_bytes_per_expert)
+            .map_or(all_experts, |budget_capacity| {
+                budget_capacity.min(all_experts as u64) as usize
+            })
     }
 
     fn state_mut(&mut self, address: ExpertAddress) -> Result<&mut ExpertState, ResidencyError> {
@@ -458,9 +456,9 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
 
     fn hottest_not_target(&self, target: &[[bool; EXPERTS]; LAYERS]) -> Option<ExpertAddress> {
         let mut best = None;
-        for layer in 0..LAYERS {
-            for expert in 0..EXPERTS {
-                if target[layer][expert] {
+        for (layer, target_row) in target.iter().enumerate() {
+            for (expert, is_targeted) in target_row.iter().enumerate() {
+                if *is_targeted {
                     continue;
                 }
                 if !self.states[layer][expert].seen {
@@ -477,9 +475,9 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
 
     fn coldest_target(&self, target: &[[bool; EXPERTS]; LAYERS]) -> Option<ExpertAddress> {
         let mut coldest = None;
-        for layer in 0..LAYERS {
-            for expert in 0..EXPERTS {
-                if !target[layer][expert] {
+        for (layer, target_row) in target.iter().enumerate() {
+            for (expert, is_targeted) in target_row.iter().enumerate() {
+                if !is_targeted {
                     continue;
                 }
                 let candidate = ExpertAddress { layer, expert };
