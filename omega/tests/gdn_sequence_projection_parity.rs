@@ -1,4 +1,5 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
 use proxima_tensor::spec::{
@@ -98,7 +99,9 @@ fn qwen35_sequence_tail_projection_matches_cpu_on_packed_weight() {
     let packed_row_bytes = CONTRACTION / QK_K * BLOCK_BYTES;
     let mut weight_blocks = vec![0_u8; EMBED as usize * packed_row_bytes];
     for (row, packed) in weight_values
-        .chunks_exact(CONTRACTION)
+        .as_chunks::<CONTRACTION>()
+        .0
+        .iter()
         .zip(weight_blocks.chunks_exact_mut(packed_row_bytes))
     {
         quantize(row, packed).expect("each output row is one q4_k block");
