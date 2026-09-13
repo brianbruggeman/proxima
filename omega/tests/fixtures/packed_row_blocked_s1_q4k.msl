@@ -10,6 +10,27 @@ inline float proxima_erf(float x) {
 }
 
 
+static inline float q2k_element(device const uchar *block, uint index) {
+    device const uchar *scales = block;
+    device const uchar *qs = block + 16;
+    ushort d_bits = (ushort)((uint)block[80] | ((uint)block[81] << 8));
+    ushort dmin_bits = (ushort)((uint)block[82] | ((uint)block[83] << 8));
+    float d = (float)as_type<half>(d_bits);
+    float dmin = (float)as_type<half>(dmin_bits);
+
+    uint chunk = index / 128u;
+    uint within = index % 128u;
+    uint group = within / 32u;
+    uint local = within % 32u;
+    uint sub_block = chunk * 8u + group * 2u + (local >= 16u ? 1u : 0u);
+    uchar scale_min = scales[sub_block];
+    float scale = d * (float)(scale_min & 0x0Fu);
+    float minimum = dmin * (float)(scale_min >> 4u);
+    uchar level = (qs[chunk * 32u + local] >> (2u * group)) & 0x03u;
+    return scale * (float)level - minimum;
+}
+
+
 // ports proxima_gguf::quant::q3_k::unpack_scale -- the same bit-interleaved
 // 6-bit unpack q4k_scale_min/q5k_scale_min use for a (scale, min) pair,
 // restated here for a scale-only code (no min), same posture as
@@ -557,6 +578,143 @@ static inline float q6k_pair_dot(device const uchar *block, uint iq, uint ir, th
         }
     }
     return result;
+}
+
+
+struct ExpertPayloadDescriptor {
+    uint expert_index;
+    uint codec;
+    uint byte_offset;
+    uint byte_length;
+    uint out_dim;
+    uint in_dim;
+    uint epoch;
+    uint reserved;
+};
+static inline float mixed_expert_element(device const uchar *payload,
+                                         device const ExpertPayloadDescriptor *descriptor,
+                                         uint expert,
+                                         uint element) {
+    ExpertPayloadDescriptor selected = descriptor[expert];
+    device const uchar *block = payload + selected.byte_offset;
+    if (selected.codec == 1u) {
+        return q2k_element(block + (element / 256u) * 84u, element % 256u);
+    }
+    if (selected.codec == 2u) {
+        return q4k_element(block + (element / 256u) * 144u, element % 256u);
+    }
+    if (selected.codec == 3u) {
+        return q6k_element(block + (element / 256u) * 210u, element % 256u);
+    }
+    if (selected.codec == 4u) {
+        return q3k_element(block + (element / 256u) * 110u, element % 256u);
+    }
+    return 0.0f;
+}
+static inline float mixed_expert_element_from_offset(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride,
+        uint codec) {
+    long local = full_offset - (long)expert * expert_stride;
+    if (codec == 1u) {
+        device const uchar *block = payload + descriptor[expert].byte_offset +
+            (uint)(local / 256l) * 84u;
+        return q2k_element(block, (uint)(local % 256l));
+    }
+    if (codec == 2u) {
+        device const uchar *block = payload + descriptor[expert].byte_offset +
+            (uint)(local / 256l) * 144u;
+        return q4k_element(block, (uint)(local % 256l));
+    }
+    if (codec == 3u) {
+        device const uchar *block = payload + descriptor[expert].byte_offset +
+            (uint)(local / 256l) * 210u;
+        return q6k_element(block, (uint)(local % 256l));
+    }
+    if (codec == 4u) {
+        device const uchar *block = payload + descriptor[expert].byte_offset +
+            (uint)(local / 256l) * 110u;
+        return q3k_element(block, (uint)(local % 256l));
+    }
+    return 0.0f;
+}
+static inline float mixed_expert_element_from_local(
+        device const uchar *base,
+        uint codec,
+        long local) {
+    if (codec == 1u) {
+        return q2k_element(base + (uint)(local / 256l) * 84u, (uint)(local % 256l));
+    }
+    if (codec == 2u) {
+        return q4k_element(base + (uint)(local / 256l) * 144u, (uint)(local % 256l));
+    }
+    if (codec == 3u) {
+        return q6k_element(base + (uint)(local / 256l) * 210u, (uint)(local % 256l));
+    }
+    if (codec == 4u) {
+        return q3k_element(base + (uint)(local / 256l) * 110u, (uint)(local % 256l));
+    }
+    return 0.0f;
+}
+
+
+static inline float uniform_expert_element_from_offset_q2k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 84u;
+    return q2k_element(block, (uint)(local % 256l));
+}
+static inline float uniform_expert_element_from_offset_q3k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 110u;
+    return q3k_element(block, (uint)(local % 256l));
+}
+static inline float uniform_expert_element_from_offset_q4k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 144u;
+    return q4k_element(block, (uint)(local % 256l));
+}
+static inline float uniform_expert_element_from_offset_q5k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 176u;
+    return q5k_element(block, (uint)(local % 256l));
+}
+static inline float uniform_expert_element_from_offset_q6k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 210u;
+    return q6k_element(block, (uint)(local % 256l));
 }
 
 
