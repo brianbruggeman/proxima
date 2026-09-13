@@ -220,8 +220,10 @@ use proxima_tensor::instrument::{
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, NumericPolicy, Op,
     QuantizedBlock, Shapes, TensorError, bind, block_node_ids, correct_packed_matmul_layouts,
-    index_node_ids, infer, node_last_reader, node_retirement, prune_dead, resolve_named_blocks,
+    index_node_ids, infer, node_retirement, prune_dead, resolve_named_blocks,
 };
+#[cfg(any(not(feature = "metal-buffer-pool"), test))]
+use proxima_tensor::node_last_reader;
 
 use crate::error::EmitError;
 #[cfg(feature = "instrument")]
@@ -5951,8 +5953,9 @@ struct Prepared {
     /// place of a per-op forward scan over remaining ops.
     // `metal-buffer-pool`'s retirement loop already trusts `retires[position]`
     // unconditionally (no guard to replace), so this field has no reader
-    // under that feature alone.
-    #[cfg_attr(feature = "metal-buffer-pool", allow(dead_code))]
+    // under that feature alone -- compiled out entirely rather than kept
+    // with an allow.
+    #[cfg(not(feature = "metal-buffer-pool"))]
     last_reader: Vec<u32>,
     /// Every node referenced as a gather's `indices` anywhere in the
     /// program — see [`gpu_dtype`]'s doc for why upload/read-back both
@@ -6116,6 +6119,7 @@ fn prepare(
     // codec-agnostic: it takes any `packed_operands` node set).
     correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
     let retires = node_retirement(&resolved, &effective_outputs);
+    #[cfg(not(feature = "metal-buffer-pool"))]
     let last_reader = node_last_reader(&resolved, program.len());
     let index_nodes = index_node_ids(program);
     let live_block_inputs = live_block_inputs(&block_nodes, &resolved, &effective_outputs);
@@ -6128,6 +6132,7 @@ fn prepare(
         packed_operands,
         resolved,
         retires,
+        #[cfg(not(feature = "metal-buffer-pool"))]
         last_reader,
         index_nodes,
     })
