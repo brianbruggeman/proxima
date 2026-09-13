@@ -1173,15 +1173,17 @@ struct Qwen35DenseAttentionPlacement<'buffers> {
     buffers: &'buffers [Option<Qwen35DenseAttentionBuffers>],
 }
 
+// device residency is a backend property, not a pre-gather-mode property
+// (ROW 531 invariant 2): the full-graph decode arm places these roots too.
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 fn qwen35_dense_attention_placement_enabled(
-    pre_gather: bool,
+    is_qwen35moe: bool,
     is_metal: bool,
     force_two_range: bool,
     seed_cached_len: usize,
     requested: bool,
 ) -> bool {
-    pre_gather && is_metal && !force_two_range && seed_cached_len == 0 && requested
+    is_qwen35moe && is_metal && !force_two_range && seed_cached_len == 0 && requested
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -8938,14 +8940,17 @@ impl<'file> LoadedModel<'file> {
             .map(|_| Qwen35DenseAttentionPadScratch::new())
             .collect();
 
+        // ROW 531 invariant 2: recurrent state, conv history and dense-attention
+        // KV roots are device-resident on Metal regardless of expert-residency
+        // mode, so this gate is the architecture, never the pre-gather flag.
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let qwen35moe_architecture = self
+            .architecture_impl
+            .is_some_and(|architecture| architecture.name() == "qwen35moe");
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let dense_attention_placement_enabled = !monolithic_all_low_requested
             && qwen35_dense_attention_placement_enabled(
-                qwen35moe_pre_gather_enabled(
-                    serving_config.qwen35moe_pre_gather,
-                    self.architecture_impl
-                        .map(|architecture| architecture.name()),
-                ),
+                qwen35moe_architecture,
                 runtime.is_metal(),
                 force_two_range,
                 seed_cached_len,
@@ -9053,9 +9058,8 @@ impl<'file> LoadedModel<'file> {
         };
 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let ssm_placement_enabled = !monolithic_all_low_requested
-            && qwen35_pre_gather_requested
-            && runtime.is_metal();
+        let ssm_placement_enabled =
+            !monolithic_all_low_requested && qwen35moe_architecture && runtime.is_metal();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let ssm_placement_max_layer = None;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -12117,7 +12121,7 @@ mod tests {
 
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     #[test]
-    fn qwen35_dense_attention_placement_is_pre_gather_metal_only() {
+    fn qwen35_dense_attention_placement_is_qwen35moe_metal_only() {
         assert!(qwen35_dense_attention_placement_enabled(
             true, true, false, 0, true
         ));
@@ -14379,6 +14383,7 @@ mod memory_fit_gate_tests {
             logits_root: proxima_tensor::op::NodeId(0),
             hidden_root: None,
             layer_roots: Vec::new(),
+            residual_roots: Vec::new(),
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
