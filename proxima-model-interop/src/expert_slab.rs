@@ -38,6 +38,7 @@ use proxima_tensor::cpu::{ExpertEntry, ExpertSource};
 
 use crate::bind::{PackedOwnedKind, quantize_to_kind};
 use crate::error::InteropError;
+use crate::residency::ExpertAddress;
 
 #[cfg(any(test, feature = "metal"))]
 pub(crate) type AllLowExpertSourceScratch<'mapping> = Vec<(
@@ -218,6 +219,23 @@ fn dequantize_expert(
         PackedOwnedKind::BFloat16 => bf16::dequantize(source, output),
     }
     .map_err(InteropError::from)
+}
+
+/// A dense weight's output and input feature extents, grouped so the paging
+/// methods that consume both keep their argument count under clippy's
+/// threshold.
+#[derive(Debug, Clone, Copy)]
+pub struct WeightDims {
+    pub out_dim: u32,
+    pub in_dim: u32,
+}
+
+/// A recode source's codec and packed bytes, grouped so
+/// [`ExpertSlab::page_expert_recode_borrowed`] keeps its argument count under
+/// clippy's threshold.
+pub struct RecodeSource<'source> {
+    pub codec: PackedOwnedKind,
+    pub bytes: &'source [u8],
 }
 
 /// One expert's backing bytes. The mapped variant owns its mapping handle and
@@ -578,16 +596,17 @@ impl<'file> ExpertSlab<'file> {
     /// existing boundary-checked page operation.
     pub fn page_expert_recode_borrowed(
         &mut self,
-        layer: usize,
-        expert: usize,
-        source_codec: PackedOwnedKind,
-        source_bytes: &[u8],
+        address: ExpertAddress,
+        source: RecodeSource<'_>,
         target_codec: PackedOwnedKind,
         scratch: &mut [f32],
         target_bytes: &'file mut [u8],
-        out_dim: u32,
-        in_dim: u32,
+        dims: WeightDims,
     ) -> Result<u64, InteropError> {
+        let RecodeSource {
+            codec: source_codec,
+            bytes: source_bytes,
+        } = source;
         let written = recode_expert_into(
             source_codec,
             source_bytes,
@@ -603,7 +622,14 @@ impl<'file> ExpertSlab<'file> {
                 },
             ));
         }
-        self.page_expert_borrowed(layer, expert, target_codec, target_bytes, out_dim, in_dim)
+        self.page_expert_borrowed(
+            address.layer,
+            address.expert,
+            target_codec,
+            target_bytes,
+            dims.out_dim,
+            dims.in_dim,
+        )
     }
 
     /// Pages one expert from `mapping[range]` without copying the expert or
@@ -628,8 +654,7 @@ impl<'file> ExpertSlab<'file> {
         codec: PackedOwnedKind,
         mapping: Arc<Mmap>,
         range: Range<usize>,
-        out_dim: u32,
-        in_dim: u32,
+        dims: WeightDims,
     ) -> Result<u64, InteropError> {
         if mapping.get(range.clone()).is_none() {
             return Err(InteropError::ExpertMappedRangeOutOfBounds {
@@ -643,8 +668,8 @@ impl<'file> ExpertSlab<'file> {
             expert,
             codec,
             ExpertBytes::Mapped { mapping, range },
-            out_dim,
-            in_dim,
+            dims.out_dim,
+            dims.in_dim,
         )
     }
 
@@ -1217,8 +1242,10 @@ mod tests {
             PackedOwnedKind::Q4K,
             Arc::clone(&mapping),
             0..144,
-            32,
-            32,
+            WeightDims {
+                out_dim: 32,
+                in_dim: 32,
+            },
         )
         .expect("the mapped expert replaces the checkpoint alias between steps");
         drop(mapping);
@@ -1341,15 +1368,21 @@ mod tests {
             .expect("the source stack binds");
         let epoch = slab
             .page_expert_recode_borrowed(
-                0,
-                0,
-                PackedOwnedKind::Q4K,
-                &source_bytes,
+                ExpertAddress {
+                    layer: 0,
+                    expert: 0,
+                },
+                RecodeSource {
+                    codec: PackedOwnedKind::Q4K,
+                    bytes: &source_bytes,
+                },
                 PackedOwnedKind::Q2K,
                 &mut scratch,
                 &mut target_bytes,
-                32,
-                32,
+                WeightDims {
+                    out_dim: 32,
+                    in_dim: 32,
+                },
             )
             .expect("the recoded expert pages at the boundary");
         assert_eq!(epoch, 1);

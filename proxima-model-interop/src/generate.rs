@@ -1478,6 +1478,31 @@ struct SegmentPlacements<'placements> {
     output_placements: &'placements [(NodeId, &'placements PlacedBuffer, usize)],
 }
 
+/// The per-call evaluation inputs for one qwen35moe pre-gather pass, grouped
+/// so the method they feed keeps its argument count under clippy's
+/// threshold. `'mapping` matches the borrow the sidecar and its scratch hold
+/// across a layer window; `'file` matches the bound model's own file borrow.
+struct PreGatherContext<'context, 'mapping, 'file> {
+    named: &'context [(&'context str, QuantizedBlock<'context>)],
+    outputs: &'context [NodeId],
+    resident_names: &'context BTreeSet<&'context str>,
+    layer_caches: &'context [LayerCacheState],
+    expert_slab: &'context mut crate::expert_slab::ExpertSlab<'file>,
+    sidecar_read_scratch: &'context mut crate::expert_sidecar::ExpertSidecarReadScratch,
+    current_sources: &'context RefCell<CurrentExpertSources>,
+    position_offset: usize,
+    layer_window: usize,
+    gdn_backend: GdnPrefillBackend,
+    #[cfg(feature = "metal")]
+    sidecar: Option<&'mapping crate::expert_sidecar::MappedExpertSidecar>,
+    #[cfg(feature = "metal")]
+    all_low_expert_scratch: &'context mut crate::expert_slab::AllLowExpertSourceScratch<'mapping>,
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    ssm_placement: Option<&'context Qwen35SsmPlacement<'context>>,
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    dense_attention_placement: Option<&'context Qwen35DenseAttentionPlacement<'context>>,
+}
+
 /// The per-call evaluation inputs for one GDN scan segment, grouped so the
 /// method they feed keeps its argument count under clippy's threshold.
 struct GdnScanSegmentContext<'context, 'data> {
@@ -2687,28 +2712,7 @@ impl<'file> LoadedModel<'file> {
         runtime: &mut BackendRuntime,
         plan: &Qwen35MoePreGatherPlan,
         symbols: &[u64],
-        named: &[(&str, QuantizedBlock<'_>)],
-        outputs: &[NodeId],
-        resident_names: &BTreeSet<&str>,
-        layer_caches: &[LayerCacheState],
-        expert_slab: &mut crate::expert_slab::ExpertSlab<'file>,
-        sidecar_read_scratch: &mut crate::expert_sidecar::ExpertSidecarReadScratch,
-        current_sources: &RefCell<CurrentExpertSources>,
-        position_offset: usize,
-        layer_window: usize,
-        gdn_backend: GdnPrefillBackend,
-        #[cfg(feature = "metal")] sidecar: Option<
-            &'mapping crate::expert_sidecar::MappedExpertSidecar,
-        >,
-        #[cfg(feature = "metal")]
-        all_low_expert_scratch: &mut crate::expert_slab::AllLowExpertSourceScratch<
-            'mapping,
-        >,
-        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))] ssm_placement: Option<
-            &Qwen35SsmPlacement<'_>,
-        >,
-        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        dense_attention_placement: Option<&Qwen35DenseAttentionPlacement<'_>>,
+        context: PreGatherContext<'_, 'mapping, 'file>,
         mut before_gather: BeforeGather,
     ) -> Result<Evaluated, InteropError>
     where
@@ -2719,6 +2723,26 @@ impl<'file> LoadedModel<'file> {
             &mut crate::expert_slab::ExpertSlab<'file>,
         ) -> Result<(), InteropError>,
     {
+        let PreGatherContext {
+            named,
+            outputs,
+            resident_names,
+            layer_caches,
+            expert_slab,
+            sidecar_read_scratch,
+            current_sources,
+            position_offset,
+            layer_window,
+            gdn_backend,
+            #[cfg(feature = "metal")]
+            sidecar,
+            #[cfg(feature = "metal")]
+            all_low_expert_scratch,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            ssm_placement,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            dense_attention_placement,
+        } = context;
         #[cfg(not(feature = "metal"))]
         let _ = layer_window;
         let mut carried: BTreeMap<NodeId, (Vec<u64>, Vec<f32>)> = BTreeMap::new();
@@ -8154,11 +8178,9 @@ impl<'file> LoadedModel<'file> {
         codec: crate::bind::PackedOwnedKind,
         mapping: Arc<Mmap>,
         range: Range<usize>,
-        out_dim: u32,
-        in_dim: u32,
+        dims: crate::expert_slab::WeightDims,
     ) -> Result<u64, InteropError> {
-        lock_expert_slab(&self.expert_slab)
-            .page_expert_mapped(layer, expert, codec, mapping, range, out_dim, in_dim)
+        lock_expert_slab(&self.expert_slab).page_expert_mapped(layer, expert, codec, mapping, range, dims)
     }
 
     /// Attaches HOBBIT's mmap-backed low-codec expert store to this model.
@@ -10045,32 +10067,40 @@ impl<'file> LoadedModel<'file> {
                             // planning still needs the original expert input
                             // metadata; execution replaces those bindings
                             // with the selected source table before staging.
-                            &named_blocks,
-                            &roots,
-                            &resident_names,
-                            &layer_caches,
-                            &mut expert_slab_guard,
-                            &mut sidecar_read_scratch,
-                            &current_sources,
-                            cached_len,
-                            serving_config.qwen35moe_layer_window,
-                            pre_gather_plan.gdn_backend,
-                            #[cfg(feature = "metal")]
-                            self.expert_sidecar.as_ref(),
-                            #[cfg(feature = "metal")]
-                            &mut layer_window_expert_scratch,
-                            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                            Some(&Qwen35SsmPlacement {
-                                input_nodes: &ssm_state_input_nodes,
-                                buffers: &ssm_state_buffers,
-                                maximum_layer: ssm_placement_max_layer,
-                                use_second_as_input: !cached_len.is_multiple_of(2),
-                            }),
-                            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                            Some(&Qwen35DenseAttentionPlacement {
-                                input_nodes: &dense_attention_input_nodes,
-                                buffers: &dense_attention_buffers,
-                            }),
+                            PreGatherContext {
+                                named: &named_blocks,
+                                outputs: &roots,
+                                resident_names: &resident_names,
+                                layer_caches: &layer_caches,
+                                expert_slab: &mut expert_slab_guard,
+                                sidecar_read_scratch: &mut sidecar_read_scratch,
+                                current_sources: &current_sources,
+                                position_offset: cached_len,
+                                layer_window: serving_config.qwen35moe_layer_window,
+                                gdn_backend: pre_gather_plan.gdn_backend,
+                                #[cfg(feature = "metal")]
+                                sidecar: self.expert_sidecar.as_ref(),
+                                #[cfg(feature = "metal")]
+                                all_low_expert_scratch: &mut layer_window_expert_scratch,
+                                #[cfg(all(
+                                    feature = "metal-output-placement",
+                                    target_os = "macos"
+                                ))]
+                                ssm_placement: Some(&Qwen35SsmPlacement {
+                                    input_nodes: &ssm_state_input_nodes,
+                                    buffers: &ssm_state_buffers,
+                                    maximum_layer: ssm_placement_max_layer,
+                                    use_second_as_input: !cached_len.is_multiple_of(2),
+                                }),
+                                #[cfg(all(
+                                    feature = "metal-output-placement",
+                                    target_os = "macos"
+                                ))]
+                                dense_attention_placement: Some(&Qwen35DenseAttentionPlacement {
+                                    input_nodes: &dense_attention_input_nodes,
+                                    buffers: &dense_attention_buffers,
+                                }),
+                            },
                             &mut before_qwen35moe_gather,
                         )?
                     } else if use_metal_output_placements(
@@ -10115,20 +10145,22 @@ impl<'file> LoadedModel<'file> {
                             &symbols,
                             // planning needs the original expert descriptors;
                             // execution substitutes the selected source table.
-                            &named_blocks,
-                            &roots,
-                            &resident_names,
-                            &layer_caches,
-                            &mut expert_slab_guard,
-                            &mut sidecar_read_scratch,
-                            &current_sources,
-                            cached_len,
-                            serving_config.qwen35moe_layer_window,
-                            pre_gather_plan.gdn_backend,
-                            #[cfg(feature = "metal")]
-                            self.expert_sidecar.as_ref(),
-                            #[cfg(feature = "metal")]
-                            &mut layer_window_expert_scratch,
+                            PreGatherContext {
+                                named: &named_blocks,
+                                outputs: &roots,
+                                resident_names: &resident_names,
+                                layer_caches: &layer_caches,
+                                expert_slab: &mut expert_slab_guard,
+                                sidecar_read_scratch: &mut sidecar_read_scratch,
+                                current_sources: &current_sources,
+                                position_offset: cached_len,
+                                layer_window: serving_config.qwen35moe_layer_window,
+                                gdn_backend: pre_gather_plan.gdn_backend,
+                                #[cfg(feature = "metal")]
+                                sidecar: self.expert_sidecar.as_ref(),
+                                #[cfg(feature = "metal")]
+                                all_low_expert_scratch: &mut layer_window_expert_scratch,
+                            },
                             &mut before_qwen35moe_gather,
                         )?
                     } else {
@@ -12027,10 +12059,11 @@ mod tests {
     #[cfg(feature = "qwen35moe-expert-prefetch")]
     use super::qwen35moe_expert_prefetch_requested;
     use super::{
-        SsmLayerCache, begin_expert_gather_phase, collect_future_gather_cuts,
-        first_nonfinite_node_value, kv_extent, lock_expert_slab, qwen35moe_admit_low_copy,
-        qwen35moe_gdn_prefill_scan_requested, qwen35moe_monolithic_all_low_enabled,
-        qwen35moe_pre_gather_enabled, should_release_monolithic_sources, step_batch_needs_logits,
+        RouterExpertCounts, RouterLogits, SsmLayerCache, begin_expert_gather_phase,
+        collect_future_gather_cuts, first_nonfinite_node_value, kv_extent, lock_expert_slab,
+        qwen35moe_admit_low_copy, qwen35moe_gdn_prefill_scan_requested,
+        qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
+        should_release_monolithic_sources, step_batch_needs_logits,
         visit_qwen35moe_router_boundary, visit_qwen35moe_router_selections,
     };
     #[cfg(all(feature = "metal", target_os = "macos"))]
