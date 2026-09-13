@@ -369,12 +369,25 @@ fn greedy_fast_path_is_safe(logits: &[f32], recent_tokens: &[u32], config: Sampl
 /// characterization of [`collapse_to_argmax`]'s lowest-index tie-break.
 /// Splitting the vocab into the (bounded) set of distinct recent ids and
 /// everything else, taking each half's own max separately, and merging the
-/// two maxima by value (ties broken by id) reproduces that same winner in
-/// O(vocab + recent log recent) instead of the general path's O(vocab *
-/// recent) per-id scan -- without ever materializing the vocab-sized
-/// candidate `Vec` [`sample_general`] builds. Proved over random
-/// logits/configs in this module's
-/// `greedy_fast_path_matches_general_path_over_random_inputs` test.
+/// two maxima by value (ties broken by id) reproduces that same winner
+/// without ever materializing the vocab-sized candidate `Vec`
+/// [`sample_general`] builds. The rest-side scan below is a plain running-max
+/// fold over raw logits -- a recent id's `binary_search` membership check
+/// runs only when that element would otherwise become the new running max
+/// (an event that happens `O(log recent)` times per new-max event, and
+/// `O(log vocab)` new-max events on typical unordered data), not on every one
+/// of the `vocab` elements -- which is what made the earlier per-element
+/// `binary_search` the dominant cost at `vocab = 248,320` (see this file's
+/// own `greedy_path_ns_per_op_with_repetition_penalty_active` timing test).
+/// A raw element equal to the running best never replaces it (first index
+/// wins, matching [`collapse_to_argmax`]'s own tie rule), and a recent id
+/// skipped as a would-be new max leaves the running best untouched, so a
+/// later non-recent element with the identical value still becomes the new
+/// max -- both cases proved by
+/// `raw_scan_ties_resolve_to_the_first_index_not_a_later_equal_value` and
+/// `a_skipped_recent_id_does_not_block_a_later_non_recent_id_with_the_same_value`.
+/// Proved against the general path over random logits/configs in this
+/// module's `greedy_fast_path_matches_general_path_over_random_inputs` test.
 fn greedy_fast_path(logits: &[f32], recent_tokens: &[u32], config: SamplingConfig) -> Option<u32> {
     if !repetition_penalty_active(recent_tokens, config) {
         return greedy_pick(logits);
@@ -397,6 +410,11 @@ fn greedy_fast_path(logits: &[f32], recent_tokens: &[u32], config: SamplingConfi
 
     let mut rest_best: Option<(u32, f32)> = None;
     for (index, &raw_logit) in logits.iter().enumerate() {
+        if let Some((_, best_logit)) = rest_best
+            && raw_logit <= best_logit
+        {
+            continue;
+        }
         let id = index as u32;
         if recent
             .binary_search_by_key(&id, |&(recent_id, _)| recent_id)
@@ -404,10 +422,7 @@ fn greedy_fast_path(logits: &[f32], recent_tokens: &[u32], config: SamplingConfi
         {
             continue;
         }
-        rest_best = match rest_best {
-            Some((_, best_logit)) if raw_logit <= best_logit => rest_best,
-            _ => Some((id, raw_logit)),
-        };
+        rest_best = Some((id, raw_logit));
     }
 
     match (recent_best, rest_best) {
@@ -1067,6 +1082,55 @@ mod tests {
                 "case {case}: dispatcher must fall back to the general path exactly"
             );
         }
+    }
+
+    /// The plain running-max fold over non-recent ids must not let a later
+    /// element with the SAME value replace an earlier winner -- id 0's
+    /// penalized logit (`100.0 / 1000.0 = 0.1`) is deliberately far below
+    /// every rest candidate, so the winner is purely [`greedy_fast_path`]'s
+    /// rest-side scan over ids 1-3, all raw `5.0`: the first (id 1) must win,
+    /// not id 2 or id 3.
+    #[test]
+    fn raw_scan_ties_resolve_to_the_first_index_not_a_later_equal_value() {
+        let config = SamplingConfig {
+            repeat_penalty: 1000.0,
+            ..SamplingConfig::default()
+        };
+        let logits = vec![100.0f32, 5.0, 5.0, 5.0];
+        let recent_tokens = vec![0u32];
+        assert_eq!(greedy_fast_path(&logits, &recent_tokens, config), Some(1));
+
+        let mut rng = Rng::with_seed(21);
+        assert_eq!(
+            greedy_fast_path(&logits, &recent_tokens, config),
+            sample_general(&logits, &recent_tokens, config, &mut rng)
+        );
+    }
+
+    /// A recent id that would have become the new running max, but is
+    /// skipped because it is recent, must not "hold the door open" for a
+    /// later non-recent element with the identical raw value -- id 1 (recent,
+    /// raw `9.0`) is skipped as a candidate; id 2 (non-recent, also raw
+    /// `9.0`) must still beat id 0's raw `3.0` and become the rest-side
+    /// winner. Penalized, id 1's own logit (`9.0 / 2.0 = 4.5`) loses the
+    /// final merge to id 2's unpenalized `9.0`, so the answer is Some(2), not
+    /// Some(0) (which a scan that let the skip "stick" as the running max
+    /// would wrongly produce).
+    #[test]
+    fn a_skipped_recent_id_does_not_block_a_later_non_recent_id_with_the_same_value() {
+        let config = SamplingConfig {
+            repeat_penalty: 2.0,
+            ..SamplingConfig::default()
+        };
+        let logits = vec![3.0f32, 9.0, 9.0];
+        let recent_tokens = vec![1u32];
+        assert_eq!(greedy_fast_path(&logits, &recent_tokens, config), Some(2));
+
+        let mut rng = Rng::with_seed(22);
+        assert_eq!(
+            greedy_fast_path(&logits, &recent_tokens, config),
+            sample_general(&logits, &recent_tokens, config, &mut rng)
+        );
     }
 
     /// ROW 530's own vocab size (`proxima-tensor/docs/discipline.md`),
