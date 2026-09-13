@@ -463,6 +463,7 @@ pub const fn route_address(decision: ServeDecision) -> ExpertAddress {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     #[cfg(feature = "qwen35moe-linked-suffix")]
     use alloc::collections::BTreeMap;

@@ -491,6 +491,7 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
         ExpertAddress, ExpertPage, ExpertResidency, ResidencyAction, ResidencyConfig, RoutedExpert,
