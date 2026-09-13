@@ -74,8 +74,10 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
         });
     }
     for (block, output) in data
-        .chunks_exact(BLOCK_BYTES)
-        .zip(output.chunks_exact_mut(QK5_0))
+        .as_chunks::<BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<QK5_0>().0.iter_mut())
     {
         dequantize_block(block, output);
     }
