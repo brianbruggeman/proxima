@@ -103,6 +103,16 @@ pub struct MappedExpertSidecar {
     low_bytes_per_expert: [u64; 3],
 }
 
+/// The checkpoint fallback and current-precision inputs that decide, per
+/// expert, whether a mapped-low copy is admitted or a checkpoint/high read
+/// is used instead.
+#[derive(Clone, Copy)]
+pub(crate) struct CheckpointAdmission<'admission> {
+    pub(crate) checkpoint_mapping: Option<&'admission [u8]>,
+    pub(crate) current_decisions: &'admission [ServeDecision],
+    pub(crate) admit_low_copy: fn(PackedOwnedKind, PackedOwnedKind) -> bool,
+}
+
 /// Reusable owner for the low-codec ranges selected by one routed layer.
 #[derive(Debug, Default)]
 pub(crate) struct ExpertSidecarReadScratch {
@@ -741,9 +751,11 @@ impl MappedExpertSidecar {
             experts,
             slab,
             scratch,
-            None,
-            &[],
-            |_source, _target| true,
+            &CheckpointAdmission {
+                checkpoint_mapping: None,
+                current_decisions: &[],
+                admit_low_copy: |_source, _target| true,
+            },
         )
     }
 
@@ -753,10 +765,13 @@ impl MappedExpertSidecar {
         experts: &[u32],
         slab: &ExpertSlab<'_>,
         scratch: &mut ExpertSidecarReadScratch,
-        checkpoint_mapping: Option<&[u8]>,
-        current_decisions: &[ServeDecision],
-        admit_low_copy: fn(PackedOwnedKind, PackedOwnedKind) -> bool,
+        admission: &CheckpointAdmission<'_>,
     ) -> Result<(), InteropError> {
+        let CheckpointAdmission {
+            checkpoint_mapping,
+            current_decisions,
+            admit_low_copy,
+        } = *admission;
         #[cfg(all(feature = "metal", target_os = "macos"))]
         omega::backend::unregister_expert_mapping(scratch.mapped_window.as_slice());
         scratch.used_buffers = 0;
@@ -2213,9 +2228,11 @@ mod tests {
                 &[0],
                 &slab,
                 &mut scratch,
-                Some(&source),
-                &high_decision,
-                |_source_codec, _target_codec| true,
+                &CheckpointAdmission {
+                    checkpoint_mapping: Some(&source),
+                    current_decisions: &high_decision,
+                    admit_low_copy: |_source_codec, _target_codec| true,
+                },
             )
             .expect("a current high decision bypasses the mapped low copy");
         assert_eq!(scratch.low_ranges_read, 0);
@@ -2242,9 +2259,11 @@ mod tests {
                 &[0],
                 &slab,
                 &mut scratch,
-                Some(&source),
-                &[],
-                |source_codec, target_codec| source_codec == target_codec,
+                &CheckpointAdmission {
+                    checkpoint_mapping: Some(&source),
+                    current_decisions: &[],
+                    admit_low_copy: |source_codec, target_codec| source_codec == target_codec,
+                },
             )
             .expect("a lossy low copy falls back to checkpoint bytes");
         assert_eq!(scratch.low_ranges_read, 0);
