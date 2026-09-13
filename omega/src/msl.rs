@@ -1694,11 +1694,16 @@ fn emit_with_expert_sources_mode(
                     && line.trim().starts_with(&format!(
                         "fetched{weight_index} = max((long)0, min(fetched{weight_index}"
                     ))
+                    && !kernel.source.contains(&format!(
+                        "fetched{weight_index} = (long)simd_broadcast_first"
+                    ))
                 {
                     // The generic gathered body does not broadcast the route
                     // because each lane owns a distinct reduction element.
                     // It still needs the descriptor codec before the first
-                    // mixed-element read below.
+                    // mixed-element read below. When the broadcast marker is
+                    // also present (cooperative gather fetch), the other arm
+                    // above already declares this codec once.
                     format!(
                         "{line}\n    uint expert_codec{weight_index} = expert_descriptors[(uint)fetched{weight_index}].codec;"
                     )
@@ -10258,8 +10263,14 @@ mod tests {
         assert!(source.contains("selected.codec == 4u"));
     }
 
-    #[test]
-    fn routed_q4k_reduce_uses_cooperative_gather_fetch() {
+    /// The routed Q4_K expert reduction from `gathered_expert_product`: a
+    /// cooperative reduce (not row-blocked), so `push_cooperative_gather_fetch`
+    /// emits both the clamp line (`fetched0 = max((long)0, min(fetched0`) and
+    /// the broadcast line (`fetched0 = (long)simd_broadcast_first`) for the
+    /// same weight index -- the exact pair
+    /// `expert_codec_declared_once_when_both_substitution_markers_fire` below
+    /// checks does not double-declare `expert_codec0`.
+    fn routed_q4k_reduce_kernel() -> Kernel {
         let mut program = Vec::new();
         let stack = append(
             &mut program,
@@ -10308,13 +10319,18 @@ mod tests {
             .expect("reduction bound op exists");
         let mut packed = BTreeMap::new();
         packed.insert(bound.operands()[0].0, PackedCodec::Q4K);
-        let kernel = emit_with_expert_sources(
+        emit_with_expert_sources(
             &bound,
             &packed,
             NumericPolicy::default(),
             bound.operands()[0].0,
         )
-        .expect("routed reduction emits");
+        .expect("routed reduction emits")
+    }
+
+    #[test]
+    fn routed_q4k_reduce_uses_cooperative_gather_fetch() {
+        let kernel = routed_q4k_reduce_kernel();
         assert!(kernel.source.contains("simd_sum(accumulator)"));
         assert!(
             kernel
@@ -10328,6 +10344,29 @@ mod tests {
                     .source
                     .contains("0x80000000u | min((uint)fetched0 + 1u"),
             "a missing routed expert must fault before the descriptor byte offset is read"
+        );
+    }
+
+    #[test]
+    fn expert_codec_declared_once_when_both_substitution_markers_fire() {
+        let kernel = routed_q4k_reduce_kernel();
+        assert!(
+            kernel.source.contains("fetched0 = max((long)0, min(fetched0"),
+            "fixture must exercise the clamp marker for this regression to mean anything:\n{}",
+            kernel.source
+        );
+        assert!(
+            kernel.source.contains("fetched0 = (long)simd_broadcast_first"),
+            "fixture must exercise the broadcast marker for this regression to mean anything:\n{}",
+            kernel.source
+        );
+        assert_eq!(
+            kernel.source.matches("uint expert_codec0 = ").count(),
+            1,
+            "both the clamp and broadcast substitution markers fire for weight 0 in this \
+             cooperative (non-row-blocked) kernel -- the codec must be declared exactly once, \
+             not once per marker, or Metal rejects the source as `redefinition of 'expert_codec0'`:\n{}",
+            kernel.source
         );
     }
 
