@@ -11,3 +11,10 @@
 /// a format fact. Policy: at `std`, `TokenizerConfig::max_input_bytes`
 /// seeds from this and can be overridden per-process.
 pub const MAX_INPUT_BYTES: usize = 1 << 20;
+
+/// Stack capacity for [`crate::sample::greedy_fast_path`]'s recent-token
+/// dedup table. Generous headroom over the production `repeat_last_n`
+/// default of 64 (`proxima-model-interop/src/serving.rs:387`); a caller
+/// window larger than this routes through the general path instead of
+/// overflowing the array.
+pub const MAX_RECENT_TOKENS: usize = 256;
