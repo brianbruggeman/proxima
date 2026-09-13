@@ -220,7 +220,7 @@ use proxima_tensor::instrument::{
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, NumericPolicy, Op,
     QuantizedBlock, Shapes, TensorError, bind, block_node_ids, correct_packed_matmul_layouts,
-    index_node_ids, infer, node_retirement, prune_dead, resolve_named_blocks,
+    index_node_ids, infer, node_last_reader, node_retirement, prune_dead, resolve_named_blocks,
 };
 
 use crate::error::EmitError;
@@ -1933,31 +1933,17 @@ fn execute_plan_inner(
             if prepared.index_nodes.contains(retired) {
                 continue;
             }
-            // Keep a value when a later bound op still names it. This is
-            // required for segment plans whose resolved order differs from
-            // source NodeId order (notably computed gather intermediates).
-            if prepared.resolved[position + 1..].iter().any(|later| {
-                later.all_read_sources().any(|(source, _, lookup)| {
-                    *source == *retired
-                        || lookup
-                            .as_ref()
-                            .is_some_and(|access| access.indices == *retired)
-                })
-            }) {
-                continue;
-            }
-            // A fused lowering may issue more than one dispatch for the
-            // current bound op.  Its generated binding list is the source of
-            // truth for those internal reads, while the resolved successor
-            // walk only sees later bound ops.  Keep a source named by this
-            // op until the command buffer finishes so the second dispatch
-            // cannot observe a retired input.
-            if bound.all_read_sources().any(|(source, _, lookup)| {
-                *source == *retired
-                    || lookup
-                        .as_ref()
-                        .is_some_and(|access| access.indices == *retired)
-            }) {
+            // `prepared.last_reader[retired] == position` is the SAME
+            // last-use fact `prepared.retires[position]` was already built
+            // from (both trace to `node_last_reader`'s one
+            // `all_read_sources()` walk, `proxima_tensor::bind`'s own
+            // `walk_last_reads`) -- a member of `retires[position]` cannot
+            // fail this check, so this is a proof the retirement is safe,
+            // not a second independent scan. One array read replaces the
+            // per-op `iter().any()` forward scan over every remaining
+            // resolved op (and the current op's own operand list) that used
+            // to re-derive the identical fact here on every token.
+            if prepared.last_reader[retired.0 as usize] != position as u32 {
                 continue;
             }
             device_buffers.remove(retired);
@@ -5960,6 +5946,14 @@ struct Prepared {
     packed_operands: PackedOperands,
     resolved: Vec<BoundOp>,
     retires: Vec<Vec<NodeId>>,
+    /// [`node_last_reader`]'s dense table over `resolved` -- every retirement
+    /// decision below is `last_reader[node] == position`, one array read, in
+    /// place of a per-op forward scan over remaining ops.
+    // `metal-buffer-pool`'s retirement loop already trusts `retires[position]`
+    // unconditionally (no guard to replace), so this field has no reader
+    // under that feature alone.
+    #[cfg_attr(feature = "metal-buffer-pool", allow(dead_code))]
+    last_reader: Vec<u32>,
     /// Every node referenced as a gather's `indices` anywhere in the
     /// program — see [`gpu_dtype`]'s doc for why upload/read-back both
     /// need this set alongside a node's own declared dtype.
@@ -6122,6 +6116,7 @@ fn prepare(
     // codec-agnostic: it takes any `packed_operands` node set).
     correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
     let retires = node_retirement(&resolved, &effective_outputs);
+    let last_reader = node_last_reader(&resolved, program.len());
     let index_nodes = index_node_ids(program);
     let live_block_inputs = live_block_inputs(&block_nodes, &resolved, &effective_outputs);
     Ok(Prepared {
@@ -6133,6 +6128,7 @@ fn prepare(
         packed_operands,
         resolved,
         retires,
+        last_reader,
         index_nodes,
     })
 }
@@ -12426,6 +12422,46 @@ mod hazard_tracker_tests {
             fused.kind
         );
         (resolved, y, consumer, PackedOperands::new())
+    }
+
+    /// The exact case the deleted per-op forward scan's own comment worried
+    /// about: a fused reduce's epilogue reads a SIBLING op's output (`y`), not
+    /// one of its own `operands()` -- so `y`'s true last reader is the fused
+    /// op's position, not `y`'s own dispatch position. `execute_plan_inner`'s
+    /// retirement loop now trusts `prepared.last_reader[y] == position`
+    /// alone; this proves that table already carries the fused read, so the
+    /// O(1) lookup cannot retire `y` early.
+    #[test]
+    fn last_reader_table_protects_a_fused_epilogues_sibling_read() {
+        let (resolved, y_node, fused_node, _packed_operands) =
+            epilogue_reads_sibling_output_fixture();
+        let node_count = resolved
+            .iter()
+            .map(|bound| bound.node.0)
+            .chain(core::iter::once(y_node.0))
+            .max()
+            .expect("fixture has at least one node")
+            + 1;
+        let last_reader = super::node_last_reader(&resolved, node_count as usize);
+        let fused_position = resolved
+            .iter()
+            .position(|bound| bound.node == fused_node)
+            .expect("fused reduce is dispatched in this program");
+        let y_own_position = resolved
+            .iter()
+            .position(|bound| bound.node == y_node)
+            .expect("y is dispatched in this program");
+
+        assert!(
+            (last_reader[y_node.0 as usize] as usize) >= fused_position,
+            "y's last reader must be at or after the fused epilogue's read of it, got {}",
+            last_reader[y_node.0 as usize]
+        );
+        assert_ne!(
+            last_reader[y_node.0 as usize] as usize, y_own_position,
+            "y must not be retired at its own dispatch position -- the fused epilogue's read of \
+             it comes later"
+        );
     }
 
     /// `bindings()`'s `Binding::Input` entries come 1:1 from
