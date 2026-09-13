@@ -134,21 +134,11 @@ pub(crate) struct ExpertSidecarReadScratch {
 /// A fixed-capacity virtual window that remaps only the selected sidecar
 /// pages. The address remains stable across steps, so Metal sees a bounded
 /// no-copy arena instead of the sidecar's sparse min-to-max range.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct MappedExpertWindow {
     #[cfg(unix)]
     pointer: Option<NonNull<u8>>,
     capacity: usize,
-}
-
-impl Default for MappedExpertWindow {
-    fn default() -> Self {
-        Self {
-            #[cfg(unix)]
-            pointer: None,
-            capacity: 0,
-        }
-    }
 }
 
 impl MappedExpertWindow {
@@ -642,7 +632,7 @@ impl MappedExpertSidecar {
         entries.clear();
         spans.clear();
         spans.resize(self.expert_count, None);
-        for expert in 0..self.expert_count {
+        for (expert, span) in spans.iter_mut().enumerate().take(self.expert_count) {
             let descriptor = self.descriptor(ExpertAddress { layer, expert }, projection)?;
             let range = Self::checked_range(
                 descriptor,
@@ -655,7 +645,7 @@ impl MappedExpertSidecar {
                 .start
                 .checked_sub(arena_start)
                 .ok_or(InteropError::SidecarSizeOverflow)?;
-            spans[expert] = Some(ExpertPayloadSpan {
+            *span = Some(ExpertPayloadSpan {
                 offset: u32::try_from(offset).map_err(|_| InteropError::SidecarSizeOverflow)?,
                 length: u32::try_from(range.len())
                     .map_err(|_| InteropError::SidecarSizeOverflow)?,
