@@ -31330,8 +31330,10 @@ mod tests {
             .collect();
         let mut weight_blocks = vec![0_u8; EMBED as usize * BLOCK_BYTES];
         for (row, packed) in weight_f32
-            .chunks_exact(CONTRACTION as usize)
-            .zip(weight_blocks.chunks_exact_mut(BLOCK_BYTES))
+            .as_chunks::<{ CONTRACTION as usize }>()
+            .0
+            .iter()
+            .zip(weight_blocks.as_chunks_mut::<BLOCK_BYTES>().0)
         {
             quantize(row, packed).expect("one complete q4_k block per row");
         }
@@ -31405,7 +31407,7 @@ mod tests {
 
         let (single_program, single_sum) = build(1);
         let mut repeated = Vec::new();
-        for row in activation.chunks_exact(CONTRACTION as usize) {
+        for row in activation.as_chunks::<{ CONTRACTION as usize }>().0 {
             let blocks = [
                 QuantizedBlock::Q4K(weight_blocks.as_slice()),
                 QuantizedBlock::Float32(row),
