@@ -10,7 +10,7 @@ use memmap2::MmapOptions;
 use proxima_gguf::parse_complete;
 use proxima_model_interop::classify_task;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paths: Vec<_> = env::args().skip(1).collect();
     if paths.is_empty() {
         eprintln!("usage: task_probe <model.gguf> [model.gguf ...]");
@@ -25,18 +25,17 @@ fn main() {
         let parsed =
             parse_complete(&mapping).unwrap_or_else(|error| panic!("parse {path}: {error}"));
         let profile = classify_task(&parsed);
-        let path_json = serde_json::to_string(&path).expect("serialize path");
-        let architecture_json =
-            serde_json::to_string(&profile.architecture).expect("serialize architecture");
-        let task_json = serde_json::to_string(profile.task.name()).expect("serialize task");
-        let evidence_json = serde_json::to_string(&profile.evidence).expect("serialize evidence");
+        let path_json = serde_json::to_string(&path)?;
+        let architecture_json = serde_json::to_string(&profile.architecture)?;
+        let task_json = serde_json::to_string(profile.task.name())?;
+        let evidence_json = serde_json::to_string(&profile.evidence)?;
         let head_tensors: Vec<_> = parsed
             .tensors
             .iter()
             .filter(|tensor| !tensor.name.starts_with("blk.") && tensor.name != "token_embd.weight")
             .map(|tensor| tensor.name.as_str())
             .collect();
-        let heads_json = serde_json::to_string(&head_tensors).expect("serialize head tensors");
+        let heads_json = serde_json::to_string(&head_tensors)?;
         let shape_probe: Vec<_> = parsed
             .tensors
             .iter()
@@ -45,11 +44,12 @@ fn main() {
                 serde_json::json!({"name": tensor.name, "dims": tensor.dims.iter().copied().collect::<Vec<_>>(), "type": format!("{:?}", tensor.ggml_type)})
             })
             .collect();
-        let shape_probe_json = serde_json::to_string(&shape_probe).expect("serialize shape probe");
+        let shape_probe_json = serde_json::to_string(&shape_probe)?;
         println!(
             "{{\"path\":{path_json},\"architecture\":{architecture_json},\"task\":{task_json},\"generation_supported\":{supported},\"tensor_count\":{tensor_count},\"head_tensors\":{heads_json},\"shape_probe\":{shape_probe_json},\"evidence\":{evidence_json}}}",
             supported = profile.generation_supported,
             tensor_count = parsed.tensor_count,
         );
     }
+    Ok(())
 }
