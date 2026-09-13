@@ -183,12 +183,7 @@ pub fn emit_wgsl(
     caps: WgslCaps,
     packed_operands: &PackedOperands,
 ) -> Result<WgslKernel, EmitError> {
-    emit_wgsl_with_policy(
-        resolved,
-        caps,
-        packed_operands,
-        NumericPolicy::default(),
-    )
+    emit_wgsl_with_policy(resolved, caps, packed_operands, NumericPolicy::default())
 }
 
 /// Emits one bound operation with explicit numerical permissions.
@@ -1568,9 +1563,7 @@ fn render_reduce_cooperative(
             ));
             shift /= 2;
         }
-        source.push_str(&format!(
-            "    let reduced: {element_type} = accumulator;\n"
-        ));
+        source.push_str(&format!("    let reduced: {element_type} = accumulator;\n"));
     } else {
         let combine_fn = subgroup_combine_fn(resolved.node, *reduce_op)?;
         source.push_str(&format!(
@@ -2095,9 +2088,11 @@ mod tests {
                 .source
                 .contains("@builtin(subgroup_invocation_id) lane: u32")
         );
-        assert!(kernel
-            .source
-            .contains("subgroupShuffleDown(accumulator, 16u)"));
+        assert!(
+            kernel
+                .source
+                .contains("subgroupShuffleDown(accumulator, 16u)")
+        );
         assert!(kernel.source.contains("shuffled_1"));
         assert!(!kernel.source.contains("subgroupAdd"));
         assert_eq!(kernel.workgroup_size, 32);

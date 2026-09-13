@@ -926,12 +926,8 @@ pub fn execute_plan(
     let mut pending_faults: Vec<(NodeId, wgpu::Buffer, Vec<u64>)> = Vec::new();
     let storage_buffer_limit = plan.device.limits().max_storage_buffers_per_shader_stage;
     for bound in &plan.resolved {
-        let kernel = emit_wgsl_with_policy(
-            bound,
-            plan.caps,
-            &plan.packed_operands,
-            plan.numeric_policy,
-        )?;
+        let kernel =
+            emit_wgsl_with_policy(bound, plan.caps, &plan.packed_operands, plan.numeric_policy)?;
         // pre-validate against the device's real limit BEFORE
         // `pipeline_for` reaches `create_compute_pipeline` -- the binding
         // count is fully known here (every `Binding` is a `var<storage,

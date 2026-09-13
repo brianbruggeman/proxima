@@ -45,6 +45,60 @@ fn identity_program(extent: u32) -> (Vec<Op>, proxima_tensor::NodeId) {
 }
 
 #[test]
+fn a_placed_input_can_be_planned_without_a_named_host_payload() {
+    const EXTENT: u32 = 4;
+    const BYTES: usize = EXTENT as usize * size_of::<f32>();
+    let (mut program, identity_node) = identity_program(EXTENT);
+    if let Some(Op::Input { name, .. }) = program.first_mut() {
+        *name = Some(String::from("placed_input"));
+    }
+    let placed_input_node = proxima_tensor::NodeId(0);
+    let input_buffer =
+        omega::allocate_placed_buffer(BYTES).expect("allocates the caller-owned input buffer");
+    omega::zero_placed_buffer(&input_buffer, BYTES);
+
+    let plan = omega::plan_named_with_placed_inputs(
+        &program,
+        &[],
+        &[],
+        &[identity_node],
+        NumericPolicy::default(),
+        &[placed_input_node],
+    )
+    .expect("placed input is valid without a host-side placeholder");
+    let output_buffer =
+        omega::allocate_placed_buffer(BYTES).expect("allocates the caller-owned output buffer");
+    omega::execute_plan_named_with_placements(
+        &plan,
+        &[],
+        &[(placed_input_node, &input_buffer, 0)],
+        &[(identity_node, &output_buffer, 0)],
+    )
+    .expect("executes with the placed input and output buffers");
+    assert_eq!(
+        omega::read_placed_buffer_f32(&output_buffer, 0, EXTENT as usize),
+        vec![0.0; EXTENT as usize],
+        "the placed-input sentinel must not be uploaded as a host payload"
+    );
+
+    let error = match omega::plan_named_with_placed_inputs(
+        &program,
+        &[],
+        &[],
+        &[identity_node],
+        NumericPolicy::default(),
+        &[],
+    ) {
+        Ok(_) => panic!("an omitted input must still fail without a placement declaration"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("placed_input"),
+        "the missing input error should name the unbound input: {error}"
+    );
+}
+
+#[test]
 fn a_placed_buffer_holds_both_runs_data_at_their_own_offsets() {
     const EXTENT: u32 = 4;
     const ELEMENT_BYTES: usize = size_of::<f32>();

@@ -52,6 +52,8 @@ pub mod error;
 mod identity;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
+#[cfg(proxima_mlx)]
+pub mod mlx;
 #[cfg(feature = "alloc")]
 pub mod msl;
 pub mod sized;
@@ -79,7 +81,7 @@ pub use metal::{
 pub use metal::{
     PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
     execute_plan_named_with_placements_and_expert_sources, execute_plan_with_placements,
-    read_placed_buffer_f32, zero_placed_buffer,
+    plan_named_with_placed_inputs, read_placed_buffer_f32, zero_placed_buffer,
 };
 #[cfg(all(
     feature = "metal-output-placement",

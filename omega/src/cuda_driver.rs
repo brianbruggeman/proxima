@@ -291,12 +291,11 @@ impl CudaDriver {
                     node: bound.node,
                     error: error.to_string(),
                 })?;
-            let packed_uniforms = crate::cuda::pack_cuda_uniforms(bound).map_err(|error| {
-                CudaDriverError::Emit {
+            let packed_uniforms =
+                crate::cuda::pack_cuda_uniforms(bound).map_err(|error| CudaDriverError::Emit {
                     node: bound.node,
                     error: error.to_string(),
-                }
-            })?;
+                })?;
             kernels.push(kernel);
             uniforms.push(packed_uniforms);
         }
@@ -810,7 +809,9 @@ impl CudaPlan {
         }
         for (node, block) in self.block_nodes.iter().copied().zip(blocks.iter()) {
             let name = match self.program.get(node.0 as usize) {
-                Some(Op::Input { name: Some(name), .. }) => name.as_str(),
+                Some(Op::Input {
+                    name: Some(name), ..
+                }) => name.as_str(),
                 _ => "",
             };
             let source = (block_address(block), block_length(block));
@@ -873,7 +874,9 @@ impl CudaPlan {
                     self.driver
                         .resident_buffers
                         .lock()
-                        .map_err(|_| CudaDriverError::Driver("CUDA resident cache poisoned".into()))?
+                        .map_err(|_| {
+                            CudaDriverError::Driver("CUDA resident cache poisoned".into())
+                        })?
                         .insert(node, (source, buffer));
                 }
             } else {
@@ -983,18 +986,14 @@ impl CudaPlan {
                     );
                 }
             } else if let proxima_tensor::BoundOpKind::Constant { value } = bound.kind {
-                self.driver.materialize_constant(
-                    &mut self.arena,
-                    bound.node,
-                    value,
-                    output_len,
-                )?;
+                self.driver
+                    .materialize_constant(&mut self.arena, bound.node, value, output_len)?;
             } else {
                 let launch = if timing
                     || kernel
-                    .bindings
-                    .iter()
-                    .any(|binding| matches!(binding, Binding::Fault))
+                        .bindings
+                        .iter()
+                        .any(|binding| matches!(binding, Binding::Fault))
                 {
                     self.driver.launch_f32_persistent_sized(
                         &mut self.arena,
