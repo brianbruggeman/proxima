@@ -3665,9 +3665,11 @@ impl<'file> LoadedModel<'file> {
                             expert_slab.selected_experts(layer),
                             expert_slab,
                             &mut *sidecar_read_scratch,
-                            Some(self.checkpoint_mapping),
-                            current_sources.borrow().as_slice(),
-                            qwen35moe_admit_low_copy,
+                            &crate::expert_sidecar::CheckpointAdmission {
+                                checkpoint_mapping: Some(self.checkpoint_mapping),
+                                current_decisions: current_sources.borrow().as_slice(),
+                                admit_low_copy: qwen35moe_admit_low_copy,
+                            },
                         )?;
                         if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
                             #[cfg(feature = "instrument")]
