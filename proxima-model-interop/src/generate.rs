@@ -234,6 +234,9 @@ fn report_encoder_split(step: usize, encoder_split_ns: (u64, u64), gpu_exec_ns: 
 /// `OpGpuTiming::kind` bucket, and the top [`OP_PROFILE_TOP_N`] ops by GPU
 /// time with their operand bytes and bytes/ns -- exactly what settles
 /// whether GPU time tracks operand bytes or is flat per dispatch.
+/// shape/dtype key -> (op count, total gpu ns, total operand bytes) accumulator
+type CooperativeShapeCounts = alloc::collections::BTreeMap<(Vec<u64>, Vec<u16>), (u64, u64, u64)>;
+
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 fn report_op_timings(step: usize, timings: &[OpGpuTiming], program: &[Op]) {
     let op_count = timings.len();
@@ -277,10 +280,7 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming], program: &[Op]) {
         );
     }
 
-    let mut cooperative_shapes: alloc::collections::BTreeMap<
-        (Vec<u64>, Vec<u16>),
-        (u64, u64, u64),
-    > = alloc::collections::BTreeMap::new();
+    let mut cooperative_shapes: CooperativeShapeCounts = alloc::collections::BTreeMap::new();
     for timing in timings
         .iter()
         .filter(|timing| timing.kind == "reduce-cooperative" && timing.weight_name.is_none())
@@ -433,14 +433,14 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming], program: &[Op]) {
             timing.operand_bytes,
             timing.operand_count,
         );
-        if timing.gpu_ns >= 100_000 {
-            if let Some(op) = program.get(timing.node.0 as usize) {
-                eprintln!(
-                    "op_profile_cooperative_slow step={step} node={} gpu_ms={:.3} op={op:?}",
-                    timing.node.0,
-                    timing.gpu_ns as f64 / 1e6,
-                );
-            }
+        if timing.gpu_ns >= 100_000
+            && let Some(op) = program.get(timing.node.0 as usize)
+        {
+            eprintln!(
+                "op_profile_cooperative_slow step={step} node={} gpu_ms={:.3} op={op:?}",
+                timing.node.0,
+                timing.gpu_ns as f64 / 1e6,
+            );
         }
     }
 
@@ -1535,7 +1535,7 @@ impl<'file> LoadedModel<'file> {
         if self.router_roots.is_empty()
             || self
                 .architecture_impl
-                .map_or(true, |architecture| architecture.name() != "qwen35moe")
+                .is_none_or(|architecture| architecture.name() != "qwen35moe")
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(
@@ -1590,8 +1590,8 @@ impl<'file> LoadedModel<'file> {
         symbols: &[u64],
     ) -> Result<
         Vec<(
-            (Vec<proxima_tensor::op::Op>, Vec<(NodeId, String)>),
-            (Vec<proxima_tensor::op::Op>, Vec<(NodeId, String)>),
+            crate::qwen35moe::execution::ProgramSegment,
+            crate::qwen35moe::execution::ProgramSegment,
         )>,
         InteropError,
     > {
@@ -1634,8 +1634,8 @@ impl<'file> LoadedModel<'file> {
         previous_layer_output: Option<NodeId>,
     ) -> Result<
         (
-            (Vec<proxima_tensor::op::Op>, Vec<(NodeId, String)>),
-            (Vec<proxima_tensor::op::Op>, Vec<(NodeId, String)>),
+            crate::qwen35moe::execution::ProgramSegment,
+            crate::qwen35moe::execution::ProgramSegment,
         ),
         InteropError,
     > {
@@ -2563,7 +2563,7 @@ impl<'file> LoadedModel<'file> {
                 let target_node = tail_mapping
                     .get(node)
                     .copied()
-                    .ok_or_else(|| InteropError::MissingEvaluatedNode { node: *node })?;
+                    .ok_or(InteropError::MissingEvaluatedNode { node: *node })?;
                 let target_shape = match tail_program.get(target_node.0 as usize) {
                     Some(Op::Input { shape, .. }) => shape
                         .iter()
@@ -2793,7 +2793,7 @@ impl<'file> LoadedModel<'file> {
             }
             #[cfg(feature = "metal")]
             if pair_window_enabled
-                && layer % 2 == 0
+                && layer.is_multiple_of(2)
                 && layer + 1 < self.qwen35moe_layer_diagnostics.len()
                 && segments.gdn_scan.is_none()
             {
@@ -3227,7 +3227,7 @@ impl<'file> LoadedModel<'file> {
                         })
                     })
                 {
-                    if let Some(mapped) = mapping.get(&node).copied() {
+                    if let Some(mapped) = mapping.get(node).copied() {
                         requested.insert(mapped, *node);
                     }
                 }
@@ -4391,7 +4391,7 @@ impl<'file> LoadedModel<'file> {
             }
             let requested_nodes: Vec<NodeId> = requested.keys().copied().collect();
             let evaluated = runtime.evaluate_segment(
-                &suffix_program,
+                suffix_program,
                 symbols,
                 &suffix_named,
                 &requested_nodes,
@@ -8669,7 +8669,6 @@ impl<'file> LoadedModel<'file> {
         serving_config: ServingConfig,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        let serving_config = serving_config;
         let mut runtime = BackendRuntime::new(&serving_config);
         #[cfg(feature = "metal")]
         if std::env::var_os("PROXIMA_WARMUP_BEFORE_GENERATE").is_some() {
@@ -9640,7 +9639,7 @@ impl<'file> LoadedModel<'file> {
                                 ssm_state_buffers[layer].as_ref(),
                             )
                         {
-                            let (input_buffer, output_buffer) = if cached_len % 2 == 0 {
+                            let (input_buffer, output_buffer) = if cached_len.is_multiple_of(2) {
                                 (input_buffer, output_buffer)
                             } else {
                                 (output_buffer, input_buffer)
@@ -9997,7 +9996,7 @@ impl<'file> LoadedModel<'file> {
                                 input_nodes: &ssm_state_input_nodes,
                                 buffers: &ssm_state_buffers,
                                 maximum_layer: ssm_placement_max_layer,
-                                use_second_as_input: cached_len % 2 != 0,
+                                use_second_as_input: !cached_len.is_multiple_of(2),
                             }),
                             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                             Some(&Qwen35DenseAttentionPlacement {
@@ -10462,11 +10461,7 @@ impl<'file> LoadedModel<'file> {
                                     .unwrap_or(self.architecture.expert_count as u64),
                             )
                             .unwrap_or(0);
-                            let rows = if row_width == 0 {
-                                0
-                            } else {
-                                values.len() / row_width
-                            };
+                            let rows = values.len().checked_div(row_width).unwrap_or(0);
                             let row = values.get(..row_width).unwrap_or(values);
                             let top = row
                                 .iter()
@@ -10664,9 +10659,8 @@ impl<'file> LoadedModel<'file> {
                                         qkv_mixed_elements = qkv_mixed_data.len() as u64,
                                         state_elements =
                                             state_out_data.map_or(0, |data| data.len() as u64),
-                                        state_bytes = state_out_data.map_or(0, |data| {
-                                            (data.len() * core::mem::size_of::<f32>()) as u64
-                                        }),
+                                        state_bytes = state_out_data
+                                            .map_or(0, |data| core::mem::size_of_val(data) as u64),
                                         state_is_placed,
                                         "ssm_state_host_transfer: recurrent output placement"
                                     );
