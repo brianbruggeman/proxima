@@ -9454,7 +9454,7 @@ mod resident_buffer_cache_tests {
         )
         .expect("model B's own name must still resolve after model A's release");
         assert!(
-            super::RESIDENT_BUFFER_REUSES.get() >= reuses_before + 1,
+            super::RESIDENT_BUFFER_REUSES.get() > reuses_before,
             "model B's entry must still be a cache HIT -- it was never released"
         );
     }
@@ -9651,7 +9651,7 @@ mod nocopy_buffer_cache_tests {
         )
         .expect("model B's own name must still resolve after model A's release");
         assert!(
-            super::NOCOPY_BUFFER_REUSES.get() >= reuses_before + 1,
+            super::NOCOPY_BUFFER_REUSES.get() > reuses_before,
             "model B's entry must still be a cache HIT -- it was never released"
         );
     }
