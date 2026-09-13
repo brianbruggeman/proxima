@@ -2428,7 +2428,25 @@ impl<'file> LoadedModel<'file> {
                 architecture: String::from("qwen35moe"),
                 reason: String::from("gdn state head dimensions overflow usize"),
             })?;
-        let projection_shape_is_valid = |shape: &[u64], first_dim: usize| {
+        // `query`/`key` are sized by `kv_heads`, `value`/`gate`/`beta`/
+        // `state` by `heads` (`GdnPrefillShape`'s own doc) -- the GQA case
+        // has `kv_heads < heads`, so the head-axes count validated against
+        // `query_shape` cannot reuse `heads` the way `value_shape` does.
+        let head_axes_product = |shape: &[u64]| {
+            shape
+                .get(2..)?
+                .iter()
+                .try_fold(1_usize, |product, extent| {
+                    product.checked_mul(*extent as usize)
+                })
+        };
+        let kv_heads = head_axes_product(query_shape).ok_or_else(|| {
+            InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: String::from("gdn query sequence has no head dimensions"),
+            }
+        })?;
+        let projection_shape_is_valid = |shape: &[u64], first_dim: usize, head_count: usize| {
             let Some((&position_extent, rest)) = shape.split_first() else {
                 return false;
             };
@@ -2439,19 +2457,19 @@ impl<'file> LoadedModel<'file> {
                 && feature_extent == first_dim as u64
                 && head_axes.iter().try_fold(1usize, |product, extent| {
                     product.checked_mul(*extent as usize)
-                }) == Some(heads)
+                }) == Some(head_count)
         };
-        if !projection_shape_is_valid(query_shape, key_dim)
-            || !projection_shape_is_valid(key_shape, key_dim)
+        if !projection_shape_is_valid(query_shape, key_dim, kv_heads)
+            || !projection_shape_is_valid(key_shape, key_dim, kv_heads)
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from("qwen35moe"),
                 reason: alloc::format!(
-                    "gdn sequence projection shape is not [positions, feature, head axes...]: query={query_shape:?} key={key_shape:?} positions={positions} key_dim={key_dim} heads={heads}"
+                    "gdn sequence projection shape is not [positions, feature, head axes...]: query={query_shape:?} key={key_shape:?} positions={positions} key_dim={key_dim} kv_heads={kv_heads}"
                 ),
             });
         }
-        if !projection_shape_is_valid(value_shape.as_slice(), value_dim) {
+        if !projection_shape_is_valid(value_shape.as_slice(), value_dim, heads) {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from("qwen35moe"),
                 reason: alloc::format!(
@@ -2465,6 +2483,7 @@ impl<'file> LoadedModel<'file> {
                 key_dim,
                 value_dim,
                 heads,
+                kv_heads,
             },
             query,
             key,
