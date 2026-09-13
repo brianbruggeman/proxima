@@ -1879,7 +1879,17 @@ fn execute_plan_inner(
                     .collect::<Vec<_>>()
             );
         }
+        #[cfg(feature = "instrument")]
+        let expert_buffers_started = read_ticks();
         let expert_buffers = expert_buffers_for(bound, &effective_expert_buffers)?;
+        #[cfg(feature = "instrument")]
+        {
+            counter!(EXPERT_BUFFERS_LOOKUP_CALLS, 1);
+            counter!(
+                EXPERT_BUFFERS_LOOKUP_TICKS,
+                elapsed_ticks(expert_buffers_started)
+            );
+        }
         let fault = encode_op(
             &device,
             &encoder,
@@ -1913,6 +1923,8 @@ fn execute_plan_inner(
         // rather than only dropped -- the clone is not pushed into the pool
         // until after this call's `waitUntilCompleted` below, so nothing here
         // hands a still-pending buffer back out early.
+        #[cfg(feature = "instrument")]
+        let retire_scan_started = read_ticks();
         #[cfg(not(feature = "metal-buffer-pool"))]
         for retired in &prepared.retires[position] {
             // gather index buffers are tiny, and keeping them until the
@@ -1960,6 +1972,14 @@ fn execute_plan_inner(
             {
                 reclaim_stash.push((buffer, bucket, dtype));
             }
+        }
+        #[cfg(feature = "instrument")]
+        {
+            counter!(
+                RETIRE_SCAN_CALLS,
+                prepared.retires[position].len() as u64
+            );
+            counter!(RETIRE_SCAN_TICKS, elapsed_ticks(retire_scan_started));
         }
     }
     encoder.finish();
@@ -7791,6 +7811,21 @@ pub static READBACK_CALLS: Counter = Counter::new("omega.metal.readback_calls");
 pub static READBACK_TICKS: Counter = Counter::new("omega.metal.readback_ticks");
 #[cfg(feature = "instrument")]
 pub static READBACK_BYTES: Counter = Counter::new("omega.metal.readback_bytes");
+/// `execute_plan_inner`'s per-op buffer-retirement forward scan (ROW 13ms
+/// attribution) -- calls counts retired-candidate iterations, not ops, so a
+/// caller can compare it against `prepared.resolved.len()` directly.
+#[cfg(feature = "instrument")]
+pub static RETIRE_SCAN_CALLS: Counter = Counter::new("omega.metal.retire_scan_calls");
+#[cfg(feature = "instrument")]
+pub static RETIRE_SCAN_TICKS: Counter = Counter::new("omega.metal.retire_scan_ticks");
+/// `execute_plan_inner`'s per-op `expert_buffers_for` lookup -- same 13ms
+/// attribution effort as [`RETIRE_SCAN_TICKS`].
+#[cfg(feature = "instrument")]
+pub static EXPERT_BUFFERS_LOOKUP_CALLS: Counter =
+    Counter::new("omega.metal.expert_buffers_lookup_calls");
+#[cfg(feature = "instrument")]
+pub static EXPERT_BUFFERS_LOOKUP_TICKS: Counter =
+    Counter::new("omega.metal.expert_buffers_lookup_ticks");
 
 /// One [`execute_plan`] call's worth of the split-4019 counters above,
 /// snapshot-and-reset so a caller (the metal decode test) can read a
@@ -7892,6 +7927,14 @@ pub struct MetalStageTotals {
     pub plan_handoff_reuses: u64,
     pub expert_source_cache_entries: u64,
     pub nocopy_cache_entries: u64,
+    /// [`RETIRE_SCAN_CALLS`]'s own per-step delta.
+    pub retire_scan_calls: u64,
+    /// [`RETIRE_SCAN_TICKS`]'s own per-step delta.
+    pub retire_scan_ticks: u64,
+    /// [`EXPERT_BUFFERS_LOOKUP_CALLS`]'s own per-step delta.
+    pub expert_buffers_lookup_calls: u64,
+    /// [`EXPERT_BUFFERS_LOOKUP_TICKS`]'s own per-step delta.
+    pub expert_buffers_lookup_ticks: u64,
 }
 
 /// Reads and resets every split-4019 counter in one call — see
@@ -7947,6 +7990,46 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         plan_handoff_reuses: PLAN_HANDOFF_REUSES.snapshot_and_reset(),
         expert_source_cache_entries: EXPERT_SOURCE_CACHE.with(|cache| cache.borrow().len() as u64),
         nocopy_cache_entries: NOCOPY_BUFFERS.with(|cache| cache.borrow().len() as u64),
+        retire_scan_calls: RETIRE_SCAN_CALLS.snapshot_and_reset(),
+        retire_scan_ticks: RETIRE_SCAN_TICKS.snapshot_and_reset(),
+        expert_buffers_lookup_calls: EXPERT_BUFFERS_LOOKUP_CALLS.snapshot_and_reset(),
+        expert_buffers_lookup_ticks: EXPERT_BUFFERS_LOOKUP_TICKS.snapshot_and_reset(),
+    }
+}
+
+#[cfg(all(test, feature = "instrument"))]
+mod host_bookkeeping_instrument_tests {
+    use proxima_telemetry::counter;
+
+    use super::{
+        EXPERT_BUFFERS_LOOKUP_CALLS, EXPERT_BUFFERS_LOOKUP_TICKS, RETIRE_SCAN_CALLS,
+        RETIRE_SCAN_TICKS, metal_stage_totals,
+    };
+
+    /// The three new counters travel through [`metal_stage_totals`] the same
+    /// way every other split-4019 counter does — a caller reading the
+    /// snapshot after a run sees them printed in `{:?}`, not silently zeroed
+    /// out of the struct's `Debug` output.
+    #[test]
+    fn new_host_bookkeeping_fields_print_in_stage_totals() {
+        counter!(RETIRE_SCAN_CALLS, 3);
+        counter!(RETIRE_SCAN_TICKS, 7);
+        counter!(EXPERT_BUFFERS_LOOKUP_CALLS, 1);
+        counter!(EXPERT_BUFFERS_LOOKUP_TICKS, 2);
+
+        let totals = metal_stage_totals();
+        let rendered = format!("{totals:?}");
+
+        assert!(rendered.contains("retire_scan_calls: 3"), "{rendered}");
+        assert!(rendered.contains("retire_scan_ticks: 7"), "{rendered}");
+        assert!(
+            rendered.contains("expert_buffers_lookup_calls: 1"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("expert_buffers_lookup_ticks: 2"),
+            "{rendered}"
+        );
     }
 }
 
