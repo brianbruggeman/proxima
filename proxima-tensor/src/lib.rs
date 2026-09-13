@@ -205,6 +205,8 @@ pub mod convert;
 pub mod cpu;
 pub mod dtype;
 #[cfg(feature = "std")]
+pub mod gdn;
+#[cfg(feature = "std")]
 pub mod similarity;
 // `error::TensorError` names `op::NodeId` on nearly every variant, so it is
 // pulled into the same gate as `op` even though most of its own variants
@@ -250,8 +252,8 @@ pub use align::AlignedBuffer;
 pub use bind::{
     BodyStep, BoundOp, BoundOpBuilder, BoundOpKind, ComposedBody, Layout, Lookup, StepArg, bind,
     bind_with_fusion, bind_without_reduce_epilogue_fusion, block_node_ids,
-    correct_packed_matmul_layouts, dead_resolved_nodes,
-    index_node_ids, node_retirement, prune_dead,
+    correct_packed_matmul_layouts, dead_resolved_nodes, index_node_ids, node_retirement,
+    prune_dead,
 };
 pub use convert::{Convert, SimdConvert};
 #[cfg(any(

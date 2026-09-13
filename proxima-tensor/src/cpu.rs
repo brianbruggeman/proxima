@@ -459,118 +459,7 @@ fn finish(
     Evaluated::from_parts(root, results, Some(peak_live_buffers))
 }
 
-/// Concrete dimensions of one caller-buffered GDN prefill scan. `heads`
-/// is the flattened `u,g` head space used by
-/// [`crate::spec::append_qwen35_delta_net_step`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GdnPrefillShape {
-    pub positions: usize,
-    pub key_dim: usize,
-    pub value_dim: usize,
-    pub heads: usize,
-}
-
-/// Borrowed inputs and caller-owned outputs for a GDN prefill scan. Tensor
-/// layout is the dense row-major form of the algebraic maps: query/key are
-/// `[s,i,h]`, value/output are `[s,j,h]`, gate/beta are `[s,h]`, and state
-/// is `[i,j,h]`.
-pub struct GdnPrefillScan<'buffer> {
-    pub shape: GdnPrefillShape,
-    pub query: &'buffer [f32],
-    pub key: &'buffer [f32],
-    pub value: &'buffer [f32],
-    pub gate: &'buffer [f32],
-    pub beta: &'buffer [f32],
-    pub inv_sqrt_key_dim: f32,
-    pub state: &'buffer mut [f32],
-    pub output: &'buffer mut [f32],
-}
-
-fn checked_gdn_product(left: usize, right: usize) -> Result<usize, TensorError> {
-    left.checked_mul(right)
-        .ok_or(TensorError::InvalidGdnPrefillShape {
-            reason: "dimension product overflowed usize",
-        })
-}
-
-fn require_gdn_buffer(
-    buffer: &'static str,
-    found: usize,
-    expected: usize,
-) -> Result<(), TensorError> {
-    if found != expected {
-        return Err(TensorError::GdnPrefillBufferSizeMismatch {
-            buffer,
-            expected,
-            found,
-        });
-    }
-    Ok(())
-}
-
-/// Executes the tensor-state recurrence at [`crate::spec::SsmMixerTaps`]'s
-/// pre-recurrence boundary for every position in order. The state and output
-/// storage are caller-owned; the inner loop allocates nothing.
-///
-/// # Errors
-/// Returns [`TensorError::InvalidGdnPrefillShape`] for invalid dimensions and
-/// [`TensorError::GdnPrefillBufferSizeMismatch`] for any mismatched buffer.
-pub fn run_gdn_prefill_scan(scan: GdnPrefillScan<'_>) -> Result<(), TensorError> {
-    let GdnPrefillShape {
-        positions,
-        key_dim,
-        value_dim,
-        heads,
-    } = scan.shape;
-    if positions == 0 || key_dim == 0 || value_dim == 0 || heads == 0 {
-        return Err(TensorError::InvalidGdnPrefillShape {
-            reason: "all dimensions must be nonzero",
-        });
-    }
-
-    let position_heads = checked_gdn_product(positions, heads)?;
-    let key_heads = checked_gdn_product(key_dim, heads)?;
-    let value_heads = checked_gdn_product(value_dim, heads)?;
-    let query_len = checked_gdn_product(positions, key_heads)?;
-    let value_len = checked_gdn_product(positions, value_heads)?;
-    let state_len = checked_gdn_product(key_dim, value_heads)?;
-    require_gdn_buffer("query", scan.query.len(), query_len)?;
-    require_gdn_buffer("key", scan.key.len(), query_len)?;
-    require_gdn_buffer("value", scan.value.len(), value_len)?;
-    require_gdn_buffer("gate", scan.gate.len(), position_heads)?;
-    require_gdn_buffer("beta", scan.beta.len(), position_heads)?;
-    require_gdn_buffer("state", scan.state.len(), state_len)?;
-    require_gdn_buffer("output", scan.output.len(), value_len)?;
-
-    for position in 0..positions {
-        for head in 0..heads {
-            let head_offset = position * heads + head;
-            let decay = libm::expf(scan.gate[head_offset]);
-            for value_index in 0..value_dim {
-                let value_offset = position * value_heads + value_index * heads + head;
-                let mut predicted = 0.0_f32;
-                for key_index in 0..key_dim {
-                    let state_offset = key_index * value_heads + value_index * heads + head;
-                    let key_offset = position * key_heads + key_index * heads + head;
-                    predicted += scan.state[state_offset] * decay * scan.key[key_offset];
-                }
-                let delta = (scan.value[value_offset] - predicted) * scan.beta[head_offset];
-                let mut readout = 0.0_f32;
-                for key_index in 0..key_dim {
-                    let state_offset = key_index * value_heads + value_index * heads + head;
-                    let key_offset = position * key_heads + key_index * heads + head;
-                    scan.state[state_offset] =
-                        scan.state[state_offset] * decay + scan.key[key_offset] * delta;
-                    let query_offset = position * key_heads + key_index * heads + head;
-                    readout += scan.state[state_offset]
-                        * (scan.query[query_offset] * scan.inv_sqrt_key_dim);
-                }
-                scan.output[value_offset] = readout;
-            }
-        }
-    }
-    Ok(())
-}
+pub use crate::gdn::{GdnPrefillScan, GdnPrefillShape, run_gdn_prefill_scan};
 
 /// Run a tensor program to f32 data.
 ///
@@ -6642,6 +6531,26 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     exact_activations: bool,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
+    let gdn_debug_q_reduce = std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
+        && output.len() >= 4_096
+        && matches!(
+            &resolved.kind,
+            BoundOpKind::Reduce { element_body, .. }
+                if element_body.steps.len() == 1
+                    && element_body.steps[0].op == ScalarOp::Multiply
+        );
+    if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
+        && (resolved.node.0 == 41 || resolved.node.0 == 1264 || resolved.node.0 == 1265)
+    {
+        eprintln!(
+            "gdn_q_nodes node={} extents={:?} output_len={} operands={:?} kind={:?}",
+            resolved.node.0,
+            resolved.extents,
+            output.len(),
+            resolved.operands().iter().map(|(node, _, _)| node.0).collect::<Vec<_>>(),
+            resolved.kind
+        );
+    }
     let result = match &resolved.kind {
         BoundOpKind::CachedAttention { .. } => {
             #[cfg(feature = "instrument")]
@@ -6711,6 +6620,14 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
         BoundOpKind::Constant { value } => run_constant(*value, output),
     };
     result?;
+    if gdn_debug_q_reduce {
+        eprintln!(
+            "gdn_q_reduce_output node={} extents={:?} first={:?}",
+            resolved.node.0,
+            resolved.extents,
+            &output[..output.len().min(4)]
+        );
+    }
     apply_reduce_epilogue(resolved, buffers, output)
 }
 
@@ -8497,6 +8414,18 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
         instrument::record_elementwise_call_size(counters.output_writes);
         counters.commit(path, distinct_operand_elements);
     }
+    if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
+        && outer_start == 0
+        && resolved.extents.as_slice() == [7, 16, 512, 2048]
+        && output.len() >= 4
+    {
+        eprintln!(
+            "elementwise_candidate node={} extents={:?} first={:?}",
+            resolved.node.0,
+            resolved.extents,
+            &output[..4]
+        );
+    }
     Ok(())
 }
 
@@ -9006,7 +8935,7 @@ fn build_matmul_stage_plan<'weights>(
     let leading_total = usize::try_from(leading_total_u64).map_err(|_| shape_error())?;
 
     if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
-        && (resolved.extents.len() == 5 || activation.len() == 7 * 4096)
+        && (activation.len() == 7 * 2048 || activation.len() == 2048)
     {
         eprintln!(
             "gdn_projection reduce={} activation={} k={} rows={} leading={} extents={:?} output_axes={:?} weight_layout={weight_layout:?} activation_layout={activation_layout:?} activation_first={:?}",
@@ -9894,7 +9823,8 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // slab swap) routes a gathered node into the per-position loop below,
     // which resolves the gather itself.
     #[cfg(feature = "q4k-int8-dot")]
-    if !exact_activations
+    if leading_total == 1
+        && !exact_activations
         && weight_gather.is_none()
         && let QuantizedBlock::Q4K(_) = weight_block
     {
@@ -10223,6 +10153,19 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
     exact_activations: bool,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
+    if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
+        && output.len() >= 4_096
+        && resolved.extents.len() == 4
+    {
+        eprintln!(
+            "quantized_reduce_candidate node={} output_len={} extents={:?} quantized_operand={:?} exact_activations={}",
+            resolved.node.0,
+            output.len(),
+            resolved.extents,
+            quantized_operand(resolved, quantized_weights).map(|node| node.0),
+            exact_activations,
+        );
+    }
     if let Some(weight_node) = quantized_operand(resolved, quantized_weights) {
         let weight_block =
             quantized_weights
@@ -10401,6 +10344,22 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     output: &mut [f32],
     packed_width: Option<&PackedWidthPanels>,
 ) -> Result<(), TensorError> {
+    if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some()
+        && resolved.node.0 == 1265
+    {
+        let output_axes = match &resolved.kind {
+            BoundOpKind::Reduce { output_axes, .. } => output_axes.as_slice(),
+            _ => &[],
+        };
+        eprintln!(
+            "dense_reduce node={} output_len={} extents={:?} output_axes={:?} operands={:?}",
+            resolved.node.0,
+            output.len(),
+            resolved.extents,
+            output_axes,
+            resolved.operands(),
+        );
+    }
     // only the `aarch64` width-tile block below reads this; every other
     // target's caller always passes `None`, so name it used here rather
     // than at every non-aarch64 call site.
@@ -10586,7 +10545,12 @@ fn run_reduce<B: Deref<Target = [f32]>>(
             width_tile_row_remainder_invocations(),
             width_tile_row_remainder_elements(),
         );
-        if try_run_width_tile(&width_path_context, &raw, packed_width, output) {
+        let disable_width_tile_for_debug = std::env::var_os("PROXIMA_DISABLE_WIDTH_TILE").is_some()
+            && resolved.extents.len() == 4
+            && resolved.extents.first().copied().unwrap_or(0) > 1;
+        if !disable_width_tile_for_debug
+            && try_run_width_tile(&width_path_context, &raw, packed_width, output)
+        {
             // the tile's own early return skips the rest of this function
             // (including the `counters.commit` call every other path reaches),
             // so this is instrument's only chance to record the node — read

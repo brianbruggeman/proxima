@@ -1882,6 +1882,42 @@ pub fn append_moe_ffn(
     )
 }
 
+/// Builds a routed feed-forward block from an already-computed router-logit
+/// node. Callers that expose the router as a graph boundary use this entry
+/// point so the routing observation and the gathered expert products consume
+/// the same node rather than rebuilding an independent projection.
+#[allow(clippy::too_many_arguments)]
+pub fn append_moe_ffn_from_logits(
+    program: &mut Vec<Op>,
+    layer: u32,
+    x: NodeId,
+    logits: NodeId,
+    expert_w_gate: NodeId,
+    expert_w_up: NodeId,
+    expert_w_down: NodeId,
+    expert_count: u32,
+    expert_used_count: u32,
+    ones: NodeId,
+    gating: ExpertGatingFunc,
+    expert_bias: Option<NodeId>,
+) -> Result<(NodeId, MoeSite), TensorError> {
+    append_moe_ffn_with_projection_strategy_from_logits(
+        program,
+        layer,
+        x,
+        logits,
+        expert_w_gate,
+        expert_w_up,
+        expert_w_down,
+        expert_count,
+        expert_used_count,
+        ones,
+        gating,
+        expert_bias,
+        MoeProjectionStrategy::PerRoute,
+    )
+}
+
 /// [`append_moe_ffn`] with gate and up projections grouped over the selected
 /// axis while each composed hidden activation still enters its own gathered
 /// down projection.
@@ -2003,13 +2039,6 @@ fn append_moe_ffn_with_projection_strategy(
     expert_bias: Option<NodeId>,
     projection_strategy: MoeProjectionStrategy,
 ) -> Result<(NodeId, MoeSite), TensorError> {
-    if expert_used_count == 0 || expert_used_count > expert_count {
-        return Err(TensorError::InvalidExpertConfig {
-            expert_count,
-            expert_used_count,
-        });
-    }
-
     let gate_product = elementwise(
         program,
         DType::Float32,
@@ -2025,6 +2054,45 @@ fn append_moe_ffn_with_projection_strategy(
         "sde->sde",
         "se->sde",
     )?;
+    append_moe_ffn_with_projection_strategy_from_logits(
+        program,
+        layer,
+        x,
+        logits,
+        expert_w_gate,
+        expert_w_up,
+        expert_w_down,
+        expert_count,
+        expert_used_count,
+        ones,
+        gating,
+        expert_bias,
+        projection_strategy,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_moe_ffn_with_projection_strategy_from_logits(
+    program: &mut Vec<Op>,
+    layer: u32,
+    x: NodeId,
+    logits: NodeId,
+    expert_w_gate: NodeId,
+    expert_w_up: NodeId,
+    expert_w_down: NodeId,
+    expert_count: u32,
+    expert_used_count: u32,
+    ones: NodeId,
+    gating: ExpertGatingFunc,
+    expert_bias: Option<NodeId>,
+    projection_strategy: MoeProjectionStrategy,
+) -> Result<(NodeId, MoeSite), TensorError> {
+    if expert_used_count == 0 || expert_used_count > expert_count {
+        return Err(TensorError::InvalidExpertConfig {
+            expert_count,
+            expert_used_count,
+        });
+    }
 
     let scores = match gating {
         ExpertGatingFunc::Softmax => logits,
@@ -3196,24 +3264,22 @@ pub fn append_mistral_cached_layer(
             ],
         )?;
         (
-            q_bias
-                .map_or(Ok(q_raw), |bias| {
-                    elementwise(
-                        program,
-                        DType::Float32,
-                        ScalarOp::Add,
-                        &[(q_raw, "shd->shd"), (bias, "hd->shd")],
-                    )
-                })?,
-            k_bias
-                .map_or(Ok(k_new_raw), |bias| {
-                    elementwise(
-                        program,
-                        DType::Float32,
-                        ScalarOp::Add,
-                        &[(k_new_raw, "sud->sud"), (bias, "ud->sud")],
-                    )
-                })?,
+            q_bias.map_or(Ok(q_raw), |bias| {
+                elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(q_raw, "shd->shd"), (bias, "hd->shd")],
+                )
+            })?,
+            k_bias.map_or(Ok(k_new_raw), |bias| {
+                elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(k_new_raw, "sud->sud"), (bias, "ud->sud")],
+                )
+            })?,
             QkvSource::Fused {
                 node: qkv_reduced,
                 v_offset: (query_heads + kv_heads) * head_dim,
@@ -3253,24 +3319,22 @@ pub fn append_mistral_cached_layer(
             "sud->sudi",
         )?;
         (
-            q_bias
-                .map_or(Ok(q_raw), |bias| {
-                    elementwise(
-                        program,
-                        DType::Float32,
-                        ScalarOp::Add,
-                        &[(q_raw, "shd->shd"), (bias, "hd->shd")],
-                    )
-                })?,
-            k_bias
-                .map_or(Ok(k_new_raw), |bias| {
-                    elementwise(
-                        program,
-                        DType::Float32,
-                        ScalarOp::Add,
-                        &[(k_new_raw, "sud->sud"), (bias, "ud->sud")],
-                    )
-                })?,
+            q_bias.map_or(Ok(q_raw), |bias| {
+                elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(q_raw, "shd->shd"), (bias, "hd->shd")],
+                )
+            })?,
+            k_bias.map_or(Ok(k_new_raw), |bias| {
+                elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(k_new_raw, "sud->sud"), (bias, "ud->sud")],
+                )
+            })?,
             QkvSource::Split,
         )
     };
@@ -3349,14 +3413,13 @@ pub fn append_mistral_cached_layer(
     // extract above already re-materializes them under `Fused`), so every
     // op below reads them exactly as the split path always has -- zero
     // further changes needed downstream of this point.
-    let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match rope_pairing {
+    let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match rope_pairing
+    {
         RopePairing::SplitHalf { .. } => {
-            let (rotated_q_first, rotated_q_second) = fused_rope_pair(
-                program, q, 'h', cos_new, sin_new, rope_pairing,
-            )?;
-            let (rotated_k_first, rotated_k_second) = fused_rope_pair(
-                program, k_new, 'u', cos_new, sin_new, rope_pairing,
-            )?;
+            let (rotated_q_first, rotated_q_second) =
+                fused_rope_pair(program, q, 'h', cos_new, sin_new, rope_pairing)?;
+            let (rotated_k_first, rotated_k_second) =
+                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, rope_pairing)?;
 
             (
                 rotated_q_first,
@@ -3368,9 +3431,8 @@ pub fn append_mistral_cached_layer(
         RopePairing::Interleaved => {
             let (rotated_q_even, rotated_q_odd) =
                 fused_rope_pair(program, q, 'h', cos_new, sin_new, rope_pairing)?;
-            let (rotated_k_new_even, rotated_k_new_odd) = fused_rope_pair(
-                program, k_new, 'u', cos_new, sin_new, rope_pairing,
-            )?;
+            let (rotated_k_new_even, rotated_k_new_odd) =
+                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, rope_pairing)?;
 
             (
                 rotated_q_even,
@@ -4608,6 +4670,9 @@ pub fn append_qwen35_dense_attention_only(
 /// distributes over disjoint output columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Qwen35DenseAttentionTaps {
+    /// `x_normed`: the RMS-normalized dense-attention input consumed by the
+    /// q/gate, key, and value projections.
+    pub normed: NodeId,
     /// `q_raw`: `x_normed @ wq_gate`, narrowed to `[0, attn_head_dim)` per
     /// head, pre-qk-norm.
     pub q_split: NodeId,
@@ -5215,6 +5280,7 @@ pub fn append_qwen35_dense_attention_only_with_taps(
     )?;
 
     let taps = Qwen35DenseAttentionTaps {
+        normed,
         q_split: q_raw,
         gate_split: gate_raw,
         q_normed: q,
@@ -5477,10 +5543,33 @@ pub fn append_mistral_single_range_cached_layer(
     gate_before_up: bool,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     append_mistral_single_range_cached_layer_with_biases(
-        program, x, inv_dim, eps, ones, inv_sqrt_head_dim, cos_new, sin_new,
-        group_ones, is_future, group, head_dim, attn_norm_weight,
-        ffn_norm_weight, wq, wk, wv, wo, w_gate, w_up, w_down, k_even_cache,
-        k_odd_cache, v_cache, qk_norm, None, gate_before_up,
+        program,
+        x,
+        inv_dim,
+        eps,
+        ones,
+        inv_sqrt_head_dim,
+        cos_new,
+        sin_new,
+        group_ones,
+        is_future,
+        group,
+        head_dim,
+        attn_norm_weight,
+        ffn_norm_weight,
+        wq,
+        wk,
+        wv,
+        wo,
+        w_gate,
+        w_up,
+        w_down,
+        k_even_cache,
+        k_odd_cache,
+        v_cache,
+        qk_norm,
+        None,
+        gate_before_up,
     )
 }
 
@@ -5579,12 +5668,24 @@ pub fn append_mistral_single_range_cached_layer_with_biases(
 
     let (q_raw, k_new_raw, v_new) = match qkv_biases {
         Some((q_bias, k_bias, v_bias)) => (
-            elementwise(program, DType::Float32, ScalarOp::Add,
-                &[(q_raw, "shd->shd"), (q_bias, "hd->shd")])?,
-            elementwise(program, DType::Float32, ScalarOp::Add,
-                &[(k_new_raw, "sud->sud"), (k_bias, "ud->sud")])?,
-            elementwise(program, DType::Float32, ScalarOp::Add,
-                &[(v_new, "sud->sud"), (v_bias, "ud->sud")])?,
+            elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(q_raw, "shd->shd"), (q_bias, "hd->shd")],
+            )?,
+            elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(k_new_raw, "sud->sud"), (k_bias, "ud->sud")],
+            )?,
+            elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(v_new, "sud->sud"), (v_bias, "ud->sud")],
+            )?,
         ),
         None => (q_raw, k_new_raw, v_new),
     };
@@ -5988,8 +6089,17 @@ pub fn mistral_single_range_cached_forward_program(
     last_row_only: bool,
 ) -> Result<SingleRangeForwardProgram, TensorError> {
     mistral_single_range_cached_forward_program_with_biases(
-        vocab, embedding, feed_forward, query_heads, kv_heads, head_dim,
-        block_count, qk_norm, false, duplicate_head, last_row_only,
+        vocab,
+        embedding,
+        feed_forward,
+        query_heads,
+        kv_heads,
+        head_dim,
+        block_count,
+        qk_norm,
+        false,
+        duplicate_head,
+        last_row_only,
     )
 }
 
