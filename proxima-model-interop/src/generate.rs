@@ -1470,6 +1470,28 @@ const fn step_batch_needs_logits(split_prefill: bool, is_last_step_batch: bool) 
     !split_prefill || is_last_step_batch
 }
 
+/// The device-resident input and output buffer placements for one segment
+/// evaluation, grouped so the method they feed keeps its argument count
+/// under clippy's threshold.
+struct SegmentPlacements<'placements> {
+    input_placements: &'placements [(NodeId, &'placements PlacedBuffer, usize)],
+    output_placements: &'placements [(NodeId, &'placements PlacedBuffer, usize)],
+}
+
+/// The per-call evaluation inputs for one GDN scan segment, grouped so the
+/// method they feed keeps its argument count under clippy's threshold.
+struct GdnScanSegmentContext<'context, 'data> {
+    state_cache: &'context [f32],
+    gdn_backend: GdnPrefillBackend,
+    future_cuts: &'context [(NodeId, String)],
+    symbols: &'context [u64],
+    named: &'context [(&'context str, QuantizedBlock<'data>)],
+    outputs: &'context [NodeId],
+    resident_names: &'context BTreeSet<&'context str>,
+    carried: &'context mut BTreeMap<NodeId, (Vec<u64>, Vec<f32>)>,
+    results: &'context mut BTreeMap<NodeId, (Vec<u64>, Vec<f32>)>,
+}
+
 impl<'file> LoadedModel<'file> {
     #[must_use]
     pub fn token_id_for_piece(&self, piece: &str) -> Option<u32> {
@@ -2096,16 +2118,19 @@ impl<'file> LoadedModel<'file> {
         runtime: &mut BackendRuntime,
         layer: usize,
         scan: &Qwen35MoeGdnScanSegment,
-        state_cache: &[f32],
-        gdn_backend: GdnPrefillBackend,
-        future_cuts: &[(NodeId, String)],
-        symbols: &[u64],
-        named: &[(&str, QuantizedBlock<'_>)],
-        outputs: &[NodeId],
-        resident_names: &BTreeSet<&str>,
-        carried: &mut BTreeMap<NodeId, (Vec<u64>, Vec<f32>)>,
-        results: &mut BTreeMap<NodeId, (Vec<u64>, Vec<f32>)>,
+        context: GdnScanSegmentContext<'_, '_>,
     ) -> Result<(), InteropError> {
+        let GdnScanSegmentContext {
+            state_cache,
+            gdn_backend,
+            future_cuts,
+            symbols,
+            named,
+            outputs,
+            resident_names,
+            carried,
+            results,
+        } = context;
         #[cfg(not(feature = "mlx-gdn"))]
         let _ = gdn_backend;
         let (program, cuts, mapping) = &scan.producer;
@@ -2763,15 +2788,17 @@ impl<'file> LoadedModel<'file> {
                     runtime,
                     layer,
                     scan,
-                    state_cache,
-                    gdn_backend,
-                    &segments.router_future_cuts,
-                    symbols,
-                    named,
-                    outputs,
-                    resident_names,
-                    &mut carried,
-                    &mut results,
+                    GdnScanSegmentContext {
+                        state_cache,
+                        gdn_backend,
+                        future_cuts: &segments.router_future_cuts,
+                        symbols,
+                        named,
+                        outputs,
+                        resident_names,
+                        carried: &mut carried,
+                        results: &mut results,
+                    },
                 )?;
                 let (router_shape, router_logits) =
                     carried
@@ -2782,10 +2809,14 @@ impl<'file> LoadedModel<'file> {
                 visit_qwen35moe_router_boundary(
                     layer,
                     position_offset,
-                    router_logits,
-                    router_shape,
-                    self.architecture.expert_count as usize,
-                    self.architecture.expert_used_count as usize,
+                    RouterLogits {
+                        values: router_logits,
+                        shape: router_shape,
+                    },
+                    RouterExpertCounts {
+                        expert_count: self.architecture.expert_count as usize,
+                        expert_used_count: self.architecture.expert_used_count as usize,
+                    },
                     &mut routed_experts,
                     expert_slab,
                     &mut before_gather,
@@ -2919,10 +2950,14 @@ impl<'file> LoadedModel<'file> {
                 visit_qwen35moe_router_boundary(
                     layer,
                     position_offset,
-                    first_logits,
-                    first_shape,
-                    self.architecture.expert_count as usize,
-                    self.architecture.expert_used_count as usize,
+                    RouterLogits {
+                        values: first_logits,
+                        shape: first_shape,
+                    },
+                    RouterExpertCounts {
+                        expert_count: self.architecture.expert_count as usize,
+                        expert_used_count: self.architecture.expert_used_count as usize,
+                    },
                     &mut routed_experts,
                     expert_slab,
                     &mut before_gather,
@@ -2935,10 +2970,14 @@ impl<'file> LoadedModel<'file> {
                 visit_qwen35moe_router_boundary(
                     layer + 1,
                     position_offset,
-                    second_logits,
-                    second_shape,
-                    self.architecture.expert_count as usize,
-                    self.architecture.expert_used_count as usize,
+                    RouterLogits {
+                        values: second_logits,
+                        shape: second_shape,
+                    },
+                    RouterExpertCounts {
+                        expert_count: self.architecture.expert_count as usize,
+                        expert_used_count: self.architecture.expert_used_count as usize,
+                    },
                     &mut routed_experts,
                     expert_slab,
                     &mut before_gather,
@@ -3506,8 +3545,10 @@ impl<'file> LoadedModel<'file> {
                                     &segment_named,
                                     &requested_nodes,
                                     resident_names,
-                                    &segment_input_placements,
-                                    &segment_output_placements,
+                                    SegmentPlacements {
+                                        input_placements: &segment_input_placements,
+                                        output_placements: &segment_output_placements,
+                                    },
                                 )?;
                             report_op_timings(position_offset, &timings, program);
                             Ok(evaluated)
@@ -4168,10 +4209,14 @@ impl<'file> LoadedModel<'file> {
                     visit_qwen35moe_router_boundary(
                         phase_layer,
                         position_offset,
-                        router_logits,
-                        router_shape,
-                        self.architecture.expert_count as usize,
-                        self.architecture.expert_used_count as usize,
+                        RouterLogits {
+                            values: router_logits,
+                            shape: router_shape,
+                        },
+                        RouterExpertCounts {
+                            expert_count: self.architecture.expert_count as usize,
+                            expert_used_count: self.architecture.expert_used_count as usize,
+                        },
                         &mut routed_experts,
                         expert_slab,
                         &mut before_gather,
@@ -6551,9 +6596,12 @@ impl BackendRuntime {
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
-        input_placements: &[(NodeId, &PlacedBuffer, usize)],
-        output_placements: &[(NodeId, &PlacedBuffer, usize)],
+        placements: SegmentPlacements<'_>,
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
+        let SegmentPlacements {
+            input_placements,
+            output_placements,
+        } = placements;
         let shape = (
             program.as_ptr() as usize,
             symbols.first().copied().unwrap_or_default() as usize,
@@ -7592,19 +7640,41 @@ fn begin_expert_gather_phase<'lock, 'file>(
     EndStepOnDrop { slab }
 }
 
+/// A router logits tensor and the `[positions, experts]` shape it was
+/// evaluated with, grouped so the functions that consume both keep their
+/// argument count under clippy's threshold.
+struct RouterLogits<'values> {
+    values: &'values [f32],
+    shape: &'values [u64],
+}
+
+/// The router's configured expert count and the top-k it selects per
+/// position, grouped so the functions that consume both keep their
+/// argument count under clippy's threshold.
+struct RouterExpertCounts {
+    expert_count: usize,
+    expert_used_count: usize,
+}
+
 fn visit_qwen35moe_router_selections<BeforeGather>(
     layer: usize,
     position_offset: usize,
-    logits: &[f32],
-    shape: &[u64],
-    expert_count: usize,
-    expert_used_count: usize,
+    logits: RouterLogits<'_>,
+    counts: RouterExpertCounts,
     scratch: &mut Vec<crate::residency::RoutedExpert>,
     before_gather: &mut BeforeGather,
 ) -> Result<(), InteropError>
 where
     BeforeGather: FnMut(usize, u64, &[crate::residency::RoutedExpert]) -> Result<(), InteropError>,
 {
+    let RouterLogits {
+        values: logits,
+        shape,
+    } = logits;
+    let RouterExpertCounts {
+        expert_count,
+        expert_used_count,
+    } = counts;
     let [positions, shaped_experts] = shape else {
         return Err(InteropError::PreGatherExecutionUnsupported {
             architecture: String::from("qwen35moe"),
@@ -7692,10 +7762,8 @@ where
 fn visit_qwen35moe_router_boundary<'file, BeforeGather>(
     layer: usize,
     position_offset: usize,
-    logits: &[f32],
-    shape: &[u64],
-    expert_count: usize,
-    expert_used_count: usize,
+    logits: RouterLogits<'_>,
+    counts: RouterExpertCounts,
     scratch: &mut Vec<crate::residency::RoutedExpert>,
     expert_slab: &mut crate::expert_slab::ExpertSlab<'file>,
     before_gather: &mut BeforeGather,
@@ -7712,9 +7780,7 @@ where
         layer,
         position_offset,
         logits,
-        shape,
-        expert_count,
-        expert_used_count,
+        counts,
         scratch,
         &mut |layer, position, routes| {
             expert_slab.end_step();
@@ -10327,10 +10393,11 @@ impl<'file> LoadedModel<'file> {
                             visit_qwen35moe_router_selections(
                                 layer,
                                 cached_len,
-                                logits,
-                                shape,
-                                self.architecture.expert_count as usize,
-                                self.architecture.expert_used_count as usize,
+                                RouterLogits { values: logits, shape },
+                                RouterExpertCounts {
+                                    expert_count: self.architecture.expert_count as usize,
+                                    expert_used_count: self.architecture.expert_used_count as usize,
+                                },
                                 &mut router_scratch,
                                 &mut |layer, position, routes| {
                                     if let Some(policy) = qwen35moe_residency.as_mut() {
@@ -12403,10 +12470,14 @@ mod tests {
         visit_qwen35moe_router_selections(
             3,
             41,
-            &logits,
-            &[2, 4],
-            4,
-            2,
+            RouterLogits {
+                values: &logits,
+                shape: &[2, 4],
+            },
+            RouterExpertCounts {
+                expert_count: 4,
+                expert_used_count: 2,
+            },
             &mut route_scratch,
             &mut |layer, position, routes| {
                 visited.push((
@@ -12453,10 +12524,14 @@ mod tests {
         visit_qwen35moe_router_boundary(
             0,
             9,
-            &[3.0],
-            &[1, 1],
-            1,
-            1,
+            RouterLogits {
+                values: &[3.0],
+                shape: &[1, 1],
+            },
+            RouterExpertCounts {
+                expert_count: 1,
+                expert_used_count: 1,
+            },
             &mut route_scratch,
             &mut slab,
             &mut |layer, position, routes, slab| {
@@ -12550,10 +12625,14 @@ mod tests {
         super::visit_qwen35moe_router_selections(
             2,
             11,
-            &[0.1, 0.9, 0.2, 0.8],
-            &[1, 4],
-            4,
-            2,
+            super::RouterLogits {
+                values: &[0.1, 0.9, 0.2, 0.8],
+                shape: &[1, 4],
+            },
+            super::RouterExpertCounts {
+                expert_count: 4,
+                expert_used_count: 2,
+            },
             &mut scratch,
             &mut |layer, position, routes| {
                 observed.push((layer, position, routes[0].expert, routes[1].expert));
@@ -12589,10 +12668,14 @@ mod tests {
         visit_qwen35moe_router_selections(
             2,
             11,
-            readback,
-            shape,
-            4,
-            2,
+            RouterLogits {
+                values: readback,
+                shape,
+            },
+            RouterExpertCounts {
+                expert_count: 4,
+                expert_used_count: 2,
+            },
             &mut scratch,
             &mut |layer, position, routes| {
                 observed.push((layer, position, routes[0].expert, routes[1].expert));
