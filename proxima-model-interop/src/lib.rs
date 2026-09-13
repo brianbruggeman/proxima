@@ -45,6 +45,8 @@ mod hf_config;
 mod lfm2;
 #[cfg(feature = "std")]
 mod loader;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+mod mapping_residency;
 #[cfg(feature = "std")]
 pub mod qwen35moe;
 #[cfg(feature = "std")]

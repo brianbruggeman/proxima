@@ -248,6 +248,29 @@ pub fn fit_context_length(
     ))
 }
 
+/// Fits `mapped_bytes` -- a checkpoint's whole mmap length, registered as
+/// ONE no-copy `MTLBuffer` (`omega::metal::register_checkpoint_mapping`'s
+/// own doc) -- against `limit`. Unlike [`fit_context_length`], there is no
+/// smaller value to retry: a no-copy mapping is either proven entirely
+/// resident before the first dispatch or it is not, so this is a hard
+/// refusal rather than a reduced budget.
+///
+/// # Errors
+///
+/// [`InteropError::MappingExceedsResidentBudget`] naming both `mapped_bytes`
+/// and `limit.available_bytes()` when the mapping does not fit.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub fn fit_mapping_bytes(mapped_bytes: u64, limit: HostMemoryLimit) -> Result<(), InteropError> {
+    let available_bytes = limit.available_bytes();
+    if mapped_bytes > available_bytes {
+        return Err(InteropError::MappingExceedsResidentBudget {
+            mapped_bytes,
+            available_bytes,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

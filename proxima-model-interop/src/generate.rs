@@ -4741,6 +4741,35 @@ impl<'file> LoadedModel<'file> {
         fused_qkv_reduce: bool,
         registry: &crate::architecture::ArchitectureRegistry,
     ) -> Result<Self, InteropError> {
+        // ROW 533's own mechanism (`proxima-tensor/docs/discipline.md`): a
+        // non-resident page behind the no-copy `MTLBuffer`
+        // `register_checkpoint_mapping` installs below reads as zero rather
+        // than faulting, silently. `crate::mapping_residency::prove_resident`
+        // is the gate that turns that into a typed refusal instead --
+        // `PROXIMA_MAPPING_FIT_OVERRIDE=1` skips only the size-vs-host-limit
+        // half of it, for a measurement run.
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        {
+            if std::env::var_os("PROXIMA_MAPPING_FIT_OVERRIDE").is_none()
+                && let Ok(facts) = omega::metal::system_memory_facts()
+            {
+                let limit = crate::memory_fit::HostMemoryLimit {
+                    limit_bytes: facts
+                        .recommended_max_working_set_size
+                        .min(facts.physical_memory_bytes),
+                    os_headroom_bytes: omega::sized::LOAD_TIME_FIT_OS_HEADROOM_BYTES,
+                };
+                crate::memory_fit::fit_mapping_bytes(file_bytes.len() as u64, limit)?;
+            }
+            let residency_report = crate::mapping_residency::prove_resident(file_bytes)?;
+            #[cfg(feature = "instrument")]
+            info!(
+                mapping_prefault_ms = residency_report.prefault_ms,
+                mapping_resident_pages = residency_report.resident_pages,
+                mapping_missing_pages = residency_report.missing_pages,
+                "checkpoint_mapping_residency: proved resident before metal no-copy registration"
+            );
+        }
         // registers `file_bytes` -- the checkpoint's own mmap, page-aligned
         // at its base by construction -- as the single mapping every packed
         // tensor's borrowed slice can be addressed into by OFFSET instead of
