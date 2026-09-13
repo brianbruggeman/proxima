@@ -281,9 +281,7 @@ pub enum InteropError {
     /// bias vector whose element count disagrees with the checkpoint's head
     /// geometry.  Biases are a semantic model parameter; silently dropping a
     /// partial family would make the model executable but incorrect.
-    #[error(
-        "layer {layer} QKV bias {projection:?} has {elements} elements, expected {expected}"
-    )]
+    #[error("layer {layer} QKV bias {projection:?} has {elements} elements, expected {expected}")]
     QkvBiasShapeMismatch {
         layer: u32,
         projection: String,

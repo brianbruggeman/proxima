@@ -473,7 +473,7 @@ proc-macro2.workspace = true
 syn = { workspace = true, features = ["full"] }
 quote.workspace = true
 proc-macro-crate = "3.5.0"
-proxima-model-interop = { path = "proxima-model-interop", features = ["std", "metal", "instrument"] }
+proxima-model-interop = { path = "proxima-model-interop", features = ["std", "metal", "instrument", "qwen35moe-expert-prefetch", "qwen35moe-linked-suffix"] }
 proxima-gguf = { path = "proxima-gguf" }
 memmap2 = "0.9.11"
 omega = { path = "omega", features = ["metal", "instrument"] }
@@ -489,6 +489,11 @@ proxima-tokenizer = { path = "proxima-tokenizer", default-features = false, feat
 workspace = true
 
 [features]
+
+# Apple MLX GDN recurrence backend. The capability is compile-time selected;
+# callers provide `PROXIMA_MLX_PREFIX` while building rather than switching
+# execution through a runtime environment read.
+mlx-gdn = ["proxima-model-interop/mlx-gdn"]
 
 # Default features list every dep explicitly — no rollups. Callers who
 # want a thinner build switch `default-features = false` and add back

@@ -6,11 +6,21 @@ use std::env;
 use std::fs::File;
 use std::io::BufWriter;
 
+use conflaguration::Settings;
 use memmap2::MmapOptions;
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{ExpertStackSpec, PackedOwnedKind, write_expert_sidecar};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Deserialize, Serialize, Settings)]
+#[settings(prefix = "PROXIMA")]
+struct SidecarConfig {
+    #[setting(default_str = "mixed")]
+    sidecar_codec: String,
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let settings = <SidecarConfig as Settings>::from_env()?;
     let mut arguments = env::args().skip(1);
     let input_path = arguments.next().ok_or("argv[1]: qwen35 gguf path")?;
     let output_path = arguments.next().ok_or("argv[2]: sidecar output path")?;
@@ -18,7 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mapping = unsafe { MmapOptions::new().map(&input)? };
     let parsed = parse_complete(&mapping)?;
 
-    let codec_name = env::var("PROXIMA_SIDECAR_CODEC").unwrap_or_else(|_| String::from("q2"));
+    // mixed is the serving-safe default: Q4_K gate/up plus Q6_K down keeps the
+    // routed product within the measured correctness envelope. Q2_K remains
+    // an explicit experiment, never an accidental production artifact.
+    let codec_name = settings.sidecar_codec;
     let target_codec = match codec_name.as_str() {
         "q2_k" | "q2" => PackedOwnedKind::Q2K,
         "mixed" => PackedOwnedKind::Q4K,

@@ -3174,6 +3174,7 @@ version = "0.1.0"
 dependencies = [
  "block2",
  "bytemuck",
+ "cc",
  "conflaguration",
  "criterion",
  "cudarc",
@@ -4548,6 +4549,7 @@ name = "proxima-model-interop"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
+ "conflaguration",
  "fastrand",
  "half",
  "libc",

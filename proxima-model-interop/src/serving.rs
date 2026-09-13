@@ -139,6 +139,12 @@ pub const GPU_LAYERS_ALL: i32 = -1;
 /// `--reasoning-budget -1` (upstream's own sentinel for "unbounded").
 pub const REASONING_BUDGET_UNBOUNDED: i32 = -1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GdnPrefillBackend {
+    Cpu,
+    Mlx,
+}
+
 /// The forward test's former hardcoded `FIXTURE_PATH`, kept as the
 /// [`ServingConfig::default`] `model_path` so existing tests keep running
 /// unmodified when no caller supplies their own checkpoint.
@@ -290,8 +296,10 @@ pub struct ServingConfig<'model> {
     /// the one compute encoder every call's `Plan`s dispatch through on the
     /// Metal backend (`generate.rs`'s `BackendRuntime::new` reads this once
     /// per call and sets it via `Plan::set_dispatch_type`). No effect when
-    /// `gpu_layers` selects the Cpu engine. `Concurrent` (this field's
-    /// default) is the measured winner as of ROW 285/312: see
+    /// `gpu_layers` selects the Cpu engine. `Serial` is the serving default
+    /// because the current concurrent hazard schedule has not been proven
+    /// for the recurrent/MoE graph; callers may opt into `Concurrent` only
+    /// for a path with repeated exactness evidence. See
     /// `omega::metal::DispatchType`'s own doc.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub dispatch_type: DispatchType,
@@ -321,11 +329,33 @@ pub struct ServingConfig<'model> {
     /// (`std`-gated) instead.
     pub weight_precision: &'model [WeightPrecisionRule<'model>],
     /// Requests the routed qwen35moe execution seam that runs the router,
-    /// residency transition, and expert gather as separate phases. The
-    /// current Metal evaluator still accepts only the full graph, so the
-    /// decode boundary rejects this request instead of silently evaluating
-    /// the full expert stack and bypassing HOBBIT/DynaExq.
+    /// residency transition, and expert gather as separate phases. The Metal
+    /// path binds only the selected expert sources at the gather boundary;
+    /// the full graph remains the explicit monolithic arm.
     pub qwen35moe_pre_gather: bool,
+    /// Keeps router cut tensors in caller-owned Metal buffers across the
+    /// router/gather boundary instead of reading them back to the host.
+    pub qwen35moe_persistent_cuts: bool,
+    pub gdn_prefill_backend: GdnPrefillBackend,
+    /// Byte budget for the DynaExq high-precision expert residency pool.
+    pub qwen35moe_residency_budget_bytes: u64,
+    /// Enables route-history advice for HOBBIT prefetching.
+    pub qwen35moe_expert_prefetch: bool,
+    /// Requests the GDN prefill scan instead of the ordinary recurrent path.
+    pub qwen35moe_gdn_prefill_scan: bool,
+    /// Enables the explicit GDN comparison gate for the prefill scan.
+    pub debug_gdn_compare: bool,
+    /// Allows the all-low monolithic pre-gather diagnostic path.
+    pub qwen35moe_monolithic_all_low: bool,
+    /// Number of adjacent qwen35moe layers to execute in one exact
+    /// sidecar-backed pre-gather window. `1` is the existing router/gather
+    /// boundary; `2` admits the bounded pair window, which exposes both
+    /// router outputs only after the pair has completed.
+    pub qwen35moe_layer_window: usize,
+    /// Uses the original mmap-backed expert stacks in one Metal graph. The
+    /// device performs the routed descriptor lookup; no low-precision copy is
+    /// substituted, so this arm is an exactness/per-submission baseline.
+    pub qwen35moe_monolithic_high_mmap: bool,
     /// When enabled in a build with the WGPU/Vulkan driver, run the serving
     /// graph through the CPU oracle even when `gpu_layers` requests the GPU.
     /// This is an explicit correctness escape hatch for models whose GPU
@@ -397,7 +427,7 @@ impl Default for ServingConfig<'static> {
             math_mode: MathMode::Relaxed,
             numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
-            dispatch_type: DispatchType::Concurrent,
+            dispatch_type: DispatchType::Serial,
             // Correctness-first default: CPU uses the scalar/dequantized
             // reference path so its oracle is comparable with GPU kernels.
             // `PROXIMA_RELAXED_ACTIVATIONS` is an explicit performance
@@ -405,6 +435,15 @@ impl Default for ServingConfig<'static> {
             exact_activations: true,
             weight_precision: &[],
             qwen35moe_pre_gather: false,
+            qwen35moe_persistent_cuts: false,
+            gdn_prefill_backend: GdnPrefillBackend::Cpu,
+            qwen35moe_residency_budget_bytes: 0,
+            qwen35moe_expert_prefetch: false,
+            qwen35moe_layer_window: 1,
+            qwen35moe_gdn_prefill_scan: false,
+            debug_gdn_compare: false,
+            qwen35moe_monolithic_all_low: false,
+            qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
         }
     }
@@ -427,6 +466,11 @@ impl Default for ServingConfig<'static> {
 /// the first knob below whose value requests behavior this forward path
 /// does not implement yet.
 pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(), InteropError> {
+    if matches!(config.gdn_prefill_backend, GdnPrefillBackend::Mlx) && !cfg!(feature = "mlx-gdn") {
+        return Err(InteropError::UnsupportedServingConfig(
+            "gdn_prefill_backend=mlx requires the mlx-gdn feature and an MLX installation".into(),
+        ));
+    }
     if sequence > config.context_length as usize {
         return Err(InteropError::SequenceExceedsContextLength {
             sequence,
@@ -559,6 +603,28 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
         )));
     }
 
+    if !matches!(config.qwen35moe_layer_window, 1 | 2) {
+        return Err(InteropError::UnsupportedServingConfig(format!(
+            "qwen35moe_layer_window={}: only 1 (the existing boundary) or 2 (the bounded exact sidecar window) is supported",
+            config.qwen35moe_layer_window
+        )));
+    }
+    if config.qwen35moe_layer_window == 2 && !config.qwen35moe_pre_gather {
+        return Err(InteropError::UnsupportedServingConfig(
+            "qwen35moe_layer_window=2 requires qwen35moe_pre_gather=true".into(),
+        ));
+    }
+    if config.qwen35moe_layer_window == 2 && config.qwen35moe_persistent_cuts {
+        return Err(InteropError::UnsupportedServingConfig(
+            "qwen35moe_layer_window=2 currently requires qwen35moe_persistent_cuts=false because the pair window returns both router roots after one command buffer".into(),
+        ));
+    }
+    if config.qwen35moe_layer_window == 2 && config.qwen35moe_gdn_prefill_scan {
+        return Err(InteropError::UnsupportedServingConfig(
+            "qwen35moe_layer_window=2 currently excludes the GDN prefill scan; its recurrent producer remains sequential by position".into(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -668,10 +734,19 @@ mod tests {
             math_mode: MathMode::Relaxed,
             numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
-            dispatch_type: DispatchType::Concurrent,
+            dispatch_type: DispatchType::Serial,
             exact_activations: true,
             weight_precision: &[],
+            gdn_prefill_backend: GdnPrefillBackend::Cpu,
             qwen35moe_pre_gather: false,
+            qwen35moe_persistent_cuts: false,
+            qwen35moe_residency_budget_bytes: 0,
+            qwen35moe_expert_prefetch: false,
+            qwen35moe_layer_window: 1,
+            qwen35moe_gdn_prefill_scan: false,
+            debug_gdn_compare: false,
+            qwen35moe_monolithic_all_low: false,
+            qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
@@ -809,10 +884,19 @@ mod tests {
             math_mode: MathMode::Relaxed,
             numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
-            dispatch_type: DispatchType::Concurrent,
+            dispatch_type: DispatchType::Serial,
             exact_activations: true,
             weight_precision: &[],
+            gdn_prefill_backend: GdnPrefillBackend::Cpu,
             qwen35moe_pre_gather: false,
+            qwen35moe_persistent_cuts: false,
+            qwen35moe_residency_budget_bytes: 0,
+            qwen35moe_expert_prefetch: false,
+            qwen35moe_layer_window: 1,
+            qwen35moe_gdn_prefill_scan: false,
+            debug_gdn_compare: false,
+            qwen35moe_monolithic_all_low: false,
+            qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
         };
         assert_eq!(via_default_override, via_full_literal);
@@ -878,10 +962,19 @@ mod tests {
             math_mode: MathMode::Relaxed,
             numeric_policy: NumericPolicy::bit_exact(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
-            dispatch_type: DispatchType::Concurrent,
+            dispatch_type: DispatchType::Serial,
             exact_activations: true,
             weight_precision: &[],
+            gdn_prefill_backend: GdnPrefillBackend::Cpu,
             qwen35moe_pre_gather: false,
+            qwen35moe_persistent_cuts: false,
+            qwen35moe_residency_budget_bytes: 0,
+            qwen35moe_expert_prefetch: false,
+            qwen35moe_layer_window: 1,
+            qwen35moe_gdn_prefill_scan: false,
+            debug_gdn_compare: false,
+            qwen35moe_monolithic_all_low: false,
+            qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
         };
         assert_eq!(via_default_override, via_full_literal);
@@ -937,10 +1030,19 @@ mod tests {
             math_mode: MathMode::Relaxed,
             numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
-            dispatch_type: DispatchType::Concurrent,
+            dispatch_type: DispatchType::Serial,
             exact_activations: true,
             weight_precision: &[],
             qwen35moe_pre_gather: false,
+            qwen35moe_persistent_cuts: false,
+            gdn_prefill_backend: GdnPrefillBackend::Cpu,
+            qwen35moe_residency_budget_bytes: 0,
+            qwen35moe_expert_prefetch: false,
+            qwen35moe_layer_window: 1,
+            qwen35moe_gdn_prefill_scan: false,
+            debug_gdn_compare: false,
+            qwen35moe_monolithic_all_low: false,
+            qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
         };
         assert_eq!(via_default_override, via_full_literal);

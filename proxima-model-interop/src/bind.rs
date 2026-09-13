@@ -265,7 +265,10 @@ pub(crate) fn checkpoint_qkv_biases(
     let mut any = false;
     for layer in 0..architecture.block_count {
         let names = [
-            ("attn_q.bias", architecture.query_heads * architecture.head_dim),
+            (
+                "attn_q.bias",
+                architecture.query_heads * architecture.head_dim,
+            ),
             ("attn_k.bias", architecture.kv_heads * architecture.head_dim),
             ("attn_v.bias", architecture.kv_heads * architecture.head_dim),
         ];
@@ -4715,6 +4718,7 @@ mod real_qwen3moe_file {
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod real_openchat_file {
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::checkpoint_qkv_biases;
     use core::ffi::c_void;
     use core::future::Future;

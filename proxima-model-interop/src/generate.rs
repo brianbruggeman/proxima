@@ -59,10 +59,15 @@ use core::future::Future;
 use core::ops::Range;
 
 use memmap2::{Advice, Mmap};
+#[cfg(feature = "mlx-gdn")]
+use omega::mlx;
 use proxima_gguf::GgmlType;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
-#[cfg(not(feature = "metal"))]
+#[cfg(any(
+    not(feature = "metal"),
+    all(feature = "instrument", target_os = "macos")
+))]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts;
 use proxima_tensor::cpu::{
     Evaluated, ExpertSource, GdnPrefillScan, GdnPrefillShape, QuantizedBlock,
@@ -75,6 +80,7 @@ use proxima_tensor::spec::{
     Qwen35LayerRoots, mistral_cached_forward_program_with_experts_and_layer_taps,
 };
 use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
+use std::cell::RefCell;
 use std::fs::File;
 use std::sync::Arc;
 
@@ -97,8 +103,7 @@ use omega::backend::execute_plan_named_metal_op_timed_with_expert_sources;
 #[cfg(feature = "metal")]
 use omega::backend::{
     Engine, Plan, clear_expert_source_cache, execute_plan_named_with_expert_sources, mark_resident,
-    plan_named, plan_named_exact, register_expert_mapping, release_resident_names,
-    unregister_checkpoint_mapping, unregister_expert_mapping,
+    plan_named, plan_named_exact, release_resident_names, unregister_checkpoint_mapping,
 };
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same
@@ -142,7 +147,7 @@ use omega::execute_plan_named_with_placements_op_timed;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use omega::{
     PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
-    execute_plan_named_with_placements_and_expert_sources, plan_named as plan_named_placed,
+    execute_plan_named_with_placements_and_expert_sources, plan_named_with_placed_inputs,
 };
 #[cfg(feature = "instrument")]
 use proxima_telemetry::{debug, info};
@@ -154,13 +159,15 @@ use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_forward_program};
 
 use crate::architecture::{Architecture, StepInput, StepInputContext, bind_symbols};
-use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
+use crate::bind::{
+    BoundWeights, ModelArchitecture, PackedOwnedKind, architecture_from_metadata, bind_all_weights,
+};
 use crate::error::InteropError;
 use crate::hf_bind::bind_all_weights_from_safetensors;
 #[cfg(feature = "metal")]
 use crate::serving::GPU_LAYERS_ALL;
-use crate::serving::ServingConfig;
 use crate::serving::apply_serving_config;
+use crate::serving::{GdnPrefillBackend, ServingConfig};
 
 /// How many of [`OpGpuTiming`]'s entries [`report_op_timings`] names
 /// individually -- the discipline log's own "top 20 ops by GPU time" ask.
@@ -679,6 +686,7 @@ fn emit_token_breakdown_metal(
     plan_cache_len: usize,
     plan_hits: usize,
     plan_misses: usize,
+    arena_allocated_bytes: (usize, usize, usize),
 ) {
     let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
     let kind_filter = kind_filter_from_env();
@@ -716,7 +724,11 @@ fn emit_token_breakdown_metal(
         resident_uploads = metal_stage.resident_uploads,
         resident_reuses = metal_stage.resident_reuses,
         mapping_offset_uploads = metal_stage.mapping_offset_uploads,
+        expert_mapping_candidate_uploads = metal_stage.expert_mapping_candidate_uploads,
+        expert_mapping_missed_uploads = metal_stage.expert_mapping_missed_uploads,
         nocopy_cache_len = omega::metal::nocopy_cache_len() as u64,
+        resident_cache_len = omega::metal::resident_cache_len() as u64,
+        resident_cache_bytes = omega::metal::resident_cache_bytes(),
         uniform_cache_len = omega::metal::uniform_cache_len() as u64,
         phys_footprint_bytes = phys_footprint_bytes(),
         device_allocated_bytes = omega::metal::current_allocated_size().unwrap_or(0),
@@ -728,33 +740,50 @@ fn emit_token_breakdown_metal(
         barriers = metal_stage.barriers_emitted,
         expert_source_cache_hits = metal_stage.expert_source_cache_hits,
         expert_source_cache_misses = metal_stage.expert_source_cache_misses,
+        expert_source_cache_cold_misses = metal_stage.expert_source_cache_cold_misses,
+        expert_source_cache_replacement_misses = metal_stage.expert_source_cache_replacement_misses,
+        expert_source_reuse_copy_bytes = metal_stage.expert_source_reuse_copy_bytes,
+        expert_source_reuse_copy_ms = ms(metal_stage.expert_source_reuse_copy_ticks),
         plan_cache_len = plan_cache_len as u64,
         plan_hits = plan_hits as u64,
         plan_misses = plan_misses as u64,
+        plan_arena_allocated_bytes = arena_allocated_bytes.0 as u64,
+        segment_arena_allocated_bytes = arena_allocated_bytes.1 as u64,
+        placed_arena_allocated_bytes = arena_allocated_bytes.2 as u64,
         ablation = !kind_filter.is_empty(),
         kind_filter,
         "token_breakdown_metal: per-decode-step metal stage attribution"
     );
     if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
         eprintln!(
-            "token_breakdown_metal step={} prepare_ms={} emit_ms={} op_setup_ms={} encode_dispatch_ms={} readback_ms={} expert_source_cache_hits={} expert_source_cache_misses={} expert_source_buffer_reuses={} plan_handoff_reuses={} expert_source_cache_entries={} nocopy_cache_entries={} block_upload_calls={} block_upload_ms={} block_copied_bytes={} block_nocopy_bound_bytes={} block_offset_bound_bytes={} resident_uploads={} resident_reuses={} output_buffer_allocations={} output_buffer_allocated_bytes={} checkpoint_mapping_buffer_bytes={} expert_mapping_buffer_bytes={} plan_uniform_writes={} barriers={} plan_cache_len={} plan_hits={} plan_misses={} gpu_exec_calls={} gpu_exec_ms={} phys_footprint_bytes={} device_allocated_bytes={}",
+            "token_breakdown_metal step={} prepare_ms={} emit_ms={} op_setup_ms={} encode_dispatch_calls={} encode_dispatch_ms={} readback_ms={} expert_source_cache_hits={} expert_source_cache_misses={} expert_source_cache_cold_misses={} expert_source_cache_replacement_misses={} expert_source_buffer_reuses={} expert_source_reuse_copy_bytes={} expert_source_reuse_copy_ms={} plan_handoff_reuses={} expert_source_cache_entries={} nocopy_cache_entries={} resident_cache_entries={} resident_cache_bytes={} block_upload_calls={} block_upload_ms={} block_copied_bytes={} block_nocopy_bound_bytes={} block_offset_bound_bytes={} mapping_offset_uploads={} expert_mapping_candidate_uploads={} expert_mapping_missed_uploads={} resident_uploads={} resident_reuses={} output_buffer_allocations={} output_buffer_allocated_bytes={} checkpoint_mapping_buffer_bytes={} expert_mapping_buffer_bytes={} plan_uniform_writes={} barriers={} plan_cache_len={} plan_hits={} plan_misses={} plan_arena_allocated_bytes={} segment_arena_allocated_bytes={} placed_arena_allocated_bytes={} gpu_exec_calls={} gpu_exec_ms={} phys_footprint_bytes={} device_allocated_bytes={}",
             step,
             ms(metal_stage.prepare_ticks),
             ms(metal_stage.emit_ticks),
             ms(metal_stage.op_setup_ticks),
+            metal_stage.encode_dispatch_calls,
             ms(metal_stage.encode_dispatch_ticks),
             ms(metal_stage.readback_ticks),
             metal_stage.expert_source_cache_hits,
             metal_stage.expert_source_cache_misses,
+            metal_stage.expert_source_cache_cold_misses,
+            metal_stage.expert_source_cache_replacement_misses,
             metal_stage.expert_source_buffer_reuses,
+            metal_stage.expert_source_reuse_copy_bytes,
+            ms(metal_stage.expert_source_reuse_copy_ticks),
             metal_stage.plan_handoff_reuses,
             metal_stage.expert_source_cache_entries,
             metal_stage.nocopy_cache_entries,
+            omega::metal::resident_cache_len(),
+            omega::metal::resident_cache_bytes(),
             metal_stage.block_upload_calls,
             ms(metal_stage.block_upload_ticks),
             metal_stage.block_copied_bytes,
             metal_stage.block_nocopy_bound_bytes,
             metal_stage.block_offset_bound_bytes,
+            metal_stage.mapping_offset_uploads,
+            metal_stage.expert_mapping_candidate_uploads,
+            metal_stage.expert_mapping_missed_uploads,
             metal_stage.resident_uploads,
             metal_stage.resident_reuses,
             metal_stage.output_buffer_allocations,
@@ -766,11 +795,25 @@ fn emit_token_breakdown_metal(
             plan_cache_len,
             plan_hits,
             plan_misses,
+            arena_allocated_bytes.0,
+            arena_allocated_bytes.1,
+            arena_allocated_bytes.2,
             metal_stage.gpu_exec_calls,
             ms(metal_stage.gpu_exec_ticks),
             phys_footprint_bytes(),
             omega::metal::current_allocated_size().unwrap_or(0),
         );
+        if step == 0 {
+            eprintln!(
+                "nocopy_cache_lengths={:?}",
+                omega::metal::nocopy_cache_lengths()
+            );
+            eprintln!("resident_cache_lengths_top={:?}", {
+                let mut entries = omega::metal::resident_cache_lengths();
+                entries.sort_unstable_by_key(|(_, bytes)| core::cmp::Reverse(*bytes));
+                entries.into_iter().take(24).collect::<Vec<_>>()
+            });
+        }
     }
 }
 
@@ -980,6 +1023,11 @@ pub struct LoadedModel<'file> {
     /// of [`Qwen35LayerRoots::Attention`]/[`Qwen35LayerRoots::Ssm`] on the
     /// qwen35 path (`crate::qwen35::qwen35_forward_program`'s own return).
     layer_roots: Vec<Qwen35LayerRoots>,
+    /// One post-layer residual root per dense layer, when the forward
+    /// builder exposes them (`crate::architecture::BoundProgram::residual_roots`'s
+    /// own doc) -- empty on the qwen35 hybrid path, which has no single
+    /// per-layer residual node. See [`Self::layer_residual_roots`].
+    residual_roots: Vec<NodeId>,
     /// Graph-level producer boundaries for each qwen35moe layer.
     qwen35moe_layer_diagnostics: Vec<crate::qwen35moe::Qwen35MoeLayerDiagnostics>,
     /// Router-logit roots aligned with routed layers.  Qwen35MoE fills this
@@ -1073,12 +1121,39 @@ pub struct LoadedModel<'file> {
 struct Qwen35MoePreGatherPlan {
     symbols: Vec<u64>,
     gdn_scan_enabled: bool,
+    gdn_backend: GdnPrefillBackend,
+    persistent_cuts: bool,
     layers: Vec<Qwen35MoeLayerSegments>,
     suffix: crate::qwen35moe::execution::MappedLayerSegment,
     prefix_carried_nodes: BTreeSet<NodeId>,
     global_cut_nodes: BTreeSet<NodeId>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     router_cut_placements: BTreeMap<NodeId, PlacedBuffer>,
+}
+
+#[cfg(feature = "qwen35moe-expert-prefetch")]
+#[derive(Clone, Copy)]
+struct Qwen35MoeRouteHistory {
+    routes: [crate::residency::RoutedExpert; 16],
+    len: usize,
+}
+
+#[cfg(feature = "qwen35moe-expert-prefetch")]
+impl Default for Qwen35MoeRouteHistory {
+    fn default() -> Self {
+        Self {
+            routes: [crate::residency::RoutedExpert {
+                expert: 0,
+                importance: 0.0,
+            }; 16],
+            len: 0,
+        }
+    }
+}
+
+#[cfg(feature = "qwen35moe-expert-prefetch")]
+fn qwen35moe_expert_prefetch_requested(value: bool) -> bool {
+    value
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1132,21 +1207,45 @@ fn retain_qwen35_segment_readbacks<RouterPlacement>(
     requested: &mut BTreeMap<NodeId, NodeId>,
     router_cut_placements: &BTreeMap<NodeId, RouterPlacement>,
     placed_dense_roots: Option<(NodeId, NodeId, NodeId, NodeId)>,
-    is_router: bool,
+    program: &[Op],
 ) {
-    requested.retain(|_, original| {
-        !placed_dense_roots
+    requested.retain(|mapped, original| {
+        if placed_dense_roots
             .is_some_and(|roots| [roots.0, roots.1, roots.2, roots.3].contains(original))
-            && (!is_router || !router_cut_placements.contains_key(original))
+        {
+            return false;
+        }
+        if router_cut_placements.contains_key(original) {
+            // A linked gather-next-router segment can contain both the
+            // boundary input and the next router's computed output. Only the
+            // input side is already resident; computed outputs stay in the
+            // placed-result set so the kernel writes them first.
+            return !matches!(program.get(mapped.0 as usize), Some(Op::Input { .. }));
+        }
+        true
     });
 }
 
 struct Qwen35MoeLayerSegments {
     router: crate::qwen35moe::execution::MappedLayerSegment,
     gather: crate::qwen35moe::execution::MappedLayerSegment,
+    /// The graph segment from this layer's router through its gather and the
+    /// next layer's router.  It is kept separate from `gather`: the former
+    /// makes the layer boundary explicit for a future double-buffered
+    /// working set, while the latter remains the fallback when a recurrent
+    /// placement or a final suffix prevents boundary batching.
+    gather_next_router: Option<crate::qwen35moe::execution::MappedLayerSegment>,
+    /// Exact two-layer window, present on the first layer of each pair when
+    /// the caller requests `qwen35moe_layer_window=2`.
+    layer_window: Option<crate::qwen35moe::execution::MappedLayerSegment>,
     gdn_scan: Option<Qwen35MoeGdnScanSegment>,
     router_future_cuts: Vec<(NodeId, String)>,
     next_cuts: Vec<(NodeId, String)>,
+    /// Original gather cuts owned by later layers.  This is part of the
+    /// linked schedule rather than an execution-time scan: retaining these
+    /// values keeps a layer's router/gather boundary connected to the next
+    /// consumer without rebuilding a suffix vector for every prompt row.
+    future_gather_cuts: Vec<NodeId>,
 }
 
 #[derive(Clone)]
@@ -1158,6 +1257,33 @@ struct Qwen35MoeGdnScanSegment {
     post_mixer_residual: NodeId,
     post_attention_norm_output: NodeId,
     router_logits: NodeId,
+}
+
+/// Links one layer's carry set to the gather cuts consumed by later layers.
+/// The link is plan data: execution must not rediscover the suffix while a
+/// prompt row is crossing the router/residency boundary.
+fn collect_future_gather_cuts(layer: usize, gather_cuts: &[Vec<(NodeId, String)>]) -> Vec<NodeId> {
+    gather_cuts[layer + 1..]
+        .iter()
+        .flat_map(|cuts| cuts.iter().map(|(node, _)| *node))
+        .collect()
+}
+
+fn fused_segment_experts_are_current_layer(
+    segment: &crate::qwen35moe::execution::MappedLayerSegment,
+    layer: usize,
+) -> bool {
+    segment
+        .0
+        .iter()
+        .filter_map(Op::name)
+        .filter(|name| name.contains("_exps.weight"))
+        .all(|name| {
+            name.strip_prefix("blk.")
+                .and_then(|rest| rest.split('.').next())
+                .and_then(|value| value.parse::<usize>().ok())
+                == Some(layer)
+        })
 }
 
 /// Releases every device buffer this checkpoint's own load caused: the
@@ -1176,9 +1302,6 @@ impl Drop for LoadedModel<'_> {
     fn drop(&mut self) {
         release_resident_names(self.resident_names().iter().copied());
         unregister_checkpoint_mapping(self.checkpoint_mapping);
-        if let Some(sidecar) = &self.expert_sidecar {
-            unregister_expert_mapping(sidecar.mapping_bytes());
-        }
     }
 }
 
@@ -1346,6 +1469,11 @@ const fn step_batch_needs_logits(split_prefill: bool, is_last_step_batch: bool) 
 }
 
 impl<'file> LoadedModel<'file> {
+    #[must_use]
+    pub fn token_id_for_piece(&self, piece: &str) -> Option<u32> {
+        self.vocab.token_id(piece)
+    }
+
     /// `true` when [`Self::load`] built a device-resident, single-range
     /// program for this checkpoint ([`Self::single_range`]'s own doc) --
     /// the ROW 373 evidence hook: a qk-norm (Qwen3) checkpoint returned
@@ -1529,6 +1657,8 @@ impl<'file> LoadedModel<'file> {
         &self,
         symbols: &[u64],
         gdn_scan_enabled: bool,
+        gdn_backend: GdnPrefillBackend,
+        persistent_cuts: bool,
     ) -> Result<Qwen35MoePreGatherPlan, InteropError> {
         let last_layer_output = self
             .qwen35moe_layer_diagnostics
@@ -1622,6 +1752,34 @@ impl<'file> LoadedModel<'file> {
                 diagnostic.block_output,
             )
             .map_err(InteropError::from)?;
+            let gather_next_router = self
+                .qwen35moe_layer_diagnostics
+                .get(layer_parts.len() + 1)
+                .filter(|_| gdn_scan.is_none())
+                .map(|next| {
+                    crate::qwen35moe::execution::split_gather_and_next_router_segment(
+                        &self.program,
+                        symbols,
+                        diagnostic.router_logits,
+                        diagnostic.block_output,
+                        next.router_logits,
+                    )
+                })
+                .transpose()
+                .map_err(InteropError::from)?;
+            #[cfg(feature = "qwen35moe-linked-suffix")]
+            let gather = if diagnostic.block_output == last_layer_output {
+                crate::qwen35moe::execution::split_gather_and_suffix_segment(
+                    &self.program,
+                    symbols,
+                    diagnostic.router_logits,
+                    diagnostic.block_output,
+                    self.logits_root,
+                )
+                .map_err(InteropError::from)?
+            } else {
+                gather
+            };
             let entry = gdn_scan.as_ref().map_or(&router, |scan| &scan.producer);
             for (node, _) in &entry.1 {
                 if !matches!(
@@ -1631,7 +1789,7 @@ impl<'file> LoadedModel<'file> {
                     prefix_required_nodes.insert(*node);
                 }
             }
-            layer_parts.push((router, gather, gdn_scan));
+            layer_parts.push((router, gather, gather_next_router, gdn_scan));
             previous_output = Some(diagnostic.block_output);
         }
 
@@ -1645,7 +1803,7 @@ impl<'file> LoadedModel<'file> {
                     reason: String::from("the bound graph has no first router segment"),
                 })?;
         let first_entry_mapping = first_entry_mapping
-            .2
+            .3
             .as_ref()
             .map_or(&first_entry_mapping.0.2, |scan| &scan.producer.2);
         let prefix_carried_nodes = first_entry_mapping
@@ -1665,13 +1823,18 @@ impl<'file> LoadedModel<'file> {
             })
             .collect();
 
+        let gather_cuts = layer_parts
+            .iter()
+            .map(|part| part.1.1.clone())
+            .collect::<Vec<_>>();
         let mut layers = Vec::with_capacity(layer_parts.len());
         for layer in 0..layer_parts.len() {
-            let (router, gather, gdn_scan) = layer_parts[layer].clone();
+            let (router, gather, gather_next_router, gdn_scan) = layer_parts[layer].clone();
+            let future_gather_cuts = collect_future_gather_cuts(layer, &gather_cuts);
             let mut future_cuts = layer_parts[layer + 1..]
                 .iter()
                 .flat_map(|part| {
-                    part.2
+                    part.3
                         .as_ref()
                         .map_or(&part.0.1, |scan| &scan.producer.1)
                         .iter()
@@ -1686,12 +1849,35 @@ impl<'file> LoadedModel<'file> {
             router_future_cuts.extend(future_cuts.iter().cloned());
             router_future_cuts.sort_by_key(|(node, _)| *node);
             router_future_cuts.dedup_by_key(|(node, _)| *node);
+            let layer_window = if layer % 2 == 0 {
+                self.qwen35moe_layer_diagnostics
+                    .get(layer + 1)
+                    .filter(|_| gdn_scan.is_none())
+                    .map(|next| {
+                        crate::qwen35moe::execution::split_two_layer_window_segment(
+                            &self.program,
+                            symbols,
+                            (layer > 0)
+                                .then(|| self.qwen35moe_layer_diagnostics[layer - 1].block_output),
+                            self.qwen35moe_layer_diagnostics[layer].router_logits,
+                            next.router_logits,
+                            next.block_output,
+                        )
+                    })
+                    .transpose()
+                    .map_err(InteropError::from)?
+            } else {
+                None
+            };
             layers.push(Qwen35MoeLayerSegments {
                 router,
                 gather,
+                gather_next_router,
+                layer_window,
                 gdn_scan,
                 router_future_cuts,
                 next_cuts: future_cuts,
+                future_gather_cuts,
             });
         }
 
@@ -1710,6 +1896,26 @@ impl<'file> LoadedModel<'file> {
                     InteropError::PreGatherExecutionUnsupported {
                         architecture: String::from("qwen35moe"),
                         reason: alloc::format!("layer {layer} {phase} segment is invalid: {error}"),
+                    }
+                })?;
+            }
+            if let Some(fused) = &segments.gather_next_router {
+                proxima_tensor::shape::infer(&fused.0, symbols).map_err(|error| {
+                    InteropError::PreGatherExecutionUnsupported {
+                        architecture: String::from("qwen35moe"),
+                        reason: alloc::format!(
+                            "layer {layer} gather-next-router segment is invalid: {error}"
+                        ),
+                    }
+                })?;
+            }
+            if let Some(window) = &segments.layer_window {
+                proxima_tensor::shape::infer(&window.0, symbols).map_err(|error| {
+                    InteropError::PreGatherExecutionUnsupported {
+                        architecture: String::from("qwen35moe"),
+                        reason: alloc::format!(
+                            "layer {layer} two-layer window is invalid: {error}"
+                        ),
                     }
                 })?;
             }
@@ -1757,72 +1963,123 @@ impl<'file> LoadedModel<'file> {
         );
 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let router_cut_placements = {
-            if std::env::var_os("PROXIMA_QWEN35MOE_PERSISTENT_CUTS").is_none() {
-                BTreeMap::new()
-            } else {
-                let shapes =
-                    proxima_tensor::shape::infer(&self.program, symbols).map_err(|error| {
-                        InteropError::PreGatherExecutionUnsupported {
-                            architecture: String::from("qwen35moe"),
-                            reason: alloc::format!("full graph shape inference failed: {error}"),
-                        }
-                    })?;
-                let mut placements = BTreeMap::new();
-                for segments in &layers {
-                    let router_outputs = segments
-                        .router_future_cuts
-                        .iter()
-                        .map(|(node, _)| *node)
-                        .collect::<BTreeSet<_>>();
-                    for (node, name) in &segments.gather.1 {
-                        if !name.starts_with("__cut_")
-                            || !router_outputs.contains(node)
-                            || segments.router.2.get(node).is_none()
-                            || segments.gather.2.get(node).is_none()
-                            || matches!(
-                                self.program.get(node.0 as usize),
-                                Some(Op::Constant { .. })
-                            )
-                        {
+        let router_cut_placements = if persistent_cuts {
+            let shapes = proxima_tensor::shape::infer(&self.program, symbols).map_err(|error| {
+                InteropError::PreGatherExecutionUnsupported {
+                    architecture: String::from("qwen35moe"),
+                    reason: alloc::format!("full graph shape inference failed: {error}"),
+                }
+            })?;
+            let mut boundary_nodes = BTreeSet::new();
+            for (layer, segments) in layers.iter().enumerate() {
+                let diagnostic = self.qwen35moe_layer_diagnostics[layer];
+                boundary_nodes.insert(diagnostic.router_logits);
+                boundary_nodes.insert(diagnostic.block_output);
+                boundary_nodes.extend(segments.router.1.iter().map(|(node, _)| *node));
+                boundary_nodes.extend(segments.gather.1.iter().map(|(node, _)| *node));
+                boundary_nodes.extend(segments.router_future_cuts.iter().map(|(node, _)| *node));
+                boundary_nodes.extend(segments.next_cuts.iter().map(|(node, _)| *node));
+                boundary_nodes.extend(segments.future_gather_cuts.iter().copied());
+                if let Some(fused) = &segments.gather_next_router {
+                    boundary_nodes.extend(fused.1.iter().map(|(node, _)| *node));
+                }
+                if let Some(scan) = &segments.gdn_scan {
+                    boundary_nodes.extend(scan.producer.1.iter().map(|(node, _)| *node));
+                    boundary_nodes.extend(scan.tail.1.iter().map(|(node, _)| *node));
+                }
+            }
+            let mut produced_cuts = BTreeSet::new();
+            let mut consumed_cuts = BTreeSet::new();
+            for segments in &layers {
+                let mut segment_maps = vec![
+                    (&segments.router.0, &segments.router.2),
+                    (&segments.gather.0, &segments.gather.2),
+                ];
+                if let Some(fused) = &segments.gather_next_router {
+                    segment_maps.push((&fused.0, &fused.2));
+                }
+                if let Some(scan) = &segments.gdn_scan {
+                    segment_maps.push((&scan.producer.0, &scan.producer.2));
+                    segment_maps.push((&scan.tail.0, &scan.tail.2));
+                }
+                for (program, mapping) in segment_maps {
+                    for (original, mapped) in mapping {
+                        if !boundary_nodes.contains(original) {
                             continue;
                         }
-                        let element_count = shapes
-                            .of(*node)
-                            .iter()
-                            .try_fold(1usize, |product, extent| {
-                                usize::try_from(*extent)
-                                    .ok()
-                                    .and_then(|extent| product.checked_mul(extent))
-                            })
+                        match program.get(mapped.0 as usize) {
+                            Some(Op::Input { .. }) => {
+                                consumed_cuts.insert(*original);
+                            }
+                            Some(_) => {
+                                produced_cuts.insert(*original);
+                            }
+                            None => {}
+                        }
+                    }
+                }
+            }
+            let placed_boundary_cuts = produced_cuts
+                .intersection(&consumed_cuts)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            if std::env::var_os("PROXIMA_DEBUG_QWEN35_PLAN").is_some() {
+                eprintln!(
+                    "qwen35 placement candidates produced={} consumed={} placed={:?}",
+                    produced_cuts.len(),
+                    consumed_cuts.len(),
+                    placed_boundary_cuts,
+                );
+            }
+            let mut placements = BTreeMap::new();
+            for node in placed_boundary_cuts {
+                if matches!(
+                    self.program.get(node.0 as usize),
+                    Some(Op::Constant { .. } | Op::Input { .. })
+                ) {
+                    continue;
+                }
+                if !boundary_nodes.contains(&node) {
+                    continue;
+                }
+                let element_count = shapes
+                    .of(node)
+                    .iter()
+                    .try_fold(1usize, |product, extent| {
+                        usize::try_from(*extent)
+                            .ok()
+                            .and_then(|extent| product.checked_mul(extent))
+                    })
+                    .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
+                        architecture: String::from("qwen35moe"),
+                        reason: alloc::format!(
+                            "boundary cut {node:?} shape does not fit a placed buffer"
+                        ),
+                    })?;
+                placements.insert(
+                    node,
+                    allocate_placed_buffer(
+                        element_count
+                            .checked_mul(core::mem::size_of::<f32>())
                             .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
                                 architecture: String::from("qwen35moe"),
                                 reason: alloc::format!(
-                                    "router cut {node:?} shape does not fit a placed buffer"
+                                    "boundary cut {node:?} byte size overflowed"
                                 ),
-                            })?;
-                        placements.insert(
-                            *node,
-                            allocate_placed_buffer(
-                                element_count
-                                    .checked_mul(core::mem::size_of::<f32>())
-                                    .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                                        architecture: String::from("qwen35moe"),
-                                        reason: alloc::format!(
-                                            "router cut {node:?} byte size overflowed"
-                                        ),
-                                    })?,
-                            )?,
-                        );
-                    }
-                }
-                placements
+                            })?,
+                    )?,
+                );
             }
+            placements
+        } else {
+            BTreeMap::new()
         };
 
         Ok(Qwen35MoePreGatherPlan {
             symbols: symbols.to_vec(),
             gdn_scan_enabled,
+            gdn_backend,
+            persistent_cuts,
             layers,
             suffix,
             prefix_carried_nodes,
@@ -1835,7 +2092,10 @@ impl<'file> LoadedModel<'file> {
     fn evaluate_qwen35moe_gdn_scan_segment(
         &self,
         runtime: &mut BackendRuntime,
+        layer: usize,
         scan: &Qwen35MoeGdnScanSegment,
+        state_cache: &[f32],
+        gdn_backend: GdnPrefillBackend,
         future_cuts: &[(NodeId, String)],
         symbols: &[u64],
         named: &[(&str, QuantizedBlock<'_>)],
@@ -1844,6 +2104,8 @@ impl<'file> LoadedModel<'file> {
         carried: &mut BTreeMap<NodeId, (Vec<u64>, Vec<f32>)>,
         results: &mut BTreeMap<NodeId, (Vec<u64>, Vec<f32>)>,
     ) -> Result<(), InteropError> {
+        #[cfg(not(feature = "mlx-gdn"))]
+        let _ = gdn_backend;
         let (program, cuts, mapping) = &scan.producer;
         let mut segment_named: Vec<(&str, QuantizedBlock<'_>)> = named
             .iter()
@@ -1902,6 +2164,16 @@ impl<'file> LoadedModel<'file> {
                             "gdn scan producer missing cut node {node:?} ({name})"
                         ),
                     })?;
+            if std::env::var_os("PROXIMA_DEBUG_GDN_CARRY").is_some() {
+                eprintln!(
+                    "gdn_scan_cut layer={} node={} name={} elements={} first4={:?}",
+                    layer,
+                    node.0,
+                    name,
+                    values.len(),
+                    values.iter().take(4).copied().collect::<Vec<_>>(),
+                );
+            }
             segment_named.push((name.as_str(), QuantizedBlock::Float32(values)));
         }
 
@@ -1912,7 +2184,6 @@ impl<'file> LoadedModel<'file> {
             taps.value_sequence,
             taps.gate_sequence,
             taps.beta_sequence,
-            taps.state_in,
         ];
         let mut requested = BTreeMap::new();
         for original in scan
@@ -1938,6 +2209,42 @@ impl<'file> LoadedModel<'file> {
             }
         }
         let requested_nodes: Vec<NodeId> = requested.keys().copied().collect();
+        // `state_in` is an Op::Input, not a computed output. The evaluator
+        // therefore does not place it in `Evaluated`; the authoritative
+        // recurrent state is the layer cache owned by the decode loop, not a
+        // partition-local input reconstruction.
+        let mapped_state =
+            mapping
+                .get(&taps.state_in)
+                .copied()
+                .ok_or(InteropError::MissingEvaluatedNode {
+                    node: taps.state_in,
+                })?;
+        let state_shape = proxima_tensor::shape::infer(program, symbols)
+            .map_err(|error| InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: alloc::format!("gdn scan state shape inference failed: {error}"),
+            })?
+            .of(mapped_state)
+            .to_vec();
+        let expected_state_elements = state_shape
+            .iter()
+            .try_fold(1usize, |product, extent| {
+                product.checked_mul(*extent as usize)
+            })
+            .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: String::from("gdn scan state shape overflowed usize"),
+            })?;
+        if state_cache.len() != expected_state_elements {
+            return Err(InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: alloc::format!(
+                    "gdn scan layer cache state has {} elements but needs {expected_state_elements}",
+                    state_cache.len()
+                ),
+            });
+        }
         let evaluated = runtime.evaluate_segment(
             program,
             symbols,
@@ -1946,6 +2253,47 @@ impl<'file> LoadedModel<'file> {
             resident_names,
             None,
         )?;
+        if std::env::var_os("PROXIMA_DEBUG_GDN_EXACT_COMPARE").is_some() {
+            let mut exact_scratch = Vec::new();
+            let mut exact_validated = None;
+            let exact = evaluate_quantized_named_exact_with_scratch_and_experts(
+                program,
+                symbols,
+                &segment_named,
+                &requested_nodes,
+                &mut exact_scratch,
+                &mut exact_validated,
+                None,
+            )?;
+            for (label, node) in [
+                ("query_sequence", taps.query_sequence),
+                ("key_sequence", taps.key_sequence),
+                ("value_sequence", taps.value_sequence),
+                ("gate_sequence", taps.gate_sequence),
+                ("beta_sequence", taps.beta_sequence),
+            ] {
+                let Some(mapped) = mapping.get(&node).copied() else {
+                    continue;
+                };
+                let Some((actual, actual_shape)) = evaluated.get(mapped) else {
+                    continue;
+                };
+                let Some((expected, expected_shape)) = exact.get(mapped) else {
+                    continue;
+                };
+                let maximum = actual
+                    .iter()
+                    .zip(expected)
+                    .map(|(actual, expected)| (actual - expected).abs())
+                    .fold(0.0_f32, f32::max);
+                eprintln!(
+                    "gdn_exact_compare layer={layer} label={label} node={} actual_shape={actual_shape:?} expected_shape={expected_shape:?} max_abs={maximum} actual_first4={:?} expected_first4={:?}",
+                    node.0,
+                    actual.iter().take(4).copied().collect::<Vec<_>>(),
+                    expected.iter().take(4).copied().collect::<Vec<_>>(),
+                );
+            }
+        }
         for (mapped, original) in requested {
             let (values, shape) = evaluated
                 .get(mapped)
@@ -1994,14 +2342,7 @@ impl<'file> LoadedModel<'file> {
             })?
             .1
             .as_slice();
-        let state_entry =
-            carried
-                .get(&taps.state_in)
-                .ok_or(InteropError::MissingEvaluatedNode {
-                    node: taps.state_in,
-                })?;
-        let state_shape = state_entry.0.clone();
-        let mut state = state_entry.1.clone();
+        let mut state = state_cache.to_vec();
         let mut output = vec![0.0_f32; value.len()];
         let positions = value_shape.first().copied().ok_or_else(|| {
             InteropError::PreGatherExecutionUnsupported {
@@ -2066,7 +2407,7 @@ impl<'file> LoadedModel<'file> {
                 ),
             });
         }
-        run_gdn_prefill_scan(GdnPrefillScan {
+        let gdn_recurrence = GdnPrefillScan {
             shape: GdnPrefillShape {
                 positions,
                 key_dim,
@@ -2083,7 +2424,15 @@ impl<'file> LoadedModel<'file> {
             inv_sqrt_key_dim: 1.0 / (key_dim as f32).sqrt(),
             state: &mut state,
             output: &mut output,
-        })?;
+        };
+        #[cfg(feature = "mlx-gdn")]
+        if matches!(gdn_backend, GdnPrefillBackend::Mlx) {
+            mlx::run_gdn_prefill_scan(gdn_recurrence)?;
+        } else {
+            run_gdn_prefill_scan(gdn_recurrence)?;
+        }
+        #[cfg(not(feature = "mlx-gdn"))]
+        run_gdn_prefill_scan(gdn_recurrence)?;
         if outputs.contains(&taps.delta_out) {
             results.insert(taps.delta_out, (value_shape.clone(), output.clone()));
         }
@@ -2125,16 +2474,17 @@ impl<'file> LoadedModel<'file> {
         if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some() {
             eprintln!(
                 "gdn_row_tail requested={requested_tail:?} program_len={}",
-                tail_program.len()
+                tail_program.len(),
             );
         }
         let tail_original_named: Vec<(&str, QuantizedBlock<'_>)> = named
             .iter()
             .copied()
             .filter(|(name, _)| {
-                tail_program
-                    .iter()
-                    .any(|operation| operation.name() == Some(*name))
+                !name.starts_with("gdn_prefill.")
+                    && tail_program
+                        .iter()
+                        .any(|operation| operation.name() == Some(*name))
             })
             .collect();
         let mut row_symbols = symbols.to_vec();
@@ -2255,6 +2605,15 @@ impl<'file> LoadedModel<'file> {
                     .iter()
                     .map(|(name, values)| (*name, QuantizedBlock::Float32(values))),
             );
+            if std::env::var_os("PROXIMA_DEBUG_GDN_TAIL_DIGEST").is_some() && position < 2 {
+                let cut_digest = row_cut_storage
+                    .iter()
+                    .map(|(name, values)| {
+                        (*name, values.iter().take(4).copied().collect::<Vec<_>>())
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!("gdn_tail_digest position={position} named={cut_digest:?}");
+            }
             let tail_evaluated = runtime.evaluate_segment(
                 tail_program,
                 &row_symbols,
@@ -2296,7 +2655,7 @@ impl<'file> LoadedModel<'file> {
         Ok(())
     }
 
-    fn evaluate_qwen35moe_pre_gather<BeforeGather>(
+    fn evaluate_qwen35moe_pre_gather<'mapping, BeforeGather>(
         &self,
         runtime: &mut BackendRuntime,
         plan: &Qwen35MoePreGatherPlan,
@@ -2304,9 +2663,20 @@ impl<'file> LoadedModel<'file> {
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
+        layer_caches: &[LayerCacheState],
         expert_slab: &mut crate::expert_slab::ExpertSlab<'file>,
         sidecar_read_scratch: &mut crate::expert_sidecar::ExpertSidecarReadScratch,
+        current_sources: &RefCell<CurrentExpertSources>,
         position_offset: usize,
+        layer_window: usize,
+        gdn_backend: GdnPrefillBackend,
+        #[cfg(feature = "metal")] sidecar: Option<
+            &'mapping crate::expert_sidecar::MappedExpertSidecar,
+        >,
+        #[cfg(feature = "metal")]
+        all_low_expert_scratch: &mut crate::expert_slab::AllLowExpertSourceScratch<
+            'mapping,
+        >,
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))] ssm_placement: Option<
             &Qwen35SsmPlacement<'_>,
         >,
@@ -2322,6 +2692,8 @@ impl<'file> LoadedModel<'file> {
             &mut crate::expert_slab::ExpertSlab<'file>,
         ) -> Result<(), InteropError>,
     {
+        #[cfg(not(feature = "metal"))]
+        let _ = layer_window;
         let mut carried: BTreeMap<NodeId, (Vec<u64>, Vec<f32>)> = BTreeMap::new();
         let mut results: BTreeMap<NodeId, (Vec<u64>, Vec<f32>)> = BTreeMap::new();
         let mut placed_results = BTreeSet::new();
@@ -2357,7 +2729,14 @@ impl<'file> LoadedModel<'file> {
                 carried.insert(NodeId(index as u32), (Vec::new(), vec![*value]));
             }
         }
-        for layer in 0..self.qwen35moe_layer_diagnostics.len() {
+        #[cfg(feature = "metal")]
+        let pair_window_enabled = layer_window == 2
+            && plan
+                .layers
+                .iter()
+                .any(|segments| segments.layer_window.is_some());
+        let mut layer = 0usize;
+        while layer < self.qwen35moe_layer_diagnostics.len() {
             let debug_layer = std::env::var("PROXIMA_DEBUG_EXPERT_GATHER_LAYER")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
@@ -2367,9 +2746,23 @@ impl<'file> LoadedModel<'file> {
             // no row reads an unselected descriptor.
             let segments = &plan.layers[layer];
             if let Some(scan) = &segments.gdn_scan {
+                let state_cache = match layer_caches.get(layer) {
+                    Some(LayerCacheState::Ssm(cache)) => cache.state.as_slice(),
+                    _ => {
+                        return Err(InteropError::PreGatherExecutionUnsupported {
+                            architecture: String::from("qwen35moe"),
+                            reason: alloc::format!(
+                                "gdn scan layer {layer} has no ssm layer cache state"
+                            ),
+                        });
+                    }
+                };
                 self.evaluate_qwen35moe_gdn_scan_segment(
                     runtime,
+                    layer,
                     scan,
+                    state_cache,
+                    gdn_backend,
                     &segments.router_future_cuts,
                     symbols,
                     named,
@@ -2396,75 +2789,267 @@ impl<'file> LoadedModel<'file> {
                     &mut before_gather,
                 )?;
             }
+            #[cfg(feature = "metal")]
+            if pair_window_enabled
+                && layer % 2 == 0
+                && layer + 1 < self.qwen35moe_layer_diagnostics.len()
+                && segments.gdn_scan.is_none()
+            {
+                let sidecar =
+                    sidecar.ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
+                        architecture: String::from("qwen35moe"),
+                        reason: String::from(
+                            "qwen35moe_layer_window=2 requires an attached exact sidecar",
+                        ),
+                    })?;
+                if !sidecar.preserves_source_codecs() {
+                    return Err(InteropError::PreGatherExecutionUnsupported {
+                        architecture: String::from("qwen35moe"),
+                        reason: String::from(
+                            "qwen35moe_layer_window=2 requires byte-preserving sidecar codecs",
+                        ),
+                    });
+                }
+                let window = segments.layer_window.as_ref().ok_or_else(|| {
+                    InteropError::PreGatherExecutionUnsupported {
+                        architecture: String::from("qwen35moe"),
+                        reason: alloc::format!(
+                            "layer {layer} has no two-layer segment despite window=2"
+                        ),
+                    }
+                })?;
+                let all_low_sources = expert_slab.all_low_sources_for_layers(
+                    sidecar,
+                    layer,
+                    2,
+                    all_low_expert_scratch,
+                )?;
+                let mapped_expert_sources = map_expert_sources_to_segment(
+                    layer,
+                    &self.program,
+                    &window.0,
+                    &all_low_sources,
+                )?;
+                let mut segment_named: Vec<(&str, QuantizedBlock<'_>)> = named
+                    .iter()
+                    .copied()
+                    .filter(|(name, _)| {
+                        window
+                            .0
+                            .iter()
+                            .any(|operation| operation.name() == Some(*name))
+                    })
+                    .collect();
+                for (node, name) in &window.1 {
+                    if segment_named
+                        .iter()
+                        .any(|(candidate, _)| *candidate == name)
+                        || name.contains("_exps.weight")
+                    {
+                        continue;
+                    }
+                    let (_, values) = carried.get(node).ok_or_else(|| {
+                        InteropError::PreGatherExecutionUnsupported {
+                            architecture: String::from("qwen35moe"),
+                            reason: alloc::format!(
+                                "two-layer window missing cut node {node:?} ({name})"
+                            ),
+                        }
+                    })?;
+                    segment_named.push((name.as_str(), QuantizedBlock::Float32(values)));
+                }
+                let first_router = self.qwen35moe_layer_diagnostics[layer].router_logits;
+                let second_router = self.qwen35moe_layer_diagnostics[layer + 1].router_logits;
+                let second_output = self.qwen35moe_layer_diagnostics[layer + 1].block_output;
+                let first_router_mapped = window
+                    .2
+                    .get(&first_router)
+                    .copied()
+                    .ok_or(InteropError::MissingEvaluatedNode { node: first_router })?;
+                let second_router_mapped = window.2.get(&second_router).copied().ok_or(
+                    InteropError::MissingEvaluatedNode {
+                        node: second_router,
+                    },
+                )?;
+                let second_output_mapped = window.2.get(&second_output).copied().ok_or(
+                    InteropError::MissingEvaluatedNode {
+                        node: second_output,
+                    },
+                )?;
+                let mut requested = BTreeMap::from([
+                    (first_router_mapped, first_router),
+                    (second_router_mapped, second_router),
+                    (second_output_mapped, second_output),
+                ]);
+                for original in segments
+                    .next_cuts
+                    .iter()
+                    .map(|(node, _)| *node)
+                    .chain(segments.future_gather_cuts.iter().copied())
+                    .chain(plan.global_cut_nodes.iter().copied())
+                    .chain(outputs.iter().copied())
+                {
+                    if let Some(mapped) = window.2.get(&original).copied()
+                        && !matches!(
+                            window.0.get(mapped.0 as usize),
+                            Some(proxima_tensor::op::Op::Input { .. })
+                        )
+                    {
+                        requested.insert(mapped, original);
+                    }
+                }
+                let requested_nodes: Vec<NodeId> = requested.keys().copied().collect();
+                let evaluated = runtime.evaluate_segment(
+                    &window.0,
+                    symbols,
+                    &segment_named,
+                    &requested_nodes,
+                    resident_names,
+                    Some(&mapped_expert_sources),
+                )?;
+                #[cfg(feature = "instrument")]
+                {
+                    segment_execution_count += 1;
+                }
+                let (first_logits, first_shape) = evaluated
+                    .get(first_router_mapped)
+                    .ok_or(InteropError::MissingEvaluatedNode { node: first_router })?;
+                visit_qwen35moe_router_boundary(
+                    layer,
+                    position_offset,
+                    first_logits,
+                    first_shape,
+                    self.architecture.expert_count as usize,
+                    self.architecture.expert_used_count as usize,
+                    &mut routed_experts,
+                    expert_slab,
+                    &mut before_gather,
+                )?;
+                let (second_logits, second_shape) = evaluated.get(second_router_mapped).ok_or(
+                    InteropError::MissingEvaluatedNode {
+                        node: second_router,
+                    },
+                )?;
+                visit_qwen35moe_router_boundary(
+                    layer + 1,
+                    position_offset,
+                    second_logits,
+                    second_shape,
+                    self.architecture.expert_count as usize,
+                    self.architecture.expert_used_count as usize,
+                    &mut routed_experts,
+                    expert_slab,
+                    &mut before_gather,
+                )?;
+                evaluated
+                    .get(second_output_mapped)
+                    .ok_or(InteropError::MissingEvaluatedNode {
+                        node: second_output,
+                    })?;
+                for (mapped, original) in requested {
+                    let (values, shape) = evaluated
+                        .get(mapped)
+                        .ok_or(InteropError::MissingEvaluatedNode { node: original })?;
+                    carried.insert(original, (shape.to_vec(), values.to_vec()));
+                    if outputs.contains(&original) {
+                        results.insert(original, (shape.to_vec(), values.to_vec()));
+                    }
+                }
+                omega::backend::clear_expert_source_cache();
+                layer += 2;
+                continue;
+            }
             let router = &segments.router;
             let gather = &segments.gather;
             let next_cuts = &segments.next_cuts;
-            let future_gather_cuts: Vec<NodeId> = plan.layers[layer + 1..]
-                .iter()
-                .flat_map(|future| future.gather.1.iter().map(|(node, _)| *node))
-                .collect();
-            let diagnostic = self.qwen35moe_layer_diagnostics[layer];
-            for (is_router, program, cuts, mapping, future_cuts, segment_output) in [
-                (
-                    true,
-                    &router.0,
-                    &router.1,
-                    &router.2,
-                    segments.router_future_cuts.as_slice(),
-                    diagnostic.router_logits,
-                ),
-                (
-                    false,
-                    &gather.0,
-                    &gather.1,
-                    &gather.2,
-                    next_cuts.as_slice(),
-                    diagnostic.block_output,
-                ),
-            ] {
+            let future_gather_cuts = &segments.future_gather_cuts;
+            // The linked boundary is the correctness-preserving default for
+            // the routed decode path: it removes one command-buffer round
+            // trip per layer while retaining the explicit router/gather
+            // transition. GDN scan and placed recurrent/dense buffers still
+            // fall back to the unfused segments below.
+            let fused_boundary_requested =
+                plan.layers
+                    .iter()
+                    .all(|segments| segments.gdn_scan.is_none())
+                    && segments.gather_next_router.as_ref().is_some_and(|segment| {
+                        fused_segment_experts_are_current_layer(segment, layer)
+                    });
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            let has_ssm_placement = ssm_placement
+                .is_some_and(|placement| {
+                    placement.buffers.iter().any(Option::is_some)
+                });
+            #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+            let has_ssm_placement = false;
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            let has_dense_attention_placement = dense_attention_placement
+                .is_some_and(|placement| {
+                    placement.buffers.iter().any(Option::is_some)
+                });
+            #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+            let has_dense_attention_placement = false;
+            // A linked boundary is only valid while every carried state is a
+            // graph value. Placed recurrent or dense-attention outputs live
+            // in caller-owned buffers, so keep the explicit router/gather
+            // boundary whenever either placement is active.
+            let fused_boundary_mode =
+                fused_boundary_requested && !has_ssm_placement && !has_dense_attention_placement;
+            if std::env::var_os("PROXIMA_DEBUG_QWEN35_FUSED").is_some() && layer < 3 {
+                eprintln!(
+                    "qwen35 fused boundary layer={} requested={} enabled={} has_segment={} ssm={} dense={}",
+                    layer,
+                    fused_boundary_requested,
+                    fused_boundary_mode,
+                    segments.gather_next_router.is_some(),
+                    has_ssm_placement,
+                    has_dense_attention_placement,
+                );
+            }
+            for phase_index in 0..2 {
+                let is_router = phase_index == 0;
+                if fused_boundary_mode && is_router && layer > 0 {
+                    continue;
+                }
+                let fused_gather = fused_boundary_mode
+                    && !is_router
+                    && layer + 1 < self.qwen35moe_layer_diagnostics.len();
+                let phase_layer = if fused_gather { layer + 1 } else { layer };
+                let diagnostic = self.qwen35moe_layer_diagnostics[phase_layer];
+                let (program, cuts, mapping, future_cuts, segment_output) = if fused_gather {
+                    let fused = segments.gather_next_router.as_ref().ok_or_else(|| {
+                        InteropError::PreGatherExecutionUnsupported {
+                            architecture: String::from("qwen35moe"),
+                            reason: String::from("fused boundary segment is absent"),
+                        }
+                    })?;
+                    (
+                        &fused.0,
+                        &fused.1,
+                        &fused.2,
+                        segments.router_future_cuts.as_slice(),
+                        diagnostic.router_logits,
+                    )
+                } else if is_router {
+                    (
+                        &router.0,
+                        &router.1,
+                        &router.2,
+                        segments.router_future_cuts.as_slice(),
+                        diagnostic.router_logits,
+                    )
+                } else {
+                    (
+                        &gather.0,
+                        &gather.1,
+                        &gather.2,
+                        next_cuts.as_slice(),
+                        diagnostic.block_output,
+                    )
+                };
                 if is_router && segments.gdn_scan.is_some() {
                     continue;
                 }
-                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                let (placement_scratch, placement_indices) =
-                    if !is_router {
-                        let segment_shapes = proxima_tensor::shape::infer(program, symbols)
-                            .map_err(|error| InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from("qwen35moe"),
-                                reason: alloc::format!("gather shape inference failed: {error}"),
-                            })?;
-                        let mut scratch = Vec::new();
-                        let mut indices = BTreeMap::new();
-                        for (node, name) in cuts {
-                            if !name.starts_with("__cut_")
-                                || !plan.router_cut_placements.contains_key(node)
-                            {
-                                continue;
-                            }
-                            let Some(mapped) = mapping.get(node) else {
-                                continue;
-                            };
-                            let count = segment_shapes
-                            .of(*mapped)
-                            .iter()
-                            .try_fold(1usize, |product, extent| {
-                                usize::try_from(*extent)
-                                    .ok()
-                                    .and_then(|extent| product.checked_mul(extent))
-                            })
-                            .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
-                                architecture: String::from("qwen35moe"),
-                                reason: alloc::format!(
-                                    "placed gather input {node:?} shape does not fit a placeholder"
-                                ),
-                            })?;
-                            indices.insert(*node, scratch.len());
-                            scratch.push(vec![0.0_f32; count]);
-                        }
-                        (scratch, indices)
-                    } else {
-                        (Vec::new(), BTreeMap::new())
-                    };
                 let mut segment_named: Vec<(&str, QuantizedBlock<'_>)> = named
                     .iter()
                     .copied()
@@ -2489,13 +3074,17 @@ impl<'file> LoadedModel<'file> {
                         continue;
                     }
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    if !is_router && plan.router_cut_placements.contains_key(node) {
-                        if let Some(index) = placement_indices.get(node) {
-                            segment_named.push((
-                                name.as_str(),
-                                QuantizedBlock::Float32(placement_scratch[*index].as_slice()),
-                            ));
+                    if plan.router_cut_placements.contains_key(node) {
+                        if !is_router && let Some((_, values)) = carried.get(node) {
+                            // gdn scan outputs are produced on the host before
+                            // the gather; bind those bytes instead of the
+                            // caller-owned placement.
+                            segment_named
+                                .push((name.as_str(), QuantizedBlock::Float32(values.as_slice())));
                         }
+                        // The placement-aware plan and resolver accept a
+                        // missing named block and bind its caller-owned
+                        // buffer directly. No host placeholder is needed.
                         continue;
                     }
                     let (_, values) = carried.get(node).ok_or_else(|| {
@@ -2506,7 +3095,111 @@ impl<'file> LoadedModel<'file> {
                             ),
                         }
                     })?;
+                    if std::env::var_os("PROXIMA_DEBUG_GDN_CARRY").is_some() {
+                        eprintln!(
+                            "gdn_gather_cut layer={} phase={} node={} name={} elements={} first4={:?}",
+                            layer,
+                            if is_router { "router" } else { "gather" },
+                            node.0,
+                            name,
+                            values.len(),
+                            values.iter().take(4).copied().collect::<Vec<_>>(),
+                        );
+                    }
                     segment_named.push((name.as_str(), QuantizedBlock::Float32(values)));
+                }
+
+                if layer == 3
+                    && is_router
+                    && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH").is_some()
+                    && let Some(Op::Reduce(reduce)) = self.program.get(
+                        self.qwen35moe_layer_diagnostics[layer]
+                            .dense_attention_taps
+                            .map_or(NodeId(u32::MAX), |taps| taps.q_split)
+                            .0 as usize,
+                    )
+                    && let Some(Op::Elementwise { operands, .. }) =
+                        self.program.get(reduce.operand.0 as usize)
+                    && let Some((q_product, _)) = operands.first()
+                    && let Some(mapped_product) = mapping.get(q_product)
+                {
+                    eprintln!(
+                        "dense_segment_qg_layout original_product={} mapped_product={} local_op={:?} original_operands={:?} local_operands={:?} named_q={:?}",
+                        q_product.0,
+                        mapped_product.0,
+                        program.get(mapped_product.0 as usize),
+                        operands,
+                        program
+                            .get(mapped_product.0 as usize)
+                            .and_then(|operation| match operation {
+                                Op::Elementwise { operands, .. } => Some(operands.as_slice()),
+                                _ => None,
+                            })
+                            .unwrap_or(&[]),
+                        segment_named
+                            .iter()
+                            .map(|(name, block)| (*name, core::mem::discriminant(block)))
+                            .filter(|(name, _)| name.contains("attn_q"))
+                            .collect::<Vec<_>>(),
+                    );
+                    if let Some(Op::Reduce(local_reduce)) = program.get(mapped_product.0 as usize) {
+                        eprintln!(
+                            "dense_segment_qg_reduce original_operand={} mapped_operand={} original_operand_op={:?} local_operand_op={:?}",
+                            self.program
+                                .get(q_product.0 as usize)
+                                .and_then(|operation| match operation {
+                                    Op::Reduce(reduce) => Some(reduce.operand.0),
+                                    _ => None,
+                                })
+                                .unwrap_or(u32::MAX),
+                            local_reduce.operand.0,
+                            self.program
+                                .get(q_product.0 as usize)
+                                .and_then(|operation| match operation {
+                                    Op::Reduce(reduce) =>
+                                        self.program.get(reduce.operand.0 as usize),
+                                    _ => None,
+                                }),
+                            program.get(local_reduce.operand.0 as usize),
+                        );
+                        eprintln!(
+                            "dense_segment_qg_inputs local_activation={:?} local_weight={:?}",
+                            program.get(39),
+                            program.get(16),
+                        );
+                        eprintln!(
+                            "dense_segment_qg_weight original={:?} local={:?}",
+                            self.program.get(1233),
+                            program.get(16),
+                        );
+                        for (index, operation) in program.iter().enumerate() {
+                            if let Op::Input { name, .. } = operation {
+                                eprintln!("dense_segment_qg_input_node node={index} name={name:?}");
+                            }
+                        }
+                    }
+                }
+
+                if std::env::var_os("PROXIMA_DEBUG_QWEN35_PLAN").is_some()
+                    && !is_router
+                    && layer == 0
+                    && let Some((route_node, route_name)) = cuts
+                        .iter()
+                        .find(|(node, _)| *node == diagnostic.router_logits)
+                    && let Some((route_shape, route_values)) = carried.get(route_node)
+                {
+                    eprintln!(
+                        "qwen35 gather route input original={route_node:?} name={route_name} shape={route_shape:?} first={:?} min={} max={} finite={}",
+                        route_values
+                            .get(..route_values.len().min(8))
+                            .unwrap_or_default(),
+                        route_values.iter().copied().fold(f32::INFINITY, f32::min),
+                        route_values
+                            .iter()
+                            .copied()
+                            .fold(f32::NEG_INFINITY, f32::max),
+                        route_values.iter().all(|value| value.is_finite()),
+                    );
                 }
 
                 let mut requested = BTreeMap::new();
@@ -2521,10 +3214,15 @@ impl<'file> LoadedModel<'file> {
                     .chain(future_gather_cuts.iter())
                     .chain(outputs)
                     .filter(|node| {
-                        !matches!(
-                            self.program[node.0 as usize],
-                            proxima_tensor::op::Op::Input { .. }
-                        )
+                        if outputs.contains(node) {
+                            return true;
+                        }
+                        mapping.get(node).is_some_and(|mapped| {
+                            !matches!(
+                                program.get(mapped.0 as usize),
+                                Some(proxima_tensor::op::Op::Input { .. })
+                            )
+                        })
                     })
                 {
                     if let Some(mapped) = mapping.get(&node).copied() {
@@ -2551,7 +3249,7 @@ impl<'file> LoadedModel<'file> {
                     &mut requested,
                     &plan.router_cut_placements,
                     placed_dense_roots,
-                    is_router,
+                    program,
                 );
                 let mut requested_nodes: Vec<NodeId> = requested.keys().copied().collect();
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -2570,12 +3268,45 @@ impl<'file> LoadedModel<'file> {
                         );
                     }
                     if let Some(mapped) = mapping.get(node).copied() {
-                        if is_router {
-                            segment_output_placements.push((mapped, buffer, 0));
-                        } else {
+                        if std::env::var_os("PROXIMA_DEBUG_QWEN35_PLACEMENTS").is_some()
+                            && layer == 39
+                            && *node == NodeId(15)
+                        {
+                            eprintln!(
+                                "qwen35 placement detail original={node:?} mapped={mapped:?} op={:?}",
+                                program.get(mapped.0 as usize),
+                            );
+                        }
+                        if matches!(program.get(mapped.0 as usize), Some(Op::Input { .. })) {
+                            if !is_router && carried.contains_key(node) {
+                                // A gdn scan produced this boundary on the
+                                // host. Let its carried block bind normally;
+                                // an input placement would override it with
+                                // the zero placeholder.
+                                continue;
+                            }
                             segment_input_placements.push((mapped, buffer, 0));
+                        } else {
+                            segment_output_placements.push((mapped, buffer, 0));
                         }
                     }
+                }
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                if std::env::var_os("PROXIMA_DEBUG_QWEN35_PLACEMENTS").is_some()
+                    && layer == 39
+                    && is_router
+                {
+                    eprintln!(
+                        "qwen35 placement bindings layer=39 inputs={:?} outputs={:?}",
+                        segment_input_placements
+                            .iter()
+                            .map(|(node, _, offset)| (*node, *offset))
+                            .collect::<Vec<_>>(),
+                        segment_output_placements
+                            .iter()
+                            .map(|(node, _, offset)| (*node, *offset))
+                            .collect::<Vec<_>>(),
+                    );
                 }
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 if is_router
@@ -2661,6 +3392,25 @@ impl<'file> LoadedModel<'file> {
                         requested_nodes.push(mapped_output);
                     }
                 }
+                if layer == 3
+                    && is_router
+                    && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH").is_some()
+                    && let Some(Op::Reduce(reduce)) = self.program.get(
+                        self.qwen35moe_layer_diagnostics[layer]
+                            .dense_attention_taps
+                            .map_or(NodeId(u32::MAX), |taps| taps.q_split)
+                            .0 as usize,
+                    )
+                    && let Some(Op::Elementwise { operands, .. }) =
+                        self.program.get(reduce.operand.0 as usize)
+                    && let Some((q_product, _)) = operands.first()
+                    && let Some(mapped) = mapping.get(q_product)
+                {
+                    requested_nodes.push(*mapped);
+                    for node in [NodeId(39), NodeId(16), NodeId(14), NodeId(15)] {
+                        requested_nodes.push(node);
+                    }
+                }
                 requested_nodes.sort_unstable_by_key(|node| node.0);
                 requested_nodes.dedup();
                 if std::env::var_os("PROXIMA_DEBUG_QWEN35_REQUESTS").is_some() {
@@ -2684,12 +3434,20 @@ impl<'file> LoadedModel<'file> {
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                     {
-                        let debug_node = NodeId(debug_node);
-                        requested_nodes.push(debug_node);
-                        if let Some(Op::Elementwise { operands, .. }) =
-                            program.get(debug_node.0 as usize)
-                        {
-                            requested_nodes.extend(operands.iter().map(|(node, _)| *node));
+                        let mut pending = vec![NodeId(debug_node)];
+                        let mut visited = BTreeSet::new();
+                        while let Some(debug_node) = pending.pop() {
+                            if !visited.insert(debug_node) {
+                                continue;
+                            }
+                            requested_nodes.push(debug_node);
+                            match program.get(debug_node.0 as usize) {
+                                Some(Op::Elementwise { operands, .. }) => {
+                                    pending.extend(operands.iter().map(|(node, _)| *node));
+                                }
+                                Some(Op::Reduce(reduce)) => pending.push(reduce.operand),
+                                _ => {}
+                            }
                         }
                     }
                     requested_nodes.sort_unstable_by_key(|node| node.0);
@@ -2698,7 +3456,7 @@ impl<'file> LoadedModel<'file> {
                 let debug_nonfinite = layer == debug_layer
                     && !is_router
                     && std::env::var_os("PROXIMA_DEBUG_EXPERT_GATHER_NONFINITE").is_some();
-                let evaluated = if is_router {
+                let evaluated = if is_router && !fused_gather {
                     let segment_started = std::time::Instant::now();
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     let result = if segment_input_placements.is_empty()
@@ -2739,8 +3497,8 @@ impl<'file> LoadedModel<'file> {
                         let empty_expert_sources = BTreeMap::new();
                         #[cfg(feature = "instrument")]
                         if routed_segment_profile_selected(layer, "router") {
-                            let (evaluated, timings) =
-                                runtime.evaluate_segment_op_timed_with_placements(
+                            let (evaluated, timings) = runtime
+                                .evaluate_segment_op_timed_with_placements(
                                     program,
                                     symbols,
                                     &segment_named,
@@ -2800,6 +3558,59 @@ impl<'file> LoadedModel<'file> {
                         );
                     }
                     let evaluated = result?;
+                    if layer == 3
+                        && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH").is_some()
+                        && let Some(Op::Reduce(reduce)) = self.program.get(
+                            self.qwen35moe_layer_diagnostics[layer]
+                                .dense_attention_taps
+                                .map_or(NodeId(u32::MAX), |taps| taps.q_split)
+                                .0 as usize,
+                        )
+                        && let Some(Op::Elementwise { operands, .. }) =
+                            self.program.get(reduce.operand.0 as usize)
+                        && let Some((q_product, _)) = operands.first()
+                        && let Some(mapped_product) = mapping.get(q_product)
+                    {
+                        let mut exact_scratch = Vec::new();
+                        let mut exact_validated = None;
+                        let exact = evaluate_quantized_named_exact_with_scratch_and_experts(
+                            program,
+                            symbols,
+                            &segment_named,
+                            &requested_nodes,
+                            &mut exact_scratch,
+                            &mut exact_validated,
+                            None,
+                        )?;
+                        eprintln!(
+                            "dense_segment_qg_compare mapped={} runtime={:?} exact={:?}",
+                            mapped_product.0,
+                            evaluated.get(*mapped_product).map(|(values, _)| values
+                                .iter()
+                                .take(4)
+                                .copied()
+                                .collect::<Vec<_>>()),
+                            exact.get(*mapped_product).map(|(values, _)| values
+                                .iter()
+                                .take(4)
+                                .copied()
+                                .collect::<Vec<_>>()),
+                        );
+                        for node in [NodeId(39), NodeId(16), NodeId(14), NodeId(15)] {
+                            eprintln!(
+                                "dense_segment_qg_local node={} runtime={:?} exact={:?}",
+                                node.0,
+                                evaluated.get(node).map(|(values, shape)| (
+                                    shape.to_vec(),
+                                    values.iter().take(4).copied().collect::<Vec<_>>(),
+                                )),
+                                exact.get(node).map(|(values, shape)| (
+                                    shape.to_vec(),
+                                    values.iter().take(4).copied().collect::<Vec<_>>(),
+                                )),
+                            );
+                        }
+                    }
                     if std::env::var_os("PROXIMA_DEBUG_EXPERT_ROUTER_PARITY").is_some()
                         && layer == debug_layer
                     {
@@ -2847,12 +3658,14 @@ impl<'file> LoadedModel<'file> {
                     {
                         #[cfg(feature = "instrument")]
                         let sidecar_read_started = read_ticks();
-                        sidecar.read_selected_with_checkpoint(
+                        sidecar.read_selected_with_checkpoint_admitting(
                             layer,
                             expert_slab.selected_experts(layer),
                             expert_slab,
                             &mut *sidecar_read_scratch,
                             Some(self.checkpoint_mapping),
+                            current_sources.borrow().as_slice(),
+                            qwen35moe_admit_low_copy,
                         )?;
                         if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
                             #[cfg(feature = "instrument")]
@@ -2876,18 +3689,31 @@ impl<'file> LoadedModel<'file> {
                     } else {
                         None
                     };
+                    #[cfg(feature = "metal")]
+                    let sidecar_mapping = self
+                        .expert_sidecar
+                        .as_ref()
+                        .map(crate::expert_sidecar::MappedExpertSidecar::mapping_bytes);
+                    #[cfg(not(feature = "metal"))]
+                    let sidecar_mapping = None;
                     let mut expert_entries_scratch = Vec::with_capacity(3);
                     let expert_sources = expert_slab.sources_for_layer_with_sidecar(
                         layer,
+                        sidecar_mapping,
                         selected_sidecar,
                         &mut expert_entries_scratch,
                     )?;
-                    let mapped_expert_sources = map_expert_sources_to_segment(
-                        layer,
-                        &self.program,
-                        program,
-                        &expert_sources,
-                    )?;
+                    let mapped_expert_sources =
+                        if std::env::var_os("PROXIMA_DEBUG_DISABLE_EXPERT_SOURCES").is_some() {
+                            BTreeMap::new()
+                        } else {
+                            map_expert_sources_to_segment(
+                                layer,
+                                &self.program,
+                                program,
+                                &expert_sources,
+                            )?
+                        };
                     if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
                         eprintln!(
                             "qwen35 mapped expert source nodes={:?}",
@@ -2988,6 +3814,46 @@ impl<'file> LoadedModel<'file> {
                         resident_names,
                         Some(&mapped_expert_sources),
                     );
+                    if layer == 3
+                        && is_router
+                        && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH").is_some()
+                        && let Some(Op::Reduce(reduce)) = self.program.get(
+                            self.qwen35moe_layer_diagnostics[layer]
+                                .dense_attention_taps
+                                .map_or(NodeId(u32::MAX), |taps| taps.q_split)
+                                .0 as usize,
+                        )
+                        && let Some(Op::Elementwise { operands, .. }) =
+                            self.program.get(reduce.operand.0 as usize)
+                        && let Some((q_product, _)) = operands.first()
+                        && let Some(mapped_product) = mapping.get(q_product)
+                    {
+                        let mut exact_scratch = Vec::new();
+                        let mut exact_validated = None;
+                        let exact = evaluate_quantized_named_exact_with_scratch_and_experts(
+                            program,
+                            symbols,
+                            &segment_named,
+                            &requested_nodes,
+                            &mut exact_scratch,
+                            &mut exact_validated,
+                            Some(&mapped_expert_sources),
+                        )?;
+                        eprintln!(
+                            "dense_segment_qg_compare mapped={} runtime={:?} exact={:?}",
+                            mapped_product.0,
+                            result.as_ref().ok().and_then(|values| {
+                                values.get(*mapped_product).map(|(values, _)| {
+                                    values.iter().take(4).copied().collect::<Vec<_>>()
+                                })
+                            }),
+                            exact.get(*mapped_product).map(|(values, _)| values
+                                .iter()
+                                .take(4)
+                                .copied()
+                                .collect::<Vec<_>>()),
+                        );
+                    }
                     if (layer == debug_layer
                         && std::env::var_os("PROXIMA_DEBUG_EXPERT_GATHER_PARITY").is_some())
                         || debug_nonfinite
@@ -3089,6 +3955,30 @@ impl<'file> LoadedModel<'file> {
                             );
                         }
                         if let Ok(actual) = &result {
+                            if std::env::var_os("PROXIMA_DEBUG_EXPERT_GATHER_DIGEST").is_some() {
+                                for node in &requested_nodes {
+                                    let Some((actual_values, actual_shape)) = actual.get(*node)
+                                    else {
+                                        continue;
+                                    };
+                                    let Some((expected_values, expected_shape)) =
+                                        expected.get(*node)
+                                    else {
+                                        continue;
+                                    };
+                                    let maximum = actual_values
+                                        .iter()
+                                        .zip(expected_values)
+                                        .map(|(actual, expected)| (actual - expected).abs())
+                                        .fold(0.0_f32, f32::max);
+                                    eprintln!(
+                                        "qwen35 gather digest layer={layer} node={node:?} name={:?} actual_shape={actual_shape:?} expected_shape={expected_shape:?} max_abs={maximum} actual_first={:?} expected_first={:?}",
+                                        program[node.0 as usize].name(),
+                                        actual_values.iter().take(4).copied().collect::<Vec<_>>(),
+                                        expected_values.iter().take(4).copied().collect::<Vec<_>>(),
+                                    );
+                                }
+                            }
                             if std::env::var_os("PROXIMA_DEBUG_EXPERT_GATHER_GRAPH").is_some() {
                                 let graph_root =
                                     std::env::var("PROXIMA_DEBUG_EXPERT_GATHER_GRAPH_NODE")
@@ -3186,6 +4076,33 @@ impl<'file> LoadedModel<'file> {
                     }
                     result?
                 };
+                if layer == 3
+                    && is_router
+                    && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH").is_some()
+                    && let Some(Op::Reduce(reduce)) = self.program.get(
+                        self.qwen35moe_layer_diagnostics[layer]
+                            .dense_attention_taps
+                            .map_or(NodeId(u32::MAX), |taps| taps.q_split)
+                            .0 as usize,
+                    )
+                    && let Some(Op::Elementwise { operands, .. }) =
+                        self.program.get(reduce.operand.0 as usize)
+                    && let Some((q_product, _)) = operands.first()
+                    && let Some(mapped) = mapping.get(q_product)
+                    && let Some((values, shape)) = evaluated.get(*mapped)
+                {
+                    eprintln!(
+                        "dense_segment_qg_product mode={} layer=3 phase=router node={} mapped={} shape={shape:?} first4={:?}",
+                        if position_offset > 0 {
+                            "cached"
+                        } else {
+                            "scan"
+                        },
+                        q_product.0,
+                        mapped.0,
+                        values.iter().take(4).copied().collect::<Vec<_>>(),
+                    );
+                }
                 #[cfg(feature = "instrument")]
                 {
                     segment_execution_count += 1;
@@ -3232,7 +4149,7 @@ impl<'file> LoadedModel<'file> {
                         );
                     }
                 }
-                if is_router {
+                if is_router || fused_gather {
                     let mapped_router = mapping.get(&diagnostic.router_logits).copied().ok_or(
                         InteropError::MissingEvaluatedNode {
                             node: diagnostic.router_logits,
@@ -3245,7 +4162,7 @@ impl<'file> LoadedModel<'file> {
                                 node: diagnostic.router_logits,
                             })?;
                     visit_qwen35moe_router_boundary(
-                        layer,
+                        phase_layer,
                         position_offset,
                         router_logits,
                         router_shape,
@@ -3270,12 +4187,16 @@ impl<'file> LoadedModel<'file> {
                     }
                     let (values, shape) = evaluated.get(mapped).ok_or_else(|| {
                         if std::env::var_os("PROXIMA_DEBUG_QWEN35_MISSING_NODE").is_some() {
+                            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                            let placed = plan.router_cut_placements.contains_key(&original);
+                            #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+                            let placed = false;
                             eprintln!(
                                 "qwen35 missing evaluated node phase={} original={:?} mapped={:?} placed={} op={:?}",
                                 if is_router { "router" } else { "gather" },
                                 original,
                                 mapped,
-                                plan.router_cut_placements.contains_key(&original),
+                                placed,
                                 self.program.get(original.0 as usize),
                             );
                         }
@@ -3319,12 +4240,16 @@ impl<'file> LoadedModel<'file> {
                         let row_length = values.len() / rows;
                         let row_start = local_position * row_length;
                         eprintln!(
-                            "qwen35 block_output layer={} position={} node={:?} shape={:?} row={:?}",
+                            "qwen35 block_output layer={} position={} node={:?} shape={:?} first4={:?}",
                             layer,
                             selected_position,
                             segment_output,
                             shape,
-                            &values[row_start..row_start + row_length],
+                            values[row_start..row_start + row_length]
+                                .iter()
+                                .take(4)
+                                .copied()
+                                .collect::<Vec<_>>(),
                         );
                     }
                     if !is_router && values.iter().any(|value| !value.is_finite()) {
@@ -3411,10 +4336,10 @@ impl<'file> LoadedModel<'file> {
             // preceding layer's gather rather than by its router. Retain
             // every such cut until its consumer layer instead of assuming
             // the next router cut list is complete.
-            let future_gather_cuts = plan.layers[layer + 1..]
-                .iter()
-                .flat_map(|segments| segments.gather.1.iter().map(|(node, _)| *node));
-            let keep: BTreeSet<NodeId> = keep.into_iter().chain(future_gather_cuts).collect();
+            let keep: BTreeSet<NodeId> = keep
+                .into_iter()
+                .chain(segments.future_gather_cuts.iter().copied())
+                .collect();
             // Keep only the handful of graph inputs that every layer may
             // reference, plus the explicit next-segment cuts. Expert stack
             // inputs are excluded above and can never enter this carry set.
@@ -3426,11 +4351,15 @@ impl<'file> LoadedModel<'file> {
                         proxima_tensor::op::Op::Constant { .. }
                     )
             });
+            layer += 1;
         }
 
         let (suffix_program, suffix_cuts, suffix_mapping) = &plan.suffix;
         let mut requested = BTreeMap::new();
         for &node in outputs {
+            if results.contains_key(&node) || placed_results.contains(&node) {
+                continue;
+            }
             if let Some(mapped) = suffix_mapping.get(&node).copied() {
                 requested.insert(mapped, node);
             }
@@ -3562,6 +4491,57 @@ impl<'file> LoadedModel<'file> {
     #[must_use]
     pub fn checkpoint_bytes(&self) -> usize {
         self.checkpoint_bytes
+    }
+
+    /// One post-layer residual root per dense layer
+    /// (`crate::architecture::BoundProgram::residual_roots`'s own doc) --
+    /// empty on the qwen35 hybrid path, which exposes no single per-layer
+    /// residual node. `examples/compare_local.rs`/`examples/embed_local.rs`
+    /// walk this to compare CPU/GPU at the first divergent layer instead of
+    /// guessing [`NodeId`] arithmetic.
+    #[must_use]
+    pub fn layer_residual_roots(&self) -> &[NodeId] {
+        &self.residual_roots
+    }
+
+    /// Every [`NodeId`] the program needs to evaluate `through`, inclusive.
+    /// `self.program` is a flat, topologically-ordered slice (`op::append`'s
+    /// own doc: "the last element is the root", by construction backwards-
+    /// only), so the prefix `0..=through.0` is exactly that set -- no graph
+    /// walk required.
+    #[must_use]
+    pub fn computed_node_ids_through(&self, through: NodeId) -> Vec<NodeId> {
+        (0..=through.0).map(NodeId).collect()
+    }
+
+    /// This node's op kind (`Op::kind`), for diagnostics that print a
+    /// divergent node without matching on the whole [`Op`] enum.
+    #[must_use]
+    pub fn node_kind(&self, node: NodeId) -> &'static str {
+        self.program[node.0 as usize].kind()
+    }
+
+    /// This node's identity name (`Op::name`), when the underlying op
+    /// carries one -- `None` for a computed leaf (`Op::Iota`/`Op::Constant`)
+    /// or an unnamed intermediate.
+    #[must_use]
+    pub fn node_name(&self, node: NodeId) -> Option<&str> {
+        self.program[node.0 as usize].name()
+    }
+
+    /// A full `Debug` rendering of this node's op, for a diagnostic that
+    /// needs more than [`Self::node_kind`]/[`Self::node_name`] to identify
+    /// which computation produced a divergent value.
+    #[must_use]
+    pub fn node_description(&self, node: NodeId) -> String {
+        alloc::format!("{:?}", self.program[node.0 as usize])
+    }
+
+    /// This node's operand [`NodeId`]s (`Op::dependencies`), in the order
+    /// the op itself addresses them.
+    #[must_use]
+    pub fn node_dependencies(&self, node: NodeId) -> Vec<NodeId> {
+        self.program[node.0 as usize].dependencies()
     }
 
     /// Binds every weight the cached forward program needs out of
@@ -3751,6 +4731,7 @@ impl<'file> LoadedModel<'file> {
                 logits_root: bound.logits_root,
                 hidden_root: bound.hidden_root,
                 layer_roots: bound.layer_roots,
+                residual_roots: bound.residual_roots,
                 qwen35moe_layer_diagnostics: bound.qwen35moe_layer_diagnostics,
                 router_roots: bound.router_roots,
                 moe_sites: bound.moe_sites,
@@ -3788,7 +4769,7 @@ impl<'file> LoadedModel<'file> {
         // always compiled for a checkpoint that carries no
         // `attn_q_norm.weight` tensor.
         let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
-        let (program, forward_roots, cache_roots, _layer_residuals, moe_sites) =
+        let (program, forward_roots, cache_roots, layer_residuals, moe_sites) =
             mistral_cached_forward_program_with_experts_and_layer_taps(
                 architecture.vocab,
                 architecture.embedding,
@@ -3865,6 +4846,7 @@ impl<'file> LoadedModel<'file> {
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
                 .collect(),
+            residual_roots: layer_residuals,
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites,
@@ -3916,7 +4898,7 @@ impl<'file> LoadedModel<'file> {
         // `attn_q_norm.weight`, and no HF/safetensors checkpoint this crate
         // binds today needs QK-norm -- see [`Self::load`]'s own `qk_norm` for
         // the GGUF path that does.
-        let (program, forward_roots, cache_roots, _layer_residuals, moe_sites) =
+        let (program, forward_roots, cache_roots, layer_residuals, moe_sites) =
             mistral_cached_forward_program_with_experts_and_layer_taps(
                 architecture.vocab,
                 architecture.embedding,
@@ -3964,6 +4946,7 @@ impl<'file> LoadedModel<'file> {
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
                 .collect(),
+            residual_roots: layer_residuals,
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites,
@@ -5356,12 +6339,18 @@ impl BackendRuntime {
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 {
                     set_math_mode(&mut plan, self.math_mode)?;
-                    set_dispatch_type(&mut plan, omega::metal::DispatchType::Serial);
+                    set_dispatch_type(&mut plan, self.dispatch_type);
                 }
                 Ok(plan)
             },
         )?;
         let resolve_elapsed_us = resolve_started.elapsed().as_micros();
+        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+        let device_before = if host_timing {
+            omega::metal::current_allocated_size().unwrap_or_default()
+        } else {
+            0
+        };
         let execute_started = std::time::Instant::now();
         let result = execute_plan_named_with_expert_sources(plan, named, expert_sources)
             .map_err(InteropError::from);
@@ -5377,7 +6366,7 @@ impl BackendRuntime {
             {
                 let stage = metal_stage_totals();
                 eprintln!(
-                    "qwen35 segment metal prepare_ms={:.3} emit_ms={:.3} pipeline_lookup_ms={:.3} op_setup_ms={:.3} gpu_exec_ms={:.3} encode_dispatch_ms={:.3} readback_ms={:.3} block_upload_ms={:.3}",
+                    "qwen35 segment metal prepare_ms={:.3} emit_ms={:.3} pipeline_lookup_ms={:.3} op_setup_ms={:.3} gpu_exec_ms={:.3} encode_dispatch_ms={:.3} readback_ms={:.3} block_upload_ms={:.3} device_before={} device_after={} device_delta={}",
                     ticks_to_nanos(stage.prepare_ticks) as f64 / 1_000_000.0,
                     ticks_to_nanos(stage.emit_ticks) as f64 / 1_000_000.0,
                     ticks_to_nanos(stage.pipeline_lookup_ticks) as f64 / 1_000_000.0,
@@ -5386,6 +6375,11 @@ impl BackendRuntime {
                     ticks_to_nanos(stage.encode_dispatch_ticks) as f64 / 1_000_000.0,
                     ticks_to_nanos(stage.readback_ticks) as f64 / 1_000_000.0,
                     ticks_to_nanos(stage.block_upload_ticks) as f64 / 1_000_000.0,
+                    device_before,
+                    omega::metal::current_allocated_size().unwrap_or_default(),
+                    omega::metal::current_allocated_size()
+                        .unwrap_or_default()
+                        .saturating_sub(device_before),
                 );
             }
         }
@@ -5471,10 +6465,33 @@ impl BackendRuntime {
                 Ok(plan)
             },
         )?;
+        let cpu_reference = std::env::var("PROXIMA_METAL_COMPARE_BOUND_NODE")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .map(NodeId)
+            .and_then(|selected| {
+                let mut scratch = Vec::new();
+                let mut validated = None;
+                let expected = evaluate_quantized_named_exact_with_scratch_and_experts(
+                    program,
+                    symbols,
+                    named,
+                    &profile_outputs,
+                    &mut scratch,
+                    &mut validated,
+                    Some(expert_sources),
+                )
+                .ok()?;
+                let (values, _) = expected.get(selected)?;
+                let mut reference = BTreeMap::new();
+                reference.insert(selected, values.to_vec());
+                Some(reference)
+            });
         Ok(execute_plan_named_metal_op_timed_with_expert_sources(
             plan,
             named,
             expert_sources,
+            cpu_reference.as_ref(),
         )?)
     }
 
@@ -5494,14 +6511,24 @@ impl BackendRuntime {
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
-            dispatch_type: omega::metal::DispatchType::Serial,
+            dispatch_type: self.dispatch_type,
         };
         let plan = Self::resolve_segment_plan(
             &mut self.placed_segment_plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
             (program_key, new_count, kv_bound_extent, outputs.to_vec()),
-            || Self::build_placed_plan(program, symbols, named, outputs, resident_names, &numerics),
+            || {
+                Self::build_placed_plan(
+                    program,
+                    symbols,
+                    named,
+                    outputs,
+                    resident_names,
+                    bindings.input_placements,
+                    &numerics,
+                )
+            },
         )?;
         Ok(execute_plan_named_with_placements_and_expert_sources(
             plan,
@@ -5539,7 +6566,17 @@ impl BackendRuntime {
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
-            || Self::build_placed_plan(program, symbols, named, outputs, resident_names, &numerics),
+            || {
+                Self::build_placed_plan(
+                    program,
+                    symbols,
+                    named,
+                    outputs,
+                    resident_names,
+                    input_placements,
+                    &numerics,
+                )
+            },
         )?;
         Ok(execute_plan_named_with_placements_op_timed(
             plan,
@@ -5587,7 +6624,17 @@ impl BackendRuntime {
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
-            || Self::build_placed_plan(program, symbols, named, outputs, resident_names, &numerics),
+            || {
+                Self::build_placed_plan(
+                    program,
+                    symbols,
+                    named,
+                    outputs,
+                    resident_names,
+                    input_placements,
+                    &numerics,
+                )
+            },
         )?;
         if let Some(expert_sources) = expert_sources {
             Ok(execute_plan_named_with_placements_and_expert_sources(
@@ -5640,10 +6687,19 @@ impl BackendRuntime {
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
+        input_placements: &[(NodeId, &PlacedBuffer, usize)],
         numerics: &PlanNumerics,
     ) -> Result<omega::metal::Plan, InteropError> {
-        let mut plan =
-            plan_named_placed(program, symbols, named, outputs, numerics.numeric_policy)?;
+        let placed_input_nodes: Vec<NodeId> =
+            input_placements.iter().map(|(node, _, _)| *node).collect();
+        let mut plan = plan_named_with_placed_inputs(
+            program,
+            symbols,
+            named,
+            outputs,
+            numerics.numeric_policy,
+            &placed_input_nodes,
+        )?;
         plan.mark_resident(resident_names);
         plan.set_math_mode(numerics.math_mode)?;
         plan.set_dispatch_type(numerics.dispatch_type);
@@ -5688,7 +6744,17 @@ impl BackendRuntime {
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
-            || Self::build_placed_plan(program, symbols, named, outputs, resident_names, &numerics),
+            || {
+                Self::build_placed_plan(
+                    program,
+                    symbols,
+                    named,
+                    outputs,
+                    resident_names,
+                    input_placements,
+                    &numerics,
+                )
+            },
         )?;
         Ok(execute_plan_named_with_placements_op_timed(
             plan,
@@ -5748,7 +6814,17 @@ impl BackendRuntime {
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
-            || Self::build_placed_plan(program, symbols, named, outputs, resident_names, &numerics),
+            || {
+                Self::build_placed_plan(
+                    program,
+                    symbols,
+                    named,
+                    outputs,
+                    resident_names,
+                    input_placements,
+                    &numerics,
+                )
+            },
         )?;
         // Applied AFTER the cache lookup, not inside the build closure above:
         // this shape's `Plan` is just as likely to have been inserted by
@@ -5861,6 +6937,33 @@ impl BackendRuntime {
         self.plans.len()
     }
 
+    /// Retained output-slot bytes across the plan caches. Peak liveness is
+    /// smaller than this when slots are reused within one plan; this census
+    /// answers why a device allocation remains high after a step completes.
+    #[cfg(feature = "instrument")]
+    pub(crate) fn arena_allocated_bytes(&self) -> (usize, usize, usize) {
+        let ordinary = self
+            .plans
+            .values()
+            .map(omega::backend::plan_arena_allocated_bytes)
+            .sum();
+        let segments = self
+            .segment_plans
+            .values()
+            .map(omega::backend::plan_arena_allocated_bytes)
+            .sum();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let placed = self
+            .placed_plans
+            .values()
+            .chain(self.placed_segment_plans.values())
+            .map(|plan| plan.arena_allocated_bytes().unwrap_or_default())
+            .sum();
+        #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+        let placed = 0;
+        (ordinary, segments, placed)
+    }
+
     /// [`Self::plans_len`]'s placed-KV counterpart -- [`Self::plans`] and
     /// [`Self::placed_plans`] are two SEPARATE maps
     /// ([`Self::evaluate_with_placements`] never touches [`Self::plans`] at
@@ -5934,7 +7037,32 @@ impl BackendRuntime {
         resident_names: &BTreeSet<&str>,
         expert_sources: &BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
-        let shape = (symbols[0] as usize, symbols[1] as usize, outputs.to_vec());
+        let exact_activations = self.exact_activations;
+        let mut profile_outputs = outputs.to_vec();
+        for selected in [
+            "PROXIMA_METAL_COMPARE_BOUND_NODE",
+            "PROXIMA_METAL_MATERIALIZE_BOUND_NODE",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .map(NodeId)
+        }) {
+            if program
+                .get(selected.0 as usize)
+                .is_some_and(|operation| !matches!(operation, Op::Input { .. }))
+                && !profile_outputs.contains(&selected)
+            {
+                profile_outputs.push(selected);
+            }
+        }
+        let shape = (
+            symbols[0] as usize,
+            symbols[1] as usize,
+            profile_outputs.clone(),
+        );
         let plan = Self::resolve_cached_plan(
             &mut self.plans,
             &mut self.plan_hits,
@@ -5947,7 +7075,7 @@ impl BackendRuntime {
                     program,
                     symbols,
                     named,
-                    outputs,
+                    &profile_outputs,
                     self.numeric_policy,
                 )?;
                 mark_resident(&mut plan, resident_names);
@@ -5956,10 +7084,45 @@ impl BackendRuntime {
                 Ok(plan)
             },
         )?;
+        let cpu_reference = std::env::var("PROXIMA_METAL_COMPARE_BOUND_NODE")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .map(NodeId)
+            .and_then(|selected| {
+                let mut scratch = Vec::new();
+                let mut validated = None;
+                let expected = if exact_activations {
+                    evaluate_quantized_named_exact_with_scratch_and_experts(
+                        program,
+                        symbols,
+                        named,
+                        &profile_outputs,
+                        &mut scratch,
+                        &mut validated,
+                        Some(expert_sources),
+                    )
+                } else {
+                    evaluate_quantized_named_with_scratch_and_experts(
+                        program,
+                        symbols,
+                        named,
+                        &profile_outputs,
+                        &mut scratch,
+                        &mut validated,
+                        Some(expert_sources),
+                    )
+                }
+                .ok()?;
+                let (values, _) = expected.get(selected)?;
+                let mut reference = BTreeMap::new();
+                reference.insert(selected, values.to_vec());
+                Some(reference)
+            });
         Ok(execute_plan_named_metal_op_timed_with_expert_sources(
             plan,
             named,
             expert_sources,
+            cpu_reference.as_ref(),
         )?)
     }
 }
@@ -6360,6 +7523,46 @@ fn wants_bos(vocab: &Vocab) -> bool {
 /// source-snapshot guard cannot remain closed after a failed evaluation.
 struct EndStepOnDrop<'a, 'file> {
     slab: &'a std::sync::Mutex<crate::expert_slab::ExpertSlab<'file>>,
+}
+
+struct CurrentExpertSources {
+    decisions: [crate::residency::ServeDecision; 16],
+    len: usize,
+}
+
+impl CurrentExpertSources {
+    fn new() -> Self {
+        Self {
+            decisions: [crate::residency::ServeDecision {
+                address: crate::residency::ExpertAddress {
+                    layer: 0,
+                    expert: 0,
+                },
+                precision: crate::residency::ServePrecision::Low,
+            }; 16],
+            len: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn push(&mut self, decision: crate::residency::ServeDecision) -> Result<(), InteropError> {
+        let Some(slot) = self.decisions.get_mut(self.len) else {
+            return Err(InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: String::from("router decision count exceeded the fixed staging bound"),
+            });
+        };
+        *slot = decision;
+        self.len += 1;
+        Ok(())
+    }
+
+    fn as_slice(&self) -> &[crate::residency::ServeDecision] {
+        &self.decisions[..self.len]
+    }
 }
 
 impl Drop for EndStepOnDrop<'_, '_> {
@@ -6988,8 +8191,8 @@ impl<'file> LoadedModel<'file> {
         // reflected by actual device buffers.
         #[cfg(feature = "metal")]
         {
+            sidecar.discard_checkpoint_expert_pages(self.checkpoint_mapping)?;
             omega::backend::unregister_checkpoint_mapping(self.checkpoint_mapping);
-            register_expert_mapping(sidecar.mapping_bytes());
         }
         self.expert_sidecar = Some(sidecar);
         Ok(())
@@ -7057,6 +8260,19 @@ impl<'file> LoadedModel<'file> {
         policy.apply_actions_at_boundary(&mut slab, actions, |slab, action| {
             sidecar.apply_action(slab, self.checkpoint_mapping, action)
         })
+    }
+
+    fn reconcile_attached_qwen35moe_residency(
+        &self,
+        policy: &mut crate::residency::ExpertResidency<40, 256>,
+    ) -> Result<(), InteropError> {
+        let actions = policy.reconcile::<{ 40 * 256 * 2 }>().map_err(|error| {
+            InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: error.to_string(),
+            }
+        })?;
+        self.apply_attached_expert_residency(policy, &actions)
     }
 
     /// Runs the explicit router -> residency -> gather protocol for a
@@ -7451,7 +8667,9 @@ impl<'file> LoadedModel<'file> {
         serving_config: ServingConfig,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        let serving_config = serving_config;
         let mut runtime = BackendRuntime::new(&serving_config);
+        #[cfg(feature = "metal")]
         if std::env::var_os("PROXIMA_WARMUP_BEFORE_GENERATE").is_some() {
             let mut warmup_callback = |_event: TokenEvent<'_>| Control::Continue;
             runtime.retain_monolithic_prefill_sources = true;
@@ -7667,6 +8885,34 @@ impl<'file> LoadedModel<'file> {
         // [`Self::forward_node_values_on_backend`] calls, so a foreign
         // architecture's cache leaf names are never hard-coded twice.
         let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
+        #[cfg(feature = "metal")]
+        let qwen35_pre_gather_requested = qwen35moe_pre_gather_enabled(
+            serving_config.qwen35moe_pre_gather,
+            self.architecture_impl
+                .map(|architecture| architecture.name()),
+        );
+        #[cfg(feature = "metal")]
+        let monolithic_high_mmap_requested = qwen35_pre_gather_requested
+            && runtime.uses_gpu()
+            && serving_config.qwen35moe_monolithic_high_mmap;
+        #[cfg(not(feature = "metal"))]
+        let monolithic_high_mmap_requested = false;
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        let monolithic_all_low_requested = qwen35moe_monolithic_all_low_enabled(
+            qwen35_pre_gather_requested,
+            runtime.uses_gpu(),
+            serving_config.qwen35moe_monolithic_all_low,
+            0,
+        );
+        #[cfg(feature = "metal")]
+        if qwen35_pre_gather_requested && !monolithic_high_mmap_requested {
+            // A whole-checkpoint MTLBuffer makes mmap look cheap while still
+            // charging every expert byte to Metal's working set.  Routed
+            // execution supplies only selected experts through the typed
+            // source table, so dense tensors must use bounded per-tensor
+            // buffers instead of retaining the 24 GB checkpoint mapping.
+            omega::backend::unregister_checkpoint_mapping(self.checkpoint_mapping);
+        }
         let mut layer_caches: Vec<LayerCacheState> = match seed {
             Some(state) => state.layer_caches,
             None => self.fresh_layer_caches(&cache_names, &layer_row_widths),
@@ -7693,17 +8939,18 @@ impl<'file> LoadedModel<'file> {
             .collect();
 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let dense_attention_placement_enabled = qwen35_dense_attention_placement_enabled(
-            qwen35moe_pre_gather_enabled(
-                serving_config.qwen35moe_pre_gather,
-                self.architecture_impl
-                    .map(|architecture| architecture.name()),
-            ),
-            runtime.is_metal(),
-            force_two_range,
-            seed_cached_len,
-            std::env::var_os("PROXIMA_METAL_DENSE_ATTENTION_PLACEMENT").is_some(),
-        );
+        let dense_attention_placement_enabled = !monolithic_all_low_requested
+            && qwen35_dense_attention_placement_enabled(
+                qwen35moe_pre_gather_enabled(
+                    serving_config.qwen35moe_pre_gather,
+                    self.architecture_impl
+                        .map(|architecture| architecture.name()),
+                ),
+                runtime.is_metal(),
+                force_two_range,
+                seed_cached_len,
+                true,
+            );
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let dense_attention_input_nodes: Vec<Option<(NodeId, NodeId, NodeId, NodeId)>> =
             cache_names
@@ -7784,10 +9031,7 @@ impl<'file> LoadedModel<'file> {
         // The fixed matrix keeps policy state bounded and is enabled only
         // when the model owns a low-codec sidecar and the caller supplies a
         // high-precision residency budget.
-        let residency_budget = std::env::var("PROXIMA_QWEN35MOE_RESIDENCY_BUDGET_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(0);
+        let residency_budget = serving_config.qwen35moe_residency_budget_bytes;
         let mut qwen35moe_residency = if self
             .architecture_impl
             .is_some_and(|architecture| architecture.name() == "qwen35moe")
@@ -7809,14 +9053,11 @@ impl<'file> LoadedModel<'file> {
         };
 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let ssm_placement_enabled = runtime.is_metal()
-            && std::env::var("PROXIMA_METAL_SSM_PLACEMENT")
-                .ok()
-                .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let ssm_placement_enabled = !monolithic_all_low_requested
+            && qwen35_pre_gather_requested
+            && runtime.is_metal();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let ssm_placement_max_layer = std::env::var("PROXIMA_METAL_SSM_PLACEMENT_MAX_LAYER")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok());
+        let ssm_placement_max_layer = None;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let ssm_state_input_nodes: Vec<Option<NodeId>> = cache_names
             .iter()
@@ -7890,17 +9131,38 @@ impl<'file> LoadedModel<'file> {
             .collect();
         let mut gdn_prefill_zero_scratch: Vec<f32> = Vec::new();
         let mut qwen35moe_pre_gather_plan: Option<Qwen35MoePreGatherPlan> = None;
+        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        let mut qwen35moe_route_history =
+            vec![Qwen35MoeRouteHistory::default(); self.architecture.block_count as usize];
+        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        let qwen35moe_expert_prefetch_enabled =
+            qwen35moe_expert_prefetch_requested(serving_config.qwen35moe_expert_prefetch);
+        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        let mut qwen35moe_prefetch_prediction_count = 0usize;
+        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        let mut qwen35moe_prefetch_hit_count = 0usize;
+        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        let mut qwen35moe_prefetch_overfetch_count = 0usize;
+        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        let mut qwen35moe_prefetch_advice_events = 0usize;
+        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        let mut qwen35moe_prefetch_advised_bytes = 0u64;
+        let mapped_window_capacity = self.expert_sidecar.as_ref().map_or([0; 3], |sidecar| {
+            sidecar.mapped_window_capacity(self.architecture.expert_used_count as usize)
+        });
         let mut sidecar_read_scratch =
-            crate::expert_sidecar::ExpertSidecarReadScratch::with_high_cache_limit(
+            crate::expert_sidecar::ExpertSidecarReadScratch::with_high_cache_limit_and_window_capacity(
                 usize::try_from(residency_budget).unwrap_or(0),
-            );
-        let gdn_prefill_scan_requested = serving_config.qwen35moe_pre_gather
-            && self
-                .architecture_impl
-                .is_some_and(|architecture| architecture.name() == "qwen35moe")
-            && std::env::var_os("PROXIMA_QWEN35MOE_GDN_PREFILL_SCAN").is_some();
+                mapped_window_capacity,
+            )?;
+        let gdn_prefill_scan_requested = qwen35moe_gdn_prefill_scan_requested(
+            serving_config.qwen35moe_gdn_prefill_scan,
+            serving_config.qwen35moe_pre_gather,
+            self.architecture_impl
+                .map(|architecture| architecture.name()),
+        );
         let gdn_prefill_scan_enabled =
-            gdn_prefill_scan_requested && std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some();
+            gdn_prefill_scan_requested && serving_config.debug_gdn_compare;
         if gdn_prefill_scan_requested && !gdn_prefill_scan_enabled {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from("qwen35moe"),
@@ -7910,7 +9172,7 @@ impl<'file> LoadedModel<'file> {
             });
         }
 
-        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
+        let decode_result = decode_until_stop_or_budget(
             &self.vocab,
             max_tokens,
             prompt_token_count,
@@ -8080,7 +9342,16 @@ impl<'file> LoadedModel<'file> {
                         &mut named_blocks,
                         self.single_position_step && !(gdn_prefill_scan_enabled && new_count > 1),
                     )?;
-                    if gdn_prefill_scan_enabled && new_count == 1 {
+                    if self.program.iter().any(|operation| {
+                        operation.name().is_some_and(|name| {
+                            gdn_prefill_names.iter().any(|candidate| candidate == name)
+                        })
+                    }) {
+                        // The ordinary recurrent graph still owns a delta_out
+                        // input.  It is the zero external residual when the
+                        // host scan is not selected; leaving the leaf absent
+                        // makes the proven single-position path fail before
+                        // it can execute.
                         let shapes = proxima_tensor::shape::infer(&self.program, &symbols)
                             .map_err(|error| InteropError::PreGatherExecutionUnsupported {
                                 architecture: String::from("qwen35moe"),
@@ -8130,7 +9401,7 @@ impl<'file> LoadedModel<'file> {
                             .map(|architecture| architecture.name()),
                     ) && runtime.uses_gpu()
                         && _step == 0
-                        && std::env::var_os("PROXIMA_QWEN35MOE_MONOLITHIC_ALL_LOW").is_some();
+                        && serving_config.qwen35moe_monolithic_all_low;
                     if step_batch_needs_logits(split_prefill, is_last_step_batch) {
                         roots.push(self.logits_root);
                     }
@@ -8221,6 +9492,89 @@ impl<'file> LoadedModel<'file> {
                             diagnostic.router_logits,
                         ]);
                     }
+                    if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_DIGEST").is_some() {
+                        for diagnostic in &self.qwen35moe_layer_diagnostics {
+                            if diagnostic.gdn_prefill.is_some() {
+                                roots.push(diagnostic.post_mixer_residual);
+                                roots.push(diagnostic.router_logits);
+                            }
+                        }
+                    }
+                    if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_BLOCKS").is_some() {
+                        roots.extend(
+                            self.qwen35moe_layer_diagnostics
+                                .iter()
+                                .map(|diagnostic| diagnostic.block_output),
+                        );
+                    }
+                    if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() {
+                        for (layer, diagnostic) in
+                            self.qwen35moe_layer_diagnostics.iter().enumerate()
+                        {
+                            if let Some(taps) = diagnostic.dense_attention_taps {
+                                if let Some(operation) = self.program.get(taps.q_split.0 as usize) {
+                                    eprintln!(
+                                        "dense_nodes layer={} normed={} q_split={} q_op={operation:?}",
+                                        layer, taps.normed.0, taps.q_split.0,
+                                    );
+                                    if let proxima_tensor::Op::Reduce(reduce) = operation
+                                        && let Some(product) =
+                                            self.program.get(reduce.operand.0 as usize)
+                                    {
+                                        eprintln!(
+                                            "dense_nodes_q_product layer={} node={} op={product:?}",
+                                            layer, reduce.operand.0,
+                                        );
+                                        if layer == 3
+                                            && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH")
+                                                .is_some()
+                                            && let Some(Op::Elementwise { operands, .. }) =
+                                                self.program.get(reduce.operand.0 as usize)
+                                            && let Some((q_product, _)) = operands.first()
+                                        {
+                                            roots.push(*q_product);
+                                            if let Some(Op::Reduce(qg_reduce)) =
+                                                self.program.get(q_product.0 as usize)
+                                            {
+                                                roots.push(qg_reduce.operand);
+                                                if let Some(Op::Elementwise { operands, .. }) =
+                                                    self.program.get(qg_reduce.operand.0 as usize)
+                                                {
+                                                    for (operand, _) in operands {
+                                                        roots.push(*operand);
+                                                        if let Some(Op::Elementwise {
+                                                            operands: weight_operands,
+                                                            ..
+                                                        }) = self.program.get(operand.0 as usize)
+                                                        {
+                                                            roots.extend(
+                                                                weight_operands
+                                                                    .iter()
+                                                                    .map(|(node, _)| *node),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                roots.extend([
+                                    diagnostic.block_input,
+                                    taps.normed,
+                                    taps.q_split,
+                                    taps.k_normed,
+                                    taps.v_new,
+                                    taps.score_new,
+                                    taps.attended,
+                                    taps.gated_attended,
+                                    taps.o_proj_out,
+                                ]);
+                            }
+                        }
+                    }
+                    roots.sort_unstable_by_key(|node| node.0);
+                    roots.dedup();
                     // Only requested when a routing observer is actually
                     // registered (`instrument::expert_observer`'s own doc): the
                     // CPU evaluator keeps every requested output's full lifetime
@@ -8323,17 +9677,17 @@ impl<'file> LoadedModel<'file> {
                         serving_config.qwen35moe_pre_gather,
                         self.architecture_impl
                             .map(|architecture| architecture.name()),
-                    );
+                    ) && !monolithic_high_mmap_requested;
                     #[cfg(feature = "metal")]
                     let monolithic_all_low = qwen35moe_monolithic_all_low_enabled(
                         pre_gather,
                         runtime.uses_gpu(),
-                        std::env::var_os("PROXIMA_QWEN35MOE_MONOLITHIC_ALL_LOW").is_some(),
+                        serving_config.qwen35moe_monolithic_all_low,
                         _step,
                     );
                     #[cfg(not(feature = "metal"))]
                     let monolithic_all_low = false;
-                    let gdn_prefill_scan = pre_gather && gdn_prefill_scan_enabled && new_count > 1;
+                    let gdn_prefill_scan = pre_gather && gdn_prefill_scan_enabled;
                     if pre_gather {
                         expert_slab_guard.clear_selected_experts_for_step();
                     }
@@ -8353,6 +9707,8 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(feature = "metal")]
                     let mut all_low_expert_scratch = Vec::new();
                     #[cfg(feature = "metal")]
+                    let mut layer_window_expert_scratch = Vec::new();
+                    #[cfg(feature = "metal")]
                     let all_low_expert_sources = if monolithic_all_low {
                         let sidecar = self.expert_sidecar.as_ref().ok_or_else(|| {
                             InteropError::PreGatherExecutionUnsupported {
@@ -8362,6 +9718,25 @@ impl<'file> LoadedModel<'file> {
                                 ),
                             }
                         })?;
+                        if !sidecar.preserves_source_codecs() {
+                            return Err(InteropError::PreGatherExecutionUnsupported {
+                                architecture: String::from("qwen35moe"),
+                                reason: String::from(
+                                    "monolithic all-low execution requires a byte-preserving sidecar",
+                                ),
+                            });
+                        }
+                        if let Some(memory_limit) = serving_config.gpu_memory_limit_bytes {
+                            let all_low_bytes = sidecar.all_low_bytes();
+                            if all_low_bytes > memory_limit {
+                                return Err(InteropError::PreGatherExecutionUnsupported {
+                                    architecture: String::from("qwen35moe"),
+                                    reason: alloc::format!(
+                                        "monolithic all-low source table is {all_low_bytes} bytes, above the configured memory limit {memory_limit}"
+                                    ),
+                                });
+                            }
+                        }
                         Some(
                             expert_slab_guard
                                 .all_low_sources_for_step(sidecar, &mut all_low_expert_scratch)?,
@@ -8369,7 +9744,6 @@ impl<'file> LoadedModel<'file> {
                     } else {
                         None
                     };
-
                     // The packed checkpoint views carry the expert input's
                     // shape and codec through plan resolution. They remain
                     // borrowed mmap ranges: Metal's expert-source executor
@@ -8385,16 +9759,23 @@ impl<'file> LoadedModel<'file> {
                     if pre_gather
                         && !monolithic_all_low
                         && qwen35moe_pre_gather_plan.as_ref().is_none_or(|plan| {
-                            plan.symbols != symbols || plan.gdn_scan_enabled != gdn_prefill_scan
+                            plan.symbols != symbols
+                                || plan.gdn_scan_enabled != gdn_prefill_scan
+                                || plan.gdn_backend != serving_config.gdn_prefill_backend
+                                || plan.persistent_cuts != serving_config.qwen35moe_persistent_cuts
                         })
                     {
-                        qwen35moe_pre_gather_plan =
-                            Some(self.qwen35moe_pre_gather_plan(&symbols, gdn_prefill_scan)?);
+                        qwen35moe_pre_gather_plan = Some(self.qwen35moe_pre_gather_plan(
+                            &symbols,
+                            gdn_prefill_scan,
+                            serving_config.gdn_prefill_backend,
+                            serving_config.qwen35moe_persistent_cuts,
+                        )?);
                     }
-                    // The full-graph path must not substitute a whole expert
-                    // table on Metal. Qwen35's pre-gather segments hand the
-                    // routed subset to omega after the router boundary below;
-                    // every other Metal path keeps the named checkpoint stack.
+                    // Ordinary Metal full-graph execution keeps the named
+                    // checkpoint stack. The explicit monolithic all-low arm
+                    // is the only exception, and its byte-preserving and
+                    // memory-limit guards run immediately above.
                     #[cfg(feature = "metal")]
                     let expert_source_substitutions = if monolithic_all_low {
                         all_low_expert_sources.as_ref()
@@ -8406,12 +9787,18 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(not(feature = "metal"))]
                     let expert_source_substitutions = Some(&expert_sources);
 
+                    let current_sources = RefCell::new(CurrentExpertSources::new());
+                    // Own the Arc-backed sidecar handle inside the callback so
+                    // its borrow is not tied to the short `&self` call.
+                    #[cfg(feature = "qwen35moe-expert-prefetch")]
+                    let expert_sidecar_for_gather = self.expert_sidecar.clone();
                     let mut before_qwen35moe_gather =
                         |layer: usize,
                          position: u64,
                          routes: &[crate::residency::RoutedExpert],
                          expert_slab: &mut crate::expert_slab::ExpertSlab<'file>|
                          -> Result<(), InteropError> {
+                            current_sources.borrow_mut().clear();
                             let mut selected_experts = [0_u32; 16];
                             if routes.len() > selected_experts.len() {
                                 return Err(InteropError::PreGatherExecutionUnsupported {
@@ -8432,74 +9819,91 @@ impl<'file> LoadedModel<'file> {
                                     &selected_experts[..routes.len()]
                                 );
                             }
+                            #[cfg(feature = "qwen35moe-expert-prefetch")]
+                            if qwen35moe_expert_prefetch_enabled {
+                                if let Some(previous_history) = qwen35moe_route_history.get(layer) {
+                                    for predicted in
+                                        &previous_history.routes[..previous_history.len]
+                                    {
+                                        qwen35moe_prefetch_prediction_count += 1;
+                                        if routes
+                                            .iter()
+                                            .any(|route| route.expert == predicted.expert)
+                                        {
+                                            qwen35moe_prefetch_hit_count += 1;
+                                        } else {
+                                            qwen35moe_prefetch_overfetch_count += 1;
+                                        }
+                                    }
+                                }
+                                if let (Some(policy), Some(sidecar)) = (
+                                    qwen35moe_residency.as_ref(),
+                                    expert_sidecar_for_gather.as_ref(),
+                                ) {
+                                    if let Some(next_history) =
+                                        qwen35moe_route_history.get(layer.saturating_add(1))
+                                    {
+                                        let candidates = policy
+                                            .prefetch_candidates::<16>(
+                                                layer.saturating_add(1),
+                                                &next_history.routes[..next_history.len],
+                                                f32::NEG_INFINITY,
+                                            )
+                                            .map_err(|error| {
+                                                InteropError::PreGatherExecutionUnsupported {
+                                                    architecture: String::from("qwen35moe"),
+                                                    reason: error.to_string(),
+                                                }
+                                            })?;
+                                        let mut advised_bytes = 0_u64;
+                                        for candidate in candidates.as_slice().iter().flatten() {
+                                            let candidate_bytes =
+                                                sidecar.advise_expert_low(candidate.address)?;
+                                            advised_bytes =
+                                                advised_bytes.saturating_add(candidate_bytes);
+                                            qwen35moe_prefetch_advised_bytes =
+                                                qwen35moe_prefetch_advised_bytes
+                                                    .saturating_add(candidate_bytes);
+                                        }
+                                        qwen35moe_prefetch_advice_events += 1;
+                                        if advised_bytes > 0
+                                            && std::env::var_os("PROXIMA_DEBUG_EXPERT_PREFETCH")
+                                                .is_some()
+                                        {
+                                            eprintln!(
+                                                "qwen35 expert prefetch layer={} next_layer={} candidates={} advised_bytes={}",
+                                                layer,
+                                                layer.saturating_add(1),
+                                                candidates.as_slice().len(),
+                                                advised_bytes
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             expert_slab
                                 .add_selected_experts(layer, &selected_experts[..routes.len()]);
-                            if let Some(policy) = qwen35moe_residency.as_mut() {
-                                // Observe the complete route set before one
-                                // reconciliation. Paging once per expert
-                                // made one gather pay the FSM transition cost
-                                // repeatedly and could churn the same slab
-                                // entries before the kernel began.
-                                for route in routes {
-                                    policy.observe(position, layer, [*route]).map_err(|error| {
-                                        InteropError::PreGatherExecutionUnsupported {
-                                            architecture: String::from("qwen35moe"),
-                                            reason: error.to_string(),
-                                        }
-                                    })?;
+                            #[cfg(feature = "qwen35moe-expert-prefetch")]
+                            if qwen35moe_expert_prefetch_enabled {
+                                if let Some(history) = qwen35moe_route_history.get_mut(layer) {
+                                    history.len = routes.len();
+                                    history.routes[..routes.len()].copy_from_slice(routes);
                                 }
-                                // Prefill visits many routed rows in one pass.
-                                // Record those observations, but do not promote
-                                // checkpoint ranges while walking them: doing so
-                                // faults hundreds of high copies before the first
-                                // token and defeats the byte budget. The first
-                                // single-row decode boundary applies the learned
-                                // resident set before its gather.
-                                if !split_prefill && new_count == 1 {
-                                    // One reconciliation can replace every expert in the
-                                    // fixed 40x256 matrix. Keep the batch large enough for
-                                    // that bounded transition rather than turning a valid
-                                    // budget into a runtime failure at an arbitrary 256.
-                                    let actions = policy.reconcile::<{ 40 * 256 * 2 }>().map_err(
-                                        |error| InteropError::PreGatherExecutionUnsupported {
-                                            architecture: String::from("qwen35moe"),
-                                            reason: error.to_string(),
-                                        },
-                                    )?;
-                                    let sidecar =
-                                        self.expert_sidecar.as_ref().ok_or_else(|| {
-                                            InteropError::PreGatherExecutionUnsupported {
+                            }
+                            if let Some(policy) = qwen35moe_residency.as_mut() {
+                                // Capture the precision decision before the
+                                // gather. Retained-set reconciliation happens
+                                // once after the whole token, never between
+                                // layers of this token.
+                                for route in routes {
+                                    let [decision] =
+                                        policy.observe(position, layer, [*route]).map_err(
+                                            |error| InteropError::PreGatherExecutionUnsupported {
                                                 architecture: String::from("qwen35moe"),
-                                                reason: String::from(
-                                                    "no expert sidecar is attached",
-                                                ),
-                                            }
-                                        })?;
-                                    policy.apply_actions_at_boundary(
-                                        expert_slab,
-                                        &actions,
-                                        |slab, action| {
-                                            sidecar.apply_action(
-                                                slab,
-                                                self.checkpoint_mapping,
-                                                action,
-                                            )
-                                        },
-                                    )?;
-                                    if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
-                                        eprintln!(
-                                            "qwen35 residency boundary layer={} position={} actions={:?}",
-                                            layer,
-                                            position,
-                                            actions.as_slice()
-                                        );
-                                    }
-                                } else if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some()
-                                {
-                                    eprintln!(
-                                        "qwen35 residency boundary layer={} position={} actions=deferred_prefill",
-                                        layer, position
-                                    );
+                                                reason: error.to_string(),
+                                            },
+                                        )?;
+                                    current_sources.borrow_mut().push(decision)?;
                                 }
                             }
                             Ok(())
@@ -8507,57 +9911,12 @@ impl<'file> LoadedModel<'file> {
 
                     #[cfg(feature = "instrument")]
                     let evaluate_started = read_ticks();
-                    // `PROXIMA_METAL_OP_PROFILE_STEP` -- diagnostic-only, `instrument`-gated,
-                    // default-off: unset in every production run, so `runtime.evaluate`
-                    // is the only path a caller without this env var ever takes. When
-                    // set to this step's own index, this ONE step instead runs
-                    // `evaluate_op_timed` (per-op command buffers, see that method's own
-                    // doc for the cost) and prints the per-op GPU attribution this
-                    // crate's own discipline log needed to settle the `gpu_exec`
-                    // investigation. Every other step, and every run without the env
-                    // var, is byte-for-byte the pre-existing path.
-                    #[cfg(all(
-                        feature = "instrument",
-                        feature = "metal",
-                        target_os = "macos",
-                        not(feature = "metal-output-placement")
-                    ))]
-                    let evaluated = match std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
-                        .ok()
-                        .and_then(|value| value.parse::<usize>().ok())
-                    {
-                        Some(target) if target == _step => {
-                            if let Some(layer) = expert_slab_guard.first_modified_layer() {
-                                return Err(InteropError::ExpertRoutingUnsupportedByBackend {
-                                    layer,
-                                });
-                            }
-                            let (evaluated, timings) = runtime.evaluate_op_timed(
-                                &self.program,
-                                &symbols,
-                                &named_blocks,
-                                &roots,
-                                &resident_names,
-                            )?;
-                            report_op_timings(_step, &timings, &self.program);
-                            evaluated
-                        }
-                        _ => runtime.evaluate(
-                            &self.program,
-                            &symbols,
-                            &named_blocks,
-                            &roots,
-                            &resident_names,
-                            expert_source_substitutions,
-                        )?,
-                    };
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     #[cfg(feature = "instrument")]
-                    let monolithic_profile_target = monolithic_all_low
-                        && std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
-                            .ok()
-                            .and_then(|value| value.parse::<usize>().ok())
-                            == Some(_step);
+                    let monolithic_profile_target = std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
+                        .ok()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        == Some(_step);
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     #[cfg(not(feature = "instrument"))]
                     let monolithic_profile_target = false;
@@ -8565,25 +9924,36 @@ impl<'file> LoadedModel<'file> {
                     let evaluated = if monolithic_profile_target {
                         #[cfg(feature = "instrument")]
                         {
-                            let expert_sources = expert_source_substitutions.ok_or_else(|| {
-                                InteropError::PreGatherExecutionUnsupported {
-                                    architecture: String::from("qwen35moe"),
-                                    reason: String::from(
-                                        "the monolithic Metal profiler requires expert sources",
-                                    ),
-                                }
-                            })?;
-                            let (evaluated, timings) = runtime
-                                .evaluate_op_timed_with_expert_sources(
-                                    &self.program,
-                                    &symbols,
-                                    &named_blocks,
-                                    &roots,
-                                    &resident_names,
-                                    expert_sources,
-                                )?;
-                            report_op_timings(_step, &timings, &self.program);
-                            evaluated
+                            if let Some(expert_sources) = expert_source_substitutions {
+                                let (evaluated, timings) = runtime
+                                    .evaluate_op_timed_with_expert_sources(
+                                        &self.program,
+                                        &symbols,
+                                        &named_blocks,
+                                        &roots,
+                                        &resident_names,
+                                        expert_sources,
+                                    )?;
+                                report_op_timings(_step, &timings, &self.program);
+                                evaluated
+                            } else {
+                                let (evaluated, timings, sampling_mode, _split_ns) = runtime
+                                    .evaluate_dispatch_timed_with_placements(
+                                        &self.program,
+                                        &symbols,
+                                        &named_blocks,
+                                        &roots,
+                                        &resident_names,
+                                        &ssm_input_placements,
+                                        &ssm_output_placements,
+                                    )?;
+                                info!(
+                                    step = _step as u64,
+                                    sampling_mode, "dispatch_profile: qwen35moe full graph"
+                                );
+                                report_op_timings(_step, &timings, &self.program);
+                                evaluated
+                            }
                         }
                         #[cfg(not(feature = "instrument"))]
                         unreachable!("the profiler is compiled out without instrumentation")
@@ -8607,9 +9977,17 @@ impl<'file> LoadedModel<'file> {
                             &named_blocks,
                             &roots,
                             &resident_names,
+                            &layer_caches,
                             &mut expert_slab_guard,
                             &mut sidecar_read_scratch,
+                            &current_sources,
                             cached_len,
+                            serving_config.qwen35moe_layer_window,
+                            pre_gather_plan.gdn_backend,
+                            #[cfg(feature = "metal")]
+                            self.expert_sidecar.as_ref(),
+                            #[cfg(feature = "metal")]
+                            &mut layer_window_expert_scratch,
                             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                             Some(&Qwen35SsmPlacement {
                                 input_nodes: &ssm_state_input_nodes,
@@ -8669,9 +10047,17 @@ impl<'file> LoadedModel<'file> {
                             &named_blocks,
                             &roots,
                             &resident_names,
+                            &layer_caches,
                             &mut expert_slab_guard,
                             &mut sidecar_read_scratch,
+                            &current_sources,
                             cached_len,
+                            serving_config.qwen35moe_layer_window,
+                            pre_gather_plan.gdn_backend,
+                            #[cfg(feature = "metal")]
+                            self.expert_sidecar.as_ref(),
+                            #[cfg(feature = "metal")]
+                            &mut layer_window_expert_scratch,
                             &mut before_qwen35moe_gather,
                         )?
                     } else {
@@ -8684,6 +10070,186 @@ impl<'file> LoadedModel<'file> {
                             expert_source_substitutions,
                         )?
                     };
+                    if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_DIGEST").is_some() && _step == 0 {
+                        for (layer, diagnostic) in
+                            self.qwen35moe_layer_diagnostics.iter().enumerate()
+                        {
+                            let mut digest_nodes = vec![
+                                ("post_mixer", diagnostic.post_mixer_residual),
+                                ("router", diagnostic.router_logits),
+                            ];
+                            if diagnostic.dense_attention_taps.is_some() {
+                                digest_nodes.push(("mixer_output", diagnostic.mixer_output));
+                                digest_nodes.push(("block_input", diagnostic.block_input));
+                            }
+                            for (label, node) in digest_nodes {
+                                let Some((values, shape)) = evaluated.get(node) else {
+                                    continue;
+                                };
+                                let row_count =
+                                    usize::try_from(shape.first().copied().unwrap_or(1))
+                                        .unwrap_or(1)
+                                        .max(1);
+                                let row_length = values.len() / row_count;
+                                let row_start =
+                                    row_length.saturating_mul(row_count.saturating_sub(1));
+                                eprintln!(
+                                    "gdn_all_digest mode={} layer={} label={} row={} first4={:?}",
+                                    if new_count > 1 { "scan" } else { "cached" },
+                                    layer,
+                                    label,
+                                    row_count.saturating_sub(1),
+                                    values
+                                        .get(row_start..row_start.saturating_add(row_length))
+                                        .unwrap_or_default()
+                                        .iter()
+                                        .take(4)
+                                        .copied()
+                                        .collect::<Vec<_>>(),
+                                );
+                            }
+                        }
+                    }
+                    if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_DIGEST").is_some() && _step == 0 {
+                        for (layer, diagnostic) in
+                            self.qwen35moe_layer_diagnostics.iter().enumerate()
+                        {
+                            let Some((values, shape)) = evaluated.get(diagnostic.block_output)
+                            else {
+                                continue;
+                            };
+                            let row_count = usize::try_from(shape.first().copied().unwrap_or(1))
+                                .unwrap_or(1)
+                                .max(1);
+                            let row_length = values.len() / row_count;
+                            let row_start = row_length.saturating_mul(row_count.saturating_sub(1));
+                            eprintln!(
+                                "gdn_block_digest mode={} layer={} node={} row={} first4={:?}",
+                                if new_count > 1 { "scan" } else { "cached" },
+                                layer,
+                                diagnostic.block_output.0,
+                                row_count.saturating_sub(1),
+                                values
+                                    .get(row_start..row_start.saturating_add(row_length))
+                                    .unwrap_or_default()
+                                    .iter()
+                                    .take(4)
+                                    .copied()
+                                    .collect::<Vec<_>>(),
+                            );
+                            if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE_ROWS").is_some()
+                                && row_length > 0
+                            {
+                                for row_index in 0..row_count {
+                                    let row_start = row_index * row_length;
+                                    eprintln!(
+                                        "gdn_block_row mode={} layer={} node={} row={} first4={:?}",
+                                        if new_count > 1 { "scan" } else { "cached" },
+                                        layer,
+                                        diagnostic.block_output.0,
+                                        row_index,
+                                        values
+                                            .get(row_start..row_start + row_length)
+                                            .unwrap_or_default()
+                                            .iter()
+                                            .take(4)
+                                            .copied()
+                                            .collect::<Vec<_>>(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() && _step == 0 {
+                        for (layer, diagnostic) in
+                            self.qwen35moe_layer_diagnostics.iter().enumerate()
+                        {
+                            let Some(taps) = diagnostic.dense_attention_taps else {
+                                continue;
+                            };
+                            if let Some(Op::Reduce(reduce)) =
+                                self.program.get(taps.q_split.0 as usize)
+                                && let Some(Op::Elementwise { operands, .. }) =
+                                    self.program.get(reduce.operand.0 as usize)
+                                && let Some((q_product, _)) = operands.first()
+                                && let Some((values, shape)) = evaluated.get(*q_product)
+                            {
+                                eprintln!(
+                                    "dense_digest mode={} layer={} label=qg_matmul shape={shape:?} first4={:?}",
+                                    if new_count > 1 { "scan" } else { "cached" },
+                                    layer,
+                                    values.iter().take(4).copied().collect::<Vec<_>>(),
+                                );
+                            }
+                            for (label, node) in [
+                                ("block_input", diagnostic.block_input),
+                                ("normed", taps.normed),
+                                ("q_split", taps.q_split),
+                                ("k_normed", taps.k_normed),
+                                ("v_new", taps.v_new),
+                                ("score_new", taps.score_new),
+                                ("attended", taps.attended),
+                                ("gated_attended", taps.gated_attended),
+                                ("o_proj_out", taps.o_proj_out),
+                            ] {
+                                let Some((values, shape)) = evaluated.get(node) else {
+                                    continue;
+                                };
+                                let row_count =
+                                    usize::try_from(shape.first().copied().unwrap_or(1))
+                                        .unwrap_or(1)
+                                        .max(1);
+                                let row_length = values.len() / row_count;
+                                eprintln!(
+                                    "dense_digest mode={} layer={} label={} shape={:?} first4={:?}",
+                                    if new_count > 1 { "scan" } else { "cached" },
+                                    layer,
+                                    label,
+                                    shape,
+                                    values.iter().take(4).copied().collect::<Vec<_>>(),
+                                );
+                                if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE_ROWS").is_some()
+                                    && row_length > 0
+                                {
+                                    for row_index in 0..row_count {
+                                        let row_start = row_index * row_length;
+                                        eprintln!(
+                                            "dense_row mode={} layer={} label={} row={} first4={:?}",
+                                            if new_count > 1 { "scan" } else { "cached" },
+                                            layer,
+                                            label,
+                                            row_index,
+                                            values
+                                                .get(row_start..row_start + row_length)
+                                                .unwrap_or_default()
+                                                .iter()
+                                                .take(4)
+                                                .copied()
+                                                .collect::<Vec<_>>(),
+                                        );
+                                    }
+                                }
+                            }
+                            if layer == 3 {
+                                for (label, node) in [
+                                    ("qg_activation", NodeId(1256)),
+                                    ("qg_product", NodeId(1257)),
+                                    ("qg_weight_product", NodeId(1233)),
+                                    ("qg_weight", NodeId(1231)),
+                                    ("qg_weight_scale", NodeId(1232)),
+                                ] {
+                                    if let Some((values, shape)) = evaluated.get(node) {
+                                        eprintln!(
+                                            "dense_digest mode={} layer=3 label={} shape={shape:?} first4={:?}",
+                                            if new_count > 1 { "scan" } else { "cached" },
+                                            label,
+                                            values.iter().take(4).copied().collect::<Vec<_>>(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     #[cfg(feature = "instrument")]
                     let evaluate_ticks = elapsed_ticks(evaluate_started);
                     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -8780,15 +10346,6 @@ impl<'file> LoadedModel<'file> {
                         }
                     }
 
-                    #[cfg(all(feature = "metal", target_os = "macos"))]
-                    if should_release_monolithic_prefill_sources(
-                        monolithic_all_low,
-                        is_last_step_batch,
-                        runtime.retain_monolithic_prefill_sources,
-                    ) {
-                        clear_expert_source_cache();
-                    }
-
                     if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_OUTPUT").is_some()
                         && let Some(target_layer) = std::env::var("PROXIMA_DEBUG_GDN_LAYER")
                             .ok()
@@ -8808,18 +10365,17 @@ impl<'file> LoadedModel<'file> {
                             .and_then(|width| values.get(..width))
                             .unwrap_or(values);
                         eprintln!(
-                            "qwen35 monolithic block_output layer={} position={} node={:?} shape={:?} row={:?}",
+                            "qwen35 monolithic block_output layer={} position={} node={:?} shape={:?} first4={:?}",
                             target_layer,
                             cached_len + batch_index,
                             diagnostic.block_output,
                             shape,
-                            row,
+                            row.iter().take(4).copied().collect::<Vec<_>>(),
                         );
                     }
 
                     if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
                         && _step == 0
-                        && batch_index == 0
                         && let Some(diagnostic) = self.qwen35moe_layer_diagnostics.first()
                         && let Some(taps) = diagnostic.ssm_taps
                     {
@@ -8843,6 +10399,8 @@ impl<'file> LoadedModel<'file> {
                                 } else {
                                     values.len()
                                 };
+                                let row_dump =
+                                    std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE_ROWS").is_some();
                                 eprintln!(
                                     "gdn_compare mode={} node={} id={} shape={:?} first_row={:?}",
                                     if new_count > 1 { "scan" } else { "cached" },
@@ -8851,7 +10409,73 @@ impl<'file> LoadedModel<'file> {
                                     shape,
                                     &values[..values.len().min(first_row_len)],
                                 );
+                                if row_dump && first_row_len > 0 {
+                                    for row_index in 0..new_count {
+                                        let start = row_index.saturating_mul(first_row_len);
+                                        let end = start.saturating_add(first_row_len);
+                                        if let Some(row) = values.get(start..end) {
+                                            eprintln!(
+                                                "gdn_compare_row mode={} node={} label={} row={} values={row:?}",
+                                                if new_count > 1 { "scan" } else { "cached" },
+                                                node.0,
+                                                label,
+                                                row_index,
+                                            );
+                                        }
+                                    }
+                                }
+                                if std::env::var_os("PROXIMA_DEBUG_GDN_ROW_DIGEST").is_some()
+                                    && first_row_len > 0
+                                {
+                                    for row_index in 0..new_count {
+                                        let start = row_index.saturating_mul(first_row_len);
+                                        let end = start.saturating_add(first_row_len);
+                                        if let Some(row) = values.get(start..end) {
+                                            let digest =
+                                                row.iter().take(4).copied().collect::<Vec<_>>();
+                                            eprintln!(
+                                                "gdn_compare_digest mode={} node={} label={} row={} first4={digest:?}",
+                                                if new_count > 1 { "scan" } else { "cached" },
+                                                node.0,
+                                                label,
+                                                row_index,
+                                            );
+                                        }
+                                    }
+                                }
                             }
+                        }
+                    }
+                    if std::env::var_os("PROXIMA_DEBUG_GDN_ROUTER_LAYERS").is_some() && _step == 0 {
+                        for (layer, router_node) in self.router_roots.iter().copied().enumerate() {
+                            let Some((values, shape)) = evaluated.get(router_node) else {
+                                continue;
+                            };
+                            let row_width = usize::try_from(
+                                shape
+                                    .last()
+                                    .copied()
+                                    .unwrap_or(self.architecture.expert_count as u64),
+                            )
+                            .unwrap_or(0);
+                            let rows = if row_width == 0 {
+                                0
+                            } else {
+                                values.len() / row_width
+                            };
+                            let row = values.get(..row_width).unwrap_or(values);
+                            let top = row
+                                .iter()
+                                .copied()
+                                .enumerate()
+                                .max_by(|left, right| left.1.total_cmp(&right.1));
+                            eprintln!(
+                                "gdn_router_layer mode={} layer={} node={} shape={shape:?} rows={} first_top={top:?}",
+                                if new_count > 1 { "scan" } else { "cached" },
+                                layer,
+                                router_node.0,
+                                rows,
+                            );
                         }
                     }
 
@@ -9130,6 +10754,25 @@ impl<'file> LoadedModel<'file> {
                                 vocab: vocab_size,
                             });
                         }
+                        if std::env::var_os("PROXIMA_DEBUG_GDN_LOGITS").is_some() {
+                            let mut ranked: Vec<usize> = (0..vocab_size).collect();
+                            ranked.sort_unstable_by(|left, right| {
+                                logits[*right]
+                                    .total_cmp(&logits[*left])
+                                    .then_with(|| left.cmp(right))
+                            });
+                            eprintln!(
+                                "gdn_logits step={} batch_index={} top={:?} first={:?}",
+                                _step,
+                                batch_index,
+                                ranked
+                                    .iter()
+                                    .take(8)
+                                    .map(|index| (*index, logits[*index]))
+                                    .collect::<Vec<_>>(),
+                                &logits[..logits.len().min(8)]
+                            );
+                        }
                         let last_position = &logits[..vocab_size];
                         #[cfg(feature = "instrument")]
                         {
@@ -9265,6 +10908,7 @@ impl<'file> LoadedModel<'file> {
                                 runtime.plans_len(),
                                 runtime.plan_hits,
                                 runtime.plan_misses,
+                                runtime.arena_allocated_bytes(),
                             );
                             // This arm's `kv_cache.{layer}.*` blocks are ordinary
                             // named blocks folded into `metal_stage`'s weight
@@ -9287,10 +10931,53 @@ impl<'file> LoadedModel<'file> {
                     }
                 }
 
+                let residency_boundary_requested = qwen35moe_residency.is_some()
+                    && qwen35moe_pre_gather_enabled(
+                        serving_config.qwen35moe_pre_gather,
+                        self.architecture_impl
+                            .map(|architecture| architecture.name()),
+                    )
+                    && runtime.uses_gpu()
+                    && !monolithic_high_mmap_requested;
+                if residency_boundary_requested && let Some(policy) = qwen35moe_residency.as_mut() {
+                    // Current routes were served from fixed decisions captured
+                    // before each gather. Reconcile once after the whole token,
+                    // so retained residency actions cannot churn later layers
+                    // of the same token.
+                    self.reconcile_attached_qwen35moe_residency(policy)?;
+                    if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
+                        eprintln!("qwen35 residency boundary position={cached_len}");
+                    }
+                }
+
                 Ok(token_id)
             },
             on_token,
-        )?;
+        );
+
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if should_release_monolithic_sources(
+            monolithic_all_low_requested,
+            runtime.retain_monolithic_prefill_sources,
+        ) {
+            clear_expert_source_cache();
+        }
+
+        let (generated_ids, stopped_by_eos) = decode_result?;
+
+        #[cfg(feature = "qwen35moe-expert-prefetch")]
+        if qwen35moe_expert_prefetch_enabled
+            && std::env::var_os("PROXIMA_DEBUG_EXPERT_PREFETCH").is_some()
+        {
+            eprintln!(
+                "qwen35 expert prefetch stats predictions={} hits={} overfetch={} advice_events={} advised_bytes={}",
+                qwen35moe_prefetch_prediction_count,
+                qwen35moe_prefetch_hit_count,
+                qwen35moe_prefetch_overfetch_count,
+                qwen35moe_prefetch_advice_events,
+                qwen35moe_prefetch_advised_bytes
+            );
+        }
 
         let text = proxima_tokenizer::decode(&generated_ids, &self.vocab)?;
         // Exactly the tokens `cached_len` now covers: `seed_ids ++ ids`
@@ -9822,6 +11509,7 @@ impl<'file> LoadedModel<'file> {
                         runtime.placed_plans_len(),
                         runtime.plan_hits,
                         runtime.plan_misses,
+                        runtime.arena_allocated_bytes(),
                     );
                     #[cfg(all(feature = "metal", target_os = "macos"))]
                     if _step == 0 {
@@ -10201,21 +11889,31 @@ fn qwen35moe_pre_gather_enabled(configured: bool, architecture_name: Option<&str
     configured && architecture_name == Some("qwen35moe")
 }
 
+fn qwen35moe_gdn_prefill_scan_requested(
+    configured: bool,
+    pre_gather: bool,
+    architecture_name: Option<&str>,
+) -> bool {
+    configured && pre_gather && architecture_name == Some("qwen35moe")
+}
+
+fn qwen35moe_admit_low_copy(source: PackedOwnedKind, target: PackedOwnedKind) -> bool {
+    source == target
+}
+
+#[cfg(any(test, feature = "metal"))]
 fn qwen35moe_monolithic_all_low_enabled(
     pre_gather: bool,
     uses_gpu: bool,
     requested: bool,
-    step: usize,
+    _step: usize,
 ) -> bool {
-    pre_gather && uses_gpu && requested && step == 0
+    pre_gather && uses_gpu && requested
 }
 
-fn should_release_monolithic_prefill_sources(
-    monolithic_all_low: bool,
-    is_last_step_batch: bool,
-    retain_for_warmup: bool,
-) -> bool {
-    monolithic_all_low && is_last_step_batch && !retain_for_warmup
+#[cfg(any(test, feature = "metal"))]
+fn should_release_monolithic_sources(monolithic_all_low: bool, retain_for_warmup: bool) -> bool {
+    monolithic_all_low && !retain_for_warmup
 }
 
 fn map_expert_sources_to_segment<'source>(
@@ -10259,10 +11957,13 @@ fn map_expert_sources_to_segment<'source>(
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[cfg(feature = "qwen35moe-expert-prefetch")]
+    use super::qwen35moe_expert_prefetch_requested;
     use super::{
-        SsmLayerCache, begin_expert_gather_phase, first_nonfinite_node_value, kv_extent,
-        lock_expert_slab, qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
-        should_release_monolithic_prefill_sources, step_batch_needs_logits,
+        SsmLayerCache, begin_expert_gather_phase, collect_future_gather_cuts,
+        first_nonfinite_node_value, kv_extent, lock_expert_slab, qwen35moe_admit_low_copy,
+        qwen35moe_gdn_prefill_scan_requested, qwen35moe_monolithic_all_low_enabled,
+        qwen35moe_pre_gather_enabled, should_release_monolithic_sources, step_batch_needs_logits,
         visit_qwen35moe_router_boundary, visit_qwen35moe_router_selections,
     };
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -10272,6 +11973,7 @@ mod tests {
         qwen35_dense_attention_placed_byte_length, qwen35_dense_attention_placement_enabled,
         retain_qwen35_segment_readbacks,
     };
+    use crate::bind::PackedOwnedKind;
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -10286,6 +11988,13 @@ mod tests {
     use proxima_gguf::{GgmlType as WireType, GgufModel, TensorPayload, write_complete};
     use proxima_tensor::NodeId;
     use proxima_tensor::cpu::Evaluated;
+
+    #[cfg(feature = "qwen35moe-expert-prefetch")]
+    #[test]
+    fn expert_prefetch_gate_requires_an_explicit_truthy_value() {
+        assert!(!qwen35moe_expert_prefetch_requested(false));
+        assert!(qwen35moe_expert_prefetch_requested(true));
+    }
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_tensor::cpu::{ExpertEntry, ExpertSource, QuantizedBlock};
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -10321,24 +12030,80 @@ mod tests {
     }
 
     #[test]
+    fn qwen35moe_gdn_scan_admission_is_config_driven() {
+        assert!(qwen35moe_gdn_prefill_scan_requested(
+            true,
+            true,
+            Some("qwen35moe")
+        ));
+        assert!(!qwen35moe_gdn_prefill_scan_requested(
+            false,
+            true,
+            Some("qwen35moe")
+        ));
+        assert!(!qwen35moe_gdn_prefill_scan_requested(
+            true,
+            false,
+            Some("qwen35moe")
+        ));
+        assert!(!qwen35moe_gdn_prefill_scan_requested(
+            true,
+            true,
+            Some("qwen3")
+        ));
+    }
+
+    #[test]
+    fn qwen35moe_low_copy_admission_requires_byte_preserving_codec() {
+        assert!(qwen35moe_admit_low_copy(
+            PackedOwnedKind::Q4K,
+            PackedOwnedKind::Q4K
+        ));
+        assert!(qwen35moe_admit_low_copy(
+            PackedOwnedKind::Q6K,
+            PackedOwnedKind::Q6K
+        ));
+        assert!(!qwen35moe_admit_low_copy(
+            PackedOwnedKind::Q4K,
+            PackedOwnedKind::Q3K
+        ));
+        assert!(!qwen35moe_admit_low_copy(
+            PackedOwnedKind::Q6K,
+            PackedOwnedKind::Q2K
+        ));
+    }
+
+    #[test]
+    fn linked_pre_gather_schedule_keeps_later_gathers_for_two_layers() {
+        let gather_cuts = vec![
+            vec![(NodeId(10), String::from("layer_zero_gather"))],
+            vec![
+                (NodeId(20), String::from("layer_one_kv")),
+                (NodeId(21), String::from("layer_one_ssm")),
+            ],
+        ];
+
+        assert_eq!(
+            collect_future_gather_cuts(0, &gather_cuts),
+            [NodeId(20), NodeId(21)]
+        );
+        assert!(collect_future_gather_cuts(1, &gather_cuts).is_empty());
+    }
+
+    #[test]
     fn qwen35moe_monolithic_all_low_is_default_off_and_gpu_only() {
         assert!(!qwen35moe_monolithic_all_low_enabled(true, true, false, 0));
         assert!(!qwen35moe_monolithic_all_low_enabled(false, true, true, 0));
         assert!(!qwen35moe_monolithic_all_low_enabled(true, false, true, 0));
         assert!(qwen35moe_monolithic_all_low_enabled(true, true, true, 0));
-        assert!(!qwen35moe_monolithic_all_low_enabled(true, true, true, 1));
+        assert!(qwen35moe_monolithic_all_low_enabled(true, true, true, 1));
     }
 
     #[test]
-    fn monolithic_prefill_sources_release_only_after_real_prefill() {
-        assert!(!should_release_monolithic_prefill_sources(
-            false, true, false
-        ));
-        assert!(!should_release_monolithic_prefill_sources(
-            true, false, false
-        ));
-        assert!(!should_release_monolithic_prefill_sources(true, true, true));
-        assert!(should_release_monolithic_prefill_sources(true, true, false));
+    fn monolithic_sources_release_only_at_decode_scope_exit() {
+        assert!(!should_release_monolithic_sources(false, false));
+        assert!(!should_release_monolithic_sources(true, true));
+        assert!(should_release_monolithic_sources(true, false));
     }
 
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -10383,34 +12148,67 @@ mod tests {
             (NodeId(2), NodeId(20)),
             (NodeId(3), NodeId(30)),
         ]);
+        let computed = Op::Constant {
+            dtype: DType::Float32,
+            shape: Vec::new(),
+            value: 0.0,
+        };
+        let router_program = vec![
+            computed.clone(),
+            computed.clone(),
+            computed.clone(),
+            computed,
+        ];
+        let gather_program = vec![
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: Vec::new(),
+                value: 0.0,
+            },
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: Vec::new(),
+                value: 0.0,
+            },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: Vec::new(),
+                name: Some(String::from("__cut_20")),
+            },
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: Vec::new(),
+                value: 0.0,
+            },
+        ];
 
         let mut router_requested = original.clone();
         retain_qwen35_segment_readbacks(
             &mut router_requested,
             &router_cut_placements,
             Some(dense_roots),
-            true,
+            &router_program,
         );
-        assert_eq!(router_requested, BTreeMap::from([(NodeId(3), NodeId(30))]));
+        assert_eq!(
+            router_requested,
+            BTreeMap::from([(NodeId(2), NodeId(20)), (NodeId(3), NodeId(30))])
+        );
 
         let mut gather_requested = original.clone();
         retain_qwen35_segment_readbacks(
             &mut gather_requested,
             &router_cut_placements,
             Some(dense_roots),
-            false,
+            &gather_program,
         );
-        assert_eq!(
-            gather_requested,
-            BTreeMap::from([(NodeId(2), NodeId(20)), (NodeId(3), NodeId(30))])
-        );
+        assert_eq!(gather_requested, BTreeMap::from([(NodeId(3), NodeId(30))]));
 
         let mut unplaced_requested = original.clone();
         retain_qwen35_segment_readbacks(
             &mut unplaced_requested,
             &BTreeMap::<NodeId, ()>::new(),
             None,
-            true,
+            &[],
         );
         assert_eq!(unplaced_requested, original);
     }
@@ -12402,6 +14200,7 @@ mod placed_plan_mode_tests {
             &named,
             &[identity_node],
             &resident_names,
+            &[],
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Safe,
                 numeric_policy: proxima_tensor::NumericPolicy::bit_exact(),
@@ -12452,6 +14251,7 @@ mod placed_plan_mode_tests {
             &named,
             &[identity_node],
             &resident_names,
+            &[],
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Safe,
                 numeric_policy: proxima_tensor::NumericPolicy::llama_relaxed(),
@@ -12485,6 +14285,7 @@ mod placed_plan_mode_tests {
             &named,
             &[identity_node],
             &resident_names,
+            &[],
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Fast,
                 numeric_policy: proxima_tensor::NumericPolicy::bit_exact(),

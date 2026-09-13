@@ -37,6 +37,54 @@ pub struct ServeDecision {
     pub precision: ServePrecision,
 }
 
+/// An advisory expert warming request produced by a predictor such as APEX or
+/// SPICE. It never changes the authoritative route or the resident set; the
+/// caller may turn it into a storage operation at a later step boundary.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PrefetchCandidate {
+    pub address: ExpertAddress,
+    pub confidence: f32,
+}
+
+/// Fixed-capacity predictor output. The caller owns the boundary transition,
+/// so no allocation or dynamic dispatch occurs while candidates are emitted.
+#[derive(Debug, Clone, Copy)]
+pub struct PrefetchCandidates<const CAPACITY: usize> {
+    entries: [Option<PrefetchCandidate>; CAPACITY],
+    len: usize,
+}
+
+impl<const CAPACITY: usize> PrefetchCandidates<CAPACITY> {
+    const fn new() -> Self {
+        Self {
+            entries: [None; CAPACITY],
+            len: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[Option<PrefetchCandidate>] {
+        &self.entries[..self.len]
+    }
+
+    fn push_unique(&mut self, candidate: PrefetchCandidate) -> Result<(), ResidencyError> {
+        if self
+            .entries
+            .iter()
+            .flatten()
+            .any(|entry| entry.address == candidate.address)
+        {
+            return Ok(());
+        }
+        let Some(slot) = self.entries.get_mut(self.len) else {
+            return Err(ResidencyError::PrefetchCapacityExceeded { capacity: CAPACITY });
+        };
+        *slot = Some(candidate);
+        self.len += 1;
+        Ok(())
+    }
+}
+
 /// A high-precision expert source that may be borrowed by [`ExpertSlab`].
 #[derive(Debug, Clone, Copy)]
 pub struct ExpertPage<'bytes> {
@@ -115,6 +163,8 @@ impl Default for ResidencyConfig {
 pub enum ResidencyError {
     #[error("residency action batch is full at {capacity} actions")]
     ActionCapacityExceeded { capacity: usize },
+    #[error("prefetch candidate batch is full at {capacity} candidates")]
+    PrefetchCapacityExceeded { capacity: usize },
     #[error("expert address ({layer}, {expert}) is outside the fixed policy matrix")]
     AddressOutOfRange { layer: usize, expert: usize },
 }
@@ -201,6 +251,33 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
             };
         }
         Ok(decisions)
+    }
+
+    /// Converts predictor output into bounded warming candidates without
+    /// mutating hotness, residency, or authoritative route decisions. A
+    /// confidence threshold is supplied by the caller so the predictor and
+    /// the policy remain independently testable.
+    pub fn prefetch_candidates<const CAPACITY: usize>(
+        &self,
+        layer: usize,
+        predicted: &[RoutedExpert],
+        minimum_confidence: f32,
+    ) -> Result<PrefetchCandidates<CAPACITY>, ResidencyError> {
+        let mut candidates = PrefetchCandidates::new();
+        for route in predicted {
+            let address = ExpertAddress {
+                layer,
+                expert: route.expert,
+            };
+            let state = self.state(address)?;
+            if route.importance >= minimum_confidence && !state.resident {
+                candidates.push_unique(PrefetchCandidate {
+                    address,
+                    confidence: route.importance,
+                })?;
+            }
+        }
+        Ok(candidates)
     }
 
     /// Reconciles the resident set to the EMA-ranked, byte-feasible top-N.
@@ -355,6 +432,17 @@ impl<const LAYERS: usize, const EXPERTS: usize> ExpertResidency<LAYERS, EXPERTS>
         self.states
             .get_mut(address.layer)
             .and_then(|layer| layer.get_mut(address.expert))
+            .ok_or(ResidencyError::AddressOutOfRange {
+                layer: address.layer,
+                expert: address.expert,
+            })
+    }
+
+    fn state(&self, address: ExpertAddress) -> Result<ExpertState, ResidencyError> {
+        self.states
+            .get(address.layer)
+            .and_then(|layer| layer.get(address.expert))
+            .copied()
             .ok_or(ResidencyError::AddressOutOfRange {
                 layer: address.layer,
                 expert: address.expert,
@@ -554,6 +642,117 @@ mod tests {
                     ResidencyAction::Page(ExpertAddress { expert: 0, .. })
                 )),
             "the former resident is not re-paged after the trace shifts"
+        );
+    }
+
+    #[test]
+    fn predictor_candidates_are_advisory_bounded_and_do_not_change_residency() {
+        let mut policy = ExpertResidency::<1, 4>::new(CONFIG);
+        policy
+            .observe(
+                1,
+                0,
+                [RoutedExpert {
+                    expert: 0,
+                    importance: 1.0,
+                }],
+            )
+            .expect("the observed route is inside the policy matrix");
+        let actions = policy.reconcile::<4>().expect("one action fits");
+        let mut slab = ExpertSlab::new();
+        let bytes = stack();
+        slab.bind_layer_stack(0, NodeId(1), PackedOwnedKind::Q4K, &bytes, 4, 32, 32)
+            .expect("the predictor fixture binds its expert stack");
+        apply(&mut policy, &mut slab, &actions, &bytes);
+
+        let candidates = policy
+            .prefetch_candidates::<2>(
+                0,
+                &[
+                    RoutedExpert {
+                        expert: 0,
+                        importance: 1.0,
+                    },
+                    RoutedExpert {
+                        expert: 2,
+                        importance: 0.8,
+                    },
+                    RoutedExpert {
+                        expert: 2,
+                        importance: 0.7,
+                    },
+                    RoutedExpert {
+                        expert: 3,
+                        importance: 0.2,
+                    },
+                ],
+                0.5,
+            )
+            .expect("predicted expert IDs are inside the policy matrix");
+
+        assert_eq!(candidates.as_slice().len(), 1);
+        assert_eq!(
+            candidates.as_slice()[0]
+                .expect("candidate is populated")
+                .address,
+            ExpertAddress {
+                layer: 0,
+                expert: 2,
+            }
+        );
+        assert_eq!(
+            policy.resident(ExpertAddress {
+                layer: 0,
+                expert: 2
+            }),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn predictor_candidates_reject_an_out_of_range_prediction() {
+        let policy = ExpertResidency::<1, 4>::new(CONFIG);
+        let error = policy
+            .prefetch_candidates::<1>(
+                0,
+                &[RoutedExpert {
+                    expert: 4,
+                    importance: 1.0,
+                }],
+                0.0,
+            )
+            .expect_err("prefetch cannot address outside the fixed matrix");
+        assert_eq!(
+            error,
+            super::ResidencyError::AddressOutOfRange {
+                layer: 0,
+                expert: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn predictor_candidates_report_fixed_capacity_overflow() {
+        let policy = ExpertResidency::<1, 4>::new(CONFIG);
+        let error = policy
+            .prefetch_candidates::<1>(
+                0,
+                &[
+                    RoutedExpert {
+                        expert: 1,
+                        importance: 1.0,
+                    },
+                    RoutedExpert {
+                        expert: 2,
+                        importance: 1.0,
+                    },
+                ],
+                0.0,
+            )
+            .expect_err("a fixed prefetch batch must not silently drop a candidate");
+        assert_eq!(
+            error,
+            super::ResidencyError::PrefetchCapacityExceeded { capacity: 1 }
         );
     }
 }

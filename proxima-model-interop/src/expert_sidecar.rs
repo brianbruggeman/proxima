@@ -8,8 +8,10 @@
 use std::alloc::{Layout, alloc, dealloc};
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
@@ -18,14 +20,24 @@ use proxima_gguf::{GgmlType, ParsedGguf};
 
 use crate::bind::PackedOwnedKind;
 use crate::expert_slab::{ExpertProjection, ExpertSlab};
-use crate::residency::{ExpertAddress, ResidencyAction};
+use crate::residency::{ExpertAddress, ResidencyAction, ServeDecision, ServePrecision};
 use crate::{InteropError, recode_expert_into};
-use proxima_tensor::cpu::{ExpertEntry, ExpertPayloadSpan};
+#[cfg(any(test, feature = "metal"))]
+use proxima_tensor::cpu::ExpertEntry;
+use proxima_tensor::cpu::ExpertPayloadSpan;
 
 const MAGIC: &[u8; 8] = b"PXEXSC01";
 const VERSION: u32 = 1;
 const MAX_PROJECTION_BYTES: usize = u16::MAX as usize;
 const DESCRIPTOR_FIXED_BYTES: u64 = 4 + 4 + 4 + 4 + 1 + 1 + 2 + 8 + 8 + 8;
+
+const fn mapped_page_size() -> usize {
+    if cfg!(target_os = "macos") {
+        16 * 1024
+    } else {
+        4096
+    }
+}
 
 /// One stacked GGUF expert tensor to include in a sidecar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +75,16 @@ pub struct ExpertSidecar {
     pub total_bytes: u64,
 }
 
+impl ExpertSidecar {
+    #[cfg(any(test, feature = "metal"))]
+    #[must_use]
+    pub(crate) fn preserves_source_codecs(&self) -> bool {
+        self.descriptors
+            .iter()
+            .all(|descriptor| descriptor.source_codec == descriptor.target_codec)
+    }
+}
+
 /// Parsed sidecar metadata and the read-only mapping that owns its payload.
 ///
 /// Descriptor lookup is a dense `(layer, expert, projection)` table built
@@ -78,6 +100,7 @@ pub struct MappedExpertSidecar {
     expert_count: usize,
     descriptor_indices: Vec<[Option<usize>; 3]>,
     high_bytes_per_expert: u64,
+    low_bytes_per_expert: [u64; 3],
 }
 
 /// Reusable owner for the low-codec ranges selected by one routed layer.
@@ -87,10 +110,16 @@ pub(crate) struct ExpertSidecarReadScratch {
     arenas: [PageAlignedBytes; 3],
     arena_used: [usize; 3],
     arena_spans: [Vec<Option<ExpertPayloadSpan>>; 3],
+    mapped_window: MappedExpertWindow,
+    mapped_window_starts: [usize; 3],
+    mapped_window_ranges: [Option<Range<usize>>; 3],
+    mapped_window_used: [usize; 3],
+    mapped_ranges: [Option<Range<usize>>; 3],
     high_cache: VecDeque<HighReadCacheEntry>,
     high_cache_bytes: usize,
     high_cache_limit: usize,
     descriptor_slots: Vec<[Option<usize>; 3]>,
+    codec_slots: Vec<[Option<PackedOwnedKind>; 3]>,
     used_buffers: usize,
     pub(crate) ranges_read: usize,
     pub(crate) bytes_read: usize,
@@ -100,6 +129,150 @@ pub(crate) struct ExpertSidecarReadScratch {
     pub(crate) high_bytes_read: usize,
     pub(crate) high_cache_hits: usize,
     pub(crate) high_cache_misses: usize,
+}
+
+/// A fixed-capacity virtual window that remaps only the selected sidecar
+/// pages. The address remains stable across steps, so Metal sees a bounded
+/// no-copy arena instead of the sidecar's sparse min-to-max range.
+#[derive(Debug)]
+struct MappedExpertWindow {
+    #[cfg(unix)]
+    pointer: Option<NonNull<u8>>,
+    capacity: usize,
+}
+
+impl Default for MappedExpertWindow {
+    fn default() -> Self {
+        Self {
+            #[cfg(unix)]
+            pointer: None,
+            capacity: 0,
+        }
+    }
+}
+
+impl MappedExpertWindow {
+    fn reserve_once(&mut self, length: usize) -> Result<(), InteropError> {
+        if length == 0 {
+            return Ok(());
+        }
+        if self.capacity != 0 {
+            return (length <= self.capacity)
+                .then_some(())
+                .ok_or(InteropError::SidecarSizeOverflow);
+        }
+        let capacity = page_round(length)?;
+        #[cfg(unix)]
+        {
+            let pointer = unsafe {
+                rustix::mm::mmap_anonymous(
+                    core::ptr::null_mut(),
+                    capacity,
+                    rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
+                    rustix::mm::MapFlags::PRIVATE,
+                )
+            }
+            .map_err(|error| InteropError::SidecarIo(error.into()))?;
+            self.pointer = NonNull::new(pointer.cast::<u8>());
+            if self.pointer.is_none() {
+                return Err(InteropError::SidecarSizeOverflow);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = capacity;
+            return Err(InteropError::PreGatherExecutionUnsupported {
+                architecture: String::from("qwen35moe"),
+                reason: String::from("mapped expert windows require unix mmap"),
+            });
+        }
+        self.capacity = capacity;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn reset(&self) -> Result<(), InteropError> {
+        let Some(pointer) = self.pointer else {
+            return Ok(());
+        };
+        unsafe {
+            rustix::mm::mmap_anonymous(
+                pointer.as_ptr().cast(),
+                self.capacity,
+                rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
+                rustix::mm::MapFlags::PRIVATE | rustix::mm::MapFlags::FIXED,
+            )
+        }
+        .map(|_| ())
+        .map_err(|error| InteropError::SidecarIo(error.into()))
+    }
+
+    #[cfg(unix)]
+    fn map_file_range(
+        &self,
+        file: &File,
+        source_start: usize,
+        length: usize,
+        slot_offset: usize,
+    ) -> Result<(), InteropError> {
+        let Some(pointer) = self.pointer else {
+            return Err(InteropError::SidecarSizeOverflow);
+        };
+        let slot = slot_offset
+            .checked_add(length)
+            .ok_or(InteropError::SidecarSizeOverflow)?;
+        if slot > self.capacity || !source_start.is_multiple_of(mapped_page_size()) {
+            return Err(InteropError::SidecarSizeOverflow);
+        }
+        let destination = unsafe { pointer.as_ptr().add(slot_offset).cast() };
+        unsafe {
+            rustix::mm::mmap(
+                destination,
+                length,
+                rustix::mm::ProtFlags::READ,
+                rustix::mm::MapFlags::SHARED | rustix::mm::MapFlags::FIXED,
+                file,
+                source_start as u64,
+            )
+        }
+        .map(|_| ())
+        .map_err(|error| InteropError::SidecarIo(error.into()))
+    }
+
+    #[cfg(unix)]
+    fn as_slice(&self) -> &[u8] {
+        let Some(pointer) = self.pointer else {
+            return &[];
+        };
+        // SAFETY: the window remains mapped for this borrow and every mapped
+        // slot is read-only file-backed memory.
+        unsafe { core::slice::from_raw_parts(pointer.as_ptr(), self.capacity) }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for MappedExpertWindow {
+    fn drop(&mut self) {
+        if let Some(pointer) = self.pointer.take() {
+            // SAFETY: pointer/capacity are the exact anonymous reservation.
+            let _ = unsafe { rustix::mm::munmap(pointer.as_ptr().cast(), self.capacity) };
+        }
+    }
+}
+
+fn page_round(length: usize) -> Result<usize, InteropError> {
+    let page_size = mapped_page_size();
+    let rounded = length
+        .checked_add(page_size - 1)
+        .ok_or(InteropError::SidecarSizeOverflow)?;
+    let pages = rounded / page_size;
+    pages
+        .checked_mul(page_size)
+        .ok_or(InteropError::SidecarSizeOverflow)
+}
+
+const fn page_floor(value: usize) -> usize {
+    value / mapped_page_size() * mapped_page_size()
 }
 
 #[derive(Debug)]
@@ -122,10 +295,14 @@ impl Default for PageAlignedBytes {
 impl PageAlignedBytes {
     fn reserve(&mut self, length: usize) -> Result<(), InteropError> {
         if length <= self.capacity {
-            self.length = length;
+            self.length = self.capacity;
             return Ok(());
         }
-        let page_size = 4096usize;
+        let page_size = if cfg!(target_os = "macos") {
+            16 * 1024
+        } else {
+            4096usize
+        };
         let capacity = length
             .checked_add(page_size - 1)
             .and_then(|value| value.checked_div(page_size))
@@ -137,6 +314,10 @@ impl PageAlignedBytes {
         // by every bounded pread before a slice is exposed to the tensor graph.
         let pointer =
             NonNull::new(unsafe { alloc(layout) }).ok_or(InteropError::SidecarSizeOverflow)?;
+        // The logical arena length is the page-rounded capacity so Metal can
+        // bind it through `newBufferWithBytesNoCopy`; initialize padding before
+        // copying a prior arena whose final range may have ended mid-page.
+        unsafe { core::ptr::write_bytes(pointer.as_ptr(), 0, capacity) };
         if self.length != 0 {
             // SAFETY: both allocations are valid for the old initialized
             // length and do not overlap.
@@ -156,7 +337,7 @@ impl PageAlignedBytes {
         }
         self.pointer = pointer;
         self.capacity = capacity;
-        self.length = length;
+        self.length = capacity;
         Ok(())
     }
 
@@ -171,10 +352,28 @@ impl PageAlignedBytes {
     }
 }
 
+fn read_file_exact_at(file: &File, bytes: &mut [u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        file.read_exact_at(bytes, offset)
+    }
+    #[cfg(not(unix))]
+    {
+        let mut reader = file.try_clone()?;
+        reader.seek(SeekFrom::Start(offset))?;
+        reader.read_exact(bytes)
+    }
+}
+
 impl Drop for PageAlignedBytes {
     fn drop(&mut self) {
         if self.capacity != 0 {
-            if let Ok(layout) = Layout::from_size_align(self.capacity, 4096) {
+            let page_size = if cfg!(target_os = "macos") {
+                16 * 1024
+            } else {
+                4096usize
+            };
+            if let Ok(layout) = Layout::from_size_align(self.capacity, page_size) {
                 // SAFETY: pointer/layout are the exact allocation pair.
                 unsafe { dealloc(self.pointer.as_ptr(), layout) };
             }
@@ -193,10 +392,27 @@ struct HighReadCacheEntry {
 
 impl ExpertSidecarReadScratch {
     pub(crate) fn with_high_cache_limit(high_cache_limit: usize) -> Self {
-        Self {
-            high_cache_limit,
-            ..Self::default()
+        let mut scratch = Self::default();
+        scratch.high_cache_limit = high_cache_limit;
+        scratch
+    }
+
+    pub(crate) fn with_high_cache_limit_and_window_capacity(
+        high_cache_limit: usize,
+        window_capacity: [usize; 3],
+    ) -> Result<Self, InteropError> {
+        let mut scratch = Self::with_high_cache_limit(high_cache_limit);
+        let mut starts = [0usize; 3];
+        let mut total = 0usize;
+        for (index, capacity) in window_capacity.into_iter().enumerate() {
+            starts[index] = total;
+            total = total
+                .checked_add(capacity)
+                .ok_or(InteropError::SidecarSizeOverflow)?;
         }
+        scratch.mapped_window.reserve_once(total)?;
+        scratch.mapped_window_starts = starts;
+        Ok(scratch)
     }
 
     pub(crate) fn bytes(&self, expert: usize, projection: ExpertProjection) -> Option<&[u8]> {
@@ -207,6 +423,14 @@ impl ExpertSidecarReadScratch {
         }
         let buffer_index = self.descriptor_slots.get(expert)?[projection.index()]?;
         self.buffers.get(buffer_index).map(Vec::as_slice)
+    }
+
+    pub(crate) fn codec(
+        &self,
+        expert: usize,
+        projection: ExpertProjection,
+    ) -> Option<PackedOwnedKind> {
+        self.codec_slots.get(expert)?[projection.index()]
     }
 
     pub(crate) fn arena(
@@ -220,6 +444,41 @@ impl ExpertSidecarReadScratch {
                 self.arenas[projection.index()].as_slice(),
                 self.arena_spans[projection.index()].as_slice(),
             ))
+    }
+
+    pub(crate) fn mapped_arena<'mapping>(
+        &self,
+        mapping: &'mapping [u8],
+        projection: ExpertProjection,
+    ) -> Option<(&'mapping [u8], &[Option<ExpertPayloadSpan>])> {
+        let range = self.mapped_ranges[projection.index()].as_ref()?;
+        Some((
+            mapping.get(range.clone())?,
+            self.arena_spans[projection.index()].as_slice(),
+        ))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn mapped_window_arena(
+        &self,
+        projection: ExpertProjection,
+    ) -> Option<(&[u8], &[Option<ExpertPayloadSpan>])> {
+        self.mapped_window_ranges[projection.index()]
+            .as_ref()
+            .and_then(|range| {
+                self.mapped_window
+                    .as_slice()
+                    .get(range.clone())
+                    .map(|bytes| (bytes, self.arena_spans[projection.index()].as_slice()))
+            })
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn mapped_window_arena(
+        &self,
+        _projection: ExpertProjection,
+    ) -> Option<(&[u8], &[Option<ExpertPayloadSpan>])> {
+        None
     }
 }
 
@@ -269,6 +528,15 @@ impl MappedExpertSidecar {
             })
             .max()
             .unwrap_or(0);
+        let mut low_bytes_per_expert = [0_u64; 3];
+        for indices in &descriptor_indices {
+            for (projection_index, descriptor_index) in indices.iter().enumerate() {
+                if let Some(descriptor_index) = descriptor_index {
+                    low_bytes_per_expert[projection_index] = low_bytes_per_expert[projection_index]
+                        .max(sidecar.descriptors[*descriptor_index].data_bytes);
+                }
+            }
+        }
         Ok(Self {
             sidecar,
             mapping,
@@ -277,6 +545,7 @@ impl MappedExpertSidecar {
             expert_count,
             descriptor_indices,
             high_bytes_per_expert,
+            low_bytes_per_expert,
         })
     }
 
@@ -300,11 +569,51 @@ impl MappedExpertSidecar {
         self.checkpoint_file.is_some()
     }
 
+    /// Whether every sidecar payload preserves the checkpoint codec exactly.
+    /// The monolithic Metal path cannot inspect routes before binding all
+    /// experts, so it may only substitute bytes that are numerically identical
+    /// to the original packed weights.
+    #[cfg(feature = "metal")]
+    #[must_use]
+    pub(crate) fn preserves_source_codecs(&self) -> bool {
+        self.sidecar.preserves_source_codecs()
+    }
+
+    /// Total packed bytes required when every expert is exposed to one
+    /// monolithic source table. This is a preflight quantity: the routed
+    /// path only stages selected ranges, while the monolithic path retains
+    /// every low-codec payload in one command-buffer-visible arena.
+    #[cfg(feature = "metal")]
+    #[must_use]
+    pub(crate) fn all_low_bytes(&self) -> u64 {
+        self.sidecar
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.data_bytes)
+            .sum()
+    }
+
+    pub(crate) fn mapped_window_capacity(&self, selected_experts: usize) -> [usize; 3] {
+        let page_size = mapped_page_size() as u64;
+        let per_expert = self.low_bytes_per_expert.map(|bytes| {
+            let page_bytes = bytes.saturating_add(page_size - 1) / page_size * page_size;
+            page_bytes.saturating_add(page_size)
+        });
+        per_expert.map(|bytes| {
+            bytes
+                .saturating_mul(selected_experts as u64)
+                .try_into()
+                .unwrap_or(usize::MAX)
+        })
+    }
+
+    #[cfg(any(test, feature = "metal"))]
     #[must_use]
     pub(crate) fn mapping_bytes(&self) -> &[u8] {
         &self.mapping
     }
 
+    #[cfg(any(test, feature = "metal"))]
     pub(crate) fn populate_all_low_source<'mapping>(
         &'mapping self,
         layer: usize,
@@ -405,6 +714,17 @@ impl MappedExpertSidecar {
         range: Range<usize>,
         bytes: &mut [u8],
     ) -> Result<(), InteropError> {
+        if bytes.len() != range.len() {
+            return Err(InteropError::ExpertMappedRangeOutOfBounds {
+                start: range.start,
+                end: range.end,
+                mapping_len: bytes.len(),
+            });
+        }
+        if let Some(source_file) = &self.source_file {
+            return read_file_exact_at(source_file, bytes, range.start as u64)
+                .map_err(InteropError::SidecarIo);
+        }
         let source =
             self.mapping
                 .get(range.clone())
@@ -413,22 +733,8 @@ impl MappedExpertSidecar {
                     end: range.end,
                     mapping_len: self.mapping.len(),
                 })?;
-        if bytes.len() != range.len() {
-            return Err(InteropError::ExpertMappedRangeOutOfBounds {
-                start: range.start,
-                end: range.end,
-                mapping_len: bytes.len(),
-            });
-        }
-        let Some(source_file) = &self.source_file else {
-            bytes.copy_from_slice(source);
-            return Ok(());
-        };
-        let mut reader = source_file.try_clone().map_err(InteropError::SidecarIo)?;
-        reader
-            .seek(SeekFrom::Start(range.start as u64))
-            .map_err(InteropError::SidecarIo)?;
-        reader.read_exact(bytes).map_err(InteropError::SidecarIo)
+        bytes.copy_from_slice(source);
+        Ok(())
     }
 
     /// Reads routed low or high ranges into reusable bounded storage.
@@ -440,20 +746,34 @@ impl MappedExpertSidecar {
         slab: &ExpertSlab<'_>,
         scratch: &mut ExpertSidecarReadScratch,
     ) -> Result<(), InteropError> {
-        self.read_selected_with_checkpoint(layer, experts, slab, scratch, None)
+        self.read_selected_with_checkpoint_admitting(
+            layer,
+            experts,
+            slab,
+            scratch,
+            None,
+            &[],
+            |_source, _target| true,
+        )
     }
 
-    /// Reads selected ranges, borrowing checkpoint bytes when supplied.
-    pub(crate) fn read_selected_with_checkpoint(
+    pub(crate) fn read_selected_with_checkpoint_admitting(
         &self,
         layer: usize,
         experts: &[u32],
         slab: &ExpertSlab<'_>,
         scratch: &mut ExpertSidecarReadScratch,
         checkpoint_mapping: Option<&[u8]>,
+        current_decisions: &[ServeDecision],
+        admit_low_copy: fn(PackedOwnedKind, PackedOwnedKind) -> bool,
     ) -> Result<(), InteropError> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        omega::backend::unregister_expert_mapping(scratch.mapped_window.as_slice());
         scratch.used_buffers = 0;
         scratch.arena_used = [0; 3];
+        scratch.mapped_window_ranges = [None, None, None];
+        scratch.mapped_window_used = [0; 3];
+        scratch.mapped_ranges = [None, None, None];
         for spans in &mut scratch.arena_spans {
             spans.clear();
         }
@@ -469,30 +789,89 @@ impl MappedExpertSidecar {
         scratch
             .descriptor_slots
             .resize(self.expert_count, [None; 3]);
+        scratch.codec_slots.clear();
+        scratch.codec_slots.resize(self.expert_count, [None; 3]);
         for spans in &mut scratch.arena_spans {
             spans.resize(self.expert_count, None);
         }
         let mut arena_totals = [0usize; 3];
+        let mut mapped_window_totals = [0usize; 3];
+        let mut mapped_low_projections = [true; 3];
+        let mut mapped_window_active = false;
+        let mut mapped_ranges: [Option<Range<usize>>; 3] = [None, None, None];
         for &expert in experts {
             let address = ExpertAddress {
                 layer,
                 expert: expert as usize,
             };
             for projection in ExpertProjection::ALL {
-                if !slab.uses_mapped_low(layer, address.expert, projection)? {
-                    continue;
-                }
                 let descriptor = self.descriptor(address, projection)?;
-                arena_totals[projection.index()] = arena_totals[projection.index()]
-                    .checked_add(
-                        usize::try_from(descriptor.data_bytes)
-                            .map_err(|_| InteropError::SidecarSizeOverflow)?,
-                    )
-                    .ok_or(InteropError::SidecarSizeOverflow)?;
+                let current_precision = current_decisions
+                    .iter()
+                    .find(|decision| decision.address == address)
+                    .map(|decision| decision.precision);
+                let mapped_low = matches!(current_precision, None | Some(ServePrecision::Low))
+                    && slab.uses_mapped_low(layer, address.expert, projection)?
+                    && admit_low_copy(descriptor.source_codec, descriptor.target_codec);
+                let projection_index = projection.index();
+                if mapped_low {
+                    let range = Self::checked_range(
+                        descriptor,
+                        descriptor.data_offset,
+                        descriptor.data_bytes,
+                        self.mapping.len(),
+                        descriptor.target_codec,
+                    )?;
+                    mapped_ranges[projection_index] =
+                        Some(match &mapped_ranges[projection_index] {
+                            Some(existing) => {
+                                existing.start.min(range.start)..existing.end.max(range.end)
+                            }
+                            None => range.clone(),
+                        });
+                    if self.source_file.is_some() && scratch.mapped_window.capacity != 0 {
+                        let page_start = page_floor(range.start);
+                        let page_end = page_round(range.end)?;
+                        mapped_window_totals[projection_index] = mapped_window_totals
+                            [projection_index]
+                            .checked_add(page_end - page_start)
+                            .ok_or(InteropError::SidecarSizeOverflow)?;
+                    }
+                } else {
+                    mapped_low_projections[projection_index] = false;
+                    arena_totals[projection_index] = arena_totals[projection_index]
+                        .checked_add(
+                            usize::try_from(descriptor.source_bytes)
+                                .map_err(|_| InteropError::SidecarSizeOverflow)?,
+                        )
+                        .ok_or(InteropError::SidecarSizeOverflow)?;
+                }
             }
         }
-        for (projection_index, total) in arena_totals.into_iter().enumerate() {
-            scratch.arenas[projection_index].reserve(total)?;
+        for projection_index in 0..ExpertProjection::ALL.len() {
+            if mapped_low_projections[projection_index] && !experts.is_empty() {
+                #[cfg(unix)]
+                if self.source_file.is_some() && scratch.mapped_window.capacity != 0 {
+                    let total = mapped_window_totals[projection_index];
+                    scratch.mapped_window_ranges[projection_index] = Some(
+                        scratch.mapped_window_starts[projection_index]
+                            ..scratch.mapped_window_starts[projection_index]
+                                .checked_add(total)
+                                .ok_or(InteropError::SidecarSizeOverflow)?,
+                    );
+                    mapped_window_active = true;
+                    continue;
+                }
+                scratch.mapped_ranges[projection_index] = mapped_ranges[projection_index]
+                    .take()
+                    .and_then(|range| Self::page_aligned_mapping_range(range, self.mapping.len()));
+            } else {
+                scratch.arenas[projection_index].reserve(arena_totals[projection_index])?;
+            }
+        }
+        #[cfg(unix)]
+        if mapped_window_active {
+            scratch.mapped_window.reset()?;
         }
         for &expert in experts {
             let address = ExpertAddress {
@@ -501,7 +880,13 @@ impl MappedExpertSidecar {
             };
             for projection in ExpertProjection::ALL {
                 let descriptor = self.descriptor(address, projection)?;
-                let mapped_low = slab.uses_mapped_low(layer, address.expert, projection)?;
+                let current_precision = current_decisions
+                    .iter()
+                    .find(|decision| decision.address == address)
+                    .map(|decision| decision.precision);
+                let mapped_low = matches!(current_precision, None | Some(ServePrecision::Low))
+                    && slab.uses_mapped_low(layer, address.expert, projection)?
+                    && admit_low_copy(descriptor.source_codec, descriptor.target_codec);
                 let (offset, length, codec) = if mapped_low {
                     (
                         descriptor.data_offset,
@@ -515,29 +900,50 @@ impl MappedExpertSidecar {
                         descriptor.source_codec,
                     )
                 };
-                let buffer_index = scratch.used_buffers;
-                if buffer_index == scratch.buffers.len() {
-                    scratch.buffers.push(Vec::new());
-                }
-                if mapped_low {
+                let projection_index = projection.index();
+                #[cfg(unix)]
+                let direct_window = scratch.mapped_window_ranges[projection_index].is_some();
+                #[cfg(not(unix))]
+                let direct_window = false;
+                if direct_window {
                     let range =
                         Self::checked_range(descriptor, offset, length, self.mapping.len(), codec)?;
-                    let projection_index = projection.index();
-                    let arena_offset = scratch.arena_used[projection_index];
-                    let arena_end = arena_offset
-                        .checked_add(range.len())
+                    let page_start = page_floor(range.start);
+                    let page_end = page_round(range.end)?;
+                    let page_length = page_end
+                        .checked_sub(page_start)
                         .ok_or(InteropError::SidecarSizeOverflow)?;
-                    scratch.arenas[projection_index].reserve(arena_end)?;
-                    self.read_range_into_slice(
-                        range.clone(),
-                        &mut scratch.arenas[projection_index].as_mut_slice()
-                            [arena_offset..arena_end],
+                    let slot_offset = scratch.mapped_window_starts[projection_index]
+                        .checked_add(scratch.mapped_window_used[projection_index])
+                        .ok_or(InteropError::SidecarSizeOverflow)?;
+                    let source_file = self.source_file.as_ref().ok_or_else(|| {
+                        InteropError::PreGatherExecutionUnsupported {
+                            architecture: String::from("qwen35moe"),
+                            reason: String::from("mapped expert window has no source file"),
+                        }
+                    })?;
+                    scratch.mapped_window.map_file_range(
+                        source_file,
+                        page_start,
+                        page_length,
+                        slot_offset,
                     )?;
+                    let arena_offset = scratch.mapped_window_used[projection_index]
+                        .checked_add(
+                            range
+                                .start
+                                .checked_sub(page_start)
+                                .ok_or(InteropError::SidecarSizeOverflow)?,
+                        )
+                        .ok_or(InteropError::SidecarSizeOverflow)?;
+                    scratch.mapped_window_used[projection_index] = scratch.mapped_window_used
+                        [projection_index]
+                        .checked_add(page_length)
+                        .ok_or(InteropError::SidecarSizeOverflow)?;
                     scratch.ranges_read += 1;
                     scratch.bytes_read += range.len();
                     scratch.low_ranges_read += 1;
                     scratch.low_bytes_read += range.len();
-                    scratch.arena_used[projection_index] = arena_end;
                     scratch.arena_spans[projection_index][address.expert] =
                         Some(ExpertPayloadSpan {
                             offset: u32::try_from(arena_offset)
@@ -545,100 +951,172 @@ impl MappedExpertSidecar {
                             length: u32::try_from(range.len())
                                 .map_err(|_| InteropError::SidecarSizeOverflow)?,
                         });
-                } else {
-                    let (start, byte_length, end, file_length) =
-                        if let Some(bytes) = checkpoint_mapping {
-                            let range = Self::checked_range(
-                                descriptor,
-                                offset,
-                                length,
-                                bytes.len(),
-                                descriptor.source_codec,
-                            )?;
-                            (range.start, range.len(), range.end, bytes.len())
-                        } else {
-                            let start = usize::try_from(offset)
-                                .map_err(|_| InteropError::SidecarSizeOverflow)?;
-                            let byte_length = usize::try_from(length)
-                                .map_err(|_| InteropError::SidecarSizeOverflow)?;
-                            let end = start
-                                .checked_add(byte_length)
-                                .ok_or(InteropError::SidecarSizeOverflow)?;
-                            let checkpoint_file = self.checkpoint_file.as_ref().ok_or_else(|| {
-                                InteropError::PreGatherExecutionUnsupported {
-                                    architecture: String::from("qwen35moe"),
-                                    reason: String::from(
-                                        "high expert staging needs a checkpoint file for bounded reads",
-                                    ),
-                                }
-                            })?;
-                            let file_length = checkpoint_file
-                                .metadata()
-                                .map_err(InteropError::SidecarIo)?
-                                .len() as usize;
-                            (start, byte_length, end, file_length)
-                        };
-                    if end > file_length {
+                    scratch.codec_slots[address.expert][projection_index] = Some(codec);
+                    continue;
+                }
+                let direct_mapping = scratch.mapped_ranges[projection_index].is_some();
+                if direct_mapping {
+                    let mapped_range = scratch.mapped_ranges[projection_index]
+                        .as_ref()
+                        .ok_or(InteropError::SidecarSizeOverflow)?;
+                    let range =
+                        Self::checked_range(descriptor, offset, length, self.mapping.len(), codec)?;
+                    let arena_offset = range
+                        .start
+                        .checked_sub(mapped_range.start)
+                        .ok_or(InteropError::SidecarSizeOverflow)?;
+                    let byte_length = range.len();
+                    if range.end > mapped_range.end {
                         return Err(InteropError::ExpertMappedRangeOutOfBounds {
-                            start,
-                            end,
-                            mapping_len: file_length,
+                            start: range.start,
+                            end: range.end,
+                            mapping_len: mapped_range.end,
                         });
                     }
-                    let cached = scratch.high_cache.iter().find(|entry| {
-                        entry.layer == layer
-                            && entry.expert == address.expert
-                            && entry.projection == projection
-                            && entry.offset == offset
-                            && entry.bytes.len() == byte_length
+                    scratch.ranges_read += 1;
+                    scratch.bytes_read += byte_length;
+                    scratch.low_ranges_read += 1;
+                    scratch.low_bytes_read += byte_length;
+                    scratch.arena_spans[projection_index][address.expert] =
+                        Some(ExpertPayloadSpan {
+                            offset: u32::try_from(arena_offset)
+                                .map_err(|_| InteropError::SidecarSizeOverflow)?,
+                            length: u32::try_from(byte_length)
+                                .map_err(|_| InteropError::SidecarSizeOverflow)?,
+                        });
+                    scratch.codec_slots[address.expert][projection_index] = Some(codec);
+                    continue;
+                }
+                let (start, byte_length, end, file_length) = if mapped_low {
+                    let range =
+                        Self::checked_range(descriptor, offset, length, self.mapping.len(), codec)?;
+                    (range.start, range.len(), range.end, self.mapping.len())
+                } else if let Some(checkpoint_file) = self.checkpoint_file.as_ref() {
+                    let start =
+                        usize::try_from(offset).map_err(|_| InteropError::SidecarSizeOverflow)?;
+                    let byte_length =
+                        usize::try_from(length).map_err(|_| InteropError::SidecarSizeOverflow)?;
+                    let end = start
+                        .checked_add(byte_length)
+                        .ok_or(InteropError::SidecarSizeOverflow)?;
+                    let file_length = checkpoint_file
+                        .metadata()
+                        .map_err(InteropError::SidecarIo)?
+                        .len() as usize;
+                    (start, byte_length, end, file_length)
+                } else if let Some(bytes) = checkpoint_mapping {
+                    let range = Self::checked_range(
+                        descriptor,
+                        offset,
+                        length,
+                        bytes.len(),
+                        descriptor.source_codec,
+                    )?;
+                    (range.start, range.len(), range.end, bytes.len())
+                } else {
+                    let start =
+                        usize::try_from(offset).map_err(|_| InteropError::SidecarSizeOverflow)?;
+                    let byte_length =
+                        usize::try_from(length).map_err(|_| InteropError::SidecarSizeOverflow)?;
+                    let end = start
+                        .checked_add(byte_length)
+                        .ok_or(InteropError::SidecarSizeOverflow)?;
+                    let file_length = self
+                        .checkpoint_file
+                        .as_ref()
+                        .ok_or_else(|| InteropError::PreGatherExecutionUnsupported {
+                            architecture: String::from("qwen35moe"),
+                            reason: String::from(
+                                "high expert staging needs a checkpoint file for bounded reads",
+                            ),
+                        })?
+                        .metadata()
+                        .map_err(InteropError::SidecarIo)?
+                        .len() as usize;
+                    (start, byte_length, end, file_length)
+                };
+                if end > file_length {
+                    return Err(InteropError::ExpertMappedRangeOutOfBounds {
+                        start,
+                        end,
+                        mapping_len: file_length,
                     });
-                    if let Some(cached) = cached {
-                        scratch.high_cache_hits += 1;
-                        scratch.buffers[buffer_index].clear();
-                        scratch.buffers[buffer_index].extend_from_slice(&cached.bytes);
-                    } else {
+                }
+                let arena_offset = scratch.arena_used[projection_index];
+                let arena_end = arena_offset
+                    .checked_add(byte_length)
+                    .ok_or(InteropError::SidecarSizeOverflow)?;
+                scratch.arenas[projection_index].reserve(arena_end)?;
+                let cached_bytes = if mapped_low {
+                    None
+                } else {
+                    scratch
+                        .high_cache
+                        .iter()
+                        .find(|entry| {
+                            entry.layer == layer
+                                && entry.expert == address.expert
+                                && entry.projection == projection
+                                && entry.offset == offset
+                                && entry.bytes.len() == byte_length
+                        })
+                        .map(|entry| entry.bytes.clone())
+                };
+                if let Some(cached_bytes) = cached_bytes {
+                    scratch.high_cache_hits += 1;
+                    scratch.arenas[projection_index].as_mut_slice()[arena_offset..arena_end]
+                        .copy_from_slice(&cached_bytes);
+                } else {
+                    if !mapped_low {
                         scratch.high_cache_misses += 1;
-                        scratch.buffers[buffer_index].resize(byte_length, 0);
-                        if let Some(bytes) = checkpoint_mapping {
-                            scratch.buffers[buffer_index].copy_from_slice(&bytes[start..end]);
-                        } else {
-                            let checkpoint_file = self.checkpoint_file.as_ref().ok_or_else(|| {
-                                InteropError::PreGatherExecutionUnsupported {
-                                    architecture: String::from("qwen35moe"),
-                                    reason: String::from(
-                                        "high expert staging needs a checkpoint file for bounded reads",
-                                    ),
-                                }
-                            })?;
-                            let mut reader = checkpoint_file
-                                .try_clone()
-                                .map_err(InteropError::SidecarIo)?;
-                            reader
-                                .seek(SeekFrom::Start(offset))
-                                .map_err(InteropError::SidecarIo)?;
-                            reader
-                                .read_exact(&mut scratch.buffers[buffer_index])
-                                .map_err(InteropError::SidecarIo)?;
-                        }
-                        if byte_length <= scratch.high_cache_limit {
-                            while scratch.high_cache_bytes + byte_length > scratch.high_cache_limit
-                            {
-                                let Some(evicted) = scratch.high_cache.pop_front() else {
-                                    break;
-                                };
-                                scratch.high_cache_bytes =
-                                    scratch.high_cache_bytes.saturating_sub(evicted.bytes.len());
-                            }
-                            scratch.high_cache_bytes += byte_length;
-                            scratch.high_cache.push_back(HighReadCacheEntry {
-                                layer,
-                                expert: address.expert,
-                                projection,
-                                offset,
-                                bytes: scratch.buffers[buffer_index].clone(),
-                            });
-                        }
                     }
+                    let target = &mut scratch.arenas[projection_index].as_mut_slice()
+                        [arena_offset..arena_end];
+                    if mapped_low {
+                        let range = Self::checked_range(
+                            descriptor,
+                            offset,
+                            length,
+                            self.mapping.len(),
+                            codec,
+                        )?;
+                        self.read_range_into_slice(range, target)?;
+                    } else if let Some(checkpoint_file) = self.checkpoint_file.as_ref() {
+                        read_file_exact_at(checkpoint_file, target, offset)
+                            .map_err(InteropError::SidecarIo)?;
+                    } else if let Some(bytes) = checkpoint_mapping {
+                        target.copy_from_slice(&bytes[start..end]);
+                    } else {
+                        let checkpoint_file = self.checkpoint_file.as_ref().ok_or_else(|| {
+                            InteropError::PreGatherExecutionUnsupported {
+                                architecture: String::from("qwen35moe"),
+                                reason: String::from(
+                                    "high expert staging needs a checkpoint file for bounded reads",
+                                ),
+                            }
+                        })?;
+                        read_file_exact_at(checkpoint_file, target, offset)
+                            .map_err(InteropError::SidecarIo)?;
+                    }
+                    if !mapped_low && byte_length <= scratch.high_cache_limit {
+                        while scratch.high_cache_bytes + byte_length > scratch.high_cache_limit {
+                            let Some(evicted) = scratch.high_cache.pop_front() else {
+                                break;
+                            };
+                            scratch.high_cache_bytes =
+                                scratch.high_cache_bytes.saturating_sub(evicted.bytes.len());
+                        }
+                        scratch.high_cache_bytes += byte_length;
+                        scratch.high_cache.push_back(HighReadCacheEntry {
+                            layer,
+                            expert: address.expert,
+                            projection,
+                            offset,
+                            bytes: target.to_vec(),
+                        });
+                    }
+                }
+                if !mapped_low {
                     let expected = codec
                         .byte_len_for(descriptor.out_dim as usize * descriptor.in_dim as usize);
                     if byte_length != expected {
@@ -647,15 +1125,30 @@ impl MappedExpertSidecar {
                         )));
                     }
                 }
-                if !mapped_low {
-                    scratch.ranges_read += 1;
-                    scratch.bytes_read += scratch.buffers[buffer_index].len();
+                scratch.ranges_read += 1;
+                scratch.bytes_read += byte_length;
+                if mapped_low {
+                    scratch.low_ranges_read += 1;
+                    scratch.low_bytes_read += byte_length;
+                } else {
                     scratch.high_ranges_read += 1;
-                    scratch.high_bytes_read += scratch.buffers[buffer_index].len();
+                    scratch.high_bytes_read += byte_length;
                 }
-                scratch.descriptor_slots[address.expert][projection.index()] = Some(buffer_index);
-                scratch.used_buffers += 1;
+                scratch.arena_used[projection_index] = arena_end;
+                scratch.arena_spans[projection_index][address.expert] = Some(ExpertPayloadSpan {
+                    offset: u32::try_from(arena_offset)
+                        .map_err(|_| InteropError::SidecarSizeOverflow)?,
+                    length: u32::try_from(byte_length)
+                        .map_err(|_| InteropError::SidecarSizeOverflow)?,
+                });
+                scratch.codec_slots[address.expert][projection.index()] = Some(codec);
             }
+        }
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if mapped_window_active {
+            omega::backend::register_expert_mapping(scratch.mapped_window.as_slice());
+        } else {
+            omega::backend::unregister_expert_mapping(scratch.mapped_window.as_slice());
         }
         Ok(())
     }
@@ -671,6 +1164,41 @@ impl MappedExpertSidecar {
                 .unchecked_advise(memmap2::UncheckedAdvice::DontNeed)
         }
         .map_err(InteropError::SidecarIo)
+    }
+
+    /// Releases checkpoint pages for expert stacks after their low-codec
+    /// sidecar has been attached. Dense tensors remain available through the
+    /// checkpoint mapping; routed expert reads come from the sidecar instead.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    pub(crate) fn discard_checkpoint_expert_pages(
+        &self,
+        checkpoint: &[u8],
+    ) -> Result<(), InteropError> {
+        let mut ranges = Vec::new();
+        for descriptor in &self.sidecar.descriptors {
+            let start = usize::try_from(descriptor.source_offset)
+                .map_err(|_| InteropError::SidecarSizeOverflow)?;
+            let length = usize::try_from(descriptor.source_bytes)
+                .map_err(|_| InteropError::SidecarSizeOverflow)?;
+            let end = start
+                .checked_add(length)
+                .ok_or(InteropError::SidecarSizeOverflow)?;
+            if end > checkpoint.len() {
+                return Err(InteropError::SidecarSizeOverflow);
+            }
+            ranges.push((start, end));
+        }
+        ranges.sort_unstable();
+        ranges.dedup();
+        for (start, end) in ranges {
+            omega::discard_checkpoint_mmap_range_immediate(&checkpoint[start..end]).map_err(
+                |error| InteropError::PreGatherExecutionUnsupported {
+                    architecture: String::from("qwen35moe"),
+                    reason: error.to_string(),
+                },
+            )?;
+        }
+        Ok(())
     }
 
     /// Advises the kernel that one expert's low-codec sidecar ranges are no
@@ -696,6 +1224,29 @@ impl MappedExpertSidecar {
             )?;
         }
         Ok(())
+    }
+
+    /// Advises the kernel that one expert's low-codec ranges will be needed
+    /// soon. This changes only page-cache scheduling: it does not copy bytes,
+    /// change the slab epoch, or promote the expert to the high codec.
+    #[cfg(any(feature = "qwen35moe-expert-prefetch", test))]
+    pub(crate) fn advise_expert_low(&self, address: ExpertAddress) -> Result<u64, InteropError> {
+        let mut advised_bytes = 0_u64;
+        for projection in ExpertProjection::ALL {
+            let descriptor = self.descriptor(address, projection)?;
+            let range = Self::checked_range(
+                descriptor,
+                descriptor.data_offset,
+                descriptor.data_bytes,
+                self.mapping.len(),
+                descriptor.target_codec,
+            )?;
+            self.mapping
+                .advise_range(memmap2::Advice::WillNeed, range.start, range.len())
+                .map_err(InteropError::SidecarIo)?;
+            advised_bytes = advised_bytes.saturating_add(range.len() as u64);
+        }
+        Ok(advised_bytes)
     }
 
     #[must_use]
@@ -758,6 +1309,13 @@ impl MappedExpertSidecar {
             )));
         }
         Ok(start..end)
+    }
+
+    fn page_aligned_mapping_range(range: Range<usize>, mapping_len: usize) -> Option<Range<usize>> {
+        let page = mapped_page_size();
+        let start = range.start / page * page;
+        let end = range.end.checked_add(page - 1)? / page * page;
+        (end <= mapping_len).then_some(start..end)
     }
 
     /// Replaces every expert projection with its low-codec sidecar view.
@@ -936,6 +1494,13 @@ impl MappedExpertSidecar {
     #[must_use]
     pub const fn high_bytes_per_expert(&self) -> u64 {
         self.high_bytes_per_expert
+    }
+}
+
+impl Drop for ExpertSidecarReadScratch {
+    fn drop(&mut self) {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        omega::backend::unregister_expert_mapping(self.mapped_window.as_slice());
     }
 }
 
@@ -1348,8 +1913,68 @@ mod tests {
     use memmap2::MmapOptions;
     use proxima_gguf::{GgmlType, TensorInfo};
     use proxima_tensor::NodeId;
-    use std::io::Cursor;
+    use std::io::{Cursor, Seek};
     use tempfile::tempfile;
+
+    #[test]
+    fn file_backed_reads_do_not_touch_the_sidecar_mapping() {
+        let mut mapped_file = tempfile().expect("creates mapped sidecar file");
+        mapped_file
+            .write_all(&[1_u8, 2, 3, 4])
+            .expect("writes mapped bytes");
+        mapped_file.flush().expect("flushes mapped bytes");
+        let mut source_file = tempfile().expect("creates source sidecar file");
+        source_file
+            .write_all(&[5_u8, 6, 7, 8])
+            .expect("writes source bytes");
+        source_file.flush().expect("flushes source bytes");
+        let initial_source_position = source_file
+            .stream_position()
+            .expect("reads the source file cursor before positioned reads");
+        let mapping = unsafe {
+            MmapOptions::new()
+                .map(&mapped_file)
+                .expect("maps sidecar bytes")
+        };
+        let sidecar = MappedExpertSidecar {
+            sidecar: ExpertSidecar {
+                descriptors: Vec::new(),
+                data_offset: 0,
+                total_bytes: 4,
+            },
+            mapping: Arc::new(mapping),
+            source_file: Some(Arc::new(source_file)),
+            checkpoint_file: None,
+            expert_count: 1,
+            descriptor_indices: vec![[None; 3]],
+            high_bytes_per_expert: 0,
+            low_bytes_per_expert: [0; 3],
+        };
+        let mut first_range = [0_u8; 2];
+        let mut second_range = [0_u8; 2];
+
+        sidecar
+            .read_range_into_slice(2..4, &mut first_range)
+            .expect("reads the later source range");
+        sidecar
+            .read_range_into_slice(0..2, &mut second_range)
+            .expect("reads the earlier source range");
+
+        assert_eq!(first_range, [7, 8]);
+        assert_eq!(second_range, [5, 6]);
+        let mut cursor_probe = sidecar
+            .source_file
+            .as_ref()
+            .expect("retains the source file")
+            .try_clone()
+            .expect("clones the source file for the cursor probe");
+        assert_eq!(
+            cursor_probe
+                .stream_position()
+                .expect("reads the source cursor after positioned reads"),
+            initial_source_position
+        );
+    }
 
     #[test]
     fn writes_each_expert_sequentially_with_descriptors_and_reused_buffers() {
@@ -1398,6 +2023,12 @@ mod tests {
         )
         .expect("the two experts write to the sidecar");
         assert_eq!(result.descriptors.len(), 2);
+        assert!(!result.preserves_source_codecs());
+        let mut byte_preserving = result.clone();
+        for descriptor in &mut byte_preserving.descriptors {
+            descriptor.target_codec = descriptor.source_codec;
+        }
+        assert!(byte_preserving.preserves_source_codecs());
         assert_eq!(result.descriptors[0].source_offset, 0);
         assert_eq!(result.descriptors[1].source_offset, 144);
         assert_eq!(result.descriptors[0].data_bytes, 84);
@@ -1566,16 +2197,72 @@ mod tests {
         assert_eq!(scratch.bytes_read, 3 * 84);
         assert_eq!(scratch.low_ranges_read, 3);
         assert_eq!(scratch.high_ranges_read, 0);
+        for projection in ExpertProjection::ALL {
+            let arena_and_spans = scratch
+                .mapped_window_arena(projection)
+                .or_else(|| scratch.mapped_arena(sidecar.mapping_bytes(), projection))
+                .or_else(|| scratch.arena(projection))
+                .expect("all-low selected ranges have a mapped or bounded arena");
+            let (arena, spans) = arena_and_spans;
+            let span = spans[0].expect("the selected expert has a mapped span");
+            let start = usize::try_from(span.offset).expect("span offset fits");
+            let end = start + usize::try_from(span.length).expect("span length fits");
+            assert_eq!(arena[start..end].len(), 84);
+        }
+        let address = ExpertAddress {
+            layer: 0,
+            expert: 0,
+        };
+        let high_decision = [ServeDecision {
+            address,
+            precision: ServePrecision::High,
+        }];
+        sidecar
+            .read_selected_with_checkpoint_admitting(
+                0,
+                &[0],
+                &slab,
+                &mut scratch,
+                Some(&source),
+                &high_decision,
+                |_source_codec, _target_codec| true,
+            )
+            .expect("a current high decision bypasses the mapped low copy");
+        assert_eq!(scratch.low_ranges_read, 0);
+        assert_eq!(scratch.high_ranges_read, 3);
+        assert_eq!(scratch.bytes_read, 3 * 144);
+        for (projection, expected) in ExpertProjection::ALL.into_iter().zip([
+            &source[0..144],
+            &source[144..288],
+            &source[288..432],
+        ]) {
+            assert!(scratch.arena(projection).is_some());
+            assert_eq!(scratch.bytes(0, projection), Some(expected));
+        }
+        assert_eq!(
+            sidecar
+                .advise_expert_low(address)
+                .expect("the mapped low ranges accept a will-need advice"),
+            3 * 84
+        );
 
         sidecar
-            .apply_action(
-                &mut slab,
-                &source,
-                ResidencyAction::Page(ExpertAddress {
-                    layer: 0,
-                    expert: 0,
-                }),
+            .read_selected_with_checkpoint_admitting(
+                0,
+                &[0],
+                &slab,
+                &mut scratch,
+                Some(&source),
+                &[],
+                |source_codec, target_codec| source_codec == target_codec,
             )
+            .expect("a lossy low copy falls back to checkpoint bytes");
+        assert_eq!(scratch.low_ranges_read, 0);
+        assert_eq!(scratch.high_ranges_read, 3);
+        assert_eq!(scratch.bytes_read, 3 * 144);
+
+        sidecar
+            .apply_action(&mut slab, &source, ResidencyAction::Page(address))
             .expect("promotes the selected expert");
         sidecar
             .read_selected(0, &[0], &slab, &mut scratch)
@@ -1586,14 +2273,7 @@ mod tests {
         assert_eq!(scratch.high_ranges_read, 3);
 
         sidecar
-            .apply_action(
-                &mut slab,
-                &source,
-                ResidencyAction::Evict(ExpertAddress {
-                    layer: 0,
-                    expert: 0,
-                }),
-            )
+            .apply_action(&mut slab, &source, ResidencyAction::Evict(address))
             .expect("restores the low copy");
         sidecar
             .read_selected(0, &[0], &slab, &mut scratch)

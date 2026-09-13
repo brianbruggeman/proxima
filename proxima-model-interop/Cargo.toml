@@ -11,6 +11,10 @@ readme.workspace = true
 
 [features]
 default = []
+# joins the final routed gather to the logits suffix without crossing a router boundary.
+qwen35moe-linked-suffix = ["std"]
+# advisory one-layer-ahead mmap warming for the HOBBIT/DynaExq route
+qwen35moe-expert-prefetch = ["std"]
 # strictly additive over the alloc-tier floor (guiding-principle 3): opens
 # proxima-gguf's `edge::read_file` (whole-file IO) and proxima-tensor's
 # `cpu` interpreter (both std-gated in their own crates) so this crate's
@@ -30,6 +34,7 @@ std = [
     "interop-bgpool",
     "dep:proxima-tokenizer",
     "dep:fastrand",
+    "conflaguration",
     "memmap2",
 ]
 # split from `std` the same way proxima-tensor splits `tensor-bgpool`
@@ -109,6 +114,7 @@ metal = [
     "metal-packed-row-nsg2",
     "metal-q4k-ggml-port",
 ]
+mlx-gdn = ["metal", "omega/mlx-gdn"]
 # Cross-platform GPU serving through omega's wgpu driver.  The existing
 # serving/runtime code is intentionally shared with the Metal path; on Linux
 # omega resolves `Engine::Gpu` to wgpu, whose Vulkan backend is selected by
@@ -163,6 +169,8 @@ metal-q4k-split-k = ["omega?/metal-q4k-split-k"]
 metal-q4k-single-fetch = ["omega?/metal-q4k-single-fetch"]
 # passthrough to `omega/metal-packed-row-nsg2` so the decode harness can measure that arm.
 metal-packed-row-nsg2 = ["omega?/metal-packed-row-nsg2"]
+# passthrough to the default-off gathered-expert packed-row body in omega.
+metal-gathered-packed-row = ["omega?/metal-gathered-packed-row"]
 # Selects `proxima-tensor`'s `cpu_mask_zero_ulp` test, the correctness
 # proof that rounding the placed-KV decode loop's growing KV extent
 # (`merged_len`) up to `ServingConfig::kv_bucket_tokens` before binding it
@@ -180,9 +188,11 @@ kv-capacity-bucket = [
 metal-q4k-ggml-port = ["omega?/metal-q4k-ggml-port"]
 memmap2 = ["dep:memmap2"]
 proxima-storage = ["dep:proxima-storage", "proxima-storage/dax"]
+conflaguration = ["dep:conflaguration"]
 
 [dependencies]
 arrayvec.workspace = true
+conflaguration = { workspace = true, optional = true }
 # only used by `generate.rs`, which is `#[cfg(feature = "std")]`-gated —
 # optional so the alloc-only floor never links it.
 fastrand = { workspace = true, optional = true }
@@ -201,6 +211,7 @@ proxima-tensor = { path = "../proxima-tensor", default-features = false, feature
 # -- optional, wired on only by this crate's own `std` feature above, so the
 # alloc-only floor never pulls it in.
 proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["gguf"], optional = true }
+rustix = { version = "1.1", features = ["std", "mm"] }
 serde = { workspace = true, features = ["derive", "alloc"] }
 # `hf_config::HfConfig` deserializes a real HF config.json (alloc-tier, no
 # std needed -- `cargo add` rejects this crate's own "alloc" feature entry

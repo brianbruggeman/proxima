@@ -22,6 +22,7 @@
 //! step's own borrowed [`ExpertSource`] snapshot.
 
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -31,11 +32,14 @@ use std::sync::Arc;
 
 use proxima_gguf::quant::{bf16, f16, q2_k, q3_k, q4_0, q4_k, q5_k, q6_k, q8_0};
 use proxima_tensor::NodeId;
-use proxima_tensor::cpu::{ExpertEntry, ExpertPayloadSpan, ExpertSource};
+#[cfg(any(test, feature = "metal"))]
+use proxima_tensor::cpu::ExpertPayloadSpan;
+use proxima_tensor::cpu::{ExpertEntry, ExpertSource};
 
 use crate::bind::{PackedOwnedKind, quantize_to_kind};
 use crate::error::InteropError;
 
+#[cfg(any(test, feature = "metal"))]
 pub(crate) type AllLowExpertSourceScratch<'mapping> = Vec<(
     NodeId,
     ExpertProjection,
@@ -278,8 +282,16 @@ impl<'file> ExpertCopy<'file> {
     }
 
     fn entry_with_bytes<'bytes>(&self, bytes: &'bytes [u8]) -> ExpertEntry<'bytes> {
+        self.entry_with_codec(bytes, self.codec)
+    }
+
+    fn entry_with_codec<'bytes>(
+        &self,
+        bytes: &'bytes [u8],
+        codec: PackedOwnedKind,
+    ) -> ExpertEntry<'bytes> {
         ExpertEntry {
-            block: self.codec.as_block(bytes),
+            block: codec.as_block(bytes),
             out_dim: self.out_dim,
             in_dim: self.in_dim,
             epoch: self.epoch,
@@ -713,10 +725,9 @@ impl<'file> ExpertSlab<'file> {
     /// The lowest layer index carrying at least one evicted expert with no
     /// paged replacement yet, or `None` if every bound layer is fully
     /// populated. [`Self::sources_for_step`] rejects an incomplete layer
-    /// before it can construct a shorter table with shifted indices. Metal's
-    /// current experimental arm consumes only uniform packed-codec tables;
-    /// mixed-codec HOBBIT remains a typed backend error until its
-    /// codec-tagged kernel is added.
+    /// before it can construct a shorter table with shifted indices. The
+    /// routed pre-gather Metal path accepts codec-tagged mixed tables; the
+    /// full-graph path still has its own segment-scope guard.
     #[must_use]
     pub fn first_incomplete_layer(&self) -> Option<usize> {
         self.layers
@@ -832,12 +843,16 @@ impl<'file> ExpertSlab<'file> {
             .collect())
     }
 
-    pub(crate) fn sources_for_layer_with_sidecar<'scratch>(
+    pub(crate) fn sources_for_layer_with_sidecar<'mapping, 'scratch>(
         &'scratch self,
         layer: usize,
+        mapping: Option<&'mapping [u8]>,
         sidecar: Option<&'scratch crate::expert_sidecar::ExpertSidecarReadScratch>,
         entries: &'scratch mut Vec<(NodeId, ExpertProjection, Vec<ExpertEntry<'scratch>>)>,
-    ) -> Result<BTreeMap<NodeId, ExpertSource<'scratch>>, InteropError> {
+    ) -> Result<BTreeMap<NodeId, ExpertSource<'scratch>>, InteropError>
+    where
+        'mapping: 'scratch,
+    {
         entries.clear();
         if !self
             .layers
@@ -869,12 +884,19 @@ impl<'file> ExpertSlab<'file> {
                 .enumerate()
                 .filter_map(|(expert_index, expert)| {
                     expert.as_ref().map(|expert| {
-                        sidecar
-                            .and_then(|scratch| {
-                                projection
-                                    .and_then(|projection| scratch.bytes(expert_index, projection))
+                        let replacement = sidecar.and_then(|scratch| {
+                            projection.and_then(|projection| {
+                                scratch
+                                    .bytes(expert_index, projection)
+                                    .map(|bytes| (bytes, scratch.codec(expert_index, projection)))
                             })
-                            .map_or_else(|| expert.entry(), |bytes| expert.entry_with_bytes(bytes))
+                        });
+                        replacement.map_or_else(
+                            || expert.entry(),
+                            |(bytes, codec)| {
+                                expert.entry_with_codec(bytes, codec.unwrap_or(expert.codec))
+                            },
+                        )
                     })
                 })
                 .collect();
@@ -890,7 +912,16 @@ impl<'file> ExpertSlab<'file> {
                     .get(layer)
                     .filter(|experts| !experts.is_empty());
                 let source = if let (Some(scratch), Some(selected)) = (sidecar, selected) {
-                    let arena = scratch.arena(*projection).filter(|(_, spans)| {
+                    let mapped_arena =
+                        mapping.and_then(|mapping| scratch.mapped_arena(mapping, *projection));
+                    #[cfg(unix)]
+                    let mapped_window_arena = scratch.mapped_window_arena(*projection);
+                    #[cfg(not(unix))]
+                    let mapped_window_arena = None;
+                    let arena = mapped_window_arena
+                        .or(mapped_arena)
+                        .or_else(|| scratch.arena(*projection));
+                    let arena = arena.filter(|(_, spans)| {
                         selected.iter().all(|expert| {
                             usize::try_from(*expert)
                                 .ok()
@@ -924,6 +955,7 @@ impl<'file> ExpertSlab<'file> {
             .collect()
     }
 
+    #[cfg(any(test, feature = "metal"))]
     pub(crate) fn all_low_sources_for_step<'mapping, 'scratch>(
         &self,
         sidecar: &'mapping crate::expert_sidecar::MappedExpertSidecar,
@@ -932,8 +964,34 @@ impl<'file> ExpertSlab<'file> {
     where
         'mapping: 'scratch,
     {
+        self.all_low_sources_for_layers(sidecar, 0, self.layers.len(), scratch)
+    }
+
+    /// Builds an exact all-low source table for a bounded contiguous layer
+    /// window. The source entries retain their original routed expert index;
+    /// only the window's six projection nodes are exposed, so a caller can
+    /// execute two adjacent layers without staging the model's full expert
+    /// sidecar.
+    #[cfg(any(test, feature = "metal"))]
+    pub(crate) fn all_low_sources_for_layers<'mapping, 'scratch>(
+        &self,
+        sidecar: &'mapping crate::expert_sidecar::MappedExpertSidecar,
+        first_layer: usize,
+        layer_count: usize,
+        scratch: &'scratch mut AllLowExpertSourceScratch<'mapping>,
+    ) -> Result<BTreeMap<NodeId, ExpertSource<'scratch>>, InteropError>
+    where
+        'mapping: 'scratch,
+    {
         scratch.clear();
-        for (site, layer_slab) in self.layers.iter().enumerate() {
+        let last_layer = first_layer
+            .checked_add(layer_count)
+            .ok_or(InteropError::SidecarSizeOverflow)?;
+        for (site, layer_slab) in self.layers.iter().enumerate().filter(|(_, layer_slab)| {
+            layer_slab
+                .model_layer
+                .is_some_and(|layer| (first_layer..last_layer).contains(&layer))
+        }) {
             let (Some(weight_node), Some(model_layer)) =
                 (layer_slab.weight_node, layer_slab.model_layer)
             else {
@@ -948,15 +1006,21 @@ impl<'file> ExpertSlab<'file> {
                     layer: model_layer,
                     expert: 0,
                 })?;
-            for expert in 0..layer_slab.experts.len() {
-                if !self.uses_mapped_low(model_layer, expert, projection)? {
-                    return Err(InteropError::ExpertAllLowSourceRequired {
-                        layer: model_layer,
-                        expert,
-                        projection: projection.name(),
-                    });
-                }
+            if let Some((expert, _)) = layer_slab
+                .experts
+                .iter()
+                .enumerate()
+                .find(|(_, copy)| copy.as_ref().is_none_or(|copy| !copy.bytes.is_mapped()))
+            {
+                return Err(InteropError::ExpertAllLowSourceRequired {
+                    layer: model_layer,
+                    expert,
+                    projection: projection.name(),
+                });
             }
+            // This source table is deliberately the authority for the whole
+            // bounded window; requiring the slab's routed residency bits here
+            // would make an all-low window impossible before the first route.
             let mut entries = Vec::new();
             let mut spans = Vec::new();
             let arena = sidecar.populate_all_low_source(

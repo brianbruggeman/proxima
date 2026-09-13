@@ -285,6 +285,33 @@ impl Op {
             Self::Iota { .. } | Self::Constant { .. } => None,
         }
     }
+
+    /// Discriminant name, for diagnostics that need to print an op's shape
+    /// without matching on the whole enum (`examples/compare_local.rs`'s
+    /// per-node divergence trace).
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Input { .. } => "input",
+            Self::Elementwise { .. } => "elementwise",
+            Self::Reduce(_) => "reduce",
+            Self::Iota { .. } => "iota",
+            Self::Constant { .. } => "constant",
+        }
+    }
+
+    /// This op's operand [`NodeId`]s, in the order the op itself addresses
+    /// them. `Input`/`Iota`/`Constant` are leaves and depend on nothing.
+    #[must_use]
+    pub fn dependencies(&self) -> Vec<NodeId> {
+        match self {
+            Self::Input { .. } | Self::Iota { .. } | Self::Constant { .. } => Vec::new(),
+            Self::Elementwise { operands, .. } => {
+                operands.iter().map(|(node, _)| *node).collect()
+            }
+            Self::Reduce(reduce) => alloc::vec![reduce.operand],
+        }
+    }
 }
 
 /// Append an expression, returning the [`NodeId`] it can be referenced by.

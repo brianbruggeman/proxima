@@ -28,8 +28,8 @@ fn main() {
     // SAFETY: `file` remains alive while the read-only mapping is borrowed.
     let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }.expect("map model");
     let parsed = parse_complete(&bytes).expect("parse model");
-    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
-        .expect("build checkpoint tokenizer");
+    let vocab =
+        proxima_tokenizer::gguf::vocab_from_metadata(&parsed).expect("build checkpoint tokenizer");
     let ids = encode_with_bos_eos(&prompt, &vocab, add_bos, false).expect("tokenize prompt");
     let roundtrip = decode(&ids, &vocab).expect("decode token IDs");
     let architecture = parsed

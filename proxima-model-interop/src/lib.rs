@@ -58,11 +58,11 @@ pub mod residency;
 mod memory_fit;
 #[cfg(feature = "std")]
 mod quality;
-#[cfg(all(feature = "std", feature = "proxima-storage"))]
-mod source;
 #[cfg(feature = "std")]
 mod qwen35;
 mod serving;
+#[cfg(all(feature = "std", feature = "proxima-storage"))]
+mod source;
 pub mod task;
 #[cfg(all(test, feature = "std"))]
 mod test_support;
@@ -109,8 +109,6 @@ pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
 pub use quality::print_quality_report;
 #[cfg(feature = "std")]
 pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, quality_report};
-#[cfg(all(feature = "std", feature = "proxima-storage"))]
-pub use source::{CheckpointMapping, CheckpointSourceError};
 #[cfg(feature = "std")]
 pub use qwen35::{
     Qwen35Arch, Qwen35Architecture, Qwen35LayerKind, Qwen35SsmShape, bind_qwen35_checkpoint,
@@ -119,12 +117,17 @@ pub use qwen35::{
 pub use qwen35moe::{QWEN35MOE, Qwen35MoeArch};
 #[cfg(feature = "std")]
 pub use residency::{
-    ExpertAddress, ExpertPage, ExpertResidency, ResidencyAction, ResidencyActions, ResidencyConfig,
-    ResidencyError, RoutedExpert, ServeDecision, ServePrecision,
+    ExpertAddress, ExpertPage, ExpertResidency, PrefetchCandidate, PrefetchCandidates,
+    ResidencyAction, ResidencyActions, ResidencyConfig, ResidencyError, RoutedExpert,
+    ServeDecision, ServePrecision,
 };
+#[cfg(feature = "std")]
+pub use serving::GdnPrefillBackend;
 pub use serving::{
     DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, NamePattern, REASONING_BUDGET_UNBOUNDED, ServingConfig,
     WeightPrecisionRule, apply_serving_config,
 };
+#[cfg(all(feature = "std", feature = "proxima-storage"))]
+pub use source::{CheckpointMapping, CheckpointSourceError};
 pub use task::{ModelTask, TaskProfile, classify_task};
 pub use transform::{gguf_to_safetensors, safetensors_to_gguf};

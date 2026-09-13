@@ -12,9 +12,9 @@ use proxima_gguf::parse_complete;
 use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel};
 
 #[cfg(feature = "metal")]
-use proxima_gguf::{MetadataValue, ParsedGguf};
-#[cfg(feature = "metal")]
 use omega::backend::{Engine, GpuDriver};
+#[cfg(feature = "metal")]
+use proxima_gguf::{MetadataValue, ParsedGguf};
 #[cfg(feature = "metal")]
 use proxima_tensor::{DType, Extent, IndexMap, NodeId, Op, ScalarOp, append, projection};
 
@@ -139,69 +139,68 @@ fn main() {
                         );
                     } else {
                         let (max_abs, max_index) = cpu_target
-                        .iter()
-                        .zip(gpu_target)
-                        .enumerate()
-                        .map(|(index, (left, right))| (f64::from((left - right).abs()), index))
-                        .max_by(|left, right| left.0.total_cmp(&right.0))
-                        .expect("nonempty target after explicit empty check");
+                            .iter()
+                            .zip(gpu_target)
+                            .enumerate()
+                            .map(|(index, (left, right))| (f64::from((left - right).abs()), index))
+                            .max_by(|left, right| left.0.total_cmp(&right.0))
+                            .expect("nonempty target after explicit empty check");
                         println!(
-                        "{{\"target_node\":{},\"kind\":{:?},\"name\":{:?},\"description\":{:?},\"max_abs\":{max_abs},\"max_index\":{max_index},\"cpu\":{},\"gpu\":{},\"dependencies\":{:?}}}",
-                        target.0,
-                        model.node_kind(target),
-                        model.node_name(target),
-                        model.node_description(target),
-                        cpu_target[max_index],
-                        gpu_target[max_index],
-                        model.node_dependencies(target)
+                            "{{\"target_node\":{},\"kind\":{:?},\"name\":{:?},\"description\":{:?},\"max_abs\":{max_abs},\"max_index\":{max_index},\"cpu\":{},\"gpu\":{},\"dependencies\":{:?}}}",
+                            target.0,
+                            model.node_kind(target),
+                            model.node_name(target),
+                            model.node_description(target),
+                            cpu_target[max_index],
+                            gpu_target[max_index],
+                            model.node_dependencies(target)
                         );
                         if target.0 == 35 {
-                        let reciprocal_index = env::var("PROXIMA_COMPARE_INDEX")
-                            .ok()
-                            .and_then(|value| value.parse::<usize>().ok())
-                            .expect("PROXIMA_COMPARE_INDEX for reciprocal probe");
-                        let dependency = proxima_tensor::NodeId(34);
-                        let dependency_index = requested_roots
-                            .iter()
-                            .position(|node| *node == dependency)
-                            .expect("node 34 requested for node 35 probe");
-                        let cpu_input = cpu_layers[dependency_index][reciprocal_index];
-                        let gpu_input = gpu_layers[dependency_index][reciprocal_index];
-                        let host_cpu_reciprocal = 1.0_f32 / cpu_input;
-                        let host_gpu_reciprocal = 1.0_f32 / gpu_input;
-                        let gpu_output = gpu_layers[index][reciprocal_index];
-                        println!(
-                            "{{\"reciprocal_probe\":true,\"index\":{reciprocal_index},\"cpu_input\":{cpu_input},\"gpu_input\":{gpu_input},\"host_cpu_reciprocal\":{host_cpu_reciprocal},\"host_gpu_reciprocal\":{host_gpu_reciprocal},\"gpu_output\":{gpu_output},\"gpu_vs_host_gpu_abs\":{},\"gpu_vs_host_cpu_abs\":{}}}",
-                            (gpu_output - host_gpu_reciprocal).abs(),
-                            (gpu_output - host_cpu_reciprocal).abs()
-                        );
-                        }
-                        for dependency in model.node_dependencies(target) {
-                        if let Some(dep_index) = requested_roots
-                            .iter()
-                            .position(|node| *node == dependency)
-                        {
-                            let cpu_dep = &cpu_layers[dep_index];
-                            let gpu_dep = &gpu_layers[dep_index];
-                            let (dep_max_abs, dep_max_index) = cpu_dep
+                            let reciprocal_index = env::var("PROXIMA_COMPARE_INDEX")
+                                .ok()
+                                .and_then(|value| value.parse::<usize>().ok())
+                                .expect("PROXIMA_COMPARE_INDEX for reciprocal probe");
+                            let dependency = proxima_tensor::NodeId(34);
+                            let dependency_index = requested_roots
                                 .iter()
-                                .zip(gpu_dep)
-                                .enumerate()
-                                .map(|(index, (left, right))| {
-                                    (f64::from((left - right).abs()), index)
-                                })
-                                .max_by(|left, right| left.0.total_cmp(&right.0))
-                                .expect("reduction dependency is nonempty");
+                                .position(|node| *node == dependency)
+                                .expect("node 34 requested for node 35 probe");
+                            let cpu_input = cpu_layers[dependency_index][reciprocal_index];
+                            let gpu_input = gpu_layers[dependency_index][reciprocal_index];
+                            let host_cpu_reciprocal = 1.0_f32 / cpu_input;
+                            let host_gpu_reciprocal = 1.0_f32 / gpu_input;
+                            let gpu_output = gpu_layers[index][reciprocal_index];
                             println!(
-                                "{{\"dependency_node\":{},\"kind\":{:?},\"description\":{:?},\"elements\":{},\"max_abs\":{dep_max_abs},\"max_index\":{dep_max_index},\"cpu\":{},\"gpu\":{}}}",
-                                dependency.0,
-                                model.node_kind(dependency),
-                                model.node_description(dependency),
-                                cpu_dep.len(),
-                                cpu_dep[dep_max_index],
-                                gpu_dep[dep_max_index]
+                                "{{\"reciprocal_probe\":true,\"index\":{reciprocal_index},\"cpu_input\":{cpu_input},\"gpu_input\":{gpu_input},\"host_cpu_reciprocal\":{host_cpu_reciprocal},\"host_gpu_reciprocal\":{host_gpu_reciprocal},\"gpu_output\":{gpu_output},\"gpu_vs_host_gpu_abs\":{},\"gpu_vs_host_cpu_abs\":{}}}",
+                                (gpu_output - host_gpu_reciprocal).abs(),
+                                (gpu_output - host_cpu_reciprocal).abs()
                             );
                         }
+                        for dependency in model.node_dependencies(target) {
+                            if let Some(dep_index) =
+                                requested_roots.iter().position(|node| *node == dependency)
+                            {
+                                let cpu_dep = &cpu_layers[dep_index];
+                                let gpu_dep = &gpu_layers[dep_index];
+                                let (dep_max_abs, dep_max_index) = cpu_dep
+                                    .iter()
+                                    .zip(gpu_dep)
+                                    .enumerate()
+                                    .map(|(index, (left, right))| {
+                                        (f64::from((left - right).abs()), index)
+                                    })
+                                    .max_by(|left, right| left.0.total_cmp(&right.0))
+                                    .expect("reduction dependency is nonempty");
+                                println!(
+                                    "{{\"dependency_node\":{},\"kind\":{:?},\"description\":{:?},\"elements\":{},\"max_abs\":{dep_max_abs},\"max_index\":{dep_max_index},\"cpu\":{},\"gpu\":{}}}",
+                                    dependency.0,
+                                    model.node_kind(dependency),
+                                    model.node_description(dependency),
+                                    cpu_dep.len(),
+                                    cpu_dep[dep_max_index],
+                                    gpu_dep[dep_max_index]
+                                );
+                            }
                         }
                     }
                 }
@@ -209,11 +208,7 @@ fn main() {
 
             #[cfg(feature = "metal")]
             if env::var_os("PROXIMA_RECIPROCAL_REPLAY").is_some() {
-                replay_reciprocal(
-                    &backend,
-                    &requested_roots,
-                    &gpu_layers,
-                );
+                replay_reciprocal(&backend, &requested_roots, &gpu_layers);
             }
             #[cfg(feature = "metal")]
             if env::var_os("PROXIMA_SQRT_REPLAY").is_some() {
@@ -242,28 +237,24 @@ fn main() {
             }
             #[cfg(feature = "metal")]
             if env::var_os("PROXIMA_NODE70_REPLAY").is_some() {
-                replay_node70_reduce(
-                    &backend,
-                    &requested_roots,
-                    &cpu_layers,
-                );
+                replay_node70_reduce(&backend, &requested_roots, &cpu_layers);
             }
         } else {
-        for (layer, (cpu_layer, gpu_layer)) in cpu_layers.iter().zip(&gpu_layers).enumerate() {
-            assert_eq!(cpu_layer.len(), gpu_layer.len());
-            let (max_abs, max_index) = cpu_layer
-                .iter()
-                .zip(gpu_layer)
-                .enumerate()
-                .map(|(index, (left, right))| (f64::from((left - right).abs()), index))
-                .max_by(|left, right| left.0.total_cmp(&right.0))
-                .expect("nonempty layer residual");
-            println!(
-                "{{\"layer\":{layer},\"root\":{},\"elements\":{},\"max_abs\":{max_abs},\"max_index\":{max_index}}}",
-                layer_roots[layer].0,
-                cpu_layer.len()
-            );
-        }
+            for (layer, (cpu_layer, gpu_layer)) in cpu_layers.iter().zip(&gpu_layers).enumerate() {
+                assert_eq!(cpu_layer.len(), gpu_layer.len());
+                let (max_abs, max_index) = cpu_layer
+                    .iter()
+                    .zip(gpu_layer)
+                    .enumerate()
+                    .map(|(index, (left, right))| (f64::from((left - right).abs()), index))
+                    .max_by(|left, right| left.0.total_cmp(&right.0))
+                    .expect("nonempty layer residual");
+                println!(
+                    "{{\"layer\":{layer},\"root\":{},\"elements\":{},\"max_abs\":{max_abs},\"max_index\":{max_index}}}",
+                    layer_roots[layer].0,
+                    cpu_layer.len()
+                );
+            }
         }
     }
     let cpu = model
@@ -299,11 +290,7 @@ fn main() {
 }
 
 #[cfg(feature = "metal")]
-fn replay_reciprocal(
-    backend: &str,
-    requested_roots: &[NodeId],
-    gpu_layers: &[Vec<f32>],
-) {
+fn replay_reciprocal(backend: &str, requested_roots: &[NodeId], gpu_layers: &[Vec<f32>]) {
     let input_node = NodeId(0);
     let output_node = NodeId(1);
     let input_index = requested_roots
@@ -344,7 +331,10 @@ fn replay_reciprocal(
         }
         _ => panic!("unsupported reciprocal replay backend"),
     };
-    let named = [("reciprocal_input", proxima_tensor::QuantizedBlock::Float32(input))];
+    let named = [(
+        "reciprocal_input",
+        proxima_tensor::QuantizedBlock::Float32(input),
+    )];
     let mut plan = omega::backend::plan_named(
         Engine::Gpu,
         Some(driver),
@@ -359,7 +349,13 @@ fn replay_reciprocal(
     for _ in 0..3 {
         let evaluated = omega::backend::execute_plan_named(&mut plan, &named)
             .expect("execute reciprocal replay");
-        replayed.push(evaluated.get(output_node).expect("replay output").0.to_vec());
+        replayed.push(
+            evaluated
+                .get(output_node)
+                .expect("replay output")
+                .0
+                .to_vec(),
+        );
     }
     let host: Vec<f32> = input.iter().map(|value| 1.0_f32 / value).collect();
     for (run, values) in replayed.iter().enumerate() {
@@ -374,11 +370,7 @@ fn replay_reciprocal(
 }
 
 #[cfg(feature = "metal")]
-fn replay_square_root(
-    backend: &str,
-    requested_roots: &[NodeId],
-    gpu_layers: &[Vec<f32>],
-) {
+fn replay_square_root(backend: &str, requested_roots: &[NodeId], gpu_layers: &[Vec<f32>]) {
     let input_node = NodeId(0);
     let output_node = NodeId(1);
     let input_index = requested_roots
@@ -419,7 +411,10 @@ fn replay_square_root(
         }
         _ => panic!("unsupported square-root replay backend"),
     };
-    let named = [("square_root_input", proxima_tensor::QuantizedBlock::Float32(input))];
+    let named = [(
+        "square_root_input",
+        proxima_tensor::QuantizedBlock::Float32(input),
+    )];
     let mut plan = omega::backend::plan_named(
         Engine::Gpu,
         Some(driver),
@@ -434,7 +429,13 @@ fn replay_square_root(
     for _ in 0..3 {
         let evaluated = omega::backend::execute_plan_named(&mut plan, &named)
             .expect("execute square-root replay");
-        replayed.push(evaluated.get(output_node).expect("replay output").0.to_vec());
+        replayed.push(
+            evaluated
+                .get(output_node)
+                .expect("replay output")
+                .0
+                .to_vec(),
+        );
     }
     let host: Vec<f32> = input.iter().map(|value| value.sqrt()).collect();
     for (run, values) in replayed.iter().enumerate() {
@@ -530,9 +531,15 @@ fn replay_epsilon_add(
     .expect("plan epsilon replay");
     let mut replayed = Vec::new();
     for _ in 0..3 {
-        let evaluated = omega::backend::execute_plan_named(&mut plan, &named)
-            .expect("execute epsilon replay");
-        replayed.push(evaluated.get(output_node).expect("replay output").0.to_vec());
+        let evaluated =
+            omega::backend::execute_plan_named(&mut plan, &named).expect("execute epsilon replay");
+        replayed.push(
+            evaluated
+                .get(output_node)
+                .expect("replay output")
+                .0
+                .to_vec(),
+        );
     }
     let host: Vec<f32> = input.iter().map(|value| value + epsilon).collect();
     for (run, values) in replayed.iter().enumerate() {
@@ -547,11 +554,7 @@ fn replay_epsilon_add(
 }
 
 #[cfg(feature = "metal")]
-fn replay_mean_square(
-    backend: &str,
-    requested_roots: &[NodeId],
-    gpu_layers: &[Vec<f32>],
-) {
+fn replay_mean_square(backend: &str, requested_roots: &[NodeId], gpu_layers: &[Vec<f32>]) {
     let input_node = NodeId(0);
     let constant_node = NodeId(1);
     let output_node = NodeId(2);
@@ -609,7 +612,10 @@ fn replay_mean_square(
         }
         _ => panic!("unsupported mean-square replay backend"),
     };
-    let named = [("mean_square_input", proxima_tensor::QuantizedBlock::Float32(input))];
+    let named = [(
+        "mean_square_input",
+        proxima_tensor::QuantizedBlock::Float32(input),
+    )];
     let mut plan = omega::backend::plan_named(
         Engine::Gpu,
         Some(driver),
@@ -624,7 +630,13 @@ fn replay_mean_square(
     for _ in 0..3 {
         let evaluated = omega::backend::execute_plan_named(&mut plan, &named)
             .expect("execute mean-square replay");
-        replayed.push(evaluated.get(output_node).expect("replay output").0.to_vec());
+        replayed.push(
+            evaluated
+                .get(output_node)
+                .expect("replay output")
+                .0
+                .to_vec(),
+        );
     }
     let host: Vec<f32> = input.iter().map(|value| value * constant).collect();
     for (run, values) in replayed.iter().enumerate() {
@@ -639,11 +651,7 @@ fn replay_mean_square(
 }
 
 #[cfg(feature = "metal")]
-fn replay_sum_squares(
-    backend: &str,
-    requested_roots: &[NodeId],
-    gpu_layers: &[Vec<f32>],
-) {
+fn replay_sum_squares(backend: &str, requested_roots: &[NodeId], gpu_layers: &[Vec<f32>]) {
     let input_node = NodeId(0);
     let output_node = NodeId(1);
     let input_index = requested_roots
@@ -696,7 +704,10 @@ fn replay_sum_squares(
         }
         _ => panic!("unsupported sum-squares replay backend"),
     };
-    let named = [("sum_squares_input", proxima_tensor::QuantizedBlock::Float32(input))];
+    let named = [(
+        "sum_squares_input",
+        proxima_tensor::QuantizedBlock::Float32(input),
+    )];
     let mut plan = omega::backend::plan_named(
         Engine::Gpu,
         Some(driver),
@@ -711,7 +722,13 @@ fn replay_sum_squares(
     for _ in 0..3 {
         let evaluated = omega::backend::execute_plan_named(&mut plan, &named)
             .expect("execute sum-squares replay");
-        replayed.push(evaluated.get(output_node).expect("replay output").0.to_vec());
+        replayed.push(
+            evaluated
+                .get(output_node)
+                .expect("replay output")
+                .0
+                .to_vec(),
+        );
     }
     let host: Vec<f32> = input
         .chunks_exact(column_count)
@@ -735,11 +752,7 @@ fn replay_sum_squares(
 }
 
 #[cfg(feature = "metal")]
-fn replay_residual_add(
-    backend: &str,
-    requested_roots: &[NodeId],
-    gpu_layers: &[Vec<f32>],
-) {
+fn replay_residual_add(backend: &str, requested_roots: &[NodeId], gpu_layers: &[Vec<f32>]) {
     let left_node = NodeId(0);
     let right_node = NodeId(1);
     let output_node = NodeId(2);
@@ -822,7 +835,13 @@ fn replay_residual_add(
     for _ in 0..3 {
         let evaluated = omega::backend::execute_plan_named(&mut plan, &named)
             .expect("execute residual-add replay");
-        replayed.push(evaluated.get(output_node).expect("replay output").0.to_vec());
+        replayed.push(
+            evaluated
+                .get(output_node)
+                .expect("replay output")
+                .0
+                .to_vec(),
+        );
     }
     let host: Vec<f32> = left
         .iter()
@@ -842,11 +861,7 @@ fn replay_residual_add(
 }
 
 #[cfg(feature = "metal")]
-fn replay_node70_reduce(
-    backend: &str,
-    requested_roots: &[NodeId],
-    cpu_layers: &[Vec<f32>],
-) {
+fn replay_node70_reduce(backend: &str, requested_roots: &[NodeId], cpu_layers: &[Vec<f32>]) {
     let input_node = NodeId(0);
     let output_node = NodeId(1);
     let input_index = requested_roots
@@ -888,7 +903,10 @@ fn replay_node70_reduce(
             name: None,
         }),
     );
-    let named = [("node70_input", proxima_tensor::QuantizedBlock::Float32(input))];
+    let named = [(
+        "node70_input",
+        proxima_tensor::QuantizedBlock::Float32(input),
+    )];
     let mut cpu_plan = omega::backend::plan_named(
         Engine::Cpu,
         None,
@@ -903,7 +921,13 @@ fn replay_node70_reduce(
     for _ in 0..3 {
         let evaluated = omega::backend::execute_plan_named(&mut cpu_plan, &named)
             .expect("execute CPU node-70 replay");
-        cpu_replayed.push(evaluated.get(output_node).expect("CPU replay output").0.to_vec());
+        cpu_replayed.push(
+            evaluated
+                .get(output_node)
+                .expect("CPU replay output")
+                .0
+                .to_vec(),
+        );
     }
     let driver = match backend {
         "vulkan" => GpuDriver::Wgpu,
@@ -933,7 +957,13 @@ fn replay_node70_reduce(
     for _ in 0..3 {
         let evaluated = omega::backend::execute_plan_named(&mut gpu_plan, &named)
             .expect("execute GPU node-70 replay");
-        gpu_replayed.push(evaluated.get(output_node).expect("GPU replay output").0.to_vec());
+        gpu_replayed.push(
+            evaluated
+                .get(output_node)
+                .expect("GPU replay output")
+                .0
+                .to_vec(),
+        );
     }
     for (run, (cpu_values, gpu_values)) in cpu_replayed.iter().zip(&gpu_replayed).enumerate() {
         let (cpu_graph_max, cpu_graph_index) = max_abs_and_index(cpu_values, original);

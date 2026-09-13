@@ -79,42 +79,41 @@ impl Architecture for DenseArch {
         // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
         // own doc on that flag and `proxima-tensor/docs/discipline.md`
         // ROW 418/421 for the measured cost of computing every row instead.
-        let (program, roots, cache_roots, layer_residuals, moe_sites) = if architecture_name
-            == "qwen2"
-        {
-            qwen2_cached_forward_program_with_experts_and_layer_taps(
-                architecture.vocab,
-                architecture.embedding,
-                architecture.feed_forward,
-                architecture.query_heads,
-                architecture.kv_heads,
-                architecture.head_dim,
-                architecture.block_count,
-                architecture.expert_count,
-                architecture.expert_used_count,
-                checkpoint_qkv_biases(parsed, &architecture)?,
-                false,
-                false,
-                last_row_only,
-            )?
-        } else {
-            mistral_cached_forward_program_with_experts_and_layer_taps(
-                architecture.vocab,
-                architecture.embedding,
-                architecture.feed_forward,
-                architecture.query_heads,
-                architecture.kv_heads,
-                architecture.head_dim,
-                architecture.block_count,
-                architecture.expert_count,
-                architecture.expert_used_count,
-                qk_norm,
-                checkpoint_qkv_biases(parsed, &architecture)?,
-                false,
-                false,
-                last_row_only,
-            )?
-        };
+        let (program, roots, cache_roots, layer_residuals, moe_sites) =
+            if architecture_name == "qwen2" {
+                qwen2_cached_forward_program_with_experts_and_layer_taps(
+                    architecture.vocab,
+                    architecture.embedding,
+                    architecture.feed_forward,
+                    architecture.query_heads,
+                    architecture.kv_heads,
+                    architecture.head_dim,
+                    architecture.block_count,
+                    architecture.expert_count,
+                    architecture.expert_used_count,
+                    checkpoint_qkv_biases(parsed, &architecture)?,
+                    false,
+                    false,
+                    last_row_only,
+                )?
+            } else {
+                mistral_cached_forward_program_with_experts_and_layer_taps(
+                    architecture.vocab,
+                    architecture.embedding,
+                    architecture.feed_forward,
+                    architecture.query_heads,
+                    architecture.kv_heads,
+                    architecture.head_dim,
+                    architecture.block_count,
+                    architecture.expert_count,
+                    architecture.expert_used_count,
+                    qk_norm,
+                    checkpoint_qkv_biases(parsed, &architecture)?,
+                    false,
+                    false,
+                    last_row_only,
+                )?
+            };
         Ok(BoundProgram {
             weights,
             architecture,
