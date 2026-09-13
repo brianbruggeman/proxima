@@ -437,13 +437,7 @@ pub fn plan_named(
                 GpuDriver::Wgpu => {
                     #[cfg(feature = "wgpu-backend")]
                     {
-                        plan_named_wgpu(
-                            _program,
-                            _symbols,
-                            _named,
-                            _outputs,
-                            _numeric_policy,
-                        )
+                        plan_named_wgpu(_program, _symbols, _named, _outputs, _numeric_policy)
                     }
                     #[cfg(not(feature = "wgpu-backend"))]
                     {
@@ -483,12 +477,13 @@ pub fn execute_plan_named(
 
 /// Executes a named plan with a per-step expert substitution table. CPU
 /// consumes the table through `proxima-tensor`'s expert-aware evaluator;
-/// Metal currently has an experimental uniform packed-codec staging arm only
-/// and does not yet implement mixed-precision HOBBIT substitution.
+/// Metal lowers the descriptor table directly and selects the packed decoder
+/// for each routed expert, including mixed-codec HOBBIT substitutions.
 ///
 /// # Errors
 /// In addition to [`execute_plan_named`]'s errors, Metal rejects malformed
-/// tables (empty, unpacked, mixed-codec, or wrong-node) with a typed error.
+/// tables (empty, unpacked, unsupported-codec, or wrong-node) with a typed
+/// error.
 pub fn execute_plan_named_with_expert_sources(
     plan: &mut Plan,
     _named: &[(&str, QuantizedBlock<'_>)],
@@ -538,11 +533,7 @@ pub fn execute_plan_named_with_resident_names(
     }
 }
 
-#[cfg(any(
-    feature = "wgpu-backend",
-    feature = "cuda-driver",
-    test
-))]
+#[cfg(any(feature = "wgpu-backend", feature = "cuda-driver", test))]
 fn reject_gpu_expert_sources(
     backend: &'static str,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
@@ -592,6 +583,30 @@ pub fn mark_resident(plan: &mut Plan, resident_names: &std::collections::BTreeSe
         Plan::Cuda(_) => {}
         // `Plan` is uninhabited with every backend feature off; `*plan {}`
         // is the never-pattern proof of that rather than a runtime `todo!`.
+        #[cfg(not(any(
+            feature = "cpu",
+            all(feature = "metal", target_os = "macos"),
+            feature = "wgpu-backend",
+            feature = "cuda-driver"
+        )))]
+        _ => match *plan {},
+    }
+}
+
+/// Returns the physical output-slot bytes retained by a resolved plan's
+/// Metal arena. Other backends have no persistent device arena and return
+/// zero; the caller uses this only for an allocation census.
+#[must_use]
+pub fn plan_arena_allocated_bytes(plan: &Plan) -> usize {
+    match plan {
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(_) => 0,
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        Plan::Metal(metal_plan) => metal_plan.arena_allocated_bytes().unwrap_or(0),
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(_) => 0,
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(_) => 0,
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
@@ -890,13 +905,8 @@ fn plan_named_wgpu(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
 ) -> Result<Plan, BackendError> {
-    let plan = wgpu_driver::plan_named_with_policy(
-        program,
-        symbols,
-        named,
-        outputs,
-        numeric_policy,
-    )?;
+    let plan =
+        wgpu_driver::plan_named_with_policy(program, symbols, named, outputs, numeric_policy)?;
     Ok(Plan::Wgpu(plan))
 }
 
@@ -918,9 +928,9 @@ fn plan_named_cuda(
     numeric_policy: NumericPolicy,
 ) -> Result<Plan, BackendError> {
     static DRIVER: OnceLock<Result<crate::cuda_driver::CudaDriver, String>> = OnceLock::new();
-    let driver = match DRIVER.get_or_init(|| {
-        crate::cuda_driver::CudaDriver::new(0).map_err(|error| error.to_string())
-    }) {
+    let driver = match DRIVER
+        .get_or_init(|| crate::cuda_driver::CudaDriver::new(0).map_err(|error| error.to_string()))
+    {
         Ok(driver) => driver,
         Err(error) => {
             return Err(BackendError::Cuda(CudaDriverError::Driver(error.clone())));
@@ -976,12 +986,14 @@ pub fn execute_plan_named_metal_op_timed_with_expert_sources(
     plan: &Plan,
     named: &[(&str, QuantizedBlock<'_>)],
     expert_sources: &std::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+    cpu_reference: Option<&std::collections::BTreeMap<NodeId, Vec<f32>>>,
 ) -> Result<(Evaluated, Vec<metal::OpGpuTiming>), BackendError> {
     match plan {
         Plan::Metal(metal_plan) => Ok(metal::execute_plan_named_op_timed_with_expert_sources(
             metal_plan,
             named,
             expert_sources,
+            cpu_reference,
         )?),
         #[cfg(feature = "cpu")]
         Plan::Cpu(_) => Err(BackendError::NotImplemented { backend: "cpu" }),

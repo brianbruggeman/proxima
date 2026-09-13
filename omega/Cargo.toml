@@ -17,6 +17,7 @@ readme.workspace = true
 # broken and uncompiled behind that flag.
 default = ["std", "metal", "cpu"]
 std = ["alloc", "thiserror/std", "proxima-tensor/std", "dep:conflaguration", "dep:serde"]
+mlx-gdn = ["std"]
 alloc = []
 cached-attention-streaming = ["proxima-tensor/cached-attention-streaming"]
 # Default-off passthrough to `proxima-tensor/reduce-epilogue-fusion` (the
@@ -304,6 +305,11 @@ metal-q4k-split-k = ["metal"]
 # ROW 270) and a decode-step seal on a quiet box, not on the mechanism
 # argument alone.
 metal-packed-row-nsg2 = ["metal"]
+# Gathered-expert packed-row body: treats each selected route as its own
+# output-group address, so the row-block decoder never reuses one expert row
+# across tokens. Default-off until the real Metal parity and decode cells seal
+# the descriptor rebasing path.
+metal-gathered-packed-row = ["metal"]
 # Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
 # wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
 # `BoundOp` descriptor, same emit-then-drive split, different target ISA
@@ -462,6 +468,7 @@ libc = { workspace = true, optional = true }
 block2 = { version = "0.6", default-features = false, optional = true }
 
 [build-dependencies]
+cc = "1.2.34"
 # reads `omega-runtime.toml` at build time via `proxima_build::sizing`
 # (`build.rs`'s `emit_sizing_consts`) -- build-dependency only, never links
 # into the compiled artifact.

@@ -13,6 +13,49 @@ use proxima_build::sizing::{SizingSource, require_nonneg, require_nonzero};
 
 fn main() {
     emit_sizing_consts();
+    emit_mlx_presence();
+}
+
+/// Detects an explicitly provisioned MLX C++ installation at build time.
+/// This is only a capability marker; execution remains opt-in until the
+/// native adapter proves parity against the tensor reference.
+fn emit_mlx_presence() {
+    println!("cargo:rustc-check-cfg=cfg(proxima_mlx)");
+    println!("cargo:rerun-if-env-changed=PROXIMA_MLX_PREFIX");
+    let Some(prefix) = env::var_os("PROXIMA_MLX_PREFIX") else {
+        if env::var_os("CARGO_FEATURE_MLX_GDN").is_some() {
+            panic!(
+                "mlx-gdn requires PROXIMA_MLX_PREFIX with mlx/include/mlx/mlx.h and mlx/lib/libmlx.dylib"
+            );
+        }
+        return;
+    };
+    let prefix = PathBuf::from(prefix);
+    let header = prefix.join("include/mlx/mlx.h");
+    let library = prefix.join("lib/libmlx.dylib");
+    if header.is_file() && library.is_file() {
+        println!("cargo:rustc-cfg=proxima_mlx");
+        println!("cargo:rustc-env=PROXIMA_MLX_PREFIX={}", prefix.display());
+        if env::var_os("CARGO_FEATURE_MLX_GDN").is_some() {
+            cc::Build::new()
+                .cpp(true)
+                .file("src/mlx_bridge.cc")
+                .include(prefix.join("include"))
+                .flag_if_supported("-std=c++17")
+                .compile("proxima_mlx_bridge");
+            println!(
+                "cargo:rustc-link-search=native={}",
+                prefix.join("lib").display()
+            );
+            println!("cargo:rustc-link-lib=dylib=mlx");
+            println!("cargo:rerun-if-changed=src/mlx_bridge.cc");
+        }
+    } else if env::var_os("CARGO_FEATURE_MLX_GDN").is_some() {
+        panic!(
+            "mlx-gdn requires MLX headers and library under {}",
+            prefix.display()
+        );
+    }
 }
 
 /// Cross-axis validation for the tiled-GEMM geometry (principle 8: these

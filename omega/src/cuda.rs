@@ -2240,12 +2240,8 @@ mod tests {
     #[test]
     fn associative_reduce_emits_warp_shuffle_cooperative_kernel() {
         let bound = matmul_reduce_op(4, 4096, ScalarOp::Add);
-        let kernel = emit_cuda_with_policy(
-            &bound,
-            &no_packed(),
-            NumericPolicy::llama_relaxed(),
-        )
-        .expect("emit succeeds");
+        let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
+            .expect("emit succeeds");
         assert!(kernel.source.contains("__shfl_down_sync"));
         assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
         assert_eq!(kernel.grid.threads, 4 * WARP_SIZE);
@@ -2606,15 +2602,14 @@ mod tests {
         assert!(source.contains("broadcast_full_coord[1]"));
         assert!(source.contains("__shfl_sync(0xffffffffu, accumulator, 0)"));
 
-        let kernel = emit_cuda_with_policy(
-            &bound,
-            &no_packed(),
-            NumericPolicy::llama_relaxed(),
-        )
-        .expect("broadcast kernel emits");
+        let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
+            .expect("broadcast kernel emits");
         assert_eq!(kernel.grid.threads, 4 * 8 * WARP_SIZE);
         let uniforms = pack_cuda_uniforms(&bound).expect("broadcast uniforms pack");
-        assert_eq!(i64::from_ne_bytes(uniforms[..8].try_into().expect("i64 output total")), 32);
+        assert_eq!(
+            i64::from_ne_bytes(uniforms[..8].try_into().expect("i64 output total")),
+            32
+        );
     }
 
     #[test]

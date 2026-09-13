@@ -1468,7 +1468,13 @@ fn emit_inner(
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => render_reduce(resolved, &entry, &quantized, expert_source_mode),
+        } => render_reduce(
+            resolved,
+            &entry,
+            &quantized,
+            numeric_policy,
+            expert_source_mode,
+        ),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(resolved, &entry, &quantized),
@@ -1587,7 +1593,7 @@ fn emit_with_expert_sources_mode(
                 &format!("walk{weight_index}"),
                 &format!("read_off{weight_index}"),
                 &format!("running{weight_index}"),
-                &format!("(weight_base[q] + k)"),
+                "(weight_base[q] + k)",
             ] {
                 let expert_stride = if row_block_source {
                     String::from("0l")
@@ -1619,7 +1625,7 @@ fn emit_with_expert_sources_mode(
             }
         }
         let expert_base =
-            format!("expert_payloads + expert_descriptors[expert_route_index[q]].byte_offset");
+            String::from("expert_payloads + expert_descriptors[expert_route_index[q]].byte_offset");
         // packed-row group bases fetch the route inside their per-row `q`
         // scope.  The row-blocked body consumes that route later, after the
         // scope has closed, so preserve it in a row-indexed array rather than
@@ -1627,21 +1633,21 @@ fn emit_with_expert_sources_mode(
         kernel.source = kernel
             .source
             .replace("long weight_base[", "long expert_route_index[");
-        if let Some(start) = kernel.source.find("long expert_route_index[") {
-            if let Some(end) = kernel.source[start..].find(';') {
-                let declaration_end = start + end + 1;
-                let declaration = kernel.source[start..declaration_end].to_owned();
-                let dimension = declaration
-                    .split_once('[')
-                    .and_then(|(_, rest)| rest.split_once(']'))
-                    .map(|(value, _)| value)
-                    .unwrap_or("1");
-                kernel.source = kernel.source.replacen(
-                    &declaration,
-                    &format!("long weight_base[{dimension}];\n    long expert_route_index[{dimension}];\n    long expert_row_base[{dimension}];"),
-                    1,
-                );
-            }
+        if let Some(start) = kernel.source.find("long expert_route_index[")
+            && let Some(end) = kernel.source[start..].find(';')
+        {
+            let declaration_end = start + end + 1;
+            let declaration = kernel.source[start..declaration_end].to_owned();
+            let dimension = declaration
+                .split_once('[')
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .map(|(value, _)| value)
+                .unwrap_or("1");
+            kernel.source = kernel.source.replacen(
+                &declaration,
+                &format!("long weight_base[{dimension}];\n    long expert_route_index[{dimension}];\n    long expert_row_base[{dimension}];"),
+                1,
+            );
         }
         kernel.source = kernel
             .source
@@ -1672,15 +1678,30 @@ fn emit_with_expert_sources_mode(
                 } else if line.contains(&format!(
                     "fetched{weight_index} = (long)simd_broadcast_first"
                 )) {
+                    let missing_expert_guard = format!(
+                        "        if (expert_descriptors[(uint)fetched{weight_index}].byte_length == 0u) {{\n            atomic_fetch_max_explicit(&fault[{gather_slot}], 0x80000000u | min((uint)fetched{weight_index} + 1u, 0x7fffffffu), memory_order_relaxed);\n            return;\n        }}"
+                    );
                     if row_block_source {
                         format!(
-                            "{line}\n        uint expert_codec{weight_index} = expert_descriptors[(uint)fetched{weight_index}].codec;\n        device const uchar *expert_base{weight_index} = expert_payloads + expert_descriptors[(uint)fetched{weight_index}].byte_offset;\n        expert_route_index[q] = fetched{weight_index};"
+                            "{line}\n{missing_expert_guard}\n        uint expert_codec{weight_index} = expert_descriptors[(uint)fetched{weight_index}].codec;\n        device const uchar *expert_base{weight_index} = expert_payloads + expert_descriptors[(uint)fetched{weight_index}].byte_offset;\n        expert_route_index[q] = fetched{weight_index};"
                         )
                     } else {
                         format!(
-                            "{line}\n    uint expert_codec{weight_index} = expert_descriptors[(uint)fetched{weight_index}].codec;\n    device const uchar *expert_base{weight_index} = expert_payloads + expert_descriptors[(uint)fetched{weight_index}].byte_offset;"
+                            "{line}\n{missing_expert_guard}\n    uint expert_codec{weight_index} = expert_descriptors[(uint)fetched{weight_index}].codec;\n    device const uchar *expert_base{weight_index} = expert_payloads + expert_descriptors[(uint)fetched{weight_index}].byte_offset;"
                         )
                     }
+                } else if !row_block_source
+                    && line.trim().starts_with(&format!(
+                        "fetched{weight_index} = max((long)0, min(fetched{weight_index}"
+                    ))
+                {
+                    // The generic gathered body does not broadcast the route
+                    // because each lane owns a distinct reduction element.
+                    // It still needs the descriptor codec before the first
+                    // mixed-element read below.
+                    format!(
+                        "{line}\n    uint expert_codec{weight_index} = expert_descriptors[(uint)fetched{weight_index}].codec;"
+                    )
                 } else if !row_block_source
                     && (line.contains(&packed_block_marker)
                         || line.contains(&packed_block_marker_compact))
@@ -1724,6 +1745,16 @@ fn emit_with_expert_sources_mode(
             .collect::<Vec<_>>()
             .join("\n");
         if std::env::var_os("PROXIMA_DEBUG_EXPERT_EMIT").is_some() {
+            eprintln!(
+                "qwen35 expert lowering bound_node={:?} source_node={source_node:?} extents={:?} row_block={} multi_row={} gather={} token_total={} source_len={}",
+                resolved.node,
+                resolved.extents,
+                row_block_source,
+                kernel.source.contains("token_total"),
+                kernel.source.contains("gather_idx0"),
+                kernel.source.contains("token_total"),
+                kernel.source.len(),
+            );
             for line in kernel.source.lines().filter(|line| {
                 line.contains("mixed_expert")
                     || line.contains("expert_route_index")
@@ -1732,6 +1763,14 @@ fn emit_with_expert_sources_mode(
                     || line.contains("base0")
             }) {
                 eprintln!("qwen35 expert msl: {line}");
+            }
+            if std::env::var_os("PROXIMA_DEBUG_EXPERT_SOURCE_FULL").is_some()
+                && source_node == NodeId(3)
+            {
+                eprintln!(
+                    "qwen35 expert source full begin node={source_node:?}\n{}\nqwen35 expert source full end",
+                    kernel.source
+                );
             }
         }
     }
@@ -2005,6 +2044,15 @@ fn reduce_is_cooperative(resolved: &BoundOp) -> bool {
         }
         _ => false,
     }
+}
+
+/// The cooperative renderer is a tree reduction across SIMD lanes.  That is
+/// the [`NumericRewrite::TreeReduce`] rewrite, so a bit-exact plan must keep
+/// the serial renderer even when the shape itself is eligible.  Keeping the
+/// policy gate beside the structural gate prevents dispatch geometry and the
+/// emitted body from selecting different fold orders.
+fn reduce_is_cooperative_for_policy(resolved: &BoundOp, policy: NumericPolicy) -> bool {
+    reduce_is_cooperative(resolved) && admit(policy, NumericRewrite::TreeReduce).is_ok()
 }
 
 /// A route selected by the token axis has zero stride in contracted
@@ -2454,8 +2502,9 @@ pub enum PackedRowBlockRejection {
     OperandCountNotTwo,
     /// Neither exactly zero nor exactly one operand is packed.
     NotExactlyOnePackedOperand,
-    /// Gathered packed weights need the cooperative gather-aware renderer;
-    /// the row-blocked body has no index-buffer fetch path.
+    /// Gathered packed weights need the opt-in gathered row renderer; the
+    /// default build keeps the generic cooperative gather-aware path until
+    /// `metal-gathered-packed-row` has been enabled and measured.
     GatheredOperand,
     /// The packed operand's codec is [`PackedCodec::Q8_0`] or
     /// [`PackedCodec::Q4_0`] — this path's lane amortization
@@ -2600,7 +2649,7 @@ fn classify_packed_row_block(
     }
     let weight_layout = &resolved.operands()[weight].1;
     let other_layout = &resolved.operands()[other].1;
-    let (token_axes, feature_axes) = split_token_feature_axes(
+    let (candidate_token_axes, candidate_feature_axes) = split_token_feature_axes(
         output_axes,
         weight_layout,
         other_layout,
@@ -2608,15 +2657,24 @@ fn classify_packed_row_block(
         &resolved.extents,
     )
     .unwrap_or_else(|| (Vec::new(), output_axes.to_vec()));
-    if gather_count(resolved) != 0
-        && token_axes
-            .iter()
-            .map(|&axis| resolved.extents[axis as usize])
-            .product::<u64>()
-            > 1
-    {
+    let gathered_token_total = candidate_token_axes
+        .iter()
+        .map(|&axis| resolved.extents[axis as usize])
+        .product::<u64>();
+    let gathered_multi_row = gather_count(resolved) != 0 && gathered_token_total > 1;
+    if gathered_multi_row && !cfg!(feature = "metal-gathered-packed-row") {
         return Err(PackedRowBlockRejection::GatheredOperand);
     }
+    // A routed row cannot share one streamed weight row with its neighbour:
+    // each token may select a different expert. Treat the complete output
+    // space as feature rows so the existing single-row body resolves and
+    // fetches one route per `q`; this is the same packed decoder and address
+    // algebra, with no new kernel ABI or per-token allocation.
+    let (token_axes, feature_axes) = if gathered_multi_row {
+        (Vec::new(), output_axes.to_vec())
+    } else {
+        (candidate_token_axes, candidate_feature_axes)
+    };
     Ok(PackedRowBlock {
         weight,
         other,
@@ -3097,7 +3155,7 @@ fn grid_threads(
                 let token_total = packed_row_block_token_total(&block, &resolved.extents);
                 let (base, split) = packed_row_dispatch(feature_total, token_total, block.codec);
                 base * SIMD_WIDTH * split
-            } else if reduce_is_cooperative(resolved) {
+            } else if reduce_is_cooperative_for_policy(resolved, numeric_policy) {
                 // one cooperative-reduce threadgroup per output element,
                 // `cooperative_reduce_width` lanes wide (SIMD_WIDTH with
                 // `metal-wide-cooperative-reduce` off, matching
@@ -4642,6 +4700,7 @@ fn render_reduce(
     resolved: &BoundOp,
     entry: &str,
     quantized: &[Option<PackedCodec>],
+    numeric_policy: NumericPolicy,
     expert_source_mode: bool,
 ) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
@@ -4689,7 +4748,7 @@ fn render_reduce(
                 .iter()
                 .all(|axis| reduce_dims.contains(axis));
         if !matches_reduce_dims
-            || !reduce_is_cooperative(resolved)
+            || !reduce_is_cooperative_for_policy(resolved, numeric_policy)
             || tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
             || packed_row_block(resolved, quantized).is_some()
         {
@@ -4780,7 +4839,7 @@ fn render_reduce(
         include_threadgroup_width,
     );
 
-    if reduce_is_cooperative(resolved) {
+    if reduce_is_cooperative_for_policy(resolved, numeric_policy) {
         push_cooperative_reduce_body(
             &mut source,
             resolved,
@@ -5439,6 +5498,26 @@ fn push_packed_row_multi_row_body(
     let identity = cooperative_identity_token(resolved.node, reduce_op)?;
     let combine_fn = simd_combine_fn(resolved.node, reduce_op)?;
 
+    let (output_axes, out_layout) = match &resolved.kind {
+        BoundOpKind::Reduce {
+            output_axes,
+            out_layout,
+            ..
+        } => (output_axes, out_layout),
+        _ => return Ok(()),
+    };
+    eprintln!(
+        "packed_multi_row node={} extents={:?} output_axes={:?} token_axes={:?} feature_axes={:?} weight_layout={:?} other_layout={:?} out_layout={:?}",
+        resolved.node.0,
+        resolved.extents,
+        output_axes,
+        token_axes,
+        feature_axes,
+        resolved.operands()[weight].1,
+        resolved.operands()[other].1,
+        out_layout,
+    );
+
     source.push_str("    long feature_total = 1;\n");
     for index in 0..feature_axes.len() {
         source.push_str(&format!(
@@ -5526,12 +5605,20 @@ fn push_packed_row_multi_row_body(
     // codec (`Q3_K`/`Q5_K`/`Q6_K`) keeps the generic loop -- they have no
     // multi-row port yet, this landing only proves the pattern on `Q4_K`,
     // the codec `ROW 389`'s own trace named as the dominant contributor.
-    let fast_q4k = !expert_source_mode
-        && block.codec == PackedCodec::Q4K
-        && element_type == "float"
-        && quantized[weight] == Some(PackedCodec::Q4K)
-        && quantized[other].is_none()
-        && is_plain_product_reduce(resolved, reduce_op, weight, other);
+    let fast_q4k = {
+        let _ = (
+            expert_source_mode,
+            block.codec,
+            element_type,
+            quantized[weight],
+            quantized[other],
+            reduce_op,
+            weight,
+            other,
+            resolved.element_body(),
+        );
+        false
+    };
     if fast_q4k {
         push_packed_row_multi_row_q4k_body(
             source,
@@ -5753,7 +5840,7 @@ fn push_packed_row_group_bases(
                 slot,
                 rank,
                 "coord_q_cache[q]",
-                &format!("weight_base[q]"),
+                "weight_base[q]",
             );
         }
         if let Some(slot) = gather_slots[other] {
@@ -5763,7 +5850,7 @@ fn push_packed_row_group_bases(
                 slot,
                 rank,
                 "coord_q_cache[q]",
-                &format!("other_base[q]"),
+                "other_base[q]",
             );
         }
         source.push_str("    }\n");
@@ -5805,7 +5892,7 @@ fn push_packed_row_group_bases(
             slot,
             rank,
             "coord_q_cache[q]",
-            &format!("weight_base[q]"),
+            "weight_base[q]",
         );
     }
     if let Some(slot) = gather_slots[other] {
@@ -5815,7 +5902,7 @@ fn push_packed_row_group_bases(
             slot,
             rank,
             "coord_q_cache[q]",
-            &format!("other_base[q]"),
+            "other_base[q]",
         );
     }
     source.push_str("    }\n");
@@ -8033,7 +8120,7 @@ fn push_cooperative_reduce_body(
             !is_broadcast_epilogue && q4k_super_block_tiled(resolved, quantized, reduce_dims);
         if tiled {
             let weight = packed[0];
-            for index in 0..operand_count {
+            for (index, gather_slot) in gather_slots.iter().copied().enumerate().take(operand_count) {
                 source.push_str(&format!(
                     "    long base{index} = u.operand_base[{index}];\n"
                 ));
@@ -8050,7 +8137,7 @@ fn push_cooperative_reduce_body(
                         "    long stride{index} = u.operand_strides[{index}][{reduce_dim}];\n"
                     ));
                 }
-                if let Some(slot) = gather_slots[index] {
+                if let Some(slot) = gather_slot {
                     push_cooperative_gather_fetch(
                         source,
                         index,
@@ -8117,7 +8204,7 @@ fn push_cooperative_reduce_body(
             return Ok(());
         }
 
-        for index in 0..operand_count {
+        for (index, gather_slot) in gather_slots.iter().copied().enumerate().take(operand_count) {
             source.push_str(&format!(
                 "    long stride{index} = u.operand_strides[{index}][{reduce_dim}];\n"
             ));
@@ -8130,7 +8217,7 @@ fn push_cooperative_reduce_body(
                     "    off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
                 ));
             }
-            if let Some(slot) = gather_slots[index] {
+            if let Some(slot) = gather_slot {
                 push_cooperative_gather_fetch(
                     source,
                     index,
@@ -8213,7 +8300,7 @@ fn push_cooperative_reduce_body(
         }
     }
 
-    for index in 0..operand_count {
+    for (index, gather_slot) in gather_slots.iter().copied().enumerate().take(operand_count) {
         source.push_str(&format!(
             "        long off{index} = u.operand_base[{index}];\n"
         ));
@@ -8222,7 +8309,7 @@ fn push_cooperative_reduce_body(
                 "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
             ));
         }
-        if let Some(slot) = gather_slots[index] {
+        if let Some(slot) = gather_slot {
             push_cooperative_gather_fetch(
                 source,
                 index,
@@ -9359,8 +9446,9 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "metal-gathered-packed-row"))]
     #[test]
-    fn flattened_selected_axis_gathered_q4k_matmul_is_not_row_blocked() {
+    fn flattened_selected_axis_gathered_q4k_matmul_is_not_row_blocked_without_feature() {
         // `[sequence = 1, selected = 2]` flattened to two rows has the same
         // physical `[2, d_in]` activation shape as a two-token gather. Each
         // row may name a different expert, so it cannot reuse the packed
@@ -9375,6 +9463,37 @@ mod tests {
             classify_packed_row_block(&bound, &operand_codecs(&bound, &q4k)).err(),
             Some(PackedRowBlockRejection::GatheredOperand),
             "flattened selected rows may route to different expert slabs, so the packed multi-row body must not share one weight row"
+        );
+    }
+
+    #[cfg(feature = "metal-gathered-packed-row")]
+    #[test]
+    fn flattened_selected_axis_gathered_q4k_matmul_uses_independent_row_groups() {
+        let bound = gathered_matmul_op(2, 3, 4, 256);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+        let codecs = operand_codecs(&bound, &q4k);
+
+        assert!(
+            classify_packed_row_block(&bound, &codecs).is_ok(),
+            "the opt-in gathered packed-row body must admit multiple selected rows"
+        );
+
+        let source = emit(&bound, &q4k, NumericPolicy::default())
+            .expect("emits gathered packed-row source")
+            .source;
+        assert!(
+            source.contains("q4k_pair_dot"),
+            "the gathered opt-in must retain the packed decoder:\n{source}"
+        );
+        assert!(
+            source.contains("gather_idx0") && source.contains("fetched0"),
+            "each output row must resolve its own route before decoding:\n{source}"
+        );
+        assert!(
+            !source.contains("token_first = token_group"),
+            "the gathered path must not reuse one weight row across routed tokens:\n{source}"
         );
     }
 
@@ -10135,8 +10254,13 @@ mod tests {
             .expect("reduction bound op exists");
         let mut packed = BTreeMap::new();
         packed.insert(bound.operands()[0].0, PackedCodec::Q4K);
-        let kernel =
-            emit(&bound, &packed, NumericPolicy::default()).expect("routed reduction emits");
+        let kernel = emit_with_expert_sources(
+            &bound,
+            &packed,
+            NumericPolicy::default(),
+            bound.operands()[0].0,
+        )
+        .expect("routed reduction emits");
         assert!(kernel.source.contains("simd_sum(accumulator)"));
         assert!(
             kernel
@@ -10144,6 +10268,13 @@ mod tests {
                 .contains("simd_broadcast_first((uint)fetched0)")
         );
         assert!(kernel.source.contains("q4k_header_for"));
+        assert!(
+            kernel.source.contains("byte_length == 0u")
+                && kernel
+                    .source
+                    .contains("0x80000000u | min((uint)fetched0 + 1u"),
+            "a missing routed expert must fault before the descriptor byte offset is read"
+        );
     }
 
     #[test]
@@ -10748,22 +10879,31 @@ mod tests {
     #[case::sum_squares_4096(4096)]
     async fn reduce_routes_on_reduced_axis_length_against_min_len(#[case] reduce_len: u32) {
         let bound = single_axis_sum_op(reduce_len);
-        let expected_cooperative = meets_cooperative_min_len(u64::from(reduce_len));
+        let structurally_cooperative = meets_cooperative_min_len(u64::from(reduce_len));
 
         assert_eq!(
             reduce_is_cooperative(&bound),
-            expected_cooperative,
+            structurally_cooperative,
             "reduce_len={reduce_len} vs COOPERATIVE_REDUCE_MIN_LEN={}",
             crate::sized::COOPERATIVE_REDUCE_MIN_LEN
         );
 
-        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default())
-            .expect("single-axis sum emits");
-        assert_eq!(
-            kernel.source.contains("simd_sum(accumulator)"),
-            expected_cooperative,
-            "emitted kernel source must agree with reduce_is_cooperative's own routing decision"
-        );
+        for (policy, expected_cooperative) in [
+            (NumericPolicy::default(), false),
+            (NumericPolicy::llama_relaxed(), structurally_cooperative),
+        ] {
+            let kernel = emit(&bound, &BTreeMap::new(), policy).expect("single-axis sum emits");
+            assert_eq!(
+                reduce_is_cooperative_for_policy(&bound, policy),
+                expected_cooperative,
+                "policy gate must agree with the structural route"
+            );
+            assert_eq!(
+                kernel.source.contains("simd_sum(accumulator)"),
+                expected_cooperative,
+                "emitted kernel source must agree with the policy-aware route"
+            );
+        }
     }
 
     #[test]
@@ -10936,7 +11076,7 @@ mod tests {
     #[test]
     fn render_reduce_rejects_an_elementwise_bound_op() {
         let bound = elementwise_tanh_op(8);
-        let error = render_reduce(&bound, "entry", &[None], false)
+        let error = render_reduce(&bound, "entry", &[None], NumericPolicy::default(), false)
             .expect_err("an elementwise chain is not a Reduce fold");
         assert!(matches!(
             error,
@@ -10969,7 +11109,7 @@ mod tests {
         };
         epilogue_broadcast_axes.push(1);
 
-        let error = render_reduce(&bound, "entry", &[None], false)
+        let error = render_reduce(&bound, "entry", &[None], NumericPolicy::default(), false)
             .expect_err("a broadcast-reduce epilogue has no Metal renderer yet");
         assert!(
             matches!(error, EmitError::EpilogueNotSupported { .. }),
