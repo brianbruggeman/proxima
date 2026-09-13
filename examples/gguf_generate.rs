@@ -47,18 +47,126 @@
 //! failure surfaces as an explicit, unambiguous CPU fallback below -- never
 //! a silent one.
 
-use std::env;
 use std::sync::Arc;
 use std::time::Instant;
+
+use conflaguration::Settings;
+use serde::{Deserialize, Serialize};
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::ArchitectureRegistry;
 use proxima_model_interop::Control;
 use proxima_model_interop::GPU_LAYERS_ALL;
+use proxima_model_interop::GdnPrefillBackend;
 use proxima_model_interop::LoadedModel;
 use proxima_model_interop::Phase;
 use proxima_model_interop::ServingConfig;
 use proxima_model_interop::TokenEvent;
+
+#[derive(Debug, Clone, Deserialize, Serialize, Settings)]
+#[settings(prefix = "PROXIMA")]
+struct GenerateConfig {
+    #[setting(default = 0)]
+    gpu_memory_limit_bytes: u64,
+    #[setting(default = 0)]
+    qwen35moe_residency_budget_bytes: u64,
+    #[setting(default = false)]
+    qwen35moe_pre_gather: bool,
+    #[setting(default = false)]
+    qwen35moe_persistent_cuts: bool,
+    #[setting(default = false)]
+    qwen35moe_expert_prefetch: bool,
+    #[setting(default = 1)]
+    qwen35moe_layer_window: usize,
+    #[setting(default = false)]
+    qwen35moe_gdn_prefill_scan: bool,
+    #[setting(default = false)]
+    debug_gdn_compare: bool,
+    #[setting(default = false)]
+    qwen35moe_monolithic_all_low: bool,
+    #[setting(default = false)]
+    qwen35moe_monolithic_high_mmap: bool,
+    #[setting(default = 0.8)]
+    temperature: f32,
+    #[setting(default = 40)]
+    top_k: i32,
+    #[setting(default = 0.95)]
+    top_p: f32,
+    #[setting(default = 0.15)]
+    min_p: f32,
+    #[setting(default = 64)]
+    repeat_last_n: i32,
+    #[setting(default = 1.1)]
+    repeat_penalty: f32,
+    #[setting(default = 0.0)]
+    frequency_penalty: f32,
+    #[setting(default = 0.0)]
+    presence_penalty: f32,
+    #[setting(default = 424242)]
+    seed: u64,
+    #[setting(default = 0)]
+    kv_bucket_tokens: usize,
+    // Concurrent remains an explicit experiment: release runs on the qwen35
+    // recurrent/MoE graph have alternated between exact and corrupted token
+    // sequences. Serving defaults to serial until that hazard path is proven.
+    #[setting(default_str = "serial")]
+    dispatch: String,
+    #[setting(default = false)]
+    debug_exact_activations: bool,
+    #[setting(default = false)]
+    mmap_random: bool,
+    #[setting(default = false)]
+    checkpoint_discard_before_generate: bool,
+    #[setting(default = false)]
+    skip_logits_probe: bool,
+    #[setting(default_str = "cpu")]
+    gdn_prefill_backend: String,
+    #[setting(default_str = "")]
+    expert_sidecar: String,
+    #[setting(default_str = "")]
+    expert_sidecar_source: String,
+}
+
+impl GenerateConfig {
+    fn from_process() -> Self {
+        <Self as Settings>::from_env()
+            .unwrap_or_else(|error| panic!("invalid PROXIMA serving settings: {error}"))
+    }
+}
+
+fn gdn_prefill_backend(value: &str) -> GdnPrefillBackend {
+    match value {
+        "cpu" => GdnPrefillBackend::Cpu,
+        "mlx" => GdnPrefillBackend::Mlx,
+        other => panic!("PROXIMA_GDN_PREFILL_BACKEND={other}: expected cpu or mlx"),
+    }
+}
+
+fn generation_prompt(parsed: &proxima_gguf::pipe::ParsedGguf, prompt: &str) -> String {
+    let architecture = parsed
+        .metadata_value("general.architecture")
+        .and_then(proxima_gguf::value::MetadataValue::as_str)
+        .unwrap_or_default();
+    let has_chat_template = parsed
+        .metadata_value("tokenizer.chat_template")
+        .and_then(proxima_gguf::value::MetadataValue::as_str)
+        .is_some();
+    let already_framed = prompt.contains("<|im_start|>");
+    if has_chat_template && architecture.starts_with("qwen35") && !already_framed {
+        return format!(
+            "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        );
+    }
+    prompt.to_owned()
+}
+
+fn should_attach_expert_sidecar(
+    sidecar_configured: bool,
+    qwen35moe_pre_gather: bool,
+    qwen35moe_monolithic_all_low: bool,
+) -> bool {
+    sidecar_configured && (qwen35moe_pre_gather || qwen35moe_monolithic_all_low)
+}
 
 fn nearest_rank(sorted: &[u64], percentile: usize) -> u64 {
     let rank = (percentile * sorted.len()).div_ceil(100);
@@ -233,29 +341,24 @@ fn print_architecture_metadata(parsed: &proxima_gguf::pipe::ParsedGguf) {
     }
 }
 
-fn supported_serving_config(model_path: &str, gpu_layers: i32) -> ServingConfig<'_> {
-    let gpu_memory_limit_bytes = env::var("PROXIMA_GPU_MEMORY_LIMIT_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok());
-    let residency_budget_bytes = env::var("PROXIMA_QWEN35MOE_RESIDENCY_BUDGET_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
-    let qwen35moe_pre_gather = env::var("PROXIMA_QWEN35MOE_PRE_GATHER")
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
-        || (env::var_os("PROXIMA_EXPERT_SIDECAR").is_some() && residency_budget_bytes > 0);
-    let qwen35moe_monolithic_all_low =
-        env::var_os("PROXIMA_QWEN35MOE_MONOLITHIC_ALL_LOW").is_some();
-    let kv_bucket_tokens = env::var("PROXIMA_KV_BUCKET_TOKENS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0);
+fn supported_serving_config<'model>(
+    model_path: &'model str,
+    gpu_layers: i32,
+    settings: &GenerateConfig,
+) -> ServingConfig<'model> {
+    let gpu_memory_limit_bytes =
+        (settings.gpu_memory_limit_bytes > 0).then_some(settings.gpu_memory_limit_bytes);
+    // the execution mode is explicit; sidecar and budget configure resources,
+    // but must not silently switch the model from the full graph to segmented
+    // pre-gather because that would make the control arm impossible to run.
+    let qwen35moe_pre_gather = settings.qwen35moe_pre_gather;
+    let qwen35moe_monolithic_all_low = settings.qwen35moe_monolithic_all_low;
+    let kv_bucket_tokens = (settings.kv_bucket_tokens > 0).then_some(settings.kv_bucket_tokens);
     #[cfg(target_os = "macos")]
-    let requested_dispatch_type = match env::var("PROXIMA_DISPATCH").as_deref() {
-        Ok("serial") => omega::DispatchType::Serial,
-        Ok("concurrent") | Err(_) => omega::DispatchType::Concurrent,
-        Ok(other) => panic!("PROXIMA_DISPATCH={other}: expected serial or concurrent"),
+    let requested_dispatch_type = match settings.dispatch.as_str() {
+        "serial" => omega::DispatchType::Serial,
+        "concurrent" => omega::DispatchType::Concurrent,
+        other => panic!("PROXIMA_DISPATCH={other}: expected serial or concurrent"),
     };
     // Full-graph low-codec expert substitution is not yet safe under Metal's
     // concurrent encoder: serial is the correctness-preserving boundary until
@@ -278,10 +381,28 @@ fn supported_serving_config(model_path: &str, gpu_layers: i32) -> ServingConfig<
         gpu_layers,
         gpu_memory_limit_bytes,
         qwen35moe_pre_gather,
+        qwen35moe_persistent_cuts: settings.qwen35moe_persistent_cuts,
+        gdn_prefill_backend: gdn_prefill_backend(&settings.gdn_prefill_backend),
+        qwen35moe_residency_budget_bytes: settings.qwen35moe_residency_budget_bytes,
+        qwen35moe_expert_prefetch: settings.qwen35moe_expert_prefetch,
+        qwen35moe_layer_window: settings.qwen35moe_layer_window,
+        qwen35moe_gdn_prefill_scan: settings.qwen35moe_gdn_prefill_scan,
+        debug_gdn_compare: settings.debug_gdn_compare,
+        qwen35moe_monolithic_all_low: settings.qwen35moe_monolithic_all_low,
+        qwen35moe_monolithic_high_mmap: settings.qwen35moe_monolithic_high_mmap,
         #[cfg(target_os = "macos")]
         dispatch_type,
-        exact_activations: env::var_os("PROXIMA_DEBUG_EXACT_ACTIVATIONS").is_some(),
+        exact_activations: settings.debug_exact_activations,
         reasoning_budget: 0,
+        temperature: settings.temperature,
+        top_k: settings.top_k,
+        top_p: settings.top_p,
+        min_p: settings.min_p,
+        repeat_last_n: settings.repeat_last_n,
+        repeat_penalty: settings.repeat_penalty,
+        frequency_penalty: settings.frequency_penalty,
+        presence_penalty: settings.presence_penalty,
+        seed: settings.seed,
         ..ServingConfig::default()
     };
     if let Some(kv_bucket_tokens) = kv_bucket_tokens {
@@ -318,7 +439,8 @@ fn parse_requested_backend(argument: Option<&String>) -> RequestedBackend {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let settings = GenerateConfig::from_process();
+    let args: Vec<String> = std::env::args().collect();
     let Some(gguf_path) = args.get(1) else {
         eprintln!("argv[1]: path to a .gguf checkpoint");
         std::process::exit(1);
@@ -375,7 +497,7 @@ fn main() {
     };
     let file_bytes: &[u8] = &file_map;
     #[cfg(target_os = "macos")]
-    if env::var_os("PROXIMA_MMAP_RANDOM").is_some() {
+    if settings.mmap_random {
         // SAFETY: the mapping remains alive and read-only for this process.
         let result = unsafe {
             libc::madvise(
@@ -405,6 +527,10 @@ fn main() {
     println!("gguf_parse_ms = {parse_ms:.3}");
 
     print_architecture_metadata(&parsed);
+    let generation_prompt = generation_prompt(&parsed, prompt);
+    if generation_prompt != prompt.as_str() {
+        println!("prompt_rendered_for_chat = {generation_prompt:?}");
+    }
 
     let load_started = Instant::now();
     let registry = ArchitectureRegistry::with_builtin();
@@ -419,7 +545,12 @@ fn main() {
     let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
     println!("weight_load_ms = {load_ms:.3}");
 
-    if let Some(sidecar_path) = env::var_os("PROXIMA_EXPERT_SIDECAR") {
+    if should_attach_expert_sidecar(
+        !settings.expert_sidecar.is_empty(),
+        settings.qwen35moe_pre_gather,
+        settings.qwen35moe_monolithic_all_low,
+    ) {
+        let sidecar_path = std::ffi::OsString::from(&settings.expert_sidecar);
         let sidecar_file = match std::fs::File::open(&sidecar_path) {
             Ok(file) => file,
             Err(error) => {
@@ -427,9 +558,21 @@ fn main() {
                 return;
             }
         };
-        let use_mmap =
-            env::var_os("PROXIMA_EXPERT_SIDECAR_SOURCE").is_some_and(|source| source == "mmap");
-        let attach_result = if use_mmap {
+        let use_mmap = settings.expert_sidecar_source == "mmap";
+        let use_mmap_window = settings.expert_sidecar_source == "mmap-window";
+        let attach_result = if use_mmap_window {
+            gguf_file
+                .try_clone()
+                .map_err(|error| error.to_string())
+                .and_then(|checkpoint_file| {
+                    model
+                        .attach_expert_sidecar_file_with_checkpoint_file(
+                            sidecar_file,
+                            checkpoint_file,
+                        )
+                        .map_err(|error| error.to_string())
+                })
+        } else if use_mmap {
             // SAFETY: the sidecar is read-only for the lifetime of the model.
             match unsafe { memmap2::Mmap::map(&sidecar_file) } {
                 Ok(mapping) => gguf_file
@@ -464,17 +607,27 @@ fn main() {
         match attach_result {
             Ok(()) => println!(
                 "expert_sidecar_attached = true expert_sidecar_source = {}",
-                if use_mmap { "mmap" } else { "pread" }
+                if use_mmap_window {
+                    "mmap-window"
+                } else if use_mmap {
+                    "mmap"
+                } else {
+                    "pread"
+                }
             ),
             Err(error) => {
                 eprintln!("attach expert sidecar: {error}");
                 return;
             }
         }
+    } else if !settings.expert_sidecar.is_empty() {
+        println!(
+            "expert_sidecar_attached = false reason=full_graph_execution_keeps_checkpoint_mapping"
+        );
     }
 
     #[cfg(target_os = "macos")]
-    if env::var_os("PROXIMA_CHECKPOINT_DISCARD_BEFORE_GENERATE").is_some() {
+    if settings.checkpoint_discard_before_generate {
         match omega::discard_checkpoint_mmap_range(file_bytes) {
             Ok(()) => println!("checkpoint_discard_before_generate = true"),
             Err(error) => {
@@ -488,16 +641,33 @@ fn main() {
         "backend_evidence_note = look for a 'token_breakdown_metal ... gpu_exec_calls=' line \
          per decode step below -- that is the mechanical proof Metal ran, not this flag"
     );
+    println!(
+        "serving_mode pre_gather={} persistent_cuts={} layer_window={} dispatch={} \
+         residency_budget_bytes={} gpu_memory_limit_bytes={} sidecar_configured={} \
+         sidecar_source={} monolithic_all_low={} monolithic_high_mmap={}",
+        settings.qwen35moe_pre_gather,
+        settings.qwen35moe_persistent_cuts,
+        settings.qwen35moe_layer_window,
+        settings.dispatch,
+        settings.qwen35moe_residency_budget_bytes,
+        settings.gpu_memory_limit_bytes,
+        !settings.expert_sidecar.is_empty(),
+        if settings.expert_sidecar_source.is_empty() {
+            "none"
+        } else {
+            settings.expert_sidecar_source.as_str()
+        },
+        settings.qwen35moe_monolithic_all_low,
+        settings.qwen35moe_monolithic_high_mmap,
+    );
 
     // A standalone logits probe is a full forward pass.  Running it before
     // generation would allocate the complete expert stack on the GPU before
     // `ServingConfig`'s memory-fit gate can reject an over-budget request.
     // Keep it for an explicitly CPU diagnostic run only; GPU serving must go
     // straight through the guarded generation path.
-    if matches!(requested_backend, RequestedBackend::Cpu)
-        && env::var_os("PROXIMA_SKIP_LOGITS_PROBE").is_none()
-    {
-        match model.forward_logits(prompt) {
+    if matches!(requested_backend, RequestedBackend::Cpu) && !settings.skip_logits_probe {
+        match model.forward_logits(&generation_prompt) {
             Ok(logits) => {
                 let len = logits.len();
                 let nan_count = logits.iter().filter(|value| value.is_nan()).count();
@@ -547,20 +717,40 @@ fn main() {
         RequestedBackend::Cpu => {
             // requested CPU: never attempts Metal, so there is nothing to
             // fall back from -- a CPU request always produces a CPU run.
-            let config = supported_serving_config(gguf_path, RequestedBackend::Cpu.gpu_layers());
-            let outcome = model.generate_streaming(prompt, max_tokens, config, &mut on_token);
+            let config =
+                supported_serving_config(gguf_path, RequestedBackend::Cpu.gpu_layers(), &settings);
+            let outcome = model.generate_streaming(
+                &generation_prompt,
+                max_tokens,
+                config,
+                &mut on_token,
+            );
             (outcome, "CPU (requested)")
         }
         RequestedBackend::Gpu => {
-            let config = supported_serving_config(gguf_path, RequestedBackend::Gpu.gpu_layers());
-            let mut outcome = model.generate_streaming(prompt, max_tokens, config, &mut on_token);
+            let config =
+                supported_serving_config(gguf_path, RequestedBackend::Gpu.gpu_layers(), &settings);
+            let mut outcome = model.generate_streaming(
+                &generation_prompt,
+                max_tokens,
+                config,
+                &mut on_token,
+            );
             let mut backend_label = "GPU/METAL (requested, gpu_layers = GPU_LAYERS_ALL)";
             if let Err(error) = &outcome {
                 println!("METAL RUN FAILED: {error}");
                 println!("falling back to CPU (gpu_layers = 0), labeled explicitly below");
-                let cpu_config =
-                    supported_serving_config(gguf_path, RequestedBackend::Cpu.gpu_layers());
-                outcome = model.generate_streaming(prompt, max_tokens, cpu_config, &mut on_token);
+                let cpu_config = supported_serving_config(
+                    gguf_path,
+                    RequestedBackend::Cpu.gpu_layers(),
+                    &settings,
+                );
+                outcome = model.generate_streaming(
+                    &generation_prompt,
+                    max_tokens,
+                    cpu_config,
+                    &mut on_token,
+                );
                 backend_label = "CPU (fallback: gpu was requested but the metal run failed, \
                                   see METAL RUN FAILED above -- gpu_exec_calls below is the \
                                   mechanical proof this did NOT run on gpu)";
@@ -628,4 +818,21 @@ fn main() {
     );
     println!("nocopy_cache_len = {}", omega::metal::nocopy_cache_len());
     print_peak_rss();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_attach_expert_sidecar;
+
+    #[test]
+    fn sidecar_does_not_change_full_graph_mode() {
+        assert!(!should_attach_expert_sidecar(true, false, false));
+    }
+
+    #[test]
+    fn sidecar_attaches_for_bounded_modes() {
+        assert!(should_attach_expert_sidecar(true, true, false));
+        assert!(should_attach_expert_sidecar(true, false, true));
+        assert!(!should_attach_expert_sidecar(false, true, false));
+    }
 }
