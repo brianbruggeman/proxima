@@ -30302,3 +30302,109 @@ open is cross-process state written by the first run. Round 2 (intermittency
 rate ×6, file-write census across a run, `CHECKPOINT_DISCARD` as the cold
 control, `MTL_DEBUG_LAYER`/`MTL_SHADER_VALIDATION`, first-zero node among
 embedding / layers 0-2) is running under `scratch/row533b/`.
+
+**Round 2 (`scratch/row533b/`, same binary, same rendered 13-token prompt,
+`PROXIMA_DISPATCH=serial`, `max_tokens 1`):**
+
+| exp | env | ids[..1] | observation |
+|---|---|---|---|
+| 1 ×6 | `DEBUG_DENSE_DIGEST` | `[16]` ×6 | layer-3 `block_input` `[0,0,0,0]` all 6 -- deterministic while warm |
+| 2 | file-write census | `[16]` | no file newer than the pre-run marker under `~/.cache/proxima`, `~/.local/share/proxima`, `/tmp`; no sidecar write path without `PROXIMA_EXPERT_SIDECAR` |
+| 3 ×3 | `CHECKPOINT_DISCARD_BEFORE_GENERATE=1` | `[16]` ×3 | TTFT 822-973 ms -- the discard does NOT reproduce the 11.5 s cold run; not a cold control |
+| 5c | `GDN_ALL_BLOCKS`+`GDN_BLOCK_DIGEST`, gpu vs cpu | gpu `[16]` / cpu `[248068]` | node 395 (layer-0 block output) gpu `[0,0,0,0]`, cpu `[-0.0532, 0.0141, -0.0155, -0.0151]` |
+| 5d | `GDN_COMPARE`+`GDN_ROW_DIGEST` | -- | **node 2 = `embedding_lookup` (`spec.rs:814-840`) is `[0,0,0,0]` on gpu for ALL 13 prefill tokens; cpu gives distinct nonzero rows per token** |
+
+The zero originates at the FIRST op of the program: the token-embedding
+gather (a bare Elementwise with a Computed gather over `token_embd.weight`,
+no reduce -- the path `omega/src/metal.rs:10552-10556` documents as having no
+engagement test). Round 1's "first correct run" (`raw-nofr.log`) used the SAME
+rendered prompt, so the discriminator is page residency of the checkpoint
+mapping (TTFT 11.5 s cold vs 0.6-1.0 s warm), not the prompt. Two hypotheses
+remain, decided by reading the weight bytes through the no-copy buffer from
+the CPU side at dispatch time (round 3, `scratch/row533c/`): H1 the mapping
+returns zeros for that range when warm (madvise/discard/wiring defect); H2
+the bytes are right and the gather kernel writes zeros (dispatch skipped,
+wrong binding, empty-sentinel placed input from ROW 527, or the Computed
+gather MSL on a packed table). Also found: `discard_checkpoint_mmap_range`
+(`examples/gguf_generate.rs:631`) does not evict the pages it names (TTFT
+unchanged) -- a second defect, filed here.
+
+**Round 3 (`scratch/row533c/`, worktree `proxima-wt-embed` at 8fb776bd +
+diag prints, branch `diag/embedding-gather-zero` 9710e8aa):** H1 is dead --
+the no-copy buffer at node 2's weight binding holds real Q4_K bytes at
+exactly the file offset (`data_offset 12,009,280 + tensor offset
+22,746,292,736 = 22,758,302,016`; `first_bytes=[2a,05,cf,11,…]`), the
+dispatch launches 2048 threads, the 13 gathered indices are in-vocab, the
+kernel's `Fault` stays 0, and the MSL is a plain Q4_K row gather. Round 3
+also reported a Uniforms word of 970 = 248,320/256 at the `gather_extent`
+position -- **RETRACTED by round 4**: a hand-decode error (the 8-byte tail
+`00 ca 03 00 00 00 00 00` read as 7 bytes); labelled prints
+(`scratch/row533d/`) give `extent=248320 element_stride=2048 base=0
+strides=[0,1]`, `correct_packed_matmul_layouts` correctly does not fire
+for a non-Reduce, and the on-wire Uniforms decode to
+`[2048,1,2048,0,0,1,0,1,0,2048,248320]`.
+
+**Round 4 (`scratch/row533d/`):** two runs of the round-4 binary (built in
+`proxima-wt-embed` from the COMMITTED tree 8fb776bd), same prompt,
+`max_tokens 1`, serial, one under `MTL_SHADER_VALIDATION=1
+MTL_DEBUG_LAYER=1`: BOTH emit the correct first token 248068 (`<think>`);
+validation reports nothing. Every failing run in rounds 1-3 (and the ROW
+532 runs, and Codex's own 15:08 France probe) used the release binary built
+at 15:50 in `/tmp/cargo_target` from the PRE-COMMIT dirty tree. The
+committed tree differs from that tree by the gate-fixer's edits folded into
+f9ba180d/3afb3db3 (`classify_kind` policy, mechanical clippy rewrites in
+`metal.rs`/`msl.rs`, the `LoadedModel` accessors) -- none of which was
+intended as a fix. Status: the defect is not reproduced on the committed
+tree by two runs; a six-run warm series on that binary decides whether ROW
+533 closes as "removed by an edit in f9ba180d, exact line unknown" or
+reopens. The 15:50 binary is the only artifact of the failing tree.
+
+**Six-run series (`scratch/row533e/`, the round-4 binary, warm, serial,
+temperature 0, 8 tokens): 0/6 pass -- every run `[0 x8]` = `!!!!!!!!`,
+TTFT 637-747 ms, TTNT 30.0-35.9 ms.** So the committed tree fails too; the
+round-4 passes were not the tree. What the two round-4 passes had that the
+six fails did not: the round-3 diag instrumentation (`PROXIMA_DEBUG_
+EMBED_GATHER=1`) READ the weight range through `buffer.contents()` on the
+CPU before the dispatch, i.e. the CPU faulted those pages of the file
+mapping into the process before the GPU read them; the one cold pass had
+the CPU faulting pages from disk. The default path creates the checkpoint
+mapping with a plain `mmap` (`proxima-model-interop/src/bind.rs:4423/4561/
+4789`) and wraps it in `newBufferWithBytesNoCopy` (`omega/src/metal.rs:
+8898-8917`) with no `WILLNEED`, no touch, no `mlock` (`mlock_if_requested`
+and `MADV_RANDOM` are env-gated; both `discard_checkpoint_mmap_range` sites
+are env- or sidecar-gated, `generate.rs:4318-4332`, `:8194`). llama.cpp's
+`llama_mmap` advises `WILLNEED` on the mapping before Metal ever touches
+it. Hypothesis under test (`scratch/row533f/`): the GPU reads pages of a
+file mapping that this process has never faulted and observes zeros;
+reproduction = an omega unit test over a fresh mapping of a patterned temp
+file, untouched vs touched; fix = prefault at the no-copy wrap site.
+
+**Matrix (`scratch/row533g/`, same binary, 12 runs): 0/12** -- 8 tokens,
+8 tokens + the diag CPU read of one embedding page, 1 token, and
+`KV_BUCKET_TOKENS=32` all fail; TTFT 661-1004 ms. Round 4's two passes had
+TTFT 10,442 and 14,556 ms (cold cache; validation layer).
+
+**Prefault cells (`scratch/row533h/`, binary c9785abc = 9710e8aa + env
+knobs in the example, mapping confirmed `MAP_SHARED | PROT_READ` via
+`memmap2::Mmap::map`): 8/8 PASS** -- baseline ×4 (TTFT 9,772 cold, then
+1,603-1,629), `PROXIMA_PREFAULT=1` ×2 (prefault 743-780 ms, TTFT
+1,712-1,793), `PROXIMA_MLOCK=1` ×2 (mlock 785-832 ms). The baseline that
+had failed 30+ times now passes, with system memory at 53% free (36.6 GB)
+versus 25-36% free during every failure (the box carried an unrelated
+memory-resident service at 29 GB and, on every turn end, the judge hook's
+28 GB Ollama load, [[ollama-loader-is-the-judge-hook]]).
+
+**Mechanism (RESULT, supported by every run on record):** the full-graph
+path wraps the 24 GB `MAP_SHARED` checkpoint mapping in a no-copy Metal
+buffer and nothing asserts that its pages are resident before the GPU
+reads them; when the mapping cannot stay resident (free memory below the
+mapping size under a concurrent 28 GB resident model) the GPU reads
+non-resident pages as ZEROS and every node downstream is zero -- the
+`!!!!` signature -- with no error. A cold cache passes because the pages
+are faulted during the forward; a warm cache with enough free memory
+passes; a warm cache under pressure fails deterministically. Fix in
+flight (`scratch/row533i/`): fit gate (mapped bytes vs available bytes,
+typed `MappingExceedsResidentBudget`), unconditional prefault, `mincore`
+residency assertion with typed `MappingNotResident`, telemetry fields.
+This is also the concrete case for the bounded HOBBIT/DynaExq arm: a
+64 GB box with a 29 GB daemon cannot hold the full graph resident.
