@@ -233,6 +233,12 @@ pub fn emit_wgsl_with_policy(
                 kind: "cached_attention",
             });
         }
+        BoundOpKind::GatedDeltaNet { .. } => {
+            return Err(EmitError::UnsupportedOpKind {
+                node: resolved.node,
+                kind: "gated_delta_net",
+            });
+        }
     };
     let (threads, workgroup_size) = match cooperative_width {
         Some(width) => (grid_threads(resolved) * u64::from(width), width),
@@ -511,14 +517,15 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => 1,
-        // `CachedAttention` never reaches this function in practice --
-        // `emit_wgsl`'s own kind-match returns `EmitError::UnsupportedOpKind`
-        // for it before `grid_threads` is called. Grouped with
-        // `Iota`/`Constant` only to satisfy exhaustiveness with a harmless
-        // value, never a real dispatch shape.
-        BoundOpKind::Iota | BoundOpKind::Constant { .. } | BoundOpKind::CachedAttention { .. } => {
-            resolved.extents.iter().product()
-        }
+        // `CachedAttention`/`GatedDeltaNet` never reach this function in
+        // practice -- `emit_wgsl`'s own kind-match returns
+        // `EmitError::UnsupportedOpKind` for either before `grid_threads` is
+        // called. Grouped with `Iota`/`Constant` only to satisfy
+        // exhaustiveness with a harmless value, never a real dispatch shape.
+        BoundOpKind::Iota
+        | BoundOpKind::Constant { .. }
+        | BoundOpKind::CachedAttention { .. }
+        | BoundOpKind::GatedDeltaNet { .. } => resolved.extents.iter().product(),
     }
 }
 
