@@ -127,3 +127,52 @@ fn qwen35_hybrid_synthetic_fixture_decodes_on_metal() {
         Err(error) => panic!("synthetic qwen35 metal forward failed: {error}"),
     }
 }
+
+/// ROW 531 fix: the full-graph decode arm (`qwen35moe_pre_gather: false`,
+/// `PROXIMA_QWEN35MOE_PRE_GATHER=false`) now places recurrent state, conv
+/// history and dense-attention KV roots the same way the pre-gather arm
+/// already did (`ssm_placement_enabled`/`dense_attention_placement_enabled`,
+/// `generate.rs`), so device residency is a Metal-backend property, not a
+/// pre-gather-mode property. Runs the full-graph arm twice over the same
+/// fixture and asserts bit-identical ids -- placement changes where a root
+/// lives, never what the forward computes -- then asserts the readback
+/// counter (`omega::metal::READBACK_CALLS`) stayed bounded by the token
+/// count once state/KV stop round-tripping through the host every step.
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
+#[test]
+#[ignore = "debug build: minutes, not seconds -- run with --release (see module doc)"]
+fn qwen35_full_graph_metal_places_state_and_bounds_readback() {
+    let file_bytes = build_fixture_bytes();
+    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parse synthetic qwen35 gguf");
+
+    let mut config = supported_config(GPU_LAYERS_ALL);
+    config.qwen35moe_pre_gather = false;
+    let token_count = 8;
+
+    let loaded_first =
+        LoadedModel::load(&parsed, &file_bytes).expect("load synthetic qwen35 checkpoint");
+    let _ = omega::metal::metal_stage_totals();
+    let (first_ids, _, _) = loaded_first
+        .generate_with_serving_config("hi", token_count, config)
+        .expect("synthetic qwen35 full-graph metal forward failed (first run)");
+    let totals = omega::metal::metal_stage_totals();
+
+    let loaded_second =
+        LoadedModel::load(&parsed, &file_bytes).expect("load synthetic qwen35 checkpoint");
+    let (second_ids, _, _) = loaded_second
+        .generate_with_serving_config("hi", token_count, config)
+        .expect("synthetic qwen35 full-graph metal forward failed (second run)");
+
+    assert!(!first_ids.is_empty(), "at least one token must decode");
+    assert_eq!(
+        first_ids, second_ids,
+        "placed full-graph decode must be bit-identical across repeated runs of the same fixture"
+    );
+    assert!(
+        totals.readback_calls <= first_ids.len() as u64,
+        "readback_calls={} exceeds the token count ({}); state/KV roots are \
+         reading back to host instead of staying device-resident (ROW 531 invariant 2)",
+        totals.readback_calls,
+        first_ids.len(),
+    );
+}
