@@ -736,7 +736,7 @@ fn replay_sum_squares(backend: &str, requested_roots: &[NodeId], gpu_layers: &[V
         .collect();
     let canonical_tree = input
         .chunks_exact(column_count)
-        .map(|row| canonical_warp_sum(row))
+        .map(canonical_warp_sum)
         .collect::<Vec<_>>();
     for (run, values) in replayed.iter().enumerate() {
         let (host_max, host_index) = max_abs_and_index(values, &host);

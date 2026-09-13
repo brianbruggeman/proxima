@@ -2467,7 +2467,7 @@ mod tests {
     fn mapped_sidecar_switches_all_three_projection_sites_without_copying() {
         let values: [f32; 256] = core::array::from_fn(|index| index as f32 * 0.01 - 1.0);
         let mut checkpoint = vec![0_u8; 144 * 3];
-        for projection in checkpoint.chunks_exact_mut(144) {
+        for projection in checkpoint.as_chunks_mut::<144>().0 {
             proxima_gguf::quant::q4_k::quantize(&values, projection)
                 .expect("the synthetic checkpoint projection encodes");
         }
