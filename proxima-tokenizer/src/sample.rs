@@ -187,13 +187,35 @@ fn sort_candidates_descending(candidates: &mut [(u32, f32)]) {
     });
 }
 
+/// The same total order [`sort_candidates_descending`]'s stable sort
+/// establishes -- descending logit, ties broken by ascending id (the
+/// vocab-index order candidates start in, which a stable sort preserves for
+/// equal keys) -- but written as a strict order with no ties of its own, so
+/// [`apply_top_k`] can hand it to `select_nth_unstable_by` and get back
+/// exactly the set and order a stable sort + truncate would.
+fn candidate_total_order(left: &(u32, f32), right: &(u32, f32)) -> core::cmp::Ordering {
+    right
+        .1
+        .partial_cmp(&left.1)
+        .unwrap_or(core::cmp::Ordering::Equal)
+        .then_with(|| left.0.cmp(&right.0))
+}
+
+/// Partial selection instead of a full sort: `select_nth_unstable_by`
+/// partitions the top `keep` candidates into the front of the slice in
+/// O(vocab) rather than O(vocab log vocab), and only that front gets
+/// sorted. [`candidate_total_order`]'s doc is the proof this is
+/// element-for-element identical to the old stable-sort-then-truncate.
 fn apply_top_k(candidates: &mut Vec<(u32, f32)>, top_k: i32) {
-    if top_k <= 0 {
+    if top_k <= 0 || candidates.is_empty() {
         return;
     }
     let keep = (top_k as usize).min(candidates.len());
-    sort_candidates_descending(candidates);
-    candidates.truncate(keep);
+    if keep < candidates.len() {
+        candidates.select_nth_unstable_by(keep - 1, candidate_total_order);
+        candidates.truncate(keep);
+    }
+    candidates.sort_unstable_by(candidate_total_order);
 }
 
 fn softmax_probabilities(candidates: &[(u32, f32)]) -> Vec<f32> {
@@ -278,16 +300,10 @@ fn repetition_penalty_active(recent_tokens: &[u32], config: SamplingConfig) -> b
 
 /// The single-candidate form of [`apply_repetition_penalty`]'s formula --
 /// same sign rule (multiply when `<= 0.0`, divide otherwise) and the same
-/// frequency/presence subtraction, but counting `id`'s occurrences by a
-/// direct scan of `recent_tokens` instead of a shared `BTreeMap`, so
-/// [`greedy_fast_path`] stays allocation-free. A token absent from
-/// `recent_tokens` is untouched, matching the `Some(&count) = counts.get`
-/// early-continue in the general path.
-fn penalized_logit(id: u32, raw_logit: f32, recent_tokens: &[u32], config: SamplingConfig) -> f32 {
-    if !repetition_penalty_active(recent_tokens, config) {
-        return raw_logit;
-    }
-    let count = recent_tokens.iter().filter(|&&token| token == id).count();
+/// frequency/presence subtraction, but taking `count` directly rather than
+/// scanning `recent_tokens` per id, so [`greedy_fast_path`] can compute each
+/// distinct recent id's penalty exactly once.
+fn penalize(raw_logit: f32, count: u32, config: SamplingConfig) -> f32 {
     if count == 0 {
         return raw_logit;
     }
@@ -300,6 +316,33 @@ fn penalized_logit(id: u32, raw_logit: f32, recent_tokens: &[u32], config: Sampl
     logit - (count as f32) * config.frequency_penalty - config.presence_penalty
 }
 
+/// Sorts a bounded copy of `recent_tokens` and folds it into `(id, count)`
+/// pairs ascending by id -- a fixed-capacity, allocation-free stand-in for
+/// the general path's `BTreeMap` counting in [`apply_repetition_penalty`].
+/// Tokens past [`crate::sized::MAX_RECENT_TOKENS`] are dropped; callers only
+/// reach this once [`greedy_fast_path_is_safe`] has confirmed the window
+/// fits.
+fn recent_token_counts(
+    recent_tokens: &[u32],
+) -> ([(u32, u32); crate::sized::MAX_RECENT_TOKENS], usize) {
+    let bound = recent_tokens.len().min(crate::sized::MAX_RECENT_TOKENS);
+    let mut sorted = [0u32; crate::sized::MAX_RECENT_TOKENS];
+    sorted[..bound].copy_from_slice(&recent_tokens[..bound]);
+    sorted[..bound].sort_unstable();
+
+    let mut counts = [(0u32, 0u32); crate::sized::MAX_RECENT_TOKENS];
+    let mut unique = 0usize;
+    for &id in &sorted[..bound] {
+        if unique > 0 && counts[unique - 1].0 == id {
+            counts[unique - 1].1 += 1;
+        } else {
+            counts[unique] = (id, 1);
+            unique += 1;
+        }
+    }
+    (counts, unique)
+}
+
 /// `true` when top-k/top-p/min-p are guaranteed not to disturb whichever
 /// candidate [`greedy_fast_path`] would pick, so skipping them entirely is
 /// safe. Top-k and top-p both sort descending and always keep at least
@@ -309,33 +352,75 @@ fn penalized_logit(id: u32, raw_logit: f32, recent_tokens: &[u32], config: Sampl
 /// clears it -- but `min_p > 1.0` makes the threshold exceed `max_logit`
 /// and can filter the max itself out, so that (and non-finite logits,
 /// whose sort/fold behavior this module makes no claim about) route
-/// through the general path instead.
-fn greedy_fast_path_is_safe(logits: &[f32], config: SamplingConfig) -> bool {
-    config.min_p <= 1.0 && !logits.iter().any(|value| !value.is_finite())
+/// through the general path instead. A `recent_tokens` window larger than
+/// [`crate::sized::MAX_RECENT_TOKENS`] also routes through the general
+/// path -- [`greedy_fast_path`]'s dedup table is fixed-capacity.
+fn greedy_fast_path_is_safe(logits: &[f32], recent_tokens: &[u32], config: SamplingConfig) -> bool {
+    config.min_p <= 1.0
+        && recent_tokens.len() <= crate::sized::MAX_RECENT_TOKENS
+        && !logits.iter().any(|value| !value.is_finite())
 }
 
 /// Zero-allocation greedy argmax: with `temperature <= 0.0` and
 /// [`greedy_fast_path_is_safe`], the general path's top-k/top-p/min-p
-/// filters are no-ops on the eventual winner and the sort they use is
-/// stable, so a single fold applying the same per-id penalty and the same
-/// lowest-index tie-break as [`collapse_to_argmax`] reproduces its result
-/// exactly -- without ever materializing the vocab-sized candidate `Vec`
-/// [`sample_general`] builds. Proved over random logits/configs in this
-/// module's `greedy_fast_path_matches_general_path_over_random_inputs`
-/// test.
+/// filters are no-ops on the eventual winner (see that function's own
+/// doc), so the winner is the smallest id achieving
+/// `max(penalized logit)` over every id -- an id-order-independent
+/// characterization of [`collapse_to_argmax`]'s lowest-index tie-break.
+/// Splitting the vocab into the (bounded) set of distinct recent ids and
+/// everything else, taking each half's own max separately, and merging the
+/// two maxima by value (ties broken by id) reproduces that same winner in
+/// O(vocab + recent log recent) instead of the general path's O(vocab *
+/// recent) per-id scan -- without ever materializing the vocab-sized
+/// candidate `Vec` [`sample_general`] builds. Proved over random
+/// logits/configs in this module's
+/// `greedy_fast_path_matches_general_path_over_random_inputs` test.
 fn greedy_fast_path(logits: &[f32], recent_tokens: &[u32], config: SamplingConfig) -> Option<u32> {
-    logits
-        .iter()
-        .enumerate()
-        .fold(None, |best: Option<(u32, f32)>, (index, &raw_logit)| {
-            let id = index as u32;
-            let logit = penalized_logit(id, raw_logit, recent_tokens, config);
-            match best {
-                Some((_, best_logit)) if logit <= best_logit => best,
-                _ => Some((id, logit)),
-            }
-        })
-        .map(|(id, _)| id)
+    if !repetition_penalty_active(recent_tokens, config) {
+        return greedy_pick(logits);
+    }
+
+    let (counts, unique) = recent_token_counts(recent_tokens);
+    let recent = &counts[..unique];
+
+    let mut recent_best: Option<(u32, f32)> = None;
+    for &(id, count) in recent {
+        let Some(&raw_logit) = logits.get(id as usize) else {
+            continue;
+        };
+        let logit = penalize(raw_logit, count, config);
+        recent_best = match recent_best {
+            Some((_, best_logit)) if logit <= best_logit => recent_best,
+            _ => Some((id, logit)),
+        };
+    }
+
+    let mut rest_best: Option<(u32, f32)> = None;
+    for (index, &raw_logit) in logits.iter().enumerate() {
+        let id = index as u32;
+        if recent
+            .binary_search_by_key(&id, |&(recent_id, _)| recent_id)
+            .is_ok()
+        {
+            continue;
+        }
+        rest_best = match rest_best {
+            Some((_, best_logit)) if raw_logit <= best_logit => rest_best,
+            _ => Some((id, raw_logit)),
+        };
+    }
+
+    match (recent_best, rest_best) {
+        (Some((recent_id, recent_logit)), Some((rest_id, rest_logit))) => Some(
+            if rest_logit > recent_logit || (rest_logit == recent_logit && rest_id < recent_id) {
+                rest_id
+            } else {
+                recent_id
+            },
+        ),
+        (Some((id, _)), None) | (None, Some((id, _))) => Some(id),
+        (None, None) => None,
+    }
 }
 
 /// The full filter chain this module's own doc names, over an allocated
@@ -392,7 +477,7 @@ pub fn sample_next_token(
     if logits.is_empty() {
         return None;
     }
-    if config.temperature <= 0.0 && greedy_fast_path_is_safe(logits, config) {
+    if config.temperature <= 0.0 && greedy_fast_path_is_safe(logits, recent_tokens, config) {
         return greedy_fast_path(logits, recent_tokens, config);
     }
     sample_general(logits, recent_tokens, config, rng)
@@ -408,7 +493,8 @@ mod tests {
 
     use super::{
         SamplingConfig, apply_min_p, apply_repetition_penalty, apply_top_k, apply_top_p,
-        greedy_fast_path, greedy_pick, sample_general, sample_next_token,
+        greedy_fast_path, greedy_pick, penalize, repetition_penalty_active, sample_general,
+        sample_next_token,
     };
 
     #[test]
@@ -459,6 +545,54 @@ mod tests {
         let mut negative = original.clone();
         apply_top_k(&mut negative, -1);
         assert_eq!(negative, original);
+    }
+
+    /// [`apply_top_k`]'s pre-partial-selection implementation, kept here as
+    /// the oracle its replacement is proved against: a full stable
+    /// descending sort by logit, then truncate.
+    fn apply_top_k_reference(candidates: &mut Vec<(u32, f32)>, top_k: i32) {
+        if top_k <= 0 {
+            return;
+        }
+        let keep = (top_k as usize).min(candidates.len());
+        candidates.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
+        candidates.truncate(keep);
+    }
+
+    /// Random logits with heavy ties clustered around the `k` boundary --
+    /// `tie_pool` restricts each logit to one of four values so repeated
+    /// draws collide -- so the boundary between kept and dropped candidates
+    /// is actually exercised, not just the easy case where every logit is
+    /// distinct. Compares [`apply_top_k`] against
+    /// [`apply_top_k_reference`] element-for-element (both id and logit,
+    /// in order) for every `k` this slice's task names.
+    #[test]
+    fn apply_top_k_matches_the_reference_stable_sort_over_random_ties() {
+        let mut lcg = DeterministicLcg::new(0xFEED_C0DE_1010_ABAB);
+        let vocab = 2_000usize;
+        let tie_pool = [1.0f32, 1.0, 2.0, 3.0];
+        let candidates: Vec<(u32, f32)> = (0..vocab)
+            .map(|index| {
+                let bucket = lcg.next_u32_below(tie_pool.len() as u32) as usize;
+                (index as u32, tie_pool[bucket])
+            })
+            .collect();
+
+        for &top_k in &[1i32, 2, 40, 1000, vocab as i32] {
+            let mut actual = candidates.clone();
+            let mut expected = candidates.clone();
+            apply_top_k(&mut actual, top_k);
+            apply_top_k_reference(&mut expected, top_k);
+            assert_eq!(
+                actual, expected,
+                "top_k={top_k}: partial selection must match the reference sort exactly"
+            );
+        }
     }
 
     /// Hand-computed: logits chosen as `ln(p)` for `p = [0.5, 0.3, 0.2]` so
@@ -800,7 +934,9 @@ mod tests {
     }
 
     fn sweep_recent_tokens(rng: &mut DeterministicLcg, vocab: u32) -> Vec<u32> {
-        let window = rng.next_u32_below(6) as usize;
+        // widened past the old bound of 6 to exercise `recent_token_counts`'s
+        // dedup/count-by-sort over windows with real duplicate structure.
+        let window = rng.next_u32_below(40) as usize;
         (0..window).map(|_| rng.next_u32_below(vocab)).collect()
     }
 
@@ -839,7 +975,7 @@ mod tests {
             let recent_tokens = sweep_recent_tokens(&mut lcg, vocab as u32);
             let config = sweep_config(&mut lcg);
             assert!(
-                super::greedy_fast_path_is_safe(&logits, config),
+                super::greedy_fast_path_is_safe(&logits, &recent_tokens, config),
                 "case {case}: sweep only generates finite logits and min_p in [0, 1)"
             );
 
@@ -849,6 +985,86 @@ mod tests {
             assert_eq!(
                 fast, general,
                 "case {case}: logits={logits:?} recent={recent_tokens:?} config={config:?}"
+            );
+        }
+    }
+
+    /// Hand-computed dedup: `recent_tokens = [3, 3, 1, 3]` gives id 3 a
+    /// count of 3 and id 1 a count of 1 -- `recent_token_counts` must fold
+    /// duplicates into one entry with the right count, not treat each
+    /// occurrence as a distinct id. id 3: `1.0 / 2.0 - 3 * 0.1 = 0.2`; id 1:
+    /// `1.0 / 2.0 - 0.1 = 0.4`; ids 0 and 2 are untouched at `1.0`, so id 0
+    /// wins on the lowest-index tie-break.
+    #[test]
+    fn greedy_fast_path_counts_duplicate_recent_tokens_correctly() {
+        let config = SamplingConfig {
+            repeat_penalty: 2.0,
+            frequency_penalty: 0.1,
+            ..SamplingConfig::default()
+        };
+        let logits = vec![1.0f32, 1.0, 1.0, 1.0];
+        let recent_tokens = vec![3u32, 3, 1, 3];
+        assert_eq!(greedy_fast_path(&logits, &recent_tokens, config), Some(0));
+
+        let mut rng = Rng::with_seed(9);
+        assert_eq!(
+            greedy_fast_path(&logits, &recent_tokens, config),
+            sample_general(&logits, &recent_tokens, config, &mut rng)
+        );
+    }
+
+    /// [`super::greedy_fast_path_is_safe`]'s own capacity guard: exactly
+    /// [`crate::sized::MAX_RECENT_TOKENS`] tokens still fits the fixed-size
+    /// dedup table, one more does not.
+    #[test]
+    fn greedy_fast_path_is_safe_at_the_recent_window_capacity_boundary() {
+        let logits = vec![0.0f32; 8];
+        let config = SamplingConfig::default();
+        let at_capacity = vec![0u32; crate::sized::MAX_RECENT_TOKENS];
+        let over_capacity = vec![0u32; crate::sized::MAX_RECENT_TOKENS + 1];
+        assert!(super::greedy_fast_path_is_safe(
+            &logits,
+            &at_capacity,
+            config
+        ));
+        assert!(!super::greedy_fast_path_is_safe(
+            &logits,
+            &over_capacity,
+            config
+        ));
+    }
+
+    fn sweep_oversized_recent_tokens(rng: &mut DeterministicLcg, vocab: u32) -> Vec<u32> {
+        let window = crate::sized::MAX_RECENT_TOKENS + 1 + rng.next_u32_below(50) as usize;
+        (0..window).map(|_| rng.next_u32_below(vocab)).collect()
+    }
+
+    /// A `recent_tokens` window past [`crate::sized::MAX_RECENT_TOKENS`] is
+    /// outside [`greedy_fast_path`]'s fixed-capacity dedup table, so
+    /// [`super::greedy_fast_path_is_safe`] must refuse it and
+    /// [`sample_next_token`] must fall back to [`sample_general`] exactly --
+    /// proved over 1,000 random oversized windows, not just the boundary
+    /// case above.
+    #[test]
+    fn oversized_recent_window_dispatches_to_general_path_over_random_inputs() {
+        let mut lcg = DeterministicLcg::new(0xB160_0A55_E1FD_00D0);
+        for case in 0..1_000u32 {
+            let vocab = 32 + (case % 64) as usize;
+            let logits = sweep_logits(&mut lcg, vocab);
+            let recent_tokens = sweep_oversized_recent_tokens(&mut lcg, vocab as u32);
+            let config = sweep_config(&mut lcg);
+            assert!(
+                !super::greedy_fast_path_is_safe(&logits, &recent_tokens, config),
+                "case {case}: window of {} tokens exceeds MAX_RECENT_TOKENS",
+                recent_tokens.len()
+            );
+
+            let mut dispatcher_rng = Rng::with_seed(u64::from(case));
+            let mut general_rng = Rng::with_seed(u64::from(case));
+            assert_eq!(
+                sample_next_token(&logits, &recent_tokens, config, &mut dispatcher_rng),
+                sample_general(&logits, &recent_tokens, config, &mut general_rng),
+                "case {case}: dispatcher must fall back to the general path exactly"
             );
         }
     }
@@ -890,6 +1106,100 @@ mod tests {
 
         println!(
             "greedy_fast_path: {} ns/op, sample_general: {} ns/op, vocab={vocab}",
+            fast_elapsed.as_nanos() / u128::from(iterations),
+            general_elapsed.as_nanos() / u128::from(iterations),
+        );
+    }
+
+    /// `SamplingConfig::default()` disables repetition penalty entirely
+    /// (`repeat_penalty: 1.0, frequency_penalty: 0.0, presence_penalty:
+    /// 0.0`), which is also this workspace's own `ServingConfig` default
+    /// (`proxima-model-interop/src/serving.rs:388-390`) -- so the test
+    /// above never reaches [`greedy_fast_path`]'s per-id penalty scan at
+    /// all; both paths take an early argmax with no `recent_tokens` cost.
+    /// This measures the case the O(vocab * recent) -> O(vocab + recent log
+    /// recent) rewrite actually targets: a caller-enabled repeat penalty
+    /// (`repeat_penalty: 1.1`, the upstream llama.cpp default) with a full
+    /// `repeat_last_n` window (`proxima-model-interop/src/serving.rs:387`).
+    /// The pre-rewrite `greedy_fast_path` body, kept only for this timing
+    /// comparison: an O(vocab * recent) per-id scan of `recent_tokens`
+    /// instead of [`recent_token_counts`]'s O(recent log recent) dedup.
+    fn greedy_fast_path_reference(
+        logits: &[f32],
+        recent_tokens: &[u32],
+        config: SamplingConfig,
+    ) -> Option<u32> {
+        logits
+            .iter()
+            .enumerate()
+            .fold(None, |best: Option<(u32, f32)>, (index, &raw_logit)| {
+                let id = index as u32;
+                let logit = if repetition_penalty_active(recent_tokens, config) {
+                    let count = recent_tokens.iter().filter(|&&token| token == id).count();
+                    penalize(raw_logit, count as u32, config)
+                } else {
+                    raw_logit
+                };
+                match best {
+                    Some((_, best_logit)) if logit <= best_logit => best,
+                    _ => Some((id, logit)),
+                }
+            })
+            .map(|(id, _)| id)
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn greedy_path_ns_per_op_with_repetition_penalty_active() {
+        let vocab = 248_320usize;
+        let mut lcg = DeterministicLcg::new(0xF100_A7ED_5EED_1234);
+        let logits = sweep_logits(&mut lcg, vocab);
+        let recent_tokens: Vec<u32> = (0..64u32)
+            .map(|_| lcg.next_u32_below(vocab as u32))
+            .collect();
+        let config = SamplingConfig {
+            repeat_penalty: 1.1,
+            ..SamplingConfig::default()
+        };
+        let iterations = 100u32;
+        assert_eq!(
+            greedy_fast_path(&logits, &recent_tokens, config),
+            greedy_fast_path_reference(&logits, &recent_tokens, config),
+            "the O(vocab log recent) rewrite must match the O(vocab * recent) reference exactly"
+        );
+
+        let reference_start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let result =
+                greedy_fast_path_reference(std::hint::black_box(&logits), &recent_tokens, config);
+            std::hint::black_box(result);
+        }
+        let reference_elapsed = reference_start.elapsed();
+
+        let fast_start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let result = greedy_fast_path(std::hint::black_box(&logits), &recent_tokens, config);
+            std::hint::black_box(result);
+        }
+        let fast_elapsed = fast_start.elapsed();
+
+        let general_start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let mut rng = Rng::with_seed(1);
+            let result = sample_general(
+                std::hint::black_box(&logits),
+                &recent_tokens,
+                config,
+                &mut rng,
+            );
+            std::hint::black_box(result);
+        }
+        let general_elapsed = general_start.elapsed();
+
+        println!(
+            "greedy_fast_path_reference (old O(vocab*recent)): {} ns/op, greedy_fast_path \
+             (new): {} ns/op, sample_general: {} ns/op, vocab={vocab}",
+            reference_elapsed.as_nanos() / u128::from(iterations),
             fast_elapsed.as_nanos() / u128::from(iterations),
             general_elapsed.as_nanos() / u128::from(iterations),
         );
