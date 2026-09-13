@@ -760,7 +760,6 @@ impl<'file> ExpertSlab<'file> {
     /// An evicted slot is rejected rather than omitted: omission would
     /// renumber every following expert and let a gather read the wrong bytes.
     /// The residency policy must page a replacement before the next snapshot.
-    #[must_use]
     pub fn sources_for_step<'scratch>(
         &'scratch self,
         entries: &'scratch mut Vec<(NodeId, Vec<ExpertEntry<'scratch>>)>,
@@ -900,8 +899,8 @@ impl<'file> ExpertSlab<'file> {
                     })
                 })
                 .collect();
-            let projection = projection
-                .ok_or_else(|| InteropError::ExpertSlabIndexOutOfRange { layer, expert: 0 })?;
+            let projection =
+                projection.ok_or(InteropError::ExpertSlabIndexOutOfRange { layer, expert: 0 })?;
             entries.push((weight_node, projection, layer_entries));
         }
         entries

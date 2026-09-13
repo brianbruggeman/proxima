@@ -17,6 +17,9 @@ use proxima_tensor::partition::{partition_at, partition_between, partition_betwe
 
 use crate::residency::{ExpertAddress, ServeDecision};
 
+/// A dense op program paired with the named cut inputs it expects.
+pub(crate) type ProgramSegment = (Vec<Op>, Vec<(NodeId, String)>);
+
 /// The two graph halves surrounding one routed layer's router output.
 ///
 /// `router_program` produces the activation named by `cut_inputs`; the
@@ -195,7 +198,7 @@ pub fn split_layer_segment(
     symbols: &[u64],
     previous_output: Option<NodeId>,
     current_output: NodeId,
-) -> Result<(Vec<Op>, Vec<(NodeId, String)>), TensorError> {
+) -> Result<ProgramSegment, TensorError> {
     partition_between(program, symbols, previous_output, current_output)
 }
 
@@ -316,13 +319,7 @@ pub fn split_router_and_gather_segments(
     previous_layer_output: Option<NodeId>,
     router_output: NodeId,
     layer_output: NodeId,
-) -> Result<
-    (
-        (Vec<Op>, Vec<(NodeId, String)>),
-        (Vec<Op>, Vec<(NodeId, String)>),
-    ),
-    TensorError,
-> {
+) -> Result<(ProgramSegment, ProgramSegment), TensorError> {
     let router = split_layer_segment(program, symbols, previous_layer_output, router_output)?;
     let gather = split_layer_segment(program, symbols, Some(router_output), layer_output)?;
     Ok((router, gather))

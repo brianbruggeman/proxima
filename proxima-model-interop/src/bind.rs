@@ -2310,7 +2310,6 @@ pub(crate) fn build_expert_slab<'file>(
                 .is_ok()
             {
                 slab.register_model_layer_site(layer as usize, projection_kind, site);
-            } else {
             }
         }
     }
