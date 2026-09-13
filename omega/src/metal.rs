@@ -5691,7 +5691,8 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
         BoundOpKind::CachedAttention { .. }
         | BoundOpKind::Elementwise { .. }
         | BoundOpKind::Iota
-        | BoundOpKind::Constant { .. } => bound.kind.name(),
+        | BoundOpKind::Constant { .. }
+        | BoundOpKind::GatedDeltaNet { .. } => bound.kind.name(),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => bound.kind.name(),
@@ -6086,6 +6087,20 @@ fn prepare(
     // nobody reads is to drop it from `resolved` before it ever reaches a
     // dispatch list. See `prune_dead`'s own doc.
     resolved = prune_dead(resolved, &effective_outputs);
+    // `bind`'s `gated-delta-net-fusion` matcher (default-off in this crate's
+    // own `proxima-tensor` dependency, but reachable through Cargo feature
+    // unification whenever another workspace member turns it on against the
+    // same `proxima-tensor`) is the only producer of
+    // `BoundOpKind::GatedDeltaNet` -- no `msl`/`wgsl`/`cuda` renderer here
+    // emits a kernel for it yet (`crate::msl::emit`'s own
+    // `GatedDeltaNetNotSupported` gate), so reject it here, at the one place
+    // every Metal entry point resolves its program, instead of letting it
+    // surface deep inside kernel emission with a less specific error.
+    for bound in &resolved {
+        if matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. }) {
+            return Err(EmitError::GatedDeltaNetNotSupported { node: bound.node }.into());
+        }
+    }
     // `BoundOpBuilder::finish` (`proxima-tensor`'s `bind.rs`) flushes every
     // held elementwise op -- requested output or not -- at the very END of
     // the walk, ascending by `NodeId` among themselves, regardless of where
@@ -6539,6 +6554,12 @@ fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
             (2 + outer_rank_len + operand_count + operand_count * rank_len + 1 + rank_len) * WORD
                 + gather_uniform_byte_len(gather, rank_len)
         }
+        // `pack_uniforms_into`'s own `GatedDeltaNet` arm rejects with
+        // `EmitError::GatedDeltaNetNotSupported` before this diagnostic
+        // byte-length estimate is ever consulted for one -- no renderer in
+        // this crate emits a kernel for it yet, so there is no uniform
+        // layout to size.
+        BoundOpKind::GatedDeltaNet { .. } => WORD,
     }
 }
 
@@ -6575,6 +6596,9 @@ fn pack_uniforms_into(
             pack_leaf_uniforms(bound, scratch);
             Ok(())
         }
+        BoundOpKind::GatedDeltaNet { .. } => Err(EmitError::GatedDeltaNetNotSupported {
+            node: bound.node,
+        }),
     }
 }
 

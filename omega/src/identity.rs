@@ -432,6 +432,15 @@ pub(crate) fn kernel_identity(
         BoundOpKind::Constant { value } => {
             format!("{prefix}_constant_r{rank}_v{:08x}", value.to_bits())
         }
+        BoundOpKind::GatedDeltaNet {
+            kv_heads,
+            num_v_heads,
+            head_k_dim,
+            head_v_dim,
+            ..
+        } => format!(
+            "{prefix}_gated_delta_net_h{kv_heads}_v{num_v_heads}_k{head_k_dim}_d{head_v_dim}"
+        ),
     };
 
     let gather_bits: String = resolved
