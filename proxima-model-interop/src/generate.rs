@@ -3042,16 +3042,12 @@ impl<'file> LoadedModel<'file> {
                     });
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             let has_ssm_placement = ssm_placement
-                .is_some_and(|placement| {
-                    placement.buffers.iter().any(Option::is_some)
-                });
+                .is_some_and(|placement| placement.buffers.iter().any(Option::is_some));
             #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
             let has_ssm_placement = false;
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             let has_dense_attention_placement = dense_attention_placement
-                .is_some_and(|placement| {
-                    placement.buffers.iter().any(Option::is_some)
-                });
+                .is_some_and(|placement| placement.buffers.iter().any(Option::is_some));
             #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
             let has_dense_attention_placement = false;
             // A linked boundary is only valid while every carried state is a
@@ -8180,7 +8176,8 @@ impl<'file> LoadedModel<'file> {
         range: Range<usize>,
         dims: crate::expert_slab::WeightDims,
     ) -> Result<u64, InteropError> {
-        lock_expert_slab(&self.expert_slab).page_expert_mapped(layer, expert, codec, mapping, range, dims)
+        lock_expert_slab(&self.expert_slab)
+            .page_expert_mapped(layer, expert, codec, mapping, range, dims)
     }
 
     /// Attaches HOBBIT's mmap-backed low-codec expert store to this model.
@@ -10425,7 +10422,10 @@ impl<'file> LoadedModel<'file> {
                             visit_qwen35moe_router_selections(
                                 layer,
                                 cached_len,
-                                RouterLogits { values: logits, shape },
+                                RouterLogits {
+                                    values: logits,
+                                    shape,
+                                },
                                 RouterExpertCounts {
                                     expert_count: self.architecture.expert_count as usize,
                                     expert_used_count: self.architecture.expert_used_count as usize,
