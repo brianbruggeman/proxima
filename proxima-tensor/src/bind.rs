@@ -4125,15 +4125,15 @@ pub(crate) fn push_indices_node(map: &IndexMap, nodes: &mut BTreeSet<NodeId>) {
 /// [`block_node_ids`]/[`index_node_ids`]: `cpu.rs`'s private `node_retirement`
 /// and `omega/src/metal.rs`'s private `bound_op_retirement` were the
 /// identical computation under two names.
-#[must_use]
-pub fn node_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
-    let outputs: BTreeSet<NodeId> = outputs.iter().copied().collect();
-    let mut last_use: BTreeMap<NodeId, usize> = BTreeMap::new();
+/// The one read-source walk both [`node_retirement`] and [`node_last_reader`]
+/// need, so the two never drift into "identical computation under two names"
+/// (the exact defect this module's own doc says it exists to end).
+fn walk_last_reads<F: FnMut(NodeId, usize)>(resolved: &[BoundOp], mut record: F) {
     for (position, node) in resolved.iter().enumerate() {
         for (source, _, gather) in node.all_read_sources() {
-            last_use.insert(*source, position);
+            record(*source, position);
             if let Some(gather_access) = gather {
-                last_use.insert(gather_access.indices, position);
+                record(gather_access.indices, position);
             }
         }
         if let BoundOpKind::Reduce {
@@ -4141,9 +4141,18 @@ pub fn node_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<Node
             ..
         } = &node.kind
         {
-            last_use.insert(lookup.indices, position);
+            record(lookup.indices, position);
         }
     }
+}
+
+#[must_use]
+pub fn node_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
+    let outputs: BTreeSet<NodeId> = outputs.iter().copied().collect();
+    let mut last_use: BTreeMap<NodeId, usize> = BTreeMap::new();
+    walk_last_reads(resolved, |node, position| {
+        last_use.insert(node, position);
+    });
 
     let mut retires = vec![Vec::new(); resolved.len()];
     for (node, position) in last_use {
@@ -4160,6 +4169,22 @@ pub fn node_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<Node
         }
     }
     retires
+}
+
+/// Dense node -> last-reader-position table over the same emitted sequence
+/// [`node_retirement`] walks, indexed by `NodeId.0`, `u32::MAX` where a node
+/// is never read. An executor's per-op retirement decision is then a single
+/// array read (`last_reader[node] == position`) instead of a scan over
+/// remaining ops or the current op's own operand list — see
+/// `omega/src/metal.rs`'s `execute_plan_inner` for the consumer this replaced
+/// a per-op `iter().any()` forward scan in.
+#[must_use]
+pub fn node_last_reader(resolved: &[BoundOp], node_count: usize) -> Vec<u32> {
+    let mut last_reader = vec![u32::MAX; node_count];
+    walk_last_reads(resolved, |node, position| {
+        last_reader[node.0 as usize] = position as u32;
+    });
+    last_reader
 }
 
 #[cfg(test)]
