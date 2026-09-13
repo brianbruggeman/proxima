@@ -11,7 +11,7 @@
 //! payload crossing the cut must be concrete — the same reason
 //! [`shape::infer`] itself takes `symbols`.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -149,6 +149,12 @@ fn remap(op: &Op, table: &BTreeMap<NodeId, NodeId>, self_id: NodeId) -> Result<O
 // flagging the signature; every element keeps its own doc below.
 type Partitioned = (Vec<Op>, Vec<(NodeId, String)>, Vec<Op>);
 
+// same reasoning as `Partitioned` above, one alias per distinct tuple shape
+// the `partition_between*` family returns.
+type SegmentAndCuts = (Vec<Op>, Vec<(NodeId, String)>);
+type SegmentCutsEnd = (Vec<Op>, Vec<(NodeId, String)>, NodeId);
+type SegmentCutsMapping = (Vec<Op>, Vec<(NodeId, String)>, BTreeMap<NodeId, NodeId>);
+
 /// Split `program` into a producer sub-program (everything at or before
 /// `boundary`, unchanged — positions are backward-only, so nothing later
 /// can be referenced without crossing the cut) and a consumer sub-program
@@ -229,7 +235,7 @@ pub fn partition_between(
     symbols: &[u64],
     start_exclusive: Option<NodeId>,
     end_inclusive: NodeId,
-) -> Result<(Vec<Op>, Vec<(NodeId, String)>), TensorError> {
+) -> Result<SegmentAndCuts, TensorError> {
     let (segment, cuts, _) =
         partition_between_with_output(program, symbols, start_exclusive, end_inclusive)?;
     Ok((segment, cuts))
@@ -244,7 +250,7 @@ pub fn partition_between_with_output(
     symbols: &[u64],
     start_exclusive: Option<NodeId>,
     end_inclusive: NodeId,
-) -> Result<(Vec<Op>, Vec<(NodeId, String)>, NodeId), TensorError> {
+) -> Result<SegmentCutsEnd, TensorError> {
     let (segment, cuts, mapping) =
         partition_between_with_mapping(program, symbols, start_exclusive, end_inclusive)?;
     let mapped_end = mapping
@@ -262,7 +268,7 @@ pub fn partition_between_with_mapping(
     symbols: &[u64],
     start_exclusive: Option<NodeId>,
     end_inclusive: NodeId,
-) -> Result<(Vec<Op>, Vec<(NodeId, String)>, BTreeMap<NodeId, NodeId>), TensorError> {
+) -> Result<SegmentCutsMapping, TensorError> {
     let end = end_inclusive.0 as usize;
     if end >= program.len() {
         return Err(TensorError::UnknownOutput(end_inclusive));
@@ -373,6 +379,122 @@ pub fn partition_between_with_mapping(
     Ok((segment, cut_inputs, table))
 }
 
+/// Like [`partition_between_with_mapping`], but retains only the nodes that
+/// are ancestors of `end_inclusive`. This is the form for a fused boundary
+/// whose interval contains unrelated future-layer inputs: interval membership
+/// alone must not force those inputs into the executable program.
+pub fn partition_between_with_mapping_ancestor_closed(
+    program: &[Op],
+    symbols: &[u64],
+    start_exclusive: Option<NodeId>,
+    end_inclusive: NodeId,
+) -> Result<SegmentCutsMapping, TensorError> {
+    let end = end_inclusive.0 as usize;
+    if end >= program.len() {
+        return Err(TensorError::UnknownOutput(end_inclusive));
+    }
+    let start = start_exclusive.map_or(usize::MAX, |node| node.0 as usize);
+    if start != usize::MAX && start >= end {
+        return Err(TensorError::UnknownOutput(end_inclusive));
+    }
+    let first = if start == usize::MAX { 0 } else { start + 1 };
+    let shapes = shape::infer(&program[..=end], symbols)?;
+    let mut reachable = BTreeSet::new();
+    let mut visit = vec![end_inclusive];
+    let mut crossing = BTreeMap::new();
+    while let Some(node) = visit.pop() {
+        if !reachable.insert(node) {
+            continue;
+        }
+        let index = node.0 as usize;
+        if index < first {
+            crossing.insert(node, ());
+            continue;
+        }
+        for reference in op_references(&program[index]) {
+            if reference.0 as usize > end {
+                return Err(TensorError::NodeOutOfRange(end_inclusive, reference));
+            }
+            visit.push(reference);
+        }
+    }
+    let mut table = BTreeMap::new();
+    let mut segment = Vec::with_capacity(reachable.len());
+    let mut cut_inputs = Vec::with_capacity(crossing.len());
+    for (position, node) in crossing.keys().enumerate() {
+        let extents = shapes
+            .of(*node)
+            .iter()
+            .map(|extent| Extent::Static(*extent as u32))
+            .collect();
+        let name = program[node.0 as usize]
+            .name()
+            .map(String::from)
+            .unwrap_or_else(|| format!("__cut_{}", node.0));
+        let mapped = NodeId(position as u32);
+        table.insert(*node, mapped);
+        cut_inputs.push((*node, name.clone()));
+        segment.push(Op::Input {
+            dtype: program[node.0 as usize].dtype(),
+            shape: extents,
+            name: Some(name),
+        });
+    }
+    let mut pending: Vec<NodeId> = reachable
+        .iter()
+        .copied()
+        .filter(|node| {
+            let index = node.0 as usize;
+            index >= first && index <= end
+        })
+        .collect();
+    let mut ordered = Vec::with_capacity(pending.len());
+    while !pending.is_empty() {
+        let position = pending.iter().position(|candidate| {
+            op_references(&program[candidate.0 as usize])
+                .into_iter()
+                .all(|reference| !pending.contains(&reference))
+        });
+        let Some(position) = position else {
+            return Err(TensorError::NodeOutOfRange(end_inclusive, pending[0]));
+        };
+        ordered.push(pending.remove(position));
+    }
+    for (offset, original) in ordered.iter().enumerate() {
+        table.insert(*original, NodeId((cut_inputs.len() + offset) as u32));
+    }
+    for original in &ordered {
+        segment.push(remap(&program[original.0 as usize], &table, *original)?);
+    }
+    Ok((segment, cut_inputs, table))
+}
+
+fn op_references(op: &Op) -> Vec<NodeId> {
+    match op {
+        Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => Vec::new(),
+        Op::Elementwise { operands, .. } => operands
+            .iter()
+            .flat_map(|(node, index_map)| {
+                let computed = match index_map {
+                    IndexMap::Affine(_) => None,
+                    IndexMap::Computed { indices, .. } => Some(*indices),
+                };
+                core::iter::once(*node).chain(computed)
+            })
+            .collect(),
+        Op::Reduce(reduce) => {
+            let mut references = vec![reduce.operand];
+            if let IndexMap::Computed { indices, .. } = &reduce.in_map {
+                references.push(*indices);
+            }
+            if let IndexMap::Computed { indices, .. } = &reduce.out_map {
+                references.push(*indices);
+            }
+            references
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -441,6 +563,60 @@ mod tests {
         )
         .expect("segment evaluates with cut bindings");
         assert_eq!(evaluated.root(), &[5.0_f32; 4]);
+    }
+
+    #[test]
+    fn ancestor_closed_partition_excludes_dead_interval_nodes() {
+        let identity_map = IndexMap::Affine(map::projection(1, &[0]));
+        let mut program = Vec::new();
+        let input = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(1)],
+                name: Some(String::from("input")),
+            },
+        );
+        let live = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: vec![(input, identity_map.clone())],
+                name: Some(String::from("live")),
+            },
+        );
+        let _dead = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(1)],
+                name: Some(String::from("dead_future_expert")),
+            },
+        );
+        let output = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: vec![(live, identity_map)],
+                name: Some(String::from("output")),
+            },
+        );
+
+        let (segment, cuts, mapping) =
+            partition_between_with_mapping_ancestor_closed(&program, &[], None, output)
+                .expect("ancestor-closed partition succeeds");
+        assert_eq!(cuts.len(), 0);
+        assert!(
+            !segment
+                .iter()
+                .any(|operation| { operation.name() == Some("dead_future_expert") })
+        );
+        let mapped_output = mapping.get(&output).copied().expect("output is retained");
+        let evaluated = cpu::evaluate(&segment, &[], &[&[2.0_f32]], &[mapped_output])
+            .expect("ancestor-closed segment evaluates");
+        assert_eq!(evaluated.root(), &[2.0_f32]);
     }
 
     #[test]

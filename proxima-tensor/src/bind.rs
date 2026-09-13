@@ -763,6 +763,10 @@ pub struct BoundOpBuilder {
     /// really one of `window_mask`'s three position markers rather than some
     /// other node that merely shares its `NodeId` shape.
     is_iota: RefCell<Vec<bool>>,
+    /// Whether this node or an elementwise descendant carries a multi-term
+    /// index map. A descendant may already be materialized when a consuming
+    /// reduce is pushed, so the original shape must survive outside `held`.
+    packed_mapping_subtree: RefCell<Vec<bool>>,
     /// `constant_value[node.0]` is `Some(value)` when `node` was pushed as an
     /// [`Op::Constant`] carrying `value` — a generalization of `ones` that
     /// keeps the actual stride literal (not just whether it is `1.0`), which
@@ -786,6 +790,7 @@ impl BoundOpBuilder {
             position: Cell::new(0),
             ones: RefCell::new(Vec::new()),
             is_iota: RefCell::new(Vec::new()),
+            packed_mapping_subtree: RefCell::new(Vec::new()),
             constant_value: RefCell::new(Vec::new()),
             numeric_policy,
         }
@@ -812,6 +817,25 @@ impl BoundOpBuilder {
         self.is_iota
             .borrow_mut()
             .push(matches!(expr, Op::Iota { .. }));
+        let packed_mapping = match expr {
+            Op::Elementwise { operands, .. } => {
+                let direct = operands.iter().any(|(_, map)| {
+                    map.affine()
+                        .axes
+                        .iter()
+                        .any(|axis| axis.terms.len() > 1)
+                });
+                let descendants = self.packed_mapping_subtree.borrow();
+                direct
+                    || operands.iter().any(|(operand, _)| {
+                        descendants.get(operand.0 as usize).copied().unwrap_or(false)
+                    })
+            }
+            _ => false,
+        };
+        self.packed_mapping_subtree
+            .borrow_mut()
+            .push(packed_mapping);
         self.constant_value
             .borrow_mut()
             .push(if let Op::Constant { value, .. } = expr {
@@ -949,10 +973,14 @@ impl BoundOpBuilder {
                 let still_live = !retires.contains(&reduce.operand);
                 let non_identity = !is_identity_projection(&reduce.in_map);
                 let not_held = !self.held.borrow().contains_key(&reduce.operand);
-                let mut fuses = !still_live && !non_identity && !not_held;
+                let fuses = !still_live && !non_identity && !not_held;
                 if fuses
                     && let Some(activation_node) =
-                        composed_packed_product_activation(&self.held, reduce.operand)
+                        composed_packed_product_activation(
+                            &self.held,
+                            &self.packed_mapping_subtree,
+                            reduce.operand,
+                        )
                 {
                     // ROW 431 (`docs/discipline.md`): materialize ONLY the
                     // composed activation side of `Multiply(packed, a)` so
@@ -972,13 +1000,6 @@ impl BoundOpBuilder {
                          (docs/discipline.md ROW 431, supersedes ROW 430)"
                     );
                     self.materialize_if_held(activation_node, shapes, &mut emitted)?;
-                    // The packed product's composed activation is not a
-                    // safe reduce-fusion operand: its fused body can retain
-                    // the absorbed node in backend bindings after the
-                    // producer's buffer is retired. Materialize the product
-                    // and keep the ordinary reduce path until that binding
-                    // representation carries the dependency explicitly.
-                    fuses = false;
                 }
                 #[cfg(feature = "instrument")]
                 {
@@ -1449,12 +1470,15 @@ fn pure_projection_axes(pattern: &IndexPattern) -> SmallVec<[u16; MAX_INLINE_RAN
 }
 
 /// ROW 431 (`docs/discipline.md`, supersedes ROW 430): whether `node`'s
-/// held body is `Multiply(packed, composed)` -- one operand's own map
-/// carrying a genuine multi-term axis (the multi-letter packed-row
-/// contraction `wo`'s own reshape idiom, `spec.rs:9017-9031`, uses -- a
-/// single-letter packed weight like `wq`/`wk`/`wv` never has one) while the
-/// OTHER operand is STILL a held, unmaterialized elementwise chain rather
-/// than a plain leaf. Returns that other (activation) node so the caller can
+/// held body is `Multiply(packed, composed)` -- one operand's own map OR a
+/// map in the held body beneath it carrying a genuine multi-term axis (the
+/// multi-letter packed-row contraction `wo`'s own reshape idiom,
+/// `spec.rs:9017-9031`, uses -- a single-letter packed weight like
+/// `wq`/`wk`/`wv` never has one) while the OTHER operand is STILL a held,
+/// unmaterialized elementwise chain rather than a plain leaf. The recursive
+/// walk matters because Qwen's gate-to-Q projection puts the multi-term
+/// reshape inside the weight's own broadcast multiply, not in the outer
+/// product's map. Returns that other (activation) node so the caller can
 /// force just IT to materialize -- this is exactly the shape
 /// `run_reduce_quantized`'s admission contract
 /// (`packed_reduce_activation_operand`, `cpu.rs`) requires: a bare
@@ -1465,6 +1489,7 @@ fn pure_projection_axes(pattern: &IndexPattern) -> SmallVec<[u16; MAX_INLINE_RAN
 /// never introduces the output axis into an intermediate buffer at all.
 fn composed_packed_product_activation(
     held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    packed_mapping_subtree: &RefCell<Vec<bool>>,
     node: NodeId,
 ) -> Option<NodeId> {
     let (body, operands) = held
@@ -1477,9 +1502,18 @@ fn composed_packed_product_activation(
     let [(first_node, first_map), (second_node, second_map)] = operands.as_slice() else {
         return None;
     };
-    let is_packed = |map: &IndexMap| map.affine().axes.iter().any(|axis| axis.terms.len() > 1);
-    let first_packed = is_packed(first_map);
-    let second_packed = is_packed(second_map);
+    let first_packed = packed_mapping_in_held_tree(held, packed_mapping_subtree, *first_node)
+        || first_map
+            .affine()
+            .axes
+            .iter()
+            .any(|axis| axis.terms.len() > 1);
+    let second_packed = packed_mapping_in_held_tree(held, packed_mapping_subtree, *second_node)
+        || second_map
+            .affine()
+            .axes
+            .iter()
+            .any(|axis| axis.terms.len() > 1);
     if first_packed == second_packed {
         return None;
     }
@@ -1491,6 +1525,40 @@ fn composed_packed_product_activation(
     held.borrow()
         .contains_key(&other_node)
         .then_some(other_node)
+}
+
+fn packed_mapping_in_held_tree(
+    held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    packed_mapping_subtree: &RefCell<Vec<bool>>,
+    root: NodeId,
+) -> bool {
+    if packed_mapping_subtree
+        .borrow()
+        .get(root.0 as usize)
+        .copied()
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let mut pending = vec![root];
+    let mut visited = BTreeSet::new();
+    while let Some(node) = pending.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        let Some(entry) = held.borrow().get(&node).cloned() else {
+            continue;
+        };
+        if entry
+            .operands
+            .iter()
+            .any(|(_, map)| map.affine().axes.iter().any(|axis| axis.terms.len() > 1))
+        {
+            return true;
+        }
+        pending.extend(entry.operands.iter().map(|(operand, _)| *operand));
+    }
+    false
 }
 
 /// A fusion can compose through: every axis a plain, unshifted projection.
