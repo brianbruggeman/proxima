@@ -7,7 +7,7 @@ use memmap2::MmapOptions;
 use proxima_storage::dax::{MappedRegion, PersistMode};
 use thiserror::Error;
 
-use crate::{LoadedModel, InteropError};
+use crate::{InteropError, LoadedModel};
 
 /// Errors opening a checkpoint through the configured storage source.
 #[derive(Debug, Error)]

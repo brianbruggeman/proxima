@@ -46,7 +46,7 @@
 
 use proxima_tensor::spec::{
     ExpertGatingFunc, ForwardRoots, GdnOutputGate, MoeSite, MoeSites, Qwen35DenseAttentionTaps,
-    Qwen35GdnSequenceTail, Qwen35LayerRoots, SsmMixerTaps, append_moe_ffn,
+    Qwen35GdnSequenceTail, Qwen35LayerRoots, SsmMixerTaps, append_moe_ffn_from_logits,
     append_qwen35_dense_attention_only_with_taps, append_qwen35_gdn_sequence_tail_with_taps,
     append_qwen35_ssm_mixer_with_taps_and_layout, causal_mask, elementwise, embedding_lookup,
     input_leaf, reduce, rmsnorm, scalar_constant, symbolic_leaf,
@@ -119,11 +119,11 @@ fn append_qwen35moe_ffn(
         gate_inp,
     )?;
 
-    let (routed_out, moe_site) = append_moe_ffn(
+    let (routed_out, moe_site) = append_moe_ffn_from_logits(
         program,
         layer,
         normed,
-        gate_inp,
+        router_logits,
         expert_w_gate,
         expert_w_up,
         expert_w_down,
@@ -944,6 +944,27 @@ pub fn qwen35moe_forward_program(
 mod tests {
     use super::*;
 
+    fn node_depends_on(program: &[Op], node: NodeId, ancestor: NodeId) -> bool {
+        let mut pending = vec![node];
+        let mut visited = std::collections::BTreeSet::new();
+        while let Some(current) = pending.pop() {
+            if current == ancestor {
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            match program.get(current.0 as usize) {
+                Some(Op::Elementwise { operands, .. }) => {
+                    pending.extend(operands.iter().map(|(operand, _)| *operand));
+                }
+                Some(Op::Reduce(reduce)) => pending.push(reduce.operand),
+                Some(Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. }) | None => {}
+            }
+        }
+        false
+    }
+
     #[test]
     fn hybrid_moe_program_builds_one_gdn_and_one_attention_layer() {
         let architecture = Architecture {
@@ -1011,5 +1032,46 @@ mod tests {
             roots.logits, roots.hidden,
             "logits follow the output projection"
         );
+    }
+
+    #[test]
+    fn routed_experts_depend_on_the_diagnostic_router_logits() {
+        let architecture = Architecture {
+            vocab: 16,
+            embedding: 8,
+            query_heads: 2,
+            kv_heads_by_layer: vec![0, 1],
+            attn_head_dim: 4,
+            rope_dims: 2,
+            rope_dimension_sections: vec![1],
+            rope_mrope_interleaved: false,
+            block_count: 2,
+            full_attention_interval: 2,
+            rope_freq_base: 10_000.0,
+            rms_epsilon: 1e-6,
+            ssm_conv_kernel: 2,
+            ssm_state_size: 2,
+            ssm_group_count: 1,
+            ssm_time_step_rank: 2,
+            ssm_inner_size: 4,
+            v_head_reordered: false,
+            expert_count: 2,
+            expert_used_count: 1,
+            expert_feed_forward: 4,
+            expert_shared_feed_forward: 4,
+            layer_kinds: vec![LayerKind::Gdn, LayerKind::Attention],
+        };
+        let (program, _, _, moe_sites, diagnostics) =
+            qwen35moe_forward_program(&architecture).expect("hybrid MoE program lowers");
+
+        for (site, diagnostic) in moe_sites.0.iter().zip(diagnostics.iter()) {
+            assert!(
+                site.selected
+                    .iter()
+                    .all(|route| { node_depends_on(&program, *route, diagnostic.router_logits) }),
+                "layer {} route reductions must consume its diagnostic router logits",
+                site.layer
+            );
+        }
     }
 }

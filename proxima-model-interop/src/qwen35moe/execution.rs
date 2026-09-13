@@ -213,6 +213,85 @@ pub fn split_mapped_layer_segment(
     partition_between_with_mapping(program, symbols, previous_output, current_output)
 }
 
+/// Uses [`partition_between_with_mapping`] to retain the final gather and
+/// logits suffix in one program; the router remains an external cut.
+#[cfg(feature = "qwen35moe-linked-suffix")]
+#[must_use]
+pub(crate) fn split_gather_and_suffix_segment(
+    program: &[Op],
+    symbols: &[u64],
+    router_output: NodeId,
+    layer_output: NodeId,
+    logits_output: NodeId,
+) -> Result<MappedLayerSegment, TensorError> {
+    if layer_output.0 <= router_output.0 {
+        return Err(TensorError::UnknownOutput(layer_output));
+    }
+    if logits_output.0 <= layer_output.0 {
+        return Err(TensorError::UnknownOutput(logits_output));
+    }
+    let segment =
+        partition_between_with_mapping(program, symbols, Some(router_output), logits_output)?;
+    if !segment.2.contains_key(&layer_output) {
+        return Err(TensorError::UnknownOutput(layer_output));
+    }
+    Ok(segment)
+}
+
+/// Builds the boundary segment that starts at one router result and ends at
+/// the next layer's router result.  The partition therefore contains the
+/// current layer's gather and the next mixer/router, while retaining one
+/// dense node map for the executor.  Keeping this as a graph operation (and
+/// not a second host-side gather) is the seam used by the layer working-set
+/// scheduler.
+pub(crate) fn split_gather_and_next_router_segment(
+    program: &[Op],
+    symbols: &[u64],
+    current_router: NodeId,
+    current_block_output: NodeId,
+    next_router: NodeId,
+) -> Result<MappedLayerSegment, TensorError> {
+    if current_block_output.0 <= current_router.0 {
+        return Err(TensorError::UnknownOutput(current_block_output));
+    }
+    if next_router.0 <= current_block_output.0 {
+        return Err(TensorError::UnknownOutput(next_router));
+    }
+    let segment = proxima_tensor::partition::partition_between_with_mapping_ancestor_closed(
+        program,
+        symbols,
+        Some(current_router),
+        next_router,
+    )?;
+    if !segment.2.contains_key(&current_block_output) {
+        return Err(TensorError::UnknownOutput(current_block_output));
+    }
+    Ok(segment)
+}
+
+/// Builds one exact two-layer execution window. The partition starts at the
+/// previous layer's carried boundary and ends at the second layer's block
+/// output, so both router roots remain addressable in the returned mapping
+/// while the expert source table can cover only those two layers.
+pub(crate) fn split_two_layer_window_segment(
+    program: &[Op],
+    symbols: &[u64],
+    previous_layer_output: Option<NodeId>,
+    first_router: NodeId,
+    second_router: NodeId,
+    second_layer_output: NodeId,
+) -> Result<MappedLayerSegment, TensorError> {
+    if second_router.0 <= first_router.0 || second_layer_output.0 <= second_router.0 {
+        return Err(TensorError::UnknownOutput(second_layer_output));
+    }
+    let segment =
+        split_mapped_layer_segment(program, symbols, previous_layer_output, second_layer_output)?;
+    if !segment.2.contains_key(&first_router) || !segment.2.contains_key(&second_router) {
+        return Err(TensorError::UnknownOutput(second_router));
+    }
+    Ok(segment)
+}
+
 /// Builds executable router and gather segments with their dense node maps.
 pub fn split_mapped_router_and_gather_segments(
     program: &[Op],
@@ -388,6 +467,8 @@ pub const fn route_address(decision: ServeDecision) -> ExpertAddress {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "qwen35moe-linked-suffix")]
+    use alloc::collections::BTreeMap;
     use alloc::vec;
 
     use proxima_tensor::cpu;
@@ -395,13 +476,154 @@ mod tests {
     use proxima_tensor::map::{self, IndexMap};
     use proxima_tensor::op::{Extent, NodeId, Op, ScalarOp, append};
 
+    #[cfg(feature = "qwen35moe-linked-suffix")]
+    use super::{MappedLayerSegment, split_gather_and_suffix_segment};
     use super::{
-        Qwen35MoeExecutionMode, execute_pre_gather, route_address, split_layer_program,
-        split_layer_segment, split_mapped_layer_segment, split_mapped_router_and_gather_segments,
+        Qwen35MoeExecutionMode, execute_pre_gather, route_address,
+        split_gather_and_next_router_segment, split_layer_program, split_layer_segment,
+        split_mapped_layer_segment, split_mapped_router_and_gather_segments,
         split_router_and_gather_segments,
     };
     use crate::residency::{ExpertAddress, ServeDecision, ServePrecision};
     use core::cell::Cell;
+    #[cfg(feature = "qwen35moe-linked-suffix")]
+    use proxima_tensor::error::TensorError;
+
+    #[cfg(feature = "qwen35moe-linked-suffix")]
+    #[test]
+    fn linked_final_gather_keeps_routes_sources_and_logits_bit_exact() {
+        let identity = IndexMap::Affine(map::projection(1, &[0]));
+        let input = |name: &str| Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(2)],
+            name: Some(name.into()),
+        };
+        let binary = |name: &str, body, first, second| Op::Elementwise {
+            dtype: DType::Float32,
+            body,
+            operands: vec![(first, identity.clone()), (second, identity.clone())],
+            name: Some(name.into()),
+        };
+        let program = vec![
+            input("activation"),
+            binary("router_zero", ScalarOp::Add, NodeId(0), NodeId(0)),
+            input("blk.0.ffn_up_exps.weight"),
+            binary("gather_zero", ScalarOp::Multiply, NodeId(1), NodeId(2)),
+            binary("router_one", ScalarOp::Add, NodeId(3), NodeId(0)),
+            input("blk.1.ffn_up_exps.weight"),
+            binary("gather_one", ScalarOp::Multiply, NodeId(4), NodeId(5)),
+            binary("logits", ScalarOp::Add, NodeId(6), NodeId(0)),
+        ];
+        let first_router = split_mapped_layer_segment(&program, &[], None, NodeId(1))
+            .expect("first router retains the activation prefix");
+        let first_gather = split_mapped_layer_segment(&program, &[], Some(NodeId(1)), NodeId(3))
+            .expect("first gather starts after its residency boundary");
+        let second_router = split_mapped_layer_segment(&program, &[], Some(NodeId(3)), NodeId(4))
+            .expect("second router consumes the first gather and original activation");
+        let second_gather = split_mapped_layer_segment(&program, &[], Some(NodeId(4)), NodeId(6))
+            .expect("second gather starts after its residency boundary");
+        let suffix = split_mapped_layer_segment(&program, &[], Some(NodeId(6)), NodeId(7))
+            .expect("suffix consumes the final gather and original activation");
+        let linked =
+            split_gather_and_suffix_segment(&program, &[], NodeId(4), NodeId(6), NodeId(7))
+                .expect("final gather and suffix share one partition");
+        assert!(second_gather.1.iter().all(|cut| linked.1.contains(cut)));
+        assert!(linked.1.contains(&(NodeId(0), String::from("activation"))));
+        assert!(matches!(
+            linked.0[linked.2[&NodeId(4)].0 as usize],
+            Op::Input { .. }
+        ));
+        assert_eq!(
+            linked.0[linked.2[&NodeId(5)].0 as usize].name(),
+            Some("blk.1.ffn_up_exps.weight")
+        );
+        assert!(!linked.2.contains_key(&NodeId(2)));
+        assert!(linked.2.contains_key(&NodeId(6)));
+        assert!(linked.2.contains_key(&NodeId(7)));
+
+        let activation = [1.25_f32, -2.5];
+        let source_zero = [0.5_f32, 3.0];
+        let source_one = [-4.0_f32, 0.25];
+        let named = [
+            ("activation", activation.as_slice()),
+            ("blk.0.ffn_up_exps.weight", source_zero.as_slice()),
+            ("blk.1.ffn_up_exps.weight", source_one.as_slice()),
+        ];
+        let execute = |segments: &[&MappedLayerSegment]| {
+            let mut carried: BTreeMap<NodeId, Vec<f32>> = BTreeMap::new();
+            let mut executions = 0;
+            for segment in segments {
+                let mut bindings = named.to_vec();
+                for (original, name) in &segment.1 {
+                    if !bindings.iter().any(|(candidate, _)| *candidate == name) {
+                        bindings.push((
+                            name.as_str(),
+                            carried
+                                .get(original)
+                                .expect("prior partition produced its cut"),
+                        ));
+                    }
+                }
+                let outputs = segment.2.values().copied().collect::<Vec<_>>();
+                let evaluated = cpu::evaluate_named(&segment.0, &[], &bindings, &outputs)
+                    .expect("partition evaluates from original-id cut bindings");
+                executions += 1;
+                for (original, mapped) in &segment.2 {
+                    carried.insert(
+                        *original,
+                        evaluated
+                            .get(*mapped)
+                            .expect("requested node is returned")
+                            .0
+                            .to_vec(),
+                    );
+                }
+            }
+            (carried, executions)
+        };
+        let (incumbent, incumbent_executions) = execute(&[
+            &first_router,
+            &first_gather,
+            &second_router,
+            &second_gather,
+            &suffix,
+        ]);
+        let (candidate, candidate_executions) =
+            execute(&[&first_router, &first_gather, &second_router, &linked]);
+        assert_eq!(incumbent_executions, 5);
+        assert_eq!(candidate_executions, 4);
+        for node in [NodeId(1), NodeId(3), NodeId(4), NodeId(6), NodeId(7)] {
+            assert_eq!(
+                candidate[&node]
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                incumbent[&node]
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "router, gather, and logits payload bits retain original node {node:?}"
+            );
+        }
+        assert_eq!(candidate[&NodeId(7)], vec![-8.75, -6.875]);
+    }
+
+    #[cfg(feature = "qwen35moe-linked-suffix")]
+    #[test]
+    fn linked_final_gather_rejects_reversed_boundaries_before_partitioning() {
+        assert!(matches!(
+            split_gather_and_suffix_segment(&[], &[], NodeId(4), NodeId(3), NodeId(7)),
+            Err(TensorError::UnknownOutput(NodeId(3)))
+        ));
+        assert!(matches!(
+            split_gather_and_suffix_segment(&[], &[], NodeId(4), NodeId(6), NodeId(6)),
+            Err(TensorError::UnknownOutput(NodeId(6)))
+        ));
+        assert!(matches!(
+            split_gather_and_suffix_segment(&[], &[], NodeId(4), NodeId(6), NodeId(7)),
+            Err(TensorError::UnknownOutput(NodeId(7)))
+        ));
+    }
 
     #[test]
     fn phases_force_router_boundary_then_source_gather() {
@@ -616,6 +838,70 @@ mod tests {
         assert_eq!(
             first_router, prefix,
             "executing a separate prefix would repeat the first router segment"
+        );
+    }
+
+    #[test]
+    fn fused_gather_next_router_keeps_both_layer_boundaries() {
+        let identity = IndexMap::Affine(map::projection(1, &[0]));
+        let mut program = Vec::new();
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(2)],
+                name: Some("activation".into()),
+            },
+        );
+        let router = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: vec![
+                    (activation, identity.clone()),
+                    (activation, identity.clone()),
+                ],
+                name: Some("router0".into()),
+            },
+        );
+        let block_output = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![(router, identity.clone()), (activation, identity.clone())],
+                name: Some("block0".into()),
+            },
+        );
+        let _dead_future_expert = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(2)],
+                name: Some("blk.1.ffn_gate_exps.weight".into()),
+            },
+        );
+        let next_router = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: vec![(block_output, identity.clone()), (activation, identity)],
+                name: Some("router1".into()),
+            },
+        );
+
+        let fused =
+            split_gather_and_next_router_segment(&program, &[], router, block_output, next_router)
+                .expect("the boundary segment contains gather and next router");
+        assert!(fused.2.contains_key(&block_output));
+        assert!(fused.2.contains_key(&next_router));
+        assert!(
+            !fused
+                .0
+                .iter()
+                .any(|operation| operation.name() == Some("blk.1.ffn_gate_exps.weight"))
         );
     }
 }

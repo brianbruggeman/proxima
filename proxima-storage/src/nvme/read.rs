@@ -92,7 +92,10 @@ mod tests {
         let request = ReadRequest::new(7, 1, 0x1234_5600, 4096, 512, 0x1000, 0x2000)
             .expect("aligned read request");
         let mut bytes = [0u8; 64];
-        request.command().write(&mut bytes).expect("encode read command");
+        request
+            .command()
+            .write(&mut bytes)
+            .expect("encode read command");
         let view = SubmissionEntry::parse(&bytes).expect("parse read command");
 
         assert_eq!(view.opcode(), READ_OPCODE);
@@ -116,7 +119,9 @@ mod tests {
         );
         assert_eq!(
             ReadRequest::new(1, 1, 0, 65_537 * 512, 512, 0, 0),
-            Err(ReadRequestError::TooManyBlocks { block_count: 65_537 })
+            Err(ReadRequestError::TooManyBlocks {
+                block_count: 65_537
+            })
         );
     }
 }
