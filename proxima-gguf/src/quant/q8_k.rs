@@ -23,8 +23,10 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
         });
     }
     for (block, out) in data
-        .chunks_exact(BLOCK_BYTES)
-        .zip(output.chunks_exact_mut(QK_Q8_K))
+        .as_chunks::<BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<QK_Q8_K>().0.iter_mut())
     {
         let scale = f32::from_le_bytes([block[0], block[1], block[2], block[3]]);
         for (i, value) in out.iter_mut().enumerate() {
