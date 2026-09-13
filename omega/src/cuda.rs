@@ -178,6 +178,12 @@ pub fn emit_cuda_with_policy(
                 kind: "cached_attention",
             });
         }
+        BoundOpKind::GatedDeltaNet { .. } => {
+            return Err(EmitError::CudaUnsupportedOpKind {
+                node: resolved.node,
+                kind: "gated_delta_net",
+            });
+        }
     };
     Ok(CudaKernel {
         source,
@@ -199,6 +205,12 @@ pub fn emit_cuda_with_policy(
 /// CUDA's emitted `Uniforms` uses native-width `long` fields, so this is
 /// deliberately separate from the wgpu i32 packer. Keeping the packer beside
 /// the emitter makes the source layout and the host layout one contract.
+/// `cuda_driver::launch` (this crate's own `cuda-driver` feature) is the one
+/// non-test caller — the `cuda` feature alone is the dependency-free emitter
+/// this module's own doc describes, with no binding/argument packer wired to
+/// it yet, so this stays test-only in that build rather than dead code the
+/// lint has to be silenced around.
+#[cfg(any(test, feature = "cuda-driver"))]
 pub(crate) fn pack_elementwise_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitError> {
     if !matches!(resolved.kind, BoundOpKind::Elementwise { .. }) {
         return Err(EmitError::RenderKindMismatch {
@@ -229,22 +241,26 @@ pub(crate) fn pack_elementwise_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, E
     Ok(bytes)
 }
 
+#[cfg(any(test, feature = "cuda-driver"))]
 fn push_cuda_i64(bytes: &mut Vec<u8>, value: i64) {
     bytes.extend_from_slice(&value.to_ne_bytes());
 }
 
+#[cfg(any(test, feature = "cuda-driver"))]
 fn push_cuda_i64_row(bytes: &mut Vec<u8>, values: &[i64], width: usize) {
     for slot in 0..width {
         push_cuda_i64(bytes, values.get(slot).copied().unwrap_or(0));
     }
 }
 
+#[cfg(any(test, feature = "cuda-driver"))]
 fn push_cuda_extents(bytes: &mut Vec<u8>, extents: &[u64], width: usize) {
     for slot in 0..width {
         push_cuda_i64(bytes, extents.get(slot).copied().unwrap_or(0) as i64);
     }
 }
 
+#[cfg(any(test, feature = "cuda-driver"))]
 fn contiguous_strides(extents: &[u64]) -> Vec<i64> {
     let mut strides = vec![0_i64; extents.len()];
     let mut stride = 1_i64;
@@ -255,6 +271,7 @@ fn contiguous_strides(extents: &[u64]) -> Vec<i64> {
     strides
 }
 
+#[cfg(any(test, feature = "cuda-driver"))]
 fn push_cuda_gather_uniforms(bytes: &mut Vec<u8>, bound: &BoundOp, rank_len: usize) {
     let gathers: Vec<&Lookup> = bound
         .operands()
@@ -278,6 +295,9 @@ fn push_cuda_gather_uniforms(bytes: &mut Vec<u8>, bound: &BoundOp, rank_len: usi
 /// Packs every non-attention CUDA graph ABI currently emitted by this module.
 /// The field order mirrors the `Uniforms` declarations in the three renderers;
 /// all fields are `long`, so the host representation is fixed at i64 words.
+/// See [`pack_elementwise_uniforms`]'s own doc for why this is test-only
+/// without the `cuda-driver` feature.
+#[cfg(any(test, feature = "cuda-driver"))]
 pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitError> {
     let rank_len = resolved.extents.len().max(1);
     let mut bytes = Vec::new();
@@ -382,7 +402,7 @@ pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitErro
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => {
             push_cuda_i64(&mut bytes, resolved.extents.iter().product::<u64>() as i64);
         }
-        BoundOpKind::CachedAttention { .. } => {
+        BoundOpKind::CachedAttention { .. } | BoundOpKind::GatedDeltaNet { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
                 kind: resolved.kind.name(),
@@ -586,12 +606,14 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> u64 {
             let rank = resolved.extents.len();
             resolved.extents[..rank.saturating_sub(1)].iter().product()
         }
-        // `CachedAttention` never reaches this function in practice --
-        // `emit_cuda`'s own match on `resolved.kind` returns
-        // `EmitError::CudaUnsupportedOpKind` for it before `grid_threads` is
-        // ever called. Grouped with `Iota`/`Constant` only to satisfy
+        // `CachedAttention`/`GatedDeltaNet` never reach this function in
+        // practice -- `emit_cuda`'s own match on `resolved.kind` returns
+        // `EmitError::CudaUnsupportedOpKind` for either before `grid_threads`
+        // is ever called. Grouped with `Iota`/`Constant` only to satisfy
         // exhaustiveness with a harmless value, never a real dispatch shape.
-        BoundOpKind::Iota | BoundOpKind::Constant { .. } => resolved.extents.iter().product(),
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } | BoundOpKind::GatedDeltaNet { .. } => {
+            resolved.extents.iter().product()
+        }
         BoundOpKind::CachedAttention { .. } => resolved.extents.iter().product(),
     }
 }
