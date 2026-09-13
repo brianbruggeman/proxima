@@ -269,6 +269,29 @@ pub enum BoundOpKind {
         cached_lower_inclusive: i64,
         new_upper_inclusive: i64,
     },
+    /// One backend-neutral gated-delta-net recurrence step
+    /// ([`crate::spec::append_qwen35_delta_net_step`]'s own ~12-op chain,
+    /// collapsed): `operands` is exactly `[query, key, value, gate, beta,
+    /// state_in]`, `query`/`key` bound PRE-[`crate::spec::repeat_kv_heads`]
+    /// (the matcher walks past that op's two broadcast multiplies, the same
+    /// move [`BoundOpKind::Reduce::epilogue_broadcast_axes`] already makes
+    /// for a broadcast-reduce epilogue) — an executor mod-broadcasts
+    /// `key_index % kv_heads` itself, exactly llama.cpp's own fused Metal
+    /// kernel (`gated_delta_net.metal:33-34`). `state_in` and this op's own
+    /// `node` output share one buffer identity in place, the same
+    /// caller-persisted convention [`BoundOpKind::CachedAttention`]'s own doc
+    /// states for a KV cache never concatenated in-graph. `n_tokens == 1` is
+    /// this slice's only supported shape (decode); an `n_tokens > 1` bind is
+    /// out of scope until the M-token prefill slice lands.
+    GatedDeltaNet {
+        operands: BoundOperands,
+        n_tokens: u64,
+        kv_heads: u64,
+        num_v_heads: u64,
+        head_k_dim: u64,
+        head_v_dim: u64,
+        inv_sqrt_key_dim: f32,
+    },
     Elementwise {
         body: ComposedBody,
         operands: BoundOperands,
@@ -386,6 +409,7 @@ impl BoundOpKind {
     pub fn name(&self) -> &'static str {
         match self {
             BoundOpKind::CachedAttention { .. } => "cached_attention",
+            BoundOpKind::GatedDeltaNet { .. } => "gated_delta_net",
             BoundOpKind::Elementwise { .. } => "elementwise",
             BoundOpKind::Reduce {
                 keep: Keep::Reduce, ..
@@ -413,6 +437,7 @@ impl BoundOp {
     pub fn operands(&self) -> &[(NodeId, Layout, Option<Lookup>)] {
         match &self.kind {
             BoundOpKind::CachedAttention { operands, .. }
+            | BoundOpKind::GatedDeltaNet { operands, .. }
             | BoundOpKind::Elementwise { operands, .. }
             | BoundOpKind::Reduce { operands, .. } => operands,
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => &[],
@@ -442,6 +467,7 @@ impl BoundOp {
                 epilogue_operands, ..
             } => epilogue_operands,
             BoundOpKind::CachedAttention { .. }
+            | BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::Elementwise { .. }
             | BoundOpKind::Iota
             | BoundOpKind::Constant { .. } => &[],
@@ -457,7 +483,7 @@ impl BoundOp {
     #[must_use]
     pub fn element_body(&self) -> &ComposedBody {
         match &self.kind {
-            BoundOpKind::CachedAttention { .. } => &EMPTY_BODY,
+            BoundOpKind::CachedAttention { .. } | BoundOpKind::GatedDeltaNet { .. } => &EMPTY_BODY,
             BoundOpKind::Elementwise { body, .. } => body,
             BoundOpKind::Reduce { element_body, .. } => element_body,
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => &EMPTY_BODY,
@@ -540,7 +566,8 @@ impl BoundOp {
 
     fn split_axis(&self) -> Option<u16> {
         match &self.kind {
-            BoundOpKind::CachedAttention { .. } => None,
+            // decode-only shape (`n_tokens == 1`): never worth splitting.
+            BoundOpKind::CachedAttention { .. } | BoundOpKind::GatedDeltaNet { .. } => None,
             BoundOpKind::Elementwise { .. } => (!self.extents.is_empty()).then_some(0),
             // `out_scatter: Some(_)` is a scatter: conservatively
             // ineligible for splitting. A chunked run would need
@@ -610,6 +637,11 @@ impl BoundOp {
                 body: body.clone(),
                 operands: rebase_operands(operands, split_axis, chunk_start),
             },
+            // unreachable in practice: `split_axis` returns `None` for
+            // `GatedDeltaNet` (this slice's `n_tokens == 1` shape is never
+            // worth chunking), kept explicit for the same reason `Iota`/
+            // `Constant` below are.
+            kind @ BoundOpKind::GatedDeltaNet { .. } => kind.clone(),
             BoundOpKind::Reduce {
                 element_body,
                 reduce_op,
@@ -3411,6 +3443,8 @@ pub fn bind_with_fusion(
         fuse_cached_attention,
         numeric_policy,
     )?;
+    #[cfg(feature = "gated-delta-net-fusion")]
+    let built = apply_gated_delta_net_fusion(built, program, shapes, outputs, numeric_policy)?;
     #[cfg(feature = "reduce-epilogue-fusion")]
     {
         admit(numeric_policy, NumericRewrite::ReduceEpilogueFusion)?;
@@ -3422,6 +3456,358 @@ pub fn bind_with_fusion(
     }
     #[cfg(not(feature = "reduce-epilogue-fusion"))]
     Ok(built)
+}
+
+/// Binary [`Op::Elementwise`] lookup, gated on this crate's own
+/// `gated-delta-net-fusion` feature — a small duplicate of
+/// [`binary_elementwise`] (that helper lives behind
+/// `cached-attention-streaming` instead) rather than a shared function two
+/// independent feature gates would both have to enable to compile.
+#[cfg(feature = "gated-delta-net-fusion")]
+fn gdn_binary_elementwise(program: &[Op], node: NodeId, body: ScalarOp) -> Option<[NodeId; 2]> {
+    match program.get(node.0 as usize)? {
+        Op::Elementwise {
+            body: actual_body,
+            operands,
+            ..
+        } if *actual_body == body => match operands.as_slice() {
+            [(left, _), (right, _)] => Some([*left, *right]),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[cfg(feature = "gated-delta-net-fusion")]
+fn gdn_unary_elementwise(program: &[Op], node: NodeId, body: ScalarOp) -> Option<NodeId> {
+    match program.get(node.0 as usize)? {
+        Op::Elementwise {
+            body: actual_body,
+            operands,
+            ..
+        } if *actual_body == body => match operands.as_slice() {
+            [(source, _)] => Some(*source),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The same [`Op::Constant`] read [`cached_attention_candidates`]'s own
+/// `scale: f32` field relies on -- `inv_sqrt_key_dim` is baked at graph-build
+/// time (`1/sqrt(head_k_dim)`, a compile-time constant of the model's own
+/// architecture), so [`BoundOpKind::GatedDeltaNet::inv_sqrt_key_dim`] is a
+/// plain `f32`, not a bound operand.
+#[cfg(feature = "gated-delta-net-fusion")]
+fn gdn_constant_value(program: &[Op], node: NodeId) -> Option<f32> {
+    match program.get(node.0 as usize)? {
+        Op::Constant { value, .. } => Some(*value),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "gated-delta-net-fusion")]
+fn gdn_reduced_source(program: &[Op], node: NodeId, body: ScalarOp) -> Option<NodeId> {
+    match program.get(node.0 as usize)? {
+        Op::Reduce(reduce)
+            if reduce.body == body
+                && reduce.init == ReduceInit::Zero
+                && reduce.keep == Keep::Reduce =>
+        {
+            Some(reduce.operand)
+        }
+        _ => None,
+    }
+}
+
+/// `true` when `node` is [`crate::spec::repeat_kv_heads`]'s own output shape:
+/// an elementwise `Multiply` against a rank-`>=1` all-ones [`Op::Constant`].
+/// Reused, not restated, from that function's own doc: the donor is what
+/// makes `shape::unify_iteration_space` resolve the broadcast group axis at
+/// all, so its value is always exactly `1.0`.
+#[cfg(feature = "gated-delta-net-fusion")]
+fn gdn_is_repeat_kv_heads_donor(program: &[Op], node: NodeId) -> bool {
+    matches!(
+        program.get(node.0 as usize),
+        Some(Op::Constant { value, .. }) if *value == 1.0
+    )
+}
+
+/// Walks past a [`crate::spec::repeat_kv_heads`] broadcast if `node` is one,
+/// returning the pre-repeat source otherwise unchanged — the one place this
+/// matcher intentionally disagrees with [`crate::spec::append_qwen35_delta_net_step`]'s
+/// own physical operand and instead binds what llama.cpp's fused Metal kernel
+/// reads directly (`gated_delta_net.metal:33-34`'s `i01 = i21 % ne01`
+/// mod-broadcast), dropping the eager repeat from the hot path entirely (this
+/// module's own doc on [`BoundOpKind::GatedDeltaNet`]).
+#[cfg(feature = "gated-delta-net-fusion")]
+fn gdn_unwrap_repeat_kv_heads(program: &[Op], node: NodeId) -> NodeId {
+    match gdn_binary_elementwise(program, node, ScalarOp::Multiply) {
+        Some([left, right]) if gdn_is_repeat_kv_heads_donor(program, right) => left,
+        Some([left, right]) if gdn_is_repeat_kv_heads_donor(program, left) => right,
+        _ => node,
+    }
+}
+
+/// One matched [`append_qwen35_delta_net_step`](crate::spec::append_qwen35_delta_net_step)
+/// recurrence, structurally recognized by walking backward from its `out`
+/// node through the exact `ScalarOp` sequence that function emits — anchored
+/// on op shape, never on node names (this module's own convention;
+/// [`cached_attention_candidates`] is the standing precedent). Declines
+/// (returns nothing for this `output`) rather than guesses on any mismatch,
+/// including a perturbed single op in the chain.
+#[cfg(feature = "gated-delta-net-fusion")]
+struct GatedDeltaNetMatch {
+    query: NodeId,
+    key: NodeId,
+    value: NodeId,
+    gate: NodeId,
+    beta: NodeId,
+    state_in: NodeId,
+    inv_sqrt_key_dim: f32,
+    state_out: NodeId,
+    /// Every node absorbed into the fused op, `out` and the six leaf sources
+    /// excluded — the set [`apply_gated_delta_net_fusion`] drops from the
+    /// rewritten program once the fusion actually fires.
+    absorbed: BTreeSet<NodeId>,
+}
+
+#[cfg(feature = "gated-delta-net-fusion")]
+fn match_gated_delta_net_step(program: &[Op], out: NodeId) -> Option<GatedDeltaNetMatch> {
+    let mut absorbed = BTreeSet::new();
+    let absorb = |node: NodeId, set: &mut BTreeSet<NodeId>| {
+        set.insert(node);
+    };
+
+    let out_product = gdn_reduced_source(program, out, ScalarOp::Add)?;
+    absorb(out_product, &mut absorbed);
+    let [state_out, query_scaled] = gdn_binary_elementwise(program, out_product, ScalarOp::Multiply)?;
+    absorb(query_scaled, &mut absorbed);
+
+    let [state_decayed_for_update, update] =
+        gdn_binary_elementwise(program, state_out, ScalarOp::Add)?;
+    absorb(state_out, &mut absorbed);
+    absorb(update, &mut absorbed);
+    absorb(state_decayed_for_update, &mut absorbed);
+
+    let [key_a, delta] = gdn_binary_elementwise(program, update, ScalarOp::Multiply)?;
+    absorb(delta, &mut absorbed);
+    let [state_in_a, decay_a] =
+        gdn_binary_elementwise(program, state_decayed_for_update, ScalarOp::Multiply)?;
+
+    let [residual, beta_bcast] = gdn_binary_elementwise(program, delta, ScalarOp::Multiply)?;
+    absorb(residual, &mut absorbed);
+    let [value, value_pred] = gdn_binary_elementwise(program, residual, ScalarOp::Subtract)?;
+    absorb(value_pred, &mut absorbed);
+
+    let value_pred_product = gdn_reduced_source(program, value_pred, ScalarOp::Add)?;
+    absorb(value_pred_product, &mut absorbed);
+    let [state_decayed, key_b] =
+        gdn_binary_elementwise(program, value_pred_product, ScalarOp::Multiply)?;
+    absorb(state_decayed, &mut absorbed);
+    let [state_in_b, decay_b] = gdn_binary_elementwise(program, state_decayed, ScalarOp::Multiply)?;
+
+    if state_in_a != state_in_b || decay_a != decay_b || key_a != key_b {
+        return None;
+    }
+    let gate = gdn_unary_elementwise(program, decay_a, ScalarOp::Exponential)?;
+    absorb(decay_a, &mut absorbed);
+
+    let [query, inv_sqrt_key_dim_node] =
+        gdn_binary_elementwise(program, query_scaled, ScalarOp::Multiply)?;
+    let inv_sqrt_key_dim = gdn_constant_value(program, inv_sqrt_key_dim_node)?;
+
+    let key = gdn_unwrap_repeat_kv_heads(program, key_a);
+    if key != key_a {
+        absorbed.insert(key_a);
+    }
+    let query_unrepeated = gdn_unwrap_repeat_kv_heads(program, query);
+    if query_unrepeated != query {
+        absorbed.insert(query);
+    }
+    let query = query_unrepeated;
+
+    Some(GatedDeltaNetMatch {
+        query,
+        key,
+        value,
+        gate,
+        beta: beta_bcast,
+        state_in: state_in_a,
+        inv_sqrt_key_dim,
+        state_out,
+        absorbed,
+    })
+}
+
+/// Scans `program` for [`append_qwen35_delta_net_step`](crate::spec::append_qwen35_delta_net_step)
+/// candidates and, for each, resolves its six operand sources' [`Layout`]s
+/// against `resolved` — the same technique [`cached_attention_candidates`]
+/// uses, and for the same reason: chain fusion may already have inlined an
+/// intermediate elementwise op into a reduce's own `element_body`, so the
+/// true physical read is whatever `resolved`'s own `operands()` names, not
+/// necessarily a node this function's own backward walk stopped at.
+///
+/// Declines a match whose `state_out` is itself a requested/effective
+/// output: this slice's [`BoundOpKind::GatedDeltaNet`] executor writes the
+/// recurrence state in place into `state_in`'s own buffer (this module's own
+/// doc on that variant), and no caller in this crate today reads `state_out`
+/// back through a separate resolved node — the interop wiring that would
+/// make `state_out` a real requested output is explicitly a later slice.
+#[cfg(feature = "gated-delta-net-fusion")]
+fn gated_delta_net_candidates(
+    program: &[Op],
+    shapes: &Shapes,
+    resolved: &[BoundOp],
+    effective_outputs: &[NodeId],
+) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
+    let mut candidates = Vec::new();
+    for output_position in (0..program.len()).rev() {
+        let output = NodeId(output_position as u32);
+        let Some(found) = match_gated_delta_net_step(program, output) else {
+            continue;
+        };
+        if effective_outputs.contains(&found.state_out) {
+            continue;
+        }
+        let source_nodes = [
+            found.query,
+            found.key,
+            found.value,
+            found.gate,
+            found.beta,
+            found.state_in,
+        ];
+        let mut operands = Vec::with_capacity(source_nodes.len());
+        for source in source_nodes {
+            let Some((_, layout, lookup)) = resolved
+                .iter()
+                .flat_map(|bound| bound.operands().iter())
+                .find(|(node, _, _)| *node == source)
+            else {
+                operands.clear();
+                break;
+            };
+            if lookup.is_some() || layout.strides.iter().any(|stride| *stride < 0) {
+                operands.clear();
+                break;
+            }
+            operands.push((source, layout.clone(), None));
+        }
+        if operands.len() != source_nodes.len() {
+            continue;
+        }
+        let value_shape = shapes.of(found.value);
+        let gate_shape = shapes.of(found.gate);
+        let key_shape = shapes.of(found.key);
+        let query_shape = shapes.of(found.query);
+        let state_shape = shapes.of(found.state_in);
+        // This slice's supported shape: single per-position call
+        // (`append_qwen35_delta_net_step`'s own `head` split at ONE physical
+        // axis, `[dim, heads]`, `heads` innermost -- matching
+        // `run_gdn_prefill_scan`'s own convention line for line, `gdn.rs`'s
+        // doc). `kv_heads == num_v_heads` here (no GQA broadcast folded in):
+        // the two-letter `head = "ug"` split
+        // [`crate::spec::repeat_kv_heads`] feeds is out of THIS matcher's
+        // scope (`gdn_unwrap_repeat_kv_heads` still walks past a repeat when
+        // present, but nothing here yet validates the resulting `kv_heads !=
+        // num_v_heads` rank-3 shape) -- a real qwen35moe GQA program declines
+        // here rather than binding a silently wrong extent; widening this to
+        // the two-axis split is follow-up work, not this slice's tested path.
+        if key_shape.len() != 2
+            || query_shape.len() != 2
+            || value_shape.len() != 2
+            || gate_shape.len() != 1
+            || state_shape.len() != 3
+            || query_shape != key_shape
+            || key_shape[1] != value_shape[1]
+            || gate_shape[0] != value_shape[1]
+            || state_shape[0] != key_shape[0]
+            || state_shape[1] != value_shape[0]
+            || state_shape[2] != value_shape[1]
+            || shapes.of(output) != value_shape
+        {
+            continue;
+        }
+        let heads = value_shape[1];
+        let fused = BoundOp {
+            node: output,
+            dtype: DType::Float32,
+            extents: shapes.of(output).to_vec(),
+            kind: BoundOpKind::GatedDeltaNet {
+                operands,
+                n_tokens: 1,
+                kv_heads: heads,
+                num_v_heads: heads,
+                head_k_dim: key_shape[0],
+                head_v_dim: value_shape[0],
+                inv_sqrt_key_dim: found.inv_sqrt_key_dim,
+            },
+        };
+        candidates.push((fused, found.absorbed));
+    }
+    candidates
+}
+
+/// Runs [`gated_delta_net_candidates`] and rewrites `built` with every
+/// non-conflicting match — the [`BoundOpKind::GatedDeltaNet`] sibling of
+/// [`bind_cached_attention_fusion`]'s own two-pass shape: an initial pass
+/// finds candidates against `built`, widens the planning outputs to every
+/// source [`match_gated_delta_net_step`] needs materialized, rebinds, then
+/// matches again against the wider `resolved` set before rewriting.
+#[cfg(feature = "gated-delta-net-fusion")]
+fn apply_gated_delta_net_fusion(
+    built: Vec<BoundOp>,
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
+) -> Result<Vec<BoundOp>, TensorError> {
+    let initial_candidates = gated_delta_net_candidates(program, shapes, &built, outputs);
+    if initial_candidates.is_empty() {
+        return Ok(built);
+    }
+    let mut planning_outputs = outputs.to_vec();
+    if planning_outputs.is_empty() {
+        let root = program
+            .len()
+            .checked_sub(1)
+            .map(|position| NodeId(position as u32))
+            .ok_or(TensorError::Empty)?;
+        planning_outputs.push(root);
+    }
+    for (fused, _) in &initial_candidates {
+        let BoundOpKind::GatedDeltaNet { operands, .. } = &fused.kind else {
+            continue;
+        };
+        for (source, _, _) in operands {
+            if !planning_outputs.contains(source) {
+                planning_outputs.push(*source);
+            }
+        }
+    }
+    let rebuilt = bind_plain(program, shapes, &planning_outputs, numeric_policy)?;
+    let candidates = gated_delta_net_candidates(program, shapes, &rebuilt, outputs);
+    if candidates.is_empty() {
+        return Ok(built);
+    }
+    let fused_by_node = candidates
+        .iter()
+        .map(|(fused, _)| (fused.node, fused))
+        .collect::<BTreeMap<_, _>>();
+    let absorbed = candidates
+        .iter()
+        .flat_map(|(_, absorbed)| absorbed.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let mut rewritten = Vec::with_capacity(rebuilt.len());
+    for bound in rebuilt {
+        if let Some(fused) = fused_by_node.get(&bound.node) {
+            rewritten.push((*fused).clone());
+        } else if !absorbed.contains(&bound.node) {
+            rewritten.push(bound);
+        }
+    }
+    Ok(rewritten)
 }
 
 fn bind_cached_attention_fusion(
@@ -7761,6 +8147,237 @@ mod tests {
                 metal_buffer_binding_count(&fold_operands, &epilogue_operands),
                 33,
                 "2 fold + 27 epilogue + 1 gather index + output + uniforms + fault must exceed Metal's 31 slots"
+            );
+        }
+    }
+
+    /// `n_tokens == 1`, single physical head axis (`kv_heads == num_v_heads`,
+    /// no GQA broadcast) — [`gated_delta_net_candidates`]'s own doc states
+    /// this is this slice's tested scope; the two-letter `head = "ug"` split
+    /// is follow-up work.
+    #[cfg(feature = "gated-delta-net-fusion")]
+    mod gated_delta_net_tests {
+        use super::*;
+        use crate::op::{Extent, append};
+        use crate::spec::append_qwen35_delta_net_step;
+
+        const HEAD_K_DIM: usize = 2;
+        const HEAD_V_DIM: usize = 3;
+        const HEADS: usize = 2;
+
+        struct SyntheticProgram {
+            program: Vec<Op>,
+            out: NodeId,
+            inputs: Vec<(NodeId, Vec<f32>)>,
+        }
+
+        fn leaf(program: &mut Vec<Op>, shape: &[usize]) -> NodeId {
+            append(
+                program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: shape
+                        .iter()
+                        .map(|extent| Extent::Static(*extent as u32))
+                        .collect(),
+                    name: None,
+                },
+            )
+        }
+
+        /// Builds one `append_qwen35_delta_net_step` recurrence over small,
+        /// distinct, deterministic values -- real production shapes at
+        /// small extents, never all-zero/all-one filler (guiding-principle
+        /// 9: the values must exercise the actual recurrence's arithmetic,
+        /// not merely round-trip plumbing).
+        fn synthetic_gated_delta_net_program() -> SyntheticProgram {
+            let mut program = Vec::new();
+            let query = leaf(&mut program, &[HEAD_K_DIM, HEADS]);
+            let key = leaf(&mut program, &[HEAD_K_DIM, HEADS]);
+            let value = leaf(&mut program, &[HEAD_V_DIM, HEADS]);
+            let gate = leaf(&mut program, &[HEADS]);
+            let beta = leaf(&mut program, &[HEADS]);
+            let state_in = leaf(&mut program, &[HEAD_K_DIM, HEAD_V_DIM, HEADS]);
+            let inv_sqrt_key_dim = append(
+                &mut program,
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: Vec::new(),
+                    value: core::f32::consts::FRAC_1_SQRT_2,
+                },
+            );
+            let (out, _state_out) = append_qwen35_delta_net_step(
+                &mut program,
+                query,
+                key,
+                value,
+                gate,
+                beta,
+                state_in,
+                inv_sqrt_key_dim,
+                "h",
+            )
+            .expect("synthetic qwen35 gated-delta-net step builds");
+
+            let inputs = alloc::vec![
+                (query, alloc::vec![0.1, -0.2, 0.3, 0.4]),
+                (key, alloc::vec![0.5, 0.6, -0.7, 0.2]),
+                (value, alloc::vec![1.0, -1.0, 0.5, 0.25, -0.5, 0.75]),
+                (gate, alloc::vec![-0.3, 0.1]),
+                (beta, alloc::vec![0.4, 0.6]),
+                (
+                    state_in,
+                    alloc::vec![0.2, -0.1, 0.05, 0.3, -0.2, 0.15, 0.1, -0.05, 0.25, 0.4, -0.3, 0.2],
+                ),
+            ];
+            SyntheticProgram {
+                program,
+                out,
+                inputs,
+            }
+        }
+
+        fn resolved_kinds(resolved: &[BoundOp]) -> Vec<&'static str> {
+            resolved.iter().map(|bound| bound.kind.name()).collect()
+        }
+
+        #[test]
+        fn fused_and_unfused_gated_delta_net_agree_bit_for_bit_at_one_token() {
+            let synthetic = synthetic_gated_delta_net_program();
+            let shapes = shape::infer(&synthetic.program, &[])
+                .expect("synthetic gated-delta-net program infers");
+
+            let unfused = bind_plain(
+                &synthetic.program,
+                &shapes,
+                &[synthetic.out],
+                NumericPolicy::bit_exact(),
+            )
+            .expect("unfused synthetic program binds");
+            let fused = bind_with_fusion(
+                &synthetic.program,
+                &shapes,
+                &[synthetic.out],
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("fused synthetic program binds");
+            assert!(
+                fused
+                    .iter()
+                    .any(|bound| matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. })),
+                "gated-delta-net-fusion feature is on: the matcher must fire on its own \
+                 synthetic program, got kinds {:?}",
+                resolved_kinds(&fused)
+            );
+
+            let unfused_buffers = run_resolved(
+                synthetic.program.len(),
+                &unfused,
+                synthetic.inputs.clone(),
+            );
+            let fused_buffers = run_resolved(synthetic.program.len(), &fused, synthetic.inputs);
+
+            let unfused_out = unfused_buffers[synthetic.out.0 as usize]
+                .as_ref()
+                .expect("unfused out present");
+            let fused_out = fused_buffers[synthetic.out.0 as usize]
+                .as_ref()
+                .expect("fused out present");
+            assert_eq!(
+                fused_out, unfused_out,
+                "fused BoundOpKind::GatedDeltaNet must be bit-identical (f32) to the unfused chain"
+            );
+        }
+
+        /// `N = 5`: `append_qwen35_delta_net_step` emits 12 computing nodes,
+        /// but this crate's own unconditional `ChainFusion` (`bind_plain`'s
+        /// own rewrite, admitted for every bind regardless of this feature)
+        /// already inlines every elementwise op whose sole use is a reduce
+        /// into that reduce's `element_body` before this matcher ever runs
+        /// — the unfused baseline this test compares against is therefore
+        /// already 6 resolved ops (1 leaf `Constant` for
+        /// `inv_sqrt_key_dim`, 3 materialized `Elementwise` nodes whose
+        /// result feeds more than one consumer, 2 `Reduce` folds), not 12.
+        /// The fused program keeps exactly 2 (the same `Constant` leaf --
+        /// this matcher does not yet prune the now-dead constant it reads
+        /// as a baked `f32` field instead of a bound operand, a follow-up
+        /// tightening, not a correctness gap -- plus the one
+        /// `BoundOpKind::GatedDeltaNet`) — `6 - 5 + 1 = 2`, i.e.
+        /// `unfused - N + 1` with `N = 5` resolved nodes absorbed.
+        #[test]
+        fn matcher_census_matches_the_documented_absorbed_node_count() {
+            let synthetic = synthetic_gated_delta_net_program();
+            let shapes = shape::infer(&synthetic.program, &[])
+                .expect("synthetic gated-delta-net program infers");
+            let unfused = bind_plain(
+                &synthetic.program,
+                &shapes,
+                &[synthetic.out],
+                NumericPolicy::bit_exact(),
+            )
+            .expect("unfused synthetic program binds");
+            let fused = bind_with_fusion(
+                &synthetic.program,
+                &shapes,
+                &[synthetic.out],
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("fused synthetic program binds");
+
+            const ABSORBED_NODE_COUNT: usize = 5;
+            assert_eq!(
+                fused.len(),
+                unfused.len() - ABSORBED_NODE_COUNT + 1,
+                "fused program must drop exactly {ABSORBED_NODE_COUNT} nodes into one \
+                 BoundOpKind::GatedDeltaNet -- unfused kinds {:?}, fused kinds {:?}",
+                resolved_kinds(&unfused),
+                resolved_kinds(&fused)
+            );
+            assert_eq!(
+                fused
+                    .iter()
+                    .filter(|bound| matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. }))
+                    .count(),
+                1,
+                "exactly one fused gated-delta-net op, got {:?}",
+                resolved_kinds(&fused)
+            );
+        }
+
+        /// Perturbs `state_out`'s own `Add` into a `Multiply` -- one op in
+        /// the middle of the chain -- and asserts the matcher declines
+        /// rather than guessing: this module's own convention
+        /// ([`cached_attention_candidates`]'s doc) is decline-on-mismatch,
+        /// never a best-effort partial fuse.
+        #[test]
+        fn matcher_declines_when_one_op_in_the_chain_is_perturbed() {
+            let mut synthetic = synthetic_gated_delta_net_program();
+            let state_out_position = synthetic.program.len() - 3;
+            match &mut synthetic.program[state_out_position] {
+                Op::Elementwise {
+                    body: body @ ScalarOp::Add,
+                    ..
+                } => *body = ScalarOp::Multiply,
+                other => panic!("expected state_out's own Add elementwise, got {other:?}"),
+            }
+            let shapes = shape::infer(&synthetic.program, &[])
+                .expect("perturbed program still infers (same shapes, different arithmetic)");
+            let fused = bind_with_fusion(
+                &synthetic.program,
+                &shapes,
+                &[synthetic.out],
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("perturbed program still binds -- just without the fusion");
+            assert!(
+                fused
+                    .iter()
+                    .all(|bound| !matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. })),
+                "matcher must decline on a perturbed chain, got {:?}",
+                resolved_kinds(&fused)
             );
         }
     }
