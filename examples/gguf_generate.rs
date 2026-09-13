@@ -496,6 +496,10 @@ fn main() {
         }
     };
     let file_bytes: &[u8] = &file_map;
+    // memmap2::Mmap::map always requests MAP_SHARED + PROT_READ (memmap2 unix.rs); printed
+    // once so ROW 533's "untouched mapping reads zero" hypothesis is checked against the
+    // actual flags rather than an assumed MAP_PRIVATE.
+    println!("mmap_flags = MAP_SHARED (memmap2::Mmap::map, prot=PROT_READ)");
     #[cfg(target_os = "macos")]
     if settings.mmap_random {
         // SAFETY: the mapping remains alive and read-only for this process.
