@@ -29274,6 +29274,26 @@ regression, and the first-router/prefix-dedup regression: three tests ran and
 three passed. The post-change real-checkpoint TTFT remains unmeasured in this
 row.
 
+The paired real-checkpoint cell is now recorded in `/tmp/qwen35-ab-off.log`
+and `/tmp/qwen35-ab-on.log`, built from the same source with the linked-suffix
+feature off and on. Both arms used the mixed sidecar, mmap source, the
+500-MiB residency budget, Metal, and the France prompt; both returned the
+same IDs `[271, 760, 6511, 314, 9338, 369, 11751, 13]` and text
+`"\\n\\nThe capital of France is Paris."`. The debug ledger records
+`encode_dispatch_calls=4874` in both arms. The feature-off arm recorded 81
+command-buffer executions per step; the feature-on arm recorded 80. This is a
+command-buffer count (`gpu_exec_calls`), not a kernel-dispatch count.
+
+The eight-token timing samples were: off TTFT 2,867 ms, TTNT
+325--343 ms (mean 338.714 ms, 2σ 11.648 ms, p90 343 ms, p99 343 ms),
+2.952 decode tokens/s; on TTFT 2,863 ms, TTNT 332--338 ms (mean
+334.857 ms, 2σ 4.333 ms, p90 338 ms, p99 338 ms), 2.986 decode tokens/s.
+Device allocation was 1,632,649,216 bytes off and 1,642,348,544 bytes on;
+peak RSS was 8,191,164,416 and 8,217,853,952 bytes respectively. This is a
+paired observation of one removed command-buffer boundary with identical
+encoded dispatch counts, not evidence that the bounded path reaches the
+throughput target.
+
 ## ROW 500 -- monolithic all-low Metal arm aliases the sidecar mapping
 
 Hypothesis: the per-layer pre-gather command-buffer boundary can be isolated
@@ -29299,3 +29319,986 @@ Metal mmap-offset lifecycle test, and one admission truth-table test pass.
 and diff whitespace checks also exited zero. No real-checkpoint latency,
 resident-memory, or generated-text measurement was run for this row, so the
 performance and output effects remain unmeasured.
+
+## ROW 501 -- external MoE/offload systems mapped to the HOBBIT/DynaExq seam
+
+This is a design-evidence row, not a performance claim. The source review
+covered Switch Transformer, GShard, DeepSpeed-MoE, FasterMoE, Tutel, MegaBlocks,
+PowerInfer, PowerInfer-2, MoE-Infinity, ExpertFlow, FlexGen, ZeRO-Inference,
+LLM in a Flash, FlashInfer, PagedAttention, TensorRT-LLM, and FasterTransformer.
+
+The transferable pieces are: an explicit sparse route relation (Switch/GShard),
+separate dense and expert placement policies (DeepSpeed-MoE), a costed
+compute/transfer schedule (FasterMoE/FlexGen/ZeRO-Inference), stable logical
+layout with runtime-selected execution (Tutel), block-sparse dispatch
+(MegaBlocks), request-scoped hotness and path-aware prefetch (PowerInfer,
+MoE-Infinity, ExpertFlow), layer-granular streaming with contiguous bundles
+(LLM in a Flash), and page-table metadata for KV state (FlashInfer,
+PagedAttention). TensorRT-LLM and FasterTransformer contribute fusion
+boundaries, not portable kernels; their CUDA implementations are not adopted.
+
+The Proxima consequence is concrete: HOBBIT/DynaExq must keep routing
+authoritative, make prefetch advisory, represent placement as sparse metadata,
+and schedule layer working sets against measured bandwidth and residency. A
+single mixed payload buffer is insufficient because high and low copies live in
+different mappings; a future Metal ABI needs two payload bases plus a source
+selector/offset (or separate descriptor banks). No reported result from these
+systems is used as a Proxima performance claim. Primary sources: Switch
+Transformer (JMLR 23, 2022), GShard (arXiv:2006.16668), Tutel (MLSys 2023),
+MegaBlocks (arXiv:2211.15841), PowerInfer (arXiv:2312.12456), PowerInfer-2
+(arXiv:2406.06282), MoE-Infinity (arXiv:2401.14361), ExpertFlow
+(arXiv:2410.17954), FlexGen (arXiv:2303.06865), LLM in a Flash
+(arXiv:2312.11514), FlashInfer (arXiv:2501.01005), and PagedAttention
+(arXiv:2309.06180).
+
+The supplied chronology adds the systems absent from the first pass: FastMoE,
+DeepSpeed Inference, DeepSeekMoE, Qwen1.5-MoE, HeteGen, HOBBIT, Jenga,
+HybriMoE, eLLM, OD-MoE, NPUMoE, HybridGen, Beyond Routing, and the negative
+SSD-offloading result. They are design inputs, not validated Proxima behavior.
+The implementation mapping is explicit:
+
+- HOBBIT/DynaExq: authoritative route, advisory prediction, byte-budgeted
+  hi/lo expert entries, and promotion/demotion state transitions.
+- Jenga/eLLM/NPUMoE/HybridGen: separate budgets and placement owners for
+  expert weights, dense layers, activations, and KV; they must not collapse
+  into one cache counter.
+- HeteGen/HybriMoE/FlexGen/DeepSpeed Inference: overlap only independent
+  transfers with compute; retain a typed step-boundary dependency and a serial
+  fallback until a lifetime trace proves overlap.
+- OD-MoE and the SSD negative result: zero- or tiny-cache mode is an
+  experiment, not the default; page-in stalls and energy must be measured
+  separately from resident execution.
+- DeepSeekMoE/Qwen1.5-MoE: shared and fine-grained expert layouts require
+  explicit model metadata; they do not justify an expert-index guess.
+- MegaBlocks/FastMoE/Beyond Routing: sparse dispatch and decoupled aggregation
+  are kernel work after route-to-source mapping is correct; they cannot hide a
+  binding defect.
+- SPICE (arXiv:2608.21240, August 2026) and SpecMD (arXiv:2602.03921):
+  confidence-aware lookahead and least-stale/speculative expert prefetch are
+  the direct references for DynaExq's advisory prefetch pipe. Their predictor
+  may issue a warming request only; the actual router remains authoritative,
+  and a miss must fall back to the exact low-codec source without changing
+  output. Prediction hit rate, overfetch bytes, page-in wait, TTFT, and TTNT
+  therefore become separate records rather than one cache-hit metric.
+- APEX (arXiv:2608.11688, August 2026) adds a lightweight pre-attention
+  prefetch router with confidence-aware candidate loading; this maps to a
+  separate DynaExq predictor state and does not replace the model router.
+  MoE-APEX (ASPLOS 2026) additionally combines token-level loading,
+  layer-level prefetch, and sequence-level cost-aware caching. Proxima should
+  reuse the state-machine boundary, but keep the exact route and output path
+  unchanged until a held-out trace proves the prefetch benefit.
+- Beyond Routing (arXiv:2608.08853, August 2026) keeps the selected expert set
+  and router mass fixed while changing aggregation commitment. This is a
+  distinct post-dispatch algebra seam: it may reduce aggregation work, but it
+  must not be mixed into HOBBIT residency admission or used to justify a
+  different expert source.
+- Cloud-Grade Local MoE Inference (arXiv:2606.10493) contributes stream-loaded
+  prefill, SmallEP, CPU/GPU disaggregation, dual-batch overlap, and a CPU FP8
+  GEMV path. These map to separate prefill/decode scheduling and layer working
+  sets; its reported SLOs are on dual-socket CPUs and consumer GPUs, so they
+  are not a Proxima/Metal performance claim.
+- CoX-MoE (arXiv:2605.17889) coalesces ordinary batches and statically assigns
+  frequently used experts across CPU/GPU. The reusable piece is coalescing
+  route-compatible work before dispatch; the AMX-specific kernel and static
+  placement must not be copied to Metal without a measured bandwidth model.
+- Speculating Experts (arXiv:2603.19289) and pre-attention expert prediction
+  (arXiv:2511.10676) provide two predictor positions: current internal state
+  and pre-attention state. Both remain advisory in Proxima; the pre-attention
+  form is the earliest candidate for hiding a page-in, while the exact router
+  controls output.
+- Multi-Layer Scheduling for MoE Reasoning (arXiv:2602.21626) separates
+  request, engine, and expert scheduling. Proxima maps this to request
+  admission, prefill/decode phase scheduling, and per-layer residency, rather
+  than one global FIFO or one global cache policy.
+- NANOZK (arXiv:2603.18046) is orthogonal to performance: its layerwise proof
+  boundary reinforces that Proxima's layer FSM is an inspectable correctness
+  seam, but proof generation is not placed on the serving hot path.
+
+The first pass also omitted the prefill/decode and layer-prefetch axes. The
+current safe baseline is recorded in `/tmp/qwen35-safe-france-8.log`: exact
+eight-token output, TTFT 2965 ms, TTNT 444--1064 ms (mean 817.286 ms,
+2σ 373.895 ms, p90/p99 1064 ms), 1.224 decode tokens/s, device allocation
+1,632,649,216 bytes, and peak RSS 10,153,312,256 bytes under the 500 MiB tier
+request. This is a bounded HOBBIT/DynaExq observation, not evidence that the
+throughput or memory target is met.
+
+The fused-boundary experiment exposed the mechanism that must be closed before
+prefetch can be trusted: `/tmp/qwen35-fused-debug3.log` failed binding because
+the fused graph contained expert inputs from another layer while the runtime
+supplied only the current-layer source table. The safety predicate therefore
+refuses that path when `fused_segment_experts_are_current_layer` is false. The
+next boundary is two-dimensional (`expert_layer`, `mixer_layer`), with two
+Metal payload bases or descriptor banks for mixed low/high mappings; one
+monolithic payload descriptor cannot represent that state without copying.
+
+## ROW 502 -- bounded advisory expert-prefetch boundary
+
+`ExpertResidency::prefetch_candidates` now exposes the APEX/SPICE-shaped
+predictor seam without changing DynaExq state: it filters caller-supplied
+confidence values, excludes already-resident entries, de-duplicates addresses,
+and returns a fixed-capacity array. It does not page, evict, update EMA, or
+alter the authoritative route. The out-of-range, duplicate/resident, and
+capacity-overflow cases are covered by three focused tests; the residency test
+module reports 5/5 passing. Overflow is typed rather than silently dropping a
+candidate. This is an API and correctness slice only; no real-checkpoint
+prefetch hit rate, overfetch bytes, page-in wait, TTFT, or TTNT was measured.
+
+## ROW 503 -- real qwen35 acceptance after advisory-prefetch seam
+
+The current release binary was rebuilt and run against the 23.9-GB qwen35moe
+checkpoint with `/tmp/qwen35-mixed-sidecar-v2.bin` mmap-backed, the 500-MiB
+high-precision budget, `PROXIMA_QWEN35MOE_PRE_GATHER=1`, and a 4-GiB Metal
+allocation ceiling. It emitted the exact IDs
+`[271, 760, 6511, 314, 9338, 369, 11751, 13]` and exact text
+`"\\n\\nThe capital of France is Paris."`. TTFT was 4,549 ms; seven TTNT
+samples ranged 494--931 ms (mean 619.857 ms, 2σ 289.203 ms, p90/p99
+931 ms), or 1.613 decode tokens/s. Metal allocation was 1,632,649,216 bytes
+and peak RSS was 10,077,634,560 bytes. This proves the current bounded path
+still produces the reference answer after the API change, but the prefetch
+candidate API was not invoked by this run, so it provides no prefetch-speedup
+evidence.
+
+## ROW 504 -- default-off one-layer-ahead mmap advice is wired through the route boundary
+
+The `qwen35moe-expert-prefetch` feature adds a fixed-width route history
+allocated once per generation (`generate.rs:1093-1111`) and an opt-in
+environment gate
+`PROXIMA_QWEN35MOE_EXPERT_PREFETCH`. At each routed layer, the previous
+step's next-layer route is converted through `ExpertResidency::prefetch_candidates`
+(`residency.rs:260-280`) and each low-codec projection is passed to
+`MappedExpertSidecar::advise_expert_low` (`expert_sidecar.rs:705-725`). The
+operation calls `mmap` `WillNeed` on the three validated low ranges and returns
+the advised byte count; it does not page, promote, evict, change an epoch, or
+alter the authoritative route. The fixed-capacity predictor overflow,
+out-of-range, duplicate/resident filtering, and mapped-sidecar advice fixture
+tests pass; `cargo check -p proxima-model-interop --features
+metal,instrument,qwen35moe-expert-prefetch` passes. No real-checkpoint
+prefetch hit-rate, TTFT, TTNT, RSS, or tok/s delta is claimed by this row.
+
+## ROW 505 -- paired real Qwen35 prefetch observation and serving-system map
+
+The rebuilt release example was run twice against the same 23.9-GB qwen35moe
+checkpoint, mmap sidecar, 500-MiB high-precision budget, 4-GiB Metal ceiling,
+France prompt, and eight generated tokens. Both arms emitted IDs
+`[271, 760, 6511, 314, 9338, 369, 11751, 13]` and
+`"\\n\\nThe capital of France is Paris."`.
+
+The prefetch-off arm recorded TTFT 3,021 ms, TTNT 404--460 ms (mean 419.000
+ms, 2σ 35.018 ms, p90/p99 460 ms), and 2.387 decode tok/s. Metal allocation
+was 1,632,649,216 bytes and peak RSS 10,152,935,424 bytes. The prefetch-on
+arm, with debug logging disabled, recorded TTFT 2,936 ms, TTNT 399--442 ms
+(mean 411.429 ms, 2σ 27.021 ms, p90/p99 442 ms), and 2.431 decode tok/s.
+Metal allocation was unchanged and peak RSS was 10,141,859,840 bytes. The
+enabled arm emitted 505 advisory events
+covering 6,268,329,984 advised bytes; those are page-cache hints, not bytes
+copied or promoted. This paired run shows correctness preservation and no
+measurable throughput win from synchronous `WillNeed` advice; it does not
+justify enabling the feature by default.
+
+The newly named systems are separated by mechanism rather than treated as
+one optimization: PD-Serve and Mooncake address prefill/decode disaggregation
+and KV movement; Preble, Sarathi-Serve, DeepSpeed-FastGen, VPP, and layered
+prefill address prompt scheduling and chunked prefill; LMCache and cached
+attention address reusable KV state; MLC-LLM/TVM provide compiler/runtime
+references; Strata, S5, and Mamba-2 are recurrent/SSM state layouts; Qwen's
+scan is a model-specific recurrence; NNSmith and TensorRight are validation
+and compiler-testing references; bitwise-behavior taming is a correctness
+constraint. None is substituted for the authoritative router or mixed-codec
+source path. Primary references include Preble (arXiv:2407.00023), Sarathi
+(arXiv:2403.02310), Mooncake (arXiv:2407.00079), DeepSpeed-FastGen
+(arXiv:2401.08671), and LMCache (arXiv:2510.09665).
+
+## ROW 506 -- prefetch route counters on the same real checkpoint
+
+The debug-enabled arm was rerun only to expose route-prediction records; its
+timing is not comparable because per-layer logging is active. The run kept the
+same eight-token France prompt, mixed mmap sidecar, 500-MiB high-precision
+budget, and 4-GiB Metal ceiling, and emitted the same IDs and text as ROW 505.
+The route counters recorded 4,160 predictions, 1,381 overlaps with the
+authoritative route, and 2,779 overfetches across 546 advice events covering
+6,268,329,984 advised bytes. The resulting overlap is 33.20% (1,381 / 4,160)
+and the overfetch is 66.80%; these are route-record facts, not a performance
+verdict. The same run reported TTFT 2,954 ms, TTNT 396--449 ms (mean 410.143
+ms, 2sigma 33.847 ms, p90/p99 449 ms), 2.438 decode tok/s, Metal allocation
+1,632,649,216 bytes, and peak RSS 10,090,561,536 bytes, but those timing and
+RSS values are debug-contaminated and are excluded from the paired timing
+comparison in ROW 505.
+
+The additional named systems are retained as research leads, not as imported
+claims: TierCheck, MLP-Offload, Opt-Pipe, SSDTrain, DataStates-LLM, Lancet,
+MLIR-based LLM compilation, and training-through-failure each need a primary
+artifact and a mechanism-level mapping before they can affect the Proxima
+serving path. The current implementation boundary remains authoritative
+routing plus advisory warming; no lead is allowed to change the route or claim
+correctness without the same exact-output acceptance.
+
+SparseForge, ProSparse, and structured dynamic-sparsity training are tracked
+separately from expert residency: they would change the arithmetic graph and
+must first show bitwise-safe sparsity masks on the actual Qwen35 tensors. They
+cannot be folded into HOBBIT/DynaExq merely because both reduce bytes.
+
+## ROW 507 -- Metal consumes the mixed low/high source table after DynaExq actions
+
+A two-token diagnostic run enabled `PROXIMA_DEBUG_EXPERT_UPLOADS` with the same
+mixed mmap sidecar, 500-MiB residency budget, 4-GiB Metal ceiling, and
+`PROXIMA_QWEN35MOE_PRE_GATHER=1`. The route boundary emitted 361 `Page` and
+104 `Evict` actions. Across 320 routed reads, the sidecar reported 7,146
+low-codec ranges and 534 high-codec ranges; the reads covered 5,221,908,480
+bytes. The Metal staging records then showed three routed source nodes per
+layer with reduced payloads (4,718,592, 4,718,592, and 6,881,280 bytes) and
+descriptor tables, while the action records showed the source codec pairs
+(`Q4_K`/`Q4_K`, `Q4_K`/`Q4_K`, `Q6_K`/`Q6_K`) for all three projection sites.
+The run emitted `"\\n\\nThe"`, so the diagnostic was not a full answer
+acceptance; it is evidence that the current pre-gather Metal path consumes
+post-policy mixed source tables rather than merely advising the mmap.
+
+## ROW 508 -- Q3_K low-copy experiment fails the correctness gate
+
+The existing Q3_K sidecar was run through the same real qwen35moe Metal path
+with pre-gather, the expert-prefetch feature, a 500-MiB high-precision budget,
+and a 4-GiB Metal ceiling. The eight-token output was
+`"\\n\\n<think>\\nHere's a thinking process"`, with IDs
+`[271, 248068, 198, 8160, 579, 264, 7047, 1817]`, rather than the reference
+France answer. TTFT was 6,856 ms; TTNT was 659--936 ms (mean 759.714 ms,
+2sigma 194.386 ms); decode was 1.316 tok/s; Metal allocation was
+1,630,175,232 bytes and peak RSS was 7,912,833,024 bytes. This is a real
+low-codec execution record, but it fails the exact-output acceptance, so Q3_K
+cannot be admitted as the serving low copy. The result also prevents treating
+the lower RSS as a win: the correctness failure is the governing observation.
+
+The per-layer parity probes narrow the mechanism: with the Q3_K sidecar, the
+layer-0 gather's Metal-versus-exact-CPU maximum absolute differences were
+about `4.47e-8`--`7.08e-8`, and the layer-39 probe was about
+`4.77e-7`--`3.34e-6`. The GPU is therefore following the Q3 source table; the
+wrong answer is not a Metal descriptor mismatch at those probes. It is the
+accumulated model-output drift from the lower expert codec, so a Q3 promotion
+policy cannot satisfy the correctness gate without an exact/high fallback.
+
+## ROW 510 -- codec admission restores exact output for the Q3 sidecar
+
+The sidecar read boundary now receives a statically dispatched low-copy
+admission predicate. The Qwen35 caller admits a low range only when its source
+and target codecs are identical; otherwise the existing checkpoint range is
+read and its source codec is carried into the `ExpertSource` entry. This keeps
+the decision allocation-free and avoids interpreting high-codec bytes with the
+low-codec tag.
+
+Focused admission and sidecar transition tests pass. On the real Q3_K sidecar,
+the strict path recorded zero low ranges and 7,680 high ranges across the
+two-token diagnostic, while the eight-token France run emitted the reference
+IDs `[271, 760, 6511, 314, 9338, 369, 11751, 13]` and exact text
+`"\\n\\nThe capital of France is Paris."`. That strict run measured TTFT 6,101
+ms, TTNT 662--813 ms (mean 749.857 ms, 2sigma 105.676 ms), 1.334 decode
+tok/s, Metal allocation 1,632,649,216 bytes, and peak RSS 11,255,480,320
+bytes. The low-copy memory saving is therefore not available for Q3 under the
+correctness gate; the path now fails closed to the high source instead of
+silently returning a drifted answer.
+
+## ROW 511 -- checkpoint discard is a re-upload control, not a low-memory path
+
+The exact France prompt was run with the mixed Q4/Q6 sidecar and both
+`PROXIMA_CHECKPOINT_DISCARD_PER_LAYER=1` and
+`PROXIMA_CHECKPOINT_DISCARD_PER_LAYER_IMMEDIATE=1`. The output remained the
+reference IDs `[271, 760, 6511, 314, 9338, 369, 11751, 13]` and exact text
+`"\\n\\nThe capital of France is Paris."`, but the control changed the execution
+shape: prefill/TTFT was 35,103 ms, TTNT was 70--80 ms (mean 74.143 ms),
+decode was 13.487 tok/s, device allocation reached 22,500,556,800 bytes, and
+peak RSS reached 19,758,481,408 bytes. The ordinary mixed-sidecar trials in
+ROW 505/510 stayed near 1.63 GB of Metal allocation and about 10 GB peak RSS.
+
+The mechanism is in `generate.rs` at the checkpoint-discard branch: after a
+layer, the control discards the checkpoint mapping, so later layers must
+re-resolve and upload checkpoint ranges. The observed 35-second TTFT and
+22.5-GB allocation are the direct signature of that re-upload loop. This
+control is disabled for serving; it does not reduce the active device or host
+working set and it cannot be used as the HOBBIT/DynaExq memory mechanism.
+
+## ROW 512 -- ordinary pre-gather returns to the bounded exact path after the discard control
+
+The same release binary was then run with the mixed sidecar, the typed
+pre-gather boundary, and the explicit 4-GiB Metal ceiling, with checkpoint
+discard disabled. It emitted the exact reference IDs
+`[271, 760, 6511, 314, 9338, 369, 11751, 13]` and text
+`"\\n\\nThe capital of France is Paris."`. The run recorded TTFT 4,161 ms;
+TTNT 409--467 ms (mean 434.714 ms, 2sigma 40.281 ms, p90/p99 467 ms);
+decode 2.300 tok/s; device allocation 1,632,649,216 bytes; and peak RSS
+4,162,846,720 bytes. This is the bounded path to compare against future
+prefetch, layer-staging, and double-buffer changes; the 35-second discard
+control is not a serving baseline.
+
+## ROW 513 -- split-prefill stage attribution
+
+With the mixed sidecar, pre-gather, and a seven-token France prompt, the
+single-position qwen35 path executed seven one-token prefill batches. Batch
+zero took 765.365 ms with 80 GPU calls and 239.285 ms of GPU execution; it
+compiled 78 pipelines in 29.566 ms. Batches one through five each took
+355.926--363.860 ms with about 180 ms of GPU execution, zero pipeline misses,
+about 12 ms of operation setup, and about 1 ms of block upload. Batch six took
+445.214 ms because two final pipelines compiled. Decode steps then stayed at
+354.038--365.483 ms with about 183 ms of GPU execution and no pipeline misses.
+The output remained the exact France answer.
+
+The mechanism is the `split_prefill` branch in `generate.rs`: the GDN
+single-position contract forces each prompt token through a complete graph
+evaluation, so pipeline caching removes compilation after batch zero but not
+the 80-kernel GPU execution per token. This identifies the next optimization
+boundary as reducing per-token graph execution or proving a sequence-preserving
+GDN scan; changing residency policy alone cannot make TTFT sub-second.
+
+## ROW 514 -- monolithic mixed-codec control preserves text but violates the memory envelope
+
+The existing `PROXIMA_QWEN35MOE_MONOLITHIC_ALL_LOW=1` mode was run with the
+same mixed Q4/Q6 sidecar and exact France prompt. It emitted the reference IDs
+and text, with TTFT 27,169 ms; TTNT 74--82 ms (mean 77.000 ms, 2sigma
+4.536 ms, p90/p99 82 ms); decode 12.987 tok/s; device allocation
+22,500,556,800 bytes; and peak RSS 26,989,789,184 bytes.
+
+This control demonstrates that removing the per-layer host residency boundary
+can reduce steady-state token time, but it does so by binding the monolithic
+checkpoint graph and exceeds the explicit 4-GiB device budget by more than
+five times. Its exact text does not make it an admissible serving path; the
+low-memory pre-gather path remains the correctness and memory reference.
+
+## ROW 515 -- ancestor-closed gather-to-next-router fusion is executable
+
+`partition_between_with_mapping_ancestor_closed` now walks backward from the
+next router output and excludes interval nodes that are not ancestors. The
+Qwen35 gather-to-next-router builder uses this variant; ordinary interval
+partitioning is unchanged. A regression test constructs a dead future expert
+input inside the interval and verifies that the segment excludes it while
+retaining identical CPU output.
+
+On the real mixed Q4/Q6 sidecar, the fused run emitted the exact France IDs
+and text. Metal stage records showed 43 GPU executions per step (rather than
+the previous 80), 176.858 ms GPU time on the first measured step and
+172.838 ms on the next; the run measured TTFT 2,741 ms and TTNT 378--422 ms
+(mean 397.714 ms, 2sigma 27.333 ms, p90/p99 422 ms), or 2.514 decode tok/s.
+Device allocation was 1,662,926,848 bytes; peak RSS was 10,142,695,424
+bytes. The dispatch reduction is therefore observed with exact output; the
+host RSS remains a separate residency measurement rather than being inferred
+from the device allocation.
+
+## ROW 516 -- linked final suffix is enabled in the root serving build
+
+The already-tested linked-suffix feature is now included in the root
+`proxima-model-interop` dev dependency used by `gguf_generate`, so the serving
+example no longer requires a separate feature override. A default release
+build with the mixed sidecar, pre-gather, and fused boundaries preserved the
+exact France IDs and text. Its Metal trace recorded 42 GPU executions per
+step, 178.618 ms GPU time on the first step, TTFT 2,760 ms, TTNT mean
+405.857 ms, decode 2.464 tok/s, device allocation 1,663,057,920 bytes, and
+peak RSS 10,022,436,864 bytes.
+
+## ROW 517 -- aliasing a routed scratch arena before the command buffer commits is unsafe
+
+An attempted Metal optimization reused the prior `MTLBuffer` wrapper when its
+host alias address stayed unchanged. The exact mixed Q4/Q6 France run then
+changed the generated IDs from `[271, 760, 6511, 314, 9338, 369, 11751, 13]`
+to `[271, 760, 6511, 314, 9338, 369, 2972, 57590]`; the change was removed.
+The stage trace still showed 120 source replacements per step and 234--240
+copy reuses, so the optimization did not remove the measured replacement work.
+
+The mechanism is that all routed source staging occurs while the enclosing
+Metal command buffer is still being encoded. Later layers rewrite the
+caller-owned scratch arenas before the earlier dispatches execute; the final
+`waitUntilCompleted` at `omega/src/metal.rs:1930` is after the whole program,
+not after each source staging call. A same-address wrapper therefore aliases
+bytes that are subsequently overwritten. The safe path retains copied buffers
+for changing signatures; any future alias reuse must first establish a
+per-segment commit boundary or an immutable arena slot.
+
+## ROW 518 -- per-expert checkpoint discard preserves output but does not lower the observed RSS
+
+The existing `PROXIMA_EXPERT_CHECKPOINT_DISCARD=1` path was run with the
+mixed Q4/Q6 sidecar, 500 MiB residency budget, fused boundaries, and 4 GiB
+Metal ceiling. It preserved the exact France IDs/text and reported TTFT
+2,795 ms, TTNT mean 425.571 ms, and 2.350 tok/s in one eight-token run; peak
+RSS was 10,083,221,504 bytes. The per-expert `mincore` records showed the
+discarded ranges at 37--54 resident pages, but the process footprint remained
+at the same roughly 10 GiB level as the non-discard run.
+
+This separates page residency of selected expert ranges from the dominant
+host footprint: discarding individual checkpoint expert pages is not enough to
+reach the low-RSS target, while whole-checkpoint discard reintroduced the
+35-second re-resolution path recorded in ROW 511.
+
+## ROW 519 -- random-access advice does not change the checkpoint RSS floor
+
+The same bounded mixed-sidecar run with `PROXIMA_MMAP_RANDOM=1` preserved the
+exact France IDs/text and measured TTFT 2,783 ms, TTNT mean 405.857 ms, and
+2.464 tok/s; peak RSS was 10,299,768,832 bytes. The mapping emitted its
+`checkpoint_mmap_random = true` confirmation, but the footprint remained at
+the same roughly 10 GiB level. The host-memory lever is therefore not the
+mapping's sequential/random readahead hint; it is the lifetime or ownership of
+the bytes bound into the graph.
+
+## ROW 520 -- concurrent release arena retirement keeps the reuse hazard
+
+`omega/src/metal.rs` no longer clears a retired `MTLBuffer` identity from the
+current command buffer's hazard tracker. The retirement loop still removes the
+logical node from `device_buffers`, but the arena-owned buffer can be assigned
+to a later output before the command buffer commits; clearing the identity
+would erase the WAR/WAW edge. `HazardState::reset` still clears the sets at the
+next command-buffer call, so the identity is not carried across submissions.
+
+The focused hazard tests passed 8/8 and the full Metal-enabled omega library
+suite passed 144/144. The release build used the optimized profile and the
+same France prompt as the serial reference. Ten explicit concurrent release
+runs all emitted IDs `[271, 760, 6511, 314, 9338, 369, 11751, 13]` and text
+`"\\n\\nThe capital of France is Paris."`, with zero mismatches against the
+serial release IDs. Per-run TTNT means were 72.714--76.714 ms; decode-only
+throughput was 13.035--13.752 tok/s; device allocation was 24,038,998,016
+bytes in every run; peak RSS was 791,871,488--935,641,088 bytes. TTFT was
+1,245--1,986 ms, with the 1,986 ms run treated as host-load variance rather
+than a latency comparison. These are correctness and operating-envelope
+observations, not a verdict that concurrent is faster.
+
+## ROW 521 -- persistent router cuts: paired release ablation
+
+`qwen35moe_persistent_cuts` is now a typed `GenerateConfig`/`ServingConfig`
+field and part of the cached pre-gather plan identity. Three interleaved
+off/on pairs used the same optimized `gguf_generate` binary, the real
+qwen3.6:35b-a3b checkpoint, the mmap mixed sidecar, a 500 MiB residency
+budget, a 4 GiB Metal ceiling, serial dispatch, and the exact France prompt.
+Every arm emitted IDs `[271, 760, 6511, 314, 9338, 369, 11751, 13]` and
+`"\\n\\nThe capital of France is Paris."`.
+
+The off TTNT means were 340.286, 338.143, and 335.571 ms; the on means were
+313.714, 317.714, and 310.571 ms. The corresponding three-run means were
+338.000 ms off and 314.000 ms on. TTFT means were 2316.3 ms off and 2200.3
+ms on. Device allocation was 2,712,584,192 bytes off and 2,712,420,352 bytes
+on; peak RSS records were 11,268,276,224/11,345,707,008/11,230,232,576
+bytes off and 11,261,263,872/11,257,987,072/11,213,291,520 bytes on.
+This is a paired measurement, not a stable performance verdict; the next
+round must repeat the same arms before attributing the roughly 7.1% TTNT
+difference to persistent placement.
+
+## ROW 522 -- same-binary release control versus bounded pre-gather
+
+Both arms used the same `cargo build --release --example gguf_generate`
+binary, the real qwen3.6:35b-a3b checkpoint, the prompt `What is the capital
+of France?`, eight generated tokens, and Metal. The control left
+`PROXIMA_QWEN35MOE_PRE_GATHER=false`; the bounded arm set it to `true` with
+the GDN scan disabled. Both emitted IDs
+`[271, 760, 6511, 314, 9338, 369, 11751, 13]` and
+`"\\n\\nThe capital of France is Paris."`.
+
+The control recorded TTFT 8,087 ms, TTNT 74--79 ms (mean 76.857 ms,
+2sigma 3.283 ms, p90/p99 79 ms), decode 13.011 tok/s, device allocation
+24,038,998,016 bytes, and peak RSS 713,424,896 bytes in
+`/tmp/qwen35-release-control-latest.log`. The bounded pre-gather arm recorded
+TTFT 9,875 ms, TTNT 500--730 ms (mean 597.571 ms, 2sigma 141.578 ms,
+p90/p99 730 ms), decode 1.673 tok/s, device allocation 1,663,057,920 bytes,
+and peak RSS 7,939,424,256 bytes in
+`/tmp/qwen35-release-pregather-latest.log`.
+
+The release profile is the workspace profile in `Cargo.toml`: fat LTO,
+one codegen unit, `opt-level = 3`, and panic abort. The observations therefore
+are release observations, but they are single runs under different host-load
+conditions and are not an attribution of the throughput gap. The payload does
+establish the current trade: pre-gather lowers the Metal allocation while the
+current segmented path adds host-side work and loses decode throughput. The
+GDN prefill scan remains disabled because its existing real-checkpoint parity
+gate rejects the experimental path before serving.
+
+## ROW 523 -- persistent cuts on the release bounded pre-gather arm
+
+The same release binary, checkpoint, prompt, eight-token request, Metal backend,
+and `PROXIMA_QWEN35MOE_PRE_GATHER=true` configuration as ROW 522 were rerun
+with `PROXIMA_QWEN35MOE_PERSISTENT_CUTS=true`; the GDN scan remained disabled.
+The emitted IDs were `[271, 760, 6511, 314, 9338, 369, 11751, 13]` and the
+text was `"\\n\\nThe capital of France is Paris."`.
+
+This arm recorded TTFT 2,751 ms, TTNT 266--287 ms (mean 272.857 ms,
+2sigma 13.155 ms, p90/p99 287 ms), decode 3.665 tok/s, device allocation
+1,667,907,584 bytes, and peak RSS 8,260,190,208 bytes in
+`/tmp/qwen35-release-pregather-persistent-latest.log`. It is a single
+release observation; the payload shows the persistent-cut schedule reduced
+the bounded arm's measured latency relative to ROW 522, but it does not
+separate host-load variance from the schedule effect.
+
+## ROW 524 -- advisory expert prefetch stays exact; previous-route full-step speculation is retracted
+
+The speculative full-step arm was removed after the release payload showed
+that it could not complete an exact step from the preceding token's routes.
+The failed arm recorded seven speculative attempts, zero successes, and seven
+typed expert-source misses in `/tmp/qwen35-release-prefetch-fixed.log:1285-1311`;
+it still emitted the exact France IDs/text, but paid the segmented fallback
+after each failed whole-graph attempt (TTNT mean 1,009.714 ms, decode 0.990
+tok/s, device allocation 2,375,827,456 bytes, peak RSS 11,255,136,256 bytes).
+The route payload at `/tmp/qwen35-release-prefetch-routes.log` shows the
+mechanism: layer 0's prior route was
+`[197,196,249,216,79,105,101,229]`, while the next position selected
+`[187,235,177,115,81,47,192,79]`, with only expert `79` overlapping; the
+following two position transitions had zero overlap. A wider seven-position
+union still missed at least one expert in 34--40 of 40 layers in the same
+route records, so the predictor cannot become an exact full-step source table
+without approaching the all-expert residency regime.
+
+The retained `qwen35moe_expert_prefetch` path is advisory only: it records
+route history and issues low-copy `madvise` advice before the authoritative
+router boundary, while the segmented gather remains the source of truth. Two
+fresh optimized-binary arms with the same checkpoint, sidecar, 500 MiB
+residency budget, 4 GiB Metal ceiling, persistent cuts, and eight-token France
+request both stayed on Metal and emitted IDs
+`[271,760,6511,314,9338,369,11751,13]` and
+`"\\n\\nThe capital of France is Paris."`. The prefetch-off arm recorded TTFT
+6,735 ms, TTNT 292--377 ms (mean 317.000 ms, 2sigma 51.691, p90/p99 377),
+and 3.155 decode tok/s; the prefetch-on arm recorded TTFT 1,991 ms, TTNT
+291--366 ms (mean 307.714 ms, 2sigma 49.115, p90/p99 366), and 3.250 decode
+tok/s. Device allocation was 1,667,907,584 bytes on both arms; peak RSS was
+9,209,544,704 bytes off and 9,090,678,784 bytes on. These are paired release
+observations, not an attribution of the TTFT difference; the on arm's
+`qwen35 expert prefetch stats` line reports predictions 4,272, hits 1,493,
+overfetch 2,779, 546 advice events, and 6,319,325,184 advised bytes, with no
+speculative-attempt fields remaining.
+
+## ROW 525 -- current-route decisions and one residency boundary per token
+
+The segmented gather now carries a fixed-capacity `CurrentExpertSources` decision
+set from DynaExq's `observe` result into HOBBIT sidecar admission. A High
+decision cannot accidentally consume a newly promoted low copy, and the
+cross-codec low-copy guard remains `source == target`; the sidecar unit test
+exercises the High decision against a mapped low copy at
+`proxima-model-interop/src/expert_sidecar.rs:521-555`. Retained residency
+reconciliation moved out of the layer callback into one post-token boundary at
+`proxima-model-interop/src/generate.rs:10655-10690`; the action buffer is
+constructed in the helper at `proxima-model-interop/src/generate.rs:8007-8018`
+so a qwen35 fixture does not reserve it on the main decode-loop stack.
+
+The qwen3.6:35b-a3b release probe used the same optimized binary built with
+`cargo build --release --example gguf_generate`, the real checkpoint, Metal,
+the Q3K sidecar, a 1 GiB residency budget, and a 4 GiB Metal ceiling. It
+emitted IDs `[271,760,6511,314,9338,369,11751,13]` and text
+`"\\n\\nThe capital of France is Paris."` in
+`/tmp/qwen35-release-boundary-1g.log`. That single run recorded TTFT 3,208 ms,
+TTNT 357--388 ms (mean 369.714 ms, 2sigma 23.633 ms, p90/p99 388 ms),
+2.705 decode tok/s, device allocation 1,667,907,584 bytes, and peak RSS
+6,111,444,992 bytes. A two-token debug run in
+`/tmp/qwen35-release-boundary-debug.log` emitted two boundary events for the
+prompt and next token (`position=7` and `position=8`), rather than one action
+batch per layer, and retained the exact `"\\n\\nThe"` prefix. These are
+single release observations; they establish the boundary count and payload,
+not a stable throughput attribution.
+
+## ROW 526 -- selected high and admitted low ranges share one page-aligned arena
+
+`PageAlignedBytes` now uses the Metal page size on macOS (16 KiB), rounds the
+exposed length to a page, and initializes the padding before reuse. The
+selected expert path copies exact-high and admitted-low ranges into that one
+arena and records exact spans, instead of assembling a second per-range
+payload vector; the sidecar test exercises both arena paths at
+`proxima-model-interop/src/expert_sidecar.rs:1757-1810`.
+
+The optimized release run in `/tmp/qwen35-release-arena-serial.log` preserved
+IDs `[271,760,6511,314,9338,369,11751,13]` and text
+`"\\n\\nThe capital of France is Paris."`. It recorded TTFT 2,519 ms, TTNT
+234--271 ms (mean 253.000 ms, 2sigma 27.087 ms, p90/p99 271 ms), 3.953
+decode tok/s, 1,748,189,184 device bytes, and 7,545,307,136 peak RSS bytes
+under the 4 GiB Metal ceiling. The same run still emitted 42 GPU command
+buffers and 4,339 dispatches; this is a single release observation, not a
+stable attribution for the remaining host orchestration cost.
+
+## ROW 527 -- placed-input planning removes per-segment shape walks and zero buffers
+
+Metal planning now accepts an explicit placed-input node set at
+`omega/src/metal.rs:3562-3588` and skips shape validation only for those
+caller-owned inputs in `prepare`; execution uses the same empty sentinel
+resolver. `BackendRuntime::build_placed_plan` threads the existing placement
+nodes through that API at `proxima-model-interop/src/generate.rs:6392-6414`.
+The qwen35 loop no longer runs per-segment `shape::infer` or allocates
+tensor-sized zero placeholders; placed cuts are omitted from `segment_named`
+at `proxima-model-interop/src/generate.rs:2824-2860`.
+
+The placement test suite is 4/4 and the qwen35 feature tests are 22/22. Three
+optimized release runs with the real qwen3.6:35b-a3b checkpoint, Q3K mmap
+sidecar, 1 GiB residency budget, and 4 GiB Metal ceiling all emitted IDs
+`[271,760,6511,314,9338,369,11751,13]` and text
+`"\\n\\nThe capital of France is Paris."`. Their TTFT values were 2,528,
+2,500, and 2,529 ms; TTNT means 247.857, 250.857, and 254.571 ms (ranges
+221--282, 222--296, and 237--289 ms); decode rates were 4.035, 3.986, and
+3.928 tok/s. Device allocation was 1,667,907,584 bytes in all three; peak RSS
+was 5,938,561,024, 5,859,098,624, and 5,810,241,536 bytes. Warm token
+`evaluate_ms` means were 242.601, 246.366, and 248.814 ms while GPU means
+were 96.043, 99.029, and 97.779 ms. These are release observations of the
+same binary/configuration, not a verdict about the remaining host cost.
+
+## ROW 528 -- sidecar attachment is gated by the execution mode
+
+The serving example now attaches the expert sidecar only when
+`qwen35moe_pre_gather` or `qwen35moe_monolithic_all_low` is explicitly
+enabled at `examples/gguf_generate.rs:491-563`. A full-graph run still uses
+the checkpoint mapping; it does not pass an expert-source substitution table
+to the evaluator. Attaching the sidecar anyway called
+`LoadedModel::attach_indexed_expert_sidecar`, whose Metal branch discards and
+unregisters checkpoint expert pages at
+`proxima-model-interop/src/generate.rs:8124-8132`, so the full graph paid the
+remapped checkpoint path without receiving bounded expert execution.
+
+Both arms used the rebuilt release binary, the real qwen3.6:35b-a3b
+checkpoint, the exact France prompt, eight generated tokens, and concurrent
+Metal dispatch. With sidecar and a 1 GiB budget present but
+`PROXIMA_QWEN35MOE_PRE_GATHER=false`, the pre-fix control in
+`/tmp/qwen35-regression-concurrent-control.log` emitted the reference IDs and
+text but measured TTNT 70--78 ms (mean 73.857 ms, 2sigma 5.391 ms),
+13.540 decode tok/s, 22,500,556,800 device bytes, and 42,675,781,632 peak
+RSS bytes. After the mode gate, the same inputs in
+`/tmp/qwen35-regression-sidecar-skipped-control.log` emitted the same IDs and
+text with TTNT 70--75 ms (mean 72.286 ms, 2sigma 3.959 ms), 13.834 decode
+tok/s, 24,038,998,016 device bytes, and 640,040,960 peak RSS bytes; the log
+prints `expert_sidecar_attached = false`.
+
+The bounded arm still attaches the sidecar: with pre-gather, persistent cuts,
+the 4 GiB Metal ceiling, and serial dispatch,
+`/tmp/qwen35-regression-bounded-postfix.log` emitted the same IDs and text,
+TTNT 269--400 ms (mean 331.143 ms, 2sigma 82.514 ms), 3.020 decode tok/s,
+2,272,737,328 device bytes, and 4,985,716,736 peak RSS bytes. These records
+separate the accidental full-graph sidecar attachment from the deliberately
+bounded path; they do not establish a 20 tok/s result.
+
+## ROW 529 -- same-release control separates host variance from the bounded-path cost
+
+The rebuilt release example now prints the complete serving mode at
+`examples/gguf_generate.rs:591-612`, so a throughput number carries its
+execution configuration rather than relying on the shell transcript. The
+instrumentation is covered by a release `cargo check` and a one-token Metal
+run in `/tmp/qwen35-mode-print.log`, which prints `pre_gather=false`,
+`dispatch=concurrent`, and `sidecar_configured=false`.
+
+The same rebuilt release binary and France prompt produced these records:
+
+* Full graph, no sidecar, concurrent Metal:
+  `/tmp/qwen35-current-full-concurrent.log` emitted
+  `[271,760,6511,314,9338,369,11751,13,271,3710,369,279,6511]` and
+  `"\\n\\nThe capital of France is Paris.\\n\\nWhat is the capital"`;
+  TTFT was 1,203 ms; TTNT was 70--75 ms (mean 71.917 ms, 2sigma 2.882 ms,
+  p90 73 ms, p99 75 ms); decode was 13.905 tok/s; Metal allocation was
+  24,038,998,016 bytes; peak RSS was 832,438,272 bytes.
+* Bounded sidecar, serial pre-gather, 1-byte residency budget:
+  `/tmp/qwen35-current-baseline.log` emitted
+  `[271,760,6511,314]` and `"\\n\\nThe capital of"`; TTFT was 2,202 ms;
+  TTNT was 233--236 ms (mean 234.333 ms, 2sigma 2.494 ms, p90/p99 236 ms);
+  decode was 4.267 tok/s; Metal allocation was 1,620,918,272 bytes; peak RSS
+  was 4,141,023,232 bytes.
+
+The bounded trace's same-step Metal record reports 80 GPU command-buffer
+executions, 120 expert-source cache misses, 177.329 ms of GPU execution, and
+three staged source nodes (`/tmp/qwen35-current-baseline.log:1585`). The
+mechanism is in `proxima-model-interop/src/generate.rs:6222-6297`, where each
+router/gather partition resolves and executes separately, and
+`omega/src/metal.rs:3521-3528`, where every execution commits and waits for
+completion. The placement gate at `generate.rs:2961-2992` deliberately keeps
+linked fusion disabled when recurrent or dense-attention state is placed;
+earlier fused-placement experiments changed token IDs, so this is a
+correctness boundary, not a free throughput switch.
+
+The prior 15.524 tok/s record in `/tmp/qwen13-final.log:792-809` is a
+different run configuration and generated a different token sequence
+(`"\\n\\n<think>..."`), while the current control generated a direct answer;
+the two rates are therefore not an apples-to-apples regression pair. No
+opened artifact in `/tmp` or this discipline log records 22 tok/s for this
+Qwen3.6 35B-A3B prompt. The evidence currently separates a roughly 14 tok/s,
+24-GB full-graph arm from a roughly 4 tok/s, ~1.6-GB bounded arm; it does not
+support a 20+ tok/s bounded result.
+
+The placed-output check in `/tmp/qwen35-current-request-bytes.log:773-852`
+shows the large 2 MiB recurrent/state payloads are no longer returned to the
+host: router records are 32 KiB plus 1 KiB (or 1 KiB on dense layers), and
+gather records are 8 KiB. That removes the earlier host-readback mechanism;
+the bounded run still reports 80 command-buffer executions and remains
+latency-bound on the per-layer router/gather synchronization.
+
+## ROW 530 -- campaign opening: qwen3.6:35b-a3b vs Ollama, meet-or-beat under a byte budget
+
+Owner ask 2026-09-13: "make proxima meet or beat llama ... with hobbit x dynaexq x
+the other research we had already in the discipline." This row fixes the
+component, the incumbent design point, the frequency bands, and the baseline
+scorecard. It is a design-evidence row; every number below is a pointer to the
+row or artifact that measured it, and none is a verdict.
+
+**Component:** the qwen35moe serving path (`proxima-model-interop` qwen35moe
+module + omega Metal) on the real qwen3.6:35b-a3b checkpoint (Ollama blob
+`sha256-f5ee307a…`, 23.94 GB, 40 layers = 30 GDN + 10 full-attention, 256
+experts top-8 + shared expert). Named incumbent: Ollama (llama.cpp Metal) on
+the same blob, default settings, full model resident (server reports ~28 GB).
+
+**Incumbent design point (home turf, `design-favors: incumbent`):** whole
+model resident on the device, one graph per token with no host sync inside
+the token, flash attention, one `mul_mat_id` dispatch per expert matrix
+covering all top-k experts, chunked GDN prefill. The incumbent read of
+llama.cpp origin/master (9400c894) is dispatched as ROW 531.
+
+**Frequency bands (written before any new arm):**
+
+- 80% case: one decode step at chat context (512--4096 tokens of context),
+  greedy, chat template applied, `/no_think`. Metric: TTNT ms (tok/s), with
+  CoV over ≥3 runs. Must carry the incumbent arm.
+- Warm (~10%): TTFT for a 150--1000-token prompt with no prefix cache.
+- Cold (<5%): model load / first-token after process start. Never a headline.
+- Feasibility gate on every arm: device allocation bytes and peak RSS under a
+  declared byte ceiling; a row that wins time by exceeding the ceiling does
+  not qualify (ROW 514 precedent).
+
+**Baseline scorecard (all MEASURED elsewhere; artifact named per cell):**
+
+| Arm | Context | TTFT | TTNT / tok/s | Device bytes | Peak RSS | Text | Source |
+|---|---|---|---|---|---|---|---|
+| Ollama warm | ~150-token prompt, 4096 generated | 91 ms | 57.45 tok/s (eval 4096 in 71.3 s) | ~28 GB (server) | n/a | coherent | `/tmp/odell-ollama-4k-warm.json` |
+| proxima full graph, concurrent, no sidecar | 7-token prompt, 8--13 generated | 1,203 ms | 71.9 ms / 13.9 tok/s | 24,038,998,016 | 832 MB | exact France | ROW 529, `/tmp/qwen35-current-full-concurrent.log` |
+| proxima full graph (Codex 2026-09-13) | ~150-token prompt, 4096 generated | 14,570 ms | 7.60 tok/s | 24.04 GB | 1.93 GB | `<think>` + repetition | `/tmp/odell-proxima-4k-nan.log` |
+| proxima bounded (HOBBIT/DynaExq sidecar, pre-gather, persistent cuts) | 7-token prompt, 8 generated | 2,500--2,529 ms | 248--255 ms / 3.9--4.0 tok/s | 1,667,907,584 | 5.8--5.9 GB | exact France | ROW 527 |
+
+Ratios at the 8-token window (DERIVED from the rows above): full graph is
+4.1x slower than Ollama per token; bounded is 14.5x slower; at 4k generated
+the full graph is 7.6x slower.
+
+**Mechanisms already on record for the gap (each is a pointer, not a new
+claim):** the bounded arm executes one router/gather partition per layer with
+a commit-and-wait per execution (80 command buffers per token, ROW 529,
+`generate.rs:6222-6297`, `metal.rs:3521-3528`) -- DynaExq's own failure mode
+(weight decisions on the token path); the full graph at 4k generated halves
+its decode rate as context grows (Codex table above; mechanism unmeasured on
+this path -- ROW 341/347 measured the dense path only); prefill runs the GDN
+mixer one token per evaluation because the batched scan is gated off by its
+own parity failure (ROW 522). The Codex 4k run also emitted `<think>` text on
+a prompt that asked for none and the short France probe printed
+`"1/.00C,3668%40$."` in one configuration (Codex report, 2026-09-13; artifact
+to be re-run under ROW 532) -- correctness is the first gate, before any rate.
+
+**Measured from the Codex artifacts (this row, no new run):**
+
+`/tmp/odell-proxima-profile.log` (full graph, `dispatch=concurrent`,
+129-token prompt, 16 tokens; median of steps 3..15 of the per-step
+`token_breakdown_*` lines): wall 38.20 ms = evaluate 27.85 + append 4.82 +
+greedy 2.75 + weights 0.46 + kv 0.46; inside evaluate the Metal sub-timers
+sum to 14.76 ms (op_setup 3.18, encode_dispatch 5.73 over 4,834 dispatch
+calls, readback 5.85, gpu_exec 7.62 with one command buffer, 3,503 barriers,
+plan_hits 133 / misses 5) leaving ~13 ms of evaluate unattributed. The GPU
+execution of one token is 7.62 ms; Ollama's whole token is 17.4 ms. The
+device holds the whole checkpoint as one no-copy buffer
+(`nocopy_cache_lengths` carries `__checkpoint_mapping__` = 23,938,334,720
+bytes), so `PROXIMA_GPU_MEMORY_LIMIT_BYTES=4 GiB` never bounds it -- the
+budgeted path (`residency_budget_bytes=0`, `sidecar_configured=false`) was
+not engaged in any Codex 4k run.
+
+`/tmp/odell-proxima-4k-nan.log` (full graph, `dispatch=serial`, 181-token
+prompt, 4,096 tokens): TTFT 14,569 ms = 80.5 ms per prompt token (one
+`prefill_event`; the per-token cost equals the decode cost, consistent with a
+one-position-per-evaluation GDN prefill); per-token wall by 512-token window
+(deltas of the `token_event` elapsed_ms):
+
+| steps | mean ms/token |
+|---|---|
+| 1--511 | 93.4 |
+| 513--1023 | 103.5 |
+| 1025--1535 | 114.1 |
+| 1537--2047 | 124.9 |
+| 2049--2559 | 136.7 |
+| 2561--3071 | 147.5 |
+| 3073--3583 | 160.0 |
+| 3585--4095 | 172.3 |
+
+Linear: +10.9 ms per 512 context tokens = 21 µs per context token per step
+(DERIVED). KV bytes for the 10 attention layers are 2 kv-heads × 256 × 2 × 4 B
+× 10 = 41 KB per context token (DERIVED from the header), so at 4,096 context
+the KV read is ~168 MB ≈ 0.8 ms at 200 GB/s -- the growth is not KV
+bandwidth; the candidates are the attention kernel's per-key loop
+(ROW 345/347 class) and host-side KV/state append (`append_ms`). The 4k text
+opened with `<think>` on a raw (untemplated) prompt and degenerated into an
+8x-repeated paragraph under the sampling defaults (`temperature 0.8`,
+`repeat_penalty 1.1`); the "NaN" in the artifact name is not in the log
+(`nan_count` never non-zero). Ollama's own prompt eval on the same blob is
+2,771 tok/s (190 tokens in 68.6 ms, `prompt_eval_*` fields).
+
+**Principles engaged:** §14 (the incumbent wins on correctness: exact France
+IDs are the gate; the Q3_K lo copy failed it in ROW 508), §19 (every rate
+below carries its mechanism or stays an open question), §1 (the residency
+table, the gather, and the scan are expressed with existing pipes/ops before
+any new type), §12 (budget bytes, chunk size, slot counts come from the sizing
+config, never a literal).
+
+**Re-prove:** every arm in this campaign is re-run through the one release
+binary `cargo build --release --example gguf_generate` (root checkout, main)
+with the serving mode printed by the example (ROW 529), and the raw log path
+named in the row.
+
+## ROW 531 -- incumbent read: llama.cpp origin/master lowering of qwen35moe on Metal
+
+Design-evidence row (source read only, no build, no run). Source:
+`~/repos/others/llama.cpp` objects for `origin/master` = 9400c8946 (2026-09-02),
+read with `git show origin/master:<path>`; the working tree there is the stale
+b25346221 and was not read. Every line number is in the origin/master blob.
+
+**Arch and layer split.** `general.architecture = "qwen35moe"` →
+`LLM_ARCH_QWEN35MOE` (`src/llama-arch.h:47`); builder
+`src/models/qwen35moe.cpp`; `is_recr_impl[i] = (i+1) % 4 != 0`
+(`qwen35moe.cpp:22-27`) → 30 GDN + 10 full-attention layers, attention at
+i = 3, 7, …, 39. No vision tensors in this arch on their side (the GGUF's
+`qwen35moe.vision.*` keys are ignored).
+
+**Per-layer op order.** Every layer: `attn_norm` → mixer → residual add →
+`attn_post_norm` → MoE FFN → residual add (`qwen35moe.cpp:180-228`).
+GDN mixer (`build_layer_attn_linear`, `:361-493`): `wqkv` + `wqkv_gate`
+mul_mat, `ssm_beta` mul_mat + sigmoid, `ssm_alpha` mul_mat + bias + softplus
++ mul, conv-state concat + `ggml_cpy` write-back, **`ggml_ssm_conv`** (one
+fused op), silu, `ggml_l2_norm` ×2, **`ggml_gated_delta_net`** (ONE fused
+op for the whole recurrence, `ggml.h:2603-2612`) + `ggml_cpy` state
+write-back, gated rms-norm (rms_norm + silu + mul), `ssm_out` mul_mat.
+Attention mixer (`build_layer_attn`, `:280-359`): joint q+gate mul_mat,
+q-norm, `wk`/`wv`, k-norm, `ggml_rope_multi` ×2 (IMRoPE, 4 sections),
+**`ggml_flash_attn_ext`** (one op; `llama-graph.cpp:2557-2569`, default on
+via probe `llama-context.cpp:229,554-556`), sigmoid(gate) × out, `wo`.
+MoE (`build_moe_ffn`, `llama-graph.cpp:1938-2290`): router mul_mat,
+soft_max, `argsort_top_k`, `get_rows`, sum_rows/clamp/div (norm), **one
+`ggml_mul_mat_id`** for gate+up (or two if the GGUF has separate tensors),
+`ggml_swiglu_split` (fused), **one `ggml_mul_mat_id`** for down, mul by
+weights, (k−1) adds; shared expert = `build_ffn` (4 ops) + shared-gate
+mul_mat + sigmoid + mul + add.
+
+**Dispatch census (DERIVED from the read, not measured):** common 4 + GDN 21
+= 43+G+E per GDN layer; 34+G+E per attention layer (G ∈ {1,2} gate/up
+tensors, E = experts-used adds); 40 layers ≈ 1,630 + 40·(G+E) ≈ 2,000
+dispatches per token, plus head. llama logs the real count at load
+(`llama-context.cpp:696` "graph nodes = %d"). Ours today: 4,834
+(`encode_dispatch_calls`, ROW 530).
+
+**GDN prefill is NOT chunk-parallel on Metal.** Three formulations exist
+(`src/models/delta-net-base.cpp:425-447`): autoregressive (n_tokens == 1),
+chunked matrix form CS = 64 (`:16-287`, only when the fused op is
+unsupported), and fused (`:373-423`). Metal supports the fused op, so
+`fused_gdn_ch` (default true, `llama-context.cpp:232-233`) routes prefill to
+`ggml_gated_delta_net`, whose Metal kernel
+(`ggml/src/ggml-metal/kernels/gated_delta_net.metal:8-141`) loops
+`for t in 0..ne22` over the ubatch's tokens sequentially inside ONE dispatch,
+state in registers (`:67-108`: `ls[j] *= exp(g)`, `s_k = simd_sum(ls·k)`,
+`d = (v − s_k)·β`, `ls += k·d`, `y = simd_sum(ls·q)`); grid = `(S_v/nsg, H,
+n_seqs)` threadgroups × `(32, nsg, 1)` threads
+(`ggml-metal-ops.cpp:1865-1934`). So the incumbent's 2,771 prompt-tok/s comes
+from ONE kernel per GDN layer per prompt (all tokens in-register), not from
+a parallel scan -- the lever for us is the same shape: one dispatch per layer
+walking the ubatch, not one program evaluation per position.
+
+**MoE experts on Metal.** Decode always takes `mul_mv_id`
+(`ggml-metal-common.cpp:18-22`: mm only when `ne21 ≥ 32` tokens): ONE
+dispatch per expert matrix with grid z = `n_expert_used × n_tokens`
+(`ggml-metal-ops.cpp:2743`); the kernel reads the expert id from the `ids`
+buffer and offsets `src0 + i02·nb02` into the SAME weight buffer
+(`mul_mv.metal:3134,3143`) -- no gather copy, straight off the mmapped
+weights. Prefill ≥ 32 tokens: `mul_mm_id_map0` builds a token→expert map,
+one GPU-side concurrency barrier, then `mul_mm_id`
+(`ggml-metal-ops.cpp:2649-2717`).
+
+**Command buffers and readback.** `n_cb = 1` default
+(`ggml-metal.cpp:620,715`); per graph compute the main thread encodes the
+first `max(64, 0.1·n_nodes)` nodes and one helper thread the rest
+(`ggml-metal-context.m:460-620`) → at most 2 command buffers per token; no
+host wait inside the graph (only a GPU-side concurrency reset for the MoE id
+map). KV and recurrent state are persistent device tensors updated by
+`ggml_cpy` into views (`llama-memory-recurrent.h:112-113`,
+`delta-net-base.cpp:496,556-558,603`); the only host readback is logits.
+
+**Context growth.** GDN decode cost is independent of context (state is
+`[S_v, S_v, H_v]`, loop count = ubatch tokens); only the 10 attention layers
+read the KV cache, through `flash_attn_ext`.
+
+**What this binds for proxima (the invariants for the slices, not fixes):**
+(1) one token = one plan, ≤ 2 command buffers, logits the only readback;
+(2) recurrent state, conv state, and KV are placed device residents across
+tokens; (3) the top-k expert product is one dispatch per expert matrix that
+indexes the weight buffer by expert id (the gather is an address, not a
+copy) -- which is also exactly the seam HOBBIT/DynaExq needs: the per-expert
+base address comes from a residency table, hi or lo, with no host decision
+on the token path; (4) prefill of a GDN layer is one dispatch walking the
+ubatch; (5) dispatches per token ≈ 2,000 is the incumbent's number, with the
+recurrence, conv, norms, swiglu and attention each ONE kernel.
+
+## ROW 532 -- correctness gate on the rebuilt release binary: token 0 on every step (OPEN)
+
+Release `gguf_generate` (no `instrument`) built 2026-09-13 from the
+uncommitted Codex tree on origin/main c2776698, full graph,
+`dispatch=concurrent`, chat template applied by the example
+(`prompt_rendered_for_chat` printed), env `PROXIMA_TEMPERATURE=0
+PROXIMA_TOP_K=1 PROXIMA_REPEAT_PENALTY=1.0 PROXIMA_GPU_MEMORY_LIMIT_BYTES=0`.
+Logs: `~/.claude/projects/-Users-brianbruggeman-repos-slot-0/scratch/row532/{france,odell256}.log`.
+
+| run | prompt tokens | TTFT ms | TTNT mean ms | tok/s | device bytes | peak RSS | ids |
+|---|---|---|---|---|---|---|---|
+| France, 16 tokens | 15 | 1,979 | 34.27 (32--36) | 29.18 | 24,038,998,016 | 785 MB | `[0 x16]` = `!!!!…` |
+| Odell + `/no_think`, 256 tokens | 145 | 5,811 | 38.66 (p99 122) | 25.87 | 24,038,998,016 | 1,114 MB | all 0 |
+
+Per-token wall by 64-step window on the Odell run: 38.1 / 40.2 / 37.1 / 39.6
+ms -- flat over 256 tokens at this context. Two facts, no verdict:
+
+1. Every emitted id is 0 on both prompts. `sample_next_token`
+   (`proxima-tokenizer/src/sample.rs:277-306`) at `temperature <= 0` folds
+   `collapse_to_argmax` (`:242-250`), which returns the FIRST index when all
+   logits are equal (all 0.0 or all -inf) and the LAST index for an all-NaN
+   vector. So the logits reaching the sampler are degenerate-equal, not NaN
+   -- either the forward produces them or the logits root is read back
+   zero-filled. ROW 529 (same tree minus the last Codex edits,
+   `dispatch=concurrent`, sampled defaults) printed exact Paris; the
+   discriminator (defaults vs temperature 0 vs serial, same binary) is
+   running.
+2. TTNT 34 ms = 29.2 tok/s, 2.1x faster than ROW 529's 71.9 ms on the same
+   arm. This build carries no `instrument` feature, so no per-step
+   breakdown exists; whether the gain is the absent instrumentation cost or
+   a degenerate forward doing less work is unmeasured until the text is
+   right again.
+
+Prefill: 1,979 ms for 15 tokens (132 ms/token) and 5,811 ms for 145
+(40 ms/token).
+
+**Discriminator (same binary, France, 16 tokens, logs
+`scratch/row532/france-{defaults,temp0,serial}.log`):** sampled defaults
+(temperature 0.8, top_k 40, seed 424242) → ids `[16,14,13,15,15,34,11,18,21,
+21,23,4,19,15,3,13]` = `"1/.00C,3668%40$."` on BOTH concurrent and serial
+dispatch (byte-identical); temperature 0 → `[0 x16]`. Every sampled id is
+below 40: `apply_top_k` (`sample.rs:190-197`) sorts descending with a stable
+sort and truncates to 40, so a CONSTANT logit vector keeps ids 0..39 and the
+draw is uniform over them -- the sampler is reporting a degenerate-constant
+logit vector, the same text Codex's own France probe printed on 2026-09-13.
+Rates: 27.1 / 28.5 / 31.4 tok/s; TTFT 990 / 759 / 701 ms.
+
+None of Codex's coherent runs (`odell-proxima-{profile,4k-nan,nothink-128}.log`,
+`qwen35-current-full-concurrent.log`) carry `prompt_rendered_for_chat`; the
+nothink-128 run passed the template as literal prompt text and decoded
+coherent text at 156 prompt tokens. The variable that separates garbage from
+coherent so far is prompt LENGTH (15 vs ≥129 tokens), not dispatch mode and
+not sampling; the `!!!!` signature previously root-caused to attention
+split-scratch OOB at small M (ROW 396/397) is the first candidate. Root-cause
+dispatched (ROW 533).
+
+## ROW 533 -- the GPU residual stream is exactly zero at layer 3; cold run correct, warm runs fail (OPEN)
+
+Round 1 (`scratch/row533/`, release binary of ROW 532, prompt `The capital
+of France is` rendered to 13 tokens, `max_tokens 1`, `PROXIMA_DISPATCH=serial`):
+
+- `PROXIMA_DEBUG_DENSE_DIGEST=1` on gpu: `dense_digest mode=cached layer=3
+  label=block_input shape=[1,2048] first4=[0.0,0.0,0.0,0.0]` for ALL 13
+  prefill rows, and `normed`, `q_split`, `k_normed`, `v_new`, `attended`,
+  `gated_attended`, `o_proj_out` all `[0,0,0,0]` (`gpu-digest.log`).
+- Same tokens on cpu: `block_input first4=[-0.0669, 0.0074, -0.0301, 0.0340]`,
+  `attended [7.88, 7.06, 13.88, 6.41]` (`cpu-digest.log`); cpu `PROBE top5 =
+  [(248068, 31.07), (760, 18.67), …]` = `<think>` (`cpu-probe.log`).
+- Length is NOT the variable: 13/14/15/16/18-token prompts all fail the same
+  way (`bisect-*.log`); the template is NOT the variable (every prompt in
+  the bisect was rendered).
+- The FIRST gpu run after the lock (`raw-nofr.log`, TTFT 11,504 ms, page
+  cache cold) produced the CORRECT text (`<think></think>\n\nThe capital of
+  France`, first id 248068 = the cpu oracle's top-1); the 12 warm runs after
+  it (TTFT 630-970 ms) all produced zeros; a 13-token prompt failed 2 of 3.
+  Memory free rose from 25% (correct run) to 36% (failing runs).
+- No `gguf_generate` process was left holding the device between runs; no
+  on-disk shader cache path exists in the source (grep of
+  `MTLBinaryArchive|pipeline_cache|shader_cache|binary_archive|metallib`).
+
+Reading (no verdict): an exactly-zero residual at every position, including
+the embedding's contribution, on a path that is correct when slow and wrong
+when fast, is the signature of an ORDERING defect on the Metal path -- a
+host write, a zero-fill, or a buffer reuse that the GPU read is ordered
+against only by elapsed time -- not of a lowering bug (which would be
+deterministic) and not of a sampler bug (ROW 532). The alternative still
+open is cross-process state written by the first run. Round 2 (intermittency
+rate ×6, file-write census across a run, `CHECKPOINT_DISCARD` as the cold
+control, `MTL_DEBUG_LAYER`/`MTL_SHADER_VALIDATION`, first-zero node among
+embedding / layers 0-2) is running under `scratch/row533b/`.
