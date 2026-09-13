@@ -268,6 +268,7 @@ struct EncoderGuard {
 }
 
 #[cfg(all(test, feature = "instrument"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod bounded_compare_tests {
     use super::{MetalError, compare_bound_f32};
     use proxima_tensor::op::NodeId;
@@ -12833,6 +12834,7 @@ mod plan_query_rows_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod expert_payload_descriptor_tests {
     use super::{
         BoundOp, BoundOpKind, ExpertPayloadDescriptor, MetalError, PackedCodec,
