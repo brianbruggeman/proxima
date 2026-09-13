@@ -1425,8 +1425,10 @@ impl MappedExpertSidecar {
                 descriptor.target_codec,
                 Arc::clone(&self.mapping),
                 range,
-                descriptor.out_dim,
-                descriptor.in_dim,
+                crate::expert_slab::WeightDims {
+                    out_dim: descriptor.out_dim,
+                    in_dim: descriptor.in_dim,
+                },
             )?;
         }
         Ok(())
