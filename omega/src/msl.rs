@@ -1501,7 +1501,7 @@ fn emit_inner(
             bindings(resolved)
         },
         grid: GridSpec {
-            threads: grid_threads(resolved, &quantized, numeric_policy)?,
+            threads: grid_threads(resolved, &quantized, numeric_policy, expert_source_mode)?,
             threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
         },
     })
@@ -1995,7 +1995,10 @@ pub(crate) fn kernel_dispatch_shape(
             bindings(resolved)
         },
         GridSpec {
-            threads: grid_threads(resolved, &quantized, numeric_policy)?,
+            // `kernel_dispatch_shape` has no expert-source caller (it never
+            // took `expert_source_mode` before this parameter existed
+            // either) -- `false` reproduces that pre-existing scope exactly.
+            threads: grid_threads(resolved, &quantized, numeric_policy, false)?,
             threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
         },
     ))
@@ -2053,6 +2056,60 @@ fn reduce_is_cooperative(resolved: &BoundOp) -> bool {
 /// emitted body from selecting different fold orders.
 fn reduce_is_cooperative_for_policy(resolved: &BoundOp, policy: NumericPolicy) -> bool {
     reduce_is_cooperative(resolved) && admit(policy, NumericRewrite::TreeReduce).is_ok()
+}
+
+/// Whether `resolved` carries a broadcast-reduce epilogue (RMSNorm-shaped
+/// `x * inv_rms`) -- the one write tail only [`push_cooperative_reduce_tail`]
+/// renders (`render_reduce`'s own doc on `is_broadcast_epilogue`).
+fn reduce_has_broadcast_epilogue(resolved: &BoundOp) -> bool {
+    matches!(
+        &resolved.kind,
+        BoundOpKind::Reduce { epilogue_broadcast_axes, .. } if !epilogue_broadcast_axes.is_empty()
+    )
+}
+
+/// Whether this reduce takes the cooperative kernel STRUCTURE -- distinct
+/// from whether its plain combine may reassociate. [`push_cooperative_reduce_body`]
+/// hosts every packed-row/tiled-GEMM/gather/expert-source specialization
+/// ([`tiled_gemm_block`], [`packed_row_block`]) as sub-branches that read
+/// their operand once per lane and never fold across lanes in a
+/// numerically-visible order -- [`NumericRewrite::TreeReduce`] permission is
+/// only needed by the one sub-branch that DOES (the generic per-lane
+/// `simd_sum` walk `push_cooperative_reduce_body` falls back to). Gating
+/// entry to the whole function on that permission -- what a bare
+/// [`reduce_is_cooperative_for_policy`] call here would do -- strands every
+/// specialized decoder behind a policy check they never needed, sending a
+/// bit-exact default policy (every fixture and the default runtime) to
+/// [`push_serial_reduce_body`], which renders none of them: this is the
+/// packed-row-blocked/tiled-GEMM/expert-source regression, not the
+/// broadcast-epilogue one alone. A broadcast epilogue is folded in here for
+/// the same reason -- see [`reduce_has_broadcast_epilogue`]'s own doc.
+fn reduce_is_cooperative_dispatch(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+    policy: NumericPolicy,
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+    expert_source_mode: bool,
+) -> bool {
+    // `emit_with_expert_sources_mode`'s string substitution hunts for the
+    // cooperative walk's own `walk{index}`/`off{index}`/`fetched{index}`
+    // spellings (`render_reduce`'s doc on this parameter) -- the serial
+    // renderer has none of those names, so expert-source hoisting needs the
+    // cooperative structure exactly as unconditionally as a packed/tiled
+    // match does, regardless of `quantized[weight]` (deliberately stripped
+    // to `None` for the substituted operand, so neither block classifier
+    // below ever fires for it).
+    if expert_source_mode
+        || reduce_has_broadcast_epilogue(resolved)
+        || tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+        || packed_row_block(resolved, quantized).is_some()
+    {
+        reduce_is_cooperative(resolved)
+    } else {
+        reduce_is_cooperative_for_policy(resolved, policy)
+    }
 }
 
 /// A route selected by the token axis has zero stride in contracted
@@ -3048,6 +3105,7 @@ fn grid_threads(
     resolved: &BoundOp,
     quantized: &[Option<PackedCodec>],
     numeric_policy: NumericPolicy,
+    expert_source_mode: bool,
 ) -> Result<u64, EmitError> {
     let threads = match &resolved.kind {
         BoundOpKind::CachedAttention {
@@ -3155,7 +3213,15 @@ fn grid_threads(
                 let token_total = packed_row_block_token_total(&block, &resolved.extents);
                 let (base, split) = packed_row_dispatch(feature_total, token_total, block.codec);
                 base * SIMD_WIDTH * split
-            } else if reduce_is_cooperative_for_policy(resolved, numeric_policy) {
+            } else if reduce_is_cooperative_dispatch(
+                resolved,
+                quantized,
+                numeric_policy,
+                *reduce_op,
+                *init,
+                output_axes,
+                expert_source_mode,
+            ) {
                 // one cooperative-reduce threadgroup per output element,
                 // `cooperative_reduce_width` lanes wide (SIMD_WIDTH with
                 // `metal-wide-cooperative-reduce` off, matching
@@ -4748,7 +4814,15 @@ fn render_reduce(
                 .iter()
                 .all(|axis| reduce_dims.contains(axis));
         if !matches_reduce_dims
-            || !reduce_is_cooperative_for_policy(resolved, numeric_policy)
+            || !reduce_is_cooperative_dispatch(
+                resolved,
+                quantized,
+                numeric_policy,
+                *reduce_op,
+                *init,
+                output_axes,
+                expert_source_mode,
+            )
             || tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
             || packed_row_block(resolved, quantized).is_some()
         {
@@ -4839,7 +4913,15 @@ fn render_reduce(
         include_threadgroup_width,
     );
 
-    if reduce_is_cooperative_for_policy(resolved, numeric_policy) {
+    if reduce_is_cooperative_dispatch(
+        resolved,
+        quantized,
+        numeric_policy,
+        *reduce_op,
+        *init,
+        output_axes,
+        expert_source_mode,
+    ) {
         push_cooperative_reduce_body(
             &mut source,
             resolved,
@@ -5498,26 +5580,6 @@ fn push_packed_row_multi_row_body(
     let identity = cooperative_identity_token(resolved.node, reduce_op)?;
     let combine_fn = simd_combine_fn(resolved.node, reduce_op)?;
 
-    let (output_axes, out_layout) = match &resolved.kind {
-        BoundOpKind::Reduce {
-            output_axes,
-            out_layout,
-            ..
-        } => (output_axes, out_layout),
-        _ => return Ok(()),
-    };
-    eprintln!(
-        "packed_multi_row node={} extents={:?} output_axes={:?} token_axes={:?} feature_axes={:?} weight_layout={:?} other_layout={:?} out_layout={:?}",
-        resolved.node.0,
-        resolved.extents,
-        output_axes,
-        token_axes,
-        feature_axes,
-        resolved.operands()[weight].1,
-        resolved.operands()[other].1,
-        out_layout,
-    );
-
     source.push_str("    long feature_total = 1;\n");
     for index in 0..feature_axes.len() {
         source.push_str(&format!(
@@ -5605,20 +5667,12 @@ fn push_packed_row_multi_row_body(
     // codec (`Q3_K`/`Q5_K`/`Q6_K`) keeps the generic loop -- they have no
     // multi-row port yet, this landing only proves the pattern on `Q4_K`,
     // the codec `ROW 389`'s own trace named as the dominant contributor.
-    let fast_q4k = {
-        let _ = (
-            expert_source_mode,
-            block.codec,
-            element_type,
-            quantized[weight],
-            quantized[other],
-            reduce_op,
-            weight,
-            other,
-            resolved.element_body(),
-        );
-        false
-    };
+    let fast_q4k = !expert_source_mode
+        && block.codec == PackedCodec::Q4K
+        && element_type == "float"
+        && quantized[weight] == Some(PackedCodec::Q4K)
+        && quantized[other].is_none()
+        && is_plain_product_reduce(resolved, reduce_op, weight, other);
     if fast_q4k {
         push_packed_row_multi_row_q4k_body(
             source,
@@ -10809,19 +10863,35 @@ mod tests {
         assert!(kernel.source.contains("reduction_total"));
         assert!(kernel.source.contains("(scratch[0] * scratch[1])"));
         assert!(kernel.source.contains("(accumulator + value)"));
+        // `NumericPolicy::default()` is `bit_exact()` -- "bit-parity with
+        // `cpu::evaluate`" (`NumericPolicy::bit_exact`'s own doc). `simd_sum`
+        // is the cross-lane TREE reduction (`reduce_is_cooperative_for_
+        // policy`'s own doc): a real reordering of this Add-fold versus the
+        // left-to-right serial accumulate `cpu::evaluate` performs, so it
+        // needs `NumericRewrite::TreeReduce`'s `reassociation` permission,
+        // which `bit_exact` withholds by construction -- this plain
+        // (unpacked, ungathered, non-broadcast-epilogue) matmul reduce now
+        // takes `push_serial_reduce_body`'s one-thread-per-output loop
+        // instead, matching every other bit-exact-policy reduce.
         assert!(
-            kernel.source.contains("simd_sum(accumulator)"),
-            "an Add-reduce body must take the cooperative SIMD-group path"
+            !kernel.source.contains("simd_sum(accumulator)"),
+            "bit-exact policy must not take the reassociating SIMD-group path"
+        );
+        assert!(
+            kernel
+                .source
+                .contains("if ((long)gid >= u.output_total) { return; }"),
+            "bit-exact policy must take the serial one-thread-per-output path"
         );
         assert_eq!(
             kernel.grid.threads,
-            4 * 5 * 32,
-            "one SIMD-group (32 lanes) per (row, col), not one thread"
+            4 * 5,
+            "one thread per (row, col) on the serial, bit-exact-policy path"
         );
         assert_eq!(
             kernel.grid.threadgroup_width,
             Some(32),
-            "the driver must dispatch exactly one SIMD-group per threadgroup"
+            "the driver dispatch width default is unaffected by the reduce's own cooperative/serial choice"
         );
     }
 
@@ -11620,9 +11690,9 @@ mod tests {
              (4x the below-the-knee width): narrow={narrow_width} wide={wide_width}"
         );
 
-        let narrow_threads = grid_threads(&narrow, &quantized, NumericPolicy::bit_exact())
+        let narrow_threads = grid_threads(&narrow, &quantized, NumericPolicy::bit_exact(), false)
             .expect("a CachedAttention op always has a thread count");
-        let wide_threads = grid_threads(&wide, &quantized, NumericPolicy::bit_exact())
+        let wide_threads = grid_threads(&wide, &quantized, NumericPolicy::bit_exact(), false)
             .expect("a CachedAttention op always has a thread count");
         assert_eq!(
             narrow_threads, wide_threads,
