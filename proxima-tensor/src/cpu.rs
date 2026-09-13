@@ -6997,9 +6997,9 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
 /// shape into [`gdn::GdnPrefillShape`]/[`gdn::GdnPrefillScan`] and call
 /// [`gdn::run_gdn_prefill_scan`] directly — no reimplementation
 /// (`BoundOpKind::GatedDeltaNet`'s own doc, and the design's own §2/§4). This
-/// slice's matched shape (single physical head axis, `heads` innermost, no
-/// GQA broadcast split — [`gated_delta_net_candidates`]'s own doc states the
-/// scope) happens to already match [`gdn::run_gdn_prefill_scan`]'s own
+/// slice's matched shape (single physical head axis OR the real qwen35moe
+/// `kv_heads`/`group` split, `heads` innermost — [`gated_delta_net_candidates`]'s
+/// own doc states the scope) happens to already match [`gdn::run_gdn_prefill_scan`]'s own
 /// operand layout convention exactly, so every operand is read as a plain
 /// contiguous slice with no gather/scatter reshape — REJECTED here (not
 /// silently reshaped) if a caller ever binds a non-natural stride, since
@@ -7034,10 +7034,10 @@ fn run_gated_delta_net<B: Deref<Target = [f32]> + Sync>(
             reason: "gated delta net runner received another bound operation",
         });
     };
-    if *n_tokens != 1 || kv_heads != num_v_heads {
+    if *n_tokens != 1 || num_v_heads % kv_heads != 0 {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
-            reason: "gated delta net executor only supports this slice's decode, non-GQA shape",
+            reason: "gated delta net executor only supports this slice's decode shape",
         });
     }
     let [query, key, value, gate, beta, state_in] = operands.as_slice() else {
@@ -7059,6 +7059,7 @@ fn run_gated_delta_net<B: Deref<Target = [f32]> + Sync>(
         key_dim: *head_k_dim as usize,
         value_dim: *head_v_dim as usize,
         heads: *num_v_heads as usize,
+        kv_heads: *kv_heads as usize,
     };
     let mut state = buffer_of(buffers, state_in.0)?.to_vec();
     run_gdn_prefill_scan(GdnPrefillScan {

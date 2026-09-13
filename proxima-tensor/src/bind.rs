@@ -282,7 +282,11 @@ pub enum BoundOpKind {
     /// caller-persisted convention [`BoundOpKind::CachedAttention`]'s own doc
     /// states for a KV cache never concatenated in-graph. `n_tokens == 1` is
     /// this slice's only supported shape (decode); an `n_tokens > 1` bind is
-    /// out of scope until the M-token prefill slice lands.
+    /// out of scope until the M-token prefill slice lands. `kv_heads` may be
+    /// less than `num_v_heads` (`num_v_heads = kv_heads * group`) — the real
+    /// qwen35moe GQA shape, `query`/`key` still bound at `kv_heads` and
+    /// `value`/`gate`/`beta`/`state_in` at `num_v_heads`; `group` itself is
+    /// not a separate field, it is exactly `num_v_heads / kv_heads`.
     GatedDeltaNet {
         operands: BoundOperands,
         n_tokens: u64,
@@ -3463,6 +3467,23 @@ pub fn bind_with_fusion(
 /// [`binary_elementwise`] (that helper lives behind
 /// `cached-attention-streaming` instead) rather than a shared function two
 /// independent feature gates would both have to enable to compile.
+/// A zero-based, row-major (last axis fastest) [`Layout`] over `extents` --
+/// what [`Op::Input`]'s own storage always is, and what
+/// [`gated_delta_net_candidates`] binds `query`/`key` to directly instead of
+/// borrowing a `repeat_kv_heads` broadcast consumer's own stride-0 read (this
+/// module's own doc on [`GatedDeltaNetMatch::query_was_repeated`]).
+#[cfg(feature = "gated-delta-net-fusion")]
+fn natural_layout(extents: &[u64]) -> Layout {
+    let mut strides = SmallVec::<[i64; MAX_INLINE_RANK]>::new();
+    strides.resize(extents.len(), 0);
+    let mut running = 1_i64;
+    for (axis, extent) in extents.iter().enumerate().rev() {
+        strides[axis] = running;
+        running *= *extent as i64;
+    }
+    Layout { base: 0, strides }
+}
+
 #[cfg(feature = "gated-delta-net-fusion")]
 fn gdn_binary_elementwise(program: &[Op], node: NodeId, body: ScalarOp) -> Option<[NodeId; 2]> {
     match program.get(node.0 as usize)? {
@@ -3549,6 +3570,20 @@ fn gdn_unwrap_repeat_kv_heads(program: &[Op], node: NodeId) -> NodeId {
     }
 }
 
+/// The all-ones donor [`gdn_unwrap_repeat_kv_heads`] walked past, if `node`
+/// was a repeat -- `repeat_kv_heads` mints a fresh `Op::Constant` per call
+/// (never shared across the query/key repeat sites), so once the multiply
+/// that reads it is absorbed this donor has no other consumer and would
+/// otherwise linger as a dead leaf in the rewritten program.
+#[cfg(feature = "gated-delta-net-fusion")]
+fn gdn_repeat_kv_heads_donor(program: &[Op], node: NodeId) -> Option<NodeId> {
+    match gdn_binary_elementwise(program, node, ScalarOp::Multiply) {
+        Some([_, right]) if gdn_is_repeat_kv_heads_donor(program, right) => Some(right),
+        Some([left, _]) if gdn_is_repeat_kv_heads_donor(program, left) => Some(left),
+        _ => None,
+    }
+}
+
 /// One matched [`append_qwen35_delta_net_step`](crate::spec::append_qwen35_delta_net_step)
 /// recurrence, structurally recognized by walking backward from its `out`
 /// node through the exact `ScalarOp` sequence that function emits — anchored
@@ -3566,6 +3601,14 @@ struct GatedDeltaNetMatch {
     state_in: NodeId,
     inv_sqrt_key_dim: f32,
     state_out: NodeId,
+    /// `true` when [`gdn_unwrap_repeat_kv_heads`] actually walked past a
+    /// broadcast for `query`/`key` — every REMAINING consumer of that
+    /// pre-repeat source reads it through the broadcast's own stride-0
+    /// trailing axis, so [`gated_delta_net_candidates`] must derive a
+    /// NATURAL layout from `query`/`key`'s own extents instead of borrowing
+    /// a consumer's read the way the other four operands safely do.
+    query_was_repeated: bool,
+    key_was_repeated: bool,
     /// Every node absorbed into the fused op, `out` and the six leaf sources
     /// excluded — the set [`apply_gated_delta_net_fusion`] drops from the
     /// rewritten program once the fusion actually fires.
@@ -3618,12 +3661,20 @@ fn match_gated_delta_net_step(program: &[Op], out: NodeId) -> Option<GatedDeltaN
     let inv_sqrt_key_dim = gdn_constant_value(program, inv_sqrt_key_dim_node)?;
 
     let key = gdn_unwrap_repeat_kv_heads(program, key_a);
-    if key != key_a {
+    let key_was_repeated = key != key_a;
+    if key_was_repeated {
         absorbed.insert(key_a);
+        if let Some(donor) = gdn_repeat_kv_heads_donor(program, key_a) {
+            absorbed.insert(donor);
+        }
     }
     let query_unrepeated = gdn_unwrap_repeat_kv_heads(program, query);
-    if query_unrepeated != query {
+    let query_was_repeated = query_unrepeated != query;
+    if query_was_repeated {
         absorbed.insert(query);
+        if let Some(donor) = gdn_repeat_kv_heads_donor(program, query) {
+            absorbed.insert(donor);
+        }
     }
     let query = query_unrepeated;
 
@@ -3636,6 +3687,8 @@ fn match_gated_delta_net_step(program: &[Op], out: NodeId) -> Option<GatedDeltaN
         state_in: state_in_a,
         inv_sqrt_key_dim,
         state_out,
+        query_was_repeated,
+        key_was_repeated,
         absorbed,
     })
 }
@@ -3671,15 +3724,28 @@ fn gated_delta_net_candidates(
             continue;
         }
         let source_nodes = [
-            found.query,
-            found.key,
-            found.value,
-            found.gate,
-            found.beta,
-            found.state_in,
+            (found.query, found.query_was_repeated),
+            (found.key, found.key_was_repeated),
+            (found.value, false),
+            (found.gate, false),
+            (found.beta, false),
+            (found.state_in, false),
         ];
         let mut operands = Vec::with_capacity(source_nodes.len());
-        for source in source_nodes {
+        for (source, was_repeated) in source_nodes {
+            // `query`/`key` walked past a `repeat_kv_heads` broadcast: every
+            // remaining consumer of `source` reads it through THAT
+            // broadcast's own stride-0 trailing axis, not `source`'s own
+            // storage -- borrowing a consumer's read here would silently
+            // bind a layout the executor's own contiguity check (`cpu.rs`'s
+            // `run_gated_delta_net`) then rejects at run time. `source`
+            // itself is always a plain natural-order node ([`Op::Input`] or
+            // an equally natural `bind_plain` output), so its own extents
+            // fully determine a natural layout.
+            if was_repeated {
+                operands.push((source, natural_layout(shapes.of(source)), None));
+                continue;
+            }
             let Some((_, layout, lookup)) = resolved
                 .iter()
                 .flat_map(|bound| bound.operands().iter())
@@ -3702,34 +3768,51 @@ fn gated_delta_net_candidates(
         let key_shape = shapes.of(found.key);
         let query_shape = shapes.of(found.query);
         let state_shape = shapes.of(found.state_in);
-        // This slice's supported shape: single per-position call
-        // (`append_qwen35_delta_net_step`'s own `head` split at ONE physical
-        // axis, `[dim, heads]`, `heads` innermost -- matching
-        // `run_gdn_prefill_scan`'s own convention line for line, `gdn.rs`'s
-        // doc). `kv_heads == num_v_heads` here (no GQA broadcast folded in):
-        // the two-letter `head = "ug"` split
-        // [`crate::spec::repeat_kv_heads`] feeds is out of THIS matcher's
-        // scope (`gdn_unwrap_repeat_kv_heads` still walks past a repeat when
-        // present, but nothing here yet validates the resulting `kv_heads !=
-        // num_v_heads` rank-3 shape) -- a real qwen35moe GQA program declines
-        // here rather than binding a silently wrong extent; widening this to
-        // the two-axis split is follow-up work, not this slice's tested path.
-        if key_shape.len() != 2
-            || query_shape.len() != 2
-            || value_shape.len() != 2
-            || gate_shape.len() != 1
-            || state_shape.len() != 3
-            || query_shape != key_shape
-            || key_shape[1] != value_shape[1]
-            || gate_shape[0] != value_shape[1]
-            || state_shape[0] != key_shape[0]
-            || state_shape[1] != value_shape[0]
-            || state_shape[2] != value_shape[1]
-            || shapes.of(output) != value_shape
-        {
-            continue;
-        }
-        let heads = value_shape[1];
+        // This slice's supported shapes: `append_qwen35_delta_net_step`'s own
+        // `head` split, either the single-letter axis (`[dim, heads]`, no GQA
+        // broadcast) or the real qwen35moe two-letter `head = "ug"` split --
+        // `u` = kv group (query/key's own trailing axis, PRE-`repeat_kv_heads`,
+        // `gdn_unwrap_repeat_kv_heads`'s own doc), `g` = query heads per group
+        // (value/gate/beta/state's own extra trailing axis, since
+        // `repeat_kv_heads`'s own doc proves `u`/`g` never collapse into one
+        // physical axis). `run_gdn_prefill_scan`'s own convention (dim first,
+        // head axes last, innermost letter fastest) extends unchanged: value
+        // is `[dim, kv_heads, group]`, gate/beta `[kv_heads, group]`, state
+        // `[key_dim, value_dim, kv_heads, group]` -- `num_v_heads = kv_heads *
+        // group` is exactly the executor's own flat value-head extent
+        // (`gdn::GdnPrefillShape::heads`), so this binds the SAME struct the
+        // single-axis case already does, group folded in rather than a new
+        // field.
+        let (kv_heads, group) = match (key_shape, value_shape, gate_shape, state_shape) {
+            ([key_dim, kv_heads], [value_dim, value_kv_heads, group], [gate_kv_heads, gate_group], [state_key_dim, state_value_dim, state_kv_heads, state_group])
+                if query_shape == key_shape
+                    && *kv_heads == *value_kv_heads
+                    && *kv_heads == *gate_kv_heads
+                    && *kv_heads == *state_kv_heads
+                    && *group == *gate_group
+                    && *group == *state_group
+                    && *state_key_dim == *key_dim
+                    && *state_value_dim == *value_dim
+                    && shapes.of(output) == value_shape =>
+            {
+                (*kv_heads, *group)
+            }
+            ([key_dim, heads], [value_dim, value_heads], [gate_heads], [state_key_dim, state_value_dim, state_heads])
+                if query_shape == key_shape
+                    && *heads == *value_heads
+                    && *heads == *gate_heads
+                    && *heads == *state_heads
+                    && *state_key_dim == *key_dim
+                    && *state_value_dim == *value_dim
+                    && shapes.of(output) == value_shape =>
+            {
+                (*heads, 1)
+            }
+            _ => continue,
+        };
+        let head_k_dim = key_shape[0];
+        let head_v_dim = value_shape[0];
+        let num_v_heads = kv_heads * group;
         let fused = BoundOp {
             node: output,
             dtype: DType::Float32,
@@ -3737,10 +3820,10 @@ fn gated_delta_net_candidates(
             kind: BoundOpKind::GatedDeltaNet {
                 operands,
                 n_tokens: 1,
-                kv_heads: heads,
-                num_v_heads: heads,
-                head_k_dim: key_shape[0],
-                head_v_dim: value_shape[0],
+                kv_heads,
+                num_v_heads,
+                head_k_dim,
+                head_v_dim,
                 inv_sqrt_key_dim: found.inv_sqrt_key_dim,
             },
         };
@@ -8159,7 +8242,7 @@ mod tests {
     mod gated_delta_net_tests {
         use super::*;
         use crate::op::{Extent, append};
-        use crate::spec::append_qwen35_delta_net_step;
+        use crate::spec::{append_qwen35_delta_net_step, elementwise};
 
         const HEAD_K_DIM: usize = 2;
         const HEAD_V_DIM: usize = 3;
@@ -8239,6 +8322,217 @@ mod tests {
 
         fn resolved_kinds(resolved: &[BoundOp]) -> Vec<&'static str> {
             resolved.iter().map(|bound| bound.kind.name()).collect()
+        }
+
+        /// A [`crate::spec::repeat_kv_heads`]-shaped broadcast (its own
+        /// all-ones-donor Multiply, [`gdn_unwrap_repeat_kv_heads`]'s own
+        /// match target) built WITHOUT that function's leading seq axis --
+        /// the real production graph threads `s` through `repeat_kv_heads`
+        /// and then a squeeze [`crate::spec::reduce`] before
+        /// [`append_qwen35_delta_net_step`] ever sees `query`/`key`
+        /// (`spec.rs:8579-8759`'s own `q_repeated`/`query` two-step), and
+        /// `gdn_unwrap_repeat_kv_heads` does not yet walk through that
+        /// squeeze (see this module's own report on this gap) -- this helper
+        /// exercises the exact structural pattern the matcher DOES already
+        /// recognize (an elementwise Multiply against an all-ones donor)
+        /// directly, at decode's own effective `s == 1`.
+        fn broadcast_kv_heads(
+            program: &mut Vec<Op>,
+            x: NodeId,
+            kv_heads: u32,
+            group: u32,
+        ) -> NodeId {
+            let donor = append(
+                program,
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+                    value: 1.0,
+                },
+            );
+            elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(x, "iu->iug"), (donor, "ug->iug")],
+            )
+            .expect("kv-heads broadcast lowers")
+        }
+
+        /// The real qwen35moe GQA split (`ssm.group_count 16`,
+        /// `ssm.state_size 128`, `ssm.inner_size 4096`, `time_step_rank 32`
+        /// -- `head_v_dim = 4096 / 32 = 128`, `group = 32 / 16 = 2`,
+        /// `head_k_dim = ssm.state_size = 128`, from
+        /// `proxima-model-interop/src/qwen35.rs`'s own `qwen35_ssm_shape`).
+        fn synthetic_gated_delta_net_gqa_program(
+            kv_heads: usize,
+            group: usize,
+            head_k_dim: usize,
+            head_v_dim: usize,
+        ) -> SyntheticProgram {
+            let mut program = Vec::new();
+            let num_v_heads = kv_heads * group;
+            let query_pre = leaf(&mut program, &[head_k_dim, kv_heads]);
+            let key_pre = leaf(&mut program, &[head_k_dim, kv_heads]);
+            let value = leaf(&mut program, &[head_v_dim, kv_heads, group]);
+            let gate = leaf(&mut program, &[kv_heads, group]);
+            let beta = leaf(&mut program, &[kv_heads, group]);
+            let state_in = leaf(&mut program, &[head_k_dim, head_v_dim, kv_heads, group]);
+            let inv_sqrt_key_dim = append(
+                &mut program,
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: Vec::new(),
+                    value: 1.0 / (head_k_dim as f32).sqrt(),
+                },
+            );
+            let query = broadcast_kv_heads(&mut program, query_pre, kv_heads as u32, group as u32);
+            let key = broadcast_kv_heads(&mut program, key_pre, kv_heads as u32, group as u32);
+
+            let (out, _state_out) = append_qwen35_delta_net_step(
+                &mut program,
+                query,
+                key,
+                value,
+                gate,
+                beta,
+                state_in,
+                inv_sqrt_key_dim,
+                "ug",
+            )
+            .expect("synthetic GQA gated-delta-net step builds");
+
+            let mut lcg = crate::test_support::Lcg(7);
+            let mut fill = |count: usize| -> Vec<f32> { (0..count).map(|_| lcg.next_unit()).collect() };
+            let inputs = alloc::vec![
+                (query_pre, fill(head_k_dim * kv_heads)),
+                (key_pre, fill(head_k_dim * kv_heads)),
+                (value, fill(head_v_dim * num_v_heads)),
+                (gate, fill(num_v_heads)),
+                (beta, fill(num_v_heads)),
+                (state_in, fill(head_k_dim * head_v_dim * num_v_heads)),
+            ];
+            SyntheticProgram {
+                program,
+                out,
+                inputs,
+            }
+        }
+
+        /// `head_k_dim = 128` sums 128 terms per reduce, wide enough that
+        /// `run_gdn_prefill_scan`'s own sequential accumulation and
+        /// `crate::cpu::run_reduce`'s own accumulation over the SAME
+        /// mathematical sum land on different (still IEEE-754-legal) f32
+        /// roundings -- floating-point addition is commutative but not
+        /// associative, and the two-term sums the small-shape test below
+        /// exercises (`head_k_dim = 2`) are too narrow to expose this at all.
+        /// Not this test's own bug: MEASURED max relative error across every
+        /// output element is checked instead of bit equality, at the same
+        /// `1e-5` bar `omega`'s own Metal-vs-CPU parity tests use.
+        #[test]
+        fn fused_and_unfused_gated_delta_net_agree_within_tolerance_at_real_qwen35moe_gqa_shape() {
+            let synthetic = synthetic_gated_delta_net_gqa_program(16, 2, 128, 128);
+            let shapes = shape::infer(&synthetic.program, &[])
+                .expect("real-shape GQA gated-delta-net program infers");
+
+            let unfused = bind_plain(
+                &synthetic.program,
+                &shapes,
+                &[synthetic.out],
+                NumericPolicy::bit_exact(),
+            )
+            .expect("unfused real-shape GQA program binds");
+            let fused = bind_with_fusion(
+                &synthetic.program,
+                &shapes,
+                &[synthetic.out],
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("fused real-shape GQA program binds");
+            assert!(
+                fused
+                    .iter()
+                    .any(|bound| matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. })),
+                "matcher must fire on the real qwen35moe GQA shape, got kinds {:?}",
+                resolved_kinds(&fused)
+            );
+
+            let unfused_buffers = run_resolved(
+                synthetic.program.len(),
+                &unfused,
+                synthetic.inputs.clone(),
+            );
+            let fused_buffers = run_resolved(synthetic.program.len(), &fused, synthetic.inputs);
+
+            let unfused_out = unfused_buffers[synthetic.out.0 as usize]
+                .as_ref()
+                .expect("unfused out present");
+            let fused_out = fused_buffers[synthetic.out.0 as usize]
+                .as_ref()
+                .expect("fused out present");
+            let max_relative_error = fused_out
+                .iter()
+                .zip(unfused_out)
+                .map(|(fused, unfused)| (fused - unfused).abs() / unfused.abs().max(1e-6))
+                .fold(0.0_f32, f32::max);
+            assert!(
+                max_relative_error <= 1e-5,
+                "fused GQA BoundOpKind::GatedDeltaNet must match the unfused chain within 1e-5 \
+                 relative error, got {max_relative_error}"
+            );
+        }
+
+        /// A small, hand-checkable GQA shape (2 kv heads, group of 3, 8x
+        /// smaller state than the real-shape test) -- catches an off-by-one
+        /// in the `kv_head = value_head / group` recovery that a 16x2 shape
+        /// could hide behind coincidental symmetry.
+        #[test]
+        fn fused_and_unfused_gated_delta_net_agree_bit_for_bit_at_small_gqa_shape() {
+            let synthetic = synthetic_gated_delta_net_gqa_program(2, 3, 2, 2);
+            let shapes = shape::infer(&synthetic.program, &[])
+                .expect("small GQA gated-delta-net program infers");
+
+            let unfused = bind_plain(
+                &synthetic.program,
+                &shapes,
+                &[synthetic.out],
+                NumericPolicy::bit_exact(),
+            )
+            .expect("unfused small GQA program binds");
+            let fused = bind_with_fusion(
+                &synthetic.program,
+                &shapes,
+                &[synthetic.out],
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("fused small GQA program binds");
+            assert!(
+                fused
+                    .iter()
+                    .any(|bound| matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. })),
+                "matcher must fire on a small GQA shape, got kinds {:?}",
+                resolved_kinds(&fused)
+            );
+
+            let unfused_buffers = run_resolved(
+                synthetic.program.len(),
+                &unfused,
+                synthetic.inputs.clone(),
+            );
+            let fused_buffers = run_resolved(synthetic.program.len(), &fused, synthetic.inputs);
+
+            let unfused_out = unfused_buffers[synthetic.out.0 as usize]
+                .as_ref()
+                .expect("unfused out present");
+            let fused_out = fused_buffers[synthetic.out.0 as usize]
+                .as_ref()
+                .expect("fused out present");
+            assert_eq!(
+                fused_out, unfused_out,
+                "fused small-shape GQA BoundOpKind::GatedDeltaNet must be bit-identical to the unfused chain"
+            );
         }
 
         #[test]
