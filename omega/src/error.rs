@@ -52,6 +52,18 @@ pub enum EmitError {
     )]
     ScatterNotSupported { node: NodeId },
 
+    /// `proxima_tensor::bind`'s `gated-delta-net-fusion` matcher (default-off)
+    /// is the only producer of [`proxima_tensor::BoundOpKind::GatedDeltaNet`]
+    /// -- `proxima_tensor::cpu::run_gated_delta_net` already interprets it,
+    /// but no `msl`/`wgsl`/`cuda` renderer in this crate emits a kernel for
+    /// it yet, the same CPU-ahead-of-GPU gap [`Self::ScatterNotSupported`]
+    /// names for a forward scatter.
+    #[error(
+        "node {node} is a gated delta net op, which no GPU emitter in this crate supports yet \
+         -- proxima_tensor::cpu::run_gated_delta_net is CPU-only"
+    )]
+    GatedDeltaNetNotSupported { node: NodeId },
+
     /// `omega::execute`'s own upstream gate (`reject_unsupported_gpu_dtype`)
     /// never lets anything but `Float32`/`Float16` reach [`crate::msl::emit`]
     /// in practice, but [`crate::msl::emit`] is a public entry point a

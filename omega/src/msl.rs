@@ -1480,6 +1480,11 @@ fn emit_inner(
         } => render_scan(resolved, &entry, &quantized),
         BoundOpKind::Iota => render_iota(resolved, &entry),
         BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
+        BoundOpKind::GatedDeltaNet { .. } => {
+            return Err(EmitError::GatedDeltaNetNotSupported {
+                node: resolved.node,
+            });
+        }
     }?;
     // Coupled to `render_cached_attention`'s own final-store branch by
     // construction: whenever the rendered SOURCE writes the scratch layout
@@ -3245,6 +3250,11 @@ fn grid_threads(
             resolved.extents[..rank.saturating_sub(1)].iter().product()
         }
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => resolved.extents.iter().product(),
+        BoundOpKind::GatedDeltaNet { .. } => {
+            return Err(EmitError::GatedDeltaNetNotSupported {
+                node: resolved.node,
+            });
+        }
     };
     Ok(threads)
 }
@@ -3430,6 +3440,15 @@ fn entry_name(resolved: &BoundOp) -> String {
         BoundOpKind::Constant { value } => {
             format!("omega_constant_r{rank}_v{:08x}", value.to_bits())
         }
+        BoundOpKind::GatedDeltaNet {
+            kv_heads,
+            num_v_heads,
+            head_k_dim,
+            head_v_dim,
+            ..
+        } => format!(
+            "omega_gated_delta_net_h{kv_heads}_v{num_v_heads}_k{head_k_dim}_d{head_v_dim}"
+        ),
     };
     let gather_bits: String = resolved
         .operands()
