@@ -621,4 +621,43 @@ pub enum InteropError {
         expected: usize,
         found: usize,
     },
+
+    /// `crate::generate::LoadedModel::load_inner`'s load-time residency
+    /// gate: `mapped_bytes` (the checkpoint mapping's own length, registered
+    /// whole as one no-copy `MTLBuffer`) exceeds `available_bytes` (the
+    /// host's own reported limit minus OS headroom, the same
+    /// `crate::memory_fit::HostMemoryLimit` shape
+    /// [`Self::MemoryBudgetExceeded`] already reads). Unlike that error,
+    /// there is no reduced value to retry -- a whole-mapping no-copy buffer
+    /// is either entirely resident or it is not, so the bounded alternative
+    /// is a caller-configured `ServingConfig::qwen35moe_residency_budget_bytes`
+    /// pre-gather instead of the whole-mapping registration this gate
+    /// refused. Set `PROXIMA_MAPPING_FIT_OVERRIDE=1` to skip this gate for a
+    /// measurement run; never for a served request.
+    // same dual gate as `Self::MemoryBudgetExceeded` (`crate::memory_fit`'s
+    // own doc): the module is forced into a bare `cargo test` build
+    // regardless of features, so a variant it constructs must stay
+    // reachable there too.
+    #[cfg(any(test, all(feature = "std", feature = "metal")))]
+    #[error(
+        "checkpoint mapping of {mapped_bytes} bytes exceeds the {available_bytes}-byte resident \
+         budget; pre-gather into qwen35moe_residency_budget_bytes instead of a whole-mapping \
+         no-copy buffer, or set PROXIMA_MAPPING_FIT_OVERRIDE=1 for a measurement run"
+    )]
+    MappingExceedsResidentBudget {
+        mapped_bytes: u64,
+        available_bytes: u64,
+    },
+
+    /// `crate::mapping_residency::prove_resident` touched every page of the
+    /// checkpoint mapping ([`crate::loader::prefault`]) and re-checked with
+    /// `mincore(2)` once, and `bytes_missing` of `bytes_total` mapped bytes
+    /// were still not resident -- the exact silent-zero-read hazard ROW 533
+    /// named (`proxima-tensor/docs/discipline.md`): a no-copy GPU mapping
+    /// reads a non-resident page as zero rather than faulting, so this
+    /// fails the load instead of letting `omega::backend::register_checkpoint_mapping`
+    /// hand a partially-resident mapping to the first dispatch.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[error("checkpoint mapping still has {bytes_missing} of {bytes_total} bytes non-resident after prefault")]
+    MappingNotResident { bytes_missing: u64, bytes_total: u64 },
 }
