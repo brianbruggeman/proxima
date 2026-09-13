@@ -1184,6 +1184,7 @@ fn arena_node_kind_label(kind: &BoundOpKind) -> &'static str {
         BoundOpKind::Iota => "iota",
         BoundOpKind::Constant { .. } => "constant",
         BoundOpKind::CachedAttention { .. } => "cached_attention",
+        BoundOpKind::GatedDeltaNet { .. } => "gated_delta_net",
     }
 }
 
@@ -6557,6 +6558,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
             instrument::record_op_kind(instrument::OpKind::CachedAttention);
             run_cached_attention(resolved, buffers, output)
         }
+        BoundOpKind::GatedDeltaNet { .. } => run_gated_delta_net(resolved, buffers, output),
         BoundOpKind::Elementwise { .. } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Elementwise);
@@ -6991,6 +6993,87 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
     }
 }
 
+/// [`BoundOpKind::GatedDeltaNet`]'s whole computation: unpack the bound
+/// shape into [`gdn::GdnPrefillShape`]/[`gdn::GdnPrefillScan`] and call
+/// [`gdn::run_gdn_prefill_scan`] directly — no reimplementation
+/// (`BoundOpKind::GatedDeltaNet`'s own doc, and the design's own §2/§4). This
+/// slice's matched shape (single physical head axis, `heads` innermost, no
+/// GQA broadcast split — [`gated_delta_net_candidates`]'s own doc states the
+/// scope) happens to already match [`gdn::run_gdn_prefill_scan`]'s own
+/// operand layout convention exactly, so every operand is read as a plain
+/// contiguous slice with no gather/scatter reshape — REJECTED here (not
+/// silently reshaped) if a caller ever binds a non-natural stride, since
+/// that would mean this slice's scope assumption stopped holding.
+///
+/// `state` is copied into a scratch buffer rather than mutated in place:
+/// `gated_delta_net_candidates` only fuses when `state_out` is not itself a
+/// requested/effective output (its own doc), so no caller in this crate
+/// today reads the recurrence's updated state back out of this call — the
+/// interop wiring that would make the state buffer genuinely caller-shared,
+/// in place, is explicitly a later slice (design doc §2's own `state_in`/
+/// `state_out` note). One heap allocation per call, sized `head_k_dim *
+/// head_v_dim * heads` (the state's own size) — a documented, scoped
+/// exception to the zero-alloc hot-path default, not an oversight.
+fn run_gated_delta_net<B: Deref<Target = [f32]> + Sync>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let BoundOpKind::GatedDeltaNet {
+        operands,
+        n_tokens,
+        kv_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        inv_sqrt_key_dim,
+    } = &resolved.kind
+    else {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "gated delta net runner received another bound operation",
+        });
+    };
+    if *n_tokens != 1 || kv_heads != num_v_heads {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "gated delta net executor only supports this slice's decode, non-GQA shape",
+        });
+    }
+    let [query, key, value, gate, beta, state_in] = operands.as_slice() else {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "gated delta net requires exactly six affine, gather-free operands",
+        });
+    };
+    for (_, layout, lookup) in [query, key, value, gate, beta, state_in] {
+        if lookup.is_some() || layout.base != 0 || layout.strides.last().copied() != Some(1) {
+            return Err(TensorError::NotLowerable {
+                node: resolved.node,
+                reason: "gated delta net requires zero-based contiguous natural-order operands",
+            });
+        }
+    }
+    let shape = GdnPrefillShape {
+        positions: *n_tokens as usize,
+        key_dim: *head_k_dim as usize,
+        value_dim: *head_v_dim as usize,
+        heads: *num_v_heads as usize,
+    };
+    let mut state = buffer_of(buffers, state_in.0)?.to_vec();
+    run_gdn_prefill_scan(GdnPrefillScan {
+        shape,
+        query: buffer_of(buffers, query.0)?,
+        key: buffer_of(buffers, key.0)?,
+        value: buffer_of(buffers, value.0)?,
+        gate: buffer_of(buffers, gate.0)?,
+        beta: buffer_of(buffers, beta.0)?,
+        inv_sqrt_key_dim: *inv_sqrt_key_dim,
+        state: &mut state,
+        output,
+    })
+}
+
 /// [`BoundOpKind::Constant`]'s whole computation: every element is the same
 /// literal. Even simpler than [`run_iota`] — no operand reads, no body, and
 /// not even a dependence on position.
@@ -7029,6 +7112,7 @@ fn node_output_len(resolved: &BoundOp) -> usize {
             };
             query_rows as usize * kv_heads as usize * query_groups as usize * head_dim as usize
         }
+        BoundOpKind::GatedDeltaNet { .. } => element_count(&resolved.extents),
         // `output_axes` excludes the scattered axis entirely (its position
         // is data-dependent, never a pure projection — see
         // `bind::pure_projection_axes`), so the ordinary leading/width
@@ -21092,6 +21176,12 @@ fn run_typed_program<T: Element>(
                     reason: "cached attention binding is not wired into the typed executor",
                 });
             }
+            BoundOpKind::GatedDeltaNet { .. } => {
+                return Err(TensorError::NotLowerable {
+                    node: node.node,
+                    reason: "gated delta net binding is not wired into the typed executor",
+                });
+            }
             BoundOpKind::Elementwise { .. } => {
                 run_elementwise_typed(node, &buffers, &index_buffers, &mut output)?
             }
@@ -21245,6 +21335,12 @@ where
                         reason: "cached attention binding is not wired into the widened executor",
                     });
                 }
+                BoundOpKind::GatedDeltaNet { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "gated delta net binding is not wired into the widened executor",
+                    });
+                }
                 BoundOpKind::Elementwise { .. } => {
                     run_elementwise_typed(node, &buffers_in, &index_buffers, &mut output)?;
                 }
@@ -21284,6 +21380,12 @@ where
                     return Err(TensorError::NotLowerable {
                         node: node.node,
                         reason: "cached attention binding is not wired into the widened executor",
+                    });
+                }
+                BoundOpKind::GatedDeltaNet { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "gated delta net binding is not wired into the widened executor",
                     });
                 }
                 BoundOpKind::Elementwise { .. } => {
