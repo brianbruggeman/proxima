@@ -1914,6 +1914,7 @@ fn invalid_sidecar(reason: impl Into<String>) -> InteropError {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use arrayvec::ArrayVec;
