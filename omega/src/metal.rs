@@ -2658,10 +2658,25 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
     /// concurrent-dispatch-scheduled GPU thread race a still-in-flight one:
     /// RAW (an input was written since the last barrier), WAW (the output
     /// buffer was written since the last barrier), or WAR (the output
-    /// buffer was read since the last barrier — arena slot reuse).
+    /// buffer was read since the last barrier — arena slot reuse). Delegates
+    /// to [`classify`] so the boolean and the per-cause breakdown can never
+    /// drift apart.
     fn needs_barrier(&self, inputs: &[Id], output: Option<Id>) -> bool {
-        inputs.iter().any(|input| self.written.contains(input))
-            || output.is_some_and(|out| self.written.contains(&out) || self.read.contains(&out))
+        self.classify(inputs, output) != HazardClass::None
+    }
+
+    /// [`needs_barrier`]'s own decomposition into which single hazard
+    /// explains it, checked in the same order that `||` chain implies (a
+    /// RAW input hazard first).
+    fn classify(&self, inputs: &[Id], output: Option<Id>) -> HazardClass {
+        if inputs.iter().any(|input| self.written.contains(input)) {
+            return HazardClass::Raw;
+        }
+        match output {
+            Some(out) if self.written.contains(&out) => HazardClass::Waw,
+            Some(out) if self.read.contains(&out) => HazardClass::War,
+            _ => HazardClass::None,
+        }
     }
 
     /// Clears both sets — called immediately after a barrier is actually
@@ -2680,6 +2695,48 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
             self.written.insert(out);
         }
         self.read.extend(inputs.iter().copied());
+    }
+
+}
+
+/// [`HazardTracker::classify`]'s result -- ROW 539's per-barrier attribution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HazardClass {
+    /// No barrier needed.
+    None,
+    /// An input was written since the last barrier -- a genuine dataflow
+    /// edge between the writer and this reader.
+    Raw,
+    /// The output identity was written since the last barrier.
+    Waw,
+    /// The output identity was read since the last barrier -- the classic
+    /// arena-slot-reuse shape: a prior op's input buffer handed straight
+    /// back out as a later, unrelated op's output.
+    War,
+}
+
+/// Attributes one fired barrier to its [`HazardClass`] counter and, for a
+/// WAW/WAR barrier, to whether the colliding identity is a
+/// [`BufferArena`]-recycled slot (a false dependency slot reuse manufactured
+/// between two data-independent ops) or a persistent/output-placed buffer
+/// genuinely written more than once.
+#[cfg(feature = "instrument")]
+fn record_hazard_class(class: HazardClass, arena_recycled: bool) {
+    match class {
+        HazardClass::None => {}
+        HazardClass::Raw => counter!(BARRIERS_RAW, 1),
+        HazardClass::Waw | HazardClass::War => {
+            if class == HazardClass::Waw {
+                counter!(BARRIERS_WAW, 1);
+            } else {
+                counter!(BARRIERS_WAR, 1);
+            }
+            if arena_recycled {
+                counter!(BARRIERS_WAW_WAR_ARENA_RECYCLED, 1);
+            } else {
+                counter!(BARRIERS_WAW_WAR_PERSISTENT, 1);
+            }
+        }
     }
 }
 
@@ -3339,6 +3396,14 @@ fn execute_plan_with_placements_inner(
                 }
             }
         }
+        // ROW 539: whether a `placement` below comes from the arena rather
+        // than a caller-owned output-placed buffer -- the arena branch is
+        // the one whose slot may be shared with an earlier, unrelated
+        // position (`BufferArena::slot_is_recycled`), while an output-placed
+        // buffer is a persistent identity the caller owns for the plan's
+        // whole life.
+        #[cfg(feature = "instrument")]
+        let placement_is_arena_sourced = !output_placed.contains_key(&bound.node);
         let placement = match output_placed.get(&bound.node).copied() {
             Some(placement) => Some(placement),
             None => arena_placement(plan, position)?,
@@ -3449,6 +3514,15 @@ fn execute_plan_with_placements_inner(
                     ) || crate::msl::hazard_write_node(bindings_for_hazard).is_none()
                 );
                 let hazard_output = Retained::as_ptr(&resolved.0);
+                // Read-only, computed BEFORE `hazard_step` mutates the
+                // tracker below, so it sees the exact same state
+                // `hazard_step`'s own internal check will -- `classify`
+                // never mutates, so precomputing it here for the counter
+                // breakdown cannot change what `hazard_step` decides.
+                #[cfg(feature = "instrument")]
+                let hazard_class = hazard_state
+                    .tracker
+                    .classify(&hazard_state.inputs, Some(hazard_output));
                 if hazard_step(
                     &mut hazard_state.tracker,
                     &hazard_state.inputs,
@@ -3456,6 +3530,15 @@ fn execute_plan_with_placements_inner(
                 ) {
                     encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
                     counter!(BARRIERS_EMITTED, 1);
+                    #[cfg(feature = "instrument")]
+                    {
+                        let arena_recycled = placement_is_arena_sourced
+                            && plan
+                                .arena
+                                .get()
+                                .is_some_and(|arena| arena.slot_is_recycled(position));
+                        record_hazard_class(hazard_class, arena_recycled);
+                    }
                 }
                 Some(resolved)
             } else {
@@ -8104,6 +8187,24 @@ pub struct MetalStageTotals {
     /// [`DispatchType::Serial`], the count of dataflow hazards the private
     /// `HazardTracker` actually found on [`DispatchType::Concurrent`].
     pub barriers_emitted: u64,
+    /// [`BARRIERS_RAW`]'s own per-step delta -- barriers caused by a genuine
+    /// dataflow edge (an input was written since the last barrier).
+    pub barriers_raw: u64,
+    /// [`BARRIERS_WAW`]'s own per-step delta -- barriers caused by this op's
+    /// output identity having been written since the last barrier.
+    pub barriers_waw: u64,
+    /// [`BARRIERS_WAR`]'s own per-step delta -- barriers caused by this op's
+    /// output identity having been read since the last barrier.
+    pub barriers_war: u64,
+    /// [`BARRIERS_WAW_WAR_ARENA_RECYCLED`]'s own per-step delta -- of
+    /// `barriers_waw + barriers_war`, how many collided on a
+    /// [`BufferArena`] slot shared with an earlier, unrelated position (a
+    /// false dependency slot reuse manufactured).
+    pub barriers_waw_war_arena_recycled: u64,
+    /// [`BARRIERS_WAW_WAR_PERSISTENT`]'s own per-step delta -- of
+    /// `barriers_waw + barriers_war`, how many collided on a persistent or
+    /// output-placed buffer genuinely written more than once.
+    pub barriers_waw_war_persistent: u64,
     pub expert_source_cache_hits: u64,
     pub expert_source_cache_misses: u64,
     pub expert_source_cache_cold_misses: u64,
@@ -8166,6 +8267,11 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         output_buffer_allocated_bytes: OUTPUT_BUFFER_ALLOCATED_BYTES.snapshot_and_reset(),
         plan_uniform_writes: PLAN_UNIFORM_WRITES.snapshot_and_reset(),
         barriers_emitted: BARRIERS_EMITTED.snapshot_and_reset(),
+        barriers_raw: BARRIERS_RAW.snapshot_and_reset(),
+        barriers_waw: BARRIERS_WAW.snapshot_and_reset(),
+        barriers_war: BARRIERS_WAR.snapshot_and_reset(),
+        barriers_waw_war_arena_recycled: BARRIERS_WAW_WAR_ARENA_RECYCLED.snapshot_and_reset(),
+        barriers_waw_war_persistent: BARRIERS_WAW_WAR_PERSISTENT.snapshot_and_reset(),
         expert_source_cache_hits: EXPERT_SOURCE_CACHE_HITS.snapshot_and_reset(),
         expert_source_cache_misses: EXPERT_SOURCE_CACHE_MISSES.snapshot_and_reset(),
         expert_source_cache_cold_misses: EXPERT_SOURCE_CACHE_COLD_MISSES.snapshot_and_reset(),
@@ -10013,6 +10119,28 @@ pub static PLAN_UNIFORM_WRITES: Counter = Counter::new("omega.metal.plan_uniform
 /// [`DispatchType::Serial`] rather than not existing at all.
 pub static BARRIERS_EMITTED: Counter = Counter::new("omega.metal.concurrent.barriers_emitted");
 
+/// [`BARRIERS_EMITTED`]'s own hazard-cause breakdown -- ROW 539's question:
+/// of the barriers a concurrent-dispatch step pays, how many are a genuine
+/// dataflow edge (RAW) versus an output identity collision (WAW/WAR), and of
+/// those, how many are a [`BufferArena`] slot handed to a new, unrelated node
+/// while a prior user of that same physical buffer has not yet been
+/// barriered off (a false dependency slot reuse manufactures) versus a
+/// persistent/output-placed identity that is genuinely written more than
+/// once. `instrument`-only: production only ever needed the boolean
+/// [`HazardTracker::needs_barrier`] already gives it.
+#[cfg(feature = "instrument")]
+pub static BARRIERS_RAW: Counter = Counter::new("omega.metal.concurrent.barriers_raw");
+#[cfg(feature = "instrument")]
+pub static BARRIERS_WAW: Counter = Counter::new("omega.metal.concurrent.barriers_waw");
+#[cfg(feature = "instrument")]
+pub static BARRIERS_WAR: Counter = Counter::new("omega.metal.concurrent.barriers_war");
+#[cfg(feature = "instrument")]
+pub static BARRIERS_WAW_WAR_ARENA_RECYCLED: Counter =
+    Counter::new("omega.metal.concurrent.barriers_waw_war_arena_recycled");
+#[cfg(feature = "instrument")]
+pub static BARRIERS_WAW_WAR_PERSISTENT: Counter =
+    Counter::new("omega.metal.concurrent.barriers_waw_war_persistent");
+
 /// Entries `UNIFORM_BUFFERS` holds right now -- the direct witness for D6
 /// (round-4 synth S2): a caller that wants to know whether the cache grows
 /// across a decode run reads this once per step rather than inferring
@@ -10285,6 +10413,12 @@ struct BufferArena {
     /// Live-bytes high-water mark reached while building -- MG-3's own
     /// witness against [`ARENA_TRANSIENT_CAP`].
     peak_bytes: usize,
+    /// Per-slot count of positions ever assigned that slot -- `instrument`-
+    /// only, ROW 539's witness for whether a WAW/WAR barrier's colliding
+    /// identity is a genuinely recycled slot (`> 1`) rather than a slot this
+    /// plan only ever assigned once. Parallel to `slots`/`slot_bytes`.
+    #[cfg(feature = "instrument")]
+    slot_occupancy: Vec<usize>,
 }
 
 #[cfg(feature = "metal-plan-stable-buffers")]
@@ -10309,6 +10443,14 @@ impl BufferArena {
     /// silently reusing an undersized one.
     fn slot_byte_len(&self, slot: usize) -> usize {
         self.slot_bytes[slot]
+    }
+
+    /// True when `position`'s own slot was assigned to more than one
+    /// position over this plan's whole program -- a recycled slot, ROW 539's
+    /// arena-reuse witness for [`record_hazard_class`].
+    #[cfg(feature = "instrument")]
+    fn slot_is_recycled(&self, position: usize) -> bool {
+        self.slot_occupancy[self.position_slot[position]] > 1
     }
 }
 
@@ -10380,6 +10522,8 @@ fn build_buffer_arena(
     let mut node_slot: BTreeMap<NodeId, usize> = BTreeMap::new();
     let mut live_bytes: usize = 0;
     let mut peak_bytes: usize = 0;
+    #[cfg(feature = "instrument")]
+    let mut slot_occupancy: Vec<usize> = Vec::new();
 
     for (position, bound) in resolved.iter().enumerate() {
         let byte_length = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
@@ -10393,9 +10537,15 @@ fn build_buffer_arena(
                     bound.dtype,
                 )?);
                 slot_bytes.push(byte_length);
+                #[cfg(feature = "instrument")]
+                slot_occupancy.push(0);
                 index
             }
         };
+        #[cfg(feature = "instrument")]
+        {
+            slot_occupancy[slot] += 1;
+        }
         // every slot assignment re-occupies `byte_length` bytes, whether the
         // slot is freshly allocated or pulled back from the free list -- a
         // reused slot was subtracted out of `live_bytes` when its PREVIOUS
@@ -10447,6 +10597,8 @@ fn build_buffer_arena(
         slot_bytes,
         position_slot,
         peak_bytes,
+        #[cfg(feature = "instrument")]
+        slot_occupancy,
     })
 }
 
@@ -12317,6 +12469,11 @@ mod hazard_tracker_tests {
         Binding, DeviceBuffer, HazardTracker, MetalError, NodeId, PackedOperands, hazard_step,
         kernel_dispatch_shape, resolve_hazard_inputs,
     };
+    #[cfg(feature = "instrument")]
+    use super::{
+        BARRIERS_RAW, BARRIERS_WAR, BARRIERS_WAW, BARRIERS_WAW_WAR_ARENA_RECYCLED,
+        BARRIERS_WAW_WAR_PERSISTENT, HazardClass, record_hazard_class,
+    };
     use crate::msl::{hazard_read_nodes, hazard_write_node};
 
     /// `a -> b`, `a -> c` (independent, both only read `a`), then `b, c ->
@@ -12369,6 +12526,67 @@ mod hazard_tracker_tests {
         assert!(
             hazard_step(&mut hazards, &[], "slot0"),
             "writing into a buffer read since the last barrier must be flagged WAR"
+        );
+    }
+
+    /// ROW 539's own counters: a synthetic 3-op sequence with exactly one
+    /// RAW barrier (`b` reads `a`, which `a`'s own encode just wrote) and one
+    /// arena-reuse WAR barrier (a later op's output is placed back into `a`'s
+    /// now-read-since-barrier identity, the same shape
+    /// [`arena_slot_reuse_after_a_read_emits_a_war_barrier`] drives) --
+    /// exactly the scenario [`record_hazard_class`] exists to attribute.
+    /// `BARRIERS_RAW`/`BARRIERS_WAR`/etc are process-wide statics; nextest's
+    /// per-test process isolation is what keeps a bare `snapshot_and_reset`
+    /// deterministic against any other test incrementing the same counters.
+    #[cfg(feature = "instrument")]
+    #[test]
+    fn hazard_class_counters_attribute_one_raw_and_one_arena_reuse_war() {
+        let mut hazards: HazardTracker<&str> = HazardTracker::new();
+
+        // op0: writes `a`, no inputs -> no hazard, nothing to attribute.
+        let class0 = hazards.classify(&[], Some("a"));
+        assert_eq!(class0, HazardClass::None);
+        assert!(!hazard_step(&mut hazards, &[], "a"));
+
+        // op1: reads `a` (written by op0 since the last barrier) and writes
+        // `b` -> RAW, a genuine dataflow edge, never arena-attributed.
+        let class1 = hazards.classify(&["a"], Some("b"));
+        assert_eq!(class1, HazardClass::Raw);
+        assert!(hazard_step(&mut hazards, &["a"], "b"));
+        record_hazard_class(class1, false);
+
+        // op2: no inputs, output placed by the arena back into `a` -- `a`
+        // was READ by op1 since the last barrier (op1's own RAW reset the
+        // tracker first), so this is a WAR hazard on a recycled arena slot.
+        let class2 = hazards.classify(&[], Some("a"));
+        assert_eq!(class2, HazardClass::War);
+        assert!(hazard_step(&mut hazards, &[], "a"));
+        record_hazard_class(class2, true);
+
+        assert_eq!(
+            BARRIERS_RAW.snapshot_and_reset(),
+            1,
+            "op1 contributed the one RAW barrier"
+        );
+        assert_eq!(
+            BARRIERS_WAR.snapshot_and_reset(),
+            1,
+            "op2 contributed the one WAR barrier"
+        );
+        assert_eq!(
+            BARRIERS_WAW.snapshot_and_reset(),
+            0,
+            "no WAW hazard in this sequence"
+        );
+        assert_eq!(
+            BARRIERS_WAW_WAR_ARENA_RECYCLED.snapshot_and_reset(),
+            1,
+            "op2's WAR fired on the arena-recycled `a` slot"
+        );
+        assert_eq!(
+            BARRIERS_WAW_WAR_PERSISTENT.snapshot_and_reset(),
+            0,
+            "no WAW/WAR fired on a persistent identity in this sequence"
         );
     }
 
