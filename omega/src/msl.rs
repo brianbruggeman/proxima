@@ -1488,11 +1488,7 @@ fn emit_inner(
         } => render_scan(resolved, &entry, &quantized),
         BoundOpKind::Iota => render_iota(resolved, &entry),
         BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
-        BoundOpKind::GatedDeltaNet { .. } => {
-            return Err(EmitError::GatedDeltaNetNotSupported {
-                node: resolved.node,
-            });
-        }
+        BoundOpKind::GatedDeltaNet { .. } => render_gated_delta_net(resolved, &entry),
     }?;
     // Coupled to `render_cached_attention`'s own final-store branch by
     // construction: whenever the rendered SOURCE writes the scratch layout
@@ -3329,11 +3325,15 @@ fn grid_threads(
             resolved.extents[..rank.saturating_sub(1)].iter().product()
         }
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => resolved.extents.iter().product(),
-        BoundOpKind::GatedDeltaNet { .. } => {
-            return Err(EmitError::GatedDeltaNetNotSupported {
-                node: resolved.node,
-            });
-        }
+        // one thread per `(v_head, value_row)` pair -- `render_gated_delta_net`'s
+        // own doc; `tiled_gemm_threadgroup_width`'s sibling arm widens the
+        // threadgroup to exactly `head_v_dim` so `num_v_heads` threadgroups
+        // land, one per head.
+        BoundOpKind::GatedDeltaNet {
+            num_v_heads,
+            head_v_dim,
+            ..
+        } => num_v_heads * head_v_dim,
     };
     Ok(threads)
 }
@@ -3974,6 +3974,115 @@ fn render_constant(resolved: &BoundOp, entry: &str, value: f32) -> Result<String
         msl_literal(value)
     ));
     source.push_str("}\n");
+    Ok(source)
+}
+
+/// [`BoundOpKind::GatedDeltaNet`]'s fused kernel -- one thread per
+/// `(v_head, value_row)` pair, the state row for that pair resident in
+/// registers across the whole `n_tokens` loop, mirroring llama.cpp's own
+/// fused Metal kernel (`gated_delta_net.metal:8-141`) and ported line for
+/// line from `proxima_tensor::gdn::run_gdn_prefill_scan` -- the SAME scalar
+/// loop `crate::cpu::run_gated_delta_net` (via that function) already runs
+/// on CPU, so this parity test's oracle and this kernel compute the exact
+/// same arithmetic in the exact same order (design doc `fused-gdn-kernel.md`
+/// §2/§4). Dispatch is `num_v_heads` threadgroups of `head_v_dim` threads
+/// each (`grid_threads`/`tiled_gemm_threadgroup_width`'s own
+/// `GatedDeltaNet` arms); `thread_position_in_grid = vh * head_v_dim + row`
+/// under `dispatchThreads_threadsPerThreadgroup`'s linear grouping (the
+/// same derivation `render_cached_attention`'s own doc uses), so `vh`/`row`
+/// recover cleanly from `gid` alone with no extra kernel parameter.
+///
+/// `kv_heads`/`num_v_heads`/`head_k_dim`/`head_v_dim` are baked `constexpr`
+/// -- they size the register array and the dispatch grid, and
+/// [`crate::identity::kernel_identity`]'s own `GatedDeltaNet` arm keys the
+/// pipeline cache on exactly these four. `n_tokens`,
+/// `query_key_head_stride`, `query_key_dim_stride`, and `inv_sqrt_key_dim`
+/// stay genuine runtime uniforms instead: two structurally-identical binds
+/// may legitimately carry different strides (`BoundOpKind::GatedDeltaNet`'s
+/// own doc on the pre-/post-`repeat_kv_heads` addressing split), so baking
+/// them would fragment the pipeline cache for values the kernel body can
+/// read once, cheaply, from a buffer. `inv_sqrt_key_dim` travels as raw
+/// bits (`as_type<float>`, the same reinterpret [`crate::cpu`]'s dequant
+/// path already relies on) since every other uniform field here is `long`.
+///
+/// `state` is bound at the SAME buffer identity as `query`/.../`beta`'s own
+/// `state_in` operand (`BoundOpKind::GatedDeltaNet`'s own doc) but declared
+/// non-`const` here: the kernel reads the caller's state once per thread at
+/// entry and writes the updated row back in place at exit, into that same
+/// device buffer -- `crate::metal`'s dispatch arm registers this buffer as
+/// both read and written with the hazard tracker accordingly.
+fn render_gated_delta_net(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
+    let BoundOpKind::GatedDeltaNet {
+        kv_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        ..
+    } = &resolved.kind
+    else {
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "gated_delta_net",
+            found: resolved.kind.name(),
+        });
+    };
+    let head_k_dim_max = crate::sized::GATED_DELTA_NET_HEAD_K_DIM_MAX;
+    if *head_k_dim > head_k_dim_max {
+        return Err(EmitError::GatedDeltaNetHeadKDimExceedsCap {
+            node: resolved.node,
+            head_k_dim: *head_k_dim,
+            cap: head_k_dim_max,
+        });
+    }
+
+    let mut source = String::new();
+    preamble(&mut source);
+    source.push_str(
+        "struct Uniforms { long n_tokens; long query_key_head_stride; long query_key_dim_stride; long inv_sqrt_key_dim_bits; };\n\n",
+    );
+    source.push_str(&format!(
+        "kernel void {entry}(device const float* query [[buffer(0)]], device const float* key [[buffer(1)]], device const float* value [[buffer(2)]], device const float* gate [[buffer(3)]], device const float* beta [[buffer(4)]], device float* state [[buffer(5)]], device float* out [[buffer(6)]], constant Uniforms& u [[buffer(7)]], uint gid [[thread_position_in_grid]]) {{\n"
+    ));
+    source.push_str(&format!(
+        "    constexpr long kv_heads = {kv_heads}; constexpr long num_v_heads = {num_v_heads}; \
+         constexpr long head_k_dim = {head_k_dim}; constexpr long head_v_dim = {head_v_dim}; \
+         constexpr long group = num_v_heads / kv_heads; constexpr long max_head_k_dim = {head_k_dim_max};\n"
+    ));
+    source.push_str(
+        "    const long vh = (long)gid / head_v_dim;\n\
+         const long row = (long)gid % head_v_dim;\n\
+         if (vh >= num_v_heads) { return; }\n\
+         const long kh = vh / group;\n\
+         const long n_tokens = u.n_tokens;\n\
+         const long qk_head_stride = u.query_key_head_stride;\n\
+         const long qk_dim_stride = u.query_key_dim_stride;\n\
+         const float inv_sqrt_key_dim = as_type<float>((uint)u.inv_sqrt_key_dim_bits);\n\
+         float state_row[max_head_k_dim];\n\
+         for (long i = 0; i < head_k_dim; i++) {\n\
+         \tstate_row[i] = state[(i * head_v_dim + row) * num_v_heads + vh];\n\
+         }\n\
+         for (long t = 0; t < n_tokens; t++) {\n\
+         \tconst float decay = exp(gate[t * num_v_heads + vh]);\n\
+         \tconst long key_row_base = t * kv_heads * head_k_dim + kh * qk_head_stride;\n\
+         \tfloat predicted = 0.0;\n\
+         \tfor (long i = 0; i < head_k_dim; i++) {\n\
+         \t\tstate_row[i] *= decay;\n\
+         \t\tpredicted += state_row[i] * key[key_row_base + i * qk_dim_stride];\n\
+         \t}\n\
+         \tconst long vout = (t * head_v_dim + row) * num_v_heads + vh;\n\
+         \tconst float delta = (value[vout] - predicted) * beta[t * num_v_heads + vh];\n\
+         \tfloat readout = 0.0;\n\
+         \tfor (long i = 0; i < head_k_dim; i++) {\n\
+         \t\tstate_row[i] += key[key_row_base + i * qk_dim_stride] * delta;\n\
+         \t\treadout += state_row[i] * (query[key_row_base + i * qk_dim_stride] * inv_sqrt_key_dim);\n\
+         \t}\n\
+         \tout[vout] = readout;\n\
+         }\n\
+         for (long i = 0; i < head_k_dim; i++) {\n\
+         \tstate[(i * head_v_dim + row) * num_v_heads + vh] = state_row[i];\n\
+         }\n\
+         }\n",
+    );
     Ok(source)
 }
 
@@ -7993,6 +8102,15 @@ fn tiled_gemm_threadgroup_width(
     quantized: &[Option<PackedCodec>],
     numeric_policy: NumericPolicy,
 ) -> Option<u64> {
+    // `head_v_dim` threads per threadgroup -- correctness-load-bearing, not
+    // an occupancy hint: `grid_threads`' own `GatedDeltaNet` arm dispatches
+    // `num_v_heads * head_v_dim` threads total, and this width is what makes
+    // `dispatchThreads_threadsPerThreadgroup`'s linear grouping land every
+    // one of `head_v_dim` value rows for a head in the SAME threadgroup as
+    // that head's own `vh` (`render_gated_delta_net`'s own doc).
+    if let BoundOpKind::GatedDeltaNet { head_v_dim, .. } = &resolved.kind {
+        return Some(*head_v_dim);
+    }
     // `query_groups * SIMD_WIDTH` threads per threadgroup -- one simdgroup
     // per query head sharing this kv_head, cooperatively loading that
     // kv_head's K/V row once per key into `threadgroup` memory instead of

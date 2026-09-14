@@ -135,6 +135,15 @@ cached-attention-streaming = [
     "proxima-tensor/cached-attention-streaming",
     "omega?/cached-attention-streaming",
 ]
+# Passthrough to `proxima-tensor/gated-delta-net-fusion` and
+# `omega/gated-delta-net-fusion` -- same shape as `cached-attention-streaming`
+# above: default-off, individually selectable so a caller can exercise the
+# fused `BoundOpKind::GatedDeltaNet` on CPU alone, without `metal`.
+gated-delta-net-fusion = [
+    "dep:omega",
+    "proxima-tensor/gated-delta-net-fusion",
+    "omega?/gated-delta-net-fusion",
+]
 # Passthrough to `proxima-tensor/reduce-epilogue-fusion` and
 # `omega/reduce-epilogue-fusion` -- folded into `metal`'s default shape above
 # but kept individually selectable so this crate's own harness can exercise

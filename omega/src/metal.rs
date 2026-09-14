@@ -3540,6 +3540,23 @@ fn execute_plan_with_placements_inner(
                         record_hazard_class(hazard_class, arena_recycled);
                     }
                 }
+                // `render_gated_delta_net` writes its `state_in` operand's
+                // buffer in place, in ADDITION to `bound.node`'s own output
+                // (`hazard_output` above) -- a second write this tracker's
+                // single-`output` `hazard_step` call cannot see. Recording
+                // it here, unconditionally (not gated behind the barrier
+                // check above), marks that buffer `written` so a LATER op in
+                // this same encoder that reads or writes it takes the RAW/
+                // WAW/WAR branch on its own `hazard_step` call rather than
+                // racing this dispatch's in-place update.
+                if let BoundOpKind::GatedDeltaNet { operands, .. } = &bound.kind
+                    && let Some(state_node) = operands.as_slice().get(5).map(|operand| operand.0)
+                    && let Some((state_buffer, _offset)) = device_buffers.get(&state_node)
+                {
+                    hazard_state
+                        .tracker
+                        .record(&[], Some(Retained::as_ptr(state_buffer)));
+                }
                 Some(resolved)
             } else {
                 None
@@ -6705,16 +6722,11 @@ fn prepare(
     // own `proxima-tensor` dependency, but reachable through Cargo feature
     // unification whenever another workspace member turns it on against the
     // same `proxima-tensor`) is the only producer of
-    // `BoundOpKind::GatedDeltaNet` -- no `msl`/`wgsl`/`cuda` renderer here
-    // emits a kernel for it yet (`crate::msl::emit`'s own
-    // `GatedDeltaNetNotSupported` gate), so reject it here, at the one place
-    // every Metal entry point resolves its program, instead of letting it
-    // surface deep inside kernel emission with a less specific error.
-    for bound in &resolved {
-        if matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. }) {
-            return Err(EmitError::GatedDeltaNetNotSupported { node: bound.node }.into());
-        }
-    }
+    // `BoundOpKind::GatedDeltaNet` -- `crate::msl::render_gated_delta_net`
+    // now emits a real kernel for it, so this Metal path dispatches it like
+    // any other op; `wgsl`/`cuda` still reject it (their own `EmitError`
+    // gates), the CPU-and-Metal-ahead-of-those-two-backends gap this crate
+    // already carries for other fused kinds.
     // `BoundOpBuilder::finish` (`proxima-tensor`'s `bind.rs`) flushes every
     // held elementwise op -- requested output or not -- at the very END of
     // the walk, ascending by `NodeId` among themselves, regardless of where
@@ -7188,12 +7200,12 @@ fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
             (2 + outer_rank_len + operand_count + operand_count * rank_len + 1 + rank_len) * WORD
                 + gather_uniform_byte_len(gather, rank_len)
         }
-        // `pack_uniforms_into`'s own `GatedDeltaNet` arm rejects with
-        // `EmitError::GatedDeltaNetNotSupported` before this diagnostic
-        // byte-length estimate is ever consulted for one -- no renderer in
-        // this crate emits a kernel for it yet, so there is no uniform
-        // layout to size.
-        BoundOpKind::GatedDeltaNet { .. } => WORD,
+        // Mirrors `render_gated_delta_net`'s own `struct Uniforms`: four
+        // `long` fields (`n_tokens`, `query_key_head_stride`,
+        // `query_key_dim_stride`, `inv_sqrt_key_dim_bits`) -- `kv_heads`/
+        // `num_v_heads`/`head_k_dim`/`head_v_dim` are baked `constexpr`
+        // instead (that function's own doc), so they never widen this blob.
+        BoundOpKind::GatedDeltaNet { .. } => 4 * WORD,
     }
 }
 
@@ -7230,10 +7242,42 @@ fn pack_uniforms_into(
             pack_leaf_uniforms(bound, scratch);
             Ok(())
         }
-        BoundOpKind::GatedDeltaNet { .. } => Err(EmitError::GatedDeltaNetNotSupported {
-            node: bound.node,
-        }),
+        BoundOpKind::GatedDeltaNet {
+            n_tokens,
+            query_key_head_stride,
+            query_key_dim_stride,
+            inv_sqrt_key_dim,
+            ..
+        } => {
+            pack_gated_delta_net_uniforms(
+                *n_tokens,
+                *query_key_head_stride,
+                *query_key_dim_stride,
+                *inv_sqrt_key_dim,
+                scratch,
+            );
+            Ok(())
+        }
     }
+}
+
+/// Mirrors `render_gated_delta_net`'s own `struct Uniforms` byte-for-byte,
+/// in field order: `n_tokens`, `query_key_head_stride`,
+/// `query_key_dim_stride`, then `inv_sqrt_key_dim` reinterpreted as raw
+/// bits in a `long` slot -- every other uniform field here is already a
+/// `long`, and MSL's `Uniforms` struct has no mixed-width fields to keep
+/// this byte-compatible with.
+fn pack_gated_delta_net_uniforms(
+    n_tokens: u64,
+    query_key_head_stride: u64,
+    query_key_dim_stride: u64,
+    inv_sqrt_key_dim: f32,
+    bytes: &mut Vec<u8>,
+) {
+    push_i64(bytes, n_tokens as i64);
+    push_i64(bytes, query_key_head_stride as i64);
+    push_i64(bytes, query_key_dim_stride as i64);
+    push_i64(bytes, i64::from(inv_sqrt_key_dim.to_bits()));
 }
 
 #[cfg(test)]

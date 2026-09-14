@@ -347,6 +347,14 @@ fn emit_sizing_consts() {
         "pub const ATTENTION_BLOCK_WIDTH: u64 = {attention_block_width};\n"
     ));
 
+    let gated_delta_net_head_k_dim_max = require_nonzero(
+        "gated_delta_net.head_k_dim_max",
+        resolve_int(&root, "gated_delta_net", "head_k_dim_max"),
+    );
+    out.push_str(&format!(
+        "pub const GATED_DELTA_NET_HEAD_K_DIM_MAX: u64 = {gated_delta_net_head_k_dim_max};\n"
+    ));
+
     let attention_splits_keys_per_split = require_nonzero(
         "attention_splits.keys_per_split",
         resolve_int(&root, "attention_splits", "keys_per_split"),

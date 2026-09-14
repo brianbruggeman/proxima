@@ -219,6 +219,19 @@ cap = 4
 # Overridable per-build via `OMEGA_ATTENTION_BLOCK_WIDTH`.
 width = 32
 
+[gated_delta_net]
+# `render_gated_delta_net`'s per-thread register array size
+# (`float state_row[head_k_dim_max]`) -- the fused kernel keeps one
+# `head_k_dim`-long state row resident in registers across the whole
+# `n_tokens` loop (design doc `fused-gdn-kernel.md` §2), so this cap bounds
+# register pressure per thread the same way `ATTENTION_SPLIT_MAX` bounds
+# dispatch width above. qwen35moe's real shape is `head_k_dim = 128`; 256
+# leaves headroom for a wider head dim without recompiling the sizing
+# config. A bind whose `head_k_dim` exceeds this cap is rejected at emit
+# time (`EmitError::GatedDeltaNetHeadKDimExceedsCap`), never silently
+# clamped. Overridable per-build via `OMEGA_GATED_DELTA_NET_HEAD_K_DIM_MAX`.
+head_k_dim_max = 256
+
 [attention_splits]
 # `render_cached_attention`'s key range, split across this many THREADGROUPS
 # per `(query_row, kv_head)` pair -- llama.cpp's own `nwg` (fixed 32,
