@@ -356,8 +356,12 @@ pub(crate) fn kernel_identity(
             // change to the sizing config's divisor/cap still shows up as
             // a distinct cache key rather than silently reusing a pipeline
             // compiled for the wrong chunk count.
-            let context_chunks =
-                crate::msl::context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy);
+            let context_chunks = crate::msl::context_chunks_for(
+                *cached_key_rows + *new_key_rows,
+                *query_groups,
+                *head_dim,
+                numeric_policy,
+            );
             // `two_range_cached_bound` (nine operands, `cached_key_rows !=
             // 0`) renders a runtime `long cached_key_rows = (long)in8[0];`
             // read where the eight-operand form bakes the identical-looking

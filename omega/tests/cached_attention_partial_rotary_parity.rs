@@ -114,27 +114,16 @@ fn forty_keys_with_three_padded_rows_holds_partial_rotary_parity() {
     assert_partial_rotary_parity_at(40, 37, production_numeric_policy());
 }
 
-/// IGNORED: pre-existing, independent of the pass plane -- once `chunks`
-/// (`context_chunks_for`/the single-range dynamic path's own compiled `cap`)
-/// reaches `ATTENTION_CONTEXT_CHUNK_CAP` (4, `omega-runtime.toml`), the
-/// declared `shared_o[query_groups * cap * head_dim]` threadgroup array
-/// alone is `query_groups * cap * head_dim * 4` bytes -- `8 * 4 * 256 * 4 =
-/// 32768`, plus `shared_m`/`shared_l`'s `8 * 4 * 4 * 2 = 256` more, exactly
-/// the driver's own reported `33024` against Metal's `32768`-byte ceiling.
-/// This is a pure function of `head_dim`/`query_groups`/the compiled `cap`
-/// (`render_cached_attention`'s own `let cap = crate::sized::
-/// ATTENTION_CONTEXT_CHUNK_CAP;`, never `rotary_dim`), so a hypothetical
-/// FULL-rotary head_dim=256/group=8 kernel would blow the identical budget
-/// at the identical context length -- confirmed by the 40-key cell above,
-/// which stays under it only because `chunks` there is 3, not 4. Fixing it
-/// needs `context_chunks_for`'s cap clamped by shape at every one of its
-/// eight call sites across `msl.rs`/`metal.rs`/`identity.rs` (dispatch grid
-/// sizing and scratch-buffer sizing must stay in lockstep with whatever the
-/// kernel body declares), which is out of scope for the pass-plane addition
-/// this file exists to test.
+/// ROW 388: previously blew Metal's 32768-byte `threadgroup` ceiling --
+/// `head_dim=256`/`query_groups=8` at the shape-independent compiled cap (4)
+/// declares `8 * 4 * (256 + 2) * 4 = 33024` bytes of `shared_m`/`shared_l`/
+/// `shared_o`, past the driver's own `maxThreadgroupMemoryLength` and a hard
+/// `CompileFailed`. `msl::effective_context_chunk_cap` now clamps the
+/// compiled cap down per-shape (`query_groups`/`head_dim`) to whatever the
+/// 32768-byte budget actually admits -- 3 for this shape, `8 * 3 * 258 * 4 =
+/// 24768` bytes -- so this cell compiles and this test asserts parity holds
+/// past the split knee at the clamped chunk count too.
 #[test]
-#[ignore = "pre-existing threadgroup-memory ceiling for head_dim=256/group=8 \
-            at chunks==ATTENTION_CONTEXT_CHUNK_CAP, unrelated to the pass plane -- see doc above"]
 fn five_hundred_twelve_keys_holds_partial_rotary_parity_past_the_split_knee() {
     assert_partial_rotary_parity_at(512, 512, production_numeric_policy());
 }

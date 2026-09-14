@@ -268,6 +268,20 @@ keys_per_split = 16
 keys_per_split_at_scale = 128
 max = 32
 
+[cached_attention]
+# Metal's per-threadgroup `threadgroup` memory ceiling on every GPU family
+# this crate targets -- `render_cached_attention`'s single-range dynamic
+# path declares `shared_m`/`shared_l`/`shared_o` sized off `query_groups *
+# effective_cap * (head_dim + 2) * 4` bytes (`msl::effective_context_chunk_
+# cap`'s own doc), and a shape whose uncapped `[attention_context_chunks]
+# .cap` blows this ceiling fails Metal pipeline compilation outright
+# (`CompileFailed`) rather than degrading. `maxThreadgroupMemoryLength`
+# reports this same 32768 on every Apple Silicon family to date; there is
+# no per-device query wired into this build step, so the fallback constant
+# below is also today's only source. Overridable per-build via
+# `OMEGA_CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES`.
+threadgroup_memory_bytes = 32768
+
 [packed_row_nsg]
 # `tiled_gemm_threadgroup_width`'s nsg multiplier for the packed
 # row-blocked path, shared by `metal-packed-row-nsg2` and

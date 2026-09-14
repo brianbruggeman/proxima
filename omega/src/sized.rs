@@ -65,6 +65,12 @@
 //!   level above `ATTENTION_CONTEXT_KEYS_PER_CHUNK`'s intra-threadgroup
 //!   split), gated by `NumericRewrite::ContextSplitMerge`; see
 //!   `omega-runtime.toml`'s `[attention_splits]`.
+//! - `CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES` (always compiled) —
+//!   Metal's per-threadgroup `threadgroup` memory ceiling; `crate::msl::
+//!   effective_context_chunk_cap` clamps `ATTENTION_CONTEXT_CHUNK_CAP`
+//!   against it per-shape so `render_cached_attention`'s
+//!   `shared_m`/`shared_l`/`shared_o` declaration never exceeds what the
+//!   driver will compile; see `omega-runtime.toml`'s `[cached_attention]`.
 //!
 //! `msl` (this module's own crate) is alloc-tier and target-independent --
 //! emission never touches a device -- so [`SIMD_WIDTH`] is visible at every

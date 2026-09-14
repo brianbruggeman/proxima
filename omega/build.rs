@@ -336,6 +336,14 @@ fn emit_sizing_consts() {
         "pub const ATTENTION_CONTEXT_CHUNK_CAP: u64 = {attention_context_chunks_cap};\n"
     ));
 
+    let cached_attention_threadgroup_memory_bytes = require_nonzero(
+        "cached_attention.threadgroup_memory_bytes",
+        resolve_int(&root, "cached_attention", "threadgroup_memory_bytes"),
+    );
+    out.push_str(&format!(
+        "pub const CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES: u64 = {cached_attention_threadgroup_memory_bytes};\n"
+    ));
+
     let attention_block_width = require_multiple_of_thirty_two(
         "attention_block.width",
         require_nonzero(
