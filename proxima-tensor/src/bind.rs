@@ -5897,6 +5897,30 @@ mod tests {
             .collect()
     }
 
+    /// Shape constants for [`qwen35_partial_rotary_attention_fixture`],
+    /// hoisted to module scope so
+    /// [`qwen35_dense_attention_f64_reference`] computes over the SAME
+    /// dimensions the fixture builds its graph with -- a private copy inside
+    /// each function is exactly the kind of drift this row's own
+    /// independent-reference discipline exists to rule out.
+    #[cfg(feature = "cached-attention-streaming")]
+    const QWEN35_PARTIAL_ROTARY_KV_HEADS: usize = 2;
+    #[cfg(feature = "cached-attention-streaming")]
+    const QWEN35_PARTIAL_ROTARY_GROUP: usize = 8;
+    #[cfg(feature = "cached-attention-streaming")]
+    const QWEN35_PARTIAL_ROTARY_ATTN_HEAD_DIM: usize = 256;
+    #[cfg(feature = "cached-attention-streaming")]
+    const QWEN35_PARTIAL_ROTARY_ROTARY_DIM: usize = 64;
+    #[cfg(feature = "cached-attention-streaming")]
+    const QWEN35_PARTIAL_ROTARY_PASS_DIM: usize =
+        QWEN35_PARTIAL_ROTARY_ATTN_HEAD_DIM - QWEN35_PARTIAL_ROTARY_ROTARY_DIM;
+    #[cfg(feature = "cached-attention-streaming")]
+    const QWEN35_PARTIAL_ROTARY_PAIR_DIM: usize = QWEN35_PARTIAL_ROTARY_ROTARY_DIM / 2;
+    #[cfg(feature = "cached-attention-streaming")]
+    const QWEN35_PARTIAL_ROTARY_NEW_TOKENS: usize = 1;
+    #[cfg(feature = "cached-attention-streaming")]
+    const QWEN35_PARTIAL_ROTARY_CACHED_EXTENT: usize = 40;
+
     /// [`append_qwen35_dense_attention_only_with_taps`] wired at qwen3.5's
     /// own real per-head shape (`kv_heads` 2, `group` 8 -> 16 query heads,
     /// `attn_head_dim` 256, `rotary_dim` 64 -> 192-wide pass plane,
@@ -5919,14 +5943,14 @@ mod tests {
         use crate::op::Extent;
         use crate::spec::{causal_mask, input_leaf, scalar_constant};
 
-        const KV_HEADS: usize = 2;
-        const GROUP: usize = 8;
-        const ATTN_HEAD_DIM: usize = 256;
-        const ROTARY_DIM: usize = 64;
-        const PASS_DIM: usize = ATTN_HEAD_DIM - ROTARY_DIM;
-        const PAIR_DIM: usize = ROTARY_DIM / 2;
-        const NEW_TOKENS: usize = 1;
-        const CACHED_EXTENT: usize = 40;
+        const KV_HEADS: usize = QWEN35_PARTIAL_ROTARY_KV_HEADS;
+        const GROUP: usize = QWEN35_PARTIAL_ROTARY_GROUP;
+        const ATTN_HEAD_DIM: usize = QWEN35_PARTIAL_ROTARY_ATTN_HEAD_DIM;
+        const ROTARY_DIM: usize = QWEN35_PARTIAL_ROTARY_ROTARY_DIM;
+        const PASS_DIM: usize = QWEN35_PARTIAL_ROTARY_PASS_DIM;
+        const PAIR_DIM: usize = QWEN35_PARTIAL_ROTARY_PAIR_DIM;
+        const NEW_TOKENS: usize = QWEN35_PARTIAL_ROTARY_NEW_TOKENS;
+        const CACHED_EXTENT: usize = QWEN35_PARTIAL_ROTARY_CACHED_EXTENT;
 
         let mut program = Vec::new();
         let x = input_leaf(
@@ -6092,13 +6116,16 @@ mod tests {
     /// unfused elementwise/reduce chain [`bind_plain`] already produces
     /// (the census, ROW 558 `docs/discipline.md`).
     ///
-    /// This does NOT yet assert bit-exact numeric parity against the
-    /// unfused chain (item (a) of the ROW 558 brief) -- running both
-    /// through [`run_resolved`] on this fixture surfaces a
-    /// still-unexplained ~4-8% relative divergence in the final row that
-    /// this slice's time budget did not resolve; recorded as a residual in
-    /// `docs/discipline.md` ROW 558 rather than silently dropped or
-    /// papered over with a loosened tolerance.
+    /// Also asserts numeric parity against the unfused chain (item (a) of
+    /// the ROW 558 brief, deliberately deferred through ROW 558-560's own
+    /// residuals while the ~8% divergence this fixture surfaced was
+    /// mislocated in two false leads before landing on the real defect --
+    /// `neon_tile_plan`'s missing row-invariance check on its `b` operand,
+    /// `docs/discipline.md` ROW 561, fixed at `cpu.rs`'s own
+    /// `neon_tile_plan`). [`qwen35_partial_rotary_dense_attention_matches_an_independent_f64_reference`]
+    /// is the test that actually PROVES which side was wrong, tap by tap,
+    /// against an f64 reference outside both engines; this test only checks
+    /// that the two engines still AGREE once that defect is fixed.
     #[test]
     #[cfg(feature = "cached-attention-streaming")]
     fn qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer() {
@@ -6161,9 +6188,6 @@ mod tests {
             "the fusion must absorb at least one op relative to the unfused chain"
         );
 
-        // both sides must still COMPUTE (produce a value for the shared
-        // output shape) even though bit-exact parity is not yet asserted
-        // here -- see this test's own doc for the open numeric residual.
         let unfused_outputs = run_resolved(program.len(), &unfused, inputs.clone());
         let fused_outputs = run_resolved(program.len(), &fused, inputs);
         let expected = unfused_outputs[residual1.0 as usize]
@@ -6176,6 +6200,444 @@ mod tests {
             expected.len(),
             actual.len(),
             "fused and unfused outputs must be the same shape"
+        );
+        for (index, (&expected_value, &actual_value)) in
+            expected.iter().zip(actual.iter()).enumerate()
+        {
+            let (expected_value, actual_value) =
+                (f64::from(expected_value), f64::from(actual_value));
+            let relative_error =
+                (expected_value - actual_value).abs() / expected_value.abs().max(1.0);
+            assert!(
+                relative_error <= 1e-5,
+                "residual1[{index}] fused vs unfused: expected={expected_value} actual={actual_value} \
+                 relative_error={relative_error} (ROW 561's own fix)"
+            );
+        }
+    }
+
+    /// Every tap [`qwen35_dense_attention_f64_reference`] computes, in the
+    /// order [`crate::spec::append_qwen35_dense_attention_only_with_taps`]
+    /// builds them -- the order this row's own per-tap divergence search
+    /// walks.
+    #[cfg(feature = "cached-attention-streaming")]
+    struct Qwen35DenseAttentionF64Reference {
+        normed: Vec<f64>,
+        q_split: Vec<f64>,
+        gate_split: Vec<f64>,
+        v_new: Vec<f64>,
+        q_normed: Vec<f64>,
+        k_normed: Vec<f64>,
+        k_pass: Vec<f64>,
+        q_rot_first: Vec<f64>,
+        q_rot_second: Vec<f64>,
+        k_rot_first: Vec<f64>,
+        k_rot_second: Vec<f64>,
+        score_new: Vec<f64>,
+        attended: Vec<f64>,
+        gate_sigmoid: Vec<f64>,
+        gated_attended: Vec<f64>,
+        o_proj_out: Vec<f64>,
+        residual1: Vec<f64>,
+    }
+
+    /// Independent f64 reference for
+    /// [`qwen35_partial_rotary_attention_fixture`]'s whole dense-attention
+    /// layer, built by plain nested loops over the SAME per-input byte
+    /// vectors the fixture feeds `run_resolved` (`inputs`, read positionally
+    /// in the fixture's own construction order -- see the `assert_eq!` on
+    /// `inputs.len()` below, which fails loudly if that order ever changes).
+    /// No `Op`/`bind`/`Reduce` machinery anywhere in this function: this is
+    /// the third, previously-missing leg `docs/discipline.md` ROW 560's own
+    /// residual asked for. ROW 559 showed the fused `CachedAttention` kernel
+    /// is exact against its own operands; ROW 560 showed `bind_plain`'s
+    /// generic reduce is ALSO exact against ITS own operands; neither row
+    /// had ever checked either chain against a party that owes nothing to
+    /// either implementation's own bugs -- an oracle from the model
+    /// semantics (`modeling_qwen3_next.py`), not from either engine.
+    ///
+    /// Math, per stage (mirrors `spec.rs:4724-5312`
+    /// (`append_qwen35_dense_attention_only_with_taps`) exactly, at f64
+    /// precision, for this fixture's own degenerate `embedding = 1`,
+    /// `new_tokens = 1` shape): RMSNorm(`x`) -> the one `q`/`gate`
+    /// projection split per head -> `k`/`v` projections -> per-head RMSNorm
+    /// of `q`/`k` over the full `attn_head_dim` -> the pass-plane slice
+    /// (`[rotary_dim, attn_head_dim)`) -> interleaved RoPE
+    /// (`(2*i, 2*i+1)` pairing, `RopePairing::Interleaved`'s own doc) over
+    /// the first `rotary_dim` channels -> grouped rotary + pass dot products
+    /// against the 40-row KV cache (masked `-inf` past `cached_len`) and the
+    /// one new key (never masked at position 0) -> one softmax over the
+    /// concatenation of both -> the value-weighted sum -> the per-head
+    /// sigmoid gate -> `o_proj` reduced to the single embedding output ->
+    /// the residual add.
+    #[cfg(feature = "cached-attention-streaming")]
+    #[allow(clippy::too_many_lines)]
+    fn qwen35_dense_attention_f64_reference(
+        inputs: &[(NodeId, Vec<f32>)],
+    ) -> Qwen35DenseAttentionF64Reference {
+        const KV_HEADS: usize = QWEN35_PARTIAL_ROTARY_KV_HEADS;
+        const GROUP: usize = QWEN35_PARTIAL_ROTARY_GROUP;
+        const ATTN_HEAD_DIM: usize = QWEN35_PARTIAL_ROTARY_ATTN_HEAD_DIM;
+        const ROTARY_DIM: usize = QWEN35_PARTIAL_ROTARY_ROTARY_DIM;
+        const PASS_DIM: usize = QWEN35_PARTIAL_ROTARY_PASS_DIM;
+        const PAIR_DIM: usize = QWEN35_PARTIAL_ROTARY_PAIR_DIM;
+        const CACHED_EXTENT: usize = QWEN35_PARTIAL_ROTARY_CACHED_EXTENT;
+        const HEADS: usize = KV_HEADS * GROUP;
+
+        assert_eq!(
+            inputs.len(),
+            16,
+            "qwen35_partial_rotary_attention_fixture's own input list grew or shrank -- \
+             this reference's positional indexing below must be re-derived, not silently \
+             misaligned"
+        );
+        let as_f64 =
+            |values: &[f32]| -> Vec<f64> { values.iter().map(|&value| f64::from(value)).collect() };
+        let x = as_f64(&inputs[0].1);
+        let eps = f64::from(inputs[1].1[0]);
+        let cos_new = as_f64(&inputs[2].1);
+        let sin_new = as_f64(&inputs[3].1);
+        let attn_norm_weight = f64::from(inputs[4].1[0]);
+        let q_norm_weight = as_f64(&inputs[5].1);
+        let k_norm_weight = as_f64(&inputs[6].1);
+        let wq_gate = as_f64(&inputs[7].1);
+        let wk = as_f64(&inputs[8].1);
+        let wv = as_f64(&inputs[9].1);
+        let wo = as_f64(&inputs[10].1);
+        let k_first_cache = as_f64(&inputs[11].1);
+        let k_second_cache = as_f64(&inputs[12].1);
+        let k_pass_cache = as_f64(&inputs[13].1);
+        let v_cache = as_f64(&inputs[14].1);
+        let cached_len = f64::from(inputs[15].1[0]);
+
+        // RMSNorm(x): embedding width 1, so the sum-of-squares is one term
+        // and inv_dim (a scalar_constant(1.0)) contributes nothing.
+        let inv_rms_x = 1.0 / (x[0] * x[0] + eps).sqrt();
+        let normed = x[0] * inv_rms_x * attn_norm_weight;
+
+        // qg_raw[h][c] = normed * wq_gate[0][h][c] (embedding contraction is
+        // one term); q_split/gate_split are the per-head [0,256)/[256,512)
+        // halves of that same activation.
+        let mut q_split = vec![0.0f64; HEADS * ATTN_HEAD_DIM];
+        let mut gate_split = vec![0.0f64; HEADS * ATTN_HEAD_DIM];
+        for head in 0..HEADS {
+            for channel in 0..ATTN_HEAD_DIM {
+                let q_weight = wq_gate[head * (2 * ATTN_HEAD_DIM) + channel];
+                let gate_weight = wq_gate[head * (2 * ATTN_HEAD_DIM) + ATTN_HEAD_DIM + channel];
+                q_split[head * ATTN_HEAD_DIM + channel] = normed * q_weight;
+                gate_split[head * ATTN_HEAD_DIM + channel] = normed * gate_weight;
+            }
+        }
+
+        let mut k_raw = vec![0.0f64; KV_HEADS * ATTN_HEAD_DIM];
+        let mut v_new = vec![0.0f64; KV_HEADS * ATTN_HEAD_DIM];
+        for kv_head in 0..KV_HEADS {
+            for channel in 0..ATTN_HEAD_DIM {
+                k_raw[kv_head * ATTN_HEAD_DIM + channel] =
+                    normed * wk[kv_head * ATTN_HEAD_DIM + channel];
+                v_new[kv_head * ATTN_HEAD_DIM + channel] =
+                    normed * wv[kv_head * ATTN_HEAD_DIM + channel];
+            }
+        }
+
+        let inv_head_dim = 1.0 / ATTN_HEAD_DIM as f64;
+        let mut q_normed = vec![0.0f64; HEADS * ATTN_HEAD_DIM];
+        for head in 0..HEADS {
+            let sum_squares: f64 = (0..ATTN_HEAD_DIM)
+                .map(|channel| q_split[head * ATTN_HEAD_DIM + channel].powi(2))
+                .sum();
+            let inv_rms = 1.0 / (sum_squares * inv_head_dim + eps).sqrt();
+            for channel in 0..ATTN_HEAD_DIM {
+                q_normed[head * ATTN_HEAD_DIM + channel] =
+                    q_split[head * ATTN_HEAD_DIM + channel] * inv_rms * q_norm_weight[channel];
+            }
+        }
+        let mut k_normed = vec![0.0f64; KV_HEADS * ATTN_HEAD_DIM];
+        for kv_head in 0..KV_HEADS {
+            let sum_squares: f64 = (0..ATTN_HEAD_DIM)
+                .map(|channel| k_raw[kv_head * ATTN_HEAD_DIM + channel].powi(2))
+                .sum();
+            let inv_rms = 1.0 / (sum_squares * inv_head_dim + eps).sqrt();
+            for channel in 0..ATTN_HEAD_DIM {
+                k_normed[kv_head * ATTN_HEAD_DIM + channel] =
+                    k_raw[kv_head * ATTN_HEAD_DIM + channel] * inv_rms * k_norm_weight[channel];
+            }
+        }
+
+        let mut k_pass = vec![0.0f64; KV_HEADS * PASS_DIM];
+        for kv_head in 0..KV_HEADS {
+            for pass_channel in 0..PASS_DIM {
+                k_pass[kv_head * PASS_DIM + pass_channel] =
+                    k_normed[kv_head * ATTN_HEAD_DIM + ROTARY_DIM + pass_channel];
+            }
+        }
+        let mut q_pass = vec![0.0f64; HEADS * PASS_DIM];
+        for head in 0..HEADS {
+            for pass_channel in 0..PASS_DIM {
+                q_pass[head * PASS_DIM + pass_channel] =
+                    q_normed[head * ATTN_HEAD_DIM + ROTARY_DIM + pass_channel];
+            }
+        }
+
+        // Interleaved RoPE, `RopePairing::Interleaved`'s own `(2*i, 2*i+1)`
+        // pairing, over the first `rotary_dim` channels only. `cos_new`/
+        // `sin_new` are `[s, pair]`-shaped with `s == 1` in this fixture, so
+        // a bare `pair` index already reads position 0's own row.
+        let rotate = |source: &[f64], head_count: usize| -> (Vec<f64>, Vec<f64>) {
+            let mut first = vec![0.0f64; head_count * PAIR_DIM];
+            let mut second = vec![0.0f64; head_count * PAIR_DIM];
+            for head in 0..head_count {
+                for pair in 0..PAIR_DIM {
+                    let even = source[head * ATTN_HEAD_DIM + 2 * pair];
+                    let odd = source[head * ATTN_HEAD_DIM + 2 * pair + 1];
+                    first[head * PAIR_DIM + pair] = even * cos_new[pair] - odd * sin_new[pair];
+                    second[head * PAIR_DIM + pair] = odd * cos_new[pair] + even * sin_new[pair];
+                }
+            }
+            (first, second)
+        };
+        let (q_rot_first, q_rot_second) = rotate(&q_normed, HEADS);
+        let (k_rot_first, k_rot_second) = rotate(&k_normed, KV_HEADS);
+
+        // query head h = GROUP*kv_head + group, `group_map_i`/`group_map_p`/
+        // `group_map_d`'s own convention (`spec.rs:4847,4866,5221`).
+        let query_head = |kv_head: usize, group: usize| GROUP * kv_head + group;
+
+        let inv_sqrt_head_dim = 1.0 / (ATTN_HEAD_DIM as f64).sqrt();
+        let mut score_cached = vec![0.0f64; CACHED_EXTENT * KV_HEADS * GROUP];
+        for cached_row in 0..CACHED_EXTENT {
+            for kv_head in 0..KV_HEADS {
+                for group in 0..GROUP {
+                    let head = query_head(kv_head, group);
+                    let mut score = 0.0f64;
+                    for pair in 0..PAIR_DIM {
+                        let cache_index = (cached_row * KV_HEADS + kv_head) * PAIR_DIM + pair;
+                        score += q_rot_first[head * PAIR_DIM + pair] * k_first_cache[cache_index];
+                        score += q_rot_second[head * PAIR_DIM + pair] * k_second_cache[cache_index];
+                    }
+                    for pass_channel in 0..PASS_DIM {
+                        let cache_index =
+                            (cached_row * KV_HEADS + kv_head) * PASS_DIM + pass_channel;
+                        score += q_pass[head * PASS_DIM + pass_channel] * k_pass_cache[cache_index];
+                    }
+                    score *= inv_sqrt_head_dim;
+                    let is_padding = cached_row as f64 > cached_len - 1.0;
+                    let index = (cached_row * KV_HEADS + kv_head) * GROUP + group;
+                    score_cached[index] = if is_padding { f64::NEG_INFINITY } else { score };
+                }
+            }
+        }
+
+        // The one new (uncached) key: position 0 is never future-masked
+        // against itself (`is_future[0][0] == (0 > 0) == false`).
+        let mut score_new = vec![0.0f64; KV_HEADS * GROUP];
+        for kv_head in 0..KV_HEADS {
+            for group in 0..GROUP {
+                let head = query_head(kv_head, group);
+                let mut score = 0.0f64;
+                for pair in 0..PAIR_DIM {
+                    score += q_rot_first[head * PAIR_DIM + pair]
+                        * k_rot_first[kv_head * PAIR_DIM + pair];
+                    score += q_rot_second[head * PAIR_DIM + pair]
+                        * k_rot_second[kv_head * PAIR_DIM + pair];
+                }
+                for pass_channel in 0..PASS_DIM {
+                    score += q_pass[head * PASS_DIM + pass_channel]
+                        * k_pass[kv_head * PASS_DIM + pass_channel];
+                }
+                score_new[kv_head * GROUP + group] = score * inv_sqrt_head_dim;
+            }
+        }
+
+        let mut attended = vec![0.0f64; KV_HEADS * GROUP * ATTN_HEAD_DIM];
+        let mut gate_sigmoid = vec![0.0f64; KV_HEADS * GROUP * ATTN_HEAD_DIM];
+        let mut gated_attended = vec![0.0f64; KV_HEADS * GROUP * ATTN_HEAD_DIM];
+        for kv_head in 0..KV_HEADS {
+            for group in 0..GROUP {
+                let cached_scores: Vec<f64> = (0..CACHED_EXTENT)
+                    .map(|cached_row| {
+                        score_cached[(cached_row * KV_HEADS + kv_head) * GROUP + group]
+                    })
+                    .collect();
+                let new_score = score_new[kv_head * GROUP + group];
+                let global_max = cached_scores.iter().copied().fold(new_score, f64::max);
+                let cached_weights: Vec<f64> = cached_scores
+                    .iter()
+                    .map(|&score| (score - global_max).exp())
+                    .collect();
+                let new_weight = (new_score - global_max).exp();
+                let inv_weight_sum = 1.0 / (cached_weights.iter().sum::<f64>() + new_weight);
+
+                let head = query_head(kv_head, group);
+                for channel in 0..ATTN_HEAD_DIM {
+                    let cached_sum: f64 = (0..CACHED_EXTENT)
+                        .map(|cached_row| {
+                            cached_weights[cached_row]
+                                * v_cache
+                                    [(cached_row * KV_HEADS + kv_head) * ATTN_HEAD_DIM + channel]
+                        })
+                        .sum();
+                    let new_sum = new_weight * v_new[kv_head * ATTN_HEAD_DIM + channel];
+                    let attended_value = (cached_sum + new_sum) * inv_weight_sum;
+                    let sigmoid = 1.0 / (1.0 + (-gate_split[head * ATTN_HEAD_DIM + channel]).exp());
+                    let index = (kv_head * GROUP + group) * ATTN_HEAD_DIM + channel;
+                    attended[index] = attended_value;
+                    gate_sigmoid[index] = sigmoid;
+                    gated_attended[index] = attended_value * sigmoid;
+                }
+            }
+        }
+
+        let mut o_proj_out = 0.0f64;
+        for kv_head in 0..KV_HEADS {
+            for group in 0..GROUP {
+                for channel in 0..ATTN_HEAD_DIM {
+                    let index = (kv_head * GROUP + group) * ATTN_HEAD_DIM + channel;
+                    o_proj_out += gated_attended[index] * wo[index];
+                }
+            }
+        }
+        let residual1 = o_proj_out + x[0];
+
+        Qwen35DenseAttentionF64Reference {
+            normed: alloc::vec![normed],
+            q_split,
+            gate_split,
+            v_new,
+            q_normed,
+            k_normed,
+            k_pass,
+            q_rot_first,
+            q_rot_second,
+            k_rot_first,
+            k_rot_second,
+            score_new,
+            attended,
+            gate_sigmoid,
+            gated_attended,
+            o_proj_out: alloc::vec![o_proj_out],
+            residual1: alloc::vec![residual1],
+        }
+    }
+
+    /// Max relative error of `actual` against `reference`, element-wise --
+    /// this row's own single comparison primitive, used identically for
+    /// every tap so the per-tap table below is apples to apples. Denominator
+    /// floors at `1.0` so a near-zero reference element does not blow up a
+    /// float-rounding-sized absolute difference into a nonsense percentage.
+    #[cfg(feature = "cached-attention-streaming")]
+    fn max_relative_error(reference: &[f64], actual: &[f32]) -> f64 {
+        assert_eq!(
+            reference.len(),
+            actual.len(),
+            "reference and actual must share a shape"
+        );
+        reference
+            .iter()
+            .zip(actual.iter())
+            .map(|(&expected, &got)| {
+                let got = f64::from(got);
+                (got - expected).abs() / expected.abs().max(1.0)
+            })
+            .fold(0.0f64, f64::max)
+    }
+
+    /// The independent-reference leg ROW 559/560's own residual named as
+    /// missing (`docs/discipline.md`): both `bind_plain` and the fused
+    /// `CachedAttention` op were already proven self-consistent against
+    /// their OWN resolved operands, but never checked against a party that
+    /// owes nothing to either implementation. This test runs both chains
+    /// through [`run_resolved`] on the SAME fixture inputs
+    /// [`qwen35_dense_attention_f64_reference`] also consumes, then asserts
+    /// every named tap from BOTH chains against that f64 reference -- the
+    /// first tap (in builder order) that fails on either side names the
+    /// defective chain and the value pair proving it.
+    #[test]
+    #[cfg(feature = "cached-attention-streaming")]
+    fn qwen35_partial_rotary_dense_attention_matches_an_independent_f64_reference() {
+        let (program, residual1, taps, inputs, shapes) = qwen35_partial_rotary_attention_fixture();
+        let reference = qwen35_dense_attention_f64_reference(&inputs);
+
+        let outputs = alloc::vec![
+            residual1,
+            taps.normed,
+            taps.q_split,
+            taps.gate_split,
+            taps.v_new,
+            taps.q_normed,
+            taps.k_normed,
+            taps.k_pass,
+            taps.q_rot_first,
+            taps.q_rot_second,
+            taps.k_rot_first,
+            taps.k_rot_second,
+            taps.score_new,
+            taps.attended,
+            taps.gate_sigmoid,
+            taps.gated_attended,
+            taps.o_proj_out,
+        ];
+
+        let unfused = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("plain bind succeeds");
+        let fused = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("fused bind succeeds");
+        let unfused_outputs = run_resolved(program.len(), &unfused, inputs.clone());
+        let fused_outputs = run_resolved(program.len(), &fused, inputs);
+
+        let taps: [(&str, NodeId, &[f64]); 17] = [
+            ("normed", taps.normed, &reference.normed),
+            ("q_split", taps.q_split, &reference.q_split),
+            ("gate_split", taps.gate_split, &reference.gate_split),
+            ("v_new", taps.v_new, &reference.v_new),
+            ("q_normed", taps.q_normed, &reference.q_normed),
+            ("k_normed", taps.k_normed, &reference.k_normed),
+            ("k_pass", taps.k_pass, &reference.k_pass),
+            ("q_rot_first", taps.q_rot_first, &reference.q_rot_first),
+            ("q_rot_second", taps.q_rot_second, &reference.q_rot_second),
+            ("k_rot_first", taps.k_rot_first, &reference.k_rot_first),
+            ("k_rot_second", taps.k_rot_second, &reference.k_rot_second),
+            ("score_new", taps.score_new, &reference.score_new),
+            ("attended", taps.attended, &reference.attended),
+            ("gate_sigmoid", taps.gate_sigmoid, &reference.gate_sigmoid),
+            (
+                "gated_attended",
+                taps.gated_attended,
+                &reference.gated_attended,
+            ),
+            ("o_proj_out", taps.o_proj_out, &reference.o_proj_out),
+            ("residual1", residual1, &reference.residual1),
+        ];
+
+        const TOLERANCE: f64 = 1e-4;
+        let mut first_divergent: Option<(&str, &str, f64)> = None;
+        for (name, node, expected) in taps {
+            let unfused_actual = unfused_outputs[node.0 as usize]
+                .as_ref()
+                .expect("unfused tap computes");
+            let fused_actual = fused_outputs[node.0 as usize]
+                .as_ref()
+                .expect("fused tap computes");
+            let unfused_error = max_relative_error(expected, unfused_actual);
+            let fused_error = max_relative_error(expected, fused_actual);
+            #[cfg(feature = "instrument")]
+            debug!(
+                tap = name,
+                unfused_error = unfused_error,
+                fused_error = fused_error,
+                "qwen35 dense attention tap vs f64 reference"
+            );
+            if first_divergent.is_none() && unfused_error > TOLERANCE {
+                first_divergent = Some((name, "unfused (bind_plain)", unfused_error));
+            }
+            if first_divergent.is_none() && fused_error > TOLERANCE {
+                first_divergent = Some((name, "fused (CachedAttention)", fused_error));
+            }
+        }
+
+        assert!(
+            first_divergent.is_none(),
+            "first tap to diverge from the independent f64 reference beyond {TOLERANCE}: {first_divergent:?}"
         );
     }
 
