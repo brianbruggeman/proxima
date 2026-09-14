@@ -422,6 +422,7 @@ fn cached_attention_kernel() -> omega::Kernel {
             kv_heads: 1,
             query_groups: 1,
             head_dim: 4,
+            rotary_dim: 4,
             scale: 0.5,
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,

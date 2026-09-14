@@ -306,3 +306,192 @@ pub fn as_named_blocks(owned: &[(String, Vec<f32>)]) -> Vec<(&str, QuantizedBloc
         .map(|(name, data)| (name.as_str(), QuantizedBlock::Float32(data.as_slice())))
         .collect()
 }
+
+/// qwen35's real partial-rotary dense-attention chain
+/// (`proxima_tensor::spec::append_qwen35_dense_attention_only_with_taps`,
+/// `kv_heads` 2, `group` 8 -> 16 query heads, `attn_head_dim` 256,
+/// `rotary_dim` 64 -> 192-wide pass plane), ported from
+/// `proxima_tensor::bind`'s own private `qwen35_partial_rotary_attention_
+/// fixture` test fixture into this crate's named-block shape so a Metal run
+/// (`omega::plan_named`/`execute_plan_named`) can be compared against the
+/// CPU reference the same way [`real_single_range_forward_fixture_with_padding`]
+/// already does for the full-rotary case. `cached_extent` is the compiled
+/// KV-capacity-bucket width; `cached_len` is the REAL runtime length fed as
+/// the fused op's own ninth operand, always `<= cached_extent`.
+#[cfg(feature = "cached-attention-streaming")]
+#[allow(clippy::too_many_lines)]
+pub fn qwen35_partial_rotary_forward_fixture(
+    new_count: u64,
+    cached_extent: u64,
+    cached_len: u64,
+) -> RealForwardFixture {
+    use proxima_tensor::spec::{
+        append_qwen35_dense_attention_only_with_taps, causal_mask, input_leaf, scalar_constant,
+    };
+    use proxima_tensor::{DType, Extent};
+
+    const KV_HEADS: u32 = 2;
+    const GROUP: u32 = 8;
+    const ATTN_HEAD_DIM: u32 = 256;
+    const ROTARY_DIM: u32 = 64;
+    const PASS_DIM: u32 = ATTN_HEAD_DIM - ROTARY_DIM;
+    const PAIR_DIM: u32 = ROTARY_DIM / 2;
+    // `proxima_tensor::bind`'s own private fixture uses embedding width 1 --
+    // valid on CPU, but `attn_norm`'s RMSNorm reduce then folds over a
+    // length of 1, below `omega::sized::COOPERATIVE_REDUCE_MIN_LEN`, and a
+    // non-cooperative reduce has no Metal renderer for a broadcast epilogue
+    // (`msl.rs`'s own `EpilogueNotSupported` gate) -- unrelated to the
+    // partial-rotary plane this file exists to test, so a wider embedding
+    // (still degenerate relative to a real model, but past the cooperative
+    // threshold) sidesteps it without touching that renderer.
+    const EMBEDDING: u32 = 64;
+
+    let mut program = Vec::new();
+    let x = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
+        "x",
+    );
+    let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+    let eps = input_leaf(&mut program, DType::Float32, vec![Extent::Symbolic(0)], "eps");
+    let ones = scalar_constant(&mut program, 1.0);
+    let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 1.0 / (ATTN_HEAD_DIM as f32).sqrt());
+    let inv_attn_head_dim = scalar_constant(&mut program, 1.0 / ATTN_HEAD_DIM as f32);
+    let rotary_shape = vec![Extent::Symbolic(0), Extent::Static(PAIR_DIM)];
+    let cos_new = input_leaf(&mut program, DType::Float32, rotary_shape.clone(), "cos");
+    let sin_new = input_leaf(&mut program, DType::Float32, rotary_shape, "sin");
+    let group_ones = proxima_tensor::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(KV_HEADS), Extent::Static(GROUP)],
+            value: 1.0,
+        },
+    );
+    let (is_future, _neg_infinity) = causal_mask(&mut program).expect("causal mask lowers");
+    let cached_len_node = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+
+    let attn_norm_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![Extent::Static(EMBEDDING)],
+        "attn_norm_weight",
+    );
+    let norm_shape = vec![Extent::Static(ATTN_HEAD_DIM)];
+    let q_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape.clone(), "q_norm_weight");
+    let k_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape, "k_norm_weight");
+    let wq_gate = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![
+            Extent::Static(EMBEDDING),
+            Extent::Static(KV_HEADS * GROUP),
+            Extent::Static(2 * ATTN_HEAD_DIM),
+        ],
+        "wq_gate",
+    );
+    let wk_wv_shape = vec![
+        Extent::Static(EMBEDDING),
+        Extent::Static(KV_HEADS),
+        Extent::Static(ATTN_HEAD_DIM),
+    ];
+    let wk = input_leaf(&mut program, DType::Float32, wk_wv_shape.clone(), "wk");
+    let wv = input_leaf(&mut program, DType::Float32, wk_wv_shape, "wv");
+    let wo = input_leaf(
+        &mut program,
+        DType::Float32,
+        vec![
+            Extent::Static(KV_HEADS),
+            Extent::Static(GROUP),
+            Extent::Static(ATTN_HEAD_DIM),
+            Extent::Static(EMBEDDING),
+        ],
+        "wo",
+    );
+    let cache_rotary_shape = vec![
+        Extent::Symbolic(1),
+        Extent::Static(KV_HEADS),
+        Extent::Static(PAIR_DIM),
+    ];
+    let cache_pass_shape = vec![
+        Extent::Symbolic(1),
+        Extent::Static(KV_HEADS),
+        Extent::Static(PASS_DIM),
+    ];
+    let cache_v_shape = vec![
+        Extent::Symbolic(1),
+        Extent::Static(KV_HEADS),
+        Extent::Static(ATTN_HEAD_DIM),
+    ];
+    let k_first_cache = input_leaf(&mut program, DType::Float32, cache_rotary_shape.clone(), "k_first_cache");
+    let k_second_cache = input_leaf(&mut program, DType::Float32, cache_rotary_shape, "k_second_cache");
+    let k_pass_cache = input_leaf(&mut program, DType::Float32, cache_pass_shape, "k_pass_cache");
+    let v_cache = input_leaf(&mut program, DType::Float32, cache_v_shape, "v_cache");
+
+    let (residual1, taps) = append_qwen35_dense_attention_only_with_taps(
+        &mut program,
+        x,
+        inv_dim,
+        eps,
+        ones,
+        inv_sqrt_attn_head_dim,
+        inv_attn_head_dim,
+        cos_new,
+        sin_new,
+        group_ones,
+        is_future,
+        cached_len_node,
+        GROUP,
+        ROTARY_DIM,
+        ATTN_HEAD_DIM,
+        attn_norm_weight,
+        q_norm_weight,
+        k_norm_weight,
+        wq_gate,
+        wk,
+        wv,
+        wo,
+        k_first_cache,
+        k_second_cache,
+        k_pass_cache,
+        v_cache,
+    )
+    .expect("qwen35 partial-rotary dense attention fixture lowers");
+
+    let symbols = vec![new_count, cached_extent];
+    let shapes = infer(&program, &symbols).expect("qwen35 partial-rotary fixture infers");
+
+    let mut named: Vec<(String, Vec<f32>)> = Vec::new();
+    for (position, op) in program.iter().enumerate() {
+        let Op::Input { name, .. } = op else { continue };
+        let node = NodeId(position as u32);
+        let count: usize = shapes.of(node).iter().map(|extent| *extent as usize).product();
+        let name = name.clone().expect("every input in this fixture is named");
+        let data = if name == "eps" {
+            vec![1e-5f32; count]
+        } else if name == "cached_len" {
+            vec![cached_len as f32]
+        } else {
+            random_vec(position as u64 + 1, count.max(1))
+        };
+        named.push((name, data));
+    }
+
+    // `taps.attended` (the fusion's own anchor node) has exactly one reader
+    // (the per-head gate multiply), and the three cache-write taps have
+    // exactly one reader each too -- every one of them must be pinned as its
+    // own materialization boundary, the same way a real KV-cache write root
+    // already is, or the matcher never gets a standalone `BoundOp` to fuse
+    // (`proxima_tensor::bind`'s own `qwen35_partial_rotary_attention_
+    // fixture` doc, ported verbatim).
+    let roots = vec![
+        residual1,
+        taps.attended,
+        taps.rotated_k_new_first,
+        taps.rotated_k_new_second,
+        taps.k_pass,
+        taps.v_new,
+    ];
+    (program, symbols, roots, named)
+}

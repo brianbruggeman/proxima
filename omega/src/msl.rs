@@ -3225,7 +3225,9 @@ fn grid_threads(
             // against a bucket-padded, compile-time-fixed `context_length`, so
             // its live `chunks`/`splits` never grow between calls the way the
             // single-range path's do (`render_cached_attention`'s own doc).
-            let single_range_dynamic = resolved.operands().len() == 9 && *cached_key_rows == 0;
+            let single_range_dynamic = (resolved.operands().len() == 9
+                || resolved.operands().len() == 12)
+                && *cached_key_rows == 0;
             let (chunks, splits) = if single_range_dynamic {
                 (
                     crate::sized::ATTENTION_CONTEXT_CHUNK_CAP,
@@ -4275,7 +4277,8 @@ pub(crate) fn cached_attention_merge_needed(kind: &BoundOpKind, policy: NumericP
     else {
         return false;
     };
-    let single_range_dynamic = operands.len() == 9 && *cached_key_rows == 0;
+    let single_range_dynamic =
+        (operands.len() == 9 || operands.len() == 12) && *cached_key_rows == 0;
     if !single_range_dynamic {
         return false;
     }
@@ -4327,6 +4330,36 @@ pub(crate) fn cached_attention_per_query_head_grid(
 /// cross-simdgroup merge below, when `context_chunks > 1` splits one
 /// `(query_row, kv_head, group)` triple's key range across simdgroups that
 /// must combine their partial online-softmax state afterward.
+/// Shared body of `render_cached_attention`'s three per-key sequential score
+/// loops (`chunks<=1`, `context_chunks>1`, and the single-range dynamic
+/// path's `block_width<=1` arm) -- byte-identical across all three, and
+/// identical to the pre-pass-plane text, whenever `pass_present` is `false`
+/// (every full-rotary caller today). `true` inserts one extra lane-strided
+/// accumulation into the SAME `partial_score` reduction the rotary planes
+/// already feed (`physical.rs:477-488`'s additive pass-dot term, the CPU
+/// reference this must match) and switches the V read off the `kbase * 2`
+/// pair-doubling shortcut -- only valid when `rotary_dim == head_dim`, since
+/// it assumes `pair_dim * 2 == head_dim` -- to a value address computed
+/// straight from `head_dim`, mirroring `physical.rs`'s own separate
+/// `value_start`/`key_start` addressing.
+fn cached_attention_scalar_score_body(pass_present: bool) -> String {
+    let pair_expr = if pass_present { "pair_dim" } else { "head_dim / 2" };
+    let value_addr = if pass_present { "value_base" } else { "kbase * 2" };
+    let value_base_decl = if pass_present {
+        "long value_base = (cached ? key : new_index) * (kv_heads * head_dim) + kv_head * head_dim;\n        "
+    } else {
+        ""
+    };
+    let pass_accum = if pass_present {
+        "\n        long pass_kbase = (cached ? key : new_index) * (kv_heads * pass_dim) + kv_head * pass_dim;\n        for (long dimension = (long)lane; dimension < pass_dim; dimension += 32L) {\n            partial_score += pass_query[pass_qbase + dimension] * (cached ? pass_cached_key[pass_kbase + dimension] : pass_new_key[pass_kbase + dimension]);\n        }".to_string()
+    } else {
+        String::new()
+    };
+    format!(
+        "        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) {{ continue; }}\n        if (!cached && relative > new_upper) {{ continue; }}\n        long kbase = (cached ? key : new_index) * (kv_heads * ({pair_expr})) + kv_head * ({pair_expr});\n        {value_base_decl}float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < {pair_expr}; pair += 32L) {{\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }}{pass_accum}\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[{value_addr} + dimension] : in7[{value_addr} + dimension]);\n        }}\n        maximum = next_max;\n"
+    )
+}
+
 fn render_cached_attention(
     resolved: &BoundOp,
     entry: &str,
@@ -4352,9 +4385,18 @@ fn render_cached_attention(
             found: resolved.kind.name(),
         });
     };
-    if rotary_dim != head_dim {
+    // `rotary_dim < head_dim` (`BoundOpKind::CachedAttention`'s own doc) is
+    // qwen35's partial-rotary shape: the trailing `pass_query`/
+    // `pass_cached_key`/`pass_new_key` operands carry one un-rotated plane
+    // per side, scored as an extra additive dot term (`physical.rs:477-488`,
+    // the same CPU reference this kernel must match). `rotary_dim > head_dim`
+    // is never legal (`physical.rs`'s own `score_cached_attention_rotary`
+    // guard), so that shape alone still rejects.
+    if rotary_dim > head_dim {
         return Err(EmitError::CachedAttentionPartialRotaryNotSupported { node: resolved.node });
     }
+    let pass_present = rotary_dim < head_dim;
+    let pass_dim = head_dim - rotary_dim;
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let cached_lower = if *cached_lower_inclusive == i64::MIN {
         "-9223372036854775807L".to_string()
@@ -4370,7 +4412,8 @@ fn render_cached_attention(
     // needs no dynamic `new_upper` at all, since its "new" range is never
     // bucketed. `entry_name`'s own "dyn"/"cb" markers are what let one
     // compiled kernel serve every live value on each path.
-    let has_ninth_operand = resolved.operands().len() == 9;
+    let base_operand_len = if pass_present { 11 } else { 8 };
+    let has_ninth_operand = resolved.operands().len() == base_operand_len + 1;
     let single_range_dynamic = has_ninth_operand && *cached_key_rows == 0;
     let two_range_cached_bound = has_ninth_operand && *cached_key_rows != 0;
     let (cached_len_param, new_upper_decl) = if single_range_dynamic {
@@ -4389,6 +4432,24 @@ fn render_cached_attention(
             format!("constexpr long new_upper = {new_upper_inclusive}L;"),
         )
     };
+    // Trailing pass-plane buffers land immediately after the optional ninth
+    // `cached_len` slot (`BoundOpKind::CachedAttention`'s own operand-layout
+    // doc), so their buffer indices shift by one when that slot is present --
+    // `bindings()` (`msl.rs`'s own doc) already derives the same order
+    // generically from `resolved.all_read_sources()`, this just names the
+    // matching Metal buffer indices in the kernel text.
+    let pass_base_index = 8 + usize::from(has_ninth_operand);
+    let pass_param = if pass_present {
+        format!(
+            ", device const {element_type}* pass_query [[buffer({})]], device const {element_type}* pass_cached_key [[buffer({})]], device const {element_type}* pass_new_key [[buffer({})]]",
+            pass_base_index,
+            pass_base_index + 1,
+            pass_base_index + 2,
+        )
+    } else {
+        String::new()
+    };
+    let out_index_offset = if pass_present { 3 } else { 0 };
     // The split kernel-plus-merge shape (redesign §4c) reads WHICH
     // threadgroup a simdgroup belongs to directly from Metal's own
     // per-dispatch coordinate rather than re-deriving it from `gid` --
@@ -4403,8 +4464,10 @@ fn render_cached_attention(
     } else {
         ""
     };
-    let (out_buffer_index, uniforms_buffer_index) =
-        if has_ninth_operand { (9, 10) } else { (8, 9) };
+    let (out_buffer_index, uniforms_buffer_index) = {
+        let out_index = pass_base_index + out_index_offset;
+        (out_index, out_index + 1)
+    };
     // `cached_key_rows`/`new_key_rows` are runtime `Uniforms` fields on the
     // single-range fused path (`dynamic_cached_len`, the ninth-operand
     // form). Redesign §5 option 2: `context_chunks` joins them as a fourth
@@ -4454,11 +4517,19 @@ fn render_cached_attention(
     preamble(&mut source);
     source.push_str(uniforms_struct);
     source.push_str(&format!(
-        "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {element_type}* in2 [[buffer(2)]], device const {element_type}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {element_type}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]]{cached_len_param}, device {element_type}* out [[buffer({out_buffer_index})]], constant Uniforms& u [[buffer({uniforms_buffer_index})]], uint gid [[thread_position_in_grid]]{tgid_param}) {{\n"
+        "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {element_type}* in2 [[buffer(2)]], device const {element_type}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {element_type}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]]{cached_len_param}{pass_param}, device {element_type}* out [[buffer({out_buffer_index})]], constant Uniforms& u [[buffer({uniforms_buffer_index})]], uint gid [[thread_position_in_grid]]{tgid_param}) {{\n"
     ));
     source.push_str("    if ((long)gid >= u.total_elements * 32L) { return; }\n");
+    // `pair_dim`/`pass_dim` are only ever declared when a pass plane is
+    // bound -- the full-rotary path never emits this text, keeping its
+    // kernel source byte-identical to before this plane existed.
+    let pass_dim_decl = if pass_present {
+        format!(" constexpr long pair_dim = {rotary_dim} / 2; constexpr long pass_dim = {pass_dim};")
+    } else {
+        String::new()
+    };
     source.push_str(&format!(
-        "    {row_count_decl} constexpr long kv_heads = {kv_heads}; constexpr long query_groups = {query_groups}; constexpr long head_dim = {head_dim}; constexpr float scale = {}; constexpr long cached_lower = {cached_lower}; {new_upper_decl}\n",
+        "    {row_count_decl} constexpr long kv_heads = {kv_heads}; constexpr long query_groups = {query_groups}; constexpr long head_dim = {head_dim}; constexpr float scale = {}; constexpr long cached_lower = {cached_lower}; {new_upper_decl}{pass_dim_decl}\n",
         msl_literal(*scale),
     ));
     // One threadgroup per (query_row, kv_head) pair -- `tiled_gemm_
@@ -4481,6 +4552,21 @@ fn render_cached_attention(
     // capacity into it) changes what this line feeds `context_chunks_for`,
     // which can change the chunk count -- a repartitioning, not merely a
     // loop-bound change.
+    // The rotary Q/K planes are `rotary_dim / 2` pairs wide, never
+    // `head_dim / 2` -- identical to `head_dim / 2` whenever `rotary_dim ==
+    // head_dim` (every full-rotary caller today), so substituting this
+    // token in place of the literal keeps full-rotary kernel text
+    // byte-identical while partial rotary addresses only its rotated width.
+    let pair_expr = if pass_present { "pair_dim" } else { "head_dim / 2" };
+    // Companion to `qbase`, in `pass_dim` units instead of `pair_expr`
+    // units -- `physical.rs:444`'s own `pass_query_start` addressing, ported
+    // verbatim. Empty for full rotary, so that path's `qbase` line renders
+    // byte-identical to before this plane existed.
+    let pass_qbase_decl = if pass_present {
+        " long pass_qbase = query_row * (kv_heads * query_groups * pass_dim) + query_head * pass_dim;"
+    } else {
+        ""
+    };
     let context_chunks = context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy);
     // Redesign §5 option 2: on the single-range fused path, the compiled
     // MAXIMUM simdgroup count (`cap`) sizes both the dispatch grid and the
@@ -4502,7 +4588,17 @@ fn render_cached_attention(
     // (equivalently, `head_dim` a multiple of 8) is sufficient regardless of
     // `kv_heads`/`query_row`/`kv_head` -- see [`EmitError::
     // AttentionBlockMisaligned`]'s own doc.
-    let block_width = block_width_for(numeric_policy);
+    // Partial rotary falls back to the sequential per-key walk regardless of
+    // policy: the block-staged float4 loads below assume the rotary plane
+    // spans the whole head (`qbase`/`kbase` offsets a multiple of
+    // `head_dim / 2`), and vectorizing the extra pass-plane dot term is
+    // unimplemented -- correctness first, the TreeReduce speed rewrite for
+    // this shape is a follow-up, not a blocker for landing the plane itself.
+    let block_width = if pass_present {
+        1
+    } else {
+        block_width_for(numeric_policy)
+    };
     if single_range_dynamic && block_width > 1 && !head_dim.is_multiple_of(8) {
         return Err(EmitError::AttentionBlockMisaligned {
             node: resolved.node,
@@ -4559,7 +4655,7 @@ fn render_cached_attention(
             "long chunk = vector_index % cap;\n    long group = (vector_index / cap) % query_groups;\n    long kv_head = (long)tgid % kv_heads;\n    long query_row_and_split = (long)tgid / kv_heads;\n"
         };
         source.push_str(&format!(
-            "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long cap = {cap};\n    long chunks = u.context_chunks;\n    long splits = u.splits;\n    {tgid_decode}    constexpr long grid_splits = {grid_splits};\n    long split = query_row_and_split % grid_splits;\n    long query_row = query_row_and_split / grid_splits;\n    if (split >= splits) {{ return; }}\n    long query_index = query_row * (kv_heads * query_groups) + kv_head * query_groups + group;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    long local_group_index = group * cap + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
+            "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long cap = {cap};\n    long chunks = u.context_chunks;\n    long splits = u.splits;\n    {tgid_decode}    constexpr long grid_splits = {grid_splits};\n    long split = query_row_and_split % grid_splits;\n    long query_row = query_row_and_split / grid_splits;\n    if (split >= splits) {{ return; }}\n    long query_index = query_row * (kv_heads * query_groups) + kv_head * query_groups + group;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * ({pair_expr})) + query_head * ({pair_expr});{pass_qbase_decl}\n    long local_group_index = group * cap + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
         ));
         source.push_str(&format!("    {last_key_decl}"));
         // Declared once here (not per `block_width` arm) because the
@@ -4604,7 +4700,10 @@ fn render_cached_attention(
         // `shared_l`/`shared_o` below it, so concurrent simdgroups in the
         // same threadgroup never alias each other's staged scores.
         if block_width <= 1 {
-            source.push_str("    if (chunk < chunks) {\n    for (long key = lo + chunk; key < hi; key += chunks) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n    }\n");
+            source.push_str(&format!(
+                "    if (chunk < chunks) {{\n    for (long key = lo + chunk; key < hi; key += chunks) {{\n{}    }}\n    }}\n",
+                cached_attention_scalar_score_body(pass_present),
+            ));
         } else {
             // The float4/ty-group V accumulate (llama's `kernel_flash_attn_
             // ext_vec` register form, ggml-metal.metal:4125-4143) needs each
@@ -4664,7 +4763,7 @@ fn render_cached_attention(
             "    if (lane == 0u) {{ shared_m[local_group_index] = maximum; shared_l[local_group_index] = sum; }}\n    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ shared_o[local_group_index * head_dim + dimension] = weighted[dimension / 32L]; }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    if (chunk == 0L) {{\n        float merged_max = -INFINITY;\n        for (long c = 0; c < cap; c++) {{ merged_max = max(merged_max, shared_m[group * cap + c]); }}\n        float merged_sum = 0.0f;\n        for (long c = 0; c < cap; c++) {{\n            float partial_max = shared_m[group * cap + c];\n            float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n            merged_sum += shared_l[group * cap + c] * rescale;\n        }}\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            float acc = 0.0f;\n            for (long c = 0; c < cap; c++) {{\n                float partial_max = shared_m[group * cap + c];\n                float rescale = (partial_max == -INFINITY) ? 0.0f : exp(partial_max - merged_max);\n                acc += shared_o[(group * cap + c) * head_dim + dimension] * rescale;\n            }}\n            weighted[local_dimension] = acc;\n        }}\n        sum = merged_sum;\n{final_store}    }}\n}}\n"
         ));
     } else if context_chunks <= 1 {
-        source.push_str("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }\n");
+        source.push_str(&format!("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * ({pair_expr})) + query_head * ({pair_expr});{pass_qbase_decl}\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"));
         source.push_str(&format!("    {last_key_decl}"));
         // Each lane reads its own K/V elements straight from device memory
         // into registers, llama.cpp's `kernel_flash_attn_ext_vec` shape
@@ -4672,7 +4771,10 @@ fn render_cached_attention(
         // no `threadgroup` staging, so no barrier is needed inside the loop:
         // nothing is shared across lanes or simdgroups until `simd_sum`
         // reduces the per-lane partial dot product within this simdgroup.
-        source.push_str("    for (long key = 0; key <= last_key; key++) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n");
+        source.push_str(&format!(
+            "    for (long key = 0; key <= last_key; key++) {{\n{}    }}\n",
+            cached_attention_scalar_score_body(pass_present),
+        ));
         source.push_str(&format!("    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n}}\n"));
     } else {
         // `context_chunks` simdgroups per (query_row, kv_head, group) triple
@@ -4691,10 +4793,13 @@ fn render_cached_attention(
         // old `key % context_chunks == chunk` gate, visited in the same
         // increasing order, so the accumulated floats are bit-identical.
         source.push_str(&format!(
-            "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long context_chunks = {context_chunks};\n    long query_index = vector_index / context_chunks;\n    long chunk = vector_index % context_chunks;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    long local_group_index = group * context_chunks + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
+            "    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) {{ return; }}\n    constexpr long context_chunks = {context_chunks};\n    long query_index = vector_index / context_chunks;\n    long chunk = vector_index % context_chunks;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * ({pair_expr})) + query_head * ({pair_expr});{pass_qbase_decl}\n    long local_group_index = group * context_chunks + chunk;\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] = 0.0f; }}\n"
         ));
         source.push_str(&format!("    {last_key_decl}"));
-        source.push_str("    for (long key = chunk; key <= last_key; key += context_chunks) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n");
+        source.push_str(&format!(
+            "    for (long key = chunk; key <= last_key; key += context_chunks) {{\n{}    }}\n",
+            cached_attention_scalar_score_body(pass_present),
+        ));
         // Single cross-simdgroup merge: each chunk's own (max, sum,
         // weighted) is the same online-softmax state the `chunks<=1` body
         // already computes over its own key subset; combining them is the
@@ -8148,7 +8253,9 @@ fn tiled_gemm_threadgroup_width(
         // `CachedAttention` arm -- `two_range_cached_bound` never widens to
         // the compiled cap, since its `context_length` is already the
         // bucket-padded compile-time value.
-        let dynamic_cached_len = resolved.operands().len() == 9 && *cached_key_rows == 0;
+        let dynamic_cached_len = (resolved.operands().len() == 9
+            || resolved.operands().len() == 12)
+            && *cached_key_rows == 0;
         let context_length = *cached_key_rows + *new_key_rows;
         let chunks = if dynamic_cached_len {
             crate::sized::ATTENTION_CONTEXT_CHUNK_CAP
