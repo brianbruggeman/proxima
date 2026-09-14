@@ -91,6 +91,7 @@ pub use metal::{
 pub use metal::{
     execute_plan_named_with_placements_dispatch_timed, execute_plan_named_with_placements_op_timed,
     execute_plan_with_placements_dispatch_timed, execute_plan_with_placements_op_timed,
+    placed_buffer_identity,
 };
 #[cfg(feature = "alloc")]
 pub use msl::{
