@@ -31764,3 +31764,56 @@ This matches ROW 550/551's own good-state reading (`block_upload_calls=76`, `map
 - `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: exit 0 (66 s).
 
 **Landed this slice:** `proxima-tensor/src/partition.rs` (`use alloc::vec;`), `proxima-model-interop/src/task.rs` (`use alloc::format;`), `proxima-model-interop/src/generate.rs` (`SegmentPlacements`/`evaluate_segment_op_timed_with_placements`/`CooperativeShapeCounts` gated on `metal-output-placement`+`macos`/`instrument`+`metal`+`macos` matching the `PlacedBuffer` import they depend on; `PreGatherContext`'s new `marker: PhantomData<&'mapping ()>` field), `proxima-model-interop/src/bind.rs` (`checkpoint_qkv_biases` gated `std`), and this doc entry. No source change from the Run A/B reproduction itself -- the failure is a genuine OS-level resource ceiling under real co-residency, not a code defect to revert or patch.
+
+## ROW 554 — placed executor on the routed model: default-path gate and measurement
+
+**Context:** Commit 1bdf9bd6 changed `use_metal_output_placements` in `proxima-model-interop/src/generate.rs` so the DEFAULT qwen35moe full-graph decode now runs through the placed executor (previously never). Its effect on the default path (feature `gated-delta-net-fusion` OFF) was unmeasured; full test gates for the routed model were not run. Decision point: gate and measure before landing.
+
+**Tripwire verified:** main branch, commit 54b9ce22, git status shows only untracked agents.tsv and todo files.
+
+**Gates (all passed with allowed failures only):**
+- `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 2 --no-fail-fast`: EXIT=100, summary failures match allowed list: `capability_matrix::dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}`, `external_expert_paging::q2k_paging_actually_changes_the_decoded_ids`, 4× `external_architecture_hybrid_cache`. No regressions.
+- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: Summary `313 tests run: 313 passed, 13 skipped`. All pass.
+- `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0.
+
+**Build:** `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (45.97 s).
+
+**Environment:** macOS, M1 Max; model lock acquired; ollama idle before each run; `memory_pressure` 80% free.
+
+**Run 1** (prompt: "What is the capital of France?", 16 tokens):
+| metric | value |
+|---|---|
+| `generated_text` | `"<think>\n\n</think>\n\nThe capital of France is **Paris**."` (correct) |
+| `ttnt_mean_ms` | 56.818 |
+| gpu_exec_ms (step 8) | 41.28575 |
+| encode_dispatch_calls | 4264 |
+| barriers | 3223 |
+| readback_ms (step 8) | 0.062208 |
+| block_upload_calls (step 8) | 76 |
+| mapping_offset_uploads | 0 |
+
+**Run 2** (identical prompt/tokens):
+| metric | value |
+|---|---|
+| `generated_text` | `"<think>\n\n</think>\n\nThe capital of France is **Paris**."` (correct) |
+| `ttnt_mean_ms` | 56.909 |
+| gpu_exec_ms (step 8) | 42.591833 |
+| encode_dispatch_calls | 4264 |
+| barriers | 3223 |
+| readback_ms (step 8) | 0.073125 |
+| block_upload_calls (step 8) | 76 |
+| mapping_offset_uploads | 0 |
+
+**Baseline** (from task description, before 1bdf9bd6):
+| metric | value |
+|---|---|
+| text | `"Paris"` |
+| ttnt_mean_ms | 56.9 |
+| gpu_exec_ms | 40–48 |
+| encode_dispatch_calls | 4264 |
+| barriers | 3223 |
+| readback_calls | ~1 |
+
+**Comparison:** Both runs contain "Paris" (text is correct). ttnt_mean_ms: 56.818/56.909 vs. baseline 56.9 — essentially identical, within 0.16% variance. gpu_exec_ms: 41.29/42.59 vs. baseline 40–48 — within baseline range. All structural metrics (dispatch_calls, barriers, block_uploads, mapping_offset_uploads) are identical to baseline. No regressions detected.
+
+**Decision:** Keep the change. Commit 1bdf9bd6 passes gate and measurement with no performance regression or correctness deviation.
