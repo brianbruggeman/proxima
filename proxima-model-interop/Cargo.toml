@@ -103,6 +103,10 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # `metal-q4k-ggml-port` joins per ROW 315 (`omega/Cargo.toml`'s own comment
 # carries the mechanism and the interleaved-bake-off numbers) -- the fixed
 # body is less work with identical output, default-on per the same rule.
+# ROW 555: `gated-delta-net-fusion` joins default-on now that the fused
+# `state_out` write actually reaches the caller's placed buffer (`encode_op`'s
+# own `state_out_placement` doc, `omega/src/metal.rs`) -- qwen35moe real-model
+# decode reaches "Paris" with `ttnt_mean_ms=52.733` (baseline 56.9).
 metal = [
     "dep:omega",
     "dep:libc",
@@ -114,6 +118,7 @@ metal = [
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
     "metal-q4k-ggml-port",
+    "gated-delta-net-fusion",
 ]
 mlx-gdn = ["metal", "omega/mlx-gdn"]
 # Cross-platform GPU serving through omega's wgpu driver.  The existing

@@ -5691,7 +5691,9 @@ mod tests {
                 BoundOpKind::CachedAttention { operands, .. }
                 | BoundOpKind::Elementwise { operands, .. }
                 | BoundOpKind::Reduce { operands, .. } => operands,
-                BoundOpKind::Iota | BoundOpKind::Constant { .. } => continue,
+                BoundOpKind::Iota
+                | BoundOpKind::Constant { .. }
+                | BoundOpKind::GatedDeltaNet { .. } => continue,
             };
             for (node, layout, lookup) in operands.iter_mut() {
                 if *node == gathered_source {

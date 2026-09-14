@@ -150,6 +150,12 @@ use omega::{
     PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
     execute_plan_named_with_placements_and_expert_sources, plan_named_with_placed_inputs,
 };
+#[cfg(all(
+    feature = "metal-output-placement",
+    feature = "instrument",
+    target_os = "macos"
+))]
+use omega::read_placed_buffer_f32;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::{debug, info};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -9813,6 +9819,21 @@ impl<'file> LoadedModel<'file> {
                             };
                             ssm_input_placements.push((state_input, input_buffer, 0));
                             ssm_output_placements.push((*state_out, output_buffer, 0));
+                            #[cfg(feature = "instrument")]
+                            if layer == 0 {
+                                debug!(
+                                    step = (cached_len + batch_index) as u64,
+                                    layer = layer as u64,
+                                    state_in_node = state_input.0,
+                                    state_out_node = state_out.0,
+                                    state_in_placed_ptr =
+                                        omega::placed_buffer_identity(input_buffer) as u64,
+                                    state_out_placed_ptr =
+                                        omega::placed_buffer_identity(output_buffer) as u64,
+                                    state_in_first4 = ?read_placed_buffer_f32(input_buffer, 0, 4),
+                                    "row 555: interop layer-0 ssm placement pre-dispatch"
+                                );
+                            }
                         }
                     }
 
@@ -10205,6 +10226,17 @@ impl<'file> LoadedModel<'file> {
                             expert_source_substitutions,
                         )?
                     };
+                    #[cfg(feature = "instrument")]
+                    if let Some((_, output_buffer, _)) = ssm_output_placements.first() {
+                        debug!(
+                            step = (cached_len + batch_index) as u64,
+                            layer = 0_u64,
+                            state_out_placed_ptr =
+                                omega::placed_buffer_identity(output_buffer) as u64,
+                            state_out_first4 = ?read_placed_buffer_f32(output_buffer, 0, 4),
+                            "row 555: interop layer-0 ssm placement post-dispatch"
+                        );
+                    }
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                     let evaluated = if pre_gather && !monolithic_all_low {
                         let pre_gather_plan =

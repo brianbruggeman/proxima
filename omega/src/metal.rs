@@ -1901,6 +1901,7 @@ fn execute_plan_inner(
             packed_operands,
             None,
             None,
+            None,
             plan.math_mode,
             plan.numeric_policy,
             None,
@@ -2591,6 +2592,16 @@ pub fn zero_placed_buffer(buffer: &PlacedBuffer, byte_len: usize) {
     // this call.
     let slots = unsafe { core::slice::from_raw_parts_mut(pointer.as_ptr().cast::<u8>(), byte_len) };
     slots.fill(0);
+}
+
+/// Row 555 diagnostic: the device pointer identity behind a [`PlacedBuffer`],
+/// so a caller can prove whether the buffer bound as `state_out` at step N is
+/// the SAME buffer bound as `state_in` at step N+1, rather than inferring it
+/// from node ids alone.
+#[cfg(all(feature = "metal-output-placement", feature = "instrument"))]
+#[must_use]
+pub fn placed_buffer_identity(buffer: &PlacedBuffer) -> usize {
+    Retained::as_ptr(buffer) as usize
 }
 
 /// Reads `element_count` `f32`s back from `buffer` starting at `byte_offset`
@@ -3423,6 +3434,17 @@ fn execute_plan_with_placements_inner(
             Some(placement) => Some(placement),
             None => arena_placement(plan, position)?,
         };
+        // row 555: `bound.node` above is the fused op's primary "out" node,
+        // never the absorbed `state_out` node it also owns -- a caller's
+        // `state_out` placement lives under a DIFFERENT key in the same
+        // map, and `encode_op`'s own doc names why skipping this silently
+        // discarded recurrent state on every fused `GatedDeltaNet` dispatch.
+        let state_out_placement = match &bound.kind {
+            BoundOpKind::GatedDeltaNet { state_out, .. } => {
+                output_placed.get(state_out).copied()
+            }
+            _ => None,
+        };
         // `ablation_skip` is `false` on every non-`instrument` build (the
         // `match` folds to the literal at compile time, so this costs
         // nothing in production) and `false` on every `instrument` build
@@ -3584,6 +3606,7 @@ fn execute_plan_with_placements_inner(
                 bound,
                 packed_operands,
                 placement,
+                state_out_placement,
                 uniform_buffer,
                 plan.math_mode,
                 plan.numeric_policy,
@@ -3905,6 +3928,7 @@ pub fn execute_plan_timed(
             &mut device_buffers,
             bound,
             packed_operands,
+            None,
             None,
             None,
             plan.math_mode,
@@ -4530,6 +4554,11 @@ fn execute_op_timed(
     position: usize,
     bound: &BoundOp,
     placement: Option<(&MetalBuffer, usize)>,
+    // row 555: same `state_out` placement gap `encode_op`'s own doc names,
+    // threaded through this diagnostic timing wrapper so a caller measuring
+    // a fused `GatedDeltaNet` decode step observes the SAME state-carry
+    // behavior the production dispatch path uses, not a silently different one.
+    state_out_placement: Option<(&MetalBuffer, usize)>,
     plan_uniform: Option<&MetalBuffer>,
     always_live: &BTreeSet<NodeId>,
     math_mode: MathMode,
@@ -4599,6 +4628,7 @@ fn execute_op_timed(
         bound,
         packed_operands,
         placement,
+        state_out_placement,
         plan_uniform,
         math_mode,
         numeric_policy,
@@ -4912,6 +4942,7 @@ fn execute_plan_op_timed_inner(
             bound,
             None,
             None,
+            None,
             &no_placements,
             plan.math_mode,
             plan.numeric_policy,
@@ -5064,6 +5095,16 @@ pub fn execute_plan_with_placements_op_timed(
             Some(placement) => Some(placement),
             None => arena_placement(plan, position)?,
         };
+        // row 555: `bound.node` above can never be a fused `state_out` node
+        // (`encode_op`'s own doc); this is the SAME `output_placed` map,
+        // keyed by `state_out` instead, so this diagnostic path carries
+        // state exactly like the production dispatch below does.
+        let state_out_placement = match &bound.kind {
+            BoundOpKind::GatedDeltaNet { state_out, .. } => {
+                output_placed.get(state_out).copied()
+            }
+            _ => None,
+        };
         let uniform_buffer = plan_uniform_buffer(plan, position)?;
         let timing = execute_op_timed(
             &device,
@@ -5075,6 +5116,7 @@ pub fn execute_plan_with_placements_op_timed(
             position,
             bound,
             placement,
+            state_out_placement,
             uniform_buffer,
             &always_live,
             plan.math_mode,
@@ -5418,6 +5460,13 @@ pub fn execute_plan_with_placements_dispatch_timed(
             Some(placement) => Some(placement),
             None => arena_placement(plan, position)?,
         };
+        // row 555: same fused-`state_out`-key gap `encode_op`'s own doc names.
+        let state_out_placement = match &bound.kind {
+            BoundOpKind::GatedDeltaNet { state_out, .. } => {
+                output_placed.get(state_out).copied()
+            }
+            _ => None,
+        };
         let uniform_buffer = plan_uniform_buffer(plan, position)?;
         let operand_bytes: u64 = bound
             .operands()
@@ -5554,6 +5603,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             bound,
             packed_operands,
             placement,
+            state_out_placement,
             uniform_buffer,
             plan.math_mode,
             plan.numeric_policy,
@@ -11370,6 +11420,16 @@ fn encode_op(
     bound: &BoundOp,
     packed_operands: &PackedOperands,
     placement: Option<(&MetalBuffer, usize)>,
+    // row 555: the fused `GatedDeltaNet` op's `state_out` is a SECOND output
+    // node absorbed into this bound op's own identity (`bound.node` is the
+    // primary "out" node, never `state_out` -- `gated_delta_net_candidates`'s
+    // own doc), so the ordinary `placement` lookup above (keyed by
+    // `bound.node`) can never resolve a caller's `state_out` placement. This
+    // is that SAME lookup, keyed by `state_out` instead, resolved by every
+    // placement-aware caller and `None` everywhere else -- see the
+    // `BoundOpKind::GatedDeltaNet` arm below for why skipping it silently
+    // discarded recurrent state every dispatch.
+    state_out_placement: Option<(&MetalBuffer, usize)>,
     plan_uniform: Option<&MetalBuffer>,
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
@@ -11654,14 +11714,24 @@ fn encode_op(
     // `docs/discipline.md`): `bindings` above only ever names ONE
     // `Binding::Output` (`bind_buffers`'s single `output` parameter cannot
     // carry two distinct node identities), so `state_out` binds at the next
-    // free slot manually, right before dispatch, same as any other output --
-    // reused from `device_buffers` on a call that already produced it (the
-    // "persistent per-layer buffer" a placed caller supplies for `state_out`
-    // Just Works here, since a placed node's buffer already lives in
-    // `device_buffers` before this function ever runs), freshly allocated
-    // otherwise.
+    // free slot manually, right before dispatch, same as any other output.
+    // ROW 555: a placed caller's `state_out` buffer does NOT already live in
+    // `device_buffers` here -- the generic per-op placement lookup
+    // (`output_placed.get(&bound.node)`, several lines above every
+    // `encode_op` call site) is keyed by this op's OWN node, which is the
+    // fused primary "out" node, never the absorbed `state_out` node
+    // (`gated_delta_net_candidates`'s own `fused.node = output`). Without
+    // `state_out_placement` threaded in separately, the caller's designated
+    // ping-pong buffer was silently never written, and the interop loop's
+    // own `ssm_input_placements` unconditionally re-bound `state_in` to that
+    // (always-zero) buffer on the very next step -- resetting the recurrent
+    // state to zero every dispatch. Measured: `state_out_placed_ptr`'s
+    // post-dispatch `first4` stayed `[0.0, 0.0, 0.0, 0.0]` across steps
+    // while the plan-internal `device_buffers[state_out]` buffer (a
+    // DIFFERENT pointer) carried the real computed state nobody read back.
     if let BoundOpKind::GatedDeltaNet {
         state_out,
+        #[cfg(feature = "instrument")]
         operands,
         num_v_heads,
         head_k_dim,
@@ -11671,23 +11741,48 @@ fn encode_op(
     {
         let state_elements = (*head_k_dim * *head_v_dim * *num_v_heads) as usize;
         let existing = device_buffers.get(state_out).cloned();
-        let placed = existing.is_some();
-        let (state_buffer, state_offset) = match existing {
-            Some(buffer) => buffer,
-            None => (allocate_buffer(device, state_elements, bound.dtype)?, 0),
+        #[cfg(feature = "instrument")]
+        let placed = state_out_placement.is_some() || existing.is_some();
+        let (state_buffer, state_offset) = match state_out_placement {
+            Some((buffer, offset)) => (buffer.clone(), offset),
+            None => match existing {
+                Some(buffer) => buffer,
+                None => (allocate_buffer(device, state_elements, bound.dtype)?, 0),
+            },
         };
         // decision point: whether this node's recurrent state carried
         // forward from the caller's placement (ROW 549 -- a stale
         // `use_metal_output_placements` gate left this always missing for
         // qwen35moe's routed-expert + GDN decode step, discarding state
         // every dispatch).
-        debug!(
-            node = bound.node.0,
-            state_out = state_out.0,
-            state_in = operands[5].0.0,
-            placed,
-            "gated_delta_net state_out resolution"
-        );
+        #[cfg(feature = "instrument")]
+        {
+            let state_in_node = operands[5].0;
+            let state_in_resolved = device_buffers.get(&state_in_node);
+            let state_in_pointer = state_in_resolved
+                .map(|(buffer, _)| Retained::as_ptr(buffer) as usize)
+                .unwrap_or(0);
+            let state_in_offset = state_in_resolved.map(|(_, offset)| *offset).unwrap_or(0);
+            let state_in_first4 = state_in_resolved.map(|(buffer, offset)| {
+                let pointer = buffer.contents().as_ptr().cast::<u8>();
+                let floats = unsafe {
+                    core::slice::from_raw_parts(pointer.add(*offset).cast::<f32>(), 4)
+                };
+                [floats[0], floats[1], floats[2], floats[3]]
+            });
+            debug!(
+                node = bound.node.0,
+                state_out = state_out.0,
+                state_in = state_in_node.0,
+                placed,
+                state_in_ptr = state_in_pointer as u64,
+                state_in_offset = state_in_offset as u64,
+                state_out_ptr = Retained::as_ptr(&state_buffer) as u64,
+                state_out_offset = state_offset as u64,
+                ?state_in_first4,
+                "row 555: gated_delta_net state_out resolution"
+            );
+        }
         unsafe {
             encoder.setBuffer_offset_atIndex(Some(&state_buffer), state_offset, bindings.len());
         }
