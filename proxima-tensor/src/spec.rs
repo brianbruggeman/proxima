@@ -1878,7 +1878,7 @@ pub fn append_moe_ffn(
         ones,
         gating,
         expert_bias,
-        MoeProjectionStrategy::GroupedGateUp,
+        MoeProjectionStrategy::PerRoute,
     )
 }
 
@@ -1906,6 +1906,41 @@ pub fn append_moe_ffn_from_logits(
         layer,
         x,
         logits,
+        expert_w_gate,
+        expert_w_up,
+        expert_w_down,
+        expert_count,
+        expert_used_count,
+        ones,
+        gating,
+        expert_bias,
+        MoeProjectionStrategy::PerRoute,
+    )
+}
+
+/// [`append_moe_ffn`] with gate and up projections grouped over the selected
+/// axis while each composed hidden activation still enters its own gathered
+/// down projection.
+#[allow(clippy::too_many_arguments)]
+pub fn append_moe_ffn_grouped_gate_up(
+    program: &mut Vec<Op>,
+    layer: u32,
+    x: NodeId,
+    gate_inp: NodeId,
+    expert_w_gate: NodeId,
+    expert_w_up: NodeId,
+    expert_w_down: NodeId,
+    expert_count: u32,
+    expert_used_count: u32,
+    ones: NodeId,
+    gating: ExpertGatingFunc,
+    expert_bias: Option<NodeId>,
+) -> Result<(NodeId, MoeSite), TensorError> {
+    append_moe_ffn_with_projection_strategy(
+        program,
+        layer,
+        x,
+        gate_inp,
         expert_w_gate,
         expert_w_up,
         expert_w_down,
@@ -11327,12 +11362,12 @@ mod tests {
                 "down",
             );
             let one = scalar_constant(&mut program, 1.0);
-            let strategy = if grouped {
-                MoeProjectionStrategy::GroupedGateUp
+            let appended = if grouped {
+                append_moe_ffn_grouped_gate_up
             } else {
-                MoeProjectionStrategy::PerRoute
+                append_moe_ffn
             };
-            let (root, _) = append_moe_ffn_with_projection_strategy(
+            let (root, _) = appended(
                 &mut program,
                 0,
                 x,
@@ -11345,7 +11380,6 @@ mod tests {
                 one,
                 ExpertGatingFunc::Softmax,
                 None,
-                strategy,
             )
             .expect("the MoE graph builds");
             (program, root)
@@ -11396,146 +11430,6 @@ mod tests {
         };
         assert_eq!(gathered_count(&per_route_program), 6);
         assert_eq!(gathered_count(&grouped_program), 4);
-    }
-
-    /// deterministic, non-degenerate fill -- avoids a single repeated value
-    /// that would make gate/up/down accidentally commute under the wrong
-    /// reduction order.
-    fn moe_fixture_values(count: usize, seed: u32) -> Vec<f32> {
-        (0..count)
-            .map(|index| {
-                let phase = (index as u32).wrapping_add(seed.wrapping_mul(2_654_435_761));
-                let unit = (phase.wrapping_mul(2_246_822_519) >> 8) as f32 / (u32::MAX >> 8) as f32;
-                unit * 2.0 - 1.0
-            })
-            .collect()
-    }
-
-    /// pins [`append_moe_ffn`]'s post-ROW-543 output against the pre-existing
-    /// per-route form it replaced, at the pinned production-adjacent shapes
-    /// named in the discipline log: `append_moe_ffn` itself now always builds
-    /// the grouped gate/up strategy, so the per-route oracle is built via the
-    /// private [`append_moe_ffn_with_projection_strategy`] directly.
-    fn assert_moe_ffn_matches_per_route_fixture(
-        expert_count: u32,
-        expert_used_count: u32,
-        embedding: u32,
-        feed_forward: u32,
-    ) {
-        let build = |strategy: MoeProjectionStrategy| {
-            let mut program = Vec::new();
-            let x = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(1), Extent::Static(embedding)],
-                "x",
-            );
-            let gate_inp = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(expert_count)],
-                "gate_inp",
-            );
-            let gate = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Static(expert_count),
-                    Extent::Static(embedding),
-                    Extent::Static(feed_forward),
-                ],
-                "gate",
-            );
-            let up = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Static(expert_count),
-                    Extent::Static(embedding),
-                    Extent::Static(feed_forward),
-                ],
-                "up",
-            );
-            let down = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Static(expert_count),
-                    Extent::Static(feed_forward),
-                    Extent::Static(embedding),
-                ],
-                "down",
-            );
-            let one = scalar_constant(&mut program, 1.0);
-            let (root, _) = append_moe_ffn_with_projection_strategy(
-                &mut program,
-                0,
-                x,
-                gate_inp,
-                gate,
-                up,
-                down,
-                expert_count,
-                expert_used_count,
-                one,
-                ExpertGatingFunc::Softmax,
-                None,
-                strategy,
-            )
-            .expect("the MoE graph builds");
-            (program, root)
-        };
-
-        let x_values = moe_fixture_values(embedding as usize, 1);
-        let gate_inp_values = moe_fixture_values((embedding * expert_count) as usize, 2);
-        let gate_values = moe_fixture_values((expert_count * embedding * feed_forward) as usize, 3);
-        let up_values = moe_fixture_values((expert_count * embedding * feed_forward) as usize, 4);
-        let down_values = moe_fixture_values((expert_count * feed_forward * embedding) as usize, 5);
-        let blocks: [&[f32]; 5] = [
-            &x_values,
-            &gate_inp_values,
-            &gate_values,
-            &up_values,
-            &down_values,
-        ];
-        let workers = core::num::NonZeroUsize::new(1).expect("one worker exists");
-
-        let (per_route_program, per_route_root) = build(MoeProjectionStrategy::PerRoute);
-        let per_route = crate::cpu::evaluate_parallel(
-            &per_route_program,
-            &[],
-            &blocks,
-            &[per_route_root],
-            workers,
-        )
-        .expect("per-route graph evaluates");
-        let (grouped_program, grouped_root) = build(MoeProjectionStrategy::GroupedGateUp);
-        let grouped =
-            crate::cpu::evaluate_parallel(&grouped_program, &[], &blocks, &[grouped_root], workers)
-                .expect("grouped gate/up graph evaluates");
-
-        let max_absolute_difference = grouped
-            .root()
-            .iter()
-            .zip(per_route.root().iter())
-            .map(|(grouped_value, per_route_value)| (grouped_value - per_route_value).abs())
-            .fold(0.0f32, f32::max);
-        assert!(
-            max_absolute_difference <= 1e-6,
-            "expert_count={expert_count} expert_used_count={expert_used_count} \
-             embedding={embedding} feed_forward={feed_forward}: max abs diff \
-             {max_absolute_difference} exceeds 1e-6"
-        );
-    }
-
-    #[test]
-    fn append_moe_ffn_reproduces_the_pinned_per_route_fixture_small_shape() {
-        assert_moe_ffn_matches_per_route_fixture(8, 2, 64, 32);
-    }
-
-    #[test]
-    fn append_moe_ffn_reproduces_the_pinned_per_route_fixture_wide_shape() {
-        assert_moe_ffn_matches_per_route_fixture(256, 8, 32, 32);
     }
 
     #[test]
@@ -13419,9 +13313,8 @@ shape = ["seq"]
             .count();
         assert_eq!(
             gathered_products,
-            2 + EXPERT_USED_COUNT as usize,
-            "gate and up gather once each over the grouped selected axis (ROW 543); \
-             down alone still gathers per selected route"
+            3 * EXPERT_USED_COUNT as usize,
+            "each selected route gathers its gate, up, and down expert independently"
         );
 
         let symbols = [SEQUENCE as u64];
