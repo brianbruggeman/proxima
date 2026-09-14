@@ -5238,10 +5238,15 @@ mod tests {
     #[test]
     #[cfg(feature = "cached-attention-streaming")]
     fn cached_attention_rewrite_replaces_the_bound_attention_subgraph() {
-        let (program, _, _) = crate::spec::mistral_cached_forward_program(32, 16, 24, 4, 2, 4, 1)
-            .expect("cached attention fixture builds");
+        let (program, logits, roots) =
+            crate::spec::mistral_cached_forward_program(32, 16, 24, 4, 2, 4, 1)
+                .expect("cached attention fixture builds");
         let shapes = crate::shape::infer(&program, &[1, 1]).expect("cached attention infers");
-        let outputs: &[NodeId] = &[];
+        let mut requested = alloc::vec![logits];
+        for cache_roots in &roots {
+            requested.extend_from_slice(&[cache_roots.0, cache_roots.1, cache_roots.2]);
+        }
+        let outputs: &[NodeId] = &requested;
         let plain = bind_plain(&program, &shapes, outputs, NumericPolicy::bit_exact())
             .expect("plain bind succeeds");
         let cached_only = bind_cached_attention_fusion(
@@ -5255,10 +5260,10 @@ mod tests {
         let rewritten = bind(&program, &shapes, outputs, NumericPolicy::bit_exact())
             .expect("rewritten bind succeeds");
 
-        assert_eq!(plain.len(), 48, "fixture baseline bound operation count");
+        assert_eq!(plain.len(), 47, "fixture baseline bound operation count");
         assert_eq!(
             cached_only.len(),
-            26,
+            25,
             "fixture cached-attention-only fused bound operation count"
         );
         // `reduce-epilogue-fusion` is a second, independent bind-time pass
