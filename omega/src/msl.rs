@@ -2732,16 +2732,15 @@ fn classify_packed_row_block(
     if gathered_multi_row && !cfg!(feature = "metal-gathered-packed-row") {
         return Err(PackedRowBlockRejection::GatheredOperand);
     }
-    // A routed row cannot share one streamed weight row with its neighbour:
-    // each token may select a different expert. Treat the complete output
-    // space as feature rows so the existing single-row body resolves and
-    // fetches one route per `q`; this is the same packed decoder and address
-    // algebra, with no new kernel ABI or per-token allocation.
-    let (token_axes, feature_axes) = if gathered_multi_row {
-        (Vec::new(), output_axes.to_vec())
-    } else {
-        (candidate_token_axes, candidate_feature_axes)
-    };
+    // A routed row's weight IS different per token, so it cannot be shared
+    // across the multi-row activation group the way the dense path shares
+    // it -- but `push_packed_row_multi_row_body` now re-gathers the
+    // expert base per token slot instead of hoisting it once, so a gathered
+    // op takes the SAME token/feature split a dense op would: `selected`
+    // (and `sequence`) as the token axis, `d_out` as the feature axis. Each
+    // token still reads its own expert's slab exactly once -- no row is
+    // shared, none is re-fetched per output element.
+    let (token_axes, feature_axes) = (candidate_token_axes, candidate_feature_axes);
     Ok(PackedRowBlock {
         weight,
         other,
@@ -5680,6 +5679,23 @@ fn push_packed_row_multi_row_body(
     source.push_str("        other_base[s] = ob;\n");
     source.push_str("    }\n");
 
+    // A routed expert's weight base depends on WHICH token slot `s` picked
+    // it, not on the feature row `q` -- gathered once per token here,
+    // alongside the token coordinate `other_base[s]` already decoded above,
+    // never re-fetched per `(s, q, k)` triple below.
+    let gather_slots = gather_slots(resolved);
+    let weight_gathered = gather_slots[weight].is_some();
+    if weight_gathered {
+        source.push_str(&format!("    long weight_expert_base[{cap}];\n"));
+        source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
+        source.push_str("        long web = 0;\n");
+        if let Some(slot) = gather_slots[weight] {
+            push_cooperative_gather_fetch(source, weight, slot, rank, "token_coord[s]", "web");
+        }
+        source.push_str("        weight_expert_base[s] = web;\n");
+        source.push_str("    }\n");
+    }
+
     source.push_str(&format!(
         "    long other_stride = u.operand_strides[{other}][{reduce_dim}];\n"
     ));
@@ -5689,9 +5705,13 @@ fn push_packed_row_multi_row_body(
     // of the M=1 decode path's `q4k_pair_dot`), instead of the per-element
     // `operand_read` below paying that decode once per token. Every other
     // codec (`Q3_K`/`Q5_K`/`Q6_K`) keeps the generic loop -- they have no
-    // multi-row port yet, this landing only proves the pattern on `Q4_K`,
-    // the codec `ROW 389`'s own trace named as the dominant contributor.
+    // multi-row port yet, this landing only proves the pattern on `Q4_K`.
+    // A gathered weight is excluded here -- `q4k_pair_dot_mr` hoists one
+    // decode shared across every token slot, which is only sound when every
+    // slot reads the SAME expert row; the generic loop below re-reads per
+    // slot instead, which a routed weight requires regardless of codec.
     let fast_q4k = !expert_source_mode
+        && !weight_gathered
         && block.codec == PackedCodec::Q4K
         && element_type == "float"
         && quantized[weight] == Some(PackedCodec::Q4K)
@@ -5713,11 +5733,29 @@ fn push_packed_row_multi_row_body(
             "            {element_type} scratch[{}];\n",
             operand_count.max(1)
         ));
-        source.push_str(&format!(
-            "            scratch[{weight}] = {};\n",
-            operand_read(weight, "(weight_base[q] + k)", quantized[weight])
-        ));
+        if !weight_gathered {
+            // shared across every token slot -- one read per (feature row,
+            // reduce element), reused `cap` times below.
+            source.push_str(&format!(
+                "            scratch[{weight}] = {};\n",
+                operand_read(weight, "(weight_base[q] + k)", quantized[weight])
+            ));
+        }
         source.push_str(&format!("            for (int s = 0; s < {cap}; ++s) {{\n"));
+        if weight_gathered {
+            // each token slot may have routed to a different expert, so the
+            // weight read moves inside the slot loop instead of being
+            // hoisted above it -- still exactly one read per (slot, feature
+            // row, reduce element), never per output element.
+            source.push_str(&format!(
+                "                scratch[{weight}] = {};\n",
+                operand_read(
+                    weight,
+                    "(weight_base[q] + weight_expert_base[s] + k)",
+                    quantized[weight]
+                )
+            ));
+        }
         source.push_str(&format!(
             "                scratch[{other}] = {};\n",
             operand_read(
@@ -9546,7 +9584,7 @@ mod tests {
 
     #[cfg(feature = "metal-gathered-packed-row")]
     #[test]
-    fn flattened_selected_axis_gathered_q4k_matmul_uses_independent_row_groups() {
+    fn flattened_selected_axis_gathered_q4k_matmul_gathers_expert_base_once_per_token() {
         let bound = gathered_matmul_op(2, 3, 4, 256);
         let weight_node = bound.operands()[0].0;
         let mut q4k = BTreeMap::new();
@@ -9561,17 +9599,102 @@ mod tests {
         let source = emit(&bound, &q4k, NumericPolicy::default())
             .expect("emits gathered packed-row source")
             .source;
+        // `selected`/`sequence` now take the SAME token/feature split a
+        // dense op would -- proof this is the multi-row body, not the old
+        // "treat every output element as its own row" collapse.
         assert!(
-            source.contains("q4k_pair_dot"),
-            "the gathered opt-in must retain the packed decoder:\n{source}"
+            source.contains("token_first = token_group"),
+            "gathered rows must take the dense token/feature split, not the flattened-feature fallback:\n{source}"
         );
         assert!(
-            source.contains("gather_idx0") && source.contains("fetched0"),
-            "each output row must resolve its own route before decoding:\n{source}"
+            source.contains("weight_expert_base"),
+            "each token slot's expert base must be its own value, not shared:\n{source}"
+        );
+        assert_eq!(
+            source.matches("long fetched0").count(),
+            1,
+            "the route must be resolved ONCE per token slot, not once per feature row:\n{source}"
         );
         assert!(
-            !source.contains("token_first = token_group"),
-            "the gathered path must not reuse one weight row across routed tokens:\n{source}"
+            source.contains("q4k_element"),
+            "the routed weight decode still runs through the packed Q4_K element reader:\n{source}"
+        );
+    }
+
+    /// Bytes proof for ROW 536/537's routed-expert regression: derives the
+    /// total weight-ROW count the dispatch reads (`feature_total *
+    /// token_total`, the exact product [`push_packed_row_multi_row_body`]
+    /// walks -- `weight_base[q]` once per feature row, `weight_expert_base[s]`
+    /// once per token slot, never re-derived per `(s, q)` pair) straight from
+    /// [`classify_packed_row_block`]'s own output, the same source the
+    /// codegen itself reads. 8 selected experts times 512 rows is the exact
+    /// slab-once shape the invariant names; the DENSE decode matvec of the
+    /// same `[rows=512, k=2048]` weight reads exactly 512 rows, one token.
+    #[cfg(feature = "metal-gathered-packed-row")]
+    #[test]
+    fn gathered_packed_row_reads_each_selected_experts_slab_exactly_once() {
+        let selected = 8u32;
+        let experts = 16u32;
+        let rows = 512u32;
+        let k = 2048u32;
+
+        let gathered = gathered_matmul_op(selected, experts, rows, k);
+        let gathered_weight = gathered.operands()[0].0;
+        let mut gathered_codecs = BTreeMap::new();
+        gathered_codecs.insert(gathered_weight, PackedCodec::Q4K);
+        let gathered_block =
+            classify_packed_row_block(&gathered, &operand_codecs(&gathered, &gathered_codecs))
+                .expect("the gathered decode matvec shape classifies as packed-row");
+        let gathered_feature_total: u64 = gathered_block
+            .feature_axes
+            .iter()
+            .map(|&axis| gathered.extents[axis as usize])
+            .product();
+        let gathered_token_total =
+            packed_row_block_token_total(&gathered_block, &gathered.extents);
+
+        assert_eq!(
+            gathered_feature_total,
+            u64::from(rows),
+            "one weight row per d_out -- never one per (token, d_out) pair"
+        );
+        assert_eq!(
+            gathered_token_total,
+            u64::from(selected),
+            "one token slot per selected expert -- the flattened axis gathered_matmul_op builds"
+        );
+        let gathered_row_reads = gathered_feature_total * gathered_token_total;
+        assert_eq!(
+            gathered_row_reads,
+            u64::from(selected) * u64::from(rows),
+            "total row reads across the whole dispatch: each of the 8 selected experts' \
+             512 rows, exactly once -- not selected*sequence*d_out re-fetches per output element"
+        );
+
+        let dense = matmul_op(1, k, rows);
+        let dense_weight = dense.operands()[0].0;
+        let mut dense_codecs = BTreeMap::new();
+        dense_codecs.insert(dense_weight, PackedCodec::Q4K);
+        let dense_block = classify_packed_row_block(&dense, &operand_codecs(&dense, &dense_codecs))
+            .expect("the dense decode matvec of the identical [rows, k] shape classifies as packed-row");
+        let dense_feature_total: u64 = dense_block
+            .feature_axes
+            .iter()
+            .map(|&axis| dense.extents[axis as usize])
+            .product();
+        let dense_token_total = packed_row_block_token_total(&dense_block, &dense.extents);
+        let dense_row_reads = dense_feature_total * dense_token_total;
+
+        assert_eq!(
+            dense_row_reads,
+            u64::from(rows),
+            "the dense kernel for the identical weight shape reads 512 rows, one token"
+        );
+        assert_eq!(
+            gathered_row_reads / dense_row_reads,
+            u64::from(selected),
+            "gathering 8 experts must scale row reads by exactly 8x over the dense baseline, \
+             not by selected*sequence*d_out/rows (the 39x-class blowup this fix removes)"
         );
     }
 
