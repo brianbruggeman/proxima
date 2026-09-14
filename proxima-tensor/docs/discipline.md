@@ -32511,3 +32511,126 @@ promoted to a permanent debug!" rule; none of it met that bar this row.
 - `cargo check --workspace --all-targets -j 4`: exit 0 (the same
   pre-existing, unrelated `proc-macro-error2` future-incompatibility
   warning ROW 558 already noted).
+
+## ROW 560 -- ROW 559's own `cpu.rs` hypothesis is REFUTED by direct instrumentation: `run_reduce`'s dot-fold path is exact against its own operands, at every leading coordinate
+
+**Task:** pin the exact `cpu.rs` line producing the wrong `score_cached_pass`
+value ROW 559 narrowed to, per that row's own residual item 1.
+
+**What was instrumented:** temporary `debug!` call sites (installed via
+`proxima_telemetry::export::install_console_recorder`, `RUST_LOG=debug`,
+`--features cached-attention-streaming,instrument`, all removed before this
+row landed) at three points in `run_reduce`: the `path` decision
+(`DotFast`/`WidthFast`/`Generic`) right after it is computed, the
+per-`leading_flat` `full_coordinate`/`running` snapshot inside the
+`reduction_fast_path` branch, and a per-slot log pairing `reduce_dot_fast`'s
+own returned value against an independent naive dot product computed by this
+row's own loop over `raw[a][running[a]+p] * raw[b][running[b]+p]` for
+`p in 0..reduction_total`, using the identical `running` bases `run_reduce`
+itself had just resolved.
+
+**Confirmed, with real payload data, on the default (unmodified) fixture**
+(`rotary_dim=64`, `head_dim=256`/`pass_dim=192`, `cached_extent=40`,
+`kv_heads=2`, `group=8`) -- no bisection needed, the divergence reproduces at
+full scale:
+
+- The pass-plane reduce is `NodeId(103)`, dispatched via `path=DotFast`
+  (`reduction_fast_path`, confirming ROW 559's guess), `leading_output_axes=
+  [1, 2]` (`s` at axis 1 with extent 40, `u`/kv_head at axis 2 with extent 2 --
+  `t` squeezed away at extent 1, NOT `s`; ROW 559's own axis letters do not
+  match this build's actual axis positions), `reduction_dims=[4]` (`p`),
+  `last_output_dim=Some(3)` (`g`, width 8).
+- Per-leading-iteration offsets are exactly what `k_pass_cache`'s declared
+  `[cached_extent, kv_heads, pass_dim]` shape and `q_pass_grouped`'s declared
+  `h = group*u + g` grouping predict: `running` for
+  `(s=0,u=0)->(s=0,u=1)` moves `[0,0]` -> `[192,1536]` (`k`: `+192 = pass_dim`
+  per `+1 u`; `q`: `+1536 = group(8)*pass_dim(192)` per `+1 u`, `q` constant
+  across `s` -- broadcast, correct), and `(s=0,u=0)->(s=1,u=0)` moves
+  `[0,0]` -> `[384,0]` (`k`: `+384 = kv_heads(2)*pass_dim(192)` per `+1 s`;
+  `q`: unchanged, correct).
+- **Every one of the 16 sampled `(leading_flat, slot_index)` cells at
+  `leading_flat` 0 and 1 (i.e. `s=0`, both `u=0` and `u=1`, all 8 groups) has
+  `reduce_dot_fast`'s FMA-path value matching this row's own independent
+  naive re-derivation to float rounding (`~1e-5` relative, e.g.
+  `leading_flat=1, slot_index=0`: `value=-22.81077003479004`,
+  `naive=-22.810766`)** -- for `u=0` AND `u=1` alike. `dot_fold_fused_multiply_add`
+  is the code actually running (`fold.len=192 >= DOT_LANES=8`, both operands'
+  `reduction_strides == 1`), and it is arithmetically exact against the
+  operand bytes `run_reduce` itself addressed.
+- Independently, this row also confirmed the divergence itself is real and
+  reproducible on this SAME default fixture (not only ROW 559's reduced
+  bisection cells): `residual1`'s own max relative error, fused vs unfused,
+  is `0.0819815918803215` at output index 0 (`expected=-1.4550812244415283`,
+  `actual=-1.574371099472046`) -- matching ROW 559's own bisect table row
+  `pass=192 (real)` (`0.0820`) to 4 significant figures.
+
+**This refutes ROW 559's own "most likely" placement of the defect.** The
+scalar `reduction_fast_path` loop this row instrumented computes EXACTLY what
+its own resolved operand addresses say it should, at `u=1` exactly as much as
+at `u=0` -- there is no addressing or fold-arithmetic defect in
+`cpu.rs::run_reduce` for this bound op. ROW 559 itself already showed the
+FUSED kernel is correct against the same bit-identical operand buffers
+(`physical.rs`'s three new tests); this row now shows `bind_plain`'s own
+reduce is ALSO correct against those same buffers. Both sides compute the
+right answer from what they are handed. **The residual therefore is not in
+either reduce kernel -- it is either in what buffer `q_pass_grouped`/
+`k_pass_cache` MATERIALIZE as (an earlier `bind_plain` elementwise node
+upstream of `NodeId(103)` writing the wrong values into that dense buffer
+despite `NodeId(103)`'s own Layout reading it back self-consistently), or in
+a part of the qwen35 attention computation this row never isolated (the
+new-key score term, the cached/new softmax combination, or the output
+projection) -- not the raw pass-plane dot product this row and ROW 559 both
+focused on.** This is exactly this skill's own "false smoking gun, trace
+backwards" case: the correlated hypothesis (this function, this fold) was
+directly disproved by instrumenting the actual payload, not inferred from
+re-reading the source a third time.
+
+**Residual, carried to the next slice:**
+1. Diff `q_pass_grouped`'s and `k_pass_cache`'s MATERIALIZED buffer bytes
+   (not the addresses read from them -- this row's own check re-uses
+   `bind_plain`'s own resolved `Layout`, so it cannot see a case where the
+   buffer's own writer and `NodeId(103)`'s reader are mutually
+   self-consistent but both wrong relative to the model's true semantics)
+   against the exact slice the fused kernel's `attention_score_sources`
+   reads for the same `(s, u, g)` cell, byte for byte, on this same default
+   fixture.
+2. If those buffers match bit-for-bit (as ROW 559's own forensics already
+   found for the smaller bisection cell), broaden the isolation past the
+   pass-plane term entirely: bisect `residual1`'s own upstream chain (rotary
+   score term, softmax combine, `wo` output projection) the same way ROW 559
+   bisected pass-plane shape parameters, rather than re-narrowing inside the
+   pass plane a third time.
+3. The isolated hand-built `BoundOp` unit test ROW 559's own residual item 1
+   asked for (a minimal `Reduce(Add, Multiply(a,b), "stugp"->"stug")` with a
+   broadcast axis matching `q_pass_grouped`/`k_pass_cache`'s shape) was not
+   built this row -- this row went straight at the real fixture with
+   `debug!` instrumentation instead and got a faster, more directly
+   falsifying answer for the SPECIFIC hypothesis ROW 559 raised, but the
+   general-shape table ROW 559's own brief wanted (varying leading-axis
+   count, broadcast placement, operand order) is still open and would still
+   catch a defect this row's one instrumented node didn't exercise (e.g.
+   three or more non-unit leading axes, which the qwen35 fixture never
+   produces).
+4. `≤ 1e-5` on `qwen35_partial_rotary_cached_attention_fuses_and_matches_the_
+   unfused_layer` is still deliberately not restored -- same reasoning as
+   ROW 559 item 2, now on firmer ground: the reduce kernel this row cleared
+   is not `bind_plain`'s own defect, so restoring the tolerance would still
+   encode the wrong premise until the real site above is found.
+5. ROW 559's own remaining items (3: NEON tile row-remainder single-leading-
+   axis latent bug; 4: `rotary_dim == head_dim` zero-width pass rejection at
+   `cpu.rs:6902`; 5: hand-rolled `eprintln!` forensics in `bind.rs`/`cpu.rs`)
+   are untouched by this row.
+
+**Landed this row:** documentation only -- the `debug!` instrumentation used
+to reach this finding was removed after use, per this skill's own
+instrument-then-remove-or-promote rule; none of it met the bar for a
+permanent `debug!` (per-iteration volume, single-investigation shape). No
+source change.
+
+**Gates run:** unchanged from ROW 559 (no source touched this row) --
+`cargo nextest run -p proxima-tensor --features
+cached-attention-streaming,instrument -E
+'test(qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer)'`:
+1 passed (shape-only assertion, as ROW 559 left it), confirming the fixture
+and fusion still behave as ROW 559 described while this row's instrumentation
+was in place.
