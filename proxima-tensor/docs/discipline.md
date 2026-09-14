@@ -31707,3 +31707,60 @@ Every `mapping_rebound_block:` debug record in (b) and (c) names a NON-resident,
 **Landed this slice:** `omega/src/metal.rs` (`MAPPING_REBOUND_BLOCKS` counter, `MetalStageTotals::mapping_rebound_blocks` field, the block-identity-mismatch `debug!`), `proxima-model-interop/src/mapping_residency.rs` (`ACHIEVED_RUNG`/`active_residency_rung_str`, `forced_start_rung`/`PROXIMA_DEBUG_FORCE_RESIDENCY_RUNG`, `walk_residency_ladder`'s new `start` parameter), `proxima-model-interop/src/generate.rs` (`mapping_rebound_blocks=`/`mapping_residency_rung=` on `token_breakdown_metal`'s `info!` and `PROXIMA_DEBUG_METAL_STAGES` lines). No fix landed -- the reuse predicate itself was never observed to fail in this row's three reproduction attempts, so there is nothing in `block_buffer_reusable`/`checkpoint_mapping_offset`/`cross_plan_resident_reuse` to change on the evidence gathered.
 
 **Unrelated, found in passing, not fixed here:** `cargo check -p proxima-model-interop` (default features, no `metal`) fails at `proxima-tensor/src/partition.rs:403,486` -- `cannot find macro 'vec' in this scope` (missing `use alloc::vec;`), a no_std-tier build gap orthogonal to this row's `metal,instrument` gates.
+
+## ROW 552 -- ROW 551's residual (2) closed: co-resident 28 GB Ollama model reproduces a WORSE failure than 809/593/0 -- `mlock` itself loses the race, contradicting `mapping_residency.rs`'s own claim
+
+**Task:** ROW 549/550's bad captures (`block_upload_calls=809 mapping_offset_uploads=593 barriers=0`) all happened while the judge hook's Ollama model (28 GB `llama-server`, loads at every turn end) was resident; ROW 551's three reproduction attempts all ran with it unloaded and all landed in the good state. This row reproduces deliberately with the model loaded, per ROW 551's own residual (2): "reproduce under genuine memory pressure... rather than a forced rung."
+
+**Also fixed first (unrelated red gate, same session, separate commits):** `proxima-tensor/src/partition.rs` was missing `use alloc::vec;` (ROW 551's own "found in passing" note) and `proxima-model-interop` had three more no_std/std-tier gaps in the same family -- `task.rs` missing `use alloc::format;`, `generate.rs`'s `SegmentPlacements`/`evaluate_segment_op_timed_with_placements`/`CooperativeShapeCounts` reachable without the `metal-output-placement` feature that gates the `PlacedBuffer` import bringing them into scope, and `PreGatherContext`'s `'mapping` lifetime unused when `metal` is off (fixed with a `PhantomData<&'mapping ()>` marker field, the compiler's own suggested fix). `bind.rs`'s `checkpoint_qkv_biases` was dead code under default features (its one non-test caller, `bind_all_weights`, is `std`-gated) -- gated it the same way. Committed separately (`fix(tensor): partition module imports alloc vec on every tier`, `fix(model-interop): placed buffer type on the std tier`) before this row's reproduction work, both pushed.
+
+**Setup:** built `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4` (clean, 66 s). Took the model lock. Loaded `qwen3.6:35b-a3b` (23 GB checkpoint's own Ollama tag, 29 GB resident per `ollama ps`) the way the judge does: `curl .../api/generate -d '{"model":"qwen3.6:35b-a3b",...}'`, confirmed `ollama ps` showed it `100% GPU` before every Run A attempt.
+
+**Run A (model resident, `memory_pressure` 28-31% free), three attempts, all identical in kind:**
+
+| attempt | memory free | outcome |
+|---|---|---|
+| 1, `RUST_LOG=info` | 31% | `WEIGHT LOAD FAILED: checkpoint mapping still has 9131655168 of 23938321664 bytes non-resident after prefault` |
+| 2, `RUST_LOG=info` | 28% | same error, `8549269504` of `23938321664` missing |
+| 3, `RUST_LOG=debug` | 29% | same error, `8810070016` of `23938321664` missing |
+
+None reached the decode loop, so `block_upload_calls`/`mapping_offset_uploads`/`barriers`/`gpu_exec_ms`/`ttnt_mean_ms`/text are N/A for Run A -- the process errors out of `LoadedModel::load` before any token is generated. This is NOT the 809/593/0 reading: it is a strictly worse outcome (total load failure vs. degraded-but-functioning decode).
+
+**Mechanism, read not guessed, from attempt 3's debug log:**
+```
+DEBUG ...mapping_residency: checkpoint_mapping_residency: mlock rung syscall failed, falling through to the existing error error=Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" }
+DEBUG ...mapping_residency: checkpoint_mapping_residency: ladder outcome mapping_residency_rung=mlock mapping_missing_pages=537724
+```
+`walk_residency_ladder` (`mapping_residency.rs:190-205`) ran all three rungs -- `Prefault` -> `Retry` -> `Mlock` -- and `mapping_residency_rung=mlock` in the outcome line proves the ladder reached and exhausted its last rung before failing (`walk_residency_ladder` only returns a rung short of `Mlock` on success, `:200-202`). `lock_resident`'s `rustix::mm::mlock` call (`:242-244`) itself returned `EAGAIN` ("Resource temporarily unavailable" is `EAGAIN`'s libc string on Darwin, errno 35) -- confirmed by `sysctl vm.global_user_wire_limit`: `56349970923` bytes (~52.5 GiB) system-wide. The co-resident Ollama process holds ~29 GB of that ceiling (Metal-resident weights on Apple Silicon's unified memory are wired), leaving roughly 23.5 GB of wireable headroom for a 24 GB (`23938321664` byte) `mlock(2)` call on the checkpoint mapping -- close enough to the ceiling, combined with other system wired memory (kernel, GPU driver, WindowServer, this very build's own process), to blow the limit and return `EAGAIN` rather than lock the pages. `lock_resident`'s own doc (`:227-234`) treats a failed `mlock` as non-fatal by design ("falls through to the existing error"), so this is not a crash bug -- it correctly reports what it measured.
+
+**This directly contradicts `mapping_residency.rs:260-264`'s own prose claim** ("`mlock` is the rung that can never lose that race") -- measured here, `mlock` DID lose the race, 3 for 3, under real co-residency with the judge's Ollama model. The claim was true against ROW 542's evictor (a *transient* page-reclaim race `mlock` wins by pinning pages before the evictor returns) but is not true against a *standing* wired-memory ceiling shared with another process holding ~29 GB of it -- a different failure class the doc did not distinguish. `mlock(2)` cannot win a race for memory that structurally does not exist to give it.
+
+**Not a one-line predicate defect -- reporting per the brief's own instruction, not fixing.** There is no code-level bug to correct: `EAGAIN` from `mlock(2)` is the kernel's honest answer under a real system-wide wired-memory ceiling with a genuine 29 GB competitor for it, and `lock_resident`/`prove_resident`'s fallthrough-to-error behavior on that answer is already correct (it neither silently accepts a false residency claim nor panics). The defect, if any, is the doc's overclaim at `mapping_residency.rs:260-264`, not the ladder's mechanics.
+
+**Run B (model unloaded, confirmed via 30 s `ollama ps` polling until empty, `memory_pressure` 77% free), same command, `RUST_LOG=debug`:**
+
+| field | value (step 8, steady state) |
+|---|---|
+| `mapping_residency_rung` | `prefault` (cheapest rung, first try) |
+| `mapping_missing_pages` | 0 |
+| `mapping_rebound_blocks` | 2 |
+| `block_upload_calls` | 76 |
+| `mapping_offset_uploads` | 0 |
+| `barriers` | 3223 |
+| `barriers_raw` | 2733 |
+| `gpu_exec_ms` | 42.98 (range across steps 0-11: 40.33-48.21, decreasing after warmup) |
+| `ttnt_mean_ms` | 56.909 (`ttnt_p90_ms=58 ttnt_p99_ms=60`, `decode_tokens_per_sec=17.572`) |
+| text | `"<think>\n\n</think>\n\nThe capital of France is **Paris**."` |
+
+This matches ROW 550/551's own good-state reading (`block_upload_calls=76`, `mapping_offset_uploads=0`, `barriers=3223`, correct "Paris" text) -- the load-then-decode path is unchanged from prior rows when memory pressure is low.
+
+**Residual:** the exact 809/593/0 mid-decode-degradation reading (weights re-binding every step but decode still completing) remains unreproduced by this row too -- what reproduced instead was a harder failure (total load abort) at a lower memory-free percentage (28-31%) than ROW 542's cited 81-82%. Whether 809/593/0 is a point *between* today's 28-31%-free total failure and the 77%-free good state -- i.e., whether there exists a narrower memory-free band where `mlock` succeeds (or the earlier rungs succeed) but `cross_plan_resident_reuse`'s caches still miss every step -- was not tested; would need a controlled memory-pressure dial (e.g., a second harness allocating and touching a tunable fraction of RAM) rather than depending on Ollama's actual resident size, which was not reproducible at a chosen intermediate value with the tools available this row.
+
+**Gates -- MEASURED, same tree, before Run A/B:**
+- `cargo check -p proxima-model-interop -j 4`: exit 0.
+- `cargo check -p proxima-model-interop --no-default-features --features std -j 4`: exit 0.
+- `cargo check -p proxima-tensor --no-default-features --features alloc -j 4`: exit 0.
+- `cargo nextest run -p proxima-tensor --test-threads 4`: `625 tests run: 625 passed, 8 skipped` (61.6 s).
+- `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: exit 0 (66 s).
+
+**Landed this slice:** `proxima-tensor/src/partition.rs` (`use alloc::vec;`), `proxima-model-interop/src/task.rs` (`use alloc::format;`), `proxima-model-interop/src/generate.rs` (`SegmentPlacements`/`evaluate_segment_op_timed_with_placements`/`CooperativeShapeCounts` gated on `metal-output-placement`+`macos`/`instrument`+`metal`+`macos` matching the `PlacedBuffer` import they depend on; `PreGatherContext`'s new `marker: PhantomData<&'mapping ()>` field), `proxima-model-interop/src/bind.rs` (`checkpoint_qkv_biases` gated `std`), and this doc entry. No source change from the Run A/B reproduction itself -- the failure is a genuine OS-level resource ceiling under real co-residency, not a code defect to revert or patch.
