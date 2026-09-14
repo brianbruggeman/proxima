@@ -140,6 +140,15 @@ pub(crate) struct MetalOnlyExtras {
     /// no dependency on the macOS-only `metal` module that defines
     /// `MathMode`.
     pub numeric_policy_token: Option<[u8; 2]>,
+    /// Group size of a horizontal packed-row merge (`docs/discipline.md`'s
+    /// horizontal-packed-merge design note, §5/§6) -- `Some(n)` only for the
+    /// merged `mv_row_blocked_z` entry point splice, `n > 1` always (a
+    /// singleton carries nothing to merge, see `split_into_independent_
+    /// groups`'s own doc), `None` for every unmerged kernel. Folded in as a
+    /// `_z{n}` suffix so the merged kernel's cache key can never collide with
+    /// the unmerged N=1 kernel's, nor with a DIFFERENT group size's merged
+    /// kernel (a future variable-`k` MoE routing).
+    pub merged_z: Option<u32>,
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
@@ -523,6 +532,10 @@ pub(crate) fn kernel_identity(
     if let Some(token) = metal.numeric_policy_token {
         identity.push(token[0] as char);
         identity.push(token[1] as char);
+    }
+    if let Some(group_size) = metal.merged_z {
+        identity.push_str("_z");
+        identity.push_str(&group_size.to_string());
     }
 
     identity

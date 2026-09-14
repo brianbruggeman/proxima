@@ -1831,6 +1831,122 @@ fn emit_with_expert_sources_mode(
     Ok(kernel)
 }
 
+/// Splices the z-indexed base-table preamble (`docs/discipline.md`'s
+/// horizontal-packed-merge design note, §5) onto an already-emitted
+/// packed-row kernel: a `SliceBase` struct ahead of the signature, a
+/// `base_table`/`merge_tgid` parameter pair appended to it, and one
+/// `SliceBase` read plus three renamed pointer locals right after the body's
+/// opening brace -- the same additive-splice shape [`emit_with_expert_sources`]
+/// already uses for `ExpertPayloads`/`ExpertDescriptors` above, rather than
+/// threading a new parameter through [`push_packed_row_blocked_body`]'s
+/// ~800-line body.
+///
+/// Every later reference to `in{weight_index}`/`in{other_index}`/`out` in the
+/// body is RENAMED to a sliced local (`replace_whole_word`), not shadowed in
+/// place: a C-family declaration's own name comes into scope at its
+/// declarator, so `device const uchar* in0 = in0 + base;` would read the
+/// UNINITIALIZED new `in0`, never the parameter -- this splice sidesteps that
+/// trap by giving the offset locals distinct names.
+///
+/// Driver-side buffer binding for `base_table` (a new plan-owned `Binding`,
+/// not `NodeId`-keyed like every other binding this module defines) is the
+/// design note's encode-loop step, not this function's job: this proves the
+/// emitted TEXT is correct in isolation, which is what lets it be unit-tested
+/// without a device (see this module's own `horizontal_merge_base_table_
+/// splice_tests`).
+// only this module's own gate-(1) splice tests call this so far -- the
+// encode-loop wiring that calls it from `metal::resolve_steps` is gate (2),
+// not yet landed (`docs/discipline.md`'s horizontal-packed-merge design note).
+#[cfg(feature = "metal-horizontal-merge")]
+#[allow(dead_code)]
+fn splice_horizontal_merge_base_table(
+    kernel: &mut Kernel,
+    node: NodeId,
+    weight_index: usize,
+    weight_type: &str,
+    other_index: usize,
+    other_type: &str,
+    element_type: &str,
+) -> Result<(), EmitError> {
+    let struct_decl =
+        "struct SliceBase { ulong weight_base; ulong activation_base; ulong output_base; };\n";
+    let signature = format!("kernel void {}(", kernel.entry);
+    let signature_start =
+        kernel
+            .source
+            .find(&signature)
+            .ok_or(EmitError::RenderKindMismatch {
+                node,
+                expected: "emitted kernel signature",
+                found: "missing",
+            })?;
+    let body_start = kernel.source[signature_start..]
+        .find(")\n{\n")
+        .map(|offset| signature_start + offset)
+        .ok_or(EmitError::RenderKindMismatch {
+            node,
+            expected: "emitted kernel signature terminator",
+            found: "missing",
+        })?;
+    kernel.source.insert_str(signature_start, struct_decl);
+    let base_table_index = kernel.bindings.len();
+    let extra_params = format!(
+        ",\n    device const SliceBase* base_table [[buffer({base_table_index})]],\n    uint3 merge_tgid [[threadgroup_position_in_grid]]"
+    );
+    let adjusted_body_start = body_start + struct_decl.len();
+    kernel.source.insert_str(adjusted_body_start, &extra_params);
+    // `)\n{\n` starts at `adjusted_body_start` post-splice: `)` + `\n` + `{`
+    // is 3 bytes, so the byte right after `{` is `adjusted_body_start +
+    // extra_params.len() + 3`.
+    let preamble_start = adjusted_body_start + extra_params.len() + 3;
+    let preamble = format!(
+        "    SliceBase merge_base = base_table[merge_tgid.z];\n    device const {weight_type}* sliced_weight = (device const {weight_type}*)((device const uchar*)in{weight_index} + merge_base.weight_base);\n    device const {other_type}* sliced_other = (device const {other_type}*)((device const uchar*)in{other_index} + merge_base.activation_base);\n    device {element_type}* sliced_out = (device {element_type}*)((device uchar*)out + merge_base.output_base);\n"
+    );
+    kernel.source.insert_str(preamble_start, &preamble);
+    let body_after_preamble = preamble_start + preamble.len();
+    let mut tail = replace_whole_word(
+        &kernel.source[body_after_preamble..],
+        &format!("in{weight_index}"),
+        "sliced_weight",
+    );
+    tail = replace_whole_word(&tail, &format!("in{other_index}"), "sliced_other");
+    tail = replace_whole_word(&tail, "out", "sliced_out");
+    kernel.source.truncate(body_after_preamble);
+    kernel.source.push_str(&tail);
+    Ok(())
+}
+
+/// Whole-word substring replace: a plain [`str::replace`] would also match
+/// `in1` inside `in10`, corrupting a sibling operand's name, so this checks
+/// both neighbours of every candidate match are not identifier characters
+/// before accepting it. Generated MSL source is plain ASCII (identifiers and
+/// numeric literals only), so byte-wise scanning is exact here.
+// same gate-(1)-only reachability as `splice_horizontal_merge_base_table`
+// above -- its own doc explains why.
+#[cfg(feature = "metal-horizontal-merge")]
+#[allow(dead_code)]
+fn replace_whole_word(text: &str, identifier: &str, replacement: &str) -> String {
+    let bytes = text.as_bytes();
+    let pattern = identifier.as_bytes();
+    let is_identifier_byte = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let candidate_matches = bytes[index..].starts_with(pattern);
+        let boundary_before = index == 0 || !is_identifier_byte(bytes[index - 1]);
+        let after = index + pattern.len();
+        let boundary_after = after >= bytes.len() || !is_identifier_byte(bytes[after]);
+        if candidate_matches && boundary_before && boundary_after {
+            output.push_str(replacement);
+            index = after;
+        } else {
+            output.push(bytes[index] as char);
+            index += 1;
+        }
+    }
+    output
+}
+
 /// The row-blocked/tiled-GEMM structural shape [`kernel_cache_key`] folds
 /// into [`crate::identity::MetalOnlyExtras::packed_row_block_shape`] — 'G'
 /// (tiled `simdgroup_matrix` GEMM, checked FIRST: [`tiled_gemm_block`] only
@@ -2010,6 +2126,7 @@ pub(crate) fn kernel_cache_key(
         packed_row_block_grouped_axes: packed_row_block_grouped_axes(resolved, &quantized),
         elementwise_addressing: elementwise_addressing_cache_token(resolved),
         numeric_policy_token: Some(crate::identity::numeric_policy_cache_token(numeric_policy)),
+        merged_z: None,
     };
     Ok(crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Metal,
@@ -9888,6 +10005,112 @@ mod tests {
             !source.contains("hdr.scale * levels[j] - hdr.minimum"),
             "the per-element dequant expression must not remain once the scale-deferred path is taken:\n{source}"
         );
+    }
+
+    /// Gate (1) of `docs/discipline.md`'s horizontal-packed-merge design
+    /// note: the merged `mv_row_blocked_z` kernel's text must differ from the
+    /// unmerged kernel's ONLY by the base-table preamble
+    /// ([`splice_horizontal_merge_base_table`]'s own doc), and its
+    /// `kernel_identity` must carry `_z8` so it can never share a
+    /// `PIPELINE_CACHE` entry with the unmerged N=1 kernel.
+    #[cfg(feature = "metal-horizontal-merge")]
+    mod horizontal_merge_base_table_splice_tests {
+        use alloc::collections::BTreeMap;
+
+        use proxima_tensor::NumericPolicy;
+
+        use super::super::{EmitError, PackedCodec, emit, splice_horizontal_merge_base_table};
+        use super::matmul_op;
+        use crate::identity::{KernelLanguage, MetalOnlyExtras, kernel_identity};
+
+        /// The exact literal `splice_horizontal_merge_base_table` inserts --
+        /// kept here, spelled out, rather than re-deriving it by calling the
+        /// function again, so the assertion below is a genuine round-trip
+        /// proof and not a tautology.
+        const STRUCT_DECL: &str =
+            "struct SliceBase { ulong weight_base; ulong activation_base; ulong output_base; };\n";
+
+        #[test]
+        fn merged_kernel_text_differs_from_unmerged_only_by_the_base_table_preamble()
+        -> Result<(), EmitError> {
+            let bound = matmul_op(4, 256, 5);
+            let weight_node = bound.operands()[0].0;
+            let mut q4k = BTreeMap::new();
+            q4k.insert(weight_node, PackedCodec::Q4K);
+
+            let unmerged = emit(&bound, &q4k, NumericPolicy::default()).expect("unmerged emits");
+            let mut merged = unmerged.clone();
+            splice_horizontal_merge_base_table(
+                &mut merged,
+                bound.node,
+                0,
+                "uchar",
+                1,
+                "float",
+                "float",
+            )?;
+
+            assert!(
+                merged.source.contains(STRUCT_DECL),
+                "merged kernel must declare SliceBase:\n{}",
+                merged.source
+            );
+            assert!(
+                merged
+                    .source
+                    .contains("base_table[merge_tgid.z]"),
+                "merged kernel must index the base table by the z threadgroup coordinate:\n{}",
+                merged.source
+            );
+
+            let extra_params = ",\n    device const SliceBase* base_table [[buffer(4)]],\n    uint3 merge_tgid [[threadgroup_position_in_grid]]";
+            let preamble = "    SliceBase merge_base = base_table[merge_tgid.z];\n    device const uchar* sliced_weight = (device const uchar*)((device const uchar*)in0 + merge_base.weight_base);\n    device const float* sliced_other = (device const float*)((device const uchar*)in1 + merge_base.activation_base);\n    device float* sliced_out = (device float*)((device uchar*)out + merge_base.output_base);\n";
+
+            let mut restored = merged.source.replacen(STRUCT_DECL, "", 1);
+            restored = restored.replacen(extra_params, "", 1);
+            restored = restored.replacen(preamble, "", 1);
+            restored = restored.replace("sliced_weight", "in0");
+            restored = restored.replace("sliced_other", "in1");
+            restored = restored.replace("sliced_out", "out");
+
+            assert_eq!(
+                restored, unmerged.source,
+                "reversing the splice's known insertions and renames must exactly recover the \
+                 unmerged kernel text -- any other diff is an UNDOCUMENTED change to the body"
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn merged_identity_carries_a_z8_suffix_the_unmerged_identity_never_carries() {
+            let bound = matmul_op(4, 256, 5);
+            let weight_node = bound.operands()[0].0;
+            let mut q4k = BTreeMap::new();
+            q4k.insert(weight_node, PackedCodec::Q4K);
+            let policy = NumericPolicy::default();
+
+            let unmerged_extras = MetalOnlyExtras::default();
+            let merged_extras = MetalOnlyExtras {
+                merged_z: Some(8),
+                ..MetalOnlyExtras::default()
+            };
+
+            let unmerged_identity =
+                kernel_identity(KernelLanguage::Metal, &bound, &q4k, unmerged_extras, policy);
+            let merged_identity =
+                kernel_identity(KernelLanguage::Metal, &bound, &q4k, merged_extras, policy);
+
+            assert!(
+                merged_identity.contains("_z8"),
+                "a size-8 merge group must carry _z8 in its identity: {merged_identity}"
+            );
+            assert_eq!(
+                merged_identity,
+                format!("{unmerged_identity}_z8"),
+                "the merged identity must be the unmerged identity plus exactly the _z8 suffix, \
+                 so a size-8 merge never collides with the unmerged N=1 kernel's cache entry"
+            );
+        }
     }
 
     /// `Q5_K` sibling of the test above: the same Add-reduce-over-plain-
