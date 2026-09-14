@@ -31618,3 +31618,22 @@ default-off.
 **Residual, carried to the next slice:** ROW 547's items (3) and (4) --
 the `proxima-model-interop` qwen35 fixture test and the real `gguf_generate`
 decode run, both now unblocked by this row's kernel fix.
+
+## ROW 549 -- fused gated delta net measured on the real decode
+
+Measurement of gated-delta-net-fusion feature impact on `gguf_generate` decode performance with proxima-model-interop/qwen35moe-14b quantized model.
+
+| arm | generated_text (first 80 chars) | ttnt_mean_ms | decode_tokens_per_sec | gpu_exec_ms | encode_dispatch_calls | barriers |
+|-----|--------------------------------|--------------|----------------------|-------------|----------------------|----------|
+| OFF-1 | "<think>\n\n</think>\n\nThe capital of France is **Paris**." | 85.909 | 11.640 | 95.509 | 4264 | 0 |
+| ON-1 | "<\|endoftext\|><\|im_start\|><\|im_start\|>user,  12222..." | 73.133 | 13.674 | 91.593 | 4143 | 0 |
+| OFF-2 | "<think>\n\n</think>\n\nThe capital of France is **Paris**." | 86.273 | 11.591 | 96.802 | 4264 | 0 |
+| ON-2 | "<\|endoftext\|><\|im_start\|><\|im_start\|>user,  12222..." | 73.333 | 13.636 | 89.923 | 4143 | 0 |
+
+**ON runs' gated_delta_net op_profile_kind (step=8):**
+- ON-1: `op_profile_kind step=8 kind=gated_delta_net op_count=30 gpu_ms=62.519 operand_bytes=63905280`
+- ON-2: `op_profile_kind step=8 kind=gated_delta_net op_count=30 gpu_ms=65.472 operand_bytes=63905280`
+
+Step=8 decode gpu_exec_ms: OFF average 96.16 ms, ON average 90.76 ms, delta 5.4 ms reduction (5.6% faster).
+
+**CRITICAL FINDING:** The gated-delta-net-fusion feature produces incorrect token sequences; ON-1 and ON-2 output does not contain expected "Paris" response to the capital-of-France query. This represents a correctness regression despite the measured decode speedup. Feature requires debugging before production use.
