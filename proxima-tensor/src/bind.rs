@@ -2868,39 +2868,93 @@ fn cached_attention_candidates(
         };
         let Some(attended_parts) = binary_elementwise(program, attended_sum[0], ScalarOp::Add)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "not_online_softmax_add",
+                "cached_attention decline -- weighted-value numerator is not an Add"
+            );
             continue;
         };
         let Some(inverse_sum) = unary_elementwise(program, attended_sum[1], ScalarOp::Reciprocal)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "not_reciprocal_denominator",
+                "cached_attention decline -- weighted-value denominator is not a Reciprocal"
+            );
             continue;
         };
         let Some(sum_parts) = binary_elementwise(program, inverse_sum, ScalarOp::Add) else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "not_denominator_add",
+                "cached_attention decline -- reciprocal source is not an Add"
+            );
             continue;
         };
         let Some(cached_weights) =
             reduced_source(program, sum_parts[0], ScalarOp::Add, ReduceInit::Zero)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "not_cached_weight_reduce",
+                "cached_attention decline -- cached-side denominator term is not a zero-init Add reduce"
+            );
             continue;
         };
         let Some(new_weights) =
             reduced_source(program, sum_parts[1], ScalarOp::Add, ReduceInit::Zero)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "not_new_weight_reduce",
+                "cached_attention decline -- new-side denominator term is not a zero-init Add reduce"
+            );
             continue;
         };
         let Some(cached_shift) = unary_elementwise(program, cached_weights, ScalarOp::Exponential)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "not_cached_shift_exp",
+                "cached_attention decline -- cached-side weight is not an Exponential"
+            );
             continue;
         };
         let Some(new_shift) = unary_elementwise(program, new_weights, ScalarOp::Exponential) else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "not_new_shift_exp",
+                "cached_attention decline -- new-side weight is not an Exponential"
+            );
             continue;
         };
         let Some(cached_score_parts) =
             binary_elementwise(program, cached_shift, ScalarOp::Subtract)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "not_cached_score_subtract",
+                "cached_attention decline -- cached-side shift source is not a Subtract"
+            );
             continue;
         };
         let Some(new_score_parts) = binary_elementwise(program, new_shift, ScalarOp::Subtract)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "not_new_score_subtract",
+                "cached_attention decline -- new-side shift source is not a Subtract"
+            );
             continue;
         };
         if cached_score_parts[1] != new_score_parts[1] {
