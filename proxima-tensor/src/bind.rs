@@ -9193,5 +9193,254 @@ mod tests {
                 "the qwen35moe mixer's own state leaf must be finite"
             );
         }
+
+        /// `a`, `b`, `c`, ... for the reduce's own iteration axes, in the
+        /// same order [`BoundOp::extents`] carries them -- used only to
+        /// name which axes a `BoundOpKind::Reduce` folds away, never
+        /// persisted or compared across ops (each op picks its own letters
+        /// fresh from its own rank).
+        fn axis_letter(axis: usize) -> char {
+            (b'a' + axis as u8) as char
+        }
+
+        /// Row 540's own table generator: one line per bound op, in
+        /// execution order, naming what
+        /// [`qwen35moe_mixer_census_at_real_shape_with_gated_delta_net_fusion`]
+        /// only counts. `program` supplies the builder-given name
+        /// ([`Op::name`]) for the node each `BoundOp` resolves, since
+        /// `BoundOp` itself carries no name field.
+        #[test]
+        fn qwen35moe_mixer_op_census_prints_every_bound_op() {
+            use crate::spec::{
+                GdnOutputGate, append_qwen35_ssm_mixer_with_taps_and_layout, input_leaf,
+                scalar_constant,
+            };
+
+            let kv_heads: u32 = 16;
+            let group: u32 = 2;
+            let head_k_dim: u32 = 128;
+            let head_v_dim: u32 = 128;
+            let num_v_heads = kv_heads * group;
+            let key_dim = kv_heads * head_k_dim;
+            let value_dim = num_v_heads * head_v_dim;
+            let model_dim: u32 = 32;
+            let l_cache: u32 = 4;
+            let qkv_dim = 2 * key_dim + value_dim;
+
+            let mut program = Vec::new();
+            let x = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0), Extent::Static(model_dim)],
+                "x",
+            );
+            let inv_dim = scalar_constant(&mut program, 1.0 / model_dim as f32);
+            let eps = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0)],
+                "eps",
+            );
+            let head_eps = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+                "head_eps",
+            );
+            let one = scalar_constant(&mut program, 1.0);
+            let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (head_k_dim as f32).sqrt());
+            let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
+            let attn_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(model_dim)],
+                "attn_norm_weight",
+            );
+            let wqkv = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(model_dim), Extent::Static(qkv_dim)],
+                "wqkv",
+            );
+            let wqkv_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(model_dim), Extent::Static(value_dim)],
+                "wqkv_gate",
+            );
+            let conv_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(qkv_dim), Extent::Static(l_cache)],
+                "conv_weight",
+            );
+            let conv_history_in = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(l_cache - 1), Extent::Static(qkv_dim)],
+                "conv_history_in",
+            );
+            let ssm_beta = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(model_dim), Extent::Static(num_v_heads)],
+                "ssm_beta",
+            );
+            let ssm_alpha = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(model_dim), Extent::Static(num_v_heads)],
+                "ssm_alpha",
+            );
+            let ssm_dt_bias = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(num_v_heads)],
+                "ssm_dt_bias",
+            );
+            let ssm_a = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(num_v_heads)],
+                "ssm_a",
+            );
+            let ssm_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(head_v_dim)],
+                "ssm_norm_weight",
+            );
+            let ssm_out = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(value_dim), Extent::Static(model_dim)],
+                "ssm_out",
+            );
+            let state_in = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(head_k_dim),
+                    Extent::Static(head_v_dim),
+                    Extent::Static(kv_heads),
+                    Extent::Static(group)
+                ],
+                "state_in",
+            );
+
+            let (mixer_out, _taps) = append_qwen35_ssm_mixer_with_taps_and_layout(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                head_eps,
+                one,
+                inv_sqrt_key_dim,
+                inv_head_v_dim,
+                Some(attn_norm_weight),
+                wqkv,
+                wqkv_gate,
+                conv_weight,
+                conv_history_in,
+                ssm_beta,
+                ssm_alpha,
+                ssm_dt_bias,
+                ssm_a,
+                ssm_norm_weight,
+                ssm_out,
+                state_in,
+                key_dim,
+                value_dim,
+                kv_heads,
+                group,
+                l_cache,
+                GdnOutputGate::Silu,
+                false,
+            )
+            .expect("real-shape qwen35moe ssm mixer lowers");
+
+            let shapes = shape::infer(&program, &[1])
+                .expect("real-shape qwen35moe ssm mixer program infers");
+
+            let fused = bind_with_fusion(
+                &program,
+                &shapes,
+                &[mixer_out],
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("real-shape qwen35moe ssm mixer binds fused");
+
+            println!(
+                "row 540 -- qwen35moe gdn mixer fused census ({} ops):",
+                fused.len()
+            );
+            for (index, bound) in fused.iter().enumerate() {
+                let node_name = program
+                    .get(bound.node.0 as usize)
+                    .and_then(Op::name)
+                    .unwrap_or("-");
+                let body_summary = match &bound.kind {
+                    BoundOpKind::Elementwise { body, .. } => body
+                        .steps
+                        .iter()
+                        .map(|step| alloc::format!("{:?}", step.op))
+                        .collect::<Vec<_>>()
+                        .join("+"),
+                    BoundOpKind::Reduce {
+                        element_body,
+                        reduce_op,
+                        epilogue_body,
+                        ..
+                    } => {
+                        let prologue = element_body
+                            .steps
+                            .iter()
+                            .map(|step| alloc::format!("{:?}", step.op))
+                            .collect::<Vec<_>>()
+                            .join("+");
+                        let core = if prologue.is_empty() || prologue == "Identity" {
+                            alloc::format!("{reduce_op:?}")
+                        } else {
+                            alloc::format!("{prologue}->{reduce_op:?}")
+                        };
+                        let epilogue = epilogue_body
+                            .steps
+                            .iter()
+                            .map(|step| alloc::format!("{:?}", step.op))
+                            .collect::<Vec<_>>()
+                            .join("+");
+                        if epilogue.is_empty() || epilogue == "Identity" {
+                            core
+                        } else {
+                            alloc::format!("{core}->epi[{epilogue}]")
+                        }
+                    }
+                    _ => alloc::string::String::new(),
+                };
+                let reduced_axes = match &bound.kind {
+                    BoundOpKind::Reduce { output_axes, .. } => (0..bound.extents.len())
+                        .filter(|axis| !output_axes.contains(&(*axis as u16)))
+                        .map(axis_letter)
+                        .collect::<alloc::string::String>(),
+                    _ => alloc::string::String::new(),
+                };
+                let output_extents: Vec<u64> = match &bound.kind {
+                    BoundOpKind::Reduce { output_axes, .. } => output_axes
+                        .iter()
+                        .map(|axis| bound.extents[*axis as usize])
+                        .collect(),
+                    _ => bound.extents.clone(),
+                };
+                println!(
+                    "  [{index:>2}] {:<16} body={:<24} name={:<16} reduced_axes={:<6} out={:?}",
+                    bound.kind.name(),
+                    body_summary,
+                    node_name,
+                    reduced_axes,
+                    output_extents,
+                );
+            }
+        }
     }
 }
