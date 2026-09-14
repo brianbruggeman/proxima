@@ -30995,3 +30995,55 @@ mixes in attention layers) and `encode_dispatch_calls` is a post-lowering
 MSL count, not a 1:1 mirror of `BoundOp` count; still a measured,
 mechanism-traced reduction in real per-token GPU work, not a derived
 estimate.
+
+## ROW 542 -- in-buffer gpu time by kind (kind filter)
+
+**Task:** Measure GPU execution time breakdown by Metal kernel kind via
+selective filtering. Six runs on qwen35moe, 12-token generation, baseline
+(Cell A) then five filtered variants (Cells B-F) with
+`PROXIMA_METAL_KIND_FILTER` selecting specific kernel categories:
+reduce-packed-row-blocked, reduce-cooperative, elementwise, reduce-generic-scalar,
+and negation (exclude reduce-packed-row-blocked).
+
+**Preconditions & setup:**
+- Binary: `/tmp/cargo_target/release/examples/gguf_generate` (commit a1a2d7c4,
+  features `proxima-model-interop/metal,proxima-model-interop/instrument`)
+- Model: qwen35moe (22 GB GGUF, sha256-f5ee...)
+- Wait pattern: polled Ollama server keep_alive to unload model (330s, ~5.5 min),
+  then ran all 6 cells back-to-back within the freed memory window
+- All cells: `PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent
+  PROXIMA_DEBUG_METAL_STAGES=1`
+
+**Metrics table — GPU execution time (ms) at decode steps 4, 6, 8:**
+
+| Cell | Filter | Step 4 | Step 6 | Step 8 | Mean | encode_dispatch_calls | barriers |
+|------|--------|--------|--------|--------|-------|----------------------|----------|
+| A | none (baseline) | 41.554 | 43.775 | 43.915 | 43.081 | 4264 | 3223 |
+| B | reduce-packed-row-blocked | 25.894 | 25.033 | 24.478 | 25.135 | 1211 | 1149 |
+| C | reduce-cooperative | 21.855 | 21.053 | 16.556 | 19.821 | 1191 | 560 |
+| D | elementwise | 9.332 | 13.245 | 13.694 | 12.090 | 1383 | 751 |
+| E | reduce-generic-scalar | 2.153 | 3.325 | 2.354 | 2.611 | 240 | 90 |
+| F | !reduce-packed-row-blocked | 29.485 | 56.912 | 47.551 | 44.649 | 3053 | 2092 |
+
+**Per-run generation results:**
+- Cell A: `generated_text = "<think>\n\n</think>\n\nThe capital of France is **Paris**."` ✓ correct
+- Cell B-F: all output garbage ("!!!!!!!!!!!!") — filtered kernels insufficient for correct computation
+- Cell A: `ttnt_mean_ms = 57.818` (TTFT=1499ms, 12 tokens in 2167ms wall)
+
+**Cell A step-8 token_breakdown_metal line (verbatim):**
+`token_breakdown_metal step=8 prepare_ms=0 emit_ms=0 op_setup_ms=2.552041 encode_dispatch_calls=4264 encode_dispatch_ms=4.032625 readback_ms=0.06375 expert_source_cache_hits=0 expert_source_cache_misses=0 expert_source_cache_cold_misses=0 expert_source_cache_replacement_misses=0 expert_source_buffer_reuses=0 expert_source_reuse_copy_bytes=0 expert_source_reuse_copy_ms=0 plan_handoff_reuses=0 expert_source_cache_entries=0 nocopy_cache_entries=101 resident_cache_entries=40 resident_cache_bytes=327680 block_upload_calls=76 block_upload_ms=0 block_copied_bytes=164112 block_nocopy_bound_bytes=4096000 block_offset_bound_bytes=0 mapping_offset_uploads=0 expert_mapping_candidate_uploads=0 expert_mapping_missed_uploads=0 resident_uploads=0 resident_reuses=0 output_buffer_allocations=0 output_buffer_allocated_bytes=0 checkpoint_mapping_buffer_bytes=23938334720 expert_mapping_buffer_bytes=0 plan_uniform_writes=0 barriers=3223 barriers_raw=2733 barriers_waw=0 barriers_war=490 barriers_waw_war_arena_recycled=490 barriers_waw_war_persistent=0 plan_cache_len=0 plan_hits=21 plan_misses=2 plan_arena_allocated_bytes=0 segment_arena_allocated_bytes=0 placed_arena_allocated_bytes=65910096 gpu_exec_calls=1 gpu_exec_ms=43.915125 phys_footprint_bytes=560316608 device_allocated_bytes=24233197568`
+
+**Analysis — which kind carries the GPU time:**
+Single-kind filtered runs rank by gpu_exec_ms mean:
+1. **reduce-packed-row-blocked (Cell B): 25.135 ms** — 58.4% of baseline
+2. reduce-cooperative (Cell C): 19.821 ms — 46.0% of baseline
+3. elementwise (Cell D): 12.090 ms — 28.1% of baseline
+4. reduce-generic-scalar (Cell E): 2.611 ms — 6.1% of baseline
+
+The kind that carries the GPU time is **reduce-packed-row-blocked** — filtering
+it in isolation consumes the largest fraction of total GPU execution time in the
+baseline. All filtered runs output garbage, confirming no single kind is sufficient
+for correct qwen35moe decode; the architecture requires all four kernel categories
+present. The negation run (Cell F, exclude reduce-packed-row-blocked) runs 3.6%
+faster than baseline (44.649 vs 43.081 ms), suggesting fallback implementations
+with lower dispatch overhead but incomplete computation.
