@@ -130,14 +130,15 @@ struct Fixture {
 
 fn build_fixture() -> Fixture {
     let mut program = Vec::new();
-    let activation_node = append(
-        &mut program,
-        Op::Input {
-            dtype: DType::Float32,
-            shape: vec![Extent::Static(IN_DIM as u32)],
-            name: Some("activation".into()),
-        },
-    );
+    // weight nodes declared BEFORE the activation node -- `q4k_matmul_layout.rs`'s
+    // own `matmul_program` convention this fixture's doc already claims to
+    // follow. `build_merged_dispatch` hardcodes `bound.operands()[0]` as the
+    // weight and `[1]` as the activation (`omega/src/metal.rs:1096-1097`);
+    // declaring activation first gave every weight a HIGHER `NodeId` than
+    // the activation, which silently swapped that positional assumption and
+    // made every merge candidate fail `packed_operands.contains_key` --
+    // `metal-horizontal-merge` never merged anything, always falling
+    // through to 8 ordinary dispatches regardless of the feature.
     let weight_nodes: Vec<NodeId> = (0..ROUNDS)
         .map(|round| {
             append(
@@ -150,6 +151,14 @@ fn build_fixture() -> Fixture {
             )
         })
         .collect();
+    let activation_node = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(IN_DIM as u32)],
+            name: Some("activation".into()),
+        },
+    );
     let output_nodes: Vec<NodeId> = weight_nodes
         .iter()
         .map(|&weight| append_matvec(&mut program, weight, activation_node))
@@ -315,4 +324,264 @@ fn eight_independent_matvecs_run_unmerged_today() {
     )
     .expect("eight independent matvecs execute");
     fixture.assert_outputs_match_reference(1e-2);
+}
+
+/// Gate (2)'s two remaining, unmeasured claims from this file's own module
+/// doc: every one of the 8 positions still gets its own hazard bookkeeping
+/// (`HAZARD_STEP_CALLS`), REGARDLESS of how many real dispatches that
+/// collapses to (`ENCODE_DISPATCH_CALLS`: 8 with `metal-horizontal-merge`
+/// off, 1 on). `PROXIMA_ROW570_DUMP`, when set, writes every round's raw
+/// `f32` output bytes to that path so a caller can `cmp` two runs of this
+/// same test built under different feature sets -- the only way to compare
+/// a compile-time feature's on/off output from outside a single process.
+#[test]
+fn dispatch_and_hazard_counts_match_the_design_note() {
+    let fixture = build_fixture();
+    let named = fixture.named();
+    let input_placements = fixture.input_placements();
+    let output_placements = fixture.output_placements();
+    #[cfg(feature = "instrument")]
+    {
+        let _ = omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset();
+        let _ = omega::metal::HAZARD_STEP_CALLS.snapshot_and_reset();
+    }
+    omega::execute_plan_named_with_placements(
+        &fixture.plan,
+        &named,
+        &input_placements,
+        &output_placements,
+    )
+    .expect("eight independent matvecs execute");
+    fixture.assert_outputs_match_reference(1e-2);
+    #[cfg(feature = "instrument")]
+    {
+        let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") { 1 } else { 8 };
+        assert_eq!(
+            omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
+            expected_dispatches,
+            "metal-horizontal-merge={}: dispatch count",
+            cfg!(feature = "metal-horizontal-merge")
+        );
+        assert_eq!(
+            omega::metal::HAZARD_STEP_CALLS.snapshot_and_reset(),
+            ROUNDS as u64,
+            "every one of the 8 positions must still run its own hazard bookkeeping"
+        );
+    }
+    if let Ok(path) = std::env::var("PROXIMA_ROW570_DUMP") {
+        let mut bytes = Vec::with_capacity(ROUNDS * OUT_DIM * size_of::<f32>());
+        for round in 0..ROUNDS {
+            let values = omega::read_placed_buffer_f32(
+                &fixture.output_buffer,
+                round * OUT_DIM * size_of::<f32>(),
+                OUT_DIM,
+            );
+            bytes.extend(values.iter().flat_map(|value| value.to_le_bytes()));
+        }
+        std::fs::write(&path, &bytes).expect("writes the row570 on/off comparison dump");
+    }
+}
+
+/// The mixed-buffer refusal `split_by_shared_buffers`'s own doc names: round
+/// 7's weight is copied into its OWN, separate buffer instead of the shared
+/// one every other round uses. `metal-horizontal-merge` must still merge the
+/// other 7 (one dispatch) and fall the mismatched one through to its own
+/// ordinary dispatch -- 2 dispatches total, never 1 (would silently read the
+/// wrong weight) and never 8 (would defeat the merge for 7 rounds that had
+/// no reason to split).
+#[test]
+fn mixed_buffer_member_does_not_merge() {
+    let fixture = build_fixture();
+    let weight_bytes_per_round = (IN_DIM / QK_K) * BLOCK_BYTES * OUT_DIM;
+    let odd_one_out = ROUNDS - 1;
+    let separate_weight_buffer =
+        omega::allocate_placed_buffer(weight_bytes_per_round).expect("allocates the odd-one-out's own weight buffer");
+    unsafe {
+        let source = core::slice::from_raw_parts(
+            fixture
+                .weight_buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(odd_one_out * weight_bytes_per_round),
+            weight_bytes_per_round,
+        );
+        write_placed_buffer(&separate_weight_buffer, 0, source);
+    }
+    let named = fixture.named();
+    let mut input_placements = fixture.input_placements();
+    input_placements[1 + odd_one_out] = (fixture.weight_nodes[odd_one_out], &separate_weight_buffer, 0);
+    let output_placements = fixture.output_placements();
+    #[cfg(feature = "instrument")]
+    let _ = omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset();
+    omega::execute_plan_named_with_placements(&fixture.plan, &named, &input_placements, &output_placements)
+        .expect("seven merged plus one ordinary dispatch execute");
+    fixture.assert_outputs_match_reference(1e-2);
+    #[cfg(feature = "instrument")]
+    {
+        let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") { 2 } else { 8 };
+        assert_eq!(
+            omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
+            expected_dispatches,
+            "metal-horizontal-merge={}: the mismatched weight buffer must not join the merge group",
+            cfg!(feature = "metal-horizontal-merge")
+        );
+    }
+}
+
+const RAW_SPLIT_SIZE: usize = QK_K;
+const RAW_SPLIT_ROUNDS: usize = 4;
+
+/// A genuine dataflow edge inside an otherwise-mergeable bucket: round 3's
+/// own "activation" operand is round 2's OUTPUT node, not the shared root
+/// activation every other round reads. `group_mergeable_positions`'s own
+/// pure unit test (`a_raw_edge_between_two_members_excludes_the_reader_from_the_group`)
+/// already proves the algorithm excludes the reader; this is that same
+/// shape run end to end on a real device, through `ensure_merged_dispatches`,
+/// so the claim is measured against a real dispatch count, not just the
+/// pure grouping function. Expected: round 3 is excluded from the group of
+/// 3 -- 2 real dispatches with `metal-horizontal-merge` on (the group of 3,
+/// plus round 3 alone), 4 with it off.
+#[test]
+fn raw_split_member_forces_its_own_dispatch() {
+    let mut program = Vec::new();
+    // weight nodes before the activation node -- see `build_fixture`'s own
+    // comment on why declaration order (not just operand-vec position)
+    // decides which slot `build_merged_dispatch` reads as the weight.
+    let weight_nodes: Vec<NodeId> = (0..RAW_SPLIT_ROUNDS)
+        .map(|round| {
+            append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::UInt8,
+                    shape: vec![
+                        Extent::Static(RAW_SPLIT_SIZE as u32),
+                        Extent::Static(RAW_SPLIT_SIZE as u32),
+                    ],
+                    name: Some(format!("raw_weight_{round}")),
+                },
+            )
+        })
+        .collect();
+    let activation_node = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(RAW_SPLIT_SIZE as u32)],
+            name: Some("activation".into()),
+        },
+    );
+    let mut output_nodes = Vec::with_capacity(RAW_SPLIT_ROUNDS);
+    for (round, &weight_node) in weight_nodes.iter().enumerate() {
+        let this_round_activation = if round == 3 { output_nodes[2] } else { activation_node };
+        output_nodes.push(append_matvec(&mut program, weight_node, this_round_activation));
+    }
+
+    let activation = random_vec(11, RAW_SPLIT_SIZE);
+    let mut placed_input_nodes = vec![activation_node];
+    placed_input_nodes.extend(weight_nodes.iter().copied());
+    let weight_names: Vec<String> = (0..RAW_SPLIT_ROUNDS).map(|round| format!("raw_weight_{round}")).collect();
+    let mut named: Vec<(&str, proxima_tensor::QuantizedBlock<'_>)> =
+        vec![("activation", proxima_tensor::QuantizedBlock::Float32(&[]))];
+    named.extend(weight_names.iter().map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Q4K(&[]))));
+
+    let plan = omega::plan_named_with_placed_inputs(
+        &program,
+        &[],
+        &named,
+        &output_nodes,
+        NumericPolicy::default(),
+        &placed_input_nodes,
+    )
+    .expect("plans the four raw-split matvecs");
+
+    let weight_bytes_per_round = (RAW_SPLIT_SIZE / QK_K) * BLOCK_BYTES * RAW_SPLIT_SIZE;
+    let weight_buffer = omega::allocate_placed_buffer(weight_bytes_per_round * RAW_SPLIT_ROUNDS)
+        .expect("allocates the shared raw-split weight buffer");
+    let activation_buffer =
+        omega::allocate_placed_buffer(RAW_SPLIT_SIZE * size_of::<f32>()).expect("allocates the activation buffer");
+    let output_buffer = omega::allocate_placed_buffer(RAW_SPLIT_SIZE * size_of::<f32>() * RAW_SPLIT_ROUNDS)
+        .expect("allocates the shared output buffer");
+
+    unsafe {
+        write_placed_buffer(
+            &activation_buffer,
+            0,
+            core::slice::from_raw_parts(activation.as_ptr().cast::<u8>(), core::mem::size_of_val(activation.as_slice())),
+        );
+    }
+
+    let mut packed_weights = Vec::with_capacity(RAW_SPLIT_ROUNDS);
+    for round in 0..RAW_SPLIT_ROUNDS {
+        let rows: Vec<Vec<f32>> = (0..RAW_SPLIT_SIZE)
+            .map(|row| random_vec(2_000_000 + round as u64 * 10_000 + row as u64, RAW_SPLIT_SIZE))
+            .collect();
+        let mut packed = vec![0u8; RAW_SPLIT_SIZE / QK_K * BLOCK_BYTES];
+        for (row, row_packed) in rows.iter().zip(packed.as_chunks_mut::<BLOCK_BYTES>().0) {
+            quantize(row, row_packed).expect("RAW_SPLIT_SIZE is a whole multiple of QK_K");
+        }
+        unsafe {
+            write_placed_buffer(&weight_buffer, round * weight_bytes_per_round, &packed);
+        }
+        packed_weights.push(packed);
+    }
+
+    let dequant_dot = |packed: &[u8], input: &[f32]| -> Vec<f32> {
+        let mut expected = Vec::with_capacity(RAW_SPLIT_SIZE);
+        for row_packed in packed.as_chunks::<BLOCK_BYTES>().0 {
+            let mut row = vec![0.0f32; RAW_SPLIT_SIZE];
+            dequantize(row_packed, &mut row).expect("packed row dequantizes");
+            expected.push(row.iter().zip(input.iter()).map(|(weight, value)| weight * value).sum());
+        }
+        expected
+    };
+    let expected0 = dequant_dot(&packed_weights[0], &activation);
+    let expected1 = dequant_dot(&packed_weights[1], &activation);
+    let expected2 = dequant_dot(&packed_weights[2], &activation);
+    let expected3 = dequant_dot(&packed_weights[3], &expected2);
+    let expected = [expected0, expected1, expected2, expected3];
+
+    let output_placements: Vec<(NodeId, &omega::PlacedBuffer, usize)> = output_nodes
+        .iter()
+        .enumerate()
+        .map(|(round, &node)| (node, &output_buffer, round * RAW_SPLIT_SIZE * size_of::<f32>()))
+        .collect();
+    let mut input_placements = vec![(activation_node, &activation_buffer, 0usize)];
+    input_placements.extend(
+        weight_nodes
+            .iter()
+            .enumerate()
+            .map(|(round, &node)| (node, &weight_buffer, round * weight_bytes_per_round)),
+    );
+
+    #[cfg(feature = "instrument")]
+    let _ = omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset();
+    omega::execute_plan_named_with_placements(&plan, &named, &input_placements, &output_placements)
+        .expect("the raw-split program executes");
+    #[cfg(feature = "instrument")]
+    {
+        let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") { 2 } else { 4 };
+        assert_eq!(
+            omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
+            expected_dispatches,
+            "metal-horizontal-merge={}: round 3's read of round 2's output must exclude it from the merge group",
+            cfg!(feature = "metal-horizontal-merge")
+        );
+    }
+
+    for (round, round_expected) in expected.iter().enumerate() {
+        let actual = omega::read_placed_buffer_f32(
+            &output_buffer,
+            round * RAW_SPLIT_SIZE * size_of::<f32>(),
+            RAW_SPLIT_SIZE,
+        );
+        for (index, (&value, &reference)) in actual.iter().zip(round_expected.iter()).enumerate() {
+            let scale = reference.abs().max(f32::MIN_POSITIVE);
+            let relative = (value - reference).abs() / scale;
+            assert!(
+                relative < 1e-2,
+                "round {round} row {index}: got={value} reference={reference} relative={relative}"
+            );
+        }
+    }
 }
