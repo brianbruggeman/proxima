@@ -279,7 +279,13 @@ impl Fixture {
 
     fn assert_outputs_match_reference(&self, relative_tolerance: f32) {
         for round in 0..ROUNDS {
-            let actual = omega::read_placed_buffer_f32(&self.output_buffer, round * OUT_DIM, OUT_DIM);
+            // `read_placed_buffer_f32` takes a byte offset, not an element
+            // count -- round 0 (offset 0) hid this by coincidence.
+            let actual = omega::read_placed_buffer_f32(
+                &self.output_buffer,
+                round * OUT_DIM * size_of::<f32>(),
+                OUT_DIM,
+            );
             for (index, (&value, &reference)) in actual.iter().zip(self.expected[round].iter()).enumerate() {
                 let scale = reference.abs().max(f32::MIN_POSITIVE);
                 let relative = (value - reference).abs() / scale;
@@ -295,20 +301,7 @@ impl Fixture {
 /// The baseline this whole design note measures against: `metal-horizontal-merge`
 /// OFF (this crate's own default), eight real dispatches, output bit-exact vs
 /// the independent dequantize+dot reference.
-// ROW 568: round 0 (offset 0 into the shared weight/output buffers) reads
-// back correct; round >= 1 (a nonzero placed-input/placed-output byte
-// offset) does not, even though the WRITE side is proven correct in this
-// same test (the raw-byte readback assertion right after each round's own
-// `write_placed_buffer` call passes for every round, ruling out a fixture
-// write bug). The read-side defect -- a nonzero `input_placements`/
-// `output_placements` offset for a `Q4_K`-packed weight not reaching the
-// dispatch this test's own `metal-horizontal-merge` code issues, or reaching
-// it wrong -- is real and reproducible with this file, but this row's time
-// ran out before it was root-caused. Left `#[ignore]`, not deleted or
-// silently passing, so the next session has a standing, already-proven
-// repro instead of having to build one from scratch.
 #[test]
-#[ignore = "ROW 568: round>=1 (nonzero placed weight/output offset) misreads -- root cause not found this row, see docs/discipline.md"]
 fn eight_independent_matvecs_run_unmerged_today() {
     let fixture = build_fixture();
     let named = fixture.named();
