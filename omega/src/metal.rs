@@ -4533,13 +4533,14 @@ fn execute_op_timed(
     let operand_bytes: u64 = bound
         .operands()
         .iter()
-        .map(|(source, _, _)| {
+        .map(|(source, _, lookup)| {
             operand_tensor_bytes(
                 program,
                 &prepared.index_nodes,
                 &prepared.shapes,
                 packed_operands,
                 *source,
+                lookup.as_ref(),
             )
         })
         .sum();
@@ -5406,13 +5407,14 @@ pub fn execute_plan_with_placements_dispatch_timed(
         let operand_bytes: u64 = bound
             .operands()
             .iter()
-            .map(|(source, _, _)| {
+            .map(|(source, _, lookup)| {
                 operand_tensor_bytes(
                     &plan.program,
                     &prepared.index_nodes,
                     &prepared.shapes,
                     packed_operands,
                     *source,
+                    lookup.as_ref(),
                 )
             })
             .sum();
@@ -6326,6 +6328,182 @@ mod classify_kind_packed_row_marker_tests {
             );
         }
     }
+
+    /// ROW 543: `proxima_tensor::spec::append_moe_ffn_grouped_gate_up` (the
+    /// production entry point for the grouped strategy this landing
+    /// investigates -- `append_moe_ffn` itself stayed on `PerRoute` after
+    /// 07e1fad8's revert), not a hand-built stand-in for it like the
+    /// ignored probe above. Census: 2 grouped-packed reduces (gate, up) +
+    /// `EXPERT_USED_COUNT` per-route-packed reduces (down), every one
+    /// `reduce-packed-row-blocked`, and no surviving elementwise op whose
+    /// output shape is the materialized `[.., d_in, d_out]` gathered
+    /// product.
+    #[test]
+    fn qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+        use proxima_tensor::spec::ExpertGatingFunc;
+
+        const EMBEDDING: usize = 512;
+        const FEED_FORWARD: usize = 2048;
+        const EXPERT_COUNT: u32 = 256;
+        const EXPERT_USED_COUNT: u32 = 8;
+        const SEQUENCE: usize = 1;
+
+        fn quantized_stack(expert_count: u32, rows: usize, k: usize) -> Vec<u8> {
+            let elements_per_expert = rows * k;
+            let blocks_per_expert = elements_per_expert / QK_K;
+            let mut stacked = vec![0u8; expert_count as usize * blocks_per_expert * BLOCK_BYTES];
+            let input = vec![0.01f32; elements_per_expert];
+            for expert in 0..expert_count as usize {
+                let byte_span = blocks_per_expert * BLOCK_BYTES;
+                let output = &mut stacked[expert * byte_span..(expert + 1) * byte_span];
+                quantize(&input, output).expect("synthetic expert slab quantizes to Q4_K");
+            }
+            stacked
+        }
+
+        let mut program = Vec::new();
+        let x_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+            "x",
+        );
+        let gate_inp_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(EXPERT_COUNT),
+            ],
+            "gate_inp",
+        );
+        let expert_w_gate_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(FEED_FORWARD as u32),
+            ],
+            "expert_w_gate",
+        );
+        let expert_w_up_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(FEED_FORWARD as u32),
+            ],
+            "expert_w_up",
+        );
+        let expert_w_down_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(FEED_FORWARD as u32),
+                Extent::Static(EMBEDDING as u32),
+            ],
+            "expert_w_down",
+        );
+        let ones = scalar_constant(&mut program, 1.0);
+
+        // main's `append_moe_ffn` reverted to `PerRoute` (07e1fad8); the
+        // production entry point for the grouped strategy under
+        // investigation is `append_moe_ffn_grouped_gate_up`.
+        let (root, _site) = proxima_tensor::spec::append_moe_ffn_grouped_gate_up(
+            &mut program,
+            0,
+            x_node,
+            gate_inp_node,
+            expert_w_gate_node,
+            expert_w_up_node,
+            expert_w_down_node,
+            EXPERT_COUNT,
+            EXPERT_USED_COUNT,
+            ones,
+            ExpertGatingFunc::Softmax,
+            None,
+        )
+        .expect("append_moe_ffn_grouped_gate_up lowers at the real qwen35moe shape");
+
+        let symbols = [SEQUENCE as u64];
+        let shapes = infer(&program, &symbols).expect("the qwen35moe-shaped ffn infers");
+        let mut resolved =
+            bind_with_fusion(&program, &shapes, &[root], true, NumericPolicy::default())
+                .expect("the qwen35moe-shaped ffn binds");
+
+        let mut packed_operands: PackedOperands = BTreeMap::new();
+        packed_operands.insert(expert_w_gate_node, PackedCodec::Q4K);
+        packed_operands.insert(expert_w_up_node, PackedCodec::Q4K);
+        packed_operands.insert(expert_w_down_node, PackedCodec::Q4K);
+        let gate_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
+        let up_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
+        let down_stack = quantized_stack(EXPERT_COUNT, FEED_FORWARD, EMBEDDING);
+        let _ = (gate_stack, up_stack, down_stack);
+
+        // `omega::metal::prepare` (`metal.rs:6530`) always runs this
+        // correction before `emit`/`classify_kind` ever see `resolved` --
+        // production's own layout, not the declared-shape layout every
+        // packed weight would otherwise wrongly decline against.
+        proxima_tensor::correct_packed_matmul_layouts(
+            &mut resolved,
+            &packed_operands.keys().copied().collect(),
+        );
+
+        let mut expert_reduce_kinds = Vec::new();
+        for bound in &resolved {
+            let touches_expert_weight = bound.operands().iter().any(|(node, _, _)| {
+                *node == expert_w_gate_node
+                    || *node == expert_w_up_node
+                    || *node == expert_w_down_node
+            });
+            if !touches_expert_weight {
+                continue;
+            }
+            match &bound.kind {
+                proxima_tensor::BoundOpKind::Reduce {
+                    keep: proxima_tensor::Keep::Reduce,
+                    ..
+                } => {
+                    let kind = classify_kind(bound, &packed_operands);
+                    expert_reduce_kinds.push(kind);
+                }
+                proxima_tensor::BoundOpKind::Elementwise { .. } => {
+                    let materializes_full_expert_product = bound.extents.len() >= 2
+                        && bound.extents[bound.extents.len() - 2..]
+                            == [FEED_FORWARD as u64, EMBEDDING as u64]
+                        || bound.extents.len() >= 2
+                            && bound.extents[bound.extents.len() - 2..]
+                                == [EMBEDDING as u64, FEED_FORWARD as u64];
+                    assert!(
+                        !materializes_full_expert_product,
+                        "an unfused elementwise op still carries the [.., d_in, d_out] \
+                         gathered-product shape (node {:?}, extents {:?}) instead of \
+                         fusing into its consuming reduce",
+                        bound.node, bound.extents
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            expert_reduce_kinds.len(),
+            2 + EXPERT_USED_COUNT as usize,
+            "2 grouped reduces (gate, up) + one per-route reduce per selected \
+             expert (down) -- 400 expert dispatches per token at k=8, not 960"
+        );
+        for kind in expert_reduce_kinds {
+            assert_eq!(
+                kind, "reduce-packed-row-blocked",
+                "every expert-weight reduce append_moe_ffn_grouped_gate_up builds must \
+                 take the fast packed-row body, whether grouped (gate/up) or per-route (down)"
+            );
+        }
+    }
 }
 
 /// [`diagnose_packed_row_block`]'s verdict for THIS bound op, against the
@@ -6685,6 +6863,19 @@ fn element_count(shape: &[u64]) -> usize {
 /// `device_buffers[source].0.length()`, which reports the shared checkpoint-
 /// mapping buffer's own size for every tensor `checkpoint_mapping_offset`
 /// binds into it (see [`OpGpuTiming::bound_buffer_bytes`]'s own doc).
+/// `lookup: Some(_)` is a GATHERED operand (a grouped or per-route MoE
+/// expert weight, addressed through `Lookup::element_stride` at runtime) --
+/// `shapes.of(source)` is the operand's full declared graph shape (every
+/// expert in the stack), which is NOT what the row-blocked kernel actually
+/// reads: it reads exactly one `element_stride`-sized row per index in
+/// `lookup.indices` (ROW 543/544, `proxima-tensor/docs/discipline.md`).
+/// Reporting the full declared shape for a gathered operand overstated a
+/// qwen35moe-shaped grouped gate/up dispatch's own `operand_bytes` by two
+/// orders of magnitude (the whole 256-expert stack, `~151 MB`, in place of
+/// the `k=8` selected rows this dispatch's `lookup.indices` shape names) --
+/// found by comparing this formula's output against the emitted kernel's
+/// own per-row block-read count, which reads exactly `element_stride`
+/// elements per lookup, not the whole stack.
 #[cfg(feature = "instrument")]
 fn operand_tensor_bytes(
     program: &[Op],
@@ -6692,8 +6883,15 @@ fn operand_tensor_bytes(
     shapes: &Shapes,
     packed_operands: &PackedOperands,
     source: NodeId,
+    lookup: Option<&Lookup>,
 ) -> u64 {
-    let elements = element_count(shapes.of(source)) as u64;
+    let elements = match lookup {
+        Some(lookup) => {
+            let rows_read = element_count(shapes.of(lookup.indices)) as u64;
+            rows_read * lookup.element_stride.unsigned_abs()
+        }
+        None => element_count(shapes.of(source)) as u64,
+    };
     match packed_operands.get(&source) {
         Some(codec) => elements * codec.block_bytes() as u64 / codec.block_elements() as u64,
         None => elements * gpu_dtype(program, index_nodes, source).size_bytes() as u64,
@@ -11785,6 +11983,7 @@ mod operand_tensor_bytes_tests {
             &shapes,
             &packed_operands,
             NodeId(0),
+            None,
         );
 
         assert_eq!(bytes, 2 * Q4K_BLOCK_BYTES as u64);
@@ -11802,6 +12001,7 @@ mod operand_tensor_bytes_tests {
             &shapes,
             &packed_operands,
             NodeId(0),
+            None,
         );
 
         assert_eq!(bytes, 3 * Q5K_BLOCK_BYTES as u64);
@@ -11818,9 +12018,70 @@ mod operand_tensor_bytes_tests {
             &shapes,
             &packed_operands,
             NodeId(0),
+            None,
         );
 
         assert_eq!(bytes, 4096 * 4);
+    }
+
+    /// ROW 544: a gathered packed operand (a grouped MoE expert weight)
+    /// must report bytes for the rows its OWN `lookup.indices` selects,
+    /// never the full declared expert-stack shape `shapes.of(source)`
+    /// carries -- the defect this test guards against overstated a
+    /// qwen35moe-shaped grouped gate/up dispatch's `operand_bytes` by
+    /// ~7x the whole 256-expert stack (`proxima-tensor/docs/discipline.md`
+    /// ROW 543/544).
+    #[test]
+    fn gathered_q4k_operand_reports_selected_rows_not_the_whole_stack() {
+        const EXPERT_COUNT: u32 = 256;
+        const ROW_ELEMENTS: u32 = 512;
+        const SELECTED: u32 = 8;
+
+        let mut program = vec![
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(EXPERT_COUNT), Extent::Static(ROW_ELEMENTS)],
+                name: Some(String::from("expert_w")),
+            },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(SELECTED)],
+                name: Some(String::from("routes")),
+            },
+        ];
+        let weight_node = NodeId(0);
+        let routes_node = NodeId(1);
+        let shapes = infer(&program, &[]).expect("weight+routes program infers");
+        let _ = &mut program;
+
+        let mut packed_operands = PackedOperands::new();
+        packed_operands.insert(weight_node, PackedCodec::Q4K);
+
+        let lookup = proxima_tensor::Lookup {
+            indices: routes_node,
+            index_layout: proxima_tensor::Layout {
+                base: 0,
+                strides: Default::default(),
+            },
+            element_stride: ROW_ELEMENTS as i64,
+            extent: EXPERT_COUNT as u64,
+        };
+
+        let bytes = operand_tensor_bytes(
+            &program,
+            &BTreeSet::new(),
+            &shapes,
+            &packed_operands,
+            weight_node,
+            Some(&lookup),
+        );
+
+        assert_eq!(
+            bytes,
+            SELECTED as u64 * ROW_ELEMENTS as u64 * Q4K_BLOCK_BYTES as u64 / 256,
+            "must report exactly the {SELECTED} selected rows, not the full \
+             {EXPERT_COUNT}-expert stack"
+        );
     }
 
     /// The mechanism-level counterpart to the three pure-function cases
@@ -11881,6 +12142,7 @@ mod operand_tensor_bytes_tests {
             &shapes,
             &packed_operands,
             NodeId(0),
+            None,
         );
         assert_eq!(
             operand_bytes,

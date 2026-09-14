@@ -31133,3 +31133,72 @@ and why it did not land -- the grouped-gate-up algebra itself is proven
 correct (bit-for-bit CPU parity, real qwen35moe-shaped packed-row admission)
 and available to re-attempt once the 83.77 GB packed-row read-amplification
 mechanism is traced.
+
+## ROW 544 -- 83.77 GB traced: `operand_tensor_bytes` never accounted for gather, not a kernel read amplification
+
+Traced ROW 543's open residual by dumping the emitted MSL for the grouped
+gate reduce at the real qwen35moe shape (`omega/src/metal.rs`'s
+`classify_kind_packed_row_marker_tests`, `crate::msl::emit` called directly
+on the bound op) and reading the addressing arithmetic in
+`push_packed_row_group_bases`'s general branch (`msl.rs:6019-6068`, the arm
+`GATE(grouped)` takes because its output spans 3 surviving axes --
+`packed_row_direct_output_axis`, `msl.rs:5977`, returns `None`, unlike
+`DOWN(per-route)`'s single-axis fast branch): `weight_base[q]` advances by
+exactly one `element_stride`-sized row per output row, and the emitted
+per-thread block loop (`super_blocks = reduction_total/256`) reads exactly
+2 Q4_K super-blocks (288 bytes) for the 512-wide embedding reduction --
+identical per-row cost to the per-route kernel. **The kernel itself does not
+read beyond the 8 selected experts' rows.**
+
+Printed every `bound.operands()` entry's declared shape and `Option<Lookup>`
+for both the grouped GATE reduce and the per-route DOWN reduces at the same
+shape: both report `declared_shape=[256, ..]` (the whole expert stack) with
+`gathered=true`, and `operand_tensor_bytes` (`metal.rs:7018`, pre-fix) computed
+`elements = element_count(shapes.of(source))` -- the FULL graph-declared
+shape of the `Op::Input` leaf -- with no branch reading `Option<Lookup>` at
+all. For the qwen35moe shape that is `256 * 512 * 2048` elements at Q4_K's
+`144/256` bytes-per-element ratio = 150,994,944 bytes (`~151 MB`, the whole
+stack) attributed to EVERY dispatch that touches the operand, gathered or
+not, regardless of how many of the 256 experts that dispatch's own
+`lookup.indices` actually selects. This is not new to the grouped strategy --
+ROW 543's own table already flagged the baseline per-route byte count
+"(counter bogus)" -- the grouped op's much lower dispatch count (2 grouped
+gate/up dispatches vs 960 per-route ones) just made the SAME pre-existing
+mis-attribution land as one dominant 83.77 GB `op_profile_kind` bucket
+instead of being smeared, silently wrong, across many smaller per-route
+entries.
+
+**Fix** (`omega/src/metal.rs`): `operand_tensor_bytes` now takes
+`lookup: Option<&Lookup>`; when the operand is gathered, bytes are
+`element_count(shapes.of(lookup.indices)) * lookup.element_stride` -- the
+exact row count the kernel's own gather actually reads, using
+`Lookup::element_stride` (the same value the emitted kernel multiplies the
+fetched expert id by) rather than assuming a leading axis. All three call
+sites (`execute_op_timed`, `resolve_op_metas`'s per-position loop, and the
+`operand_bound_at_a_nonzero_mapping_offset...` test) now pass the operand's
+own `Option<Lookup>` through. New test
+`gathered_q4k_operand_reports_selected_rows_not_the_whole_stack`
+(`metal.rs`, `operand_tensor_bytes_tests`) asserts `8 selected rows * 512
+elements * 144/256 bytes`, not the 256-expert stack. `cargo test -p omega
+--features metal,instrument --lib metal::operand_tensor_bytes_tests`: 5/5
+passed. `cargo test -p omega --features metal,instrument --lib
+metal::classify_kind_packed_row_marker_tests`: 3/3 passed, 1 ignored
+(pre-existing, unrelated to this fix). `cargo clippy -p omega --features
+metal,instrument --all-targets`: clean. `cargo check -p omega --features
+wgpu-backend,cuda --all-targets`: clean.
+
+**Residual, left open:** this fix corrects the byte-accounting counter; it
+does NOT explain ROW 543's real, measured wall-clock regression
+(`gpu_exec` 43.9 ms -> 82.1 ms, `encode_dispatch_calls` 4,264 -> 4,744) --
+that remains a genuine, separate, unresolved question about the grouped
+dispatch's actual GPU cost, most likely in the slower general-axis
+addressing branch (`push_packed_row_group_bases`'s `else` arm) `DOWN`'s
+fast single-axis branch avoids, or in per-thread utilization (only 2 of 4
+`ix` groups do real reads at `super_blocks=2`). The full re-land
+(`git revert --no-edit 07e1fad8`) and the real-model GPU run this row's
+own decision rule requires were NOT re-attempted in this slice (45-minute
+wall-clock ceiling) -- next slice: re-run the real-model
+`PROXIMA_METAL_OP_PROFILE_STEP=8` capture with this fix applied to get a
+TRUSTWORTHY `operand_bytes` number for the grouped arm, and profile
+`gpu_exec` directly (Metal counters, not the byte estimate) to trace the
+82.1 ms.
