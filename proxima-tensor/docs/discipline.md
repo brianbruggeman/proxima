@@ -30444,3 +30444,71 @@ routed expert per matrix, ~40 ops per GDN layer, 72 per attention layer,
 prefill one position per evaluation, and the 24 GB no-copy mapping walked
 sparsely per token (ROW 326-329's per-token first-touch cost). Also owner:
 no more worktrees; one slice at a time on main.
+
+## ROW 535 -- checkpoint-residency retry hardened to touch only the holes
+
+`scratch/row535/run{1,2}.log`: the instrumented release build
+(`proxima-model-interop/src/mapping_residency.rs`'s `prove_resident`) failed
+twice loading the qwen35moe blob with `MappingNotResident { bytes_missing:
+11704205312, bytes_total: 23938321664 }` (~49% missing), 10 minutes after
+the non-instrumented build passed the same gate. Code-level check of the
+four named suspects: (a) page size is `omega::metal::page_size()` ->
+`sysconf(_SC_PAGESIZE)` = 16384 on this host, never hardcoded 4096; (b)
+`loader::prefault`'s join blocks on `chunk_ranges_len` channel reports
+before returning -- an incomplete join surfaces as
+`PrefaultPoolUnavailable`, not `MappingNotResident`, so the observed error
+variant proves every chunk DID report; (c) all offset arithmetic is 64-bit
+`usize`/`u64` on this platform, no overflow risk at 24 GB; (d) the
+`mincore` incore bit is read as `& libc::MINCORE_INCORE`, correct. All four
+ruled out by reading the code, not inferred.
+
+Added an `#[ignore]`d real-checkpoint test
+(`mapping_residency::tests::prove_resident_per_gib_range_pattern_on_the_real_qwen35moe_checkpoint`)
+that reports per-1-GiB resident/missing counts to stderr. On this host it
+showed 0% missing in 5.88s (`scratch/row535b/diag_run1.log`) -- a clean
+round trip in isolation. Three further full `gguf_generate` reproductions
+(one at ~53% free, two at ~15% free, `scratch/row535b/france_run{1,2,3}.log`,
+`scratch/row535/france_final.log`) also all passed with `mapping_missing_pages=0`
+-- the original 49%-missing failure did not reproduce under any memory
+state tried in this slice, so the "82% free / 45% free" correlation named
+in the brief is not itself the cause; it stands unproven either way.
+
+The mechanism this session DID fix by direct code reading, independent of
+reproduction: `prove_resident`'s one retry re-called
+`crate::loader::prefault(bytes)` on the WHOLE mapping again rather than the
+byte ranges `mincore` actually found missing (mapping_residency.rs:99-101,
+the "(e)" suspect named in the brief). Under real concurrent eviction this
+retry can never converge -- touching all 24 GB again gives an evictor
+exactly as much wall-clock time to reclaim the pages it already reclaimed
+once, which is consistent with run1 and run2 landing within 1% of each
+other (49% vs. 48.9%) despite the retry running. Added
+`missing_byte_ranges` (collapses the `mincore` residency vector's holes
+into contiguous byte spans) and changed the retry to call `prefault` only
+over those spans, so a retry under real pressure finishes in a fraction of
+the time and is far more likely to outrun the evictor. Three new unit
+tests on hand-built residency vectors (scattered holes, no holes, a
+trailing hole shorter than one page) plus the existing 256 MiB
+zero-missing fixture test.
+
+This is a hardening of a proven design flaw, not a proof that it was THE
+cause of `scratch/row535/run{1,2}.log` -- that specific failure was never
+reproduced this session. Gates: `cargo nextest run -p proxima-model-interop
+--features metal,instrument --test-threads 2 -E 'test(residen) or
+test(prefault) or test(fit)'` 22 passed, 0 failed
+(`scratch/row535b/nextest.log`); `cargo clippy -p proxima-model-interop
+--features metal,instrument --all-targets -j 4` 0 warnings
+(`scratch/row535b/clippy.log`). France run with the instrumented
+`gguf_generate` (`scratch/row535/france_final.log`): loaded, text contains
+`Paris`, `mapping_prefault_ms=1337.625 mapping_resident_pages=1461080
+mapping_missing_pages=0`, `weight_load_ms = 1674.902`, `ttnt_mean_ms =
+59.727`, step-8 `token_breakdown_wall step=8 wall_ms=58.658333
+evaluate_ms=55.750541 position_ms=0.001375 weights_ms=0.065041
+kv_ms=0.062 append_ms=0.648416 greedy_ms=0.187708` and
+`token_breakdown_metal step=8 ... gpu_exec_calls=1 gpu_exec_ms=42.98975
+phys_footprint_bytes=566837376 device_allocated_bytes=24234344448`.
+
+`examples/gguf_generate.rs` also gained an unconditional console telemetry
+recorder + 5ms drain pump: the `instrument`-gated `info!`/`debug!` calls in
+`generate.rs` (including this gate's own `mapping_prefault_ms` line) were
+silent no-ops in this example before this session -- no recorder had ever
+been installed for it, so `RUST_LOG` alone was doing nothing.
