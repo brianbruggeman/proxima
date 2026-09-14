@@ -3540,23 +3540,6 @@ fn execute_plan_with_placements_inner(
                         record_hazard_class(hazard_class, arena_recycled);
                     }
                 }
-                // `render_gated_delta_net` writes its `state_in` operand's
-                // buffer in place, in ADDITION to `bound.node`'s own output
-                // (`hazard_output` above) -- a second write this tracker's
-                // single-`output` `hazard_step` call cannot see. Recording
-                // it here, unconditionally (not gated behind the barrier
-                // check above), marks that buffer `written` so a LATER op in
-                // this same encoder that reads or writes it takes the RAW/
-                // WAW/WAR branch on its own `hazard_step` call rather than
-                // racing this dispatch's in-place update.
-                if let BoundOpKind::GatedDeltaNet { operands, .. } = &bound.kind
-                    && let Some(state_node) = operands.as_slice().get(5).map(|operand| operand.0)
-                    && let Some((state_buffer, _offset)) = device_buffers.get(&state_node)
-                {
-                    hazard_state
-                        .tracker
-                        .record(&[], Some(Retained::as_ptr(state_buffer)));
-                }
                 Some(resolved)
             } else {
                 None
@@ -11377,7 +11360,10 @@ fn encode_op(
     // every `DispatchType::Serial` call), since program order alone already
     // orders a split's write before its merge's read there (see the
     // `dispatch(encoder, &pipeline, grid)` call site's own doc below).
-    hazard: Option<&mut HazardTracker<*const ProtocolObject<dyn MTLBuffer>>>,
+    // `mut` so `GatedDeltaNet`'s own `state_out` write below can reborrow it
+    // (`as_deref_mut`) AFTER the merge block's own reborrow, instead of the
+    // merge block's tuple match moving this `Option` outright.
+    mut hazard: Option<&mut HazardTracker<*const ProtocolObject<dyn MTLBuffer>>>,
     expert_buffers: Option<&ExpertSourceBuffers>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     let expert_source_node = match expert_buffers {
@@ -11635,6 +11621,37 @@ fn encode_op(
         );
         return Err(err);
     }
+    // `render_gated_delta_net`'s own second output (ROW 547,
+    // `docs/discipline.md`): `bindings` above only ever names ONE
+    // `Binding::Output` (`bind_buffers`'s single `output` parameter cannot
+    // carry two distinct node identities), so `state_out` binds at the next
+    // free slot manually, right before dispatch, same as any other output --
+    // reused from `device_buffers` on a call that already produced it (the
+    // "persistent per-layer buffer" a placed caller supplies for `state_out`
+    // Just Works here, since a placed node's buffer already lives in
+    // `device_buffers` before this function ever runs), freshly allocated
+    // otherwise.
+    if let BoundOpKind::GatedDeltaNet {
+        state_out,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        ..
+    } = &bound.kind
+    {
+        let state_elements = (*head_k_dim * *head_v_dim * *num_v_heads) as usize;
+        let (state_buffer, state_offset) = match device_buffers.get(state_out) {
+            Some(existing) => existing.clone(),
+            None => (allocate_buffer(device, state_elements, bound.dtype)?, 0),
+        };
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(&state_buffer), state_offset, bindings.len());
+        }
+        if let Some(tracker) = hazard.as_deref_mut() {
+            tracker.record(&[], Some(Retained::as_ptr(&state_buffer)));
+        }
+        device_buffers.insert(*state_out, (state_buffer, state_offset));
+    }
     dispatch(encoder, &pipeline, grid);
     // Redesign §4c: the split kernel above wrote its partial into `scratch`
     // (its own `Binding::Scratch` slot, never `output`); this second
@@ -11651,7 +11668,7 @@ fn encode_op(
     // `Binding::Scratch` maps to its own buffer identity exactly like
     // `Binding::Output`/`Binding::Input` do (see that variant's own doc).
     if let Some(merge) = merge {
-        if let (Some(tracker), Some((scratch_buffer, _))) = (hazard, scratch) {
+        if let (Some(tracker), Some((scratch_buffer, _))) = (&mut hazard, scratch) {
             let scratch_pointer = Retained::as_ptr(scratch_buffer);
             let output_pointer = Retained::as_ptr(&output);
             // the split dispatch above just wrote `scratch` -- record it,

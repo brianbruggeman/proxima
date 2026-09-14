@@ -11,6 +11,12 @@
 //! CPU and Metal compute the exact same arithmetic in the exact same order,
 //! and a real divergence here means the Metal kernel's addressing, not its
 //! numerics, is wrong.
+//!
+//! Also proves ROW 547's own second output: `state_out` matches CPU exactly
+//! like `out` does, and `state_in`'s own bytes come back byte-identical to
+//! what was uploaded, proving the kernel never wrote into it (the bug this
+//! row fixed -- `render_gated_delta_net` used to write the updated state
+//! back into `state_in`'s own buffer in place).
 
 #![cfg(all(
     feature = "metal",
@@ -73,6 +79,8 @@ fn broadcast_kv_heads(program: &mut Vec<Op>, x: NodeId, kv_heads: u32, group: u3
 struct Synthetic {
     program: Vec<Op>,
     out: NodeId,
+    state_out: NodeId,
+    state_in: NodeId,
     inputs: Vec<(NodeId, Vec<f32>)>,
 }
 
@@ -106,7 +114,7 @@ fn synthetic_gated_delta_net_gqa_program(
     let query = broadcast_kv_heads(&mut program, query_pre, kv_heads as u32, group as u32);
     let key = broadcast_kv_heads(&mut program, key_pre, kv_heads as u32, group as u32);
 
-    let (out, _state_out) = append_qwen35_delta_net_step(
+    let (out, state_out) = append_qwen35_delta_net_step(
         &mut program,
         query,
         key,
@@ -132,6 +140,8 @@ fn synthetic_gated_delta_net_gqa_program(
     Synthetic {
         program,
         out,
+        state_out,
+        state_in,
         inputs,
     }
 }
@@ -164,33 +174,73 @@ fn assert_fused_bind_matches(synthetic: &Synthetic, shape_name: &str, max_relati
         .map(|(_, values)| proxima_tensor::QuantizedBlock::Float32(values.as_slice()))
         .collect();
 
+    let requested_outputs = [synthetic.out, synthetic.state_out, synthetic.state_in];
     let cpu = proxima_tensor::cpu::evaluate_quantized_exact(
         &synthetic.program,
         &[],
         &blocks,
-        &[synthetic.out],
+        &requested_outputs,
     )
     .unwrap_or_else(|error| panic!("{shape_name}: cpu evaluates: {error}"));
     let metal = omega::execute(
         &synthetic.program,
         &[],
         &blocks,
-        &[synthetic.out],
+        &requested_outputs,
         NumericPolicy::bit_exact(),
     )
     .unwrap_or_else(|error| panic!("{shape_name}: metal evaluates: {error}"));
 
+    assert_matches(&cpu, &metal, synthetic.out, shape_name, "out", max_relative_error);
+    assert_matches(
+        &cpu,
+        &metal,
+        synthetic.state_out,
+        shape_name,
+        "state_out",
+        max_relative_error,
+    );
+
+    let original_state_in = &synthetic
+        .inputs
+        .iter()
+        .find(|(node, _)| *node == synthetic.state_in)
+        .unwrap_or_else(|| panic!("{shape_name}: state_in is one of the fed inputs"))
+        .1;
+    let metal_state_in = metal
+        .get(synthetic.state_in)
+        .unwrap_or_else(|| panic!("{shape_name}: metal retains state_in as a requested output"))
+        .0;
+    assert_eq!(
+        metal_state_in,
+        original_state_in.as_slice(),
+        "{shape_name}: state_in's own buffer must read back byte-identical to what was \
+         uploaded -- the Metal kernel must never write into it"
+    );
+}
+
+/// One node's Metal/CPU relative-error comparison, shared by `out` and
+/// `state_out` -- both are real op outputs after ROW 547, so both get the
+/// exact same check.
+fn assert_matches(
+    cpu: &proxima_tensor::cpu::Evaluated,
+    metal: &proxima_tensor::cpu::Evaluated,
+    node: NodeId,
+    shape_name: &str,
+    label: &str,
+    max_relative_error: f32,
+) {
     let expected = cpu
-        .get(synthetic.out)
-        .unwrap_or_else(|| panic!("{shape_name}: cpu retains the requested output"))
+        .get(node)
+        .unwrap_or_else(|| panic!("{shape_name}: cpu retains {label}"))
         .0;
     let actual = metal
-        .get(synthetic.out)
-        .unwrap_or_else(|| panic!("{shape_name}: metal retains the requested output"))
+        .get(node)
+        .unwrap_or_else(|| panic!("{shape_name}: metal retains {label}"))
         .0;
     assert!(
         !actual.is_empty(),
-        "{shape_name}: output comparison must not be vacuous"
+        "{shape_name}: {label} comparison must not be vacuous"
     );
     assert_eq!(actual.len(), expected.len());
 
@@ -202,10 +252,10 @@ fn assert_fused_bind_matches(synthetic: &Synthetic, shape_name: &str, max_relati
             (actual - expected).abs() / denominator
         })
         .fold(0.0_f32, f32::max);
-    eprintln!("gated_delta_net {shape_name} max_relative_error={max_relative}");
+    eprintln!("gated_delta_net {shape_name} {label} max_relative_error={max_relative}");
     assert!(
         max_relative <= max_relative_error,
-        "{shape_name}: gated delta net Metal/CPU parity diverged by {max_relative} \
+        "{shape_name}: gated delta net Metal/CPU {label} parity diverged by {max_relative} \
          (bound {max_relative_error})"
     );
 }
