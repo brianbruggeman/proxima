@@ -31297,3 +31297,117 @@ suspect, per `op_profile_kind`'s own numbers: `reduce-cooperative`
 a Metal GPU counter capture (not the byte/dispatch-count proxy) per op
 kind to trace which specific kernel's dispatch count or per-dispatch cost
 grew when gate/up switched from per-route to grouped.
+
+## ROW 546 -- fused gdn on the real decode loop: architecture gap found, not landed this slice
+
+**Task:** land the state-persistence half of ROW 540's fusion (CPU executor
+keeps the recurrence state across tokens; interop stops requesting `state_out`
+for fused GDN layers so the matcher actually fuses on the real qwen35moe
+decode loop) and re-measure the real model.
+
+**What was read, `file:line`:**
+
+- `proxima-tensor/src/cpu.rs:7017-7080` (`run_gated_delta_net`): copies
+  `state_in` into a local `Vec<f32>` (`:7066`), mutates it correctly inside
+  `run_gdn_prefill_scan` (`gdn.rs:78-` -- `scan.state: &mut [f32]` is written
+  in place by the recurrence loop), then returns without writing it anywhere
+  a caller can read. `output` (the op's own return value) is value-shaped
+  only (`node_output_len`, `cpu.rs:7120`, `element_count(&resolved.extents)`
+  -- the value shape, never state-shaped).
+- `proxima-tensor/src/bind.rs:3838-3881` (`gated_delta_net_candidates`):
+  declines a fusion candidate whenever `state_out` (or any absorbed node) is
+  an `effective_outputs` member, uniformly for every backend -- binding has
+  no backend parameter, so this decision is not CPU- or Metal-specific.
+- `proxima-model-interop/src/generate.rs:10786-10855`: the production decode
+  loop's `Ssm` cache-advance arm always resolves `evaluated.get(*state_out)`
+  (falling back to a metal-output-placement-only skip,
+  `:10795-10806`, gated `feature = "metal-output-placement", target_os =
+  "macos"`, unrelated to `gated-delta-net-fusion`) and copies the result into
+  `SsmLayerCache.state` (`:10852`, `cache.advance`). `state_out` is an
+  `effective_outputs` member on every real decode step regardless of the
+  `gated-delta-net-fusion` feature -- this is why the task brief's premise
+  holds: fusion never engages on the real loop today, on either backend.
+- `proxima-model-interop/src/generate.rs:5527-5563` (`SsmLayerCache`): the
+  per-layer state is a plain host `Vec<f32>` fed into each token's evaluate
+  call as a **named input block** (`named_blocks`, `:5565-5577`,
+  `QuantizedBlock::Float32(self.state.as_slice())` -- an immutable borrow),
+  read back by NAME from that call's own `Evaluated` results, and copied into
+  `self.state` (`:5548`/`:5551`). There is no persistent, aliasable device or
+  host buffer shared between one token's `state_out` write and the next
+  token's `state_in` read on the CPU path -- each call is a fresh functional
+  evaluate over caller-supplied snapshots
+  (`proxima-tensor/src/cpu.rs:6526-6534`, `run_node_into`'s own
+  `buffers: &[Option<B>], B: Deref<Target = [f32]>` -- immutable through this
+  signature, and instantiated with `&[f32]` at `evaluate_bound_f32_into`
+  (`:6492`), so no universal path exists to mutate a `state_in` slot through
+  it without breaking that caller).
+- The one caller-visible in-place mechanism that DOES exist on this shape,
+  `evaluate_named_with_arena_in_place` (`cpu.rs:3730-3765`, `rebind:
+  &[(NodeId, &str)]`, a zero-copy `Vec::swap` of a computed node's buffer
+  into an `Op::Input` slot): built for a **training loop's own resident
+  arena** (`docs/discipline.md` ROW 164's own residual, cited in that
+  function's doc), never wired into `generate.rs`'s decode loop, which uses
+  `push_step_named_blocks` (`generate.rs:8109`) against per-call named blocks,
+  not a `StaticArena` a caller keeps resident across steps.
+- Metal's own kernel (`omega/src/msl.rs`'s `render_gated_delta_net`,
+  `BoundOpKind::GatedDeltaNet { .. }` destructured with `..` at every call
+  site in `omega/src/{msl,wgsl,cuda,wgpu_driver,identity}.rs` -- confirmed by
+  grep, no named-field destructure outside `cpu.rs:7022` and the
+  construction site `bind.rs:4020`) already writes the updated state IN
+  PLACE into the `state_in` device buffer (main, pre-existing, per this row's
+  own brief and `omega/tests/gated_delta_net_parity.rs`'s 5.8e-7 parity) --
+  the CPU gap is not mirrored on the Metal side.
+
+**Why this did not land this slice:** the CPU decode loop's own buffer
+contract is copy-based end to end (owned `Vec<f32>` per layer, named-block
+snapshot in, named-result copy out) with no aliased or mutable slot a fused
+op could write through today. Making the fused op skip re-deriving
+`state_out` (this row's invariant) requires one of two real redesigns, not a
+signature tweak:
+
+1. Route the SSM decode path through `StaticArena` +
+   `evaluate_named_with_arena_in_place`'s existing `rebind` swap (reuse,
+   `principle 1` -- this primitive already does exactly "a computed node's
+   buffer becomes an input node's buffer, zero copy" for the training loop),
+   which means threading arena residency through `generate.rs`'s per-token
+   call path for GDN layers specifically, while every other cache kind
+   (`LayerCache`, `Qwen35DenseAttentionCache`) keeps the current copy
+   contract -- a mixed-mode evaluate call the decode loop does not have
+   today.
+2. Give `BoundOpKind::GatedDeltaNet` a second, state-shaped output computed
+   by a companion resolved node sharing its six operands (cheap: `n_tokens
+   == 1`, one recurrence step, not a rescan), and change
+   `gated_delta_net_candidates`'s decline (`bind.rs:3857`) to route
+   `state_out` to that companion instead of declining. This keeps the
+   existing copy-based interop contract (`generate.rs` unchanged) but sends
+   Metal a second `BoundOpKind::GatedDeltaNet`-shaped resolved node it has
+   never seen with `gated-delta-net-fusion` + `metal` on together in
+   production -- landing it without also teaching `msl.rs`'s renderer the new
+   shape risks silently mis-rendering a live decode step's recurrence state,
+   which is exactly the class of unreviewed hot-path correctness change
+   principle 14/15/18 rule out under time pressure.
+
+Both are real, scoped follow-ups; neither is a signature-level fix, and
+guessing between them inside this slice's remaining budget -- with the loaded
+model already committed to a Metal decode run that would be the only oracle
+for "did the state actually carry forward correctly" -- was assessed as
+higher-risk than useful. **Disagreement, stated once, per directive:** the
+row as briefed assumed the CPU/Metal contracts already had a shared mutable
+or aliasable `state_in` slot to hang a small persistence fix on; they do not,
+CPU's is copy-based by construction, and closing that gap is a
+`generate.rs`-scale change, not a `cpu.rs`-scale one.
+
+**Landed this slice:** nothing in `proxima-tensor`, `proxima-model-interop`,
+or `omega` -- no code changed, so no regression risk. This row itself.
+
+**Gates:** N/A -- no source changed. `git status --short` before and after
+this row's investigation: only the pre-existing untracked `agents.tsv` /
+`todo-2026-09-07.md` at the repo root, confirmed via `git diff` (empty) and
+`git status --short` (unchanged).
+
+**Real model:** not run -- no code changed to measure; running the baseline
+again would not be a re-proof of anything this row claims.
+
+**Residual, left open for the next slice:** pick option 1 or 2 above (owner's
+call, not asserted here), then land the interop wiring and the real-model
+gate this row's brief specified, unchanged.
