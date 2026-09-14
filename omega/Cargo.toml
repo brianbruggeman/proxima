@@ -387,6 +387,10 @@ metal-q4k-ggml-port = ["metal"]
 # into one real `grid.z` dispatch are follow-up work, named explicitly so
 # this flag's ON state is provably a no-op on `generated_text`/`gpu_exec_ms`
 # today. Default-off: `metal-horizontal-merge` has no default-path caller.
+# a group only merges when every member is CALLER output-placed into the
+# SAME physical buffer (`BufferArena`'s own doc: two simultaneously-live
+# positions never share a slot, so the arena cannot back base_table's
+# output_base -- only an explicit `output_placements` buffer can).
 metal-horizontal-merge = ["metal"]
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }

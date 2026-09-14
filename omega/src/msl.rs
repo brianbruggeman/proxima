@@ -1854,12 +1854,8 @@ fn emit_with_expert_sources_mode(
 /// emitted TEXT is correct in isolation, which is what lets it be unit-tested
 /// without a device (see this module's own `horizontal_merge_base_table_
 /// splice_tests`).
-// only this module's own gate-(1) splice tests call this so far -- the
-// encode-loop wiring that calls it from `metal::resolve_steps` is gate (2),
-// not yet landed (`docs/discipline.md`'s horizontal-packed-merge design note).
 #[cfg(feature = "metal-horizontal-merge")]
-#[allow(dead_code)]
-fn splice_horizontal_merge_base_table(
+pub(crate) fn splice_horizontal_merge_base_table(
     kernel: &mut Kernel,
     node: NodeId,
     weight_index: usize,
@@ -1921,10 +1917,7 @@ fn splice_horizontal_merge_base_table(
 /// both neighbours of every candidate match are not identifier characters
 /// before accepting it. Generated MSL source is plain ASCII (identifiers and
 /// numeric literals only), so byte-wise scanning is exact here.
-// same gate-(1)-only reachability as `splice_horizontal_merge_base_table`
-// above -- its own doc explains why.
 #[cfg(feature = "metal-horizontal-merge")]
-#[allow(dead_code)]
 fn replace_whole_word(text: &str, identifier: &str, replacement: &str) -> String {
     let bytes = text.as_bytes();
     let pattern = identifier.as_bytes();
