@@ -3197,6 +3197,7 @@ fn grid_threads(
             head_dim,
             cached_key_rows,
             new_key_rows,
+            query_groups,
             ..
         } => {
             // The single-range fused path (nine operands) always dispatches
@@ -3230,7 +3231,7 @@ fn grid_threads(
                 && *cached_key_rows == 0;
             let (chunks, splits) = if single_range_dynamic {
                 (
-                    crate::sized::ATTENTION_CONTEXT_CHUNK_CAP,
+                    effective_context_chunk_cap(*query_groups, *head_dim),
                     if cached_attention_merge_needed(&resolved.kind, numeric_policy) {
                         crate::sized::ATTENTION_SPLIT_MAX
                     } else {
@@ -3238,7 +3239,10 @@ fn grid_threads(
                     },
                 )
             } else {
-                (context_chunks_for(context_length, numeric_policy), 1)
+                (
+                    context_chunks_for(context_length, *query_groups, *head_dim, numeric_policy),
+                    1,
+                )
             };
             resolved
                 .extents
@@ -3431,7 +3435,8 @@ fn entry_name(resolved: &BoundOp) -> String {
                 // `render_cached_attention`), so the row-count tokens drop
                 // from the name entirely -- two different `kv-capacity-
                 // bucket` extents share one compiled kernel, keyed only by
-                // the compiled MAXIMUM chunk count (`_x{cap}`), never by the
+                // the shape-bounded compiled MAXIMUM chunk count
+                // (`_x{cap}`, `effective_context_chunk_cap`), never by the
                 // live capacity.
                 let per_query_head_grid =
                     cached_attention_per_query_head_grid(true, *cached_key_rows + *new_key_rows);
@@ -3439,7 +3444,7 @@ fn entry_name(resolved: &BoundOp) -> String {
                     "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_b{}_qh{}",
                     scale.to_bits(),
                     signed_name_part(*cached_lower_inclusive),
-                    crate::sized::ATTENTION_CONTEXT_CHUNK_CAP,
+                    effective_context_chunk_cap(*query_groups, *head_dim),
                     crate::sized::ATTENTION_BLOCK_WIDTH,
                     u8::from(per_query_head_grid),
                 )
@@ -4135,13 +4140,40 @@ fn msl_literal(value: f32) -> String {
 /// than failing the whole plan -- the same "reject/fallback at bind time"
 /// shape `fuse_cached_attention: false` gives wgpu/cuda
 /// (`proxima_tensor::bind::bind_with_fusion`'s own doc).
-pub(crate) fn context_chunks_for(context_length: u64, policy: NumericPolicy) -> u64 {
+pub(crate) fn context_chunks_for(
+    context_length: u64,
+    query_groups: u64,
+    head_dim: u64,
+    policy: NumericPolicy,
+) -> u64 {
     if admit(policy, NumericRewrite::ContextChunkMerge).is_err() {
         return 1;
     }
     context_length
         .div_ceil(crate::sized::ATTENTION_CONTEXT_KEYS_PER_CHUNK)
-        .clamp(1, crate::sized::ATTENTION_CONTEXT_CHUNK_CAP)
+        .clamp(1, effective_context_chunk_cap(query_groups, head_dim))
+}
+
+/// The PLAN-TIME chunk cap `render_cached_attention`'s single-range dynamic
+/// path may actually declare -- `omega-runtime.toml`'s `[attention_context_
+/// chunks].cap` (`ATTENTION_CONTEXT_CHUNK_CAP`) is a shape-INDEPENDENT
+/// build-time ceiling, but the `shared_m`/`shared_l`/`shared_o` threadgroup
+/// arrays it sizes (`render_cached_attention`'s own doc) scale with
+/// `query_groups * cap * (head_dim + 2)` floats -- at `query_groups=8`,
+/// `head_dim=256` the compiled cap (4) alone already declares 33024 bytes
+/// against Metal's 32768-byte `threadgroup` ceiling
+/// (`CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES`), which fails pipeline
+/// compilation (`CompileFailed`) rather than degrading. This clamps the
+/// compiled cap down, per shape, to whatever the budget actually admits --
+/// every one of [`context_chunks_for`]'s call sites and every raw
+/// `ATTENTION_CONTEXT_CHUNK_CAP` read in the single-range dynamic path
+/// (dispatch grid width, entry-name cache key, scratch declaration) must
+/// call THIS function instead, or the dispatch/scratch/identity can disagree
+/// on how many simdgroups the compiled kernel actually has room for.
+pub(crate) fn effective_context_chunk_cap(query_groups: u64, head_dim: u64) -> u64 {
+    let bytes_per_chunk = 4 * query_groups.max(1) * (head_dim + 2);
+    let budget_cap = crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES / bytes_per_chunk;
+    crate::sized::ATTENTION_CONTEXT_CHUNK_CAP.min(budget_cap.max(1))
 }
 
 /// [`render_cached_attention`]'s single-range dynamic path's in-block
@@ -4567,7 +4599,12 @@ fn render_cached_attention(
     } else {
         ""
     };
-    let context_chunks = context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy);
+    let context_chunks = context_chunks_for(
+        *cached_key_rows + *new_key_rows,
+        *query_groups,
+        *head_dim,
+        numeric_policy,
+    );
     // Redesign §5 option 2: on the single-range fused path, the compiled
     // MAXIMUM simdgroup count (`cap`) sizes both the dispatch grid and the
     // threadgroup-memory merge arrays -- never the bind's own compiled
@@ -4579,7 +4616,7 @@ fn render_cached_attention(
     // (`maximum = -INFINITY`, `sum = 0.0`) rather than looping -- the same
     // "idle simdgroup, identity partial" shape llama's own dispatch-time
     // `nsg` uses against a compiled maximum (`ggml-metal.m:4887-4913`).
-    let cap = crate::sized::ATTENTION_CONTEXT_CHUNK_CAP;
+    let cap = effective_context_chunk_cap(*query_groups, *head_dim);
     // The block-staged body's `float4` K/Q loads (below) reinterpret each
     // real/imaginary plane offset as `device const {element_type}4*` --
     // legal only when every `qbase`/`kbase` offset this kernel computes is a
@@ -8237,18 +8274,20 @@ fn tiled_gemm_threadgroup_width(
     // is `chunks * SIMD_WIDTH` alone.
     if let BoundOpKind::CachedAttention {
         query_groups,
+        head_dim,
         cached_key_rows,
         new_key_rows,
         ..
     } = &resolved.kind
     {
         // Must agree with `grid_threads`'s own `CachedAttention` arm: the
-        // single-range fused (dynamic) path always dispatches the compiled
-        // MAXIMUM chunk count (`cap`), so the threadgroup width has to widen
-        // to match -- a mismatch here puts fewer threads in the threadgroup
-        // than `local_group_index`'s own `cap`-sized addressing assumes,
-        // which is an out-of-bounds `threadgroup` memory write, not merely a
-        // wrong answer.
+        // single-range fused (dynamic) path always dispatches the shape-
+        // bounded compiled MAXIMUM chunk count (`effective_context_chunk_
+        // cap`), so the threadgroup width has to widen to match -- a
+        // mismatch here puts fewer threads in the threadgroup than
+        // `local_group_index`'s own `cap`-sized addressing assumes, which is
+        // an out-of-bounds `threadgroup` memory write, not merely a wrong
+        // answer.
         // Same `cached_key_rows == 0` discriminator as `grid_threads`'s own
         // `CachedAttention` arm -- `two_range_cached_bound` never widens to
         // the compiled cap, since its `context_length` is already the
@@ -8258,9 +8297,9 @@ fn tiled_gemm_threadgroup_width(
             && *cached_key_rows == 0;
         let context_length = *cached_key_rows + *new_key_rows;
         let chunks = if dynamic_cached_len {
-            crate::sized::ATTENTION_CONTEXT_CHUNK_CAP
+            effective_context_chunk_cap(*query_groups, *head_dim)
         } else {
-            context_chunks_for(context_length, numeric_policy)
+            context_chunks_for(context_length, *query_groups, *head_dim, numeric_policy)
         };
         // Below the split-at-scale knee, `cached_attention_per_query_head_grid`
         // moves `query_groups` out of this width and into a threadgroup-count
@@ -11609,13 +11648,18 @@ mod tests {
             cached_key_rows,
             new_key_rows,
             query_groups,
+            head_dim,
             ..
         } = &bound.kind
         else {
             panic!("cached_attention_op must build a CachedAttention bound op");
         };
-        let context_chunks =
-            context_chunks_for(*cached_key_rows + *new_key_rows, NumericPolicy::default());
+        let context_chunks = context_chunks_for(
+            *cached_key_rows + *new_key_rows,
+            *query_groups,
+            *head_dim,
+            NumericPolicy::default(),
+        );
 
         assert!(kernel.source.contains("long relative ="));
         assert!(kernel.source.contains("simd_sum(partial_score)"));
@@ -11669,12 +11713,20 @@ mod tests {
         let BoundOpKind::CachedAttention {
             cached_key_rows,
             new_key_rows,
+            query_groups,
+            head_dim,
             ..
         } = &bound.kind
         else {
             panic!("cached_attention_op must build a CachedAttention bound op");
         };
-        if context_chunks_for(*cached_key_rows + *new_key_rows, NumericPolicy::default()) != 1 {
+        if context_chunks_for(
+            *cached_key_rows + *new_key_rows,
+            *query_groups,
+            *head_dim,
+            NumericPolicy::default(),
+        ) != 1
+        {
             return;
         }
 
@@ -12078,18 +12130,98 @@ mod tests {
     #[test]
     fn context_chunk_merge_is_gated_by_numeric_policy_for_a_real_64_key_context() {
         let context_length: u64 = 64;
+        let query_groups: u64 = 1;
+        let head_dim: u64 = 4;
         assert_eq!(
-            context_chunks_for(context_length, NumericPolicy::bit_exact()),
+            context_chunks_for(
+                context_length,
+                query_groups,
+                head_dim,
+                NumericPolicy::bit_exact()
+            ),
             1,
             "bit_exact() withholds reassociation, ContextChunkMerge, so this falls back to the \
              single-pass chunk<=1 kernel `render_cached_attention` already renders"
         );
-        let chunks = context_chunks_for(context_length, NumericPolicy::llama_relaxed());
+        let chunks = context_chunks_for(
+            context_length,
+            query_groups,
+            head_dim,
+            NumericPolicy::llama_relaxed(),
+        );
         assert!(
             chunks > 1,
             "llama_relaxed() grants reassociation, clearing NumericRewrite::ContextChunkMerge, \
              so a 64-key context (4x omega-runtime.toml's 16-key chunk) must split across more \
              than one simdgroup; got {chunks}"
+        );
+    }
+
+    /// ROW 388: `effective_context_chunk_cap` must return the compiled
+    /// `ATTENTION_CONTEXT_CHUNK_CAP` unchanged for openchat's real shape
+    /// (`kv_heads` 4, `group` 4 -> `query_groups=4`, `head_dim=128`) --
+    /// `4 * 4 * (128 + 2) = 2080` bytes per chunk, comfortably under the
+    /// 32768-byte threadgroup ceiling even at the compiled maximum.
+    #[test]
+    fn effective_context_chunk_cap_holds_the_compiled_cap_for_the_openchat_shape() {
+        assert_eq!(
+            effective_context_chunk_cap(4, 128),
+            crate::sized::ATTENTION_CONTEXT_CHUNK_CAP,
+            "openchat's per-chunk threadgroup footprint is well under budget"
+        );
+    }
+
+    /// ROW 388's own defect: qwen35's `query_groups=8`/`head_dim=256` shape
+    /// declares `8 * 4 * (256 + 2) = 33024` bytes at the compiled cap (4),
+    /// past Metal's 32768-byte `threadgroup` ceiling
+    /// (`CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES`) -- this must clamp down
+    /// to 3, the largest chunk count whose declared footprint (24768 bytes)
+    /// still fits.
+    #[test]
+    fn effective_context_chunk_cap_clamps_below_the_threadgroup_budget_for_qwen35_shape() {
+        assert_eq!(
+            effective_context_chunk_cap(8, 256),
+            3,
+            "qwen35's query_groups=8/head_dim=256 shape must clamp the compiled cap down to what \
+             the 32768-byte threadgroup budget actually admits"
+        );
+    }
+
+    /// `render_cached_attention`'s single-range dynamic path must never
+    /// declare more `shared_m`/`shared_l`/`shared_o` threadgroup bytes than
+    /// [`CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES`] admits, for any shape
+    /// this crate can bind -- the assertion this whole cap exists to
+    /// guarantee, checked directly against the rendered source rather than
+    /// inferred from the cap function alone.
+    #[test]
+    fn render_cached_attention_never_declares_past_the_threadgroup_budget() {
+        let mut bound = cached_attention_op_dynamic(0, 512);
+        let BoundOpKind::CachedAttention {
+            query_groups,
+            head_dim,
+            rotary_dim,
+            ..
+        } = &mut bound.kind
+        else {
+            unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
+        };
+        *query_groups = 8;
+        *head_dim = 256;
+        *rotary_dim = 256;
+
+        let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
+            .expect("qwen35-shaped single-range dynamic attention renders");
+        let cap = effective_context_chunk_cap(8, 256);
+        assert!(cap < crate::sized::ATTENTION_CONTEXT_CHUNK_CAP);
+        let declared_bytes = 4 * 8 * cap * (256 + 2);
+        assert!(
+            declared_bytes <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
+            "declared shared_m/shared_l/shared_o bytes ({declared_bytes}) must stay within the \
+             threadgroup budget"
+        );
+        assert!(
+            source.contains(&format!("constexpr long cap = {cap};")),
+            "rendered source must declare the SAME effective cap this test computed"
         );
     }
 

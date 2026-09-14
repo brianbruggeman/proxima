@@ -7718,6 +7718,7 @@ fn pack_cached_attention_uniforms(
 ) -> Result<(), EmitError> {
     let BoundOpKind::CachedAttention {
         head_dim,
+        query_groups,
         cached_key_rows,
         new_key_rows,
         ..
@@ -7738,10 +7739,13 @@ fn pack_cached_attention_uniforms(
     let dynamic_cached_len =
         (bound.operands().len() == 9 || bound.operands().len() == 12) && *cached_key_rows == 0;
     let context_length = *cached_key_rows + *new_key_rows;
-    let chunks = crate::msl::context_chunks_for(context_length, numeric_policy) as i64;
+    let chunks =
+        crate::msl::context_chunks_for(context_length, *query_groups, *head_dim, numeric_policy)
+            as i64;
     let splits = crate::msl::splits_for(context_length, numeric_policy) as i64;
     // Redesign §5 option 2: the single-range fused path always dispatches
-    // the compiled MAXIMUM chunk count (`cap`) -- `grid_threads`'s own
+    // the shape-bounded compiled MAXIMUM chunk count
+    // (`effective_context_chunk_cap`) -- `grid_threads`'s own
     // `CachedAttention` arm (`omega/src/msl.rs`) -- so `total_elements` here
     // must agree with that grid width, never the live `chunks` value, which
     // travels separately as its own `Uniforms` field below. Redesign §4c:
@@ -7751,7 +7755,8 @@ fn pack_cached_attention_uniforms(
     // a chunk, cannot be widened unconditionally without racing the real
     // dispatch's output write; this must stay in lock-step with that gate.
     let dispatch_chunks = if dynamic_cached_len {
-        i64::try_from(crate::sized::ATTENTION_CONTEXT_CHUNK_CAP).unwrap_or(chunks)
+        i64::try_from(crate::msl::effective_context_chunk_cap(*query_groups, *head_dim))
+            .unwrap_or(chunks)
     } else {
         chunks
     };
@@ -8265,6 +8270,8 @@ fn pipeline_for(
     // of a later dispatch: a cache hit on the same key emits nothing here.
     #[cfg(feature = "instrument")]
     if let BoundOpKind::CachedAttention {
+        query_groups,
+        head_dim,
         cached_key_rows,
         new_key_rows,
         ..
@@ -8273,7 +8280,12 @@ fn pipeline_for(
         let context_length = cached_key_rows + new_key_rows;
         debug!(
             context_length,
-            context_chunks = crate::msl::context_chunks_for(context_length, numeric_policy),
+            context_chunks = crate::msl::context_chunks_for(
+                context_length,
+                *query_groups,
+                *head_dim,
+                numeric_policy
+            ),
             numeric_policy = ?numeric_policy,
             kernel_identity = %cache_key,
             "lowering selected attention chunking"
