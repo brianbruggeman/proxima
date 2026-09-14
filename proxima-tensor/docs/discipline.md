@@ -32773,3 +32773,71 @@ named by ROW 559/560 and untouched here):**
    this row's OWN instrumentation (`neon_tile_plan` eprintln, `bind.rs`
    diagnostic sub-term/grouped-buffer taps) was removed before landing, per
    this skill's own instrument-then-remove-or-promote rule.
+
+## ROW 562 -- `cached-attention-streaming` measured on the real qwen35moe decode; not flipped default-on
+
+**Task:** the fix landed for `omega`'s cached-attention threadgroup-memory
+overflow (`msl::effective_context_chunk_cap`, this same session, commit
+`fix(omega): cached attention chunk cap bounded by threadgroup memory`) owed
+a real-model measurement: build `gguf_generate` with
+`proxima-model-interop/cached-attention-streaming` on top of `metal`, run the
+France smoke (16 tokens) and a 128-token creative-writing prompt that crosses
+the 64-key split-at-scale knee, and decide whether to fold the feature into
+`proxima-model-interop`'s default `metal` list.
+
+**Build:** `cargo build --release --example gguf_generate --features
+proxima-model-interop/metal,proxima-model-interop/instrument,proxima-model-interop/cached-attention-streaming
+-j 4` -- exit 0, `omega`/`proxima-tensor`/`proxima-safetensors`/
+`proxima-model-interop`/`proxima` all recompiled clean.
+
+**Run (a), France, 16 tokens** (checkpoint `qwen35moe`, 40 layers,
+`full_attention_interval=4`): `generated_text = "<think>\n\n</think>\n\nThe
+capital of France is **Paris**.<|endoftext|>..."` -- correct. `ttnt_mean_ms =
+73.467` (baseline band 52.7-53.5). Mechanism: `token_breakdown_wall` per step
+is 51-54 ms for every step EXCEPT step 8 (`wall_ms=352.976`), the one step
+`PROXIMA_METAL_OP_PROFILE_STEP=8` instruments for per-op attribution -- that
+instrumentation itself is the outlier's cause, not a decode regression.
+Excluding step 8, the mean over the remaining 14 `ttnt` samples is
+`744.905 / 14 = 53.207 ms`, inside the baseline band.
+
+**Run (b), 128-token Odell/Spark-arena creative prompt** (crosses the
+64-key split-at-scale knee): `generated_text` degenerates into ~120 repeated
+bare `\n` characters after one short opening sentence -- FAILS the "text
+must be prose" bar. `ttnt_mean_ms = 61.606`.
+
+**Residual, both runs:** `op_profile_kind step=8` never emits a
+`kind=cached_attention` line in either run -- only `constant`, `elementwise`,
+`gated_delta_net` (op_count 30, matching the 30 non-full-attention layers),
+`iota`, `reduce-cooperative`, `reduce-generic-scalar`, and
+`reduce-packed-row-blocked`. `classify_kind` (`omega/src/metal.rs:5836`)
+names `BoundOpKind::CachedAttention` as `"cached_attention"` unconditionally,
+so the 10 expected full-attention layers either never reach `bind`'s
+`CachedAttention` fusion for this checkpoint's shape (partial-rotary,
+`full_attention_interval=4`) or are absorbed into one of the other buckets
+upstream of `classify_kind` -- unmeasured; the profiling command in this row
+did not isolate which. This means the threadgroup-cap fix this row set out
+to exercise on the real model was NOT proven to fire on this checkpoint's
+decode path; the fix's own `omega` unit/parity gates (326/326 and 317/317
+passed, this session) remain the load-bearing proof, not this run.
+
+**Decision:** per the stated gate ("keep if both texts correct and TTNT <=
+53.5"), run (b)'s text is not correct -- `cached-attention-streaming` stays
+default-off in `proxima-model-interop`'s `metal` feature list. No feature
+flip lands this row.
+
+**Re-prove commands:**
+
+```text
+cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument,proxima-model-interop/cached-attention-streaming -j 4
+env PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent PROXIMA_DEBUG_METAL_STAGES=1 PROXIMA_METAL_OP_PROFILE_STEP=8 \
+  target/release/examples/gguf_generate <qwen35moe.gguf> "What is the capital of France?" 16 gpu
+env PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent PROXIMA_DEBUG_METAL_STAGES=1 PROXIMA_METAL_OP_PROFILE_STEP=8 \
+  target/release/examples/gguf_generate <qwen35moe.gguf> "<128-token Odell/Spark-arena prompt>" 128 gpu
+```
+
+**Open items for a future row:** (1) find why `cached_attention` never
+appears in `op_profile_kind` on this checkpoint -- confirm whether the
+full-attention layers are fusing into `BoundOpKind::CachedAttention` at
+`bind` time at all; (2) root-cause run (b)'s degenerate all-newline output
+independent of `cached-attention-streaming` (run with the feature off, same
+prompt, to isolate whether this is pre-existing).
