@@ -837,6 +837,18 @@ pub struct Plan {
     /// `None` for this plan's whole life, which costs nothing beyond the
     /// one empty `RefCell`.
     resolved_steps: RefCell<Option<ResolvedSteps>>,
+    /// Resolved once per plan, lazily, the first call whose `device_buffers`
+    /// already names every candidate group's own weight/activation/output
+    /// buffers -- `resolve_steps`'s own `merge_candidates` is pure structure
+    /// (pipeline identity + no dataflow edge) and knows nothing about which
+    /// physical buffer a `NodeId` resolves to; THIS is where a candidate is
+    /// admitted or refused on buffer identity (`ensure_merged_dispatches`'s
+    /// own doc) and where the `base_table` upload happens, once. `None`
+    /// until that first call; cleared by [`resolve_steps`] on a math-mode
+    /// rebuild, since a stale entry would dispatch a pipeline compiled under
+    /// the wrong mode.
+    #[cfg(feature = "metal-horizontal-merge")]
+    merged: RefCell<Option<MergedPlanState>>,
     /// [`HazardState`]'s own doc: [`execute_plan_with_placements`]'s hazard
     /// tracker and its per-step input-pointer scratch, reused call-to-call
     /// instead of rebuilt every call.
@@ -875,6 +887,14 @@ pub struct Plan {
 struct ResolvedSteps {
     math_mode: MathMode,
     steps: Vec<ResolvedStep>,
+    /// Structural merge candidates (`group_mergeable_positions`, pipeline
+    /// identity + no-dataflow-edge only -- no buffer identity check yet: that
+    /// half needs `device_buffers`, which does not exist this early). Empty
+    /// when the feature is off, or the plan hits its own [`Plan::merged`]
+    /// cache first (see that field's own doc for why buffer identity is
+    /// resolved lazily, once per plan, from THIS list).
+    #[cfg(feature = "metal-horizontal-merge")]
+    merge_candidates: Vec<Vec<usize>>,
 }
 
 /// Plan-time grouping of positions that share one compiled pipeline
@@ -947,6 +967,334 @@ fn split_into_independent_groups(
     result.into_iter().filter(|group| group.len() > 1).collect()
 }
 
+/// [`group_mergeable_positions`]'s structural candidates further split by
+/// PHYSICAL buffer identity -- two positions sharing a pipeline can still
+/// read/write two unrelated device buffers (a different weight stack, an
+/// activation the caller never placed alongside the others), and merging
+/// those into one `grid.z` dispatch would read or write the wrong bytes. A
+/// candidate is admitted only when its weight operand (`operands()[0]`), its
+/// activation operand (`operands()[1]`), and its own CALLER-placed output all
+/// resolve to the exact same [`MetalBuffer`] object as every other member of
+/// its bucket -- checked by raw pointer, the same identity
+/// [`resolve_hazard_inputs_into`] already uses. A position with a different
+/// operand arity, an unresolved operand, or no output placement is dropped
+/// from consideration entirely (never merged, never blocks the rest of the
+/// bucket) -- [`build_merged_dispatch`]'s own `Ok(None)` path covers the
+/// remaining "wrong op shape" refusal (not a packed weight).
+#[cfg(feature = "metal-horizontal-merge")]
+fn split_by_shared_buffers(
+    group: &[usize],
+    resolved: &[BoundOp],
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    output_placed: &BTreeMap<NodeId, (&PlacedBuffer, usize)>,
+) -> Vec<Vec<usize>> {
+    let mut buckets: HashMap<(usize, usize, usize), Vec<usize>> = HashMap::new();
+    for &position in group {
+        let bound = &resolved[position];
+        let operands = bound.operands();
+        if operands.len() != 2 {
+            continue;
+        }
+        let Some((weight_buffer, _)) = device_buffers.get(&operands[0].0) else {
+            continue;
+        };
+        let Some((activation_buffer, _)) = device_buffers.get(&operands[1].0) else {
+            continue;
+        };
+        let Some((output_buffer, _)) = output_placed.get(&bound.node) else {
+            continue;
+        };
+        let key = (
+            Retained::as_ptr(weight_buffer) as usize,
+            Retained::as_ptr(activation_buffer) as usize,
+            Retained::as_ptr(*output_buffer) as usize,
+        );
+        buckets.entry(key).or_default().push(position);
+    }
+    buckets.into_values().filter(|bucket| bucket.len() > 1).collect()
+}
+
+/// Resolved once per [`Plan`], the first call whose `device_buffers` and
+/// `output_placed` already name every candidate's own operands: promotes
+/// [`ResolvedSteps::merge_candidates`] (pure structure) into real,
+/// dispatchable [`MergedDispatch`]es (real buffer identity, a compiled
+/// `_z{n}` pipeline, an uploaded offset table) or refuses them, never both --
+/// a refused candidate falls through to [`encode_op`]'s ordinary one-
+/// dispatch-per-position path exactly as if `metal-horizontal-merge` were
+/// off. No-op on a call that already populated [`Plan::merged`].
+#[cfg(feature = "metal-horizontal-merge")]
+fn ensure_merged_dispatches(
+    device: &ProtocolObject<dyn MTLDevice>,
+    plan: &Plan,
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    output_placed: &BTreeMap<NodeId, (&PlacedBuffer, usize)>,
+) -> Result<(), MetalError> {
+    if plan.merged.borrow().is_some() {
+        return Ok(());
+    }
+    let candidates: Vec<Vec<usize>> = plan
+        .resolved_steps
+        .borrow()
+        .as_ref()
+        .map(|steps| steps.merge_candidates.clone())
+        .unwrap_or_default();
+    let mut groups: Vec<MergedDispatch> = Vec::new();
+    let mut position_merge: Vec<Option<(usize, u32)>> = vec![None; plan.prepared.resolved.len()];
+    for candidate in &candidates {
+        for subgroup in
+            split_by_shared_buffers(candidate, &plan.prepared.resolved, device_buffers, output_placed)
+        {
+            let subgroup_len = subgroup.len();
+            match build_merged_dispatch(device, plan, &subgroup, device_buffers, output_placed)? {
+                Some(dispatch) => {
+                    let merge_index = groups.len();
+                    for (z, &position) in dispatch.members.iter().enumerate() {
+                        position_merge[position] = Some((merge_index, z as u32));
+                    }
+                    groups.push(dispatch);
+                }
+                None => debug!(
+                    group_len = subgroup_len,
+                    "horizontal-merge candidate refused: not a packed two-operand matvec shape"
+                ),
+            }
+        }
+    }
+    *plan.merged.borrow_mut() = Some(MergedPlanState {
+        groups,
+        position_merge,
+    });
+    Ok(())
+}
+
+/// Builds one [`MergedDispatch`] from a buffer-identity-confirmed group:
+/// emits the leader's own kernel, splices the `SliceBase`/`base_table`
+/// preamble onto it ([`crate::msl::splice_horizontal_merge_base_table`]),
+/// compiles it under a `_z{n}`-suffixed cache key so it never aliases the
+/// leader's own N=1 pipeline, and uploads the per-member offset table --
+/// every offset RELATIVE to the leader's own (weight, activation, output)
+/// byte offsets, since [`bind_buffers`] binds the leader's buffers at the
+/// leader's own offset and the spliced kernel body adds `base_table[z]` on
+/// top of that already-offset pointer (`z == 0`'s own row is all zeros).
+/// `Ok(None)` -- not `Err` -- for every shape this landing does not cover
+/// (not a packed weight, an operand this driver cannot resolve): a candidate
+/// this function declines is not a defect, it is `encode_op`'s ordinary path
+/// asked to keep handling that position.
+#[cfg(feature = "metal-horizontal-merge")]
+fn build_merged_dispatch(
+    device: &ProtocolObject<dyn MTLDevice>,
+    plan: &Plan,
+    group: &[usize],
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    output_placed: &BTreeMap<NodeId, (&PlacedBuffer, usize)>,
+) -> Result<Option<MergedDispatch>, MetalError> {
+    let leader = &plan.prepared.resolved[group[0]];
+    let operands = leader.operands();
+    if operands.len() != 2 {
+        return Ok(None);
+    }
+    let weight_node = operands[0].0;
+    let activation_node = operands[1].0;
+    if !plan.packed_operands.contains_key(&weight_node) {
+        return Ok(None);
+    }
+    let mut kernel = crate::msl::emit(leader, &plan.packed_operands, plan.numeric_policy)?;
+    let Some(weight_index) = kernel.bindings.iter().position(
+        |binding| matches!(binding, Binding::Input(node) if *node == weight_node),
+    ) else {
+        return Ok(None);
+    };
+    let Some(other_index) = kernel.bindings.iter().position(
+        |binding| matches!(binding, Binding::Input(node) if *node == activation_node),
+    ) else {
+        return Ok(None);
+    };
+    crate::msl::splice_horizontal_merge_base_table(
+        &mut kernel,
+        leader.node,
+        weight_index,
+        "uchar",
+        other_index,
+        "float",
+        "float",
+    )?;
+    let mut cache_key = kernel_cache_key(leader, &plan.packed_operands, plan.numeric_policy)?;
+    cache_key.push(plan.math_mode.cache_token());
+    cache_key.push_str(&format!("_z{}", group.len()));
+    let pipeline = pipeline_for_kernel(device, &kernel, &cache_key, plan.math_mode)?;
+    let grid = GridSpec {
+        threads: kernel.grid.threads,
+        threadgroup_width: kernel.grid.threadgroup_width,
+        depth: group.len() as u64,
+    };
+    let (_, leader_weight_offset) = buffer_for(device_buffers, weight_node)?;
+    let (_, leader_activation_offset) = buffer_for(device_buffers, activation_node)?;
+    let Some((_, leader_output_offset)) = output_placed.get(&leader.node).copied() else {
+        return Ok(None);
+    };
+    let mut offsets: Vec<u64> = Vec::with_capacity(group.len() * 3);
+    for &position in group {
+        let bound = &plan.prepared.resolved[position];
+        let bound_operands = bound.operands();
+        let (_, weight_offset) = buffer_for(device_buffers, bound_operands[0].0)?;
+        let (_, activation_offset) = buffer_for(device_buffers, bound_operands[1].0)?;
+        let Some((_, output_offset)) = output_placed.get(&bound.node).copied() else {
+            return Ok(None);
+        };
+        offsets.push(relative_byte_offset(weight_offset, leader_weight_offset));
+        offsets.push(relative_byte_offset(activation_offset, leader_activation_offset));
+        offsets.push(relative_byte_offset(output_offset, leader_output_offset));
+    }
+    let base_table = upload_base_table(device, &offsets)?;
+    Ok(Some(MergedDispatch {
+        members: group.to_vec(),
+        pipeline,
+        bindings: kernel.bindings,
+        grid,
+        base_table,
+    }))
+}
+
+/// `member_offset - leader_offset` as a `u64`: both are byte offsets into the
+/// SAME [`MetalBuffer`] ([`split_by_shared_buffers`]'s own admission
+/// requirement), so this never wraps in practice, but the subtraction is
+/// still done in `i64` first so a member ever placed BEFORE its leader (a
+/// legal, if unusual, offset ordering) round-trips exactly rather than
+/// panicking on an unsigned underflow.
+#[cfg(feature = "metal-horizontal-merge")]
+fn relative_byte_offset(member_offset: usize, leader_offset: usize) -> u64 {
+    (member_offset as i64 - leader_offset as i64) as u64
+}
+
+/// Uploads `offsets` (three `u64`s per merged member: weight/activation/
+/// output base, [`splice_horizontal_merge_base_table`]'s own `SliceBase`
+/// layout) as one small, plan-owned buffer -- built once per group inside
+/// [`ensure_merged_dispatches`]'s own lazy resolution, never per dispatch.
+#[cfg(feature = "metal-horizontal-merge")]
+fn upload_base_table(
+    device: &ProtocolObject<dyn MTLDevice>,
+    offsets: &[u64],
+) -> Result<MetalBuffer, MetalError> {
+    let bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(offsets.as_ptr().cast::<u8>(), core::mem::size_of_val(offsets))
+    };
+    // SAFETY: `bytes` borrows `offsets`, which outlives this call, and its
+    // length matches `offsets`'s own byte length exactly -- the same
+    // single-copy contract `upload_uniforms` relies on for its own
+    // `newBufferWithBytes_length_options` call just above it in this file.
+    let pointer = unsafe { NonNull::new_unchecked(bytes.as_ptr() as *mut c_void) };
+    unsafe { device.newBufferWithBytes_length_options(pointer, bytes.len(), MTLResourceOptions::StorageModeShared) }
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "device refused to allocate the horizontal-merge base table".to_string(),
+        })
+}
+
+/// [`execute_plan_with_placements_inner`]'s per-position loop, factored out
+/// so the merge arm compiles ONLY under this feature ([`Plan::merged`] does
+/// not exist otherwise) without an inline `#[cfg]` splitting one `if`
+/// expression's branches. Returns `false` for any position `Plan::merged`
+/// never claimed -- the caller falls through to its own ordinary
+/// `encode_op` path exactly as if this feature were off. `true` covers BOTH
+/// a real dispatch (`z == 0`) and a skipped member (`z > 0`): either way the
+/// caller's own retirement loop still runs unconditionally afterward, so a
+/// skipped member's buffer is retired at the same program position it
+/// always was.
+#[cfg(feature = "metal-horizontal-merge")]
+#[allow(clippy::too_many_arguments)]
+fn handle_merged_position(
+    device: &ProtocolObject<dyn MTLDevice>,
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    plan: &Plan,
+    position: usize,
+    bound: &BoundOp,
+    dispatch_type: DispatchType,
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    hazard_state: &mut HazardState,
+    output_placed: &BTreeMap<NodeId, (&PlacedBuffer, usize)>,
+) -> Result<bool, MetalError> {
+    let Some((merge_index, z)) = plan
+        .merged
+        .borrow()
+        .as_ref()
+        .and_then(|state| state.position_merge[position])
+    else {
+        return Ok(false);
+    };
+    // Every member's own output still needs a hazard record against the
+    // shared read set -- `HazardTracker::record`'s own signature is
+    // unchanged (one `Option<Id>` output); this is the caller (design note
+    // §4) looping it once per member instead of once per dispatch, since
+    // only `z == 0` actually dispatches. A miss here (skipping hazard
+    // bookkeeping for z>0) is exactly the silent RAW/WAW/WAR data race the
+    // design note's own Risks section names -- see `split_by_shared_buffers`'s
+    // own admission requirement for why every member here is already known
+    // to write into the SAME physical output buffer as its leader.
+    if dispatch_type == DispatchType::Concurrent {
+        let operand_nodes: Vec<NodeId> = bound.operands().iter().map(|(node, ..)| *node).collect();
+        resolve_hazard_inputs_into(operand_nodes.into_iter(), device_buffers, &mut hazard_state.inputs)?;
+        let output_pointer = output_placed
+            .get(&bound.node)
+            .map(|(buffer, _)| Retained::as_ptr(*buffer))
+            .ok_or(MetalError::UnresolvedHazardOperand { node: bound.node })?;
+        if hazard_step(&mut hazard_state.tracker, &hazard_state.inputs, output_pointer) {
+            encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+            counter!(BARRIERS_EMITTED, 1);
+        }
+    }
+    if z != 0 {
+        return Ok(true);
+    }
+    let merged_guard = plan.merged.borrow();
+    let merged_state = merged_guard.as_ref().ok_or(MetalError::CompileFailed {
+        log: "horizontal-merge position_merge named a group but Plan::merged is empty".to_string(),
+    })?;
+    let merged_dispatch = &merged_state.groups[merge_index];
+    let output = output_placed
+        .get(&bound.node)
+        .copied()
+        .ok_or(MetalError::UnresolvedHazardOperand { node: bound.node })?;
+    let uniform_buffer = plan_uniform_buffer(plan, position)?;
+    let owned_uniforms: MetalBuffer;
+    let uniforms: &MetalBuffer = match uniform_buffer {
+        Some(buffer) => buffer,
+        None => {
+            owned_uniforms = upload_uniforms(device, &pack_uniforms(bound, plan.numeric_policy)?)?;
+            &owned_uniforms
+        }
+    };
+    encoder.setComputePipelineState(&merged_dispatch.pipeline);
+    bind_buffers(
+        encoder,
+        &merged_dispatch.bindings,
+        device_buffers,
+        output,
+        None,
+        uniforms,
+        None,
+        None,
+        None,
+        None,
+    )?;
+    // the ONE binding `splice_horizontal_merge_base_table` adds outside
+    // `Kernel::bindings` (design note §1: no `NodeId` of its own, so it
+    // never belongs in the shared `Binding` enum) -- bound at the buffer
+    // index the splice's own MSL text literally names
+    // (`kernel.bindings.len()` AT SPLICE TIME, which is
+    // `merged_dispatch.bindings.len()` here since splicing never mutates
+    // that `Vec`).
+    unsafe {
+        encoder.setBuffer_offset_atIndex(
+            Some(&merged_dispatch.base_table),
+            0,
+            merged_dispatch.bindings.len(),
+        );
+    }
+    dispatch(encoder, &merged_dispatch.pipeline, merged_dispatch.grid);
+    #[cfg(feature = "instrument")]
+    counter!(ENCODE_DISPATCH_CALLS, 1);
+    Ok(true)
+}
+
 /// One [`Plan::prepared`] position's compiled pipeline plus the two other
 /// per-op values [`encode_op`] needs to dispatch it -- resolved once by
 /// [`resolve_steps`] instead of every step re-deriving [`kernel_cache_key`]
@@ -975,6 +1323,31 @@ struct ResolvedMergeStep {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     bindings: Vec<Binding>,
     grid: GridSpec,
+}
+
+/// One [`ResolvedSteps::merge_candidates`] group, promoted to a real,
+/// dispatchable merged kernel: the leader's own bindings/grid (unchanged --
+/// `base_table`/`merge_tgid` are bound OUTSIDE this list, see the design
+/// note's own reasoning against widening the shared [`Binding`] enum for a
+/// buffer with no `NodeId` of its own) plus the compiled `_z{n}` pipeline and
+/// the uploaded per-slice offset table.
+#[cfg(feature = "metal-horizontal-merge")]
+struct MergedDispatch {
+    /// Positions in `plan.prepared.resolved`, leader (z=0) first.
+    members: Vec<usize>,
+    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    bindings: Vec<Binding>,
+    grid: GridSpec,
+    base_table: MetalBuffer,
+}
+
+/// [`Plan::merged`]'s payload: every merge this plan resolved into a real
+/// dispatch, plus a dense position -> `(merged index, z)` map so the encode
+/// loop is one array read per position instead of a scan.
+#[cfg(feature = "metal-horizontal-merge")]
+struct MergedPlanState {
+    groups: Vec<MergedDispatch>,
+    position_merge: Vec<Option<(usize, u32)>>,
 }
 
 impl Plan {
@@ -1680,6 +2053,8 @@ fn plan_with_placed_inputs(
         #[cfg(feature = "metal-plan-stable-buffers")]
         attention_scratch: core::cell::OnceCell::new(),
         resolved_steps: RefCell::new(None),
+        #[cfg(feature = "metal-horizontal-merge")]
+        merged: RefCell::new(None),
         hazard_state: RefCell::new(HazardState::new()),
         device_buffers: RefCell::new(BTreeMap::new()),
         block_identity: RefCell::new(Vec::new()),
@@ -3473,6 +3848,16 @@ fn execute_plan_with_placements_inner(
     // `RefMut`'s own `Deref`/`DerefMut` to know the two fields are disjoint.
     let hazard_state = &mut *hazard_state;
 
+    // Resolved once per plan, lazily: needs `device_buffers` (weight/
+    // activation identity) and `output_placed` (a merged group's output_base
+    // has no home in the arena -- `BufferArena`'s own doc says a slot is
+    // reused only after its earlier occupant retires, never shared between
+    // two simultaneously-live positions, so only a caller-placed output
+    // buffer can back it). A plan with no eligible group still costs one
+    // `Option::is_some()` check per call after the first.
+    #[cfg(feature = "metal-horizontal-merge")]
+    ensure_merged_dispatches(&device, plan, &device_buffers, &output_placed)?;
+
     // diagnostic-only, `instrument`-gated, always emitted at `trace` level
     // (default-off via the runtime filter, never a bespoke env var): each
     // output-placed node's WRITE position and each of its aliased readers'
@@ -3533,7 +3918,27 @@ fn execute_plan_with_placements_inner(
         #[cfg(not(feature = "instrument"))]
         let ablation_skip = false;
 
-        if ablation_skip {
+        #[cfg(feature = "metal-horizontal-merge")]
+        let merged_this_position = handle_merged_position(
+            &device,
+            &encoder,
+            plan,
+            position,
+            bound,
+            dispatch_type,
+            &device_buffers,
+            hazard_state,
+            &output_placed,
+        )?;
+        #[cfg(not(feature = "metal-horizontal-merge"))]
+        let merged_this_position = false;
+
+        if merged_this_position {
+            // encoded (or, for a z>0 member, hazard-recorded with no
+            // dispatch) entirely inside `handle_merged_position` -- nothing
+            // left to do here but fall through to the retirement loop below,
+            // exactly like the ordinary path's own `else` arm does.
+        } else if ablation_skip {
             // `ablation_skip` is always `false` on a non-`instrument` build
             // (see its own binding above), so this arm never runs there --
             // `register_skipped_output` itself is `instrument`-gated and
@@ -11430,6 +11835,12 @@ fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<
     if !stale {
         return Ok(());
     }
+    // a math-mode change recompiles every pipeline, so a merged group's own
+    // compiled pipeline/base_table (keyed off the STALE step pipelines) must
+    // be dropped too, or the encode loop below would dispatch a merged
+    // kernel compiled under the old mode against buffers resolved for it.
+    #[cfg(feature = "metal-horizontal-merge")]
+    plan.merged.borrow_mut().take();
     let mut steps = Vec::with_capacity(plan.prepared.resolved.len());
     for bound in &plan.prepared.resolved {
         let mut cache_key = kernel_cache_key(bound, &plan.packed_operands, plan.numeric_policy)?;
@@ -11470,7 +11881,7 @@ fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<
         });
     }
     #[cfg(feature = "metal-horizontal-merge")]
-    {
+    let merge_candidates = {
         let identities: Vec<*const ProtocolObject<dyn MTLComputePipelineState>> = steps
             .iter()
             .map(|step| Retained::as_ptr(&step.pipeline))
@@ -11487,12 +11898,15 @@ fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<
             plan_positions = steps.len(),
             merge_groups = groups.len(),
             merged_positions = groups.iter().map(Vec::len).sum::<usize>(),
-            "resolve_steps computed horizontal-merge candidate groups (encode loop does not consume them yet)"
+            "resolve_steps computed horizontal-merge candidate groups"
         );
-    }
+        groups
+    };
     *plan.resolved_steps.borrow_mut() = Some(ResolvedSteps {
         math_mode: plan.math_mode,
         steps,
+        #[cfg(feature = "metal-horizontal-merge")]
+        merge_candidates,
     });
     Ok(())
 }
