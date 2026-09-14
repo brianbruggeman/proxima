@@ -32634,3 +32634,142 @@ cached-attention-streaming,instrument -E
 1 passed (shape-only assertion, as ROW 559 left it), confirming the fixture
 and fusion still behave as ROW 559 described while this row's instrumentation
 was in place.
+
+## ROW 561 -- root cause found and fixed: `neon_tile_plan`'s GEMM tile never checked that its `b` operand is row-invariant
+
+**Task:** ROW 560's own residual -- write an independent f64 reference for
+qwen35's whole dense-attention layer, request every named tap from BOTH
+`bind_plain` and `bind`, find the first tap that diverges from that
+reference (not from each other), and fix the named site.
+
+**What was built:** `qwen35_dense_attention_f64_reference` (`bind.rs`, new,
+permanent), plain nested `f64` loops reproducing
+`append_qwen35_dense_attention_only_with_taps`'s own math (`spec.rs:4724-5312`)
+node for node -- RMSNorm, the one `q`/`gate` projection split, per-head
+RMSNorm, the pass-plane slice, interleaved RoPE
+(`RopePairing::Interleaved`'s own `(2*i, 2*i+1)` pairing), the cached and
+new-key score terms, one softmax over their concatenation, the gate, `o_proj`,
+the residual add -- built from the SAME per-input byte vectors the fixture
+feeds `run_resolved` (read positionally, with an `assert_eq!` on
+`inputs.len()` guarding the positional contract). A new permanent test,
+`qwen35_partial_rotary_dense_attention_matches_an_independent_f64_reference`,
+requests all 17 named taps (every field of `Qwen35DenseAttentionTaps` plus
+`residual1`) as outputs from BOTH `bind_plain` and `bind`, and asserts each
+against the reference at `<= 1e-4` relative error, reporting the first
+divergent tap and which chain owns it.
+
+**First run, real payload data:** with this broad an outputs list `bind`
+declines the `CachedAttention` fusion entirely (`fused_attention_count == 0`
+-- too many of the taps this test requests are nodes the fusion would
+otherwise absorb), so both "unfused" and "fused" ran the SAME generic
+scheduling and produced BIT-IDENTICAL wrong values -- proof the defect lives
+in the shared generic execution path, not in the fusion `bind` vs
+`bind_plain` comparison ROW 558-560 kept re-examining. Every tap through
+`k_pass`/`k_rot_first`/`k_rot_second` matched the reference to float rounding
+(`~1e-7`); the FIRST divergent tap was `score_new`
+(`max_rel_error = 3.118`, both chains): `expected[8..16]` (kv_head=1, all 8
+groups) `= [1.465, -1.467, 1.446, -2.517, 1.023, -0.375, 0.032, 1.275]` vs
+`actual[8..16] = [-0.654, 1.588, -1.571, 1.356, -2.168, 0.829, 0.122, -0.294]`
+-- kv_head=0 (indices 0..8) matched exactly.
+
+**Narrowing (real payload data, each step):**
+1. Requested `score_new_first`/`score_new_second`/`score_new_pass` (the three
+   pre-scale, pre-mask sub-terms, `spec.rs:4999-5049`) as extra outputs: ALL
+   THREE diverged for kv_head=1, ruling out the pass-plane-specific hypothesis
+   ROW 558-560 kept returning to.
+2. Requested `q_first_grouped` (the `group_map_i`-indexed broadcast,
+   `spec.rs:4847-4856`) directly: it matched the reference exactly for BOTH
+   kv_heads (`max_diff <= 2.1e-7`) -- the materialized operand feeding the
+   reduce is correct; the defect is in how the reduce CONSUMES it.
+3. Instrumented `neon_tile_plan` (`cpu.rs:14249`) directly: for all three
+   `score_new_*` reduce nodes, `index_b` (the operand `neon_tile_plan` treats
+   as the GEMM's row-invariant right-hand side) resolved to
+   `q_first_grouped`/`q_second_grouped`/`q_pass_grouped`, and
+   `row_stride_b = resolved.operands()[index_b].1.stride(leading_output_axes[0])`
+   was **256, 256, and 1536** respectively -- NONZERO. `neon_tile_plan`'s own
+   gate never reads this value at all.
+
+**Root cause, `cpu.rs:14281-14298` (pre-fix):** `neon_tile_plan` builds a
+`NeonTilePlan` whenever exactly one operand's WIDTH-dim stride is zero (that
+one becomes `a`) and the other's is nonzero (`b`) -- a real GEMM's
+`[m,k] x [k,n]` shape, where `b` (the `[k,n]` operand) is BY CONSTRUCTION
+identical across every row `m`. The gate never verified that assumption: it
+checks `row_stride_a >= 0` but never checks `b`'s own stride along
+`leading_output_axes[0]` (the row/`m` axis). `q_first_grouped`/
+`q_second_grouped`/`q_pass_grouped` (`spec.rs:4847-4872`, shape
+`[s,u,g,i]`/`[s,u,g,p]`) satisfy every OTHER gate condition (both reduction
+strides `== 1`, exactly one operand's width-dim stride `0`) while genuinely
+varying along `u`, the leading axis here (`s`/`w` both squeeze to extent 1 in
+this fixture, leaving `leading_output_axes = [u]`, `leading_total = 2` --
+`resolve_reduce_axis_shape`'s own doc, `cpu.rs:10463-10495`). Once accepted,
+`gemm_tile_neon`/its row-remainder variant (`cpu.rs:11229-11346`) advances
+`b`'s address by `column * col_stride_b` ONLY -- it never adds a per-row term
+for `b` at all, because a real GEMM's right-hand operand never needs one.
+Row 0 (`u=0`) reads `q_first_grouped` at the correct (`u=0`) base address
+(computed once, before the per-row loop); every later row (`u=1` here, `u=2..`
+in general) silently reuses that SAME base, reading `u=0`'s own values as if
+they belonged to `u=1`.
+
+Why ROW 559/560's own `score_cached_pass` (`NodeId(103)`) never showed this:
+`score_cached`'s own leading axes are `[s_or_t, u]` -- TWO non-unit axes (`t`
+has extent 40, unlike `score_new`'s `w`, which squeezes to 1) --
+`neon_tile_plan`'s `leading_output_axes.len() != 1` gate declines outright,
+falling through to the scalar `reduction_fast_path` loop, which re-derives
+every operand's base address from `full_coordinate` on every `leading_flat`
+iteration and was already proven exact (ROW 560). `score_new`'s own shape has
+exactly one non-unit leading axis (`u`), which is precisely the shape
+`neon_tile_plan` engages for -- the one case ROW 559/560 never instrumented.
+
+**Fix, `cpu.rs:14286-14310`:** after computing `row_stride_a`, also read
+`resolved.operands()[index_b].1.stride(leading_output_axes[0])` and decline
+(`return None`) whenever it is nonzero, falling through to the
+already-proven-exact scalar path. Two false leads (ROW 558's fusion-vs-fusion
+framing, ROW 559/560's `run_reduce` dot-fold-arithmetic framing) are why this
+took three rows to reach: both were real self-consistency proofs against the
+WRONG comparison (each engine against itself), never against an oracle
+outside both.
+
+**Fixed and reproven:**
+- `qwen35_partial_rotary_dense_attention_matches_an_independent_f64_reference`
+  (new): every one of 17 taps, both chains, `<= 1e-4` relative error --
+  passes.
+- `qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer`:
+  the `<= 1e-5` fused-vs-unfused `residual1` parity ROW 558/559/560 all
+  deliberately left unrestored is now back, asserted per-element, and passes
+  -- `expected=-1.4550812244415283`, matching `actual` to `<= 1e-5` relative
+  error (ROW 560's own divergent pair, now equal).
+
+**Gates run:**
+- `cargo nextest run -p proxima-tensor --features cached-attention-streaming
+  -j 4`: `639 tests run: 639 passed, 8 skipped` (ROW 560's own `638`
+  baseline, +1 for the new f64-reference test; zero regressions).
+- `cargo nextest run -p proxima-tensor -j 4` (default features):
+  `629 tests run: 629 passed, 8 skipped` (unchanged from ROW 560's own `629`
+  baseline -- the new test is feature-gated).
+- `cargo clippy -p proxima-tensor --all-targets --features
+  cached-attention-streaming -j 4`: exit 0, 0 warnings.
+- `cargo check --workspace --all-targets -j 4`: exit 0 (the same
+  pre-existing, unrelated `proc-macro-error2` future-incompatibility warning
+  every prior row already noted).
+- `cargo nextest run -p omega --features metal,instrument -E 'not
+  test(qwen35moe_shaped_append_moe_ffn)'`: `313 tests run: 313 passed, 13
+  skipped` (unchanged from ROW 559's own baseline; `cpu.rs`'s
+  `neon_tile_plan` is a production path this gate exercises directly).
+- `cargo nextest run -p proxima-model-interop --features metal,instrument -E
+  'test(qwen35)'`: `20 tests run: 20 passed, 278 skipped` (unchanged from ROW
+  558's own baseline).
+
+**Residual, carried to the next slice (unrelated to this row's own fix, all
+named by ROW 559/560 and untouched here):**
+1. The NEON tile row-remainder macro's single-leading-axis assumption
+   (`cpu.rs`, ROW 559's own item 3) is a separate, real, currently-dead latent
+   bug -- not fixed this row.
+2. `rotary_dim == head_dim` (no pass plane) still makes the matcher find a
+   zero-width pass term that `cpu.rs`'s own operand-count discriminator then
+   rejects (ROW 559's own item 4) -- not fixed this row.
+3. Hand-rolled `eprintln!` forensics pre-dating this row still live in
+   `bind.rs`'s `cached_attention_candidates` and `cpu.rs::run_reduce`
+   (`PROXIMA_DEBUG_DENSE_DIGEST`, ROW 559's own item 5) -- not touched here;
+   this row's OWN instrumentation (`neon_tile_plan` eprintln, `bind.rs`
+   diagnostic sub-term/grouped-buffer taps) was removed before landing, per
+   this skill's own instrument-then-remove-or-promote rule.
