@@ -1496,9 +1496,7 @@ fn emit_inner(
         BoundOpKind::Iota => render_iota(resolved, &entry),
         BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
         BoundOpKind::GatedDeltaNet { .. } => render_gated_delta_net(resolved, &entry),
-        BoundOpKind::MoeTopK { .. } => Err(EmitError::MoeTopKNotSupported {
-            node: resolved.node,
-        }),
+        BoundOpKind::MoeTopK { .. } => render_moe_topk(resolved, &entry),
     }?;
     // Coupled to `render_cached_attention`'s own final-store branch by
     // construction: whenever the rendered SOURCE writes the scratch layout
@@ -3462,11 +3460,13 @@ fn grid_threads(
             head_v_dim,
             ..
         } => num_v_heads * head_v_dim,
-        BoundOpKind::MoeTopK { .. } => {
-            return Err(EmitError::MoeTopKNotSupported {
-                node: resolved.node,
-            });
-        }
+        // One threadgroup, `expert_count` threads -- `dispatch`'s own doc:
+        // `grid.threadgroup_width` left `None` at this kind's call site
+        // defaults the threadgroup to the WHOLE grid, exactly one
+        // threadgroup, which is what `render_moe_topk`'s own threadgroup
+        // reduction (`live`/`reduce_val`/`reduce_idx` are `threadgroup`
+        // arrays, coherent only within one threadgroup) requires.
+        BoundOpKind::MoeTopK { expert_count, .. } => *expert_count,
     };
     Ok(threads)
 }
@@ -4226,6 +4226,147 @@ fn render_gated_delta_net(resolved: &BoundOp, entry: &str) -> Result<String, Emi
          }\n\
          }\n",
     );
+    Ok(source)
+}
+
+/// [`BoundOpKind::MoeTopK`]'s fused kernel -- one threadgroup of
+/// `expert_count` threads (ROW 569, `docs/discipline.md`), `top_k` rounds of
+/// a threadgroup-wide max reduction over a mutable `live` copy of `scores`,
+/// ported directly from the identical scalar loop
+/// `proxima_tensor::cpu::run_moe_topk` already runs on CPU (this kernel's
+/// own parity test's oracle and this kernel compute the exact same
+/// arithmetic in the exact same order, the same design this module's
+/// `render_gated_delta_net` doc names for its own CPU counterpart).
+///
+/// Per round: every thread's own `live[tid]` feeds a standard tree
+/// reduction (halving stride, `threadgroup_barrier` between steps) to find
+/// the round's maximum VALUE, then a second tree reduction over
+/// `live[tid] == max_value ? tid : -1` to find the HIGHEST index among every
+/// tied lane -- `max()` over a candidate/`-1` pair can only ever prefer the
+/// larger valid index, the exact bit-exact match for
+/// `proxima_tensor::spec::append_moe_ffn`'s own `mask * expert_index ->
+/// reduce(Maximum)` construction this crate's own CPU executor and its
+/// parity test both prove (ROW 569's own tie fixture: an exact tie resolves
+/// to the HIGHER index). Exclusion then clears EVERY lane equal to the
+/// round's max, not only the winner (`run_moe_topk`'s own doc on why a
+/// single-index exclusion silently diverges from the graph on a genuine
+/// tie) -- every thread whose own `live[tid]` matches performs this write in
+/// parallel, no serialization needed since each thread only ever writes its
+/// own slot.
+///
+/// Only thread 0 writes the round's `route`/`weight` outputs (there is
+/// exactly one winner index per round to report, so nothing is gained by
+/// spreading that write across threads) and accumulates `weight_total`;
+/// every other thread's own final barrier keeps `live` and the two
+/// reduction scratch arrays coherent for the NEXT round before thread 0's
+/// serial bookkeeping is trusted to have landed.
+///
+/// `expert_count`/`top_k` are baked `constexpr` -- [`crate::identity::kernel_identity`]'s
+/// own `MoeTopK` arm keys the pipeline cache on exactly these two, the same
+/// shape `render_gated_delta_net`'s own `kv_heads`/`num_v_heads`/
+/// `head_k_dim`/`head_v_dim` bake. `scores` (buffer 0) is this op's one true
+/// operand; `route0` (buffer 1) is [`bindings`]'s own `Binding::Output`
+/// slot; buffer 2 is the ordinary (unread) `Uniforms` slot every kind gets
+/// from [`bindings`]; buffers 3..19 are this op's own 16 extra outputs
+/// (`routes[1..]`, every `weights` entry, `weight_total`, in exactly
+/// [`crate::identity`]'s -- no, `crate::metal::moe_topk_extra_node_order`'s
+/// own order) -- `crate::metal::encode_op`'s own `MoeTopK` arm binds them
+/// manually past `bindings.len()`, the same "second output binds at the next
+/// free slot" shape [`render_gated_delta_net`]'s own doc names for
+/// `state_out`, just widened from one extra output to sixteen.
+fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
+    let BoundOpKind::MoeTopK {
+        expert_count,
+        top_k,
+        ..
+    } = &resolved.kind
+    else {
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "moe_topk",
+            found: resolved.kind.name(),
+        });
+    };
+    let expert_count = *expert_count;
+    let top_k = *top_k;
+    // `crate::metal::encode_op`'s own `MoeTopK` arm binds exactly
+    // `2 * top_k` extra buffers -- `routes[1..top_k]` (`top_k - 1` entries),
+    // every `weights` entry (`top_k` entries), then `weight_total` (1) --
+    // the same `extra_nodes` order `proxima_tensor::cpu::run_moe_topk`'s own
+    // `moe_topk_extra_node_order` uses on CPU. A fixed 16-slot layout here
+    // (this function's own first draft) silently read past the buffers
+    // `encode_op` actually bound whenever `top_k != 8` -- caught by this
+    // kernel's own parity test at `top_k` in `{2, 4}`.
+    let extra_count = 2 * top_k;
+
+    let mut source = String::new();
+    preamble(&mut source);
+    source.push_str("struct Uniforms { long unused; };\n\n");
+    source.push_str(&format!(
+        "kernel void {entry}(device const float* scores [[buffer(0)]], device float* route0 [[buffer(1)]], constant Uniforms& u [[buffer(2)]],\n"
+    ));
+    for index in 0..extra_count {
+        let buffer_index = 3 + index;
+        source.push_str(&format!(
+            "    device float* extra{index} [[buffer({buffer_index})]],\n"
+        ));
+    }
+    source.push_str("    uint tid [[thread_position_in_threadgroup]]) {\n");
+    let extra_params: Vec<String> = (0..extra_count).map(|index| format!("extra{index}")).collect();
+    source.push_str(&format!(
+        "    device float* extras[{extra_count}] = {{ {} }};\n",
+        extra_params.join(", ")
+    ));
+    source.push_str(&format!(
+        "    constexpr uint expert_count = {expert_count}u; constexpr uint top_k = {top_k}u;\n\
+         \t(void)u;\n\
+         \tthreadgroup float live[expert_count];\n\
+         \tthreadgroup float reduce_val[expert_count];\n\
+         \tthreadgroup int reduce_idx[expert_count];\n\
+         \tthreadgroup float max0;\n\
+         \tthreadgroup float weight_total;\n\
+         \tif (tid < expert_count) {{ live[tid] = scores[tid]; }}\n\
+         \tif (tid == 0) {{ weight_total = 0.0; }}\n\
+         \tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
+         \tfor (uint round = 0; round < top_k; round++) {{\n\
+         \t\tif (tid < expert_count) {{ reduce_val[tid] = live[tid]; }}\n\
+         \t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
+         \t\tfor (uint stride = expert_count / 2; stride > 0; stride /= 2) {{\n\
+         \t\t\tif (tid < stride && tid + stride < expert_count) {{\n\
+         \t\t\t\treduce_val[tid] = max(reduce_val[tid], reduce_val[tid + stride]);\n\
+         \t\t\t}}\n\
+         \t\t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
+         \t\t}}\n\
+         \t\tconst float max_value = reduce_val[0];\n\
+         \t\tif (tid < expert_count) {{\n\
+         \t\t\treduce_idx[tid] = (live[tid] == max_value) ? int(tid) : -1;\n\
+         \t\t}}\n\
+         \t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
+         \t\tfor (uint stride = expert_count / 2; stride > 0; stride /= 2) {{\n\
+         \t\t\tif (tid < stride && tid + stride < expert_count) {{\n\
+         \t\t\t\treduce_idx[tid] = max(reduce_idx[tid], reduce_idx[tid + stride]);\n\
+         \t\t\t}}\n\
+         \t\t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
+         \t\t}}\n\
+         \t\tconst int winner_index = reduce_idx[0];\n\
+         \t\tif (round == 0 && tid == 0) {{ max0 = max_value; }}\n\
+         \t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
+         \t\tif (tid == 0) {{\n\
+         \t\t\tconst float weight = exp(max_value - max0);\n\
+         \t\t\tweight_total += weight;\n\
+         \t\t\tif (round == 0) {{\n\
+         \t\t\t\troute0[0] = float(winner_index);\n\
+         \t\t\t}} else {{\n\
+         \t\t\t\textras[round - 1][0] = float(winner_index);\n\
+         \t\t\t}}\n\
+         \t\t\textras[(top_k - 1) + round][0] = weight;\n\
+         \t\t\tif (round == top_k - 1) {{ extras[{extra_count} - 1][0] = weight_total; }}\n\
+         \t\t}}\n\
+         \t\tif (tid < expert_count && live[tid] == max_value) {{ live[tid] = -INFINITY; }}\n\
+         \t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
+         \t}}\n\
+         }}\n"
+    ));
     Ok(source)
 }
 
