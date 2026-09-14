@@ -1547,13 +1547,22 @@ fn composed_packed_product_activation(
     let [(first_node, first_map), (second_node, second_map)] = operands.as_slice() else {
         return None;
     };
+    // a computed (data-dependent) map is ALSO the packed operand's own
+    // signal, not just a multi-term affine reshape: `grouped_gathered_expert_product`
+    // (`spec.rs`) gathers the packed weight stack with a single-term
+    // `IndexMap::Computed` axis per operand axis, so the multi-term check
+    // alone (tuned for `wo`'s reshape idiom) never fires for it and this
+    // fusion silently declined, materializing the full `[sequence, selected,
+    // d_in, d_out]` product instead (`docs/discipline.md` ROW 538).
     let first_packed = packed_mapping_in_held_tree(held, packed_mapping_subtree, *first_node)
+        || first_map.is_data_dependent()
         || first_map
             .affine()
             .axes
             .iter()
             .any(|axis| axis.terms.len() > 1);
     let second_packed = packed_mapping_in_held_tree(held, packed_mapping_subtree, *second_node)
+        || second_map.is_data_dependent()
         || second_map
             .affine()
             .axes
