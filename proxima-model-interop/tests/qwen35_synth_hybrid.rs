@@ -128,6 +128,60 @@ fn qwen35_hybrid_synthetic_fixture_decodes_on_metal() {
     }
 }
 
+/// ROW 549 diagnostic: prints the CPU-decoded id sequence for the same
+/// fixture under whichever feature set this binary was built with -- run
+/// once with `--features gated-delta-net-fusion` and once without, diff the
+/// printed `ids=` line by hand. CPU has no placement path (`generate.rs`'s
+/// placement machinery is Metal-only), so if these two runs disagree the
+/// defect is in the fused op's own CPU `state_out` flow
+/// (`proxima-tensor/src/cpu.rs::run_node_into_with_gdn_state`), not in the
+/// decode loop's placement bookkeeping.
+#[test]
+#[ignore = "debug build: minutes, not seconds -- run with --release (see module doc)"]
+fn qwen35_hybrid_synthetic_fixture_cpu_decode_row549_diagnostic() {
+    let file_bytes = build_fixture_bytes();
+    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parse synthetic qwen35 gguf");
+    let loaded = LoadedModel::load(&parsed, &file_bytes).expect("load synthetic qwen35 checkpoint");
+
+    let outcome = loaded.generate_with_serving_config("hi", 6, supported_config(0));
+
+    match outcome {
+        Ok((ids, text, _stopped_by_eos)) => {
+            println!(
+                "row549 cpu feature={} ids={ids:?} text={text:?}",
+                cfg!(feature = "gated-delta-net-fusion"),
+            );
+        }
+        Err(error) => panic!("synthetic qwen35 cpu forward failed: {error}"),
+    }
+}
+
+/// ROW 549 diagnostic: [`qwen35_hybrid_synthetic_fixture_cpu_decode_row549_diagnostic`]'s
+/// Metal counterpart -- compares against the CPU ids printed by that test
+/// (same fixture, same feature set) to localize the divergence to the
+/// placement/readback path rather than the fused op's own math (already
+/// proven identical CPU-vs-CPU across the feature toggle).
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+#[ignore = "debug build: minutes, not seconds -- run with --release (see module doc)"]
+fn qwen35_hybrid_synthetic_fixture_metal_decode_row549_diagnostic() {
+    let file_bytes = build_fixture_bytes();
+    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parse synthetic qwen35 gguf");
+    let loaded = LoadedModel::load(&parsed, &file_bytes).expect("load synthetic qwen35 checkpoint");
+
+    let outcome = loaded.generate_with_serving_config("hi", 6, supported_config(GPU_LAYERS_ALL));
+
+    match outcome {
+        Ok((ids, text, _stopped_by_eos)) => {
+            println!(
+                "row549 metal feature={} ids={ids:?} text={text:?}",
+                cfg!(feature = "gated-delta-net-fusion"),
+            );
+        }
+        Err(error) => panic!("synthetic qwen35 metal forward failed: {error}"),
+    }
+}
+
 /// ROW 531 fix: the full-graph decode arm (`qwen35moe_pre_gather: false`,
 /// `PROXIMA_QWEN35MOE_PRE_GATHER=false`) now places recurrent state, conv
 /// history and dense-attention KV roots the same way the pre-gather arm
