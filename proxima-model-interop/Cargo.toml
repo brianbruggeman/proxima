@@ -122,6 +122,13 @@ metal = [
     "gated-delta-net-fusion",
 ]
 mlx-gdn = ["metal", "omega/mlx-gdn"]
+# Default-off passthrough to `omega/metal-horizontal-merge` (plan-time
+# grouping of independent same-identity packed-row matvec dispatches -- see
+# that flag's own doc in `omega/Cargo.toml`). Deliberately NOT in `metal`'s
+# list above: the grouping this flag turns on is resolve_steps-side only
+# today and has no encode-side consumer yet, so there is nothing for a
+# default build to gain by enabling it.
+metal-horizontal-merge = ["metal", "omega/metal-horizontal-merge"]
 # Cross-platform GPU serving through omega's wgpu driver.  The existing
 # serving/runtime code is intentionally shared with the Metal path; on Linux
 # omega resolves `Engine::Gpu` to wgpu, whose Vulkan backend is selected by

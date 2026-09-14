@@ -187,7 +187,7 @@ use core::ffi::c_void;
 use core::mem::{size_of, size_of_val};
 use core::ops::Deref;
 use core::ptr::NonNull;
-#[cfg(feature = "metal-buffer-pool")]
+#[cfg(any(feature = "metal-buffer-pool", feature = "metal-horizontal-merge"))]
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -875,6 +875,76 @@ pub struct Plan {
 struct ResolvedSteps {
     math_mode: MathMode,
     steps: Vec<ResolvedStep>,
+}
+
+/// Plan-time grouping of positions that share one compiled pipeline
+/// (`kernel_identity`/`kernel_cache_key` equality, already paid for by
+/// [`resolve_steps`]'s own pipeline-cache lookup) and have no dataflow edge
+/// between them -- the shape `append_moe_round_output`'s 8 routed-expert
+/// gate/up/down gathers per (layer, projection) take
+/// (`proxima-tensor/src/spec.rs:1963-2010`): one shared weight-stack NodeId,
+/// one shared activation NodeId, a distinct per-round gather-index and
+/// output NodeId. Such a group COULD be issued as one Metal dispatch with a
+/// `grid.z = group.len()` axis instead of `group.len()` separate dispatches
+/// (see `docs/discipline.md`'s horizontal-packed-merge design note) -- this
+/// function computes the grouping only; nothing downstream of
+/// [`resolve_steps`] consumes it yet (see that feature's own doc in
+/// `omega/Cargo.toml`).
+///
+/// Pure over caller-supplied identity/read/write data, no Metal types, so it
+/// is testable without a device: `identity[index]` is any equality key that
+/// collapses exactly the positions sharing one pipeline (a raw pipeline
+/// pointer on the real driver path, `usize`/`&str` in tests); `writes[index]`
+/// is the position's own output [`NodeId`]; `reads[index]` is every NodeId it
+/// consumes. A group is returned only when it has 2 or more members --
+/// singletons carry nothing to merge, so [`resolve_steps`] leaves them alone.
+#[cfg(feature = "metal-horizontal-merge")]
+fn group_mergeable_positions<Identity: Eq + core::hash::Hash + Copy>(
+    identities: &[Identity],
+    reads: &[Vec<NodeId>],
+    writes: &[NodeId],
+) -> Vec<Vec<usize>> {
+    let mut buckets: HashMap<Identity, Vec<usize>> = HashMap::new();
+    for (index, identity) in identities.iter().enumerate() {
+        buckets.entry(*identity).or_default().push(index);
+    }
+    let mut groups = Vec::new();
+    for bucket in buckets.into_values() {
+        groups.extend(split_into_independent_groups(&bucket, reads, writes));
+    }
+    groups
+}
+
+/// [`group_mergeable_positions`]'s per-identity-bucket half: greedily packs
+/// positions into the first group every one of its current members is
+/// independent of (`no_dataflow_edge`, `docs/discipline.md`'s design note
+/// §1), opening a new group otherwise. A RAW edge between two same-identity
+/// positions (one reads the other's write) therefore lands them in separate
+/// groups rather than blocking the merge outright -- exactly the "a RAW edge
+/// between two of them splits the group" behavior this landing's own test
+/// asserts.
+#[cfg(feature = "metal-horizontal-merge")]
+fn split_into_independent_groups(
+    bucket: &[usize],
+    reads: &[Vec<NodeId>],
+    writes: &[NodeId],
+) -> Vec<Vec<usize>> {
+    let mut result: Vec<Vec<usize>> = Vec::new();
+    'candidate: for &index in bucket {
+        for group in &mut result {
+            let independent = group.iter().all(|&member| {
+                writes[member] != writes[index]
+                    && !reads[index].contains(&writes[member])
+                    && !reads[member].contains(&writes[index])
+            });
+            if independent {
+                group.push(index);
+                continue 'candidate;
+            }
+        }
+        result.push(alloc::vec![index]);
+    }
+    result.into_iter().filter(|group| group.len() > 1).collect()
 }
 
 /// One [`Plan::prepared`] position's compiled pipeline plus the two other
@@ -10894,7 +10964,7 @@ fn dispatch(
     let grid_size = MTLSize {
         width: grid.threads as usize,
         height: 1,
-        depth: 1,
+        depth: grid.depth as usize,
     };
     let threadgroup = MTLSize {
         width: threadgroup_width,
@@ -11398,6 +11468,27 @@ fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<
             grid,
             merge,
         });
+    }
+    #[cfg(feature = "metal-horizontal-merge")]
+    {
+        let identities: Vec<*const ProtocolObject<dyn MTLComputePipelineState>> = steps
+            .iter()
+            .map(|step| Retained::as_ptr(&step.pipeline))
+            .collect();
+        let writes: Vec<NodeId> = plan.prepared.resolved.iter().map(|bound| bound.node).collect();
+        let reads: Vec<Vec<NodeId>> = plan
+            .prepared
+            .resolved
+            .iter()
+            .map(|bound| bound.operands().iter().map(|(node, ..)| *node).collect())
+            .collect();
+        let groups = group_mergeable_positions(&identities, &reads, &writes);
+        debug!(
+            plan_positions = steps.len(),
+            merge_groups = groups.len(),
+            merged_positions = groups.iter().map(Vec::len).sum::<usize>(),
+            "resolve_steps computed horizontal-merge candidate groups (encode loop does not consume them yet)"
+        );
     }
     *plan.resolved_steps.borrow_mut() = Some(ResolvedSteps {
         math_mode: plan.math_mode,
@@ -13149,13 +13240,13 @@ mod hazard_tracker_tests {
     };
 
     use super::{
-        Binding, DeviceBuffer, HazardTracker, MetalError, NodeId, PackedOperands, hazard_step,
-        kernel_dispatch_shape, resolve_hazard_inputs,
+        Binding, DeviceBuffer, HazardClass, HazardTracker, MetalError, NodeId, PackedOperands,
+        hazard_step, kernel_dispatch_shape, resolve_hazard_inputs,
     };
     #[cfg(feature = "instrument")]
     use super::{
         BARRIERS_RAW, BARRIERS_WAR, BARRIERS_WAW, BARRIERS_WAW_WAR_ARENA_RECYCLED,
-        BARRIERS_WAW_WAR_PERSISTENT, HazardClass, record_hazard_class,
+        BARRIERS_WAW_WAR_PERSISTENT, record_hazard_class,
     };
     use crate::msl::{hazard_read_nodes, hazard_write_node};
 
@@ -13645,6 +13736,127 @@ mod hazard_tracker_tests {
             barrier1,
             "a RAW hazard against a buffer just written must barrier even when the read arrived \
              through a binding slot no separate operand table names"
+        );
+    }
+
+    /// The horizontal-packed-merge shape: 8 routed-expert gathers sharing
+    /// one weight-stack NodeId and one activation NodeId, each with its own
+    /// distinct output -- exactly what a merged `grid.z = 8` dispatch would
+    /// hazard-record as one shared `inputs` slice against 8 outputs
+    /// (`docs/discipline.md`'s design note §4). Recording all 8 writes
+    /// against the SAME shared-inputs snapshot must leave every one of them
+    /// visible to a later reader without a second `record` call widening
+    /// [`HazardTracker::record`]'s own single-`Option<Id>` signature.
+    #[test]
+    fn merged_dispatch_records_all_eight_outputs_against_one_shared_input_set() {
+        let mut hazards: HazardTracker<&str> = HazardTracker::new();
+        let shared_inputs = ["weight_stack", "activation"];
+        let outputs: Vec<String> = (0..8).map(|round| format!("round{round}_out")).collect();
+
+        assert!(
+            !hazards.needs_barrier(&shared_inputs, None),
+            "the weight stack and activation are fresh reads, nothing has written them yet"
+        );
+        hazards.record(&shared_inputs, None);
+        for output in &outputs {
+            hazards.written.insert(output.as_str());
+        }
+
+        for output in &outputs {
+            assert!(
+                hazards.written.contains(output.as_str()),
+                "every merged member's own output must be a recorded hazard write, not just the \
+                 group's first member"
+            );
+        }
+
+        // a later op reading round7's output sees a RAW hazard exactly as it
+        // would against 8 separate dispatches -- the merge changes how many
+        // GPU dispatches ran, never what a later reader observes.
+        assert_eq!(
+            hazards.classify(&[outputs[7].as_str()], None),
+            HazardClass::Raw,
+            "a later reader of the LAST merged member's output must still see a RAW hazard"
+        );
+    }
+}
+
+/// [`group_mergeable_positions`]'s own fixtures -- pure over `NodeId`
+/// reads/writes and an opaque identity key, so these run without a device.
+/// See that function's doc for the shape (`append_moe_round_output`'s 8
+/// routed-expert gathers) this exists to recognize.
+#[cfg(all(test, feature = "metal-horizontal-merge"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod horizontal_merge_grouping_tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::{NodeId, group_mergeable_positions};
+
+    /// 8 independent same-identity packed reduces -- one shared weight-stack
+    /// NodeId, one shared activation NodeId, a distinct per-round gather
+    /// index and output -- must resolve to exactly one group of all 8.
+    #[test]
+    fn eight_independent_identical_identity_reduces_form_one_group_of_eight() {
+        let identities = [0usize; 8];
+        let weight_stack = NodeId(100);
+        let activation = NodeId(101);
+        let reads: Vec<Vec<NodeId>> = (0..8)
+            .map(|round| vec![weight_stack, activation, NodeId(200 + round)])
+            .collect();
+        let writes: Vec<NodeId> = (0..8).map(|round| NodeId(300 + round)).collect();
+
+        let groups = group_mergeable_positions(&identities, &reads, &writes);
+
+        assert_eq!(groups.len(), 1, "all 8 independent positions form one group");
+        assert_eq!(groups[0].len(), 8, "the one group must contain every position");
+    }
+
+    /// Position 5 reads position 2's output -- a genuine dataflow edge
+    /// between two same-identity positions. The edge must keep position 5
+    /// out of the merge group entirely (it still runs as its own individual
+    /// dispatch, unchanged from today) rather than either silently merging
+    /// it in (a data race: its read could observe a stale, not-yet-written
+    /// slice from the SAME dispatch) or refusing to merge anyone else in
+    /// the bucket.
+    #[test]
+    fn a_raw_edge_between_two_members_excludes_the_reader_from_the_group() {
+        let identities = [0usize; 8];
+        let weight_stack = NodeId(100);
+        let mut reads: Vec<Vec<NodeId>> = (0..8)
+            .map(|round| vec![weight_stack, NodeId(200 + round)])
+            .collect();
+        let writes: Vec<NodeId> = (0..8).map(|round| NodeId(300 + round)).collect();
+        // position 5 also reads position 2's own output -- a RAW edge.
+        reads[5].push(writes[2]);
+
+        let groups = group_mergeable_positions(&identities, &reads, &writes);
+
+        assert_eq!(groups.len(), 1, "the other 7 independent positions still merge into one group");
+        assert_eq!(
+            groups[0],
+            vec![0, 1, 2, 3, 4, 6, 7],
+            "position 5 -- the reader on the RAW edge -- is excluded from the merge group"
+        );
+        assert!(
+            !groups[0].contains(&5),
+            "position 5 must fall back to its own individual dispatch, never join the group"
+        );
+    }
+
+    /// Two different `kernel_identity`s never merge, regardless of
+    /// independence -- the predicate's first, cheapest gate.
+    #[test]
+    fn different_identities_never_merge_even_when_independent() {
+        let identities = [0usize, 1usize];
+        let reads: Vec<Vec<NodeId>> = vec![vec![NodeId(1)], vec![NodeId(2)]];
+        let writes = [NodeId(10), NodeId(11)];
+
+        let groups = group_mergeable_positions(&identities, &reads, &writes);
+
+        assert!(
+            groups.is_empty(),
+            "two singleton identity buckets carry nothing to merge"
         );
     }
 }

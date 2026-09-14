@@ -373,6 +373,21 @@ kv-capacity-bucket = ["proxima-tensor/kv-capacity-bucket"]
 # body rewrite earns the production default only after a quiet-box
 # decode-step seal, not on the "verbatim port" argument alone.
 metal-q4k-ggml-port = ["metal"]
+# Plan-time grouping of independent, identically-shaped packed-row matvec
+# dispatches sharing one `kernel_identity` (the 8 routed-expert gate/up/down
+# gathers per (layer, projection) `append_moe_round_output` already emits,
+# `proxima-tensor/src/spec.rs:1963-2010`) so they COULD be issued as one
+# Metal dispatch with a z grid axis instead of 8 -- see
+# `docs/discipline.md`'s horizontal-packed-merge design note. This landing
+# is `resolve_steps`-side grouping only (`crate::metal::group_mergeable_
+# positions`, pure over pipeline identity + operand `NodeId`s, no Metal
+# types): it computes and logs merge groups on every plan resolve but the
+# encode loop still calls `encode_op` once per position exactly as before --
+# the MSL kernel body and dispatch-side consumption that would turn a group
+# into one real `grid.z` dispatch are follow-up work, named explicitly so
+# this flag's ON state is provably a no-op on `generated_text`/`gpu_exec_ms`
+# today. Default-off: `metal-horizontal-merge` has no default-path caller.
+metal-horizontal-merge = ["metal"]
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
