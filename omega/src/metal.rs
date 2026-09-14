@@ -6318,7 +6318,8 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
         | BoundOpKind::Elementwise { .. }
         | BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
-        | BoundOpKind::GatedDeltaNet { .. } => bound.kind.name(),
+        | BoundOpKind::GatedDeltaNet { .. }
+        | BoundOpKind::MoeTopK { .. } => bound.kind.name(),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => bound.kind.name(),
@@ -7738,6 +7739,13 @@ fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
         // `num_v_heads`/`head_k_dim`/`head_v_dim` are baked `constexpr`
         // instead (that function's own doc), so they never widen this blob.
         BoundOpKind::GatedDeltaNet { .. } => 4 * WORD,
+        // ROW 569: never actually reached -- `emit_inner`/`pack_uniforms_into`
+        // both reject `MoeTopK` with `EmitError::MoeTopKNotSupported` before
+        // any caller of this function would encode one, since no Metal
+        // kernel renders it yet (`crate::error::EmitError::MoeTopKNotSupported`'s
+        // own doc). `WORD` is an inert placeholder, not a real uniform
+        // layout, until that kernel lands.
+        BoundOpKind::MoeTopK { .. } => WORD,
     }
 }
 
@@ -7790,6 +7798,7 @@ fn pack_uniforms_into(
             );
             Ok(())
         }
+        BoundOpKind::MoeTopK { .. } => Err(EmitError::MoeTopKNotSupported { node: bound.node }),
     }
 }
 
