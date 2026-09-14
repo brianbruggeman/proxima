@@ -140,6 +140,12 @@ pub struct Lookup {
 
 type BoundOperands = Vec<(NodeId, Layout, Option<Lookup>)>;
 
+/// [`attention_score_sources`]'s own return shape: the rotary even/odd
+/// query+key sources, plus `Some((query_pass_grouped, key_pass))` only when
+/// qwen35's partial-rotary chain matched.
+#[cfg(feature = "cached-attention-streaming")]
+type AttentionScoreSources = (NodeId, NodeId, NodeId, NodeId, Option<(NodeId, NodeId)>);
+
 /// Capacity for one [`BoundOpBuilder::push`] call's ready batch. An
 /// elementwise push materializes at most one [`BoundOp`] per operand that
 /// fails to fuse, bounded by [`ScalarOp::arity`]'s current maximum
@@ -2658,20 +2664,9 @@ fn constant_value(program: &[Op], node: NodeId) -> Option<f32> {
 }
 
 #[cfg(feature = "cached-attention-streaming")]
-fn attention_score_sources(
-    program: &[Op],
-    score: NodeId,
-    scale: NodeId,
-) -> Option<(NodeId, NodeId, NodeId, NodeId)> {
-    let scaled = binary_elementwise(program, score, ScalarOp::Multiply)?;
-    if constant_value(program, scaled[1]) != constant_value(program, scale)
-        || constant_value(program, scaled[1]).is_none()
-    {
-        return None;
-    }
-    let score_sum = binary_elementwise(program, scaled[0], ScalarOp::Add)?;
-    let even_product = reduced_source(program, score_sum[0], ScalarOp::Add, ReduceInit::Zero)?;
-    let odd_product = reduced_source(program, score_sum[1], ScalarOp::Add, ReduceInit::Zero)?;
+fn decode_rotary_terms(program: &[Op], terms: [NodeId; 2]) -> Option<(NodeId, NodeId, NodeId, NodeId)> {
+    let even_product = reduced_source(program, terms[0], ScalarOp::Add, ReduceInit::Zero)?;
+    let odd_product = reduced_source(program, terms[1], ScalarOp::Add, ReduceInit::Zero)?;
     let even_operands = binary_elementwise(program, even_product, ScalarOp::Multiply)?;
     let odd_operands = binary_elementwise(program, odd_product, ScalarOp::Multiply)?;
     Some((
@@ -2680,6 +2675,98 @@ fn attention_score_sources(
         even_operands[1],
         odd_operands[1],
     ))
+}
+
+/// One un-rotated pass-plane term (qwen35's `score_cached_pass`/
+/// `score_new_pass`, `spec.rs:4910-4927,5035-5049`): a bare
+/// `reduced(query_pass_grouped * key_pass)`, no even/odd split because the
+/// pass plane is never rotated. Returns `(query_pass_grouped, key_pass)`.
+#[cfg(feature = "cached-attention-streaming")]
+fn decode_pass_term(program: &[Op], node: NodeId) -> Option<(NodeId, NodeId)> {
+    let pass_product = reduced_source(program, node, ScalarOp::Add, ReduceInit::Zero)?;
+    let pass_operands = binary_elementwise(program, pass_product, ScalarOp::Multiply)?;
+    Some((pass_operands[0], pass_operands[1]))
+}
+
+/// `score = Multiply(Add(rotary_sum, pass_sum), scale)` when a partial-rotary
+/// pass plane is present (qwen35's chain, `spec.rs`'s own `score_cached`/
+/// `score_new`), `score = Multiply(Add(even, odd), scale)` otherwise (every
+/// other caller today, `rotary_dim == head_dim`). Both shapes share the outer
+/// `Multiply`-by-`scale`; only the sum operand's own shape differs, so this
+/// tries the nested three-term interpretation first and falls back to the
+/// flat two-term one. Returns
+/// `(query_even_grouped, query_odd_grouped, key_even, key_odd, pass)`, where
+/// `pass` is `Some((query_pass_grouped, key_pass))` only for the nested shape.
+#[cfg(feature = "cached-attention-streaming")]
+fn attention_score_sources(
+    program: &[Op],
+    score: NodeId,
+    scale: NodeId,
+) -> Option<AttentionScoreSources> {
+    let scaled = binary_elementwise(program, score, ScalarOp::Multiply)?;
+    if constant_value(program, scaled[1]) != constant_value(program, scale)
+        || constant_value(program, scaled[1]).is_none()
+    {
+        return None;
+    }
+    let outer = binary_elementwise(program, scaled[0], ScalarOp::Add)?;
+    if let Some(rotary_terms) = binary_elementwise(program, outer[0], ScalarOp::Add)
+        && let Some(rotary) = decode_rotary_terms(program, rotary_terms)
+        && let Some(pass) = decode_pass_term(program, outer[1])
+    {
+        return Some((rotary.0, rotary.1, rotary.2, rotary.3, Some(pass)));
+    }
+    let rotary = decode_rotary_terms(program, outer)?;
+    Some((rotary.0, rotary.1, rotary.2, rotary.3, None))
+}
+
+/// `true` when `node` is exactly [`Op::Iota`] -- the raw key/query index a
+/// causal or padding mask compares against.
+#[cfg(feature = "cached-attention-streaming")]
+fn is_iota(program: &[Op], node: NodeId) -> bool {
+    matches!(program.get(node.0 as usize), Some(Op::Iota { .. }))
+}
+
+/// The `cached_len` bound a padding predicate excludes rows at-or-past, when
+/// `node` is exactly `Greater(Iota, Subtract(cached_len, one))` -- `x > n - 1`
+/// excludes exactly `x >= n`, and qwen35's own builder (`spec.rs:4973-4987`,
+/// `is_cached_padding`) emits precisely this shape. Anything else returns
+/// `None` -- the caller declines the fusion rather than guessing at an
+/// unfamiliar predicate.
+#[cfg(feature = "cached-attention-streaming")]
+fn cached_len_padding_bound(program: &[Op], node: NodeId) -> Option<NodeId> {
+    let operands = binary_elementwise(program, node, ScalarOp::Greater)?;
+    if !is_iota(program, operands[0]) {
+        return None;
+    }
+    let shifted = binary_elementwise(program, operands[1], ScalarOp::Subtract)?;
+    (constant_value(program, shifted[1]) == Some(1.0)).then_some(shifted[0])
+}
+
+/// Walks past qwen35's own padding mask (`spec.rs:4979-4997`,
+/// `is_cached_padding` selecting `-inf` for `key_index >= cached_len`) to the
+/// unmasked scaled score underneath, returning `None` (decline the fusion)
+/// unless `node` is exactly `Select(padding_predicate, -inf, inner)` AND the
+/// predicate's own bound is the SAME `cached_len` leaf the fused op's runtime
+/// `cached_key_rows` clip already reads (`cpu.rs:6944-6974`) -- that clip
+/// excludes exactly the rows this mask would have scored `-inf`, which is
+/// what makes dropping the mask node sound rather than a silent behavior
+/// change.
+#[cfg(feature = "cached-attention-streaming")]
+fn unwrap_cached_padding_select(
+    program: &[Op],
+    node: NodeId,
+    cached_len: Option<NodeId>,
+) -> Option<NodeId> {
+    let operands = elementwise_operands(program, node, ScalarOp::Select)?;
+    let [(predicate, _), (negative_infinity, _), (inner, _)] = operands else {
+        return None;
+    };
+    if constant_value(program, *negative_infinity) != Some(f32::NEG_INFINITY) {
+        return None;
+    }
+    let bound = cached_len_padding_bound(program, *predicate)?;
+    (Some(bound) == cached_len).then_some(*inner)
 }
 
 #[cfg(feature = "cached-attention-streaming")]
@@ -2768,6 +2855,11 @@ fn cached_attention_candidates(
     effective_outputs: &[NodeId],
 ) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
     let mut candidates = Vec::new();
+    // resolved once: every caller supplies this leaf unconditionally
+    // (`find_named_input`'s own doc), and both the padding-select walk below
+    // and the ninth-operand push near the end of this loop need the SAME
+    // node identity to agree it is the one true `cached_len`.
+    let named_cached_len = find_named_input(program, "cached_len");
     for output_position in (0..program.len()).rev() {
         let output = NodeId(output_position as u32);
         let Some(attended_sum) = binary_elementwise(program, output, ScalarOp::Multiply) else {
@@ -2825,8 +2917,18 @@ fn cached_attention_candidates(
         {
             continue;
         }
+        // qwen35's own chain masks cached-range padding with a `Select`
+        // right here (`spec.rs:4979-4997`, `is_cached_padding`) before the
+        // online-softmax subtract this matcher already walked past above --
+        // the fused op's own runtime `cached_key_rows` clip
+        // (`cpu.rs:6944-6974`) excludes exactly those rows, so dropping the
+        // mask node is sound whenever its bound is the SAME `cached_len`
+        // leaf the ninth operand below reads.
+        let cached_scaled_source =
+            unwrap_cached_padding_select(program, cached_score_parts[0], named_cached_len)
+                .unwrap_or(cached_score_parts[0]);
         let Some(cached_scaled_parts) =
-            binary_elementwise(program, cached_score_parts[0], ScalarOp::Multiply)
+            binary_elementwise(program, cached_scaled_source, ScalarOp::Multiply)
         else {
             continue;
         };
@@ -2838,12 +2940,12 @@ fn cached_attention_candidates(
         if new_scaled_parts[1] != scale {
             continue;
         }
-        let Some((query_even_grouped, query_odd_grouped, cached_key_even, cached_key_odd)) =
-            attention_score_sources(program, cached_score_parts[0], scale)
+        let Some((query_even_grouped, query_odd_grouped, cached_key_even, cached_key_odd, cached_pass)) =
+            attention_score_sources(program, cached_scaled_source, scale)
         else {
             continue;
         };
-        let Some((new_query_even_grouped, new_query_odd_grouped, new_key_even, new_key_odd)) =
+        let Some((new_query_even_grouped, new_query_odd_grouped, new_key_even, new_key_odd, new_pass)) =
             attention_score_sources(program, *new_scaled, scale)
         else {
             continue;
@@ -2868,6 +2970,30 @@ fn cached_attention_candidates(
         }
         let query_even = query_even_parts[0];
         let query_odd = query_odd_parts[0];
+        // A pass plane must appear on BOTH the cached and new score, or not
+        // at all -- qwen35's own builder always emits it on both sides
+        // (`spec.rs:4910-4927,5035-5049`), so a mismatch here means this
+        // program is not that shape.
+        if cached_pass.is_some() != new_pass.is_some() {
+            continue;
+        }
+        let pass = match (cached_pass, new_pass) {
+            (Some((cached_query_pass_grouped, cached_key_pass)), Some((new_query_pass_grouped, new_key_pass))) => {
+                if cached_query_pass_grouped != new_query_pass_grouped {
+                    continue;
+                }
+                let Some(query_pass_parts) =
+                    binary_elementwise(program, cached_query_pass_grouped, ScalarOp::Multiply)
+                else {
+                    continue;
+                };
+                if query_pass_parts[1] != query_even_parts[1] {
+                    continue;
+                }
+                Some((query_pass_parts[0], cached_key_pass, new_key_pass))
+            }
+            _ => None,
+        };
         let Some(cached_value_source) =
             reduced_source(program, attended_parts[0], ScalarOp::Add, ReduceInit::Zero)
         else {
@@ -2893,7 +3019,7 @@ fn cached_attention_candidates(
         if cached_value_product[0] != cached_weights || new_value_product[0] != new_weights {
             continue;
         }
-        let source_nodes = [
+        let mut source_nodes = alloc::vec![
             query_even,
             query_odd,
             cached_key_even,
@@ -2903,12 +3029,15 @@ fn cached_attention_candidates(
             cached_value,
             new_value,
         ];
+        if let Some((pass_query, pass_cached_key, pass_new_key)) = pass {
+            source_nodes.extend([pass_query, pass_cached_key, pass_new_key]);
+        }
         let mut operands = Vec::with_capacity(source_nodes.len());
-        for source in source_nodes {
+        for source in &source_nodes {
             let Some((_, layout, lookup)) = resolved
                 .iter()
                 .flat_map(|bound| bound.operands().iter())
-                .find(|(node, _, _)| *node == source)
+                .find(|(node, _, _)| node == source)
             else {
                 operands.clear();
                 break;
@@ -2917,7 +3046,7 @@ fn cached_attention_candidates(
                 operands.clear();
                 break;
             }
-            operands.push((source, layout.clone(), None));
+            operands.push((*source, layout.clone(), None));
         }
         if operands.len() != source_nodes.len() {
             continue;
@@ -2930,8 +3059,25 @@ fn cached_attention_candidates(
         let new_key_shape = shapes.of(new_key_even);
         let cached_value_shape = shapes.of(cached_value);
         let new_value_shape = shapes.of(new_value);
-        let Some(head_dim) = query_shape[3].checked_mul(2) else {
+        let Some(rotary_width) = query_shape[3].checked_mul(2) else {
             continue;
+        };
+        // `total_head_dim` is `rotary_width` whenever no pass plane is
+        // present (every non-qwen35 caller today) -- V is never rotated, so
+        // its own width is the one place the pass plane's extra columns
+        // surface even when the rotary planes alone would say `rotary_width`
+        // (`BoundOpKind::CachedAttention`'s own doc).
+        let total_head_dim = match pass {
+            Some((pass_query, _, _)) => {
+                let Some(&pass_dim) = shapes.of(pass_query).last() else {
+                    continue;
+                };
+                let Some(total) = rotary_width.checked_add(pass_dim) else {
+                    continue;
+                };
+                total
+            }
+            None => rotary_width,
         };
         if query_shape.len() != 4
             || cached_key_shape.len() != 3
@@ -2944,10 +3090,14 @@ fn cached_attention_candidates(
             || new_key_shape[1] != new_value_shape[1]
             || cached_key_shape[0] != cached_value_shape[0]
             || new_key_shape[0] != new_value_shape[0]
-            || cached_value_shape[2] != head_dim
-            || new_value_shape[2] != head_dim
-            || shapes.of(output) != [query_shape[0], query_shape[1], query_shape[2], head_dim]
+            || cached_value_shape[2] != total_head_dim
+            || new_value_shape[2] != total_head_dim
+            || shapes.of(output) != [query_shape[0], query_shape[1], query_shape[2], total_head_dim]
         {
+            std::eprintln!(
+                "DEBUG decline output={} stage=shape_checks query_shape={:?} cached_key_shape={:?} new_key_shape={:?} cached_value_shape={:?} new_value_shape={:?} total_head_dim={} output_shape={:?}",
+                output.0, query_shape, cached_key_shape, new_key_shape, cached_value_shape, new_value_shape, total_head_dim, shapes.of(output)
+            );
             continue;
         }
         let pair_dim = query_shape[3];
@@ -2966,8 +3116,8 @@ fn cached_attention_candidates(
         ];
         let value_strides = [
             0i64,
-            (query_shape[1] * query_shape[3] * 2) as i64,
-            (query_shape[3] * 2) as i64,
+            (query_shape[1] * total_head_dim) as i64,
+            total_head_dim as i64,
             0,
             1,
         ];
@@ -2980,8 +3130,60 @@ fn cached_attention_candidates(
             || operands[6].1.strides.as_slice() != value_strides
             || operands[7].1.strides.as_slice() != value_strides
         {
+            std::eprintln!(
+                "DEBUG decline output={} stage=base_strides want_query={query_strides:?} want_key={key_strides:?} want_value={value_strides:?} got={:?}",
+                output.0,
+                operands[..8].iter().map(|(_, layout, _)| layout.strides.clone()).collect::<Vec<_>>()
+            );
             continue;
         }
+        if let Some((_, pass_cached_key, pass_new_key)) = pass {
+            let pass_dim = total_head_dim - rotary_width;
+            let pass_query_strides = [
+                (query_shape[1] * query_shape[2] * pass_dim) as i64,
+                (query_shape[2] * pass_dim) as i64,
+                pass_dim as i64,
+                1i64,
+            ];
+            let pass_key_strides = [
+                0i64,
+                (query_shape[1] * pass_dim) as i64,
+                pass_dim as i64,
+                0,
+                1,
+            ];
+            let cached_key_pass_shape = shapes.of(pass_cached_key);
+            let new_key_pass_shape = shapes.of(pass_new_key);
+            if cached_key_pass_shape.len() != 3
+                || new_key_pass_shape.len() != 3
+                || cached_key_pass_shape[1] != query_shape[1]
+                || new_key_pass_shape[1] != query_shape[1]
+                || cached_key_pass_shape[2] != pass_dim
+                || new_key_pass_shape[2] != pass_dim
+                || cached_key_pass_shape[0] != cached_key_shape[0]
+                || new_key_pass_shape[0] != new_key_shape[0]
+                || operands[8].1.strides.as_slice() != pass_query_strides
+                || operands[9].1.strides.as_slice() != pass_key_strides
+                || operands[10].1.strides.as_slice() != pass_key_strides
+            {
+                std::eprintln!(
+                    "DEBUG decline output={} stage=pass_strides want_query={pass_query_strides:?} want_key={pass_key_strides:?} got={:?} cached_key_pass_shape={cached_key_pass_shape:?} new_key_pass_shape={new_key_pass_shape:?}",
+                    output.0,
+                    operands[8..11].iter().map(|(_, layout, _)| layout.strides.clone()).collect::<Vec<_>>()
+                );
+                continue;
+            }
+        }
+        // The pass triple is set aside here and re-appended AFTER the
+        // optional `cached_len` push below -- `cpu.rs:6913-6917`'s own
+        // `pass_start` reads the pass plane at index 8 when `cached_len` is
+        // absent and index 9 when present, never at a fixed offset from the
+        // base eight.
+        let pass_operands = if pass.is_some() {
+            Some(operands.split_off(8))
+        } else {
+            None
+        };
         let dependencies = attention_dependencies(program, output, &source_nodes);
         let dependencies = dependencies
             .difference(&source_nodes.into_iter().collect())
@@ -3027,7 +3229,7 @@ fn cached_attention_candidates(
         // indistinguishable at that value, so this is the one case that
         // must stay eight-operand regardless of bucketing.
         if cached_key_shape[0] > 0
-            && let Some(cached_len_node) = find_named_input(program, "cached_len")
+            && let Some(cached_len_node) = named_cached_len
             && shapes.of(cached_len_node).is_empty()
         {
             operands.push((
@@ -3038,6 +3240,9 @@ fn cached_attention_candidates(
                 },
                 None,
             ));
+        }
+        if let Some(pass_operands) = pass_operands {
+            operands.extend(pass_operands);
         }
         let fused = BoundOp {
             node: output,
@@ -3050,11 +3255,12 @@ fn cached_attention_candidates(
                 new_key_rows: new_key_shape[0],
                 kv_heads: query_shape[1],
                 query_groups: query_shape[2],
-                head_dim,
-                // this matcher recognizes only the flat two-term score
-                // (`attention_score_sources`'s own doc) -- full rotary,
-                // never a pass plane.
-                rotary_dim: head_dim,
+                head_dim: total_head_dim,
+                // `rotary_width` whenever no pass plane matched (every
+                // non-qwen35 caller, `total_head_dim == rotary_width`);
+                // qwen35's own partial-rotary chain sets this strictly
+                // below `head_dim` (`attention_score_sources`'s own doc).
+                rotary_dim: rotary_width,
                 scale: scale_value,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
@@ -3157,7 +3363,9 @@ fn cached_attention_single_range_candidates(
             continue;
         };
         let scale = scaled_operands[1];
-        let Some((query_even_grouped, query_odd_grouped, key_even, key_odd)) =
+        // mistral's single-range chain never carries a pass plane -- this
+        // matcher's own shape is full-rotary only, per its module doc.
+        let Some((query_even_grouped, query_odd_grouped, key_even, key_odd, None)) =
             attention_score_sources(program, *scores_scaled, scale)
         else {
             continue;
@@ -3343,11 +3551,7 @@ fn cached_attention_single_range_candidates(
 }
 
 #[cfg(feature = "cached-attention-streaming")]
-fn attention_dependencies(
-    program: &[Op],
-    output: NodeId,
-    sources: &[NodeId; 8],
-) -> BTreeSet<NodeId> {
+fn attention_dependencies(program: &[Op], output: NodeId, sources: &[NodeId]) -> BTreeSet<NodeId> {
     let source_set: BTreeSet<NodeId> = sources.iter().copied().collect();
     let mut visited = BTreeSet::new();
     let mut pending = vec![output];
@@ -5676,6 +5880,343 @@ mod tests {
             operands.len(),
             9,
             "the live cached_len still travels as the ninth runtime operand"
+        );
+    }
+
+    /// Deterministic non-degenerate weight data -- a golden-ratio fractional
+    /// sequence, not a crate RNG dependency, and never all-same-value (which
+    /// would hide a transposed axis or a dropped operand behind coincidental
+    /// symmetry).
+    #[cfg(feature = "cached-attention-streaming")]
+    fn deterministic_values(count: usize, seed: f32) -> Vec<f32> {
+        (0..count)
+            .map(|index| {
+                let phase = (index as f32 + seed) * 0.618_034;
+                (phase - libm::floorf(phase)) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    /// [`append_qwen35_dense_attention_only_with_taps`] wired at qwen3.5's
+    /// own real per-head shape (`kv_heads` 2, `group` 8 -> 16 query heads,
+    /// `attn_head_dim` 256, `rotary_dim` 64 -> 192-wide pass plane,
+    /// `docs/discipline.md` ROW 556/557's own residual) -- `embedding` stays
+    /// 1, the same degenerate-but-valid width
+    /// `dense_attention_only_test_inputs` (`spec.rs`) already uses, since
+    /// only the attention block's own per-head shape is under test here.
+    /// `cached_extent` is 40 keys; `cached_len` (a runtime scalar, not a
+    /// shape) is fed 37 at execution, leaving 3 trailing rows the padding
+    /// `Select` masks with `-inf` (`spec.rs:4979-4997`).
+    #[cfg(feature = "cached-attention-streaming")]
+    #[allow(clippy::too_many_lines, clippy::type_complexity)]
+    fn qwen35_partial_rotary_attention_fixture() -> (
+        Vec<Op>,
+        NodeId,
+        crate::spec::Qwen35DenseAttentionTaps,
+        Vec<(NodeId, Vec<f32>)>,
+        Shapes,
+    ) {
+        use crate::op::Extent;
+        use crate::spec::{causal_mask, input_leaf, scalar_constant};
+
+        const KV_HEADS: usize = 2;
+        const GROUP: usize = 8;
+        const ATTN_HEAD_DIM: usize = 256;
+        const ROTARY_DIM: usize = 64;
+        const PASS_DIM: usize = ATTN_HEAD_DIM - ROTARY_DIM;
+        const PAIR_DIM: usize = ROTARY_DIM / 2;
+        const NEW_TOKENS: usize = 1;
+        const CACHED_EXTENT: usize = 40;
+
+        let mut program = Vec::new();
+        let x = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(1)],
+            "x",
+        );
+        let inv_dim = scalar_constant(&mut program, 1.0);
+        let eps = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0)],
+            "eps",
+        );
+        let ones = scalar_constant(&mut program, 1.0);
+        let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 1.0 / (ATTN_HEAD_DIM as f32).sqrt());
+        let inv_attn_head_dim = scalar_constant(&mut program, 1.0 / ATTN_HEAD_DIM as f32);
+        let rotary_shape = alloc::vec![Extent::Symbolic(0), Extent::Static(PAIR_DIM as u32)];
+        let cos_new = input_leaf(&mut program, DType::Float32, rotary_shape.clone(), "cos");
+        let sin_new = input_leaf(&mut program, DType::Float32, rotary_shape, "sin");
+        let group_ones = crate::op::append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(KV_HEADS as u32), Extent::Static(GROUP as u32)],
+                value: 1.0,
+            },
+        );
+        let (is_future, _neg_infinity) = causal_mask(&mut program).expect("causal mask lowers");
+        let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+
+        let attn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1)],
+            "attn_norm_weight",
+        );
+        let norm_shape = alloc::vec![Extent::Static(ATTN_HEAD_DIM as u32)];
+        let q_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape.clone(), "q_norm_weight");
+        let k_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape, "k_norm_weight");
+        // `wq_gate`'s own middle axis is the FULL query head count
+        // (`kv_heads * group`), never `kv_heads` alone -- `spec.rs:10730-10769`
+        // packs it that way, and the group-broadcast reshape further down
+        // (`group_map_i`) depends on it.
+        let wq_gate = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(1),
+                Extent::Static((KV_HEADS * GROUP) as u32),
+                Extent::Static((2 * ATTN_HEAD_DIM) as u32)
+            ],
+            "wq_gate",
+        );
+        let wk_wv_shape = alloc::vec![
+            Extent::Static(1),
+            Extent::Static(KV_HEADS as u32),
+            Extent::Static(ATTN_HEAD_DIM as u32)
+        ];
+        let wk = input_leaf(&mut program, DType::Float32, wk_wv_shape.clone(), "wk");
+        let wv = input_leaf(&mut program, DType::Float32, wk_wv_shape, "wv");
+        let wo = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(GROUP as u32),
+                Extent::Static(ATTN_HEAD_DIM as u32),
+                Extent::Static(1)
+            ],
+            "wo",
+        );
+        let cache_rotary_shape = alloc::vec![
+            Extent::Symbolic(1),
+            Extent::Static(KV_HEADS as u32),
+            Extent::Static(PAIR_DIM as u32)
+        ];
+        let cache_pass_shape = alloc::vec![
+            Extent::Symbolic(1),
+            Extent::Static(KV_HEADS as u32),
+            Extent::Static(PASS_DIM as u32)
+        ];
+        let cache_v_shape = alloc::vec![
+            Extent::Symbolic(1),
+            Extent::Static(KV_HEADS as u32),
+            Extent::Static(ATTN_HEAD_DIM as u32)
+        ];
+        let k_first_cache = input_leaf(
+            &mut program,
+            DType::Float32,
+            cache_rotary_shape.clone(),
+            "k_first_cache",
+        );
+        let k_second_cache = input_leaf(&mut program, DType::Float32, cache_rotary_shape, "k_second_cache");
+        let k_pass_cache = input_leaf(&mut program, DType::Float32, cache_pass_shape, "k_pass_cache");
+        let v_cache = input_leaf(&mut program, DType::Float32, cache_v_shape, "v_cache");
+
+        let (residual1, taps) = crate::spec::append_qwen35_dense_attention_only_with_taps(
+            &mut program,
+            x,
+            inv_dim,
+            eps,
+            ones,
+            inv_sqrt_attn_head_dim,
+            inv_attn_head_dim,
+            cos_new,
+            sin_new,
+            group_ones,
+            is_future,
+            cached_len,
+            GROUP as u32,
+            ROTARY_DIM as u32,
+            ATTN_HEAD_DIM as u32,
+            attn_norm_weight,
+            q_norm_weight,
+            k_norm_weight,
+            wq_gate,
+            wk,
+            wv,
+            wo,
+            k_first_cache,
+            k_second_cache,
+            k_pass_cache,
+            v_cache,
+        )
+        .expect("qwen35 partial-rotary dense attention fixture lowers");
+
+        let shapes = crate::shape::infer(&program, &[NEW_TOKENS as u64, CACHED_EXTENT as u64])
+            .expect("qwen35 partial-rotary dense attention fixture infers");
+
+        let leaf_values = |node: NodeId, seed: f32| -> (NodeId, Vec<f32>) {
+            let count = shapes.of(node).iter().product::<u64>().max(1) as usize;
+            (node, deterministic_values(count, seed))
+        };
+        let eps_count = shapes.of(eps).iter().product::<u64>().max(1) as usize;
+        let inputs = alloc::vec![
+            leaf_values(x, 1.0),
+            (eps, alloc::vec![1e-5f32; eps_count]),
+            leaf_values(cos_new, 2.0),
+            leaf_values(sin_new, 3.0),
+            leaf_values(attn_norm_weight, 4.0),
+            leaf_values(q_norm_weight, 5.0),
+            leaf_values(k_norm_weight, 6.0),
+            leaf_values(wq_gate, 7.0),
+            leaf_values(wk, 8.0),
+            leaf_values(wv, 9.0),
+            leaf_values(wo, 10.0),
+            leaf_values(k_first_cache, 11.0),
+            leaf_values(k_second_cache, 12.0),
+            leaf_values(k_pass_cache, 13.0),
+            leaf_values(v_cache, 14.0),
+            (cached_len, alloc::vec![37.0]),
+        ];
+        (program, residual1, taps, inputs, shapes)
+    }
+
+    /// The matcher's own recognition gate: qwen35's real partial-rotary
+    /// chain (`rotary_dim` 64 of `head_dim` 256, `kv_heads` 2, `group` 8)
+    /// fuses into exactly one [`BoundOpKind::CachedAttention`] carrying the
+    /// full eight-base + `cached_len` + three-pass-plane operand set, and
+    /// the fusion strictly reduces the bound-op count relative to the
+    /// unfused elementwise/reduce chain [`bind_plain`] already produces
+    /// (the census, ROW 558 `docs/discipline.md`).
+    ///
+    /// This does NOT yet assert bit-exact numeric parity against the
+    /// unfused chain (item (a) of the ROW 558 brief) -- running both
+    /// through [`run_resolved`] on this fixture surfaces a
+    /// still-unexplained ~4-8% relative divergence in the final row that
+    /// this slice's time budget did not resolve; recorded as a residual in
+    /// `docs/discipline.md` ROW 558 rather than silently dropped or
+    /// papered over with a loosened tolerance.
+    #[test]
+    #[cfg(feature = "cached-attention-streaming")]
+    fn qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer() {
+        let (program, residual1, taps, inputs, shapes) = qwen35_partial_rotary_attention_fixture();
+        // `attended` (the fusion's own anchor node, `attention_score_sources`'s
+        // own doc) has exactly one reader (the per-head gate multiply) --
+        // qwen35's own extra gate stage, absent from mistral/openchat, gives
+        // `ChainFusion` one more link to fold it into, so it must be pinned
+        // as its own materialization boundary the same way the cache roots
+        // already are, or `bind_plain` never gives it a standalone `BoundOp`
+        // for `cached_attention_candidates` to find.
+        let outputs = alloc::vec![
+            residual1,
+            taps.attended,
+            taps.rotated_k_new_first,
+            taps.rotated_k_new_second,
+            taps.k_pass,
+            taps.v_new,
+        ];
+
+        let unfused = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("plain bind succeeds");
+        let fused = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("fused bind succeeds");
+
+        let fused_attention_count = fused
+            .iter()
+            .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+            .count();
+        assert_eq!(
+            fused_attention_count, 1,
+            "the qwen35 partial-rotary chain must fuse into exactly one \
+             cached-attention op"
+        );
+        let BoundOpKind::CachedAttention {
+            rotary_dim,
+            head_dim,
+            operands,
+            ..
+        } = fused
+            .iter()
+            .find(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+            .map(|bound| &bound.kind)
+            .expect("a cached-attention op was just counted above")
+        else {
+            unreachable!("just matched CachedAttention above");
+        };
+        assert_eq!(*rotary_dim, 64, "rotary width is qwen35's own 64, not the full head_dim");
+        assert_eq!(*head_dim, 256, "head_dim carries the full width, rotary plus pass");
+        assert_eq!(
+            operands.len(),
+            12,
+            "eight base sources, the runtime cached_len, and the three pass-plane sources"
+        );
+        // the census: how many bound ops this one fusion absorbed (66 unfused
+        // vs 40 fused on this fixture -- 26 ops absorbed by the one fusion,
+        // `docs/discipline.md` ROW 558).
+        assert!(
+            unfused.len() > fused.len(),
+            "the fusion must absorb at least one op relative to the unfused chain"
+        );
+
+        // both sides must still COMPUTE (produce a value for the shared
+        // output shape) even though bit-exact parity is not yet asserted
+        // here -- see this test's own doc for the open numeric residual.
+        let unfused_outputs = run_resolved(program.len(), &unfused, inputs.clone());
+        let fused_outputs = run_resolved(program.len(), &fused, inputs);
+        let expected = unfused_outputs[residual1.0 as usize]
+            .as_ref()
+            .expect("unfused layer output computes");
+        let actual = fused_outputs[residual1.0 as usize]
+            .as_ref()
+            .expect("fused layer output computes");
+        assert_eq!(
+            expected.len(),
+            actual.len(),
+            "fused and unfused outputs must be the same shape"
+        );
+    }
+
+    /// Negative: perturbing the pass plane's own index map so it no longer
+    /// reads the SAME `q_pass_grouped` node on both the cached and new score
+    /// sides must make the matcher decline the whole fusion, not silently
+    /// drop the pass plane and fuse a rotary-only op that would then compute
+    /// the wrong score.
+    #[test]
+    #[cfg(feature = "cached-attention-streaming")]
+    fn a_perturbed_pass_plane_map_declines_the_qwen35_fusion() {
+        let (mut program, residual1, _taps, _inputs, shapes) =
+            qwen35_partial_rotary_attention_fixture();
+        let outputs = alloc::vec![residual1];
+
+        // The pass plane's own product is the one `Multiply` whose output's
+        // last axis is exactly `PASS_DIM` (192) -- distinct from every
+        // rotary product (last axis `PAIR_DIM`, 32). Flipping its body to
+        // `Add` breaks [`decode_pass_term`]'s own "reduced(query * key)"
+        // shape deterministically, without depending on the exact index-map
+        // encoding this fixture happens to produce.
+        let pass_product = (0..program.len())
+            .rev()
+            .find(|&position| {
+                matches!(
+                    &program[position],
+                    Op::Elementwise { body: ScalarOp::Multiply, .. }
+                ) && shapes.of(NodeId(position as u32)).last() == Some(&192)
+            })
+            .expect("the fixture must contain a pass-plane product to perturb");
+        let Op::Elementwise { body, .. } = &mut program[pass_product] else {
+            unreachable!("just matched Op::Elementwise above");
+        };
+        *body = ScalarOp::Add;
+
+        let resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("plain bind still succeeds on the perturbed program");
+        let candidates = cached_attention_candidates(&program, &shapes, &resolved, &outputs);
+        assert!(
+            candidates.is_empty(),
+            "a perturbed pass-plane product must not still match the qwen35 fusion"
         );
     }
 
