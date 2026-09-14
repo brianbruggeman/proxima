@@ -347,6 +347,60 @@ pub enum BoundOpKind {
         inv_sqrt_key_dim: f32,
         state_out: NodeId,
     },
+    /// One qwen35moe layer's whole top-k routing decision (ROW 569,
+    /// `docs/discipline.md`), collapsing
+    /// [`crate::spec::append_moe_ffn_from_logits`]'s own `expert_used_count`
+    /// unrolled argmax-with-exclusion rounds into one bound op: `operands`
+    /// carries exactly one entry, `scores` (the gate logits under
+    /// [`crate::spec::ExpertGatingFunc::Softmax`], `scores` aliased to
+    /// `logits`, no `expert_bias` -- this slice's only matched shape, the one
+    /// `proxima-model-interop/src/qwen35moe/program.rs`'s own
+    /// `append_qwen35moe_ffn` builds). `n_tokens == 1` is this slice's only
+    /// supported shape (decode), the same restriction
+    /// [`BoundOpKind::GatedDeltaNet`] carries for the same reason: an
+    /// M-token prefill bind is out of scope until that slice lands.
+    ///
+    /// Each round picks the still-live expert with the MAXIMUM score
+    /// (`mask = Equal(selection_scores, max_selection)`,
+    /// `candidate = mask * expert_index`,
+    /// `route = reduce(Maximum, Int32, candidate)`) -- an exact tie keeps the
+    /// HIGHER index, because `reduce(Maximum, ...)` over `mask * expert_index`
+    /// can only ever prefer the larger product (ROW 569's own census fixture
+    /// proves this against a genuine tied-score pair). `weight_r =
+    /// exp(max_selection_r - max_selection_0)` (the softmax-restricted-to-
+    /// top-k shape [`crate::spec::append_moe_ffn`]'s own doc names),
+    /// `weight_total = sum(weight_0..weight_{top_k-1})`; the caller's own
+    /// `output = weighted_sum * (1 / weight_total)` renormalization
+    /// [`crate::spec::append_moe_ffn_from_logits`] builds AFTER this op is
+    /// exactly the same consumer whether or not this kind fires, since
+    /// `weight_total` is this op's own third kind of output, not
+    /// recomputed.
+    ///
+    /// `routes`/`weights` are `top_k`-length, one entry per round, in round
+    /// order — index `r` is round `r`'s own `route`/`weight` node, exactly
+    /// the [`crate::spec::MoeSite::selected`]/[`crate::spec::MoeSite::weights`]
+    /// entries the unfused chain already produces, so every downstream
+    /// per-round `gathered_expert_product` consumer reads the identical
+    /// `NodeId` whether or not this kind fired — this op only replaces how
+    /// those values are PRODUCED, never what reads them. `routes[0]` is
+    /// this op's own primary `node` (the same "first output is the bound
+    /// op's own node, extra outputs are named fields" shape
+    /// [`BoundOpKind::GatedDeltaNet::state_out`] established); `routes[1..]`,
+    /// every `weights` entry, and `weight_total` are extra outputs, written
+    /// by the same dispatch that writes `routes[0]`'s own buffer — ordinary
+    /// `device_buffers`/interpreter-buffer-table entries, no placement
+    /// threading, because none of them is cross-decode-step persistent
+    /// recurrent state the way `GatedDeltaNet::state_out` is: every one of
+    /// these 17 values is consumed entirely within the SAME forward
+    /// evaluation that produced it.
+    MoeTopK {
+        operands: BoundOperands,
+        expert_count: u64,
+        top_k: u64,
+        routes: Vec<NodeId>,
+        weights: Vec<NodeId>,
+        weight_total: NodeId,
+    },
     Elementwise {
         body: ComposedBody,
         operands: BoundOperands,
@@ -465,6 +519,7 @@ impl BoundOpKind {
         match self {
             BoundOpKind::CachedAttention { .. } => "cached_attention",
             BoundOpKind::GatedDeltaNet { .. } => "gated_delta_net",
+            BoundOpKind::MoeTopK { .. } => "moe_topk",
             BoundOpKind::Elementwise { .. } => "elementwise",
             BoundOpKind::Reduce {
                 keep: Keep::Reduce, ..
@@ -493,6 +548,7 @@ impl BoundOp {
         match &self.kind {
             BoundOpKind::CachedAttention { operands, .. }
             | BoundOpKind::GatedDeltaNet { operands, .. }
+            | BoundOpKind::MoeTopK { operands, .. }
             | BoundOpKind::Elementwise { operands, .. }
             | BoundOpKind::Reduce { operands, .. } => operands,
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => &[],
@@ -523,6 +579,7 @@ impl BoundOp {
             } => epilogue_operands,
             BoundOpKind::CachedAttention { .. }
             | BoundOpKind::GatedDeltaNet { .. }
+            | BoundOpKind::MoeTopK { .. }
             | BoundOpKind::Elementwise { .. }
             | BoundOpKind::Iota
             | BoundOpKind::Constant { .. } => &[],
@@ -538,7 +595,9 @@ impl BoundOp {
     #[must_use]
     pub fn element_body(&self) -> &ComposedBody {
         match &self.kind {
-            BoundOpKind::CachedAttention { .. } | BoundOpKind::GatedDeltaNet { .. } => &EMPTY_BODY,
+            BoundOpKind::CachedAttention { .. }
+            | BoundOpKind::GatedDeltaNet { .. }
+            | BoundOpKind::MoeTopK { .. } => &EMPTY_BODY,
             BoundOpKind::Elementwise { body, .. } => body,
             BoundOpKind::Reduce { element_body, .. } => element_body,
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => &EMPTY_BODY,
@@ -622,7 +681,9 @@ impl BoundOp {
     fn split_axis(&self) -> Option<u16> {
         match &self.kind {
             // decode-only shape (`n_tokens == 1`): never worth splitting.
-            BoundOpKind::CachedAttention { .. } | BoundOpKind::GatedDeltaNet { .. } => None,
+            BoundOpKind::CachedAttention { .. }
+            | BoundOpKind::GatedDeltaNet { .. }
+            | BoundOpKind::MoeTopK { .. } => None,
             BoundOpKind::Elementwise { .. } => (!self.extents.is_empty()).then_some(0),
             // `out_scatter: Some(_)` is a scatter: conservatively
             // ineligible for splitting. A chunked run would need
@@ -695,10 +756,12 @@ impl BoundOp {
                 operands: rebase_operands(operands, split_axis, chunk_start),
             },
             // unreachable in practice: `split_axis` returns `None` for
-            // `GatedDeltaNet` (this slice's `n_tokens == 1` shape is never
-            // worth chunking), kept explicit for the same reason `Iota`/
-            // `Constant` below are.
-            kind @ BoundOpKind::GatedDeltaNet { .. } => kind.clone(),
+            // `GatedDeltaNet`/`MoeTopK` (both this slice's `n_tokens == 1`
+            // shape, never worth chunking), kept explicit for the same
+            // reason `Iota`/`Constant` below are.
+            kind @ (BoundOpKind::GatedDeltaNet { .. } | BoundOpKind::MoeTopK { .. }) => {
+                kind.clone()
+            }
             BoundOpKind::Reduce {
                 element_body,
                 reduce_op,
@@ -4002,6 +4065,8 @@ pub fn bind_with_fusion(
         fuse_cached_attention,
         numeric_policy,
     )?;
+    #[cfg(feature = "moe-topk-fusion")]
+    let built = apply_moe_topk_fusion(built, program, shapes, outputs)?;
     #[cfg(feature = "reduce-epilogue-fusion")]
     {
         admit(numeric_policy, NumericRewrite::ReduceEpilogueFusion)?;
@@ -4556,6 +4621,442 @@ fn gated_delta_net_candidates(
         candidates.push((fused, found.absorbed));
     }
     candidates
+}
+
+#[cfg(feature = "moe-topk-fusion")]
+fn moe_binary_elementwise(program: &[Op], node: NodeId, body: ScalarOp) -> Option<[NodeId; 2]> {
+    match program.get(node.0 as usize)? {
+        Op::Elementwise {
+            body: actual_body,
+            operands,
+            ..
+        } if *actual_body == body => match operands.as_slice() {
+            [(left, _), (right, _)] => Some([*left, *right]),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[cfg(feature = "moe-topk-fusion")]
+fn moe_reduce_operand(
+    program: &[Op],
+    node: NodeId,
+    dtype: DType,
+    body: ScalarOp,
+    init: ReduceInit,
+) -> Option<NodeId> {
+    match program.get(node.0 as usize)? {
+        Op::Reduce(reduce)
+            if reduce.dtype == dtype
+                && reduce.body == body
+                && reduce.init == init
+                && reduce.keep == Keep::Reduce =>
+        {
+            Some(reduce.operand)
+        }
+        _ => None,
+    }
+}
+
+/// Every [`NodeId`] in `program` that reads `node` as one of its own
+/// [`Op::dependencies`] -- the forward index [`match_moe_topk`] needs because
+/// `append_moe_ffn_from_logits`'s own per-round chain only ever links
+/// backwards from a LATER round's `selection_scores` to an EARLIER round's
+/// `mask` (the exclusion `Select`), never the reverse, so finding round
+/// `r + 1` from round `r`'s own `mask` is a forward lookup, not a backward
+/// one the way every other fusion matcher in this module walks.
+#[cfg(feature = "moe-topk-fusion")]
+fn moe_consumers(program: &[Op]) -> BTreeMap<NodeId, Vec<NodeId>> {
+    let mut consumers: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+    for (position, op) in program.iter().enumerate() {
+        let node = NodeId(position as u32);
+        for dependency in op.dependencies() {
+            consumers.entry(dependency).or_default().push(node);
+        }
+    }
+    consumers
+}
+
+/// One round's own three consumer-side facts: [`crate::spec::append_moe_ffn_from_logits`]'s
+/// own `mask`/`max_selection`/`route`/`weight` for whichever round produced
+/// `selection_scores`'s own `mask`/`max_selection` pair — see
+/// [`match_moe_topk`] for how successive rounds chain together.
+#[cfg(feature = "moe-topk-fusion")]
+struct MoeRound {
+    mask: NodeId,
+    candidate: NodeId,
+    max_selection: NodeId,
+    shifted: NodeId,
+    route: NodeId,
+    weight: NodeId,
+}
+
+/// Matches one round of [`crate::spec::append_moe_ffn_from_logits`]'s own
+/// argmax-with-exclusion loop, forward from `selection_scores` (this round's
+/// own live-score tensor, `scores` itself for round 0, the previous round's
+/// exclusion `Select` output otherwise) using `consumers` rather than walking
+/// backward from a guessed `route` node -- `selection_scores` has exactly two
+/// live-score consumers in the real program (`max_selection`'s own reduce,
+/// found here, and nothing else at this stage; `mask`'s own `Equal` is found
+/// from `max_selection` next), so the forward search is a small, bounded scan
+/// no matter how many total ops the program carries.
+///
+/// `max_selection_0` is `None` only for round 0's own call (this round's
+/// `max_selection` becomes the caller's own anchor for every later round's
+/// `weight = exp(max_selection_r - max_selection_0)` shift); every later
+/// round passes `Some` of round 0's already-matched `max_selection`.
+#[cfg(feature = "moe-topk-fusion")]
+fn moe_match_round(
+    program: &[Op],
+    selection_scores: NodeId,
+    max_selection_0: Option<NodeId>,
+    expert_index: NodeId,
+    consumers: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> Option<MoeRound> {
+    let max_selection = consumers
+        .get(&selection_scores)?
+        .iter()
+        .copied()
+        .find(|candidate| {
+            moe_reduce_operand(
+                program,
+                *candidate,
+                DType::Float32,
+                ScalarOp::Maximum,
+                ReduceInit::NegativeInfinity,
+            ) == Some(selection_scores)
+        })?;
+    let mask = consumers
+        .get(&selection_scores)?
+        .iter()
+        .copied()
+        .find(|candidate| {
+            moe_binary_elementwise(program, *candidate, ScalarOp::Equal)
+                == Some([selection_scores, max_selection])
+        })?;
+    let candidate = consumers.get(&mask)?.iter().copied().find(|candidate| {
+        moe_binary_elementwise(program, *candidate, ScalarOp::Multiply)
+            == Some([mask, expert_index])
+    })?;
+    let route = consumers.get(&candidate)?.iter().copied().find(|route| {
+        moe_reduce_operand(program, *route, DType::Int32, ScalarOp::Maximum, ReduceInit::Zero)
+            == Some(candidate)
+    })?;
+    let anchor = max_selection_0.unwrap_or(max_selection);
+    let shifted = consumers
+        .get(&max_selection)?
+        .iter()
+        .copied()
+        .find(|candidate| {
+            moe_binary_elementwise(program, *candidate, ScalarOp::Subtract)
+                == Some([max_selection, anchor])
+        })?;
+    let weight = consumers.get(&shifted)?.iter().copied().find(|candidate| {
+        matches!(
+            program.get(candidate.0 as usize),
+            Some(Op::Elementwise { body: ScalarOp::Exponential, operands, .. })
+                if operands.len() == 1 && operands[0].0 == shifted
+        )
+    })?;
+    Some(MoeRound {
+        mask,
+        candidate,
+        max_selection,
+        shifted,
+        route,
+        weight,
+    })
+}
+
+/// The whole fused kind's own shape: `scores`/`expert_count`/`top_k` plus
+/// every round's own `route`/`weight` (in round order, [`crate::spec::MoeSite`]'s
+/// own ordering) and the final `weight_total`, plus every internal node the
+/// fusion consumes and must therefore drop from `resolved` once it fires.
+#[cfg(feature = "moe-topk-fusion")]
+struct MoeTopKMatch {
+    scores: NodeId,
+    expert_count: u64,
+    routes: Vec<NodeId>,
+    weights: Vec<NodeId>,
+    weight_total: NodeId,
+    absorbed: BTreeSet<NodeId>,
+}
+
+/// Matches `append_moe_ffn_from_logits`'s own whole routing chain, anchored
+/// at `route0` (round 0's own `route` node -- this op's own eventual primary
+/// `node`, mirroring [`BoundOpKind::GatedDeltaNet`]'s "first output is the
+/// bound op's own node" shape). Declines (returns `None`) on ANY structural
+/// deviation -- a different gating function, an `expert_bias`, a rank/shape
+/// this slice does not support, `n_tokens != 1` -- rather than guess: ROW
+/// 569's own design note names this as the one safe default for a
+/// correctness-critical routing decision.
+#[cfg(feature = "moe-topk-fusion")]
+fn match_moe_topk(
+    program: &[Op],
+    shapes: &Shapes,
+    route0: NodeId,
+    consumers: &BTreeMap<NodeId, Vec<NodeId>>,
+) -> Option<MoeTopKMatch> {
+    let candidate0 =
+        moe_reduce_operand(program, route0, DType::Int32, ScalarOp::Maximum, ReduceInit::Zero)?;
+    let [mask0, expert_index] = moe_binary_elementwise(program, candidate0, ScalarOp::Multiply)?;
+    if !matches!(program.get(expert_index.0 as usize), Some(Op::Iota { .. })) {
+        return None;
+    }
+    let [scores, max_selection0] = moe_binary_elementwise(program, mask0, ScalarOp::Equal)?;
+    if moe_reduce_operand(
+        program,
+        max_selection0,
+        DType::Float32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+    ) != Some(scores)
+    {
+        return None;
+    }
+    // Round 0's own live-score tensor is never itself the exclusion
+    // `Select`'s output -- [`crate::spec::ExpertGatingFunc::Softmax`] with no
+    // `expert_bias`, the ONLY shape `proxima-model-interop`'s own qwen35moe
+    // builder produces (`qwen35moe/program.rs:122-135`). Any bias/Sigmoid
+    // program builds a DIFFERENT node here (an `Add`/`Reciprocal` chain, not
+    // this reduce's own direct source), so this also implicitly declines
+    // both of those, exactly as designed.
+    if matches!(
+        program.get(scores.0 as usize),
+        Some(Op::Elementwise {
+            body: ScalarOp::Select,
+            ..
+        })
+    ) {
+        return None;
+    }
+    let expert_count = *shapes.of(expert_index).first()?;
+    if shapes.of(expert_index) != [expert_count] {
+        return None;
+    }
+    if shapes.of(route0) != [1] {
+        // n_tokens == 1 only, the same decode-only restriction
+        // `BoundOpKind::GatedDeltaNet` carries.
+        return None;
+    }
+
+    let mut routes = Vec::new();
+    let mut weights = Vec::new();
+    let mut absorbed: BTreeSet<NodeId> = BTreeSet::new();
+    let mut selection_scores = scores;
+    let mut max_selection_0_node: Option<NodeId> = None;
+    let mut weight_total_running: Option<NodeId> = None;
+    let mut round: usize = 0;
+    const ROUND_SANITY_CAP: usize = 64;
+    loop {
+        let matched =
+            moe_match_round(program, selection_scores, max_selection_0_node, expert_index, consumers)?;
+        if round == 0 {
+            if matched.route != route0 || matched.mask != mask0 {
+                return None;
+            }
+            max_selection_0_node = Some(matched.max_selection);
+        }
+        absorbed.insert(matched.mask);
+        absorbed.insert(matched.candidate);
+        absorbed.insert(matched.max_selection);
+        absorbed.insert(matched.shifted);
+        absorbed.insert(matched.weight);
+        // `route0` (round 0) becomes this op's own primary `node`, never an
+        // absorbed one -- every LATER round's `route` is multi-consumer
+        // (three `gathered_expert_product` gathers in
+        // `append_moe_ffn_with_projection_strategy_from_logits`'s own
+        // per-round FFN evaluation), so it materializes as its own `BoundOp`
+        // in `rebuilt` regardless of this fusion; it must be dropped here so
+        // the fused kind's own extra-output write supplies it instead.
+        if round != 0 {
+            absorbed.insert(matched.route);
+        }
+        routes.push(matched.route);
+        weights.push(matched.weight);
+        weight_total_running = Some(match weight_total_running {
+            None => matched.weight,
+            Some(running) => {
+                let add_node = consumers
+                    .get(&matched.weight)?
+                    .iter()
+                    .copied()
+                    .find(|candidate| {
+                        moe_binary_elementwise(program, *candidate, ScalarOp::Add)
+                            == Some([running, matched.weight])
+                    })?;
+                absorbed.insert(add_node);
+                add_node
+            }
+        });
+        let next_selection_scores = consumers.get(&matched.mask).and_then(|list| {
+            list.iter().copied().find(|candidate| {
+                matches!(
+                    program.get(candidate.0 as usize),
+                    Some(Op::Elementwise { body: ScalarOp::Select, operands, .. })
+                        if operands.len() == 3
+                            && operands[0].0 == matched.mask
+                            && operands[2].0 == selection_scores
+                )
+            })
+        });
+        round += 1;
+        match next_selection_scores {
+            Some(next) if round < ROUND_SANITY_CAP => {
+                absorbed.insert(next);
+                selection_scores = next;
+            }
+            Some(_) => return None,
+            None => break,
+        }
+    }
+    if routes.len() < 2 {
+        // A genuine single-expert "top-1" program never builds the exclusion
+        // `Select` this matcher's forward walk relies on to terminate the
+        // loop the same way it started -- declining rather than fusing a
+        // shape this matcher cannot have actually exercised.
+        return None;
+    }
+    let weight_total = weight_total_running?;
+    Some(MoeTopKMatch {
+        scores,
+        expert_count,
+        routes,
+        weights,
+        weight_total,
+        absorbed,
+    })
+}
+
+/// Scans `program` for [`append_moe_ffn_from_logits`] round-0 candidates and,
+/// for each, resolves `scores`'s own [`Layout`] against `resolved` -- the
+/// same technique [`gated_delta_net_candidates`] uses for its own six
+/// operand sources, scaled down to the one true operand this kind reads
+/// (`routes`/`weights`/`weight_total` are outputs, not operands).
+#[cfg(feature = "moe-topk-fusion")]
+fn moe_topk_candidates(
+    program: &[Op],
+    shapes: &Shapes,
+    resolved: &[BoundOp],
+    effective_outputs: &[NodeId],
+) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
+    let consumers = moe_consumers(program);
+    let mut candidates = Vec::new();
+    for output_position in (0..program.len()).rev() {
+        let route0 = NodeId(output_position as u32);
+        let Some(found) = match_moe_topk(program, shapes, route0, &consumers) else {
+            continue;
+        };
+        // Every extra output this kind will supply directly (`routes[1..]`,
+        // every `weights` entry, `weight_total`) is fine to be a requested
+        // output; any OTHER absorbed node (a mask, a max-selection reduce, an
+        // exclusion `Select`, ...) genuinely disappears once fusion fires, the
+        // same guard [`gated_delta_net_candidates`] makes for `state_out`.
+        let legitimate_outputs: BTreeSet<NodeId> = found
+            .routes
+            .iter()
+            .skip(1)
+            .chain(found.weights.iter())
+            .chain(core::iter::once(&found.weight_total))
+            .copied()
+            .collect();
+        if found
+            .absorbed
+            .iter()
+            .any(|node| !legitimate_outputs.contains(node) && effective_outputs.contains(node))
+        {
+            continue;
+        }
+        let Some((_, layout, lookup)) = resolved
+            .iter()
+            .flat_map(|bound| bound.operands().iter())
+            .find(|(node, _, _)| *node == found.scores)
+        else {
+            continue;
+        };
+        if lookup.is_some() || layout.strides.iter().any(|stride| *stride < 0) {
+            continue;
+        }
+        let top_k = found.routes.len() as u64;
+        let fused = BoundOp {
+            node: route0,
+            dtype: DType::Int32,
+            extents: shapes.of(route0).to_vec(),
+            kind: BoundOpKind::MoeTopK {
+                operands: vec![(found.scores, layout.clone(), None)],
+                expert_count: found.expert_count,
+                top_k,
+                routes: found.routes.clone(),
+                weights: found.weights.clone(),
+                weight_total: found.weight_total,
+            },
+        };
+        candidates.push((fused, found.absorbed));
+    }
+    candidates
+}
+
+/// Runs [`moe_topk_candidates`] and rewrites `built` with every
+/// non-conflicting match -- the [`BoundOpKind::MoeTopK`] sibling of
+/// [`apply_gated_delta_net_fusion`]'s own two-pass shape: an initial pass
+/// finds candidates against `built`, widens the planning outputs to `scores`
+/// (the one true operand every candidate needs materialized), rebinds, then
+/// matches again against the wider `resolved` set before rewriting. Runs
+/// inside [`bind_with_fusion`] only -- never [`bind_plain`], the same rule
+/// [`apply_gated_delta_net_fusion`] follows.
+#[cfg(feature = "moe-topk-fusion")]
+fn apply_moe_topk_fusion(
+    built: Vec<BoundOp>,
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+) -> Result<Vec<BoundOp>, TensorError> {
+    let initial_candidates = moe_topk_candidates(program, shapes, &built, outputs);
+    if initial_candidates.is_empty() {
+        return Ok(built);
+    }
+    let mut planning_outputs = outputs.to_vec();
+    if planning_outputs.is_empty() {
+        let root = program
+            .len()
+            .checked_sub(1)
+            .map(|position| NodeId(position as u32))
+            .ok_or(TensorError::Empty)?;
+        planning_outputs.push(root);
+    }
+    for (fused, _) in &initial_candidates {
+        let BoundOpKind::MoeTopK { operands, .. } = &fused.kind else {
+            continue;
+        };
+        for (source, _, _) in operands {
+            if !planning_outputs.contains(source) {
+                planning_outputs.push(*source);
+            }
+        }
+    }
+    let rebuilt = bind_plain(program, shapes, &planning_outputs, NumericPolicy::bit_exact())?;
+    let candidates = moe_topk_candidates(program, shapes, &rebuilt, outputs);
+    if candidates.is_empty() {
+        return Ok(built);
+    }
+    let fused_by_node = candidates
+        .iter()
+        .map(|(fused, _)| (fused.node, fused))
+        .collect::<BTreeMap<_, _>>();
+    let absorbed = candidates
+        .iter()
+        .flat_map(|(_, absorbed)| absorbed.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let mut rewritten = Vec::with_capacity(rebuilt.len());
+    for bound in rebuilt {
+        if let Some(fused) = fused_by_node.get(&bound.node) {
+            rewritten.push((*fused).clone());
+        } else if !absorbed.contains(&bound.node) {
+            rewritten.push(bound);
+        }
+    }
+    Ok(rewritten)
 }
 
 /// Runs [`gated_delta_net_candidates`] and rewrites `built` with every
@@ -11242,6 +11743,314 @@ mod tests {
                 "the mask*iota->reduce-Maximum tie-break keeps the HIGHER index on an exact \
                  tie, got route {route_0}, expected 9"
             );
+        }
+
+        /// Builds the same real-shape qwen35moe routing program
+        /// [`qwen35moe_routing_census_at_real_expert_shape`] does, returning
+        /// every node a caller needs to fill inputs and read every routing
+        /// output back out.
+        #[cfg(feature = "moe-topk-fusion")]
+        struct RoutingProgram {
+            program: Vec<Op>,
+            x: NodeId,
+            logits: NodeId,
+            expert_w_gate: NodeId,
+            expert_w_up: NodeId,
+            expert_w_down: NodeId,
+            output: NodeId,
+            selected: Vec<NodeId>,
+            weights: Vec<NodeId>,
+        }
+
+        #[cfg(feature = "moe-topk-fusion")]
+        fn build_routing_program() -> RoutingProgram {
+            let mut program = Vec::new();
+            let x = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
+                "x",
+            );
+            let logits = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0), Extent::Static(EXPERT_COUNT)],
+                "logits",
+            );
+            let expert_w_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EXPERT_COUNT),
+                    Extent::Static(EMBEDDING),
+                    Extent::Static(FEED_FORWARD)
+                ],
+                "expert_w_gate",
+            );
+            let expert_w_up = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EXPERT_COUNT),
+                    Extent::Static(EMBEDDING),
+                    Extent::Static(FEED_FORWARD)
+                ],
+                "expert_w_up",
+            );
+            let expert_w_down = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EXPERT_COUNT),
+                    Extent::Static(FEED_FORWARD),
+                    Extent::Static(EMBEDDING)
+                ],
+                "expert_w_down",
+            );
+            let ones = scalar_constant(&mut program, 1.0);
+            let (output, site) = append_moe_ffn_from_logits(
+                &mut program,
+                0,
+                x,
+                logits,
+                expert_w_gate,
+                expert_w_up,
+                expert_w_down,
+                EXPERT_COUNT,
+                EXPERT_USED_COUNT,
+                ones,
+                ExpertGatingFunc::Softmax,
+                None,
+            )
+            .expect("real-shape qwen35moe routing block lowers");
+            RoutingProgram {
+                program,
+                x,
+                logits,
+                expert_w_gate,
+                expert_w_up,
+                expert_w_down,
+                output,
+                selected: site.selected,
+                weights: site.weights,
+            }
+        }
+
+        /// The reference top-k selection [`RoutingProgram`]'s own unfused
+        /// chain implements: `top_k` rounds of take-the-maximum-with-
+        /// exclusion, HIGHER index wins an exact tie (`>=` below), `weight_r
+        /// = exp(max_r - max_0)`, `weight_total = sum(weight_0..weight_{k-1})`
+        /// -- independent of the graph, the same role `top_k_routes_and_weights`
+        /// plays for the standalone probes above, corrected for this
+        /// construction's own tie-break (that function's own doc claims
+        /// "toward the lower index", which ROW 569's own census fixture
+        /// proved is stale prose for the real `mask * iota -> reduce(Maximum)`
+        /// construction).
+        #[cfg(feature = "moe-topk-fusion")]
+        fn reference_topk(scores: &[f32], top_k: usize) -> (Vec<f32>, Vec<f32>, f32) {
+            let mut live = scores.to_vec();
+            let mut routes = Vec::with_capacity(top_k);
+            let mut weights = Vec::with_capacity(top_k);
+            let mut max_selection_0 = 0.0_f32;
+            let mut weight_total = 0.0_f32;
+            for round in 0..top_k {
+                let mut best_index = 0_usize;
+                let mut best_value = f32::NEG_INFINITY;
+                for (index, value) in live.iter().enumerate() {
+                    if *value >= best_value {
+                        best_value = *value;
+                        best_index = index;
+                    }
+                }
+                if round == 0 {
+                    max_selection_0 = best_value;
+                }
+                let weight = (best_value - max_selection_0).exp();
+                routes.push(best_index as f32);
+                weights.push(weight);
+                weight_total += weight;
+                // Exclude EVERY position tied with this round's own max, not
+                // only the winning index -- `mask = Equal(selection_scores,
+                // max_selection)` is `true` at every tied position, and
+                // `Select(mask, neg_infinity, selection_scores)` blanks all
+                // of them at once. Caught by this function's own caller: an
+                // exact tie's round + 1 disagreed with the graph until this
+                // matched `run_moe_topk`'s identical fix.
+                for value in live.iter_mut() {
+                    if *value == best_value {
+                        *value = f32::NEG_INFINITY;
+                    }
+                }
+            }
+            (routes, weights, weight_total)
+        }
+
+        /// ROW 569: the fused `BoundOpKind::MoeTopK` bind must produce
+        /// bit-identical routes and weights to the always-unfused chain, over
+        /// 200 random real-shape score vectors PLUS exact-tie vectors, and
+        /// must remove a substantial number of bound ops relative to the
+        /// unfused bind -- MEASURED at 38 for this shape, smaller than the
+        /// raw 64-op ancestor closure
+        /// [`qwen35moe_routing_census_at_real_expert_shape`] counts over the
+        /// PROGRAM graph, because `bind_plain`'s own ordinary chain fusion
+        /// already inlines some of `match_moe_topk`'s `absorbed` nodes (e.g.
+        /// each round's `candidate` multiply, single-consumer into `route`'s
+        /// own reduce) before this fusion ever runs.
+        #[cfg(feature = "moe-topk-fusion")]
+        #[test]
+        fn fused_moe_topk_matches_unfused_routing_over_random_scores_and_exact_ties() {
+            let built = build_routing_program();
+            let shapes =
+                shape::infer(&built.program, &[1]).expect("routing program infers");
+            let mut outputs = alloc::vec![built.output];
+            outputs.extend(built.selected.iter().copied());
+            outputs.extend(built.weights.iter().copied());
+
+            let unfused = bind_plain(&built.program, &shapes, &outputs, NumericPolicy::bit_exact())
+                .expect("unfused routing program binds");
+            let fused = bind_with_fusion(
+                &built.program,
+                &shapes,
+                &outputs,
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("fused routing program binds");
+
+            let matcher_fired = fused
+                .iter()
+                .any(|bound| matches!(bound.kind, BoundOpKind::MoeTopK { .. }));
+            assert!(
+                matcher_fired,
+                "the moe-topk-fusion matcher must fire on the real qwen35moe routing shape, got \
+                 kinds {:?}",
+                fused.iter().map(|bound| bound.kind.name()).collect::<Vec<_>>()
+            );
+            let op_delta = unfused.len() - fused.len();
+            println!(
+                "row 569 moe-topk-fusion op census: unfused = {}, fused = {}, delta = {op_delta}",
+                unfused.len(),
+                fused.len()
+            );
+            // MEASURED, not the raw 64-op ancestor-closure
+            // `qwen35moe_routing_census_at_real_expert_shape` counts over the
+            // PROGRAM graph: `bind_plain`'s own chain fusion already inlines
+            // several of `match_moe_topk`'s `absorbed` nodes (the per-round
+            // `candidate = mask * expert_index` multiply, single-consumer
+            // into `route`'s own reduce, never materializes as its own
+            // `BoundOp` even in the always-unfused bind) BEFORE this fusion
+            // ever runs, so the net op count this fusion alone removes is
+            // smaller than the closure's raw node count -- the closure names
+            // what the matcher must WALK, not what bind_plain would have
+            // separately executed.
+            assert!(
+                op_delta >= 30,
+                "fusing the whole 8-round routing chain into one MoeTopK op must remove a \
+                 substantial number of bound ops, got only {op_delta}"
+            );
+
+            let expert_w_gate_data =
+                alloc::vec![0.0_f32; EXPERT_COUNT as usize * EMBEDDING as usize * FEED_FORWARD as usize];
+            let expert_w_up_data = expert_w_gate_data.clone();
+            let expert_w_down_data = expert_w_gate_data.clone();
+            let x_data = alloc::vec![0.1_f32; EMBEDDING as usize];
+
+            let mut lcg = crate::test_support::Lcg(97);
+            let mut score_vectors: Vec<Vec<f32>> = (0..200)
+                .map(|_| {
+                    (0..EXPERT_COUNT as usize)
+                        .map(|_| lcg.next_unit() * 10.0)
+                        .collect()
+                })
+                .collect();
+            // Two exact-tie fixtures on top of the 200 random draws: a tie at
+            // the very top (round 0) and a tie that only surfaces after
+            // round 0's own winner is excluded (round 1).
+            let mut top_tie = (0..EXPERT_COUNT as usize)
+                .map(|index| index as f32 * 0.01)
+                .collect::<Vec<f32>>();
+            top_tie[12] = 9.0;
+            top_tie[200] = 9.0;
+            score_vectors.push(top_tie);
+            let mut later_tie = (0..EXPERT_COUNT as usize)
+                .map(|index| index as f32 * 0.01)
+                .collect::<Vec<f32>>();
+            later_tie[5] = 20.0;
+            later_tie[40] = 7.0;
+            later_tie[220] = 7.0;
+            score_vectors.push(later_tie);
+
+            for (case, scores) in score_vectors.into_iter().enumerate() {
+                let inputs = alloc::vec![
+                    (built.x, x_data.clone()),
+                    (built.logits, scores.clone()),
+                    (built.expert_w_gate, expert_w_gate_data.clone()),
+                    (built.expert_w_up, expert_w_up_data.clone()),
+                    (built.expert_w_down, expert_w_down_data.clone()),
+                ];
+                let unfused_buffers =
+                    run_resolved(built.program.len(), &unfused, inputs.clone());
+                let fused_buffers = run_resolved(built.program.len(), &fused, inputs);
+
+                let (reference_routes, reference_weights, reference_weight_total) =
+                    reference_topk(&scores, EXPERT_USED_COUNT as usize);
+
+                for (round, route_node) in built.selected.iter().enumerate() {
+                    let unfused_route = unfused_buffers[route_node.0 as usize]
+                        .as_ref()
+                        .expect("unfused route resolves")[0];
+                    let fused_route = fused_buffers[route_node.0 as usize]
+                        .as_ref()
+                        .expect("fused route resolves")[0];
+                    assert_eq!(
+                        unfused_route, fused_route,
+                        "case {case} round {round}: fused route must exactly match unfused"
+                    );
+                    assert_eq!(
+                        unfused_route, reference_routes[round],
+                        "case {case} round {round}: unfused route must exactly match the \
+                         independent reference"
+                    );
+                }
+                for (round, weight_node) in built.weights.iter().take(EXPERT_USED_COUNT as usize).enumerate() {
+                    let unfused_weight = unfused_buffers[weight_node.0 as usize]
+                        .as_ref()
+                        .expect("unfused weight resolves")[0];
+                    let fused_weight = fused_buffers[weight_node.0 as usize]
+                        .as_ref()
+                        .expect("fused weight resolves")[0];
+                    assert_eq!(
+                        unfused_weight, fused_weight,
+                        "case {case} round {round}: fused weight must exactly match unfused"
+                    );
+                    assert!(
+                        (unfused_weight - reference_weights[round]).abs() <= 1e-6,
+                        "case {case} round {round}: unfused weight must match the independent \
+                         reference within 1e-6, got {unfused_weight} vs \
+                         {}",
+                        reference_weights[round]
+                    );
+                }
+                let weight_total_node = *built
+                    .weights
+                    .last()
+                    .expect("weights carries weight_total as its last entry");
+                let unfused_weight_total = unfused_buffers[weight_total_node.0 as usize]
+                    .as_ref()
+                    .expect("unfused weight_total resolves")[0];
+                let fused_weight_total = fused_buffers[weight_total_node.0 as usize]
+                    .as_ref()
+                    .expect("fused weight_total resolves")[0];
+                assert_eq!(
+                    unfused_weight_total, fused_weight_total,
+                    "case {case}: fused weight_total must exactly match unfused"
+                );
+                assert!(
+                    (unfused_weight_total - reference_weight_total).abs() <= 1e-6,
+                    "case {case}: unfused weight_total must match the independent reference \
+                     within 1e-6"
+                );
+            }
         }
     }
 }
