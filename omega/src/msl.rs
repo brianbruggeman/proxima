@@ -1921,6 +1921,41 @@ fn packed_row_block_direct_axis(
     packed_row_direct_output_axis(resolved, output_axes)
 }
 
+/// Whether [`push_packed_row_group_bases`] rendered the grouped two-axis
+/// direct addressing (ROW 545) for this op, and on which `(selected, out)`
+/// axis pair -- `None` when it did not, mirroring
+/// [`packed_row_block_direct_axis`]'s own gate. Two bindings that agree on
+/// every other cache-key axis but disagree on whether the grouped fast path
+/// applied (the `out % rows_per_simdgroup` divisibility check
+/// [`push_packed_row_group_bases`] itself runs) render different addressing
+/// source text and must never share a pipeline-cache entry -- this is that
+/// disambiguator, folded into [`crate::identity::kernel_identity`] the same
+/// way the single-axis case already is.
+#[cfg(any(test, feature = "metal-core"))]
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
+)]
+fn packed_row_block_grouped_axes(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+) -> Option<(u16, u16)> {
+    let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
+        return None;
+    };
+    let block = packed_row_block(resolved, quantized)?;
+    if packed_row_block_token_total(&block, &resolved.extents) > 1 {
+        return None;
+    }
+    let (_, selected_axis, _, out_axis) = packed_row_direct_grouped_axes(resolved, output_axes)?;
+    let rows = block.codec.rows_per_simdgroup() as u64;
+    if resolved.extents[out_axis as usize].is_multiple_of(rows) {
+        Some((selected_axis, out_axis))
+    } else {
+        None
+    }
+}
+
 /// Cheap structural + compile-option identity for the kernel [`emit`] would
 /// produce from `resolved` — built without ever rendering the MSL body
 /// text, so a caller can decide whether a pipeline compile is needed before
@@ -1968,6 +2003,7 @@ pub(crate) fn kernel_cache_key(
         packed_row_block_shape: Some(packed_row_block_shape_token(resolved, &quantized)),
         packed_row_block_stride_is_one: packed_row_block_stride_is_one(resolved, &quantized),
         packed_row_block_direct_axis: packed_row_block_direct_axis(resolved, &quantized),
+        packed_row_block_grouped_axes: packed_row_block_grouped_axes(resolved, &quantized),
         elementwise_addressing: elementwise_addressing_cache_token(resolved),
         numeric_policy_token: Some(crate::identity::numeric_policy_cache_token(numeric_policy)),
     };
@@ -5952,6 +5988,41 @@ fn packed_row_direct_output_axis(resolved: &BoundOp, output_axes: &[u16]) -> Opt
     found
 }
 
+/// The grouped-expert sibling of [`packed_row_direct_output_axis`]:
+/// `docs/discipline.md` ROW 543/544 named the MoE gate/up reduce
+/// (`output_extents = [1, selected, out]`) as the case with exactly TWO
+/// non-unit output axes that still fell through to the general `%`/`/`
+/// decomposition, at 98.7% of the emitted-body gap ROW 350/351 already
+/// closed for the single-axis decode matvec. Returns the `(index, axis)`
+/// pair for the outer "selected expert" axis and the inner "out" axis, in
+/// the SAME `u.output_extents` index space `push_packed_row_group_bases`'s
+/// general arm already reads -- found by walking `output_axes` from the
+/// innermost entry backward (mirroring that arm's own decomposition order)
+/// and skipping every unit-extent axis along the way, so axes interleaved
+/// between the two non-unit ones (always extent 1, or this fast path would
+/// not apply) contribute nothing to either bound. `None` whenever zero, one,
+/// or three-or-more axes are non-unit, so [`packed_row_direct_output_axis`]
+/// and the general decomposition both stay the correct answer for every
+/// shape this one does not cover.
+fn packed_row_direct_grouped_axes(
+    resolved: &BoundOp,
+    output_axes: &[u16],
+) -> Option<(usize, u16, usize, u16)> {
+    let mut found: Vec<(usize, u16)> = Vec::new();
+    for (index, &axis) in output_axes.iter().enumerate().rev() {
+        if resolved.extents[axis as usize] > 1 {
+            found.push((index, axis));
+            if found.len() > 2 {
+                return None;
+            }
+        }
+    }
+    let [(out_index, out_axis), (selected_index, selected_axis)] = found[..] else {
+        return None;
+    };
+    Some((selected_index, selected_axis, out_index, out_axis))
+}
+
 /// Renders `weight_base[q]`/`other_base[q]`/`coord_q_cache[q]` for one
 /// row-blocked group -- the ONE place every [`push_packed_row_blocked_body`]
 /// body variant (the default/mask-fma arm, [`push_q4k_ggml_port_body`],
@@ -6015,6 +6086,72 @@ fn push_packed_row_group_bases(
         }
         source.push_str("    }\n");
         return;
+    }
+    if let Some((_selected_index, selected_axis, out_index, out_axis)) =
+        packed_row_direct_grouped_axes(resolved, output_axes)
+    {
+        // a threadgroup must never straddle two experts: `group_first` is
+        // always a multiple of `rows` (`group_first = output_index * rows`),
+        // so `out % rows == 0` guarantees every one of this group's `rows`
+        // flat indices divides to the SAME `expert_slot` -- computed once
+        // here instead of once per `q` the way the general branch's
+        // per-thread `%`/`/` chain would.
+        if resolved.extents[out_axis as usize].is_multiple_of(rows as u64) {
+            source.push_str(&format!(
+                "    long weight_selected_stride = u.operand_strides[{weight}][{selected_axis}];\n"
+            ));
+            source.push_str(&format!(
+                "    long weight_out_stride = u.operand_strides[{weight}][{out_axis}];\n"
+            ));
+            source.push_str(&format!(
+                "    long other_selected_stride = u.operand_strides[{other}][{selected_axis}];\n"
+            ));
+            source.push_str(&format!(
+                "    long other_out_stride = u.operand_strides[{other}][{out_axis}];\n"
+            ));
+            source.push_str(&format!(
+                "    long group_out_extent = u.output_extents[{out_index}];\n"
+            ));
+            source.push_str("    long expert_slot = group_first / group_out_extent;\n");
+            source.push_str("    long out_row_base = group_first % group_out_extent;\n");
+            source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+            source.push_str(&format!(
+                "        for (int d = 0; d < {rank}; ++d) {{ coord_q_cache[q][d] = 0; }}\n"
+            ));
+            source.push_str("        long out_row = out_row_base + q;\n");
+            source.push_str(&format!(
+                "        coord_q_cache[q][{selected_axis}] = expert_slot;\n"
+            ));
+            source.push_str(&format!("        coord_q_cache[q][{out_axis}] = out_row;\n"));
+            source.push_str(&format!(
+                "        weight_base[q] = u.operand_base[{weight}] + expert_slot * weight_selected_stride + out_row * weight_out_stride;\n"
+            ));
+            source.push_str(&format!(
+                "        other_base[q] = u.operand_base[{other}] + expert_slot * other_selected_stride + out_row * other_out_stride;\n"
+            ));
+            if let Some(slot) = gather_slots[weight] {
+                push_cooperative_gather_fetch(
+                    source,
+                    weight,
+                    slot,
+                    rank,
+                    "coord_q_cache[q]",
+                    "weight_base[q]",
+                );
+            }
+            if let Some(slot) = gather_slots[other] {
+                push_cooperative_gather_fetch(
+                    source,
+                    other,
+                    slot,
+                    rank,
+                    "coord_q_cache[q]",
+                    "other_base[q]",
+                );
+            }
+            source.push_str("    }\n");
+            return;
+        }
     }
     source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str("        long flat = group_first + q;\n");
