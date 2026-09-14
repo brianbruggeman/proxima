@@ -31047,3 +31047,89 @@ for correct qwen35moe decode; the architecture requires all four kernel categori
 present. The negation run (Cell F, exclude reduce-packed-row-blocked) runs 3.6%
 faster than baseline (44.649 vs 43.081 ms), suggesting fallback implementations
 with lower dispatch overhead but incomplete computation.
+
+## ROW 543 -- grouped gate/up alone (down stays per-route), real model: regression, reverted
+
+**Task:** `append_moe_ffn` (production entry point, unchanged signature)
+flipped from `MoeProjectionStrategy::PerRoute` to `MoeProjectionStrategy::GroupedGateUp`
+-- gate and up each become one `grouped_gathered_expert_product` + reduce over
+the `k` selected experts; down is left exactly as it always was, one
+`gathered_expert_product` per selected route per round (never grouped, in
+either strategy -- `append_moe_round_output`, `spec.rs:1963-2024`). Distinct
+from ROW 538's arms, which grouped all three of gate/up/down; this slice
+groups only gate/up, the half ROW 537/538 already showed admits
+`reduce-packed-row-blocked` once `correct_packed_matmul_layouts` runs.
+
+**Correctness (proxima-tensor, CPU, before the real-model run):**
+- `cargo nextest run -p proxima-tensor -j 4 --no-fail-fast`: 627/627 passed,
+  8 skipped, including two new pinned per-route-vs-grouped parity fixtures at
+  the shapes named in the brief (`append_moe_ffn_reproduces_the_pinned_per_route_fixture_small_shape`
+  8/2/64/32, `..._wide_shape` 256/8/32/32, both `<= 1e-6` max abs diff) and
+  the pre-existing `a_routed_ffn_built_by_append_moe_ffn_matches_an_independent_topk_swiglu_reference`
+  gathered-op-count assertion updated from `3 * expert_used_count` to
+  `2 + expert_used_count`.
+- `cargo clippy -p proxima-tensor --all-targets -j 4`: clean.
+- New census test `omega::metal::classify_kind_packed_row_marker_tests::qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down`
+  builds the real qwen35moe shape (256 experts, k=8, embedding 512,
+  feed_forward 2048) through `append_moe_ffn` itself (not a hand-built
+  stand-in), binds with `correct_packed_matmul_layouts` applied exactly like
+  `omega::metal::prepare`, and asserts: exactly `2 + 8 = 10` expert-weight
+  reduces, every one `reduce-packed-row-blocked`, and no surviving
+  elementwise `BoundOp` whose output extents carry the materialized
+  `[.., feed_forward, embedding]`/`[.., embedding, feed_forward]` gathered-
+  product shape. PASSED (289.9 s -- dominated by quantizing three real
+  256-expert Q4_K stacks, not kernel time).
+- `cargo nextest run -p omega --features metal,instrument -j 4`: 313/313
+  passed, 12 skipped.
+- `cargo check -p proxima-model-interop --features metal,instrument --examples -j 4`:
+  clean; `cargo nextest run -p proxima-model-interop --features metal,instrument -E 'test(qwen35)'`:
+  20/20 passed.
+
+**Real model (`gguf_generate`, qwen35moe 22 GB Q4_K checkpoint, "What is the
+capital of France?", 16 tokens, gpu, `PROXIMA_TEMPERATURE=0
+PROXIMA_DISPATCH=concurrent PROXIMA_DEBUG_METAL_STAGES=1
+PROXIMA_METAL_OP_PROFILE_STEP=8`):**
+
+| arm | TTNT ms | gpu_exec ms (step 8) | encode_dispatch_calls (step 8) | packed-row op_count / bytes | cooperative op_count / bytes |
+|---|---|---|---|---|---|
+| baseline (ROW 542 Cell A, per-route) | 57.818 | 43.915 | 4,264 | 1,211 / (counter bogus) | 1,281 / 257 MB |
+| this slice (grouped gate/up, per-route down) | **76.364** | **82.104** | **4,744** | 651 / 83.77 GB | 1,191 / 256.4 MB |
+
+**Text:** `generated_text = "<think>\n\n</think>\n\nThe capital of France is
+**Paris**."` -- correct.
+
+**op_profile_kind step=8 (verbatim):**
+```
+op_profile_kind step=8 kind=constant op_count=427 gpu_ms=27.132 operand_bytes=0
+op_profile_kind step=8 kind=elementwise op_count=2063 gpu_ms=198.820 operand_bytes=378008240
+op_profile_kind step=8 kind=iota op_count=172 gpu_ms=14.727 operand_bytes=0
+op_profile_kind step=8 kind=reduce-cooperative op_count=1191 gpu_ms=298.614 operand_bytes=256409504
+op_profile_kind step=8 kind=reduce-generic-scalar op_count=240 gpu_ms=67.309 operand_bytes=5436800
+op_profile_kind step=8 kind=reduce-packed-row-blocked op_count=651 gpu_ms=237.632 operand_bytes=83768410112
+```
+
+**Result, not a verdict:** the packed-row-blocked op_count drop (1,211 ->
+651, a loss of 560) lands almost exactly on the brief's own prediction
+(1,211 - 560 = 651) -- the algebraic change did take the fast body for
+gate/up at the fewer, wider dispatch count expected. Cooperative bytes held
+at 256.4 MB (unchanged from the 257 MB baseline), so no new cooperative
+materialization was introduced. But total per-token GPU time roughly
+doubled (82.1 ms vs 43.9 ms) and `encode_dispatch_calls` rose (4,744 vs
+4,264) instead of falling toward the 400-expert-dispatch target -- fewer
+expert reduces did not translate into fewer or cheaper total dispatches.
+The `reduce-packed-row-blocked` bucket alone reports 83.77 GB of
+`operand_bytes` for 651 ops, roughly two orders of magnitude more than the
+per-route baseline's weight footprint (0.57 GB, ROW 538) -- each grouped
+gate/up dispatch now reads a wider row-blocked tile per selected expert than
+the per-route form's single-slab reads did, and that wider read is not
+explained further here; it is the residual this row leaves open.
+
+**Decision (owner's, not asserted here as settled):** TTNT 76.364 ms is not
+< the 57.7 ms baseline threshold this row was gated on. Per the pre-agreed
+decision rule, the change is reverted:
+`git revert --no-edit <perf commit sha>`. The pinned fixture tests, the
+census test, and this row stay on main as the record of what was measured
+and why it did not land -- the grouped-gate-up algebra itself is proven
+correct (bit-for-bit CPU parity, real qwen35moe-shaped packed-row admission)
+and available to re-attempt once the 83.77 GB packed-row read-amplification
+mechanism is traced.
