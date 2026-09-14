@@ -107,6 +107,15 @@ pub(crate) struct MetalOnlyExtras {
     /// non-unit render different literals baked into the row-base source
     /// text and must never share a cache entry.
     pub packed_row_block_direct_axis: Option<u16>,
+    /// The `(selected, out)` axis pair `push_packed_row_group_bases` used
+    /// for grouped two-axis direct addressing (ROW 545), when it found
+    /// exactly two non-unit output axes AND `out` divided evenly by the
+    /// codec's `rows_per_simdgroup` -- `None` when the generic decomposition
+    /// rendered instead. Both axis indices, not just a bool, for the same
+    /// reason [`Self::packed_row_block_direct_axis`] carries its axis: two
+    /// bindings sharing rank/`output_axes` but disagreeing on which axis is
+    /// "selected" vs "out" bake different literals into the row-base source.
+    pub packed_row_block_grouped_axes: Option<(u16, u16)>,
     /// The elementwise address specialization rendered by Metal: coordinate
     /// width and decoded axes plus one dense/strided bit per operand. Metal
     /// omits div/mod work for dense operands, so two stride layouts may emit
@@ -481,6 +490,12 @@ pub(crate) fn kernel_identity(
     if let Some(axis) = metal.packed_row_block_direct_axis {
         identity.push_str("_da");
         identity.push_str(&axis.to_string());
+    }
+    if let Some((selected_axis, out_axis)) = metal.packed_row_block_grouped_axes {
+        identity.push_str("_dg");
+        identity.push_str(&selected_axis.to_string());
+        identity.push('_');
+        identity.push_str(&out_axis.to_string());
     }
     if let Some(addressing) = metal.elementwise_addressing {
         identity.push_str(&addressing);
