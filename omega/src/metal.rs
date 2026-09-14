@@ -3266,6 +3266,21 @@ fn execute_plan_with_placements_inner(
         }
         let current_identity = block_identity_key(block);
         let resident = plan.resident_nodes.contains(node);
+        #[cfg(feature = "instrument")]
+        if let Some(previous_identity) = block_identity[index]
+            && previous_identity != current_identity
+        {
+            counter!(MAPPING_REBOUND_BLOCKS, 1);
+            debug!(
+                block_name = %plan.program[node.0 as usize].name().unwrap_or("<unnamed>"),
+                previous_pointer = previous_identity.0 as u64,
+                previous_length = previous_identity.1 as u64,
+                current_pointer = current_identity.0 as u64,
+                current_length = current_identity.1 as u64,
+                resident,
+                "mapping_rebound_block: block_identity_key disagreed with the prior step's"
+            );
+        }
         if block_buffer_reusable(resident, block_identity[index], current_identity)
             && device_buffers.contains_key(node)
         {
@@ -8443,6 +8458,15 @@ pub static PIPELINE_MISSES: Counter = Counter::new("omega.metal.pipeline_misses"
 pub static PIPELINE_COMPILE_TICKS: Counter = Counter::new("omega.metal.pipeline_compile_ticks");
 #[cfg(feature = "instrument")]
 pub static BLOCK_UPLOAD_CALLS: Counter = Counter::new("omega.metal.block_upload_calls");
+/// Counts a block-upload-loop position whose [`block_identity_key`] this step
+/// disagrees with what [`Plan::block_identity`] recorded for it last step --
+/// a REBIND, not a first-ever upload (`block_identity[index]` was already
+/// `Some`). ROW 551: the direct witness that [`block_buffer_reusable`]'s fast
+/// skip is missing every step for a resident weight block, forcing
+/// [`checkpoint_mapping_offset`] to re-bind it from the mmap every token
+/// instead of reusing the prior step's `device_buffers` entry.
+#[cfg(feature = "instrument")]
+pub static MAPPING_REBOUND_BLOCKS: Counter = Counter::new("omega.metal.mapping_rebound_blocks");
 #[cfg(feature = "instrument")]
 pub static EXPERT_SOURCE_STAGE_CALLS: Counter =
     Counter::new("omega.metal.expert_source_stage_calls");
@@ -8594,6 +8618,10 @@ pub struct MetalStageTotals {
     /// direct witness the 429,173,760-byte per-tensor copy this counter
     /// replaces never happens.
     pub mapping_offset_uploads: u64,
+    /// [`MAPPING_REBOUND_BLOCKS`]'s own per-step delta -- see that counter's
+    /// own doc. Zero on every step where `block_buffer_reusable` correctly
+    /// fast-skips every already-bound resident block.
+    pub mapping_rebound_blocks: u64,
     pub expert_mapping_candidate_uploads: u64,
     pub expert_mapping_missed_uploads: u64,
     /// CARD 6.5 census: [`OUTPUT_BUFFER_ALLOCATIONS`]'s own per-step delta --
@@ -8685,6 +8713,7 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         resident_uploads: RESIDENT_BUFFER_UPLOADS.snapshot_and_reset(),
         resident_reuses: RESIDENT_BUFFER_REUSES.snapshot_and_reset(),
         mapping_offset_uploads: MAPPING_OFFSET_UPLOADS.snapshot_and_reset(),
+        mapping_rebound_blocks: MAPPING_REBOUND_BLOCKS.snapshot_and_reset(),
         expert_mapping_candidate_uploads: EXPERT_MAPPING_CANDIDATE_UPLOADS.snapshot_and_reset(),
         expert_mapping_missed_uploads: EXPERT_MAPPING_MISSED_UPLOADS.snapshot_and_reset(),
         output_buffer_allocations: OUTPUT_BUFFER_ALLOCATIONS.snapshot_and_reset(),

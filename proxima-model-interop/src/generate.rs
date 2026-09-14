@@ -724,6 +724,8 @@ fn emit_token_breakdown_metal(
         resident_uploads = metal_stage.resident_uploads,
         resident_reuses = metal_stage.resident_reuses,
         mapping_offset_uploads = metal_stage.mapping_offset_uploads,
+        mapping_rebound_blocks = metal_stage.mapping_rebound_blocks,
+        mapping_residency_rung = crate::mapping_residency::active_residency_rung_str(),
         expert_mapping_candidate_uploads = metal_stage.expert_mapping_candidate_uploads,
         expert_mapping_missed_uploads = metal_stage.expert_mapping_missed_uploads,
         nocopy_cache_len = omega::metal::nocopy_cache_len() as u64,
@@ -761,7 +763,7 @@ fn emit_token_breakdown_metal(
     );
     if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
         eprintln!(
-            "token_breakdown_metal step={} prepare_ms={} emit_ms={} op_setup_ms={} encode_dispatch_calls={} encode_dispatch_ms={} readback_ms={} expert_source_cache_hits={} expert_source_cache_misses={} expert_source_cache_cold_misses={} expert_source_cache_replacement_misses={} expert_source_buffer_reuses={} expert_source_reuse_copy_bytes={} expert_source_reuse_copy_ms={} plan_handoff_reuses={} expert_source_cache_entries={} nocopy_cache_entries={} resident_cache_entries={} resident_cache_bytes={} block_upload_calls={} block_upload_ms={} block_copied_bytes={} block_nocopy_bound_bytes={} block_offset_bound_bytes={} mapping_offset_uploads={} expert_mapping_candidate_uploads={} expert_mapping_missed_uploads={} resident_uploads={} resident_reuses={} output_buffer_allocations={} output_buffer_allocated_bytes={} checkpoint_mapping_buffer_bytes={} expert_mapping_buffer_bytes={} plan_uniform_writes={} barriers={} barriers_raw={} barriers_waw={} barriers_war={} barriers_waw_war_arena_recycled={} barriers_waw_war_persistent={} plan_cache_len={} plan_hits={} plan_misses={} plan_arena_allocated_bytes={} segment_arena_allocated_bytes={} placed_arena_allocated_bytes={} gpu_exec_calls={} gpu_exec_ms={} phys_footprint_bytes={} device_allocated_bytes={}",
+            "token_breakdown_metal step={} prepare_ms={} emit_ms={} op_setup_ms={} encode_dispatch_calls={} encode_dispatch_ms={} readback_ms={} expert_source_cache_hits={} expert_source_cache_misses={} expert_source_cache_cold_misses={} expert_source_cache_replacement_misses={} expert_source_buffer_reuses={} expert_source_reuse_copy_bytes={} expert_source_reuse_copy_ms={} plan_handoff_reuses={} expert_source_cache_entries={} nocopy_cache_entries={} resident_cache_entries={} resident_cache_bytes={} block_upload_calls={} block_upload_ms={} block_copied_bytes={} block_nocopy_bound_bytes={} block_offset_bound_bytes={} mapping_offset_uploads={} mapping_rebound_blocks={} mapping_residency_rung={} expert_mapping_candidate_uploads={} expert_mapping_missed_uploads={} resident_uploads={} resident_reuses={} output_buffer_allocations={} output_buffer_allocated_bytes={} checkpoint_mapping_buffer_bytes={} expert_mapping_buffer_bytes={} plan_uniform_writes={} barriers={} barriers_raw={} barriers_waw={} barriers_war={} barriers_waw_war_arena_recycled={} barriers_waw_war_persistent={} plan_cache_len={} plan_hits={} plan_misses={} plan_arena_allocated_bytes={} segment_arena_allocated_bytes={} placed_arena_allocated_bytes={} gpu_exec_calls={} gpu_exec_ms={} phys_footprint_bytes={} device_allocated_bytes={}",
             step,
             ms(metal_stage.prepare_ticks),
             ms(metal_stage.emit_ticks),
@@ -787,6 +789,8 @@ fn emit_token_breakdown_metal(
             metal_stage.block_nocopy_bound_bytes,
             metal_stage.block_offset_bound_bytes,
             metal_stage.mapping_offset_uploads,
+            metal_stage.mapping_rebound_blocks,
+            crate::mapping_residency::active_residency_rung_str(),
             metal_stage.expert_mapping_candidate_uploads,
             metal_stage.expert_mapping_missed_uploads,
             metal_stage.resident_uploads,

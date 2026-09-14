@@ -66,7 +66,7 @@ pub struct ResidencyReport {
 /// evictor under memory pressure, so `mlock(2)` (the same whole-mapping lock
 /// llama.cpp's own `--mlock` flag takes) is the rung of last resort before
 /// giving up and returning [`InteropError::MappingNotResident`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum ResidencyRung {
     /// The first prefault + `mincore` pass already found every page resident.
@@ -85,6 +85,24 @@ impl ResidencyRung {
             ResidencyRung::Retry => "retry",
             ResidencyRung::Mlock => "mlock",
         }
+    }
+}
+
+/// The rung [`prove_resident`]'s last successful call resolved on --
+/// `Prefault` (0) until a load has actually run. `omega/src/metal.rs`'s
+/// `token_breakdown_metal` per-step line reads this through
+/// [`active_residency_rung_str`] so ROW 551's reproduction table can read the
+/// rung straight off the same log line as `mapping_rebound_blocks`, rather
+/// than cross-referencing a separate one-shot load-time log record.
+static ACHIEVED_RUNG: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// See [`ACHIEVED_RUNG`]'s own doc.
+#[must_use]
+pub fn active_residency_rung_str() -> &'static str {
+    match ACHIEVED_RUNG.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => ResidencyRung::Retry.as_str(),
+        2 => ResidencyRung::Mlock.as_str(),
+        _ => ResidencyRung::Prefault.as_str(),
     }
 }
 
@@ -165,19 +183,45 @@ fn probe_residency(bytes: &[u8]) -> Vec<i8> {
 /// pure control-flow function over an injected `attempt` so a unit test can
 /// drive the whole ladder with a fake residency probe -- no real mapping or
 /// syscall -- the same reason [`count_missing_pages`] is split out of
-/// [`probe_residency`] above.
-fn walk_residency_ladder<F>(mut attempt: F) -> (usize, ResidencyRung)
+/// [`probe_residency`] above. `start` skips every earlier rung outright (used
+/// by [`forced_start_rung`] to reproduce a specific rung deliberately,
+/// ROW 551's own reproduction harness) -- production always calls this with
+/// [`ResidencyRung::Prefault`].
+fn walk_residency_ladder<F>(start: ResidencyRung, mut attempt: F) -> (usize, ResidencyRung)
 where
     F: FnMut(ResidencyRung) -> usize,
 {
     let mut missing = 0;
     for rung in [ResidencyRung::Prefault, ResidencyRung::Retry, ResidencyRung::Mlock] {
+        if rung < start {
+            continue;
+        }
         missing = attempt(rung);
         if missing == 0 {
             return (0, rung);
         }
     }
     (missing, ResidencyRung::Mlock)
+}
+
+/// `PROXIMA_DEBUG_FORCE_RESIDENCY_RUNG=retry|mlock` skips [`prove_resident`]
+/// straight to that rung of the ladder, so ROW 551's reproduction harness can
+/// exercise the mlock rung deliberately instead of hoping a real evictor race
+/// lands it. Unset or unrecognized falls through to the normal
+/// [`ResidencyRung::Prefault`] start. `#[cfg(feature = "instrument")]`-gated:
+/// a reproduction knob has no business compiling into a default build.
+#[cfg(feature = "instrument")]
+fn forced_start_rung() -> ResidencyRung {
+    match std::env::var("PROXIMA_DEBUG_FORCE_RESIDENCY_RUNG").as_deref() {
+        Ok("retry") => ResidencyRung::Retry,
+        Ok("mlock") => ResidencyRung::Mlock,
+        _ => ResidencyRung::Prefault,
+    }
+}
+
+#[cfg(not(feature = "instrument"))]
+fn forced_start_rung() -> ResidencyRung {
+    ResidencyRung::Prefault
 }
 
 /// Best-effort `mlock(2)` over the whole mapping -- the ladder's last rung
@@ -233,7 +277,7 @@ pub fn prove_resident(bytes: &[u8]) -> Result<ResidencyReport, InteropError> {
     let mut residency: Vec<i8> = Vec::new();
     let mut first_error: Option<InteropError> = None;
 
-    let (missing_pages, rung) = walk_residency_ladder(|rung| {
+    let (missing_pages, rung) = walk_residency_ladder(forced_start_rung(), |rung| {
         if first_error.is_some() {
             return count_missing_pages(&residency);
         }
@@ -285,6 +329,7 @@ pub fn prove_resident(bytes: &[u8]) -> Result<ResidencyReport, InteropError> {
             bytes_total,
         });
     }
+    ACHIEVED_RUNG.store(rung as u8, std::sync::atomic::Ordering::Relaxed);
     Ok(ResidencyReport {
         prefault_ms,
         resident_pages,
@@ -364,7 +409,7 @@ mod tests {
     #[test]
     fn walk_residency_ladder_stops_at_prefault_when_it_already_resolves_everything() {
         let mut calls = Vec::new();
-        let (missing, rung) = walk_residency_ladder(|rung| {
+        let (missing, rung) = walk_residency_ladder(ResidencyRung::Prefault, |rung| {
             calls.push(rung);
             0
         });
@@ -380,7 +425,7 @@ mod tests {
     #[test]
     fn walk_residency_ladder_falls_through_to_mlock_when_earlier_rungs_still_have_holes() {
         let mut calls = Vec::new();
-        let (missing, rung) = walk_residency_ladder(|rung| {
+        let (missing, rung) = walk_residency_ladder(ResidencyRung::Prefault, |rung| {
             calls.push(rung);
             match rung {
                 ResidencyRung::Prefault => 42,
@@ -401,7 +446,7 @@ mod tests {
     /// -- this is what `prove_resident` turns into `MappingNotResident`.
     #[test]
     fn walk_residency_ladder_reports_the_residual_when_mlock_still_has_holes() {
-        let (missing, rung) = walk_residency_ladder(|_rung| 3);
+        let (missing, rung) = walk_residency_ladder(ResidencyRung::Prefault, |_rung| 3);
         assert_eq!(missing, 3);
         assert_eq!(rung, ResidencyRung::Mlock);
     }
