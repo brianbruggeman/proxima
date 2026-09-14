@@ -133,9 +133,13 @@ mlx-gdn = ["metal", "omega/mlx-gdn"]
 # Default-off passthrough to `omega/metal-horizontal-merge` (plan-time
 # grouping of independent same-identity packed-row matvec dispatches -- see
 # that flag's own doc in `omega/Cargo.toml`). Deliberately NOT in `metal`'s
-# list above: the grouping this flag turns on is resolve_steps-side only
-# today and has no encode-side consumer yet, so there is nothing for a
-# default build to gain by enabling it.
+# list above: the encode-side consumer landed and is proven correct
+# (`omega/tests/horizontal_merge_dispatch.rs`, ROW 570) but a real
+# qwen35moe decode run shows `encode_dispatch_calls` byte-identical on vs
+# off (2,704 every step) -- the model's MoE experts route through
+# `execute_plan_named_with_placements_and_expert_sources`'s gather/expert-
+# source shape, which never forms a `group_mergeable_positions` candidate,
+# so there is nothing for a default build to gain by enabling it today.
 metal-horizontal-merge = ["metal", "omega/metal-horizontal-merge"]
 # Cross-platform GPU serving through omega's wgpu driver.  The existing
 # serving/runtime code is intentionally shared with the Metal path; on Linux
