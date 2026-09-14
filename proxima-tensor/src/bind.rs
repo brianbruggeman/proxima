@@ -140,19 +140,13 @@ pub struct Lookup {
 
 type BoundOperands = Vec<(NodeId, Layout, Option<Lookup>)>;
 
-/// Capacity for one [`BoundOpBuilder::push`] call's ready batch. The shallow
-/// case is arity-bounded: an elementwise push materializes at most one
-/// [`BoundOp`] per operand that fails to fuse ([`ScalarOp::arity`]'s current
-/// maximum, `Select`, 3), and a reduce push materializes at most one held
-/// predecessor plus the reduce's own op (2). [`BoundOpBuilder::materialize_node`]'s
-/// Metal 31-buffer-ABI cascade is NOT arity-bounded, though: it recursively
-/// materializes however many still-held ancestors it takes to bring one
-/// node's buffer count back under 31, so a deep held chain (a routed MoE
-/// block's grouped `append_moe_ffn`, real qwen3moe shape) can ready more
-/// than `arity + 1` `BoundOp`s from a single push. `push` and
-/// `materialize_if_held` return [`TensorError::NotLowerable`] rather than
-/// overflow this if a chain ever cascades past the measured capacity in
-/// [`crate::sized::READY_BATCH_CAPACITY`]'s own doc.
+/// Capacity for one [`BoundOpBuilder::push`] call's ready batch. An
+/// elementwise push materializes at most one [`BoundOp`] per operand that
+/// fails to fuse, bounded by [`ScalarOp::arity`]'s current maximum
+/// (`Select`, 3); a reduce push materializes at most one held predecessor
+/// plus the reduce's own op (2). `push` and `materialize_if_held` return
+/// [`TensorError::NotLowerable`] rather than overflow this if a future
+/// higher-arity `ScalarOp` variant is ever added.
 pub use crate::sized::READY_BATCH_CAPACITY;
 
 /// The batch [`BoundOpBuilder::push`] readies for one `Op`: [`Pipe::Out`]
@@ -846,11 +840,8 @@ impl BoundOpBuilder {
     /// expression can read it, so a single push can ready both that
     /// standalone op and the current expression's own — and, for an
     /// elementwise expression, one materialization per operand that fails to
-    /// fuse, up to [`ScalarOp::arity`]'s current maximum — or, when a held
-    /// operand's own chain exceeds Metal's 31-buffer ABI, however many
-    /// cascaded ancestor materializations bringing it back under that limit
-    /// takes (see [`READY_BATCH_CAPACITY`]'s own doc). Bounded by
-    /// `READY_BATCH_CAPACITY` either way.
+    /// fuse, up to [`ScalarOp::arity`]'s current maximum
+    /// (`READY_BATCH_CAPACITY`).
     pub fn push(&self, expr: &Op, shapes: &Shapes) -> Result<ReadyBatch, TensorError> {
         let node = NodeId(self.position.get());
         self.position.set(self.position.get() + 1);
