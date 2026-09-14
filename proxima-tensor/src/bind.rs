@@ -2853,6 +2853,7 @@ fn cached_attention_candidates(
     shapes: &Shapes,
     resolved: &[BoundOp],
     effective_outputs: &[NodeId],
+    require_output_resolved: bool,
 ) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
     let mut candidates = Vec::new();
     // resolved once: every caller supplies this leaf unconditionally
@@ -2903,18 +2904,43 @@ fn cached_attention_candidates(
             continue;
         };
         if cached_score_parts[1] != new_score_parts[1] {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "score_denominator_mismatch",
+                "cached_attention decline -- cached/new score denominators diverge"
+            );
             continue;
         }
         let new_masked = new_score_parts[0];
         let Some(mask_parts) = elementwise_operands(program, new_masked, ScalarOp::Select) else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "mask_select_shape",
+                "cached_attention decline -- new score is not a Select mask node"
+            );
             continue;
         };
         let [(mask, _), (negative_infinity, _), (new_scaled, _)] = mask_parts else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "mask_select_arity",
+                "cached_attention decline -- mask Select does not carry exactly 3 operands"
+            );
             continue;
         };
         if !is_exact_causal_mask(program, *mask)
             || constant_value(program, *negative_infinity) != Some(f32::NEG_INFINITY)
         {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "mask_form",
+                is_causal = is_exact_causal_mask(program, *mask),
+                "cached_attention decline -- mask is not the exact causal form"
+            );
             continue;
         }
         // qwen35's own chain masks cached-range padding with a `Select`
@@ -2930,42 +2956,96 @@ fn cached_attention_candidates(
         let Some(cached_scaled_parts) =
             binary_elementwise(program, cached_scaled_source, ScalarOp::Multiply)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "cached_scale_shape",
+                "cached_attention decline -- cached padding-unwrapped score is not a scale Multiply"
+            );
             continue;
         };
         let scale = cached_scaled_parts[1];
         let Some(new_scaled_parts) = binary_elementwise(program, *new_scaled, ScalarOp::Multiply)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "new_scale_shape",
+                "cached_attention decline -- masked new score is not a scale Multiply"
+            );
             continue;
         };
         if new_scaled_parts[1] != scale {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "scale_mismatch",
+                "cached_attention decline -- cached and new score use different scale constants"
+            );
             continue;
         }
         let Some((query_even_grouped, query_odd_grouped, cached_key_even, cached_key_odd, cached_pass)) =
             attention_score_sources(program, cached_scaled_source, scale)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "cached_score_sources",
+                "cached_attention decline -- cached score does not decompose into the qwen35 q.k score-source shape"
+            );
             continue;
         };
         let Some((new_query_even_grouped, new_query_odd_grouped, new_key_even, new_key_odd, new_pass)) =
             attention_score_sources(program, *new_scaled, scale)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "new_score_sources",
+                "cached_attention decline -- new score does not decompose into the qwen35 q.k score-source shape"
+            );
             continue;
         };
         if new_query_even_grouped != query_even_grouped
             || new_query_odd_grouped != query_odd_grouped
         {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "query_identity_mismatch",
+                "cached_attention decline -- cached and new score read different query nodes"
+            );
             continue;
         }
         let Some(query_even_parts) =
             binary_elementwise(program, query_even_grouped, ScalarOp::Multiply)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "query_even_group_shape",
+                "cached_attention decline -- grouped query-even is not a Multiply (group broadcast) node"
+            );
             continue;
         };
         let Some(query_odd_parts) =
             binary_elementwise(program, query_odd_grouped, ScalarOp::Multiply)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "query_odd_group_shape",
+                "cached_attention decline -- grouped query-odd is not a Multiply (group broadcast) node"
+            );
             continue;
         };
         if query_even_parts[1] != query_odd_parts[1] {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "group_broadcast_mismatch",
+                "cached_attention decline -- query-even/odd use different group-broadcast operands"
+            );
             continue;
         }
         let query_even = query_even_parts[0];
@@ -2975,19 +3055,45 @@ fn cached_attention_candidates(
         // (`spec.rs:4910-4927,5035-5049`), so a mismatch here means this
         // program is not that shape.
         if cached_pass.is_some() != new_pass.is_some() {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "pass_presence_mismatch",
+                cached_has_pass = cached_pass.is_some(),
+                new_has_pass = new_pass.is_some(),
+                "cached_attention decline -- pass plane present on one side of cached/new score only"
+            );
             continue;
         }
         let pass = match (cached_pass, new_pass) {
             (Some((cached_query_pass_grouped, cached_key_pass)), Some((new_query_pass_grouped, new_key_pass))) => {
                 if cached_query_pass_grouped != new_query_pass_grouped {
+                    #[cfg(feature = "instrument")]
+                    debug!(
+                        node = output.0,
+                        stage = "pass_query_identity_mismatch",
+                        "cached_attention decline -- cached and new score read different pass-plane query nodes"
+                    );
                     continue;
                 }
                 let Some(query_pass_parts) =
                     binary_elementwise(program, cached_query_pass_grouped, ScalarOp::Multiply)
                 else {
+                    #[cfg(feature = "instrument")]
+                    debug!(
+                        node = output.0,
+                        stage = "pass_query_group_shape",
+                        "cached_attention decline -- grouped pass-plane query is not a Multiply (group broadcast) node"
+                    );
                     continue;
                 };
                 if query_pass_parts[1] != query_even_parts[1] {
+                    #[cfg(feature = "instrument")]
+                    debug!(
+                        node = output.0,
+                        stage = "pass_group_broadcast_mismatch",
+                        "cached_attention decline -- pass-plane query uses a different group-broadcast operand than q_even"
+                    );
                     continue;
                 }
                 Some((query_pass_parts[0], cached_key_pass, new_key_pass))
@@ -2997,26 +3103,56 @@ fn cached_attention_candidates(
         let Some(cached_value_source) =
             reduced_source(program, attended_parts[0], ScalarOp::Add, ReduceInit::Zero)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "cached_value_reduce_shape",
+                "cached_attention decline -- cached attended-value term is not a zero-init Add reduce"
+            );
             continue;
         };
         let Some(new_value_source) =
             reduced_source(program, attended_parts[1], ScalarOp::Add, ReduceInit::Zero)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "new_value_reduce_shape",
+                "cached_attention decline -- new attended-value term is not a zero-init Add reduce"
+            );
             continue;
         };
         let Some(cached_value_product) =
             binary_elementwise(program, cached_value_source, ScalarOp::Multiply)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "cached_value_product_shape",
+                "cached_attention decline -- cached value-weight term is not a Multiply node"
+            );
             continue;
         };
         let Some(new_value_product) =
             binary_elementwise(program, new_value_source, ScalarOp::Multiply)
         else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "new_value_product_shape",
+                "cached_attention decline -- new value-weight term is not a Multiply node"
+            );
             continue;
         };
         let cached_value = cached_value_product[1];
         let new_value = new_value_product[1];
         if cached_value_product[0] != cached_weights || new_value_product[0] != new_weights {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "value_weight_identity_mismatch",
+                "cached_attention decline -- value product does not multiply against this branch's own softmax weight"
+            );
             continue;
         }
         let mut source_nodes = alloc::vec![
@@ -3039,10 +3175,25 @@ fn cached_attention_candidates(
                 .flat_map(|bound| bound.operands().iter())
                 .find(|(node, _, _)| node == source)
             else {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "source_not_found",
+                    source = source.0,
+                    "cached_attention decline -- a score/value source node is not an operand of any resolved op"
+                );
                 operands.clear();
                 break;
             };
             if lookup.is_some() || layout.strides.iter().any(|stride| *stride < 0) {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "source_indirect_or_negative_stride",
+                    source = source.0,
+                    has_lookup = lookup.is_some(),
+                    "cached_attention decline -- a score/value source is gathered indirectly or carries a negative stride"
+                );
                 operands.clear();
                 break;
             }
@@ -3052,6 +3203,12 @@ fn cached_attention_candidates(
             continue;
         }
         let Some(scale_value) = constant_value(program, scale) else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "scale_not_constant",
+                "cached_attention decline -- the score scale operand is not a compile-time constant"
+            );
             continue;
         };
         let query_shape = shapes.of(query_even_grouped);
@@ -3094,9 +3251,18 @@ fn cached_attention_candidates(
             || new_value_shape[2] != total_head_dim
             || shapes.of(output) != [query_shape[0], query_shape[1], query_shape[2], total_head_dim]
         {
-            std::eprintln!(
-                "DEBUG decline output={} stage=shape_checks query_shape={:?} cached_key_shape={:?} new_key_shape={:?} cached_value_shape={:?} new_value_shape={:?} total_head_dim={} output_shape={:?}",
-                output.0, query_shape, cached_key_shape, new_key_shape, cached_value_shape, new_value_shape, total_head_dim, shapes.of(output)
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "shape_checks",
+                ?query_shape,
+                ?cached_key_shape,
+                ?new_key_shape,
+                ?cached_value_shape,
+                ?new_value_shape,
+                total_head_dim,
+                output_shape = ?shapes.of(output),
+                "cached_attention decline -- query/key/value/output shapes do not agree on kv_heads/head_dim"
             );
             continue;
         }
@@ -3130,10 +3296,15 @@ fn cached_attention_candidates(
             || operands[6].1.strides.as_slice() != value_strides
             || operands[7].1.strides.as_slice() != value_strides
         {
-            std::eprintln!(
-                "DEBUG decline output={} stage=base_strides want_query={query_strides:?} want_key={key_strides:?} want_value={value_strides:?} got={:?}",
-                output.0,
-                operands[..8].iter().map(|(_, layout, _)| layout.strides.clone()).collect::<Vec<_>>()
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "base_strides",
+                ?query_strides,
+                ?key_strides,
+                ?value_strides,
+                got = ?operands[..8].iter().map(|(_, layout, _)| layout.strides.clone()).collect::<Vec<_>>(),
+                "cached_attention decline -- the base 8 operands do not carry the fused kernel's assumed GEMM strides"
             );
             continue;
         }
@@ -3166,10 +3337,16 @@ fn cached_attention_candidates(
                 || operands[9].1.strides.as_slice() != pass_key_strides
                 || operands[10].1.strides.as_slice() != pass_key_strides
             {
-                std::eprintln!(
-                    "DEBUG decline output={} stage=pass_strides want_query={pass_query_strides:?} want_key={pass_key_strides:?} got={:?} cached_key_pass_shape={cached_key_pass_shape:?} new_key_pass_shape={new_key_pass_shape:?}",
-                    output.0,
-                    operands[8..11].iter().map(|(_, layout, _)| layout.strides.clone()).collect::<Vec<_>>()
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "pass_strides",
+                    ?pass_query_strides,
+                    ?pass_key_strides,
+                    got = ?operands[8..11].iter().map(|(_, layout, _)| layout.strides.clone()).collect::<Vec<_>>(),
+                    ?cached_key_pass_shape,
+                    ?new_key_pass_shape,
+                    "cached_attention decline -- the pass-plane operands do not carry the fused kernel's assumed strides"
                 );
                 continue;
             }
@@ -3209,9 +3386,21 @@ fn cached_attention_candidates(
         }
         let absorbed = removable_attention_dependencies(program, &dependencies, output);
         if absorbed.is_empty() {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "no_removable_dependencies",
+                "cached_attention decline -- no intermediate ops become dead once this fusion absorbs its sources"
+            );
             continue;
         }
-        if !resolved.iter().any(|bound| bound.node == output) {
+        if require_output_resolved && !resolved.iter().any(|bound| bound.node == output) {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "output_not_resolved",
+                "cached_attention decline -- the candidate output node has no resolved binding"
+            );
             continue;
         }
         // Every caller of `mistral_cached_forward_program_with_experts`
@@ -3266,6 +3455,14 @@ fn cached_attention_candidates(
                 new_upper_inclusive: 0,
             },
         };
+        #[cfg(feature = "instrument")]
+        debug!(
+            node = output.0,
+            require_output_resolved,
+            kv_heads = query_shape[1],
+            head_dim = total_head_dim,
+            "cached_attention candidate accepted"
+        );
         candidates.push((fused, absorbed));
     }
     candidates
@@ -4361,7 +4558,14 @@ fn bind_cached_attention_fusion(
         if !fuse_cached_attention {
             return Ok(built);
         }
-        let mut initial_candidates = cached_attention_candidates(program, shapes, &built, outputs);
+        // `false`: this discovery pass finds anchors `bind_plain` has already
+        // folded into their single consumer (qwen35's own `attended` tap,
+        // `bind.rs:993`'s `elementwise_operand_fuse`) precisely so their node
+        // id can be pinned into `planning_outputs` below and survive the
+        // rebuild -- requiring a resolved binding here would make discovery
+        // depend on the very materialization it exists to produce.
+        let mut initial_candidates =
+            cached_attention_candidates(program, shapes, &built, outputs, false);
         initial_candidates.extend(cached_attention_single_range_candidates(
             program, shapes, &built, outputs,
         ));
@@ -4381,6 +4585,18 @@ fn bind_cached_attention_fusion(
             let BoundOpKind::CachedAttention { operands, .. } = &fused.kind else {
                 continue;
             };
+            // the anchor itself (qwen35's own `attended` tap, single-consumer
+            // into the per-head gate multiply) must be pinned alongside its
+            // sources -- `bind_plain`'s single-consumer elementwise fusion
+            // folds an unrequested single-consumer node into its consumer
+            // before this function ever sees it (`bind.rs:993`'s own
+            // `elementwise_operand_fuse`), so without this the anchor never
+            // gets a standalone `BoundOp` for the second pass below to find
+            // (`qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer`'s
+            // own comment names the same requirement for its fixture's outputs).
+            if !planning_outputs.contains(&fused.node) {
+                planning_outputs.push(fused.node);
+            }
             for (source, _, _) in operands {
                 if !planning_outputs.contains(source) {
                     planning_outputs.push(*source);
@@ -4388,7 +4604,7 @@ fn bind_cached_attention_fusion(
             }
         }
         let rebuilt = bind_plain(program, shapes, &planning_outputs, numeric_policy)?;
-        let mut candidates = cached_attention_candidates(program, shapes, &rebuilt, outputs);
+        let mut candidates = cached_attention_candidates(program, shapes, &rebuilt, outputs, true);
         candidates.extend(cached_attention_single_range_candidates(
             program, shapes, &rebuilt, outputs,
         ));
@@ -6216,6 +6432,69 @@ mod tests {
         }
     }
 
+    /// The real forward-pass builder (`program.rs`'s own qwen35moe caller)
+    /// never requests `taps.attended` as an output -- only `residual1` and
+    /// the four cache-write roots survive into the next layer/decode step --
+    /// so this test drops `taps.attended` from `outputs` relative to
+    /// [`qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer`]'s
+    /// own list, reproducing the exact shape ROW 563's real-checkpoint
+    /// telemetry captured (`node=1288 elementwise_operand_fuse decision=fused
+    /// into=1294`, immediately followed by every full-attention layer's
+    /// `cached_attention decline ... stage=output_not_resolved`). Before
+    /// `bind_cached_attention_fusion`'s own `planning_outputs` loop pinned a
+    /// discovered candidate's anchor node (`fused.node`) alongside its
+    /// source operands, this exact `outputs` list produced
+    /// `fused_attention_count == 0` on this fixture.
+    #[test]
+    #[cfg(feature = "cached-attention-streaming")]
+    fn qwen35_partial_rotary_cached_attention_fuses_without_pinning_the_attended_tap() {
+        let (program, residual1, taps, inputs, shapes) = qwen35_partial_rotary_attention_fixture();
+        let outputs = alloc::vec![
+            residual1,
+            taps.rotated_k_new_first,
+            taps.rotated_k_new_second,
+            taps.k_pass,
+            taps.v_new,
+        ];
+
+        let fused = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("fused bind succeeds");
+        let fused_attention_count = fused
+            .iter()
+            .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+            .count();
+        assert_eq!(
+            fused_attention_count, 1,
+            "the qwen35 partial-rotary chain must fuse into exactly one \
+             cached-attention op even when only the real forward pass's own \
+             outputs are requested"
+        );
+
+        let unfused = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+            .expect("plain bind succeeds");
+        let unfused_outputs = run_resolved(program.len(), &unfused, inputs.clone());
+        let fused_outputs = run_resolved(program.len(), &fused, inputs);
+        let expected = unfused_outputs[residual1.0 as usize]
+            .as_ref()
+            .expect("unfused layer output computes");
+        let actual = fused_outputs[residual1.0 as usize]
+            .as_ref()
+            .expect("fused layer output computes");
+        for (index, (&expected_value, &actual_value)) in
+            expected.iter().zip(actual.iter()).enumerate()
+        {
+            let (expected_value, actual_value) =
+                (f64::from(expected_value), f64::from(actual_value));
+            let relative_error =
+                (expected_value - actual_value).abs() / expected_value.abs().max(1.0);
+            assert!(
+                relative_error <= 1e-5,
+                "residual1[{index}] fused vs unfused: expected={expected_value} actual={actual_value} \
+                 relative_error={relative_error}"
+            );
+        }
+    }
+
     /// Every tap [`qwen35_dense_attention_f64_reference`] computes, in the
     /// order [`crate::spec::append_qwen35_dense_attention_only_with_taps`]
     /// builds them -- the order this row's own per-tap divergence search
@@ -6675,7 +6954,7 @@ mod tests {
 
         let resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
             .expect("plain bind still succeeds on the perturbed program");
-        let candidates = cached_attention_candidates(&program, &shapes, &resolved, &outputs);
+        let candidates = cached_attention_candidates(&program, &shapes, &resolved, &outputs, true);
         assert!(
             candidates.is_empty(),
             "a perturbed pass-plane product must not still match the qwen35 fusion"
