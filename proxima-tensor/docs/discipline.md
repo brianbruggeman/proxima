@@ -30512,3 +30512,165 @@ recorder + 5ms drain pump: the `instrument`-gated `info!`/`debug!` calls in
 `generate.rs` (including this gate's own `mapping_prefault_ms` line) were
 silent no-ops in this example before this session -- no recorder had ever
 been installed for it, so `RUST_LOG` alone was doing nothing.
+
+## ROW 536 -- the token on a correct forward: 43 ms of GPU, per-expert dispatch pairs
+
+Instrumented release build on main (5b00105a), France, 16 tokens,
+`dispatch=concurrent`, Ollama not resident, logs `scratch/row535b/`,
+`scratch/row536/`. Step 8 (`token_breakdown_*`, verbatim in
+`scratch/row535b/`): wall 58.66 = evaluate 55.75 + append 0.65 + greedy
+0.19 + weights 0.07 + kv 0.06; inside evaluate: **gpu_exec 42.99**,
+op_setup 2.84, encode_dispatch 4.50 over 4,834 calls, readback 0.075,
+barriers 3,523, plan_hits 21 / misses 2, output_buffer_allocations 0,
+placed_arena 66.9 MB, device_allocated 24.23 GB, phys_footprint 567 MB.
+
+Read against ROW 530 (38.2 ms wall, gpu_exec 7.62 on the ZEROED forward of
+ROW 533): the host removals landed (readback 5.85 → 0.08, append 4.82 →
+0.65, greedy 2.75 → 0.19, weights/kv 0.9 → 0.13), and the residual host
+term is ~12.8 ms (op_setup + encode + ~5.4 unattributed). The GPU term is
+not 7.6 but 43.0: the zeroed forward routed every layer to experts 0..7,
+so the 7.6 ms measured a token whose expert pages never changed. With real
+routing the GPU term alone is 2.5x Ollama's whole token (17.4).
+
+Per-kind profile at step 8 (`PROXIMA_METAL_OP_PROFILE_STEP=8`, one command
+buffer per op, so absolute ms carry the per-op buffer floor and are NOT the
+in-buffer split; the counts and the ordering are what this row records):
+
+| kind | ops | serialized ms |
+|---|---|---|
+| reduce-packed-row-blocked | 1,211 | 300.1 |
+| reduce-cooperative | 1,281 | 274.4 |
+| elementwise | 1,593 | 152.7 |
+| reduce-generic-scalar | 270 | 76.6 |
+| iota + constant | 479 | 33.6 |
+
+Codec split: Q4_K 841 ops, Q6_K 371, none 3,622; variant q4k-ggml-port
+840. 1,211 packed reduces ≈ 30 per layer = 24 routed-expert matrices (8
+experts × gate/up/down) + 6 trunk projections; the ~960 per-expert
+`gathered_expert_product` multiplies (`proxima-tensor/src/spec.rs:1570-
+1602`, output `[s, d_in, d_out]`) sit in the elementwise bucket as their
+own dispatches. Whether each such product is MATERIALIZED (4 MB f32 per
+expert matrix, ~7.7 GB of intermediate traffic per token ≈ 38 ms at 200
+GB/s -- the size of the GPU term) or absorbed into its reduce is the
+question the grouped-product slice answers by reading `bind.rs` and by the
+gpu_exec delta; llama's `mul_mv_id` reads only the 0.57 GB of routed weight
+bytes. Serial slices on main from here (owner: no worktrees, one at a time):
+grouped expert product → GDN fused kind on the real program + Metal kernel →
+fused attention on the dense layers → prefill of M positions → bounded arm.
+
+## ROW 537 -- grouped expert product as landed (10bac25a) is a regression: the product is materialized
+
+`perf(tensor): one grouped expert product for gate, up and down` (10bac25a,
+main): `MoeProjectionStrategy`/`PerRoute` deleted, gate/up/down each one
+`grouped_gathered_expert_product` + reduce over the k routed experts;
+proxima-tensor 626/626, omega 311/311, pinned per-route fixture ≤ 1e-6;
+also fixed a bind capacity regression the grouped chain exposed
+(`READY_BATCH_CAPACITY` 4 → 8, `sized.rs:74-87`: `materialize_node`'s
+31-buffer cascade, `bind.rs:1161-1219`, is not bounded by ScalarOp arity as
+its doc claimed).
+
+Measured (`scratch/row537/`, instrumented release, France 16 tokens,
+concurrent, Ollama not resident, 81% free): TTNT **66.5 ms** (R1 66.46, R2
+66.64; was 59.7), 15.0 tok/s; step-8 profile 5,274 ops (was 4,834):
+`reduce-packed-row-blocked` **331** (was 1,211), `reduce-cooperative` 1,321
+with operand_bytes **9,066,087,624** (was 257 MB), `elementwise` 2,153 (was
+1,593), `constant` 897 (was 257), `iota` 302, generic-scalar 270. Text
+correct.
+
+Mechanism (read, then measured): the grouped weight operand is an
+`IndexMap::Computed` gather with single-term axes (`spec.rs:1631-1651`);
+the packed-matmul admission (`bind.rs:1535-1573` looks for a multi-term
+composed axis; `cpu.rs:6279-6318`; the Metal packed classification) does
+not recognize it, so the `[s,k,d_in,d_out]` f32 product (8 × 2048 × 512 ×
+4 B ≈ 33.5 MB per matrix per layer, ~4 GB per token written and read back)
+is MATERIALIZED and reduced by the generic cooperative body -- the 9 GB of
+cooperative operand bytes. The per-route form had been admitted to the
+packed-row body (its gathered operand looks like the dense matvec's). So
+the shape is right and the lowering is wrong: the routed product must be
+the packed matvec with `ids[k] * expert_stride` as the row-block base
+(`push_cooperative_gather_fetch`, `msl.rs:3605-3632`), one dispatch per
+matrix, weight bytes only -- admission fix in flight; if it does not beat
+59.7 ms in budget, 10bac25a is reverted so main does not regress.
+
+## ROW 538 -- two lowerings of the grouped product measured, both lose; reverted, fixes kept default-off
+
+Main history: 10bac25a grouped product → a38c983a revert → fbfcdc3b
+`fix(omega): gathered packed-row kernel fetches each selected expert row
+once` (the `metal-gathered-packed-row` feature's `classify_packed_row_block`
+no longer collapses `token_axes`; `weight_expert_base[s]` gathered once per
+token slot in `push_packed_row_multi_row_body`, `msl.rs:5686-5698`; bytes
+test 8 × 512 row reads for selected = 8; 312/312 omega) → a8bba74d re-land
+→ fc0d0f96 revert. Net: main's default path = ROW 535 (59.7 ms); the
+grouped algebra is off; the lowering fix and the interop forwarding
+(`proxima-model-interop/Cargo.toml:174`) are on main, default-off.
+
+| arm (France, 16 tokens, concurrent, instrumented) | TTNT ms | gpu_exec ms | ops | packed ops / bytes | cooperative ops / bytes | logs |
+|---|---|---|---|---|---|---|
+| per-route (baseline, ROW 535) | 59.7 | 43.0 | 4,834 | 1,211 / (counter bogus) | 1,281 / 257 MB | row535b |
+| grouped, no feature (10bac25a) | 66.5 | -- | 5,274 | 331 / 13.3 GB | 1,321 / 9.07 GB | row537 |
+| grouped + `metal-gathered-packed-row` BEFORE fbfcdc3b | 80.8 | -- | -- | 371 / 22.1 GB | 1,281 / 257 MB | slice-d1b |
+| grouped + feature AFTER fbfcdc3b (a8bba74d) | 201.2 | 181.5 | 5,274 | 331 / 13.3 GB | 1,321 / 9.07 GB | slice-d1d |
+
+Read: the last arm's kind counts are IDENTICAL to the no-feature arm, so on
+the real program the feature's classifier never took the grouped op -- the
+product is still materialized and reduced cooperatively (9 GB) -- and the
+generic multi-row body that fbfcdc3b routes gathered ops through (Q4_K
+fast path disabled for gathered weights) made whatever it did catch 4x
+slower. The design note's "already address-based, no emitter change" claim
+(ROW 531 §1 of `expert-product-mul-mv-id.md`) held only for its synthetic
+shapes. The per-route form is admitted to the fast packed body but as 960
+dispatches of one 0.59 MB slab each, ≈16 GB/s effective over the 0.57 GB of
+routed weights (43 ms − the 7.6 ms the zeroed forward showed for the same
+dispatch list, ROW 530/536).
+
+Next lowering (one slice): the grouped op at decode (s = 1, shape
+`[1, k, d_in, d_out]` reduced over `d_in`) lowers to the SAME single-row
+fast packed body the per-route dispatches use (`push_packed_row_blocked_body`
+with the ggml-port Q4_K/Q6_K bodies), with the selected axis as the
+dispatch grid's z and ONE `weight_expert_base = ids[z] * expert_stride`
+computed per threadgroup -- eight dense matvecs in one grid, exactly
+llama's `mul_mv_id`. Proof = kernel identity/classify shows the fast body,
+bytes = k × slab, then the real-model TTNT.
+
+Fifth attempt (14cf5921): `composed_packed_product_activation`
+(`bind.rs:1550-1567`) now admits Computed-gather operands as packed (kept,
+inert on the per-route graph), but a second structural gate inside
+`classify_packed_row_block` (`msl.rs:2676-2734`) still returns
+`reduce-cooperative` for the real shape with or without the feature
+(`omega/src/metal.rs:5895-6062`, ignored probe test); re-land reverted
+(739fca8e). Thread parked: the grouped lowering needs that gate named
+first.
+
+## ROW 539 -- barriers by hazard class: 83% RAW; the token is a serial chain of 4,834 dispatches
+
+`feat(omega): count barriers by hazard class and arena reuse` (ad050c36):
+`HazardTracker::classify` (`metal.rs:2666-2679`), `BufferArena::
+slot_is_recycled` (`metal.rs:10420`), five `instrument` counters surfaced
+in `token_breakdown_metal`; unit test with one RAW and one arena WAR. One
+instrumented step (`scratch/row539/run1.log:802`, concurrent, France,
+text `Paris`, TTNT 59.64):
+
+`barriers=3523 barriers_raw=2913 barriers_waw=0 barriers_war=610
+barriers_waw_war_arena_recycled=610 barriers_waw_war_persistent=0`
+
+RESULT: 82.7% of barriers are true dataflow edges; every false edge (610)
+is an arena slot reuse, so liveness-aware slot assignment caps at −17% of
+barriers and cannot make the 960 expert matvecs overlap. The graph itself
+is serial: gpu_exec 43.0 ms over 4,834 dispatches ≈ 8.9 µs per dispatch,
+which is the launch-plus-drain floor of a dependent chain on this device,
+not a bandwidth number (the routed weight bytes, 0.57 GB, would take 1.5
+ms at the ROW 302 ceiling). Cross-check against the incumbent: llama.cpp's
+≈2,000 dispatches per token (ROW 531, derived) at 17.4 ms is ≈8.7 µs per
+dispatch -- the same floor. CONCLUSION (across ROW 530/536/539): at this
+model's shape both runtimes are dispatch-count bound; proxima is 2.4x
+slower because it issues 2.4x the dispatches. The lever is op count, in
+this order of ops per token: GDN mixer 30 layers × ~40 (fused kind exists
+on main: `BoundOpKind::GatedDeltaNet`, matcher must take the real
+program's squeeze reduce + natural operand order, then the Metal kernel);
+MoE routing 40 × 55 (k argmax rounds → one top-k kind, ROW 531 design §2)
+and 40 × 24 expert products (→ 3 per layer once the grouped lowering's
+second gate is named); dense attention 10 × 72 (→ one CachedAttention per
+layer, the ROW 380-385 kernel). Target ≤ 2,000 dispatches = parity;
+below it = ahead. The unexplained residual: the zeroed forward's 7.6 ms
+gpu_exec over the same 4,834 dispatches (ROW 530) contradicts a pure
+launch floor and is not understood; it does not change the lever.
