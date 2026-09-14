@@ -11042,4 +11042,206 @@ mod tests {
             }
         }
     }
+
+    /// ROW 569 (`docs/discipline.md`) census: names every bound op
+    /// [`crate::spec::append_moe_ffn_from_logits`]'s own round loop builds
+    /// at qwen35moe's real routing shape (256 experts, `expert_used_count`
+    /// = 8), the shape `moe-topk-fusion`'s own `BoundOpKind` is meant to
+    /// collapse into one bound op per layer -- no fusion runs here yet,
+    /// this only counts and names what a future matcher must replace.
+    mod moe_routing_census {
+        use super::*;
+        use crate::spec::{
+            ExpertGatingFunc, append_moe_ffn_from_logits, input_leaf, scalar_constant,
+        };
+
+        const EXPERT_COUNT: u32 = 256;
+        const EXPERT_USED_COUNT: u32 = 8;
+        const EMBEDDING: u32 = 8;
+        const FEED_FORWARD: u32 = 8;
+
+        /// One qwen35moe layer's routing block: [`ExpertGatingFunc::Softmax`],
+        /// `expert_bias = None` -- `proxima-model-interop/src/qwen35moe/program.rs`'s
+        /// own `append_qwen35moe_ffn` call into `append_moe_ffn_from_logits`
+        /// (lines 122-135), NOT the `Sigmoid` gate this crate's Mixtral-style
+        /// dense callers (`append_mistral_moe_layer`) use -- the two gating
+        /// functions cost the same op count per round (`shifted`+`exp` for
+        /// softmax vs `masked_scores`+reduce for sigmoid), so the fusion
+        /// target is identical either way, but the matcher must anchor on
+        /// the gate this program actually builds.
+        #[test]
+        fn qwen35moe_routing_census_at_real_expert_shape() {
+            let mut program = Vec::new();
+            let x = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
+                "x",
+            );
+            let logits = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0), Extent::Static(EXPERT_COUNT)],
+                "logits",
+            );
+            let expert_w_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EXPERT_COUNT),
+                    Extent::Static(EMBEDDING),
+                    Extent::Static(FEED_FORWARD)
+                ],
+                "expert_w_gate",
+            );
+            let expert_w_up = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EXPERT_COUNT),
+                    Extent::Static(EMBEDDING),
+                    Extent::Static(FEED_FORWARD)
+                ],
+                "expert_w_up",
+            );
+            let expert_w_down = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EXPERT_COUNT),
+                    Extent::Static(FEED_FORWARD),
+                    Extent::Static(EMBEDDING)
+                ],
+                "expert_w_down",
+            );
+            let ones = scalar_constant(&mut program, 1.0);
+            let routing_start = program.len();
+
+            let (_output, site) = append_moe_ffn_from_logits(
+                &mut program,
+                0,
+                x,
+                logits,
+                expert_w_gate,
+                expert_w_up,
+                expert_w_down,
+                EXPERT_COUNT,
+                EXPERT_USED_COUNT,
+                ones,
+                ExpertGatingFunc::Softmax,
+                None,
+            )
+            .expect("real-shape qwen35moe routing block lowers");
+
+            assert_eq!(
+                site.selected.len(),
+                EXPERT_USED_COUNT as usize,
+                "one gather-index node per round"
+            );
+            assert_eq!(
+                site.weights.len(),
+                EXPERT_USED_COUNT as usize + 1,
+                "one weight node per round plus the final weight_total"
+            );
+
+            let shapes = shape::infer(&program, &[1]).expect("routing program infers");
+            let outputs = [_output];
+            let resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
+                .expect("real-shape qwen35moe routing block binds");
+
+            // The routing DECISION subgraph alone -- backward closure over
+            // `Op::dependencies` from every gather-index and weight node
+            // (including `weight_total`), bounded below by `routing_start`
+            // -- excludes the interleaved per-round `gathered_expert_product`
+            // gate/up/down projections and SwiGLU chain
+            // (`append_moe_round_output`) `append_moe_ffn_with_projection_strategy_from_logits`
+            // builds in the SAME loop iteration: those consume `route`/
+            // `weight` but nothing in the routing chain consumes anything
+            // they produce, so the closure never crosses into them. A
+            // naive "every bound op after routing_start" scan (this test's
+            // own first draft) counted 73, conflating routing with FFN
+            // evaluation; this closure is what a `BoundOpKind::TopK`
+            // matcher must actually anchor on and replace.
+            let mut routing_nodes: alloc::collections::BTreeSet<u32> = alloc::collections::BTreeSet::new();
+            let mut frontier: Vec<NodeId> = site
+                .selected
+                .iter()
+                .chain(site.weights.iter())
+                .copied()
+                .collect();
+            while let Some(node) = frontier.pop() {
+                if (node.0 as usize) < routing_start || !routing_nodes.insert(node.0) {
+                    continue;
+                }
+                frontier.extend(program[node.0 as usize].dependencies());
+            }
+            let mut routing_op_ids: Vec<u32> = routing_nodes.into_iter().collect();
+            routing_op_ids.sort_unstable();
+
+            println!(
+                "row 569 qwen35moe routing census: {} ops in the pure routing-decision closure \
+                 for expert_count={EXPERT_COUNT}, expert_used_count={EXPERT_USED_COUNT}",
+                routing_op_ids.len()
+            );
+            for node_id in &routing_op_ids {
+                println!(
+                    "  node={node_id} kind={:?}",
+                    core::mem::discriminant(&program[*node_id as usize])
+                );
+            }
+            println!("gather-index nodes (site.selected): {:?}", site.selected);
+            println!("weight nodes (site.weights, last is weight_total): {:?}", site.weights);
+            println!(
+                "resolved bind produced {} total BoundOps for this routing+FFN program \
+                 (routing closure = {} of them)",
+                resolved.len(),
+                routing_op_ids.len()
+            );
+
+            // A degenerate ties fixture proves the tie-break rule the
+            // `mask * expert_index` -> `reduce Maximum` construction
+            // implements: two experts tied at the maximum score, the
+            // reduce keeps the HIGHER index -- opposite of
+            // `top_k_routes_and_weights`'s own doc comment ("ties broken
+            // toward the lower index"), which this test's own finding
+            // (ROW 569) shows is stale prose, not the code's behavior.
+            let mut tie_logits = alloc::vec![0.0_f32; EXPERT_COUNT as usize];
+            tie_logits[3] = 9.0;
+            tie_logits[9] = 9.0; // exact tie, index 3 vs 9
+            let x_data = alloc::vec![0.1_f32; EMBEDDING as usize];
+            let expert_w_gate_data =
+                alloc::vec![0.0_f32; EXPERT_COUNT as usize * EMBEDDING as usize * FEED_FORWARD as usize];
+            let expert_w_up_data = expert_w_gate_data.clone();
+            let mut expert_w_down_data = expert_w_gate_data.clone();
+            // Tag expert 3's down-projection distinctly from expert 9's so
+            // the winning route is visible in the output, not just in the
+            // route node's own buffer.
+            let tagged = |data: &mut Vec<f32>, expert: usize, value: f32| {
+                let base = expert * FEED_FORWARD as usize * EMBEDDING as usize;
+                for element in 0..(FEED_FORWARD as usize * EMBEDDING as usize) {
+                    data[base + element] = value;
+                }
+            };
+            tagged(&mut expert_w_down_data, 3, 0.0);
+            tagged(&mut expert_w_down_data, 9, 1.0);
+
+            let inputs = alloc::vec![
+                (x, x_data),
+                (logits, tie_logits),
+                (expert_w_gate, expert_w_gate_data),
+                (expert_w_up, expert_w_up_data),
+                (expert_w_down, expert_w_down_data),
+            ];
+            let buffers = run_resolved(program.len(), &resolved, inputs);
+            let route_0 = buffers[site.selected[0].0 as usize]
+                .as_ref()
+                .expect("round 0 route resolves")[0];
+            println!("tie fixture: round 0 route = {route_0} (expects 9, the higher index)");
+            assert!(
+                (route_0 - 9.0).abs() < 1e-6,
+                "the mask*iota->reduce-Maximum tie-break keeps the HIGHER index on an exact \
+                 tie, got route {route_0}, expected 9"
+            );
+        }
+    }
 }
