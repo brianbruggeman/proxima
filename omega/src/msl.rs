@@ -1834,10 +1834,14 @@ fn emit_with_expert_sources_mode(
 
 /// Splices the z-indexed base-table preamble (`docs/discipline.md`'s
 /// horizontal-packed-merge design note, §5) onto an already-emitted
-/// packed-row kernel: a `SliceBase` struct ahead of the signature, a
-/// `base_table`/`merge_tgid` parameter pair appended to it, and one
-/// `SliceBase` read plus three renamed pointer locals right after the body's
-/// opening brace -- the same additive-splice shape [`emit_with_expert_sources`]
+/// packed-row kernel: a `SliceBase` struct ahead of the signature, the
+/// existing scalar `gid` parameter widened to `uint3 merge_gid` (Metal
+/// rejects a signature mixing a scalar and a vector thread-position
+/// attribute, so a second, separately-attributed z parameter does not
+/// compile) plus a `base_table` parameter appended to it, and a `gid`
+/// local restoring the scalar reads the rest of the body already makes,
+/// one `SliceBase` read, and three renamed pointer locals right after the
+/// body's opening brace -- the same additive-splice shape [`emit_with_expert_sources`]
 /// already uses for `ExpertPayloads`/`ExpertDescriptors` above, rather than
 /// threading a new parameter through [`push_packed_row_blocked_body`]'s
 /// ~800-line body.
@@ -1886,18 +1890,45 @@ pub(crate) fn splice_horizontal_merge_base_table(
             found: "missing",
         })?;
     kernel.source.insert_str(signature_start, struct_decl);
-    let base_table_index = kernel.bindings.len();
-    let extra_params = format!(
-        ",\n    device const SliceBase* base_table [[buffer({base_table_index})]],\n    uint3 merge_tgid [[threadgroup_position_in_grid]]"
+    let body_start_after_struct = body_start + struct_decl.len();
+    // Metal rejects a kernel signature mixing a scalar and a vector
+    // thread-position attribute ("expecting input declarations with either
+    // all scalar types or all vector types with the same number of
+    // elements") -- every packed-row kernel already declares a scalar `uint
+    // gid [[thread_position_in_grid]]` (`kernel_signature`'s own doc), so
+    // adding a SEPARATE `uint3 ... [[threadgroup_position_in_grid]]`
+    // parameter for the z-slice index does not compile. This widens the
+    // EXISTING `gid` parameter to `uint3` instead (renamed to avoid
+    // colliding with the scalar local the preamble below reintroduces) --
+    // one 3D dispatch already gives one threadgroup per z-slice
+    // (`crate::metal::dispatch`'s own `threadgroup.depth == 1`), so
+    // `merge_gid.z` and what a separate `threadgroup_position_in_grid.z`
+    // would have read are the identical value.
+    let scalar_gid = "    uint gid [[thread_position_in_grid]]";
+    let vector_gid = "    uint3 merge_gid [[thread_position_in_grid]]";
+    let gid_offset = kernel.source[signature_start..body_start_after_struct]
+        .find(scalar_gid)
+        .ok_or(EmitError::RenderKindMismatch {
+            node,
+            expected: "scalar thread_position_in_grid parameter",
+            found: "missing",
+        })?;
+    kernel.source.replace_range(
+        signature_start + gid_offset..signature_start + gid_offset + scalar_gid.len(),
+        vector_gid,
     );
-    let adjusted_body_start = body_start + struct_decl.len();
+    let width_delta = vector_gid.len() - scalar_gid.len();
+    let base_table_index = kernel.bindings.len();
+    let extra_params =
+        format!(",\n    device const SliceBase* base_table [[buffer({base_table_index})]]");
+    let adjusted_body_start = body_start_after_struct + width_delta;
     kernel.source.insert_str(adjusted_body_start, &extra_params);
     // `)\n{\n` starts at `adjusted_body_start` post-splice: `)` + `\n` + `{`
     // is 3 bytes, so the byte right after `{` is `adjusted_body_start +
     // extra_params.len() + 3`.
     let preamble_start = adjusted_body_start + extra_params.len() + 3;
     let preamble = format!(
-        "    SliceBase merge_base = base_table[merge_tgid.z];\n    device const {weight_type}* sliced_weight = (device const {weight_type}*)((device const uchar*)in{weight_index} + merge_base.weight_base);\n    device const {other_type}* sliced_other = (device const {other_type}*)((device const uchar*)in{other_index} + merge_base.activation_base);\n    device {element_type}* sliced_out = (device {element_type}*)((device uchar*)out + merge_base.output_base);\n"
+        "    uint gid = merge_gid.x;\n    SliceBase merge_base = base_table[merge_gid.z];\n    device const {weight_type}* sliced_weight = (device const {weight_type}*)((device const uchar*)in{weight_index} + merge_base.weight_base);\n    device const {other_type}* sliced_other = (device const {other_type}*)((device const uchar*)in{other_index} + merge_base.activation_base);\n    device {element_type}* sliced_out = (device {element_type}*)((device uchar*)out + merge_base.output_base);\n"
     );
     kernel.source.insert_str(preamble_start, &preamble);
     let body_after_preamble = preamble_start + preamble.len();
@@ -10195,19 +10226,36 @@ mod tests {
                 merged.source
             );
             assert!(
+                merged.source.contains("base_table[merge_gid.z]"),
+                "merged kernel must index the base table by the z grid coordinate:\n{}",
+                merged.source
+            );
+            // Metal rejects a signature mixing a scalar and a vector
+            // thread-position attribute, so the splice widens the existing
+            // `gid` parameter to `uint3 merge_gid` instead of adding a
+            // second, separately-attributed parameter.
+            assert!(
+                !merged.source.contains("uint gid [[thread_position_in_grid]]"),
+                "the merged kernel must not keep the scalar gid parameter:\n{}",
+                merged.source
+            );
+            assert!(
                 merged
                     .source
-                    .contains("base_table[merge_tgid.z]"),
-                "merged kernel must index the base table by the z threadgroup coordinate:\n{}",
+                    .contains("uint3 merge_gid [[thread_position_in_grid]]"),
+                "the merged kernel must declare the widened vector gid parameter:\n{}",
                 merged.source
             );
 
-            let extra_params = ",\n    device const SliceBase* base_table [[buffer(4)]],\n    uint3 merge_tgid [[threadgroup_position_in_grid]]";
-            let preamble = "    SliceBase merge_base = base_table[merge_tgid.z];\n    device const uchar* sliced_weight = (device const uchar*)((device const uchar*)in0 + merge_base.weight_base);\n    device const float* sliced_other = (device const float*)((device const uchar*)in1 + merge_base.activation_base);\n    device float* sliced_out = (device float*)((device uchar*)out + merge_base.output_base);\n";
+            let vector_gid = "uint3 merge_gid [[thread_position_in_grid]]";
+            let scalar_gid = "uint gid [[thread_position_in_grid]]";
+            let extra_params = ",\n    device const SliceBase* base_table [[buffer(4)]]";
+            let preamble = "    uint gid = merge_gid.x;\n    SliceBase merge_base = base_table[merge_gid.z];\n    device const uchar* sliced_weight = (device const uchar*)((device const uchar*)in0 + merge_base.weight_base);\n    device const float* sliced_other = (device const float*)((device const uchar*)in1 + merge_base.activation_base);\n    device float* sliced_out = (device float*)((device uchar*)out + merge_base.output_base);\n";
 
             let mut restored = merged.source.replacen(STRUCT_DECL, "", 1);
             restored = restored.replacen(extra_params, "", 1);
             restored = restored.replacen(preamble, "", 1);
+            restored = restored.replacen(vector_gid, scalar_gid, 1);
             restored = restored.replace("sliced_weight", "in0");
             restored = restored.replace("sliced_other", "in1");
             restored = restored.replace("sliced_out", "out");
