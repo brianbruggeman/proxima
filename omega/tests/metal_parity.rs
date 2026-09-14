@@ -19,6 +19,15 @@ use proxima_tensor::{
     bind, evaluate, infer, projection,
 };
 
+/// The last node `program` builds -- what every fixture in this file treats
+/// as "the answer" by construction. `bind_plain`'s reachability pass
+/// (ROW 541, `proxima-tensor/docs/discipline.md`) binds only what `outputs`
+/// names, so a fixture that wants its whole constructed chain bound must
+/// pass this instead of `&[]` -- an empty `outputs` correctly binds nothing.
+fn terminal(program: &[Op]) -> NodeId {
+    NodeId((program.len() - 1) as u32)
+}
+
 /// Asserts `cpu` and `metal` agree within `1e-6`, refusing a vacuous
 /// (zero-element) comparison, and prints how many elements were compared and
 /// the max abs diff observed — the number a report can cite even on a
@@ -677,8 +686,13 @@ fn multiply_sqrt_reciprocal_chain_matches_cpu_on_a_real_device() {
     let program = multiply_sqrt_reciprocal_chain_program();
 
     let shapes = infer(&program, &[]).expect("multiply/sqrt/reciprocal chain infers");
-    let resolved = bind(&program, &shapes, &[], NumericPolicy::default())
-        .expect("multiply/sqrt/reciprocal chain resolves");
+    let resolved = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("multiply/sqrt/reciprocal chain resolves");
     assert_eq!(
         resolved.len(),
         1,
@@ -858,8 +872,13 @@ fn a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device() {
     );
 
     let shapes = infer(&program, &[]).expect("elementwise chain infers");
-    let resolved =
-        bind(&program, &shapes, &[], NumericPolicy::default()).expect("elementwise chain resolves");
+    let resolved = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::default(),
+    )
+    .expect("elementwise chain resolves");
     assert_eq!(
         resolved.len(),
         1,

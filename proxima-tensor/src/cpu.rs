@@ -22783,7 +22783,7 @@ mod tests {
             );
 
             let shapes = shape::infer(&program, &[]).expect("shape inference succeeds");
-            let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+            let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
                 .expect("bind succeeds");
             let BoundOpKind::Elementwise { body, .. } = &resolved
                 .iter()
@@ -25262,21 +25262,23 @@ mod tests {
         (program, dead, live)
     }
 
-    /// [`build_static_arena`] finds `dead` (zero consumers, not requested)
-    /// dead and elides it -- `run_resolved_nodes_in_arena` never runs it --
-    /// while `live` still evaluates bit-identically to [`evaluate_named`]'s
+    /// `dead` (zero consumers, not requested) never reaches `resolved` at
+    /// all -- [`bind::bind_plain`]'s reachability pass (ROW 541,
+    /// `docs/discipline.md`) skips it at bind time, before this arena's own
+    /// [`StaticArena::dead`]/`run_resolved_nodes_in_arena` skip machinery
+    /// (ROW 166's) ever sees it, so `dead` is stronger than "bound but
+    /// elided": there is no `BoundOp` and no pre-sized buffer for it at
+    /// all. `live` still evaluates bit-identically to [`evaluate_named`]'s
     /// own result (which elides the identical way through its own
-    /// separately-cached arena). `dead`'s pre-sized buffer stays whatever
-    /// [`build_static_arena`] initialized it to (zeros), proving the skip is
-    /// real rather than a coincidence of the two ops sharing a body shape.
+    /// separately-cached arena).
     #[test]
     fn build_static_arena_elides_a_node_with_zero_consumers() {
         let (program, dead, live) = dead_node_program();
         let mut arena = build_static_arena(&program, &[], &[live])
             .expect("dead-node program builds a static arena");
         assert!(
-            arena.dead.contains(&dead),
-            "the zero-consumer, non-output node must be marked dead"
+            !arena.dead.contains(&dead),
+            "a node unreachable from every requested output is never bound, so it cannot be a POST-bind dead entry either"
         );
         assert!(
             !arena.dead.contains(&live),
@@ -25296,8 +25298,8 @@ mod tests {
         );
         assert_eq!(
             arena_output(&arena, dead),
-            Some([0.0f32, 0.0, 0.0, 0.0].as_slice()),
-            "the elided node's buffer must stay untouched -- run_resolved_nodes_in_arena skipped writing it"
+            None,
+            "the unreachable node was never bound, so it never got a buffer slot at all"
         );
     }
 
@@ -25432,10 +25434,11 @@ mod tests {
 
     /// The other half of ROW 174's same contract, mirroring
     /// [`build_static_arena_does_not_elide_a_dead_node_that_is_also_a_requested_output`]:
-    /// a `Constant` with zero consumers lands in `dead`, not `static_nodes`
-    /// -- `static_resolved_nodes` excludes anything `dead_resolved_nodes`
-    /// already marked, so a dead constant is never even run the one time
-    /// `static_nodes` would otherwise cost.
+    /// a `Constant` with zero consumers is never bound at all --
+    /// [`bind::bind_plain`]'s reachability pass (ROW 541, `docs/discipline.md`)
+    /// skips it before `dead_resolved_nodes`/`static_resolved_nodes` ever run
+    /// over `resolved` -- so it lands in neither `dead` nor `static_nodes`,
+    /// stronger than ROW 174's original "bound but skipped" guarantee.
     #[test]
     fn a_dead_constant_is_marked_dead_not_static() {
         let (mut program, _a, constant, live) = constant_feeds_live_program();
@@ -25451,12 +25454,12 @@ mod tests {
         let arena = build_static_arena(&program, &[], &[live])
             .expect("program with an unused constant builds a static arena");
         assert!(
-            arena.dead.contains(&dead_constant),
-            "a zero-consumer Constant must be marked dead"
+            !arena.dead.contains(&dead_constant),
+            "a zero-consumer Constant unreachable from `live` is never bound, so it cannot be a POST-bind dead entry either"
         );
         assert!(
             !arena.static_nodes.contains(&dead_constant),
-            "a dead Constant must not also be marked static -- dead already skips it"
+            "a never-bound Constant must not also be marked static"
         );
         assert!(
             arena.static_nodes.contains(&constant),
@@ -25612,6 +25615,17 @@ mod tests {
 
     fn f32_block(program: &mut Vec<Op>, shape: &[Extent]) -> NodeId {
         block(program, DType::Float32, shape)
+    }
+
+    /// The last node `program` builds -- what a fixture that appends its
+    /// nodes in dependency order and never binds anything past its own
+    /// "answer" treats as the requested output. `bind::bind_plain`'s
+    /// reachability pass (ROW 541, `docs/discipline.md`) binds only what
+    /// `outputs` names, so a direct `bind::bind` call in this module must
+    /// pass this instead of `&[]` -- an empty `outputs` correctly binds
+    /// nothing now.
+    fn terminal(program: &[Op]) -> NodeId {
+        NodeId((program.len() - 1) as u32)
     }
 
     /// `run_iota`'s whole contract: `output[i] = i`, evaluated through the
@@ -26252,7 +26266,7 @@ mod tests {
             embedding_matmul_program(vocab as u32, embed_dim as u32, seq as u32, out_dim as u32);
 
         let shapes = shape::infer(&program, &[]).expect("embedding matmul infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("embedding matmul resolves");
         assert_eq!(
             resolved.len(),
@@ -26327,7 +26341,7 @@ mod tests {
 
         let shapes = shape::infer(&program, &[]).expect("infers");
         let resolved =
-            bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("resolves");
+            bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact()).expect("resolves");
         assert_eq!(resolved.len(), 1, "fused into one reduction node");
         assert!(
             element_count(&resolved[0].extents) >= PARALLEL_THRESHOLD,
@@ -27101,7 +27115,7 @@ mod tests {
         let _ = current;
 
         let shapes = shape::infer(&program, &[]).expect("tanh chain infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("tanh chain resolves");
         assert_eq!(
             resolved.len(),
@@ -27161,7 +27175,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("elementwise chain resolves");
         assert_eq!(
             resolved.len(),
@@ -27235,7 +27249,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("diamond chain infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("diamond chain resolves");
         assert_eq!(
             resolved.len(),
@@ -27554,7 +27568,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("elementwise infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("elementwise resolves");
         let node = &resolved[0];
 
@@ -27585,7 +27599,7 @@ mod tests {
         let rhs: Vec<f32> = (0..k * n).map(|value| value as f32).collect();
 
         let shapes = shape::infer(&program, &[]).expect("matmul infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("matmul resolves");
         assert_eq!(resolved.len(), 1, "fused into one reduction node");
         let node = &resolved[0];
@@ -27881,7 +27895,7 @@ mod tests {
         let rhs: Vec<f32> = (0..k * n).map(|value| (value % 5) as f32).collect();
 
         let shapes = shape::infer(&program, &[]).expect("64x64x64 matmul infers");
-        let resolved = bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("64x64x64 matmul resolves");
         assert_eq!(resolved.len(), 1, "fused into one reduction node");
         assert!(

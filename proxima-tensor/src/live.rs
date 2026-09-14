@@ -47,6 +47,31 @@ pub fn annotate(program: &[Op], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
     retires
 }
 
+/// Every node reachable from `outputs` through [`uses`] — operands, gather
+/// indices, and a data-dependent reduce `out_map`'s own indices. This is
+/// [`bind::bind_plain`](crate::bind::bind_plain)'s reachability pass: a
+/// program built once and bound for several output sets (ROW 541,
+/// `docs/discipline.md` — a prefill tap a decode-only `outputs` never
+/// requests) only ever binds the ops this set names, never the whole
+/// program. Backward-only references (this module's own doc, and
+/// [`crate::op`]'s) are what make a plain worklist sufficient here — no
+/// node visits twice, and nothing later in `program` can ever point back
+/// into a node this walk has already resolved.
+#[must_use]
+pub fn reachable(program: &[Op], outputs: &[NodeId]) -> BTreeSet<NodeId> {
+    let mut visited: BTreeSet<NodeId> = BTreeSet::new();
+    let mut pending: Vec<NodeId> = outputs.to_vec();
+    while let Some(node) = pending.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        if let Some(expr) = program.get(node.0 as usize) {
+            pending.extend(uses(expr));
+        }
+    }
+    visited
+}
+
 fn uses(expr: &Op) -> Vec<NodeId> {
     match expr {
         Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => Vec::new(),

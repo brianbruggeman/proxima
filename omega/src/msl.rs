@@ -352,7 +352,7 @@ pub struct GridSpec {
 ///         name: None,
 ///     },
 /// );
-/// append(
+/// let activated = append(
 ///     &mut program,
 ///     Op::Elementwise {
 ///         dtype: DType::Float32,
@@ -363,7 +363,15 @@ pub struct GridSpec {
 /// );
 ///
 /// let shapes = proxima_tensor::infer(&program, &[])?;
-/// let bound_ops = proxima_tensor::bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default())?;
+/// // `bind` binds only what `outputs` reaches (`bind_plain`'s reachability
+/// // pass, ROW 541, `proxima-tensor/docs/discipline.md`) -- an empty
+/// // outputs list binds nothing.
+/// let bound_ops = proxima_tensor::bind(
+///     &program,
+///     &shapes,
+///     &[activated],
+///     proxima_tensor::NumericPolicy::default(),
+/// )?;
 ///
 /// // no packed (quantized/half-precision) operand in this program, so an
 /// // empty codec table is exactly right -- see `PackedOperands`'s own doc.
@@ -8921,6 +8929,17 @@ mod tests {
 
     use super::*;
 
+    /// The last node `program` builds -- what every fixture in this module
+    /// treats as "the answer" by construction (`proxima_tensor::op`'s own
+    /// doc: "the last element is the root"). `bind_plain`'s reachability
+    /// pass (ROW 541, `proxima-tensor/docs/discipline.md`) binds only what
+    /// `outputs` names, so a fixture that wants its whole constructed chain
+    /// bound must pass this instead of `&[]` -- an empty `outputs`
+    /// correctly binds nothing.
+    fn terminal(program: &[Op]) -> NodeId {
+        NodeId((program.len() - 1) as u32)
+    }
+
     #[test]
     fn dense_layout_accepts_contiguous_and_rejects_broadcast() {
         let dense = Layout {
@@ -8968,7 +8987,7 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("broadcast elementwise infers");
-        let bound = bind(&program, &shapes, &[], NumericPolicy::default())
+        let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("broadcast elementwise lowers")
             .into_iter()
             .find(|candidate| candidate.node == equal)
@@ -9000,7 +9019,7 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("elementwise infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("elementwise lowers")
             .into_iter()
             .next()
@@ -9051,7 +9070,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("matmul infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("matmul lowers")
             .into_iter()
             .next()
@@ -9137,7 +9156,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("gathered matmul infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("gathered matmul lowers")
             .into_iter()
             .next()
@@ -9184,7 +9203,7 @@ mod tests {
         )
         .expect("permuted reduce builds");
         let shapes = infer(&program, &[]).expect("permuted reduction matmul infers");
-        let mut resolved = bind(&program, &shapes, &[], NumericPolicy::default())
+        let mut resolved = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("permuted reduction matmul lowers");
         let mut packed = BTreeSet::new();
         packed.insert(weight);
@@ -9322,7 +9341,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("matmul infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("matmul lowers")
             .into_iter()
             .next()
@@ -9379,7 +9398,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("f16 matmul infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("f16 matmul lowers")
             .into_iter()
             .next()
@@ -9939,7 +9958,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("tiled gemm op infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("tiled gemm op lowers")
             .into_iter()
             .next()
@@ -10002,7 +10021,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("multi-head matmul infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("multi-head matmul lowers")
             .into_iter()
             .next()
@@ -10277,7 +10296,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("cumsum infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("cumsum lowers")
             .into_iter()
             .next()
@@ -10330,7 +10349,7 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("embedding lookup infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("embedding lookup lowers")
             .into_iter()
             .next()
@@ -10454,7 +10473,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("routed reduction infers");
-        let bound = bind(&program, &shapes, &[], NumericPolicy::default())
+        let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("routed reduction lowers")
             .into_iter()
             .find(|bound| matches!(bound.kind, BoundOpKind::Reduce { .. }))
@@ -10618,7 +10637,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("rank3 identity sum infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("rank3 identity sum lowers")
             .into_iter()
             .next()
@@ -10731,17 +10750,27 @@ mod tests {
             },
         );
         let f32_shapes = infer(&program, &[]).expect("f32 infers");
-        let f32_bound = bind(&program, &f32_shapes, &[], NumericPolicy::default())
-            .expect("f32 lowers")
-            .into_iter()
-            .next()
-            .expect("one bound emitted");
+        let f32_bound = bind(
+            &program,
+            &f32_shapes,
+            &[terminal(&program)],
+            NumericPolicy::default(),
+        )
+        .expect("f32 lowers")
+        .into_iter()
+        .next()
+        .expect("one bound emitted");
         let f16_shapes = infer(&f16_program, &[]).expect("f16 infers");
-        let f16_bound = bind(&f16_program, &f16_shapes, &[], NumericPolicy::default())
-            .expect("f16 lowers")
-            .into_iter()
-            .next()
-            .expect("one bound emitted");
+        let f16_bound = bind(
+            &f16_program,
+            &f16_shapes,
+            &[terminal(&f16_program)],
+            NumericPolicy::default(),
+        )
+        .expect("f16 lowers")
+        .into_iter()
+        .next()
+        .expect("one bound emitted");
         assert_ne!(
             emit(&f32_bound, &empty, NumericPolicy::default())
                 .expect("emits")
@@ -10956,7 +10985,7 @@ mod tests {
             },
         );
         let shapes = infer(&program, &[]).expect("f32 elementwise infers");
-        let f32_bound = bind(&program, &shapes, &[], NumericPolicy::default())
+        let f32_bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("f32 elementwise lowers")
             .into_iter()
             .next()
@@ -10981,7 +11010,12 @@ mod tests {
             },
         );
         let half_shapes = infer(&half_program, &[]).expect("f16 elementwise infers");
-        let f16_bound = bind(&half_program, &half_shapes, &[], NumericPolicy::default())
+        let f16_bound = bind(
+            &half_program,
+            &half_shapes,
+            &[terminal(&half_program)],
+            NumericPolicy::default(),
+        )
             .expect("f16 elementwise lowers")
             .into_iter()
             .next()
@@ -11104,7 +11138,7 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("single-axis sum infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("single-axis sum lowers")
             .into_iter()
             .next()

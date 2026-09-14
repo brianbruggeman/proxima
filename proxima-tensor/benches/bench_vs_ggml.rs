@@ -35,6 +35,15 @@ use proxima_tensor::{
 };
 use std::hint::black_box;
 
+/// The last node `program` builds -- what every fixture in this file treats
+/// as "the answer" by construction. `bind_plain`'s reachability pass
+/// (ROW 541, `docs/discipline.md`) binds only what `outputs` names, so a
+/// fixture that wants its whole constructed chain bound must pass this
+/// instead of `&[]` -- an empty `outputs` correctly binds nothing.
+fn terminal(program: &[Op]) -> NodeId {
+    NodeId((program.len() - 1) as u32)
+}
+
 fn random_vec(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     let mut lcg = Lcg(seed);
     (0..n).map(|_| lcg.next_unit() * scale).collect()
@@ -522,7 +531,7 @@ fn row_c_gather_fused_reduce(c: &mut Criterion) {
     let _ = reduced;
 
     let shapes = proxima_tensor::infer(&program, &[]).expect("row c infers");
-    let resolved = proxima_tensor::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+    let resolved = proxima_tensor::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
         .expect("row c binds");
     println!(
         "proxima BoundOp count for gather->scale->reduce: {} (1 means gather+scale never materialize)",
@@ -663,7 +672,7 @@ fn row_d_deep_chain(c: &mut Criterion) {
     let _ = reduced;
 
     let shapes = proxima_tensor::infer(&program, &[]).expect("row d infers");
-    let resolved = proxima_tensor::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+    let resolved = proxima_tensor::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
         .expect("row d binds");
     println!(
         "proxima BoundOp count for the 9-op chain + reduce: {} (expect 9: 8 elementwise ops \
@@ -794,7 +803,7 @@ fn row_e_locally_connected_window(c: &mut Criterion) {
     let _ = reduced;
 
     let shapes = proxima_tensor::infer(&program, &[]).expect("row e infers");
-    let resolved = proxima_tensor::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+    let resolved = proxima_tensor::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
         .expect("row e binds");
     println!(
         "proxima BoundOp count: {} (the two-term window*multiply folds directly into the reduce)",
@@ -1052,7 +1061,7 @@ fn row_g_mlp_chain(c: &mut Criterion) {
     let _ = out;
 
     let shapes = proxima_tensor::infer(&program, &[]).expect("row g infers");
-    let resolved = proxima_tensor::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+    let resolved = proxima_tensor::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
         .expect("row g binds");
     println!(
         "proxima BoundOp count for the full MLP chain: {} (only the up-projection's product \
@@ -1153,7 +1162,7 @@ fn row_h_elementwise_chain(c: &mut Criterion) {
     let _ = h;
 
     let shapes = proxima_tensor::infer(&program, &[]).expect("row h infers");
-    let resolved = proxima_tensor::bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+    let resolved = proxima_tensor::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
         .expect("row h binds");
     println!(
         "proxima BoundOp count for the 7-op pure chain: {} (== 7: no fusion, every op \

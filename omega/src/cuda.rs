@@ -129,7 +129,7 @@ pub struct CudaGridSpec {
 ///         name: None,
 ///     },
 /// );
-/// append(
+/// let activated = append(
 ///     &mut program,
 ///     Op::Elementwise {
 ///         dtype: DType::Float32,
@@ -140,7 +140,15 @@ pub struct CudaGridSpec {
 /// );
 ///
 /// let shapes = proxima_tensor::infer(&program, &[])?;
-/// let bound_ops = proxima_tensor::bind(&program, &shapes, &[], proxima_tensor::NumericPolicy::default())?;
+/// // `bind` binds only what `outputs` reaches (`bind_plain`'s reachability
+/// // pass, ROW 541, `proxima-tensor/docs/discipline.md`) -- an empty
+/// // outputs list binds nothing.
+/// let bound_ops = proxima_tensor::bind(
+///     &program,
+///     &shapes,
+///     &[activated],
+///     proxima_tensor::NumericPolicy::default(),
+/// )?;
 /// let packed_operands = omega::PackedOperands::new();
 /// let kernel = omega::emit_cuda(&bound_ops[0], &packed_operands)?;
 /// assert!(kernel.source.contains("extern \"C\" __global__"));

@@ -40,9 +40,18 @@ use std::collections::BTreeMap;
 
 use omega::msl::{PackedCodec, PackedOperands, emit};
 use proxima_tensor::{
-    BoundOp, DType, Extent, IndexMap, Keep, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp,
-    append, bind, infer, map,
+    BoundOp, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit,
+    ScalarOp, append, bind, infer, map,
 };
+
+/// The last node `program` builds -- what every fixture in this file treats
+/// as "the answer" by construction. `bind_plain`'s reachability pass
+/// (ROW 541, `proxima-tensor/docs/discipline.md`) binds only what `outputs`
+/// names, so a fixture that wants its whole constructed chain bound must
+/// pass this instead of `&[]` -- an empty `outputs` correctly binds nothing.
+fn terminal(program: &[Op]) -> NodeId {
+    NodeId((program.len() - 1) as u32)
+}
 
 // REAL openchat decode dims (`row_376_cached_attention_batched.rs`'s own
 // constants).
@@ -184,7 +193,7 @@ fn matmul_op(m: u32, k: u32, n: u32) -> (BoundOp, proxima_tensor::NodeId) {
         }),
     );
     let shapes = infer(&program, &[]).expect("matmul infers");
-    let bound = bind(&program, &shapes, &[], NumericPolicy::default())
+    let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
         .expect("matmul lowers")
         .into_iter()
         .next()

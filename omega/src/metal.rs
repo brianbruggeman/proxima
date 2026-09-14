@@ -5872,8 +5872,18 @@ mod classify_kind_packed_row_marker_tests {
         bind, infer, map,
     };
 
+    use proxima_tensor::NodeId;
+
     use super::classify_kind;
     use crate::{PackedCodec, PackedOperands};
+
+    /// The last node `program` builds -- see `msl::tests::terminal`'s own
+    /// doc (ROW 541, `proxima-tensor/docs/discipline.md`): every fixture
+    /// here treats it as "the answer", and `bind_plain`'s reachability pass
+    /// now requires it be named explicitly rather than relying on `&[]`.
+    fn terminal(program: &[Op]) -> NodeId {
+        NodeId((program.len() - 1) as u32)
+    }
 
     fn matmul_op_with_reduce(m: u32, k: u32, n: u32, reduce_op: ScalarOp) -> BoundOp {
         let mut program = Vec::new();
@@ -5919,7 +5929,7 @@ mod classify_kind_packed_row_marker_tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("matmul infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("matmul lowers")
             .into_iter()
             .next()
@@ -7090,11 +7100,19 @@ mod pack_uniforms_byte_len_tests {
     use alloc::vec::Vec;
 
     use proxima_tensor::{
-        BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NumericPolicy, Op, Reduce, ReduceInit,
-        ScalarOp, append, bind, infer, map,
+        BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce,
+        ReduceInit, ScalarOp, append, bind, infer, map,
     };
 
     use super::{pack_uniforms, pack_uniforms_byte_len};
+
+    /// The last node `program` builds -- see `msl::tests::terminal`'s own
+    /// doc (ROW 541, `proxima-tensor/docs/discipline.md`): every fixture
+    /// here treats it as "the answer", and `bind_plain`'s reachability pass
+    /// now requires it be named explicitly rather than relying on `&[]`.
+    fn terminal(program: &[Op]) -> NodeId {
+        NodeId((program.len() - 1) as u32)
+    }
 
     fn elementwise_add_op(extent_a: u32, extent_b: u32) -> BoundOp {
         let mut program = Vec::new();
@@ -7127,7 +7145,7 @@ mod pack_uniforms_byte_len_tests {
             },
         );
         let shapes = infer(&program, &[]).expect("elementwise infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("elementwise lowers")
             .into_iter()
             .next_back()
@@ -7178,7 +7196,7 @@ mod pack_uniforms_byte_len_tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("matmul infers");
-        bind(&program, &shapes, &[], NumericPolicy::default())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
             .expect("matmul lowers")
             .into_iter()
             .next_back()
