@@ -17972,16 +17972,21 @@ value = 1.0
         // `reduce_total`/`constant`/`iota` are untouched because the fused
         // reduce keeps its `BoundOpKind::Reduce` kind, just gains a
         // non-default `epilogue_body`.
+        // 1195, not 1196: ROW 541 (`docs/discipline.md`) made `bind_plain`
+        // bind only what `outputs` reaches. This program carries exactly one
+        // `Op::Constant` no `outputs` entry reads (see `constant`'s own
+        // count below, 36 not 37) -- previously bound and left as dead
+        // weight in `bound`, now never bound at all.
         #[cfg(not(feature = "reduce-epilogue-fusion"))]
         assert_eq!(
-            total, 1196,
+            total, 1195,
             "total BoundOps must match the measured forward"
         );
         #[cfg(feature = "reduce-epilogue-fusion")]
         assert_eq!(
             total,
-            1196 - 4 * 32,
-            "1068 = 1196 unfused total minus the 128 reduce-epilogue-fusion absorptions"
+            1195 - 4 * 32,
+            "1067 = 1195 unfused total minus the 128 reduce-epilogue-fusion absorptions"
         );
         assert_eq!(
             reduce_total,
@@ -18004,8 +18009,11 @@ value = 1.0
             "419 = 547 unfused elementwise BoundOps minus the 128 reduce-epilogue-fusion \
              absorptions (4/layer x 32 layers) -- see epilogued_reduce_count's own doc above"
         );
+        // 36, not 37: the one `Op::Constant` ROW 541's reachability pass
+        // (`bind_plain`, `docs/discipline.md`) no longer binds -- see
+        // `total`'s own comment above.
         assert_eq!(
-            constant, 37,
+            constant, 36,
             "constant BoundOps must match the measured forward"
         );
         assert_eq!(iota, 2, "iota BoundOps must match the measured forward");

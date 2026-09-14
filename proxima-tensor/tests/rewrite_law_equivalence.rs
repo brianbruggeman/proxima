@@ -565,8 +565,8 @@ proptest! {
     ) {
         let (program, root) = weighted_dot_program(length);
         let shapes = shape::infer(&program, &[]).expect("weighted dot infers");
-        let resolved =
-            bind::bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("weighted dot resolves");
+        let resolved = bind::bind(&program, &shapes, &[root], NumericPolicy::bit_exact())
+            .expect("weighted dot resolves");
         prop_assert_eq!(
             resolved.len(),
             1,

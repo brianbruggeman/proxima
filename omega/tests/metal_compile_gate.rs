@@ -11,11 +11,20 @@
 use std::process::Command;
 
 use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, Keep, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp,
-    append, bind, infer, map,
+    AxisTerm, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit,
+    ScalarOp, append, bind, infer, map,
 };
 #[cfg(feature = "cached-attention-streaming")]
-use proxima_tensor::{BoundOp, BoundOpKind, Layout, NodeId};
+use proxima_tensor::{BoundOp, BoundOpKind, Layout};
+
+/// The last node `program` builds -- what every fixture in this file treats
+/// as "the answer" by construction. `bind_plain`'s reachability pass
+/// (ROW 541, `proxima-tensor/docs/discipline.md`) binds only what `outputs`
+/// names, so a fixture that wants its whole constructed chain bound must
+/// pass this instead of `&[]` -- an empty `outputs` correctly binds nothing.
+fn terminal(program: &[Op]) -> NodeId {
+    NodeId((program.len() - 1) as u32)
+}
 
 fn elementwise_tanh_kernel() -> omega::Kernel {
     let mut program = Vec::new();
@@ -37,7 +46,7 @@ fn elementwise_tanh_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("elementwise infers");
-    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("elementwise lowers");
+    let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("elementwise lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
@@ -70,7 +79,7 @@ fn elementwise_erf_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("erf infers");
-    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("erf lowers");
+    let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("erf lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
@@ -123,7 +132,7 @@ fn fused_matmul_kernel() -> omega::Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("matmul infers");
-    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("matmul lowers");
+    let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("matmul lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
@@ -185,7 +194,7 @@ fn tiled_gemm_q4k_kernel() -> omega::Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("tiled gemm infers");
-    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("tiled gemm lowers");
+    let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("tiled gemm lowers");
     let weight_node = nests[0].operands()[0].0;
     let mut q4k = std::collections::BTreeMap::new();
     q4k.insert(weight_node, omega::PackedCodec::Q4K);
@@ -223,7 +232,7 @@ fn cumsum_kernel() -> omega::Kernel {
         }),
     );
     let shapes = infer(&program, &[]).expect("cumsum infers");
-    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("cumsum lowers");
+    let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("cumsum lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
@@ -278,7 +287,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("embedding lookup infers");
     let nests =
-        bind(&program, &shapes, &[], NumericPolicy::default()).expect("embedding lookup lowers");
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("embedding lookup lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
@@ -355,7 +364,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     );
     let shapes = infer(&program, &[]).expect("embedding matmul infers");
     let nests =
-        bind(&program, &shapes, &[], NumericPolicy::default()).expect("embedding matmul lowers");
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("embedding matmul lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
@@ -378,7 +387,7 @@ fn iota_kernel() -> omega::Kernel {
         },
     );
     let shapes = infer(&program, &[]).expect("iota infers");
-    let nests = bind(&program, &shapes, &[], NumericPolicy::default()).expect("iota lowers");
+    let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("iota lowers");
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),

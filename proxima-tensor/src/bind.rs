@@ -1119,8 +1119,26 @@ impl BoundOpBuilder {
         Ok(emitted)
     }
 
-    /// Flush every elementwise op still held: each was either a requested
-    /// output or dead code, and either way it materializes as its own op.
+    /// [`bind_plain`]'s reachability skip lane: advances the position
+    /// counter and keeps every per-node bookkeeping vector
+    /// (`ones`/`is_iota`/`packed_mapping_subtree`/`constant_value`) aligned
+    /// to it, without running any of [`push`](Self::push)'s binding work.
+    /// Safe because a program only ever references backwards
+    /// (`op.rs`'s own module doc), so no node this method skips can be an
+    /// operand, gather index, or reduce map of a node the caller does push
+    /// — every read of these vectors is at a live node's own index.
+    pub fn skip(&self) {
+        self.position.set(self.position.get() + 1);
+        self.ones.borrow_mut().push(false);
+        self.is_iota.borrow_mut().push(false);
+        self.packed_mapping_subtree.borrow_mut().push(false);
+        self.constant_value.borrow_mut().push(None);
+    }
+
+    /// Flush every elementwise op still held: each was a requested output,
+    /// and either way it materializes as its own op. A node reachable from
+    /// no output never enters `held` at all — [`bind_plain`] never calls
+    /// [`push`](Self::push) for it — so this no longer flushes dead code.
     /// Processed from the highest [`NodeId`] down: a still-held node can
     /// only ever be fused into a consumer with a *greater* id (references
     /// point backwards only), so visiting consumers first lets
@@ -4703,6 +4721,16 @@ fn compose_reduce_epilogue(
     Some((ComposedBody { steps }, new_operands))
 }
 
+/// The single choke point every [`bind`]/[`bind_with_fusion`]/
+/// [`bind_without_reduce_epilogue_fusion`] route eventually calls (ROW 541,
+/// `docs/discipline.md`). Binds only the ops [`live::reachable`] reaches
+/// from `outputs` through operands, gather indices, and reduce `out_map`
+/// indices — a program built for a wider caller (a shared spec module
+/// producing both a prefill and a decode graph, say) never dispatches the
+/// prefill-only tail decode's own `outputs` do not reach. Node ids stay
+/// exactly [`program`]'s own positions: an unreachable position is skipped
+/// via [`BoundOpBuilder::skip`], never renumbered, since every backward
+/// reference elsewhere in the program is a raw index into this same slice.
 fn bind_plain(
     program: &[Op],
     shapes: &Shapes,
@@ -4710,10 +4738,15 @@ fn bind_plain(
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
     let retires = live::annotate(program, outputs);
+    let reachable = live::reachable(program, outputs);
     let building = BoundOpBuilder::new(retires, numeric_policy);
     let mut built = Vec::new();
-    for expr in program {
-        built.extend(building.push(expr, shapes)?);
+    for (position, expr) in program.iter().enumerate() {
+        if reachable.contains(&NodeId(position as u32)) {
+            built.extend(building.push(expr, shapes)?);
+        } else {
+            building.skip();
+        }
     }
     built.extend(building.finish(shapes)?);
     Ok(built)
@@ -4881,6 +4914,16 @@ mod tests {
             }
         }
         buffers
+    }
+
+    /// The last node `program` builds -- what every fixture in this module
+    /// treats as "the answer" by construction (`op.rs`'s own doc: "the last
+    /// element is the root"). [`bind_plain`]'s reachability pass (ROW 541,
+    /// `docs/discipline.md`) now binds only what `outputs` actually names,
+    /// so a fixture that wants its whole constructed chain bound must pass
+    /// this instead of `&[]` -- an empty `outputs` correctly binds nothing.
+    fn terminal(program: &[Op]) -> NodeId {
+        NodeId((program.len() - 1) as u32)
     }
 
     /// `max(x, -inf)` -- owner counterexample (2026-09-06): `f32::max`'s own
@@ -5730,7 +5773,7 @@ mod tests {
 
         let shapes = shape::infer(&program, &[]).expect("iota infers");
         let built =
-            bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("iota builds ops");
+            bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact()).expect("iota builds ops");
 
         assert_eq!(built.len(), 1, "the iota leaf materializes on its own");
         assert_eq!(built[0].node, iota);
@@ -5748,7 +5791,7 @@ mod tests {
         let (program, product, sum, _lhs) = matmul_program();
         let shapes = shape::infer(&program, &[512]).expect("matmul infers");
         let built =
-            bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("matmul builds ops");
+            bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact()).expect("matmul builds ops");
 
         assert_eq!(
             built.len(),
@@ -5864,7 +5907,7 @@ mod tests {
     fn a_chain_of_elementwise_ops_fuses_into_one_bound_op_not_three() {
         let (program, _b, _c, d) = elementwise_chain_program();
         let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("elementwise chain builds ops");
 
         assert_eq!(
@@ -5950,7 +5993,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("diamond chain infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("diamond chain builds ops");
 
         assert_eq!(
@@ -6035,7 +6078,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("weighted dot infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("weighted dot builds ops");
 
         assert_eq!(
@@ -6086,7 +6129,7 @@ mod tests {
 
         let shapes = shape::infer(&program, &[]).expect("broadcast infers");
         let built =
-            bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("broadcast builds ops");
+            bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact()).expect("broadcast builds ops");
         let op = built.iter().find(|op| op.node == sum).expect("sum emitted");
         assert_eq!(
             op.operands()[1].1.stride(0),
@@ -6143,7 +6186,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("conv window infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("conv window builds ops");
         let op = built
             .iter()
@@ -6182,7 +6225,7 @@ mod tests {
 
         let shapes = shape::infer(&program, &[]).expect("transpose infers");
         let built =
-            bind(&program, &shapes, &[], NumericPolicy::bit_exact()).expect("transpose builds ops");
+            bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact()).expect("transpose builds ops");
         let op = built
             .iter()
             .find(|op| op.node == transposed)
@@ -6262,7 +6305,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("two-axis output group infers");
-        let mut built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let mut built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("two-axis output group binds");
         let packed: BTreeSet<NodeId> = core::iter::once(weight).collect();
         correct_packed_matmul_layouts(&mut built, &packed);
@@ -6389,7 +6432,7 @@ mod tests {
         );
 
         let shapes = shape::infer(&program, &[]).expect("multi-axis contraction group infers");
-        let mut built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let mut built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("multi-axis contraction group binds");
         let packed: BTreeSet<NodeId> = core::iter::once(weight).collect();
         correct_packed_matmul_layouts(&mut built, &packed);
@@ -6452,7 +6495,7 @@ mod tests {
             },
         );
         let shapes = shape::infer(&program, &[]).expect("elementwise infers");
-        bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("elementwise builds ops")
             .into_iter()
             .next()
@@ -6483,7 +6526,7 @@ mod tests {
             }),
         );
         let shapes = shape::infer(&program, &[]).expect("scalar reduction infers");
-        bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("scalar reduction builds ops")
             .into_iter()
             .next()
@@ -6514,7 +6557,7 @@ mod tests {
             }),
         );
         let shapes = shape::infer(&program, &[]).expect("scan infers");
-        bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("scan builds ops")
             .into_iter()
             .next()
@@ -6604,7 +6647,7 @@ mod tests {
     fn split_of_a_fused_matmul_reduction_rebases_operands_but_not_out_layout() {
         let (program, _product, sum, _lhs) = matmul_program();
         let shapes = shape::infer(&program, &[512]).expect("matmul infers");
-        let op = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let op = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("matmul builds ops")
             .into_iter()
             .next()
@@ -6774,7 +6817,7 @@ mod tests {
         use proxima_primitives::pipe::PipeExt;
 
         let (program, _product, sum, _lhs) = matmul_program();
-        let outputs: Vec<NodeId> = Vec::new();
+        let outputs: Vec<NodeId> = alloc::vec![sum];
         let retires = live::annotate(&program, &outputs);
 
         let shape_table = ShapeTable::new(&[512]);
@@ -7062,7 +7105,7 @@ mod tests {
         let (program, source, reduced) =
             masked_window_reduce_program(1, 0, 5, 3, 3, 1, ScalarOp::Equal);
         let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("masked-window program builds ops");
 
         let folded = built
@@ -7103,7 +7146,7 @@ mod tests {
         let (program, _source, reduced) =
             masked_window_reduce_program(1, 0, 5, 3, 3, 2, ScalarOp::Equal);
         let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("masked-window program builds ops");
 
         let folded = built
@@ -7153,7 +7196,7 @@ mod tests {
         let (program, _source, reduced) =
             masked_window_reduce_program(1, 0, 5, 3, 3, 1, ScalarOp::Greater);
         let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
-        let built = bind(&program, &shapes, &[], NumericPolicy::bit_exact())
+        let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
             .expect("masked-window program builds ops");
 
         let folded = built
