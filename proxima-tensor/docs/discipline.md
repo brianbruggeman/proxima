@@ -31411,3 +31411,136 @@ again would not be a re-proof of anything this row claims.
 **Residual, left open for the next slice:** pick option 1 or 2 above (owner's
 call, not asserted here), then land the interop wiring and the real-model
 gate this row's brief specified, unchanged.
+
+## ROW 547 -- gated delta net's state_out lands as a real second output (CPU); Metal kernel not yet taught the new shape
+
+**Task:** the owner's locked decision on ROW 546's option 2, refined: give
+`BoundOpKind::GatedDeltaNet` a second, state-shaped output produced by the
+SAME dispatch (no companion `BoundOp`, no new kind), teach every real CPU
+executor to write it, stop declining fusion when a caller requests it, teach
+Metal's kernel/bindings/hazard tracking the same shape, add the interop
+fixture test, and re-measure the real decode loop.
+
+**What landed, `file:line`:**
+
+- `proxima-tensor/src/bind.rs:302-317` -- `BoundOpKind::GatedDeltaNet` gained
+  `state_out: NodeId`. `gated_delta_net_candidates` (`:3844-3924`) no longer
+  declines a match because `state_out` is itself a requested/effective
+  output; it still declines when any OTHER absorbed node is requested
+  (`:3860-3864`). The construction site (`:4020-4038`) supplies
+  `state_out: found.state_out`.
+- `proxima-tensor/src/cpu.rs`: `run_gated_delta_net` (`:7017-7098`) now takes
+  `state_sink: Option<&mut Vec<f32>>` and hands its already-computed scratch
+  state to it instead of discarding it. A new `run_node_into_with_gdn_state`
+  (`:6576-6608`) wraps `run_node_into`'s own body with that one seam;
+  `run_node_into` itself, and its thirteen other call sites, are UNCHANGED
+  (always pass `None`, correct because none of them can reach a resolved
+  `GatedDeltaNet` node). Three real dispatch points call the new function and
+  write `state_out`'s own buffer: `Interpreter::fold` (`:7267-7295`,
+  `bind.rs`'s own two `run_resolved` test helpers ride this),
+  `evaluate_quantized_with_scratch_impl`'s per-node loop (`:4949-4970`, the
+  real quantized-weight decode path), and `run_resolved_nodes_in_arena`
+  (`:1194-1281`, `evaluate_named`/`evaluate_named_via_arena`'s own
+  `StaticArena` path). `build_static_arena_with_constants` (`:927-942`) now
+  also pre-sizes `state_out`'s own arena slot, since it is never any resolved
+  node's `.node` and the existing per-node sizing loop would otherwise never
+  touch it.
+- **A fourth, MEASURED consumer this row's own brief did not name:**
+  `evaluate_named`/`run_resolved_nodes_in_arena` genuinely reaches a resolved
+  `GatedDeltaNet` node whenever a caller's program matches the pattern AND
+  requests `state_out` -- confirmed by running the full gate: two existing
+  `spec.rs` tests (`qwen35_delta_net_step_matches_a_hand_computed_recurrence`,
+  `qwen35_gdn_prefill_scan_matches_repeated_graph_steps`) broke the moment
+  `gated_delta_net_candidates` stopped declining, because they call
+  `evaluate_named` requesting `[out, state_out]` on a program that now fuses.
+  This is the SAME class of gap ROW 546 flagged for `generate.rs`'s own
+  decode loop, just on a different, already-tested caller -- closing it
+  (the arena pre-sizing + dispatch above) was in scope, not deferred.
+- Tests, `proxima-tensor/src/bind.rs`'s `gated_delta_net_tests` module:
+  `fused_and_unfused_gated_delta_net_agree_bit_for_bit_at_one_token` and
+  `..._at_small_gqa_shape` now also request and compare `state_out`. `out`
+  itself is compared against an `out`-ONLY bind (requesting `state_out`
+  alongside `out` changes what `ChainFusion` inlines into the UNFUSED
+  baseline's own reduce, an unrelated pre-existing behavior, not this row's
+  own regression) and stays bit-identical. `state_out` itself is NOT
+  bit-identical: MEASURED max relative error 1.2e-7 at both shapes, mechanism
+  traced to `gdn.rs:141` (`gdn::run_gdn_prefill_scan`'s
+  `state[i] = state[i] * decay + key[i] * delta`, one Rust expression the
+  compiler may lower to an FMA) against the unfused chain's own separate
+  `Multiply`/`Add` nodes -- an FMA-vs-separate-rounding artifact on the last
+  bit, not a structural mismatch, so both bit-identical tests assert
+  `state_out` within `1e-6` relative error instead of `assert_eq!`, one line
+  each explaining why. `qwen35moe_mixer_census_at_real_shape_with_gated_delta_net_fusion`
+  now asserts the matcher FIRES with `[mixer_out, taps.state_out]` requested
+  (previously asserted it declined) and compares `state_out` within `2e-4`
+  relative error, the same bar (and the same 128-term-reduce reassociation
+  reason) `fused_and_unfused_gated_delta_net_agree_within_tolerance_at_real_qwen35moe_gqa_shape`
+  already carries.
+- Also fixed, found while making the gate command in this row's own brief
+  actually compile: `gated_delta_net_candidates`'s `debug!` call
+  (`bind.rs:3881`, pre-existing on `main`) was the only `debug!` site in this
+  file not gated `#[cfg(feature = "instrument")]` -- `cargo check -p
+  proxima-tensor --features gated-delta-net-fusion` (no `instrument`) never
+  compiled before this row. Gated it to match every other `debug!` site.
+
+**Gates, verbatim:**
+
+- `cargo nextest run -p proxima-tensor --features gated-delta-net-fusion -j 4`:
+  `632 tests run: 632 passed, 8 skipped`.
+- `cargo nextest run -p proxima-tensor -j 4` (feature OFF): `625 tests run:
+  625 passed, 8 skipped`.
+- `cargo clippy -p proxima-tensor --all-targets --features
+  gated-delta-net-fusion -j 4`: clean (one `#[allow(clippy::too_many_arguments)]`
+  on `run_node_into_with_gdn_state`, one-line why: it mirrors
+  `run_node_into`'s own seven plus the one seam this function adds).
+- `cargo check -p omega --features metal,instrument,gated-delta-net-fusion
+  --all-targets` and `cargo clippy` with the same features: clean.
+- `cargo check -p proxima-model-interop --features metal,instrument,
+  gated-delta-net-fusion --all-targets`: clean.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument,
+  gated-delta-net-fusion --test-threads 2 -E 'test(qwen35)'`: `20 tests run:
+  20 passed, 276 skipped` -- all pre-existing qwen35 tests, none of them
+  request `state_out` on the fused path today, so this gate does not by
+  itself prove the interop wiring; see the residual below.
+
+**Why the Metal kernel, the interop fixture test, and the real-model run did
+NOT land this slice -- MEASURED, not guessed:** `omega/src/msl.rs`'s
+`render_gated_delta_net` (`:4014-4087`) still writes the updated state IN
+PLACE into the `state` buffer (`buffer(5)`, the SAME device buffer `state_in`
+reads from, per its own doc at `:4008-4013`) -- it has no `state_out`
+binding, and `omega/src/metal.rs`'s own hazard-tracking comment
+(`:3543-3559`) is written entirely around that in-place convention. This
+row's own CPU-side change makes `gated_delta_net_candidates` fire MORE
+broadly than before (ROW 547's own fourth-consumer finding above) --
+including, per ROW 546's own reading of `generate.rs:10786-10855`, the real
+qwen35moe Metal decode loop, which requests `state_out` on every token. Metal
++ `gated-delta-net-fusion` together in production would therefore now
+dispatch the fused kernel on the real decode step and hand the caller back
+whatever stale bytes happened to sit in `state_out`'s own (never-written)
+device buffer -- silently wrong generated text, not a compile error or a
+panic. Teaching `msl.rs`/`metal.rs` the two-output shape is a genuine kernel
++ hazard-tracking rewrite (new binding slot, new uniform accounting,
+`hazard_step` taught about a second write target instead of the current
+one-off `tracker.record` patch at `metal.rs:3552-3559`), unreviewed and
+unbenched under this row's remaining budget -- landing it rushed is exactly
+what principle 14/15/18 rule out. `gated-delta-net-fusion` stays
+default-off, so no default path regresses; but it is `#[cfg]`-visible to
+`metal` in the same crate, and this row is the one that made the interaction
+real rather than latent. The interop fixture test and the real-model gate
+both require this kernel fix first (running either against today's kernel
+would either read stale state silently or, if `debug_assertions` catch the
+missing buffer, panic) -- neither was run.
+
+**Landed this slice:** `proxima-tensor` only (`src/bind.rs`, `src/cpu.rs`).
+No changes to `omega` or `proxima-model-interop` source.
+
+**Residual, left open for the next slice, in order:** (1) `msl.rs`'s
+`render_gated_delta_net` -- read `state` from its own buffer, write the
+update to a new `state_out` binding; (2) `metal.rs`'s bind-buffer resolution
+and hazard tracking -- resolve `state_out`'s own device buffer the same way
+`bound.node`'s output is resolved today, replace the `:3552-3559` in-place
+`tracker.record` patch with an ordinary second `hazard_step` write, add a
+uniform/binding slot; (3) `proxima-model-interop/tests/qwen35_synth_hybrid.rs`
+-- the 8-token fixture the brief specifies; (4) the real `gguf_generate`
+run against the qwen35moe checkpoint, gated on (1)-(3) actually passing
+first.
