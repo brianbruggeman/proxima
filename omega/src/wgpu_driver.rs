@@ -719,7 +719,8 @@ fn pack_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
         BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
         | BoundOpKind::CachedAttention { .. }
-        | BoundOpKind::GatedDeltaNet { .. } => Ok(pack_leaf_uniforms(bound)),
+        | BoundOpKind::GatedDeltaNet { .. }
+        | BoundOpKind::MoeTopK { .. } => Ok(pack_leaf_uniforms(bound)),
     }
 }
 

@@ -157,6 +157,15 @@ gated-delta-net-fusion = [
     "proxima-tensor/gated-delta-net-fusion",
     "omega?/gated-delta-net-fusion",
 ]
+# Passthrough to `proxima-tensor/moe-topk-fusion` and `omega/moe-topk-fusion`
+# (ROW 569) -- same shape as `gated-delta-net-fusion` above: default-off
+# until a real-model A/B lands, individually selectable so this crate's own
+# harness can exercise the fused `BoundOpKind::MoeTopK` on CPU alone.
+moe-topk-fusion = [
+    "dep:omega",
+    "proxima-tensor/moe-topk-fusion",
+    "omega?/moe-topk-fusion",
+]
 # Passthrough to `proxima-tensor/reduce-epilogue-fusion` and
 # `omega/reduce-epilogue-fusion` -- folded into `metal`'s default shape above
 # but kept individually selectable so this crate's own harness can exercise

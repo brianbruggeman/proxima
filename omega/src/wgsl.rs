@@ -239,6 +239,12 @@ pub fn emit_wgsl_with_policy(
                 kind: "gated_delta_net",
             });
         }
+        BoundOpKind::MoeTopK { .. } => {
+            return Err(EmitError::UnsupportedOpKind {
+                node: resolved.node,
+                kind: "moe_topk",
+            });
+        }
     };
     let (threads, workgroup_size) = match cooperative_width {
         Some(width) => (grid_threads(resolved) * u64::from(width), width),
@@ -525,7 +531,8 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
         BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
         | BoundOpKind::CachedAttention { .. }
-        | BoundOpKind::GatedDeltaNet { .. } => resolved.extents.iter().product(),
+        | BoundOpKind::GatedDeltaNet { .. }
+        | BoundOpKind::MoeTopK { .. } => resolved.extents.iter().product(),
     }
 }
 

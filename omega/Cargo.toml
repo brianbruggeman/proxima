@@ -27,6 +27,10 @@ cached-attention-streaming = ["proxima-tensor/cached-attention-streaming"]
 # only effect is whether `proxima_tensor::bind` ever produces the kind for
 # it to render.
 gated-delta-net-fusion = ["proxima-tensor/gated-delta-net-fusion"]
+# Default-off passthrough to `proxima-tensor/moe-topk-fusion` (ROW 569, the
+# `BoundOpKind::MoeTopK` bind-time matcher) -- same shape as
+# `gated-delta-net-fusion` above.
+moe-topk-fusion = ["proxima-tensor/moe-topk-fusion"]
 # Default-off passthrough to `proxima-tensor/reduce-epilogue-fusion` (the
 # `BoundOpKind::Reduce::epilogue_body`/`epilogue_operands` bind-time fusion
 # pass) -- same shape as `cached-attention-streaming` above. `crate::msl`'s

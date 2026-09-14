@@ -475,6 +475,11 @@ pub(crate) fn kernel_identity(
         } => format!(
             "{prefix}_gated_delta_net_h{kv_heads}_v{num_v_heads}_k{head_k_dim}_d{head_v_dim}"
         ),
+        BoundOpKind::MoeTopK {
+            expert_count,
+            top_k,
+            ..
+        } => format!("{prefix}_moe_topk_e{expert_count}_k{top_k}"),
     };
 
     let gather_bits: String = resolved

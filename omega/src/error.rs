@@ -95,6 +95,17 @@ pub enum EmitError {
     )]
     CachedAttentionPartialRotaryNotSupported { node: NodeId },
 
+    /// ROW 569: the CPU executor (`proxima_tensor::cpu::run_moe_topk`) and
+    /// the bind-time matcher landed first; the Metal kernel (one threadgroup,
+    /// 256 lanes, `top_k` rounds of simd-group max with exclusion) is this
+    /// row's own next slice, the same CPU-ahead-of-GPU gap
+    /// [`Self::GatedDeltaNetNotSupported`] names.
+    #[error(
+        "node {node} is a moe top-k routing op, which no GPU emitter in this crate supports yet \
+         -- proxima_tensor::cpu::run_moe_topk is CPU-only"
+    )]
+    MoeTopKNotSupported { node: NodeId },
+
     /// `omega::execute`'s own upstream gate (`reject_unsupported_gpu_dtype`)
     /// never lets anything but `Float32`/`Float16` reach [`crate::msl::emit`]
     /// in practice, but [`crate::msl::emit`] is a public entry point a

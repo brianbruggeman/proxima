@@ -1496,6 +1496,9 @@ fn emit_inner(
         BoundOpKind::Iota => render_iota(resolved, &entry),
         BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
         BoundOpKind::GatedDeltaNet { .. } => render_gated_delta_net(resolved, &entry),
+        BoundOpKind::MoeTopK { .. } => Err(EmitError::MoeTopKNotSupported {
+            node: resolved.node,
+        }),
     }?;
     // Coupled to `render_cached_attention`'s own final-store branch by
     // construction: whenever the rendered SOURCE writes the scratch layout
@@ -3459,6 +3462,11 @@ fn grid_threads(
             head_v_dim,
             ..
         } => num_v_heads * head_v_dim,
+        BoundOpKind::MoeTopK { .. } => {
+            return Err(EmitError::MoeTopKNotSupported {
+                node: resolved.node,
+            });
+        }
     };
     Ok(threads)
 }
@@ -3654,6 +3662,11 @@ fn entry_name(resolved: &BoundOp) -> String {
         } => format!(
             "omega_gated_delta_net_h{kv_heads}_v{num_v_heads}_k{head_k_dim}_d{head_v_dim}"
         ),
+        BoundOpKind::MoeTopK {
+            expert_count,
+            top_k,
+            ..
+        } => format!("omega_moe_topk_e{expert_count}_k{top_k}"),
     };
     let gather_bits: String = resolved
         .operands()
