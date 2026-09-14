@@ -56,6 +56,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::future::Future;
+use core::marker::PhantomData;
 use core::ops::Range;
 
 use memmap2::{Advice, Mmap};
@@ -235,6 +236,7 @@ fn report_encoder_split(step: usize, encoder_split_ns: (u64, u64), gpu_exec_ns: 
 /// time with their operand bytes and bytes/ns -- exactly what settles
 /// whether GPU time tracks operand bytes or is flat per dispatch.
 /// shape/dtype key -> (op count, total gpu ns, total operand bytes) accumulator
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 type CooperativeShapeCounts = alloc::collections::BTreeMap<(Vec<u64>, Vec<u16>), (u64, u64, u64)>;
 
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -1487,6 +1489,7 @@ const fn step_batch_needs_logits(split_prefill: bool, is_last_step_batch: bool) 
 /// The device-resident input and output buffer placements for one segment
 /// evaluation, grouped so the method they feed keeps its argument count
 /// under clippy's threshold.
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 struct SegmentPlacements<'placements> {
     input_placements: &'placements [(NodeId, &'placements PlacedBuffer, usize)],
     output_placements: &'placements [(NodeId, &'placements PlacedBuffer, usize)],
@@ -1507,6 +1510,9 @@ struct PreGatherContext<'context, 'mapping, 'file> {
     position_offset: usize,
     layer_window: usize,
     gdn_backend: GdnPrefillBackend,
+    // `'mapping` is only borrowed by metal-gated fields below; this marker
+    // keeps the lifetime parameter used on every feature combination.
+    marker: PhantomData<&'mapping ()>,
     #[cfg(feature = "metal")]
     sidecar: Option<&'mapping crate::expert_sidecar::MappedExpertSidecar>,
     #[cfg(feature = "metal")]
@@ -2774,6 +2780,7 @@ impl<'file> LoadedModel<'file> {
             position_offset,
             layer_window,
             gdn_backend,
+            marker: _,
             #[cfg(feature = "metal")]
             sidecar,
             #[cfg(feature = "metal")]
@@ -6677,7 +6684,11 @@ impl BackendRuntime {
         )?)
     }
 
-    #[cfg(all(feature = "instrument", target_os = "macos"))]
+    #[cfg(all(
+        feature = "metal-output-placement",
+        feature = "instrument",
+        target_os = "macos"
+    ))]
     fn evaluate_segment_op_timed_with_placements(
         &mut self,
         program: &[Op],
@@ -10144,6 +10155,7 @@ impl<'file> LoadedModel<'file> {
                                 position_offset: cached_len,
                                 layer_window: serving_config.qwen35moe_layer_window,
                                 gdn_backend: pre_gather_plan.gdn_backend,
+                                marker: PhantomData,
                                 #[cfg(feature = "metal")]
                                 sidecar: self.expert_sidecar.as_ref(),
                                 #[cfg(feature = "metal")]
@@ -10222,6 +10234,7 @@ impl<'file> LoadedModel<'file> {
                                 position_offset: cached_len,
                                 layer_window: serving_config.qwen35moe_layer_window,
                                 gdn_backend: pre_gather_plan.gdn_backend,
+                                marker: PhantomData,
                                 #[cfg(feature = "metal")]
                                 sidecar: self.expert_sidecar.as_ref(),
                                 #[cfg(feature = "metal")]

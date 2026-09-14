@@ -4,6 +4,7 @@
 //! based and conservative. It is a routing result, not a claim that an
 //! encoder graph is already executable by [`crate::generate::LoadedModel`].
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
