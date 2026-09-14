@@ -31817,3 +31817,96 @@ This matches ROW 550/551's own good-state reading (`block_upload_calls=76`, `map
 **Comparison:** Both runs contain "Paris" (text is correct). ttnt_mean_ms: 56.818/56.909 vs. baseline 56.9 — essentially identical, within 0.16% variance. gpu_exec_ms: 41.29/42.59 vs. baseline 40–48 — within baseline range. All structural metrics (dispatch_calls, barriers, block_uploads, mapping_offset_uploads) are identical to baseline. No regressions detected.
 
 **Decision:** Keep the change. Commit 1bdf9bd6 passes gate and measurement with no performance regression or correctness deviation.
+
+## ROW 555 -- fused GDN's `state_out` write never reached the caller's placed buffer
+
+**Root cause:** `omega/src/metal.rs`, the `BoundOpKind::GatedDeltaNet` arm inside
+`encode_op` (previously ~11673). `gated_delta_net_candidates`
+(`proxima-tensor/src/bind.rs:4029`, `fused.node = output`) absorbs the unfused
+`state_out` elementwise node into the fused op, so the fused `BoundOp`'s own
+`bound.node` is the PRIMARY "out" node, never `state_out`. The one place a
+caller's output placement is consulted --
+`output_placed.get(&bound.node)` in `execute_plan_with_placements_inner`'s
+per-op loop (`metal.rs:3433`, and the two `_op_timed`/`_dispatch_timed`
+twins) -- is keyed by `bound.node`, so a caller's `ssm_output_placements`
+entry for `state_out` (`proxima-model-interop/src/generate.rs:9821`) was
+NEVER consulted for a fused op. `encode_op`'s own `state_out` handling
+(`device_buffers.get(state_out)` / fresh `allocate_buffer`) wrote the real
+recurrent state into a Metal-Plan-internal buffer instead, under the correct
+key but never exposed to the caller. The next step, `ssm_input_placements`
+unconditionally re-binds `state_in`'s `NodeId` to the caller's own (always
+zero, never written) ping-pong buffer (`metal.rs:3246`, the block-input
+placement loop) -- so the fused kernel's recurrent state reset to zero on
+every dispatch.
+
+**Execution data that proves it (feature ON, 4-token run, layer 0, before
+the fix):**
+
+| step | state_in ptr | state_in first4 | state_out ptr (metal-internal) | state_out ptr (caller's `ssm_output_placements`) | caller's buffer first4 post-dispatch |
+|---|---|---|---|---|---|
+| 0 | 5374397008 | `[0,0,0,0]` | 4601709408 | 5374397376 | `[0,0,0,0]` |
+| 2 | 5374397376 (ping-ponged to the UNWRITTEN caller buffer) | `[0,0,0,0]` | 4601709408 (`placed=true`, reused, holds the real computed state) | 5374397008 | (never read back in this table; caller buffer never written on any step) |
+
+The caller's own placed buffer (`state_out_placed_ptr`) reads `[0.0, 0.0,
+0.0, 0.0]` after every dispatch across all 20+ steps captured in
+`fixed_4tok`/`on_4tok` diagnostic logs -- proving the write never landed
+there, while the plan-internal buffer (a DIFFERENT, never-exposed pointer)
+correctly persisted across `placed=true` steps. Feature-ON `generated_text`
+before the fix: `"<|endoftext|><|im_start|><|im_start|>user, 12222..."`
+(ROW 549's own capture, reproduced here).
+
+**Instrumented:** `debug!` in `encode_op`'s `GatedDeltaNet` arm
+(`state_in`/`state_out` node ids, resolved buffer pointers/offsets, first-4
+floats of `state_in` read via `.contents()`, instrument-gated); `debug!` in
+the interop decode loop at `ssm_input_placements`/`ssm_output_placements`
+construction (layer 0 pointer identities + first-4 floats pre-dispatch) and
+after `waitUntilCompleted` (post-dispatch first-4 floats of the caller's
+placed output buffer), via a new `omega::placed_buffer_identity` diagnostic
+helper.
+
+**Fix:** threaded a new `state_out_placement: Option<(&MetalBuffer, usize)>`
+parameter through `encode_op` and `execute_op_timed`, resolved by every
+placement-aware caller (`execute_plan_with_placements_inner`,
+`execute_plan_with_placements_op_timed`, `execute_plan_with_placements_dispatch_timed`)
+as `output_placed.get(state_out)` -- the SAME map the ordinary `placement`
+lookup already uses, keyed correctly this time. The `GatedDeltaNet` arm now
+prefers this caller-supplied buffer over the plan-internal
+`device_buffers.get(state_out)` fallback, so the fused kernel's real output
+lands exactly where the interop's ping-pong `state_in` binding reads it back
+next step. Fixed `proxima-tensor/src/bind.rs:5690`'s test match in passing
+(now non-exhaustive once `gated-delta-net-fusion` reaches default-on and
+unifies with `omega`'s own `cached-attention-streaming` dev-dependency in a
+full-workspace build) -- `BoundOpKind::GatedDeltaNet` joins the existing
+`continue` arm.
+
+**Execution data after the fix (same 4-token run, layer 0):**
+
+| step | state_in first4 (pre-dispatch) | state_out first4 (post-dispatch, SAME ping-pong buffer) |
+|---|---|---|
+| 0 | `[0,0,0,0]` | `[1.8362462e-6, -3.3710473e-6, -4.9235732e-5, -1.1399259e-6]` |
+| 2 | `[1.8362462e-6, -3.3710473e-6, -4.9235732e-5, -1.1399259e-6]` (exact match to step 0's post-dispatch value) | `[1.5177654e-5, 2.2876115e-5, -1.6817534e-5, 0.00014608575]` |
+| 4 | `[1.5177654e-5, 2.2876115e-5, -1.6817534e-5, 0.00014608575]` (exact match) | `[0.00040357374, 0.0011725879, -5.1003695e-5, 1.5119118e-5]` |
+
+Every step's `state_in` pre-dispatch value now matches the PRIOR step's
+`state_out` post-dispatch value bit-for-bit -- the ping-pong loop is closed.
+
+**16-token gate run (feature explicitly on, matches ROW 554's fixture):**
+`generated_text = "<think>\n\n</think>\n\nThe capital of France is
+**Paris**.<|endoftext|>..."`, `ttnt_mean_ms = 52.733` (baseline 56.9),
+`token_breakdown_metal step=8`: `encode_dispatch_calls=4143 barriers=0
+gpu_exec_ms=41.559958 plan_hits=21 plan_misses=2`.
+
+**Gates:**
+- `cargo nextest run -p proxima-model-interop --features metal,instrument,gated-delta-net-fusion --test-threads 2 -E 'test(qwen35)'`: `20 tests run: 20 passed, 278 skipped`.
+- `cargo nextest run -p proxima-model-interop --no-default-features --features metal,instrument --test-threads 2 -E 'test(qwen35)'`: `20 tests run: 20 passed, 278 skipped` (feature off).
+- `cargo nextest run -p omega --features metal,instrument,gated-delta-net-fusion --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: `315 tests run: 315 passed, 13 skipped`.
+- `cargo clippy -p omega -p proxima-model-interop --features metal,instrument,gated-delta-net-fusion --all-targets`: exit 0.
+- `cargo clippy -p proxima-tensor --features cached-attention-streaming,gated-delta-net-fusion --all-targets`: exit 0.
+- `cargo check --workspace --all-targets` (default features): exit 0 -- catches the `bind.rs` exhaustiveness gap the default-on flip exposed.
+
+**Decision:** `gated-delta-net-fusion` flipped into `proxima-model-interop`'s
+default `metal` feature list (`Cargo.toml`). Rebuilt WITHOUT the explicit
+feature flag (relying on the new default) and reran: `generated_text`
+unchanged, contains "Paris"; `ttnt_mean_ms = 53.467`. Kept per the
+less-work/no-regression rule -- correctness restored, performance within
+baseline noise, all gates green.
