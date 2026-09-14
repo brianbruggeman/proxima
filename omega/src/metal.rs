@@ -6048,7 +6048,7 @@ mod classify_kind_packed_row_marker_tests {
     /// 2048, embedding 512), gate/up/down each grouped over the `k` selected
     /// experts through ONE [`grouped_gathered_expert_product`] call apiece --
     /// gate/up via main's own exported function (the same primitive
-    /// `append_moe_ffn_grouped_gate_up` uses), down via this test's own
+    /// `append_moe_ffn` now uses unconditionally, ROW 543), down via this test's own
     /// [`grouped_gathered_expert_product_with_x_axes`] (see its doc for why
     /// main's exported form cannot take down's rank-3 activation as-is).
     /// `append_moe_ffn`'s full router is a PRIVATE fn on main and always
@@ -6329,15 +6329,15 @@ mod classify_kind_packed_row_marker_tests {
         }
     }
 
-    /// ROW 543: `proxima_tensor::spec::append_moe_ffn_grouped_gate_up` (the
-    /// production entry point for the grouped strategy this landing
-    /// investigates -- `append_moe_ffn` itself stayed on `PerRoute` after
-    /// 07e1fad8's revert), not a hand-built stand-in for it like the
-    /// ignored probe above. Census: 2 grouped-packed reduces (gate, up) +
-    /// `EXPERT_USED_COUNT` per-route-packed reduces (down), every one
-    /// `reduce-packed-row-blocked`, and no surviving elementwise op whose
-    /// output shape is the materialized `[.., d_in, d_out]` gathered
-    /// product.
+    /// ROW 543/545: `proxima_tensor::spec::append_moe_ffn` itself (the
+    /// function every production call site uses, unchanged signature) now
+    /// always builds the grouped gate/up strategy while leaving down
+    /// per-route -- this is the production entry point, not a hand-built
+    /// stand-in for it like the ignored probe above. Census: 2 grouped-packed
+    /// reduces (gate, up) + `EXPERT_USED_COUNT` per-route-packed reduces
+    /// (down), every one `reduce-packed-row-blocked`, and no surviving
+    /// elementwise op whose output shape is the materialized
+    /// `[.., d_in, d_out]` gathered product.
     #[test]
     fn qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down() {
         use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
@@ -6410,10 +6410,7 @@ mod classify_kind_packed_row_marker_tests {
         );
         let ones = scalar_constant(&mut program, 1.0);
 
-        // main's `append_moe_ffn` reverted to `PerRoute` (07e1fad8); the
-        // production entry point for the grouped strategy under
-        // investigation is `append_moe_ffn_grouped_gate_up`.
-        let (root, _site) = proxima_tensor::spec::append_moe_ffn_grouped_gate_up(
+        let (root, _site) = proxima_tensor::spec::append_moe_ffn(
             &mut program,
             0,
             x_node,
@@ -6427,7 +6424,7 @@ mod classify_kind_packed_row_marker_tests {
             ExpertGatingFunc::Softmax,
             None,
         )
-        .expect("append_moe_ffn_grouped_gate_up lowers at the real qwen35moe shape");
+        .expect("append_moe_ffn lowers at the real qwen35moe shape");
 
         let symbols = [SEQUENCE as u64];
         let shapes = infer(&program, &symbols).expect("the qwen35moe-shaped ffn infers");
@@ -6499,8 +6496,8 @@ mod classify_kind_packed_row_marker_tests {
         for kind in expert_reduce_kinds {
             assert_eq!(
                 kind, "reduce-packed-row-blocked",
-                "every expert-weight reduce append_moe_ffn_grouped_gate_up builds must \
-                 take the fast packed-row body, whether grouped (gate/up) or per-route (down)"
+                "every expert-weight reduce append_moe_ffn builds must take the \
+                 fast packed-row body, whether grouped (gate/up) or per-route (down)"
             );
         }
     }
