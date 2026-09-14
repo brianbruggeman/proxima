@@ -3984,8 +3984,24 @@ pub fn bind_with_fusion(
         fuse_cached_attention,
         numeric_policy,
     )?;
+    #[cfg(feature = "instrument")]
+    debug!(
+        stage = "after_cached_attention_fusion",
+        cached_attention_count = built
+            .iter()
+            .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+            .count() as u64,
+        "bind_with_fusion: fused-op-kind count per stage, catches a later stage silently discarding an earlier fusion"
+    );
     #[cfg(feature = "gated-delta-net-fusion")]
-    let built = apply_gated_delta_net_fusion(built, program, shapes, outputs, numeric_policy)?;
+    let built = apply_gated_delta_net_fusion(
+        built,
+        program,
+        shapes,
+        outputs,
+        fuse_cached_attention,
+        numeric_policy,
+    )?;
     #[cfg(feature = "reduce-epilogue-fusion")]
     {
         admit(numeric_policy, NumericRewrite::ReduceEpilogueFusion)?;
@@ -3993,7 +4009,17 @@ pub fn bind_with_fusion(
         if std::env::var_os("PROXIMA_DISABLE_REDUCE_EPILOGUE_FUSION").is_some() {
             return Ok(built);
         }
-        reduce_epilogue_fusion(built, outputs, numeric_policy)
+        let epilogued = reduce_epilogue_fusion(built, outputs, numeric_policy)?;
+        #[cfg(feature = "instrument")]
+        debug!(
+            stage = "after_reduce_epilogue_fusion",
+            cached_attention_count = epilogued
+                .iter()
+                .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+                .count() as u64,
+            "bind_with_fusion: fused-op-kind count per stage, catches a later stage silently discarding an earlier fusion"
+        );
+        Ok(epilogued)
     }
     #[cfg(not(feature = "reduce-epilogue-fusion"))]
     Ok(built)
@@ -4544,6 +4570,7 @@ fn apply_gated_delta_net_fusion(
     program: &[Op],
     shapes: &Shapes,
     outputs: &[NodeId],
+    fuse_cached_attention: bool,
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
     let initial_candidates = gated_delta_net_candidates(program, shapes, &built, outputs);
@@ -4569,7 +4596,19 @@ fn apply_gated_delta_net_fusion(
             }
         }
     }
-    let rebuilt = bind_plain(program, shapes, &planning_outputs, numeric_policy)?;
+    // `bind_plain` here used to drop every `BoundOpKind::CachedAttention`
+    // `bind_cached_attention_fusion` above already spliced into `built` --
+    // this rebind must carry that SAME fusion forward, or a hybrid
+    // full-attention/gated-delta-net model (qwen35moe) loses all of its
+    // cached-attention fusion the moment this feature is compiled in
+    // (row 565: `built` measured 9-10 `CachedAttention` ops, `rebuilt` measured 0).
+    let rebuilt = bind_cached_attention_fusion(
+        program,
+        shapes,
+        &planning_outputs,
+        fuse_cached_attention,
+        numeric_policy,
+    )?;
     let candidates = gated_delta_net_candidates(program, shapes, &rebuilt, outputs);
     if candidates.is_empty() {
         return Ok(built);

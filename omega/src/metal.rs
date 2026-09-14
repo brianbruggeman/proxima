@@ -6747,6 +6747,15 @@ fn prepare(
 
     let mut resolved = bind(program, &shapes, &effective_outputs, numeric_policy)?;
     #[cfg(feature = "instrument")]
+    debug!(
+        cached_attention_count = resolved
+            .iter()
+            .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+            .count() as u64,
+        resolved_len = resolved.len() as u64,
+        "prepare: proxima_tensor::bind() fused-op count reaching this driver"
+    );
+    #[cfg(feature = "instrument")]
     if effective_outputs.iter().any(|output| output.0 == 2)
         && let Some(bound_embedding) = resolved.iter().find(|bound| bound.node.0 == 2)
         && let Some((source, layout, gather)) = bound_embedding.operands().first()
