@@ -585,3 +585,46 @@ fn raw_split_member_forces_its_own_dispatch() {
         }
     }
 }
+
+/// ROW 570's ladder: wall-clock time around one call to
+/// `execute_plan_named_with_placements` for the whole 8-round fixture, on
+/// the SAME 0.59 MB (`weight_bytes_per_round`) Q4_K slab shape every other
+/// case in this file uses. `execute_plan_with_placements` always
+/// `waitUntilCompleted`s before returning (its own doc), so this wall-clock
+/// window covers exactly one command buffer's worth of encode+dispatch+GPU
+/// execution -- the CPU-side encode overhead is real but IDENTICAL in
+/// shape between the two feature builds (8 ordinary `encode_op` calls vs 1
+/// `handle_merged_position` call), so it does not favor either arm. Which
+/// of "8 separate dispatches" or "1 depth-8 dispatch" this measures is
+/// entirely decided by which feature set the binary was BUILT with
+/// (`metal-horizontal-merge` on or off) -- run this test under both to get
+/// both arms. Two untimed warmup calls pay the pipeline-cache-miss cost
+/// once, outside the 7 recorded samples, matching how the crate itself
+/// only ever pays that cost on the plan's first execution.
+#[test]
+#[ignore = "perf ladder -- run explicitly, once per metal-horizontal-merge feature setting"]
+fn ladder_eight_dispatches_vs_one_merged_dispatch_gpu_time() {
+    let fixture = build_fixture();
+    let named = fixture.named();
+    let input_placements = fixture.input_placements();
+    let output_placements = fixture.output_placements();
+    for _ in 0..2 {
+        omega::execute_plan_named_with_placements(&fixture.plan, &named, &input_placements, &output_placements)
+            .expect("warmup run executes");
+    }
+    let mut samples_us: Vec<f64> = Vec::with_capacity(7);
+    for _ in 0..7 {
+        let started = std::time::Instant::now();
+        omega::execute_plan_named_with_placements(&fixture.plan, &named, &input_placements, &output_placements)
+            .expect("timed run executes");
+        samples_us.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+    }
+    fixture.assert_outputs_match_reference(1e-2);
+    let mut sorted = samples_us.clone();
+    sorted.sort_by(f64::total_cmp);
+    let median = sorted[sorted.len() / 2];
+    eprintln!(
+        "row570_ladder metal-horizontal-merge={} samples_us={samples_us:?} median_us={median}",
+        cfg!(feature = "metal-horizontal-merge")
+    );
+}
