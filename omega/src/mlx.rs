@@ -87,6 +87,7 @@ mod tests {
             key_dim: 4,
             value_dim: 5,
             heads: 2,
+            kv_heads: 2,
         };
         let query: Vec<f32> = (0..24)
             .map(|index| (index as f32 - 7.0) * 0.03125)
@@ -107,6 +108,8 @@ mod tests {
             shape,
             query: &query,
             key: &key,
+            query_key_head_stride: 1,
+            query_key_dim_stride: 2,
             value: &value,
             gate: &gate,
             beta: &beta,
@@ -119,6 +122,8 @@ mod tests {
             shape,
             query: &query,
             key: &key,
+            query_key_head_stride: 1,
+            query_key_dim_stride: 2,
             value: &value,
             gate: &gate,
             beta: &beta,
