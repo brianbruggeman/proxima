@@ -5868,13 +5868,18 @@ mod classify_kind_packed_row_marker_tests {
     use alloc::vec;
 
     use proxima_tensor::{
-        BoundOp, DType, Extent, IndexMap, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append,
-        bind, infer, map,
+        AxisIndex, AxisTerm, BoundOp, DType, Extent, IndexMap, IndexPattern, NumericPolicy, Op,
+        Reduce, ReduceInit, ScalarOp, append, bind, bind_with_fusion, infer, map,
     };
 
     use proxima_tensor::NodeId;
+    use proxima_tensor::spec::{
+        elementwise, grouped_gathered_expert_product, input_leaf, reduce as spec_reduce,
+        scalar_constant,
+    };
 
     use super::classify_kind;
+    use crate::msl::diagnose_packed_row_block;
     use crate::{PackedCodec, PackedOperands};
 
     /// The last node `program` builds -- see `msl::tests::terminal`'s own
@@ -5985,24 +5990,109 @@ mod classify_kind_packed_row_marker_tests {
         }
     }
 
+    /// The `[sequence, selected, d_in, d_out]` gather
+    /// [`grouped_gathered_expert_product`] (`proxima_tensor::spec`,
+    /// `spec.rs:1617-1654`) builds, generalized to accept an `x` of any
+    /// rank via `x_axes` -- main's exported function hardcodes `x_axes =
+    /// [0, 2]` (an `x` of rank 2, `[sequence, d_in]`, the gate/up shape).
+    /// Down's own activation is `silu(grouped_gate) * grouped_up`, already
+    /// `[sequence, selected, d_in]` (rank 3) because gate/up are grouped
+    /// upstream of it -- `x_axes = [0, 1, 2]` reads that shape directly, no
+    /// per-round stacking needed. This is a test-only reconstruction of the
+    /// generalization ROW 538's reverted `10bac25a` landed in `spec.rs`
+    /// itself; everything it is built from (`IndexMap::Computed`,
+    /// `IndexPattern`, `AxisIndex`, `AxisTerm`) is public on main today.
+    fn grouped_gathered_expert_product_with_x_axes(
+        program: &mut Vec<Op>,
+        stack: NodeId,
+        route: NodeId,
+        x: NodeId,
+        x_axes: &[u16],
+    ) -> NodeId {
+        let gathered_map = IndexMap::Computed {
+            indices: route,
+            index_map: map::projection(4, &[0, 1]),
+            base: IndexPattern {
+                iter_rank: 4,
+                axes: vec![
+                    AxisIndex::default(),
+                    AxisIndex {
+                        terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                        offset: 0,
+                        len: None,
+                    },
+                    AxisIndex {
+                        terms: core::iter::once(AxisTerm::projection(3)).collect(),
+                        offset: 0,
+                        len: None,
+                    },
+                ],
+            },
+            gathered_dim: 0,
+        };
+        let x_map = IndexMap::Affine(map::projection(4, x_axes));
+        append(
+            program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![(stack, gathered_map), (x, x_map)],
+                name: None,
+            },
+        )
+    }
+
     /// ROW 538: the real qwen35moe decode shape (256 experts, top-8, hidden
-    /// 2048, embedding 512) built through the SAME `append_moe_ffn` graph
-    /// production uses, bound through `bind_with_fusion` exactly like
-    /// `omega::metal::prepare` does. Prints every reduce's `classify_kind` so
-    /// a failure names which of the three expert reduces (gate/up/down)
-    /// regressed, and which kind it fell to instead of
-    /// `reduce-packed-row-blocked`.
-    // ROW 538: `append_moe_ffn` currently builds the PER-ROUTE graph on
-    // main (the grouped landing is reverted pending a further admission
-    // fix beyond `composed_packed_product_activation`'s computed-map
-    // check) -- this test's "exactly 3 expert reduces" shape only holds
-    // for the grouped form. Re-enable when the grouped product re-lands.
-    #[ignore = "requires the grouped expert product landing (ROW 538); per-route main builds a different reduce count"]
+    /// 2048, embedding 512), gate/up/down each grouped over the `k` selected
+    /// experts through ONE [`grouped_gathered_expert_product`] call apiece --
+    /// gate/up via main's own exported function (the same primitive
+    /// `append_moe_ffn_grouped_gate_up` uses), down via this test's own
+    /// [`grouped_gathered_expert_product_with_x_axes`] (see its doc for why
+    /// main's exported form cannot take down's rank-3 activation as-is).
+    /// `append_moe_ffn`'s full router is a PRIVATE fn on main and always
+    /// takes the reverted `PerRoute` branch for down (ROW 538), so `routes`
+    /// is built directly as an `[sequence, selected]` input here --
+    /// `classify_kind` only reads the resulting reduce's shape/layout, never
+    /// how the route ids were produced, and main's own
+    /// `grouped_gathered_expert_product_infers_selected_axis` unit test
+    /// (`spec.rs:11226`) already establishes an `Input` route is a
+    /// legitimate shape to bind this gather against.
+    ///
+    /// Bound through `bind_with_fusion` exactly like `omega::metal::prepare`
+    /// does. Prints every reduce's `classify_kind`, and on decline the exact
+    /// [`crate::msl::PackedRowBlockRejection`] `diagnose_packed_row_block`
+    /// names, so a failure shows which of the three expert reduces
+    /// (gate/up/down) regressed and why.
+    ///
+    /// ROW 538 update: with `correct_packed_matmul_layouts` applied (this
+    /// test used to skip it -- see the call site's own doc), gate and up
+    /// both classify `reduce-packed-row-blocked` with `diagnose_packed_row_block`
+    /// verdict `Ok(())`, unconditionally. Down alone declines
+    /// `Err(GatheredOperand)` (`msl.rs:2740-2742`) with the feature off:
+    /// unlike gate/up, whose activation is the SAME `x` for every one of the
+    /// `k` selected experts (`split_token_feature_axes` sees a zero stride on
+    /// the selected axis for both operands and falls back to "no token
+    /// axis"), down's own activation genuinely varies per selected expert
+    /// (`silu(gate_k) * up_k`), so `split_token_feature_axes` correctly
+    /// names BOTH `sequence` and `selected` as token axes and
+    /// `packed_row_block_token_total` comes back `8 > 1` -- a real
+    /// multi-row-gathered dispatch, not a probe artifact. Turning
+    /// `metal-gathered-packed-row` on flips `diagnose_packed_row_block` to
+    /// `Ok(())` for down too, but `classify_kind`'s own render-and-inspect
+    /// still reports `reduce-cooperative` for it even then -- a SECOND site
+    /// beyond `classify_packed_row_block`'s admission (inside
+    /// `push_packed_row_blocked_body`'s multi-row body,
+    /// `msl.rs:8169-8183` and onward) does not yet emit the packed markers
+    /// for this shape. That is a kernel-body change, out of scope for this
+    /// slice -- named here rather than fixed.
+    #[ignore = "down's grouped reduce is a genuine multi-row-gathered dispatch \
+                (msl.rs:2740 GatheredOperand); metal-gathered-packed-row admits \
+                it structurally but push_packed_row_blocked_body's multi-row \
+                body still does not render the packed markers for it (kernel \
+                change, out of scope)"]
     #[test]
     fn qwen35moe_shaped_grouped_expert_reduces_classify_as_packed_row_blocked() {
         use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
-        use proxima_tensor::bind_with_fusion;
-        use proxima_tensor::spec::{append_moe_ffn, input_leaf, scalar_constant};
 
         const EMBEDDING: usize = 512;
         const FEED_FORWARD: usize = 2048;
@@ -6030,14 +6120,11 @@ mod classify_kind_packed_row_marker_tests {
             vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
             "x",
         );
-        let gate_inp_node = input_leaf(
+        let routes_node = input_leaf(
             &mut program,
-            DType::Float32,
-            vec![
-                Extent::Static(EMBEDDING as u32),
-                Extent::Static(EXPERT_COUNT),
-            ],
-            "gate_inp",
+            DType::Int32,
+            vec![Extent::Symbolic(0), Extent::Static(EXPERT_USED_COUNT)],
+            "routes",
         );
         let expert_w_gate_node = input_leaf(
             &mut program,
@@ -6069,34 +6156,105 @@ mod classify_kind_packed_row_marker_tests {
             ],
             "expert_w_down",
         );
-        let ones = scalar_constant(&mut program, 1.0);
 
-        let (root, _site) = append_moe_ffn(
+        let gate_product =
+            grouped_gathered_expert_product(&mut program, expert_w_gate_node, routes_node, x_node);
+        let grouped_gate = spec_reduce(
             &mut program,
-            0,
-            x_node,
-            gate_inp_node,
-            expert_w_gate_node,
-            expert_w_up_node,
-            expert_w_down_node,
-            EXPERT_COUNT,
-            EXPERT_USED_COUNT,
-            ones,
-            proxima_tensor::spec::ExpertGatingFunc::Softmax,
-            None,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            gate_product,
+            "skio->skio",
+            "sko->skio",
         )
-        .expect("the qwen35moe-shaped routed ffn lowers");
+        .expect("grouped gate reduce lowers");
+        let up_product =
+            grouped_gathered_expert_product(&mut program, expert_w_up_node, routes_node, x_node);
+        let grouped_up = spec_reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            up_product,
+            "skio->skio",
+            "sko->skio",
+        )
+        .expect("grouped up reduce lowers");
+
+        // silu(grouped_gate) * grouped_up, vectorized over the whole
+        // [sequence, selected, feed_forward] tensor in one pass -- gate and
+        // up are already grouped, so down's own per-round hidden activation
+        // falls out without `stack_selected_routes`'s one-hot stacking (that
+        // trick exists only to combine round-scoped values computed one
+        // round at a time; nothing here is round-scoped any more).
+        let neg_gate = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Negate,
+            &[(grouped_gate, "sko->sko")],
+        )
+        .expect("negate lowers");
+        let exp_neg_gate = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Exponential,
+            &[(neg_gate, "sko->sko")],
+        )
+        .expect("exponential lowers");
+        let one = scalar_constant(&mut program, 1.0);
+        let one_plus_exp = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            &[(exp_neg_gate, "sko->sko"), (one, "->sko")],
+        )
+        .expect("add lowers");
+        let sigmoid_gate = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Reciprocal,
+            &[(one_plus_exp, "sko->sko")],
+        )
+        .expect("reciprocal lowers");
+        let silu_gate = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(grouped_gate, "sko->sko"), (sigmoid_gate, "sko->sko")],
+        )
+        .expect("silu lowers");
+        let hidden = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(silu_gate, "sko->sko"), (grouped_up, "sko->sko")],
+        )
+        .expect("hidden lowers");
+
+        let down_product = grouped_gathered_expert_product_with_x_axes(
+            &mut program,
+            expert_w_down_node,
+            routes_node,
+            hidden,
+            &[0, 1, 2],
+        );
+        let root = spec_reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            down_product,
+            "skio->skio",
+            "sko->skio",
+        )
+        .expect("grouped down reduce lowers");
 
         let symbols = [SEQUENCE as u64];
-        let shapes = infer(&program, &symbols).expect("the qwen35moe-shaped routed ffn infers");
-        let resolved = bind_with_fusion(
-            &program,
-            &shapes,
-            &[root],
-            true,
-            NumericPolicy::default(),
-        )
-        .expect("the qwen35moe-shaped routed ffn binds");
+        let shapes = infer(&program, &symbols).expect("the qwen35moe-shaped grouped ffn infers");
+        let mut resolved =
+            bind_with_fusion(&program, &shapes, &[root], true, NumericPolicy::default())
+                .expect("the qwen35moe-shaped grouped ffn binds");
 
         let gate_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
         let up_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
@@ -6109,6 +6267,19 @@ mod classify_kind_packed_row_marker_tests {
         // `classify_kind`'s emit path never reads bytes -- kept alive so the
         // borrow checker sees them span the assertions below.
         let _ = (gate_stack, up_stack, down_stack);
+
+        // `bind_with_fusion`'s own `layout_of` assumes every operand is
+        // row-major in its DECLARED axis order -- wrong for a packed Q4_K
+        // weight, whose bytes are GGUF's native `[out, in]` regardless of
+        // the declared shape. `omega::metal::prepare` (`metal.rs:6530`)
+        // always runs this correction before `emit`/`classify_kind` ever see
+        // `resolved`; skipping it here made every one of gate/up/down
+        // decline with `NonUnitWeightStride` against the UNCORRECTED
+        // declared-shape layout, not against the real production layout.
+        proxima_tensor::correct_packed_matmul_layouts(
+            &mut resolved,
+            &packed_operands.keys().copied().collect(),
+        );
 
         let mut expert_reduce_kinds = Vec::new();
         for bound in &resolved {
@@ -6127,6 +6298,16 @@ mod classify_kind_packed_row_marker_tests {
                         || *node == expert_w_down_node
                 });
                 if touches_expert_weight {
+                    let quantized: Vec<Option<PackedCodec>> = bound
+                        .operands()
+                        .iter()
+                        .map(|(node, _, _)| packed_operands.get(node).copied())
+                        .collect();
+                    let verdict = diagnose_packed_row_block(bound, &quantized);
+                    std::eprintln!(
+                        "diagnose_packed_row_block: node={:?} kind={kind} verdict={verdict:?}",
+                        bound.node
+                    );
                     expert_reduce_kinds.push(kind);
                 }
             }
