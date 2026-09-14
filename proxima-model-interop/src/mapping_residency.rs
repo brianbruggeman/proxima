@@ -5,21 +5,25 @@
 //! own mechanism (`proxima-tensor/docs/discipline.md`): a non-resident page
 //! behind a no-copy GPU buffer reads as zero rather than faulting, silently.
 //!
-//! [`prove_resident`] is the whole gate: [`crate::loader::prefault`] touches
-//! every page once, `mincore(2)` proves it, and a single retry absorbs the
-//! rare page a concurrent evictor reclaimed between the touch and the check.
-//! The retry re-touches ONLY the byte ranges [`missing_byte_ranges`] found
-//! still missing, not the whole mapping again (ROW 535: a retry that
-//! re-touches everything gives a concurrent evictor exactly as much time to
-//! reclaim the pages it already evicted once, so it can never converge under
-//! sustained pressure -- narrowing the retry to the actual holes makes it
-//! finish in a fraction of the time and lets it outrun the evictor).
-//! [`count_missing_pages`] is split out of the `mincore` call itself so the
-//! counting rule (which residency-vector bit means "resident") is testable
-//! against a hand-built vector, with no real mapping or syscall involved --
-//! `omega::metal::checkpoint_mmap_resident_pages` fuses the syscall and the
-//! count into one diagnostic-only return value and does not expose the
-//! vector, so it cannot serve that test.
+//! [`prove_resident`] is the whole gate, walked as a [`ResidencyRung`]
+//! ladder: [`crate::loader::prefault`] touches every page once, `mincore(2)`
+//! proves it, and a retry absorbs the rare page a concurrent evictor
+//! reclaimed between the touch and the check. The retry re-touches ONLY the
+//! byte ranges [`missing_byte_ranges`] found still missing, not the whole
+//! mapping again (ROW 535: a retry that re-touches everything gives a
+//! concurrent evictor exactly as much time to reclaim the pages it already
+//! evicted once, so it can never converge under sustained pressure --
+//! narrowing the retry to the actual holes makes it finish in a fraction of
+//! the time and lets it outrun the evictor). ROW 542: that retry still lost
+//! the race at 81-82% memory free, so a final `mlock(2)` rung
+//! ([`lock_resident`]) pins the whole mapping before the gate gives up --
+//! a false refusal blocks serving, which is worse than the silent zero-read
+//! ROW 533 named. [`count_missing_pages`] is split out of the `mincore` call
+//! itself so the counting rule (which residency-vector bit means "resident")
+//! is testable against a hand-built vector, with no real mapping or syscall
+//! involved -- `omega::metal::checkpoint_mmap_resident_pages` fuses the
+//! syscall and the count into one diagnostic-only return value and does not
+//! expose the vector, so it cannot serve that test.
 
 use crate::error::InteropError;
 
@@ -53,6 +57,35 @@ pub struct ResidencyReport {
     pub prefault_ms: f64,
     pub resident_pages: usize,
     pub missing_pages: usize,
+    pub rung: ResidencyRung,
+}
+
+/// Which step of [`prove_resident`]'s ladder actually resolved every page --
+/// ROW 542's fix for ROW 535's false refusal at 81-82% memory free: a plain
+/// prefault + one holes-only retry can still lose the race to a concurrent
+/// evictor under memory pressure, so `mlock(2)` (the same whole-mapping lock
+/// llama.cpp's own `--mlock` flag takes) is the rung of last resort before
+/// giving up and returning [`InteropError::MappingNotResident`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResidencyRung {
+    /// The first prefault + `mincore` pass already found every page resident.
+    Prefault,
+    /// A holes-only re-prefault ([`missing_byte_ranges`]) resolved the rest.
+    Retry,
+    /// `mlock(2)` over the whole mapping was needed to pin the remainder.
+    Mlock,
+}
+
+impl ResidencyRung {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResidencyRung::Prefault => "prefault",
+            ResidencyRung::Retry => "retry",
+            ResidencyRung::Mlock => "mlock",
+        }
+    }
 }
 
 /// Counts pages in `residency` -- one byte per page, in the exact
@@ -126,42 +159,126 @@ fn probe_residency(bytes: &[u8]) -> Vec<i8> {
     residency
 }
 
+/// Walks [`ResidencyRung::Prefault`] -> [`ResidencyRung::Retry`] ->
+/// [`ResidencyRung::Mlock`], calling `attempt` for each rung and stopping at
+/// the first one whose reported missing-page count is zero. Extracted as a
+/// pure control-flow function over an injected `attempt` so a unit test can
+/// drive the whole ladder with a fake residency probe -- no real mapping or
+/// syscall -- the same reason [`count_missing_pages`] is split out of
+/// [`probe_residency`] above.
+fn walk_residency_ladder<F>(mut attempt: F) -> (usize, ResidencyRung)
+where
+    F: FnMut(ResidencyRung) -> usize,
+{
+    let mut missing = 0;
+    for rung in [ResidencyRung::Prefault, ResidencyRung::Retry, ResidencyRung::Mlock] {
+        missing = attempt(rung);
+        if missing == 0 {
+            return (0, rung);
+        }
+    }
+    (missing, ResidencyRung::Mlock)
+}
+
+/// Best-effort `mlock(2)` over the whole mapping -- the ladder's last rung
+/// before [`InteropError::MappingNotResident`]. llama.cpp's own `--mlock`
+/// flag takes the identical whole-mapping lock (measured 0.8 s on the
+/// qwen35moe checkpoint used in this module's own `#[ignore]`d test). A
+/// failed lock is not fatal here: [`probe_residency`] re-checks afterward
+/// and the ladder falls through to the existing error if pages are still
+/// missing, mirroring [`probe_residency`]'s own "a failed probe proves
+/// nothing" stance on a failed `mincore`.
+fn lock_resident(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    // SAFETY: `bytes` is a live borrow for the duration of this call;
+    // `mlock` only pins pages already mapped into this process and never
+    // writes through the pointer.
+    let outcome = unsafe {
+        rustix::mm::mlock(bytes.as_ptr().cast::<core::ffi::c_void>().cast_mut(), bytes.len())
+    };
+    #[cfg(feature = "instrument")]
+    if let Err(error) = outcome {
+        proxima_telemetry::debug!(
+            ?error,
+            "checkpoint_mapping_residency: mlock rung syscall failed, falling through to the existing error"
+        );
+    }
+    #[cfg(not(feature = "instrument"))]
+    let _ = outcome;
+}
+
 /// Touches every page of `bytes` ([`crate::loader::prefault`]), then proves
 /// residency with `mincore(2)`. A hole after the first prefault retries by
-/// re-touching ONLY [`missing_byte_ranges`]' holes (not the whole mapping --
-/// this module's own doc on why) and re-checks; a hole that survives the
-/// retry is [`InteropError::MappingNotResident`] naming the exact byte
-/// counts.
+/// re-touching ONLY [`missing_byte_ranges`]' holes (this module's own doc on
+/// why), then re-checks; a hole that survives the retry gets one more rung
+/// -- [`lock_resident`]'s whole-mapping `mlock(2)` -- before giving up. ROW
+/// 542: the retry-only ladder still lost to a concurrent evictor at 81-82%
+/// memory free (11.7-8.5 GB missing of 24 GB), a false refusal that is worse
+/// than the silent zero-read it guards against (ROW 533), so `mlock` is the
+/// rung that can never lose that race.
 ///
 /// # Errors
 ///
-/// [`InteropError::PrefaultPoolUnavailable`] if either prefault call fails.
-/// [`InteropError::MappingNotResident`] if pages are still missing after the
-/// retry.
+/// [`InteropError::PrefaultPoolUnavailable`] if a prefault call fails.
+/// [`InteropError::MappingNotResident`] if pages are still missing after
+/// every rung, including `mlock`.
 pub fn prove_resident(bytes: &[u8]) -> Result<ResidencyReport, InteropError> {
     let page = omega::metal::page_size();
     let page_bytes = u64::try_from(page).unwrap_or(1);
     let bytes_total = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
 
     let started = std::time::Instant::now();
-    crate::loader::prefault(bytes)?;
-    let mut residency = probe_residency(bytes);
-    let mut missing_pages = count_missing_pages(&residency);
-    if missing_pages > 0 {
-        #[cfg(feature = "instrument")]
-        log_missing_pattern(&residency, page, "first probe, before retry");
-        for (start, end) in missing_byte_ranges(&residency, page, bytes.len()) {
-            crate::loader::prefault(&bytes[start..end])?;
+    let mut residency: Vec<i8> = Vec::new();
+    let mut first_error: Option<InteropError> = None;
+
+    let (missing_pages, rung) = walk_residency_ladder(|rung| {
+        if first_error.is_some() {
+            return count_missing_pages(&residency);
+        }
+        let outcome = match rung {
+            ResidencyRung::Prefault => crate::loader::prefault(bytes),
+            ResidencyRung::Retry => {
+                let mut result = Ok(());
+                for (start, end) in missing_byte_ranges(&residency, page, bytes.len()) {
+                    if let Err(error) = crate::loader::prefault(&bytes[start..end]) {
+                        result = Err(error);
+                        break;
+                    }
+                }
+                result
+            }
+            ResidencyRung::Mlock => {
+                lock_resident(bytes);
+                Ok(())
+            }
+        };
+        if let Err(error) = outcome {
+            first_error = Some(error);
+            return count_missing_pages(&residency);
         }
         residency = probe_residency(bytes);
-        missing_pages = count_missing_pages(&residency);
+        let missing = count_missing_pages(&residency);
+        #[cfg(feature = "instrument")]
+        log_missing_pattern(&residency, page, rung.as_str());
+        missing
+    });
+
+    if let Some(error) = first_error {
+        return Err(error);
     }
     let prefault_ms = started.elapsed().as_secs_f64() * 1000.0;
     let resident_pages = residency.len().saturating_sub(missing_pages);
 
+    #[cfg(feature = "instrument")]
+    proxima_telemetry::debug!(
+        mapping_residency_rung = rung.as_str(),
+        mapping_missing_pages = missing_pages,
+        "checkpoint_mapping_residency: ladder outcome"
+    );
+
     if missing_pages > 0 {
-        #[cfg(feature = "instrument")]
-        log_missing_pattern(&residency, page, "second probe, after retry");
         let bytes_missing = (missing_pages as u64).saturating_mul(page_bytes).min(bytes_total);
         return Err(InteropError::MappingNotResident {
             bytes_missing,
@@ -172,13 +289,17 @@ pub fn prove_resident(bytes: &[u8]) -> Result<ResidencyReport, InteropError> {
         prefault_ms,
         resident_pages,
         missing_pages,
+        rung,
     })
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{ResidencyReport, count_missing_pages, missing_byte_ranges, prove_resident};
+    use super::{
+        ResidencyReport, ResidencyRung, count_missing_pages, missing_byte_ranges, prove_resident,
+        walk_residency_ladder,
+    };
 
     const MAPPING_SIZE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -235,6 +356,54 @@ mod tests {
         let residency = [libc::MINCORE_INCORE as i8, 0];
         let ranges = missing_byte_ranges(&residency, PAGE, bytes_len);
         assert_eq!(ranges, vec![(PAGE, bytes_len)]);
+    }
+
+    /// A fake probe that reports zero missing at the very first rung must
+    /// stop the ladder there -- the common case never needs a retry or an
+    /// `mlock`.
+    #[test]
+    fn walk_residency_ladder_stops_at_prefault_when_it_already_resolves_everything() {
+        let mut calls = Vec::new();
+        let (missing, rung) = walk_residency_ladder(|rung| {
+            calls.push(rung);
+            0
+        });
+        assert_eq!(missing, 0);
+        assert_eq!(rung, ResidencyRung::Prefault);
+        assert_eq!(calls, vec![ResidencyRung::Prefault]);
+    }
+
+    /// ROW 542's own reproduction shape: prefault and the holes-only retry
+    /// both still report holes, and only the `mlock` rung resolves them --
+    /// the ladder must walk all three rungs in order and report `Mlock` as
+    /// the one that succeeded.
+    #[test]
+    fn walk_residency_ladder_falls_through_to_mlock_when_earlier_rungs_still_have_holes() {
+        let mut calls = Vec::new();
+        let (missing, rung) = walk_residency_ladder(|rung| {
+            calls.push(rung);
+            match rung {
+                ResidencyRung::Prefault => 42,
+                ResidencyRung::Retry => 7,
+                ResidencyRung::Mlock => 0,
+            }
+        });
+        assert_eq!(missing, 0);
+        assert_eq!(rung, ResidencyRung::Mlock);
+        assert_eq!(
+            calls,
+            vec![ResidencyRung::Prefault, ResidencyRung::Retry, ResidencyRung::Mlock]
+        );
+    }
+
+    /// A hole that survives every rung, including `mlock`, must report the
+    /// final missing count at `Mlock` rather than silently claiming success
+    /// -- this is what `prove_resident` turns into `MappingNotResident`.
+    #[test]
+    fn walk_residency_ladder_reports_the_residual_when_mlock_still_has_holes() {
+        let (missing, rung) = walk_residency_ladder(|_rung| 3);
+        assert_eq!(missing, 3);
+        assert_eq!(rung, ResidencyRung::Mlock);
     }
 
     #[test]
@@ -305,5 +474,77 @@ mod tests {
             residency.len(),
             100.0 * total_missing as f64 / residency.len() as f64,
         );
+    }
+
+    /// ROW 542 root-cause: stages a second immediate prefault, an
+    /// `MADV_WILLNEED`, and an `mlock` against the same real qwen35moe
+    /// mapping in sequence, timing and `mincore`-checking each one, so the
+    /// rung that actually resolves the holes ROW 535 hit is visible instead
+    /// of guessed. A near-zero elapsed time for a stage over a 24 GB mapping
+    /// (this module's own doc: a real touch is >= 500 ms) would mean that
+    /// stage's touch is a no-op the optimizer elided.
+    #[test]
+    #[ignore = "requires the real, local qwen3.6:35b-a3b GGUF blob; set PROXIMA_QWEN35MOE_GGUF"]
+    fn residency_ladder_stage_timings_on_the_real_qwen35moe_checkpoint() {
+        let path = std::env::var("PROXIMA_QWEN35MOE_GGUF").unwrap_or_else(|_| {
+            "/Users/brianbruggeman/.ollama/models/blobs/\
+             sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d"
+                .to_string()
+        });
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("skipping: no checkpoint at {path} (set PROXIMA_QWEN35MOE_GGUF)");
+            return;
+        }
+        let file = std::fs::File::open(&path).unwrap_or_else(|error| panic!("open {path}: {error}"));
+        // SAFETY: read-only mapping of a file this test does not write or
+        // truncate; the mapping is the whole test's scope.
+        let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("mmap the real checkpoint read-only");
+        let bytes: &[u8] = &mapping;
+
+        let report = |label: &str, elapsed: std::time::Duration, residency: &[i8]| {
+            let missing = count_missing_pages(residency);
+            let ranges = missing_byte_ranges(residency, omega::metal::page_size(), bytes.len());
+            let first_missing = ranges.first().map(|range| range.0);
+            let last_missing = ranges.last().map(|range| range.1);
+            eprintln!(
+                "{label}: {:.1} ms, missing_pages={missing} of {}, contiguous_runs={}, \
+                 first_missing_offset={first_missing:?}, last_missing_offset={last_missing:?}",
+                elapsed.as_secs_f64() * 1000.0,
+                residency.len(),
+                ranges.len(),
+            );
+        };
+
+        let started = std::time::Instant::now();
+        crate::loader::prefault(bytes).expect("first prefault must resolve or report");
+        let residency = super::probe_residency(bytes);
+        report("stage 1: prefault", started.elapsed(), &residency);
+
+        let started = std::time::Instant::now();
+        crate::loader::prefault(bytes).expect("second immediate prefault must resolve or report");
+        let residency = super::probe_residency(bytes);
+        report("stage 2: second immediate prefault", started.elapsed(), &residency);
+
+        let started = std::time::Instant::now();
+        // SAFETY: `bytes` is a live borrow for the duration of this call;
+        // `madvise` only advises the kernel and never writes through the
+        // pointer.
+        let advised = unsafe {
+            rustix::mm::madvise(
+                bytes.as_ptr().cast::<core::ffi::c_void>().cast_mut(),
+                bytes.len(),
+                rustix::mm::Advice::WillNeed,
+            )
+        };
+        if let Err(error) = advised {
+            eprintln!("stage 3: madvise(WILLNEED) failed: {error}");
+        }
+        let residency = super::probe_residency(bytes);
+        report("stage 3: madvise(WILLNEED)", started.elapsed(), &residency);
+
+        let started = std::time::Instant::now();
+        super::lock_resident(bytes);
+        let residency = super::probe_residency(bytes);
+        report("stage 4: mlock", started.elapsed(), &residency);
     }
 }
