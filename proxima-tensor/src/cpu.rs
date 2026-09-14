@@ -14289,6 +14289,27 @@ fn neon_tile_plan(
     if row_stride_a < 0 {
         return None;
     }
+    // GEMM precondition this gate never checked (`docs/discipline.md` ROW
+    // 561, found by direct instrumentation on qwen35's own partial-rotary
+    // "new key" score term): `b`'s address advance below is `column *
+    // col_stride_b` ONLY -- `gemm_tile_neon` never adds a per-row term for
+    // `b` at all, because a real GEMM's right-hand operand (`[k,n]`) never
+    // varies with the left-hand operand's own row axis (`m`). A grouped
+    // broadcast like qwen35's `q_first_grouped`/`q_pass_grouped`
+    // (`spec.rs:4847-4872`, `[s,u,g,i]`, genuinely dependent on `u` AND `g`)
+    // satisfies every OTHER gate here (both reduction strides `== 1`, exactly
+    // one operand's width-dim stride `0`) while still varying along the
+    // leading axis -- silently reusing row 0's `base_b` for every later row.
+    // Declining whenever `b` is not truly row-invariant falls through to the
+    // scalar `reduction_fast_path` loop, which re-derives every operand's
+    // base address from `full_coordinate` on every `leading_flat` iteration
+    // and was already proven exact for this exact reduce shape (ROW 560).
+    let row_stride_b = resolved.operands()[index_b]
+        .1
+        .stride(leading_output_axes[0]);
+    if row_stride_b != 0 {
+        return None;
+    }
     Some(NeonTilePlan {
         index_a,
         index_b,
