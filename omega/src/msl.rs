@@ -4230,36 +4230,40 @@ fn render_gated_delta_net(resolved: &BoundOp, entry: &str) -> Result<String, Emi
 }
 
 /// [`BoundOpKind::MoeTopK`]'s fused kernel -- one threadgroup of
-/// `expert_count` threads (ROW 569, `docs/discipline.md`), `top_k` rounds of
-/// a threadgroup-wide max reduction over a mutable `live` copy of `scores`,
-/// ported directly from the identical scalar loop
-/// `proxima_tensor::cpu::run_moe_topk` already runs on CPU (this kernel's
-/// own parity test's oracle and this kernel compute the exact same
-/// arithmetic in the exact same order, the same design this module's
-/// `render_gated_delta_net` doc names for its own CPU counterpart).
+/// `expert_count` threads (ROW 569, `docs/discipline.md`), `top_k` rounds,
+/// ported from the identical scalar loop `proxima_tensor::cpu::run_moe_topk`
+/// already runs on CPU. This is the SIMD-group rewrite of this function's
+/// first draft (a full threadgroup-memory tree reduction, measured at a
+/// 5.4ms median bare-dispatch cost for 256 experts -- `omega/tests/
+/// moe_topk_bare_dispatch_timing.rs`'s own oracle): 256 lanes are 8
+/// simdgroups of 32, and `simd_max` reduces within one simdgroup in
+/// lock-step, no barrier, so only the CROSS-simdgroup exchange (one value
+/// per simdgroup) needs `threadgroup_barrier` -- 2 barriers per round
+/// (under the ROW 569 target of <= 3), not the tree reduction's
+/// `2 * log2(expert_count)`.
 ///
-/// Per round: every thread's own `live[tid]` feeds a standard tree
-/// reduction (halving stride, `threadgroup_barrier` between steps) to find
-/// the round's maximum VALUE, then a second tree reduction over
-/// `live[tid] == max_value ? tid : -1` to find the HIGHEST index among every
-/// tied lane -- `max()` over a candidate/`-1` pair can only ever prefer the
-/// larger valid index, the exact bit-exact match for
-/// `proxima_tensor::spec::append_moe_ffn`'s own `mask * expert_index ->
-/// reduce(Maximum)` construction this crate's own CPU executor and its
-/// parity test both prove (ROW 569's own tie fixture: an exact tie resolves
-/// to the HIGHER index). Exclusion then clears EVERY lane equal to the
-/// round's max, not only the winner (`run_moe_topk`'s own doc on why a
-/// single-index exclusion silently diverges from the graph on a genuine
-/// tie) -- every thread whose own `live[tid]` matches performs this write in
-/// parallel, no serialization needed since each thread only ever writes its
-/// own slot.
+/// Per round: `simd_max(masked)` gives each simdgroup's own max VALUE in
+/// lock-step; lane 0 of each simdgroup writes it to `sg_max[sg_id]`; ONE
+/// barrier makes every simdgroup's entry visible; every thread then folds
+/// the (at most 8) `sg_max` entries into `max_value` redundantly -- cheap,
+/// and avoids a second reduction pass for something this small. The same
+/// two-level shape finds the winner index: `simd_max` over
+/// `masked == max_value ? tid : -1` (a `max` over a candidate/`-1` pair
+/// can only ever prefer the larger valid index, so ties resolve to the
+/// HIGHEST index within a simdgroup for free); lane 0 writes the
+/// simdgroup's own candidate to `sg_idx[sg_id]`; a SECOND barrier, then
+/// every thread folds `sg_idx` the same way -- the exact bit-exact match
+/// for `proxima_tensor::spec::append_moe_ffn`'s own `mask * expert_index ->
+/// reduce(Maximum)` construction (ROW 569's own tie fixture: ties resolve
+/// to the HIGHER index) `run_moe_topk`'s own doc and this kernel's parity
+/// test both prove. Exclusion (`masked = (masked == max_value) ? -inf :
+/// masked`) is then a per-lane compare with no shared state and no
+/// barrier at all -- each thread only ever mutates its OWN register, and
+/// the next round's `simd_max` reads it fresh from that same lane.
 ///
-/// Only thread 0 writes the round's `route`/`weight` outputs (there is
-/// exactly one winner index per round to report, so nothing is gained by
-/// spreading that write across threads) and accumulates `weight_total`;
-/// every other thread's own final barrier keeps `live` and the two
-/// reduction scratch arrays coherent for the NEXT round before thread 0's
-/// serial bookkeeping is trusted to have landed.
+/// `max0`/`weight_total` are plain per-thread registers, not threadgroup
+/// memory: only thread 0 ever reads or writes them, so nothing needs
+/// synchronizing across threads for those two values either.
 ///
 /// `expert_count`/`top_k` are baked `constexpr` -- [`crate::identity::kernel_identity`]'s
 /// own `MoeTopK` arm keys the pipeline cache on exactly these two, the same
@@ -4267,13 +4271,12 @@ fn render_gated_delta_net(resolved: &BoundOp, entry: &str) -> Result<String, Emi
 /// `head_k_dim`/`head_v_dim` bake. `scores` (buffer 0) is this op's one true
 /// operand; `route0` (buffer 1) is [`bindings`]'s own `Binding::Output`
 /// slot; buffer 2 is the ordinary (unread) `Uniforms` slot every kind gets
-/// from [`bindings`]; buffers 3..19 are this op's own 16 extra outputs
-/// (`routes[1..]`, every `weights` entry, `weight_total`, in exactly
-/// [`crate::identity`]'s -- no, `crate::metal::moe_topk_extra_node_order`'s
-/// own order) -- `crate::metal::encode_op`'s own `MoeTopK` arm binds them
-/// manually past `bindings.len()`, the same "second output binds at the next
-/// free slot" shape [`render_gated_delta_net`]'s own doc names for
-/// `state_out`, just widened from one extra output to sixteen.
+/// from [`bindings`]; buffers 3.. are this op's own `2 * top_k` extra
+/// outputs (`routes[1..]`, every `weights` entry, `weight_total`, in
+/// exactly `crate::metal::moe_topk_extra_node_order`'s own order) --
+/// `crate::metal::encode_op`'s own `MoeTopK` arm binds them manually past
+/// `bindings.len()`, the same "second output binds at the next free slot"
+/// shape [`render_gated_delta_net`]'s own doc names for `state_out`.
 fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     let BoundOpKind::MoeTopK {
         expert_count,
@@ -4293,11 +4296,9 @@ fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String, EmitError>
     // `2 * top_k` extra buffers -- `routes[1..top_k]` (`top_k - 1` entries),
     // every `weights` entry (`top_k` entries), then `weight_total` (1) --
     // the same `extra_nodes` order `proxima_tensor::cpu::run_moe_topk`'s own
-    // `moe_topk_extra_node_order` uses on CPU. A fixed 16-slot layout here
-    // (this function's own first draft) silently read past the buffers
-    // `encode_op` actually bound whenever `top_k != 8` -- caught by this
-    // kernel's own parity test at `top_k` in `{2, 4}`.
+    // `moe_topk_extra_node_order` uses on CPU.
     let extra_count = 2 * top_k;
+    let num_simdgroups = expert_count.div_ceil(32);
 
     let mut source = String::new();
     preamble(&mut source);
@@ -4311,46 +4312,38 @@ fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String, EmitError>
             "    device float* extra{index} [[buffer({buffer_index})]],\n"
         ));
     }
-    source.push_str("    uint tid [[thread_position_in_threadgroup]]) {\n");
+    source.push_str(
+        "    uint tid [[thread_position_in_threadgroup]],\n\
+         \tuint sg_id [[simdgroup_index_in_threadgroup]],\n\
+         \tuint sg_lane [[thread_index_in_simdgroup]]) {\n",
+    );
     let extra_params: Vec<String> = (0..extra_count).map(|index| format!("extra{index}")).collect();
     source.push_str(&format!(
         "    device float* extras[{extra_count}] = {{ {} }};\n",
         extra_params.join(", ")
     ));
     source.push_str(&format!(
-        "    constexpr uint expert_count = {expert_count}u; constexpr uint top_k = {top_k}u;\n\
+        "    constexpr uint expert_count = {expert_count}u; constexpr uint top_k = {top_k}u; \
+         constexpr uint num_simdgroups = {num_simdgroups}u;\n\
          \t(void)u;\n\
-         \tthreadgroup float live[expert_count];\n\
-         \tthreadgroup float reduce_val[expert_count];\n\
-         \tthreadgroup int reduce_idx[expert_count];\n\
-         \tthreadgroup float max0;\n\
-         \tthreadgroup float weight_total;\n\
-         \tif (tid < expert_count) {{ live[tid] = scores[tid]; }}\n\
-         \tif (tid == 0) {{ weight_total = 0.0; }}\n\
-         \tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
+         \tthreadgroup float sg_max[num_simdgroups];\n\
+         \tthreadgroup int sg_idx[num_simdgroups];\n\
+         \tfloat masked = (tid < expert_count) ? scores[tid] : -INFINITY;\n\
+         \tfloat max0 = 0.0;\n\
+         \tfloat weight_total = 0.0;\n\
          \tfor (uint round = 0; round < top_k; round++) {{\n\
-         \t\tif (tid < expert_count) {{ reduce_val[tid] = live[tid]; }}\n\
+         \t\tconst float sg_max_value = simd_max(masked);\n\
+         \t\tif (sg_lane == 0) {{ sg_max[sg_id] = sg_max_value; }}\n\
          \t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
-         \t\tfor (uint stride = expert_count / 2; stride > 0; stride /= 2) {{\n\
-         \t\t\tif (tid < stride && tid + stride < expert_count) {{\n\
-         \t\t\t\treduce_val[tid] = max(reduce_val[tid], reduce_val[tid + stride]);\n\
-         \t\t\t}}\n\
-         \t\t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
-         \t\t}}\n\
-         \t\tconst float max_value = reduce_val[0];\n\
-         \t\tif (tid < expert_count) {{\n\
-         \t\t\treduce_idx[tid] = (live[tid] == max_value) ? int(tid) : -1;\n\
-         \t\t}}\n\
+         \t\tfloat max_value = sg_max[0];\n\
+         \t\tfor (uint i = 1; i < num_simdgroups; i++) {{ max_value = max(max_value, sg_max[i]); }}\n\
+         \t\tconst int candidate = (masked == max_value) ? int(tid) : -1;\n\
+         \t\tconst int sg_candidate = simd_max(candidate);\n\
+         \t\tif (sg_lane == 0) {{ sg_idx[sg_id] = sg_candidate; }}\n\
          \t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
-         \t\tfor (uint stride = expert_count / 2; stride > 0; stride /= 2) {{\n\
-         \t\t\tif (tid < stride && tid + stride < expert_count) {{\n\
-         \t\t\t\treduce_idx[tid] = max(reduce_idx[tid], reduce_idx[tid + stride]);\n\
-         \t\t\t}}\n\
-         \t\t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
-         \t\t}}\n\
-         \t\tconst int winner_index = reduce_idx[0];\n\
-         \t\tif (round == 0 && tid == 0) {{ max0 = max_value; }}\n\
-         \t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
+         \t\tint winner_index = sg_idx[0];\n\
+         \t\tfor (uint i = 1; i < num_simdgroups; i++) {{ winner_index = max(winner_index, sg_idx[i]); }}\n\
+         \t\tif (round == 0) {{ max0 = max_value; }}\n\
          \t\tif (tid == 0) {{\n\
          \t\t\tconst float weight = exp(max_value - max0);\n\
          \t\t\tweight_total += weight;\n\
@@ -4362,8 +4355,7 @@ fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String, EmitError>
          \t\t\textras[(top_k - 1) + round][0] = weight;\n\
          \t\t\tif (round == top_k - 1) {{ extras[{extra_count} - 1][0] = weight_total; }}\n\
          \t\t}}\n\
-         \t\tif (tid < expert_count && live[tid] == max_value) {{ live[tid] = -INFINITY; }}\n\
-         \t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
+         \t\tif (masked == max_value) {{ masked = -INFINITY; }}\n\
          \t}}\n\
          }}\n"
     ));
