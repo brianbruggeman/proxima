@@ -115,6 +115,7 @@ metal = [
     "metal-wide-cooperative-reduce",
     "kv-capacity-bucket",
     "metal-plan-stable-buffers",
+    "cached-attention-streaming",
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
     "metal-q4k-ggml-port",

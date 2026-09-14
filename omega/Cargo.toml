@@ -145,6 +145,7 @@ metal = [
     "metal-output-placement",
     "metal-wide-cooperative-reduce",
     "metal-plan-stable-buffers",
+    "cached-attention-streaming",
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
     "metal-q4k-ggml-port",
