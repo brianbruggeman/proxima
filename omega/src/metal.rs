@@ -7739,12 +7739,10 @@ fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
         // `num_v_heads`/`head_k_dim`/`head_v_dim` are baked `constexpr`
         // instead (that function's own doc), so they never widen this blob.
         BoundOpKind::GatedDeltaNet { .. } => 4 * WORD,
-        // ROW 569: never actually reached -- `emit_inner`/`pack_uniforms_into`
-        // both reject `MoeTopK` with `EmitError::MoeTopKNotSupported` before
-        // any caller of this function would encode one, since no Metal
-        // kernel renders it yet (`crate::error::EmitError::MoeTopKNotSupported`'s
-        // own doc). `WORD` is an inert placeholder, not a real uniform
-        // layout, until that kernel lands.
+        // ROW 569: `render_moe_topk`'s own `Uniforms { long unused; }` --
+        // `expert_count`/`top_k` are baked `constexpr` instead (that
+        // function's own doc), so this is the same "leaf" one-`long` shape
+        // `pack_leaf_uniforms` already packs for `Iota`/`Constant`.
         BoundOpKind::MoeTopK { .. } => WORD,
     }
 }
@@ -7798,7 +7796,15 @@ fn pack_uniforms_into(
             );
             Ok(())
         }
-        BoundOpKind::MoeTopK { .. } => Err(EmitError::MoeTopKNotSupported { node: bound.node }),
+        // `render_moe_topk`'s own `Uniforms { long unused; }`: `expert_count`/
+        // `top_k` are baked `constexpr` (that function's own doc), so this
+        // slot is never read by the kernel body -- packed only because
+        // `bindings` gives every kind one, and `pack_leaf_uniforms`'s single
+        // `long` is exactly `sizeof(Uniforms)`.
+        BoundOpKind::MoeTopK { .. } => {
+            pack_leaf_uniforms(bound, scratch);
+            Ok(())
+        }
     }
 }
 
@@ -12326,6 +12332,49 @@ fn encode_op(
             tracker.record(&[], Some(Retained::as_ptr(&state_buffer)));
         }
         device_buffers.insert(*state_out, (state_buffer, state_offset));
+    }
+    // `render_moe_topk`'s own 16 extra outputs (ROW 569, `docs/discipline.md`):
+    // `bindings` above only ever names ONE `Binding::Output` (the same
+    // single-output limit `GatedDeltaNet`'s own `state_out` arm names), so
+    // every one of `routes[1..]`/`weights`/`weight_total` binds at the next
+    // free slot manually, right before dispatch -- unlike `state_out`, none
+    // of these needs a caller-supplied placement (`BoundOpKind::MoeTopK`'s
+    // own doc: nothing here is cross-decode-step persistent recurrent
+    // state), so this is the plain "resolve from `device_buffers`, or
+    // allocate fresh" path with no placement lookup at all.
+    if let BoundOpKind::MoeTopK {
+        routes,
+        weights,
+        weight_total,
+        ..
+    } = &bound.kind
+    {
+        let extra_nodes: Vec<NodeId> = routes
+            .iter()
+            .skip(1)
+            .chain(weights.iter())
+            .chain(core::iter::once(weight_total))
+            .copied()
+            .collect();
+        for (offset, extra_node) in extra_nodes.iter().enumerate() {
+            let buffer_index = bindings.len() + offset;
+            let existing = device_buffers.get(extra_node).cloned();
+            let (extra_buffer, extra_offset) = match existing {
+                Some(buffer) => buffer,
+                None => (allocate_buffer(device, 1, bound.dtype)?, 0),
+            };
+            unsafe {
+                encoder.setBuffer_offset_atIndex(
+                    Some(&extra_buffer),
+                    extra_offset,
+                    buffer_index,
+                );
+            }
+            if let Some(tracker) = hazard.as_deref_mut() {
+                tracker.record(&[], Some(Retained::as_ptr(&extra_buffer)));
+            }
+            device_buffers.insert(*extra_node, (extra_buffer, extra_offset));
+        }
     }
     dispatch(encoder, &pipeline, grid);
     // Redesign §4c: the split kernel above wrote its partial into `scratch`
