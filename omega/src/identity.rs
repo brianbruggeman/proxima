@@ -325,6 +325,7 @@ pub(crate) fn kernel_identity(
             kv_heads,
             query_groups,
             head_dim,
+            rotary_dim,
             scale,
             cached_lower_inclusive,
             new_upper_inclusive,
@@ -368,8 +369,19 @@ pub(crate) fn kernel_identity(
             } else {
                 ""
             };
+            // `rotary_dim == head_dim` (every caller before qwen35's
+            // partial-rotary dense attention) is byte-identical to this
+            // identity's pre-partial-rotary string -- the `_r{rotary_dim}`
+            // token appears ONLY when the pass plane is present, since a
+            // full-rotary op with the same `head_dim` would otherwise share
+            // an identity with one that carries a different `rotary_dim`.
+            let rotary_token = if rotary_dim == head_dim {
+                String::new()
+            } else {
+                format!("_r{rotary_dim}")
+            };
             format!(
-                "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{context_chunks}{cached_bound_token}",
+                "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_s{:08x}_l{}_u{upper_token}_x{context_chunks}{cached_bound_token}",
                 scale.to_bits(),
                 signed_name_part(*cached_lower_inclusive),
             )

@@ -78,6 +78,23 @@ pub enum EmitError {
         cap: u64,
     },
 
+    /// [`crate::msl::render_cached_attention`] still assumes every rotary
+    /// plane covers the whole `head_dim` (`BoundOpKind::CachedAttention`'s
+    /// own doc: `rotary_dim == head_dim` is byte-identical to this backend's
+    /// pre-partial-rotary shape) -- a partial-rotary bind (qwen35's dense
+    /// attention, `rotary_dim < head_dim`, three trailing pass-plane
+    /// operands) is rejected here rather than silently dropping the pass
+    /// plane's score contribution, the same CPU-ahead-of-GPU gap
+    /// [`Self::GatedDeltaNetNotSupported`] names — `docs/discipline.md`
+    /// ROW 556/557's own residual: teaching this kernel the pass plane is
+    /// its own next slice.
+    #[error(
+        "node {node} is a partial-rotary cached attention bind (rotary_dim < head_dim), which \
+         this metal backend does not render yet -- proxima_tensor::cpu::run_cached_attention is \
+         the only executor with the pass-plane term so far"
+    )]
+    CachedAttentionPartialRotaryNotSupported { node: NodeId },
+
     /// `omega::execute`'s own upstream gate (`reject_unsupported_gpu_dtype`)
     /// never lets anything but `Float32`/`Float16` reach [`crate::msl::emit`]
     /// in practice, but [`crate::msl::emit`] is a public entry point a

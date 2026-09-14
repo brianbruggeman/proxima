@@ -6884,6 +6884,7 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         kv_heads,
         query_groups,
         head_dim,
+        rotary_dim,
         scale,
         cached_lower_inclusive,
         new_upper_inclusive,
@@ -6894,12 +6895,26 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
             reason: "cached attention runner received another bound operation",
         });
     };
-    if !matches!(operands.len(), 8 | 9) || operands.iter().any(|(_, _, lookup)| lookup.is_some()) {
+    // `rotary_dim < head_dim` (`BoundOpKind::CachedAttention`'s own doc) is
+    // the discriminator for the trailing three-operand pass plane -- never
+    // the operand count alone, since the optional ninth `cached_len` slot
+    // already varies independently of it.
+    let pass_present = rotary_dim < head_dim;
+    let expected_lengths: &[usize] = if pass_present { &[11, 12] } else { &[8, 9] };
+    if !expected_lengths.contains(&operands.len())
+        || operands.iter().any(|(_, _, lookup)| lookup.is_some())
+    {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
-            reason: "cached attention requires eight or nine affine, gather-free operands",
+            reason: "cached attention requires eight or nine base operands, plus three more \
+                     when a partial-rotary pass plane is present",
         });
     }
+    let cached_len_index = if pass_present {
+        (operands.len() == 12).then_some(8)
+    } else {
+        (operands.len() == 9).then_some(8)
+    };
     // The optional ninth operand shares its slot between two DIFFERENT
     // runtime scalars, discriminated by `cached_key_rows`
     // (`BoundOpKind::CachedAttention`'s own doc): `cached_key_rows == 0`
@@ -6909,7 +6924,7 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
     // (bucket-padded) `cached_key_rows` below. Read here, not looped over
     // with the eight Q/K/V sources below, since it is a bare rank-0 value
     // rather than a contiguous tensor tail.
-    let dynamic_ninth = match operands.get(8) {
+    let dynamic_ninth = match cached_len_index.and_then(|index| operands.get(index)) {
         Some((node, layout, _)) => {
             if layout.base != 0 || !layout.strides.is_empty() {
                 return Err(TensorError::NotLowerable {
@@ -7007,7 +7022,7 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
     // buffer through, is what lets `AttentionExtents.cached_key_rows` below
     // carry the live count without `stream_cached_attention_split_gqa`'s own
     // exact-length shape check rejecting the mismatch.
-    let pair_dim = (*head_dim / 2) as usize;
+    let pair_dim = (*rotary_dim / 2) as usize;
     let live_cached_key_rows_usize = live_cached_key_rows as usize;
     let live_pair_len = live_cached_key_rows_usize * *kv_heads as usize * pair_dim;
     let live_value_len = live_cached_key_rows_usize * *kv_heads as usize * *head_dim as usize;
@@ -7021,7 +7036,48 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
     let cached_key_odd = cached_key_odd
         .get(..live_pair_len)
         .ok_or(out_of_range.clone())?;
-    let cached_value = cached_value.get(..live_value_len).ok_or(out_of_range)?;
+    let cached_value = cached_value.get(..live_value_len).ok_or(out_of_range.clone())?;
+    // The trailing pass-plane triple (`pass_query`, `pass_cached_key`,
+    // `pass_new_key` -- `BoundOpKind::CachedAttention`'s own doc) sits right
+    // after the base eight and the optional `cached_len` scalar; `pair_dim`
+    // above already used `rotary_dim`, not `head_dim`, so this is the ONLY
+    // other place partial rotary changes this executor's shape.
+    let pass = if pass_present {
+        let pass_start = if cached_len_index.is_some() { 9 } else { 8 };
+        let pass_dim = (*head_dim - *rotary_dim) as usize;
+        let mut pass_sources = operands[pass_start..pass_start + 3].iter().map(
+            |(node, layout, _)| -> Result<&[f32], TensorError> {
+                if layout.base != 0 || layout.strides.last().copied() != Some(1) {
+                    return Err(TensorError::NotLowerable {
+                        node: resolved.node,
+                        reason: "cached attention requires zero-based contiguous source tails",
+                    });
+                }
+                buffer_of(buffers, *node)
+            },
+        );
+        let pass_query = pass_sources.next().ok_or(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "cached attention pass-plane query source is missing",
+        })??;
+        let pass_cached_key = pass_sources.next().ok_or(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "cached attention pass-plane cached-key source is missing",
+        })??;
+        let pass_new_key = pass_sources.next().ok_or(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "cached attention pass-plane new-key source is missing",
+        })??;
+        let live_pass_len = live_cached_key_rows_usize * *kv_heads as usize * pass_dim;
+        let pass_cached_key = pass_cached_key.get(..live_pass_len).ok_or(out_of_range)?;
+        Some(crate::physical::CachedAttentionPassPlane {
+            query: pass_query,
+            cached_key: pass_cached_key,
+            new_key: pass_new_key,
+        })
+    } else {
+        None
+    };
     let streamed = crate::physical::stream_cached_attention_split_gqa(
         [query_even, query_odd],
         [
@@ -7038,17 +7094,23 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
             query_groups: *query_groups,
             head_dim: *head_dim,
         },
-        *scale,
-        [
-            crate::physical::CausalBand {
-                lower_inclusive: *cached_lower_inclusive,
-                upper_inclusive: i64::MAX,
-            },
-            crate::physical::CausalBand {
-                lower_inclusive: i64::MIN,
-                upper_inclusive: new_upper_inclusive,
-            },
-        ],
+        crate::physical::CachedAttentionRotary {
+            rotary_dim: *rotary_dim,
+            pass,
+        },
+        crate::physical::CachedAttentionScore {
+            scale: *scale,
+            bands: [
+                crate::physical::CausalBand {
+                    lower_inclusive: *cached_lower_inclusive,
+                    upper_inclusive: i64::MAX,
+                },
+                crate::physical::CausalBand {
+                    lower_inclusive: i64::MIN,
+                    upper_inclusive: new_upper_inclusive,
+                },
+            ],
+        },
     );
     if streamed {
         Ok(())
@@ -23643,6 +23705,7 @@ mod tests {
                 kv_heads: 1,
                 query_groups: 1,
                 head_dim: 2,
+                rotary_dim: 2,
                 scale: 1.0,
                 cached_lower_inclusive: -1,
                 new_upper_inclusive: 0,
@@ -23654,6 +23717,81 @@ mod tests {
         let cached_weight = 1.0f32.exp() / (1.0f32.exp() + 1.0);
         assert!((output[0] - (2.0 * cached_weight + 4.0 * (1.0 - cached_weight))).abs() < 1e-6);
         assert!((output[1] - (3.0 * cached_weight + 5.0 * (1.0 - cached_weight))).abs() < 1e-6);
+    }
+
+    /// [`cached_attention_bound_step_runs_online_softmax`]'s counterpart for
+    /// `rotary_dim < head_dim` (qwen35's partial-rotary shape,
+    /// `BoundOpKind::CachedAttention`'s own doc, ROW 556/557
+    /// `docs/discipline.md`): `head_dim` 4, `rotary_dim` 2, so the trailing
+    /// three-operand pass plane scores an extra dot product alongside the
+    /// even/odd rotary planes. Expected weights are hand-computed the same
+    /// online-softmax way this file's own reference test already does.
+    #[test]
+    fn cached_attention_bound_step_scores_the_partial_rotary_pass_plane() {
+        let mut buffers = vec![None; 11];
+        let inputs = [
+            vec![1.0],           // query_even
+            vec![0.0],           // query_odd
+            vec![1.0],           // cached_key_even
+            vec![0.0],           // cached_key_odd
+            vec![0.0],           // new_key_even
+            vec![1.0],           // new_key_odd
+            vec![2.0, 3.0, 10.0, 11.0], // cached_value
+            vec![4.0, 5.0, 12.0, 13.0], // new_value
+            vec![1.0, 0.0],      // pass_query
+            vec![1.0, 0.0],      // pass_cached_key
+            vec![0.0, 1.0],      // pass_new_key
+        ];
+        for (index, input) in inputs.iter().enumerate() {
+            buffers[index] = Some(input.as_slice());
+        }
+        let operands = inputs
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                (
+                    NodeId(index as u32),
+                    bind::Layout {
+                        base: 0,
+                        strides: smallvec::smallvec![1],
+                    },
+                    None,
+                )
+            })
+            .collect();
+        let resolved = BoundOp {
+            node: NodeId(10),
+            dtype: DType::Float32,
+            extents: vec![1, 1, 1, 4],
+            kind: BoundOpKind::CachedAttention {
+                operands,
+                query_rows: 1,
+                cached_key_rows: 1,
+                new_key_rows: 1,
+                kv_heads: 1,
+                query_groups: 1,
+                head_dim: 4,
+                rotary_dim: 2,
+                scale: 1.0,
+                cached_lower_inclusive: -1,
+                new_upper_inclusive: 0,
+            },
+        };
+        let mut output = vec![0.0; 4];
+        run_node_into(&resolved, &buffers, None, None, None, false, &mut output)
+            .expect("partial-rotary cached attention bound step runs");
+        // score_cached = (1*1 + 0*0) + (1*1 + 0*0) = 2; score_new = (1*0 + 0*1) + (1*0 + 0*1) = 0.
+        let cached_weight = 1.0 / (1.0 + (-2.0f32).exp());
+        let new_weight = 1.0 - cached_weight;
+        for dimension in 0..4 {
+            let expected =
+                cached_weight * inputs[6][dimension] + new_weight * inputs[7][dimension];
+            assert!(
+                (output[dimension] - expected).abs() < 1e-6,
+                "dimension {dimension}: got {}, expected {expected}",
+                output[dimension]
+            );
+        }
     }
 
     #[test]
