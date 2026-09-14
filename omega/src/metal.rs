@@ -6046,7 +6046,7 @@ mod classify_kind_packed_row_marker_tests {
     /// 2048, embedding 512), gate/up/down each grouped over the `k` selected
     /// experts through ONE [`grouped_gathered_expert_product`] call apiece --
     /// gate/up via main's own exported function (the same primitive
-    /// `append_moe_ffn_grouped_gate_up` uses), down via this test's own
+    /// `append_moe_ffn` now uses unconditionally, ROW 543), down via this test's own
     /// [`grouped_gathered_expert_product_with_x_axes`] (see its doc for why
     /// main's exported form cannot take down's rank-3 activation as-is).
     /// `append_moe_ffn`'s full router is a PRIVATE fn on main and always
@@ -6323,6 +6323,178 @@ mod classify_kind_packed_row_marker_tests {
                 kind, "reduce-packed-row-blocked",
                 "the grouped expert product must lower to the same fast packed-row body \
                  the per-route form uses, not materialize the gathered product cooperatively"
+            );
+        }
+    }
+
+    /// ROW 543: `proxima_tensor::spec::append_moe_ffn` itself (the function
+    /// every production call site uses, unchanged signature) now always
+    /// builds the grouped gate/up strategy while leaving down per-route --
+    /// this is the production entry point, not a hand-built stand-in for it
+    /// like the ignored probe above. Census: 2 grouped-packed reduces
+    /// (gate, up) + `EXPERT_USED_COUNT` per-route-packed reduces (down),
+    /// every one `reduce-packed-row-blocked`, and no surviving elementwise
+    /// op whose output shape is the materialized `[.., d_in, d_out]`
+    /// gathered product.
+    #[test]
+    fn qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+        use proxima_tensor::spec::ExpertGatingFunc;
+
+        const EMBEDDING: usize = 512;
+        const FEED_FORWARD: usize = 2048;
+        const EXPERT_COUNT: u32 = 256;
+        const EXPERT_USED_COUNT: u32 = 8;
+        const SEQUENCE: usize = 1;
+
+        fn quantized_stack(expert_count: u32, rows: usize, k: usize) -> Vec<u8> {
+            let elements_per_expert = rows * k;
+            let blocks_per_expert = elements_per_expert / QK_K;
+            let mut stacked = vec![0u8; expert_count as usize * blocks_per_expert * BLOCK_BYTES];
+            let input = vec![0.01f32; elements_per_expert];
+            for expert in 0..expert_count as usize {
+                let byte_span = blocks_per_expert * BLOCK_BYTES;
+                let output = &mut stacked[expert * byte_span..(expert + 1) * byte_span];
+                quantize(&input, output).expect("synthetic expert slab quantizes to Q4_K");
+            }
+            stacked
+        }
+
+        let mut program = Vec::new();
+        let x_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+            "x",
+        );
+        let gate_inp_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(EXPERT_COUNT),
+            ],
+            "gate_inp",
+        );
+        let expert_w_gate_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(FEED_FORWARD as u32),
+            ],
+            "expert_w_gate",
+        );
+        let expert_w_up_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(FEED_FORWARD as u32),
+            ],
+            "expert_w_up",
+        );
+        let expert_w_down_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(FEED_FORWARD as u32),
+                Extent::Static(EMBEDDING as u32),
+            ],
+            "expert_w_down",
+        );
+        let ones = scalar_constant(&mut program, 1.0);
+
+        let (root, _site) = proxima_tensor::spec::append_moe_ffn(
+            &mut program,
+            0,
+            x_node,
+            gate_inp_node,
+            expert_w_gate_node,
+            expert_w_up_node,
+            expert_w_down_node,
+            EXPERT_COUNT,
+            EXPERT_USED_COUNT,
+            ones,
+            ExpertGatingFunc::Softmax,
+            None,
+        )
+        .expect("append_moe_ffn lowers at the real qwen35moe shape");
+
+        let symbols = [SEQUENCE as u64];
+        let shapes = infer(&program, &symbols).expect("the qwen35moe-shaped ffn infers");
+        let mut resolved = bind_with_fusion(&program, &shapes, &[root], true, NumericPolicy::default())
+            .expect("the qwen35moe-shaped ffn binds");
+
+        let mut packed_operands: PackedOperands = BTreeMap::new();
+        packed_operands.insert(expert_w_gate_node, PackedCodec::Q4K);
+        packed_operands.insert(expert_w_up_node, PackedCodec::Q4K);
+        packed_operands.insert(expert_w_down_node, PackedCodec::Q4K);
+        let gate_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
+        let up_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
+        let down_stack = quantized_stack(EXPERT_COUNT, FEED_FORWARD, EMBEDDING);
+        let _ = (gate_stack, up_stack, down_stack);
+
+        // `omega::metal::prepare` (`metal.rs:6530`) always runs this
+        // correction before `emit`/`classify_kind` ever see `resolved` --
+        // production's own layout, not the declared-shape layout every
+        // packed weight would otherwise wrongly decline against.
+        proxima_tensor::correct_packed_matmul_layouts(
+            &mut resolved,
+            &packed_operands.keys().copied().collect(),
+        );
+
+        let mut expert_reduce_kinds = Vec::new();
+        for bound in &resolved {
+            let touches_expert_weight = bound.operands().iter().any(|(node, _, _)| {
+                *node == expert_w_gate_node
+                    || *node == expert_w_up_node
+                    || *node == expert_w_down_node
+            });
+            if !touches_expert_weight {
+                continue;
+            }
+            match &bound.kind {
+                proxima_tensor::BoundOpKind::Reduce {
+                    keep: proxima_tensor::Keep::Reduce,
+                    ..
+                } => {
+                    let kind = classify_kind(bound, &packed_operands);
+                    expert_reduce_kinds.push(kind);
+                }
+                proxima_tensor::BoundOpKind::Elementwise { .. } => {
+                    let materializes_full_expert_product = bound.extents.len() >= 2
+                        && bound.extents[bound.extents.len() - 2..]
+                            == [FEED_FORWARD as u64, EMBEDDING as u64]
+                        || bound.extents.len() >= 2
+                            && bound.extents[bound.extents.len() - 2..]
+                                == [EMBEDDING as u64, FEED_FORWARD as u64];
+                    assert!(
+                        !materializes_full_expert_product,
+                        "an unfused elementwise op still carries the [.., d_in, d_out] \
+                         gathered-product shape (node {:?}, extents {:?}) instead of \
+                         fusing into its consuming reduce",
+                        bound.node, bound.extents
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            expert_reduce_kinds.len(),
+            2 + EXPERT_USED_COUNT as usize,
+            "2 grouped reduces (gate, up) + one per-route reduce per selected \
+             expert (down) -- 400 expert dispatches per token at k=8, not 960"
+        );
+        for kind in expert_reduce_kinds {
+            assert_eq!(
+                kind, "reduce-packed-row-blocked",
+                "every expert-weight reduce append_moe_ffn builds must take the \
+                 fast packed-row body, whether grouped (gate/up) or per-route (down)"
             );
         }
     }
