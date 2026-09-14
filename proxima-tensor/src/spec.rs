@@ -17420,6 +17420,13 @@ value = 1.0
                 }
                 crate::bind::BoundOpKind::Constant { .. } => constant += 1,
                 crate::bind::BoundOpKind::Iota => iota += 1,
+                // This program never binds a Qwen3.5 GDN mixer, so a
+                // `gated-delta-net-fusion` build never produces this kind
+                // here -- an arm is still required once the variant exists
+                // regardless of which program a given test walks.
+                crate::bind::BoundOpKind::GatedDeltaNet { .. } => {
+                    panic!("this Mistral cached-forward program never binds a GatedDeltaNet op")
+                }
             }
         }
         assert_eq!(
