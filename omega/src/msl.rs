@@ -4005,12 +4005,16 @@ fn render_constant(resolved: &BoundOp, entry: &str, value: f32) -> Result<String
 /// bits (`as_type<float>`, the same reinterpret [`crate::cpu`]'s dequant
 /// path already relies on) since every other uniform field here is `long`.
 ///
-/// `state` is bound at the SAME buffer identity as `query`/.../`beta`'s own
-/// `state_in` operand (`BoundOpKind::GatedDeltaNet`'s own doc) but declared
-/// non-`const` here: the kernel reads the caller's state once per thread at
-/// entry and writes the updated row back in place at exit, into that same
-/// device buffer -- `crate::metal`'s dispatch arm registers this buffer as
-/// both read and written with the hazard tracker accordingly.
+/// `state_in` (buffer 5) is one of `bindings`'s ordinary read operands, and
+/// stays `const` -- this kernel never mutates it. `state_out` (buffer 8,
+/// past `bindings`'s own `Output`/`Uniforms` slots) is `BoundOpKind::
+/// GatedDeltaNet::state_out`'s own SECOND output (ROW 547,
+/// `docs/discipline.md`): the kernel reads `state_in` once per thread at
+/// entry and writes the updated row to `state_out` at exit, a DIFFERENT
+/// device buffer, never back into `state_in` -- `crate::metal::encode_op`'s
+/// own `GatedDeltaNet` arm resolves and binds that buffer manually (`bind_
+/// buffers`'s single `output` parameter cannot carry two distinct node
+/// identities) and registers it with the hazard tracker as written.
 fn render_gated_delta_net(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     let BoundOpKind::GatedDeltaNet {
         kv_heads,
@@ -4041,7 +4045,7 @@ fn render_gated_delta_net(resolved: &BoundOp, entry: &str) -> Result<String, Emi
         "struct Uniforms { long n_tokens; long query_key_head_stride; long query_key_dim_stride; long inv_sqrt_key_dim_bits; };\n\n",
     );
     source.push_str(&format!(
-        "kernel void {entry}(device const float* query [[buffer(0)]], device const float* key [[buffer(1)]], device const float* value [[buffer(2)]], device const float* gate [[buffer(3)]], device const float* beta [[buffer(4)]], device float* state [[buffer(5)]], device float* out [[buffer(6)]], constant Uniforms& u [[buffer(7)]], uint gid [[thread_position_in_grid]]) {{\n"
+        "kernel void {entry}(device const float* query [[buffer(0)]], device const float* key [[buffer(1)]], device const float* value [[buffer(2)]], device const float* gate [[buffer(3)]], device const float* beta [[buffer(4)]], device const float* state_in [[buffer(5)]], device float* out [[buffer(6)]], constant Uniforms& u [[buffer(7)]], device float* state_out [[buffer(8)]], uint gid [[thread_position_in_grid]]) {{\n"
     ));
     source.push_str(&format!(
         "    constexpr long kv_heads = {kv_heads}; constexpr long num_v_heads = {num_v_heads}; \
@@ -4059,7 +4063,7 @@ fn render_gated_delta_net(resolved: &BoundOp, entry: &str) -> Result<String, Emi
          const float inv_sqrt_key_dim = as_type<float>((uint)u.inv_sqrt_key_dim_bits);\n\
          float state_row[max_head_k_dim];\n\
          for (long i = 0; i < head_k_dim; i++) {\n\
-         \tstate_row[i] = state[(i * head_v_dim + row) * num_v_heads + vh];\n\
+         \tstate_row[i] = state_in[(i * head_v_dim + row) * num_v_heads + vh];\n\
          }\n\
          for (long t = 0; t < n_tokens; t++) {\n\
          \tconst float decay = exp(gate[t * num_v_heads + vh]);\n\
@@ -4079,7 +4083,7 @@ fn render_gated_delta_net(resolved: &BoundOp, entry: &str) -> Result<String, Emi
          \tout[vout] = readout;\n\
          }\n\
          for (long i = 0; i < head_k_dim; i++) {\n\
-         \tstate[(i * head_v_dim + row) * num_v_heads + vh] = state_row[i];\n\
+         \tstate_out[(i * head_v_dim + row) * num_v_heads + vh] = state_row[i];\n\
          }\n\
          }\n",
     );

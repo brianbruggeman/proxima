@@ -31544,3 +31544,77 @@ uniform/binding slot; (3) `proxima-model-interop/tests/qwen35_synth_hybrid.rs`
 -- the 8-token fixture the brief specifies; (4) the real `gguf_generate`
 run against the qwen35moe checkpoint, gated on (1)-(3) actually passing
 first.
+
+## ROW 548 -- Metal kernel writes `state_out` as a real second output; ROW 547's residual (1)/(2) closed
+
+Closes ROW 547's residual items (1) and (2): `omega/src/msl.rs`'s
+`render_gated_delta_net` (`:4014-4090`) now declares `state_in` (`buffer(5)`)
+`const` and reads it once per thread, and writes the updated register state
+to a NEW `state_out` binding (`buffer(8)`, past `bindings()`'s own
+`Output`/`Uniforms` slots) -- never back into `state_in`'s own buffer.
+`omega/src/metal.rs`'s `encode_op` resolves `state_out`'s device buffer the
+same way `bound.node`'s own output is resolved (reuse from `device_buffers`
+if a prior call -- or a placed caller -- already put one there, else a fresh
+`allocate_buffer` sized `head_k_dim * head_v_dim * num_v_heads`), binds it
+manually right before `dispatch` (`bind_buffers`'s single `output` parameter
+cannot carry two distinct node identities), records it into the hazard
+tracker as written, and inserts it into `device_buffers` under `state_out`'s
+own `NodeId` -- exactly the "any other resolved node's own output" contract
+`BoundOpKind::GatedDeltaNet::state_out`'s own doc (`bind.rs`) already
+specifies. The old `:3543-3559` in-place `tracker.record` special case
+(marking `state_in`'s buffer as written after an in-place update) is
+deleted outright: `state_in` is ordinary read-only input now, already
+covered by the generic per-op hazard read set. `kernel_identity` is
+unchanged -- it already keys only on `kv_heads`/`num_v_heads`/`head_k_dim`/
+`head_v_dim`, none of which moved.
+
+Because `device_buffers` is the `Plan`-owned map `execute_plan_with_
+placements` reuses call to call (never cleared for a node that is not in
+`prepared.retires`), a caller on that path gets `state_out`'s persistent
+per-layer buffer identity for free the first time this op ever dispatches,
+with no separate placement wiring required; a caller that DOES place
+`state_out` explicitly in its own `output_placements` list also Just Works,
+since `device_buffers` already holds that entry before `encode_op` ever
+runs, and the reuse branch above finds it before falling back to a fresh
+allocation.
+
+**Gates -- MEASURED:**
+- `cargo check -p omega --features metal,instrument,gated-delta-net-fusion
+  --tests -j 4`: clean.
+- `cargo nextest run -p omega --features metal,instrument,
+  gated-delta-net-fusion --test gated_delta_net_parity --test-threads 4`:
+  `2 tests run: 2 passed, 0 skipped` -- both cases now also assert
+  `state_out` Metal == CPU (same relative-error bound as `out`) and that
+  `state_in`'s own buffer reads back byte-identical to what was uploaded
+  (proving the kernel never touches it).
+- `cargo nextest run -p omega --features metal,instrument,
+  gated-delta-net-fusion --test-threads 4` (full crate, once):
+  `316 tests run: 316 passed (1 slow), 12 skipped` -- the one slow test is
+  `classify_kind_packed_row_marker_tests::qwen35moe_shaped_append_moe_ffn_
+  packs_grouped_gate_up_and_per_route_down` (289s), the debug-profile Q4_K
+  quantization of three 150 MB synthetic slabs the brief named up front, not
+  a regression from this change; re-run with that test excluded (`-E 'not
+  test(qwen35moe_shaped_append_moe_ffn)'`) for confirmation: `315 tests run:
+  315 passed, 13 skipped` in 84s.
+- `cargo clippy -p omega --features metal,instrument,gated-delta-net-fusion
+  --all-targets -j 4`: clean. One incidental fix the compiler forced:
+  `encode_op`'s own `hazard` parameter needed `mut` and its merge-block use
+  changed from a consuming tuple match (`(hazard, scratch)`) to a reborrow
+  (`(&mut hazard, scratch)`) so `state_out`'s own hazard record, later in
+  the same function, still has a live `hazard` to reborrow from
+  (`hazard.as_deref_mut()`) -- `clippy::needless_option_as_deref` rejected
+  the `as_deref_mut()`-on-both-sides form, `&mut hazard` on the merge side
+  is the form clippy accepts and the one that keeps the merge block's own
+  behavior identical (an extra layer of `&mut` on `tracker`, transparent to
+  every method call through it).
+- `cargo check -p omega --features wgpu-backend,cuda --all-targets -j 4`:
+  clean -- `wgsl`/`cuda` still reject `BoundOpKind::GatedDeltaNet` outright
+  (`EmitError::GatedDeltaNetNotSupported`), unaffected by this row.
+
+**Landed this slice:** `omega/src/msl.rs`, `omega/src/metal.rs`,
+`omega/tests/gated_delta_net_parity.rs`. `gated-delta-net-fusion` stays
+default-off.
+
+**Residual, carried to the next slice:** ROW 547's items (3) and (4) --
+the `proxima-model-interop` qwen35 fixture test and the real `gguf_generate`
+decode run, both now unblocked by this row's kernel fix.
