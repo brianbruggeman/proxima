@@ -97,6 +97,14 @@ reduce-epilogue-fusion = []
 # real-model A/B lands, alloc-tier only (a structural `Op` walk plus a
 # `BTreeMap`/`BTreeSet` rebuild, no platform dependency).
 gated-delta-net-fusion = []
+# Bind-time MoE top-k routing fusion (ROW 569, decode/n_tokens=1 only):
+# collapses `append_moe_ffn_from_logits`'s own `expert_used_count`-round
+# unrolled argmax-with-exclusion chain into one `BoundOpKind::MoeTopK`, the
+# same "matcher walks the exact structural shape a known builder emits"
+# technique `gated-delta-net-fusion` uses -- see `bind.rs`'s
+# `moe_topk_candidates`. Same disciplined-component firewall: default-off
+# until a real-model A/B lands, alloc-tier only.
+moe-topk-fusion = []
 # real execution-witness counters (elements/bytes/gather-vs-affine) plus
 # per-bound-op spans over `proxima-telemetry`'s legacy Metrics/Telemetry
 # surface — default-off, no effect on the default build or the no_std+alloc

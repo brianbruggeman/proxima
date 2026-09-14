@@ -941,6 +941,21 @@ pub fn build_static_arena_with_constants(
             let state_len = (*head_k_dim * *head_v_dim * *num_v_heads) as usize;
             buffers[state_out.0 as usize] = Some(vec![0.0f32; state_len]);
         }
+        // ROW 569: `MoeTopK`'s own `2 * top_k` extra outputs never appear as
+        // any resolved node's `.node` either, for the same reason `state_out`
+        // does not -- size every one of them here, one scalar slot apiece
+        // (this slice's `n_tokens == 1` decode-only shape).
+        if let BoundOpKind::MoeTopK {
+            routes,
+            weights,
+            weight_total,
+            ..
+        } = &computed.kind
+        {
+            for extra_node in moe_topk_extra_node_order(routes, weights, *weight_total) {
+                buffers[extra_node.0 as usize] = Some(vec![0.0f32; 1]);
+            }
+        }
     }
     let dead = dead_resolved_nodes(&resolved, &effective_outputs);
     let static_nodes = static_resolved_nodes(&resolved, &dead);
@@ -1200,6 +1215,7 @@ fn arena_node_kind_label(kind: &BoundOpKind) -> &'static str {
         BoundOpKind::Constant { .. } => "constant",
         BoundOpKind::CachedAttention { .. } => "cached_attention",
         BoundOpKind::GatedDeltaNet { .. } => "gated_delta_net",
+        BoundOpKind::MoeTopK { .. } => "moe_topk",
     }
 }
 
@@ -1242,8 +1258,11 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
             // escape valve `set_pack_at_plan_time_enabled(false)`, since
             // `packed_width_panels` is always empty there.
             // `state_out` (ROW 547, `docs/discipline.md`): kept empty and
-            // unread for every kind but `GatedDeltaNet`.
+            // unread for every kind but `GatedDeltaNet`. `moe_topk_extra`
+            // (ROW 569) is the same shape, generalized: kept empty and
+            // unread for every kind but `MoeTopK`.
             let mut gdn_state = Vec::new();
+            let mut moe_topk_extra = Vec::new();
             match arena.packed_width_panels.get(&node) {
                 Some(packed) => run_reduce(computed, &arena.buffers, &mut output, Some(packed))?,
                 None => run_node_into_with_gdn_state(
@@ -1255,6 +1274,7 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
                     false,
                     &mut output,
                     Some(&mut gdn_state),
+                    Some(&mut moe_topk_extra),
                 )?,
             }
             #[cfg(feature = "epilogue-profile-probe")]
@@ -1278,6 +1298,20 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
             arena.buffers[node_index] = Some(output);
             if let BoundOpKind::GatedDeltaNet { state_out, .. } = &computed.kind {
                 arena.buffers[state_out.0 as usize] = Some(gdn_state);
+            }
+            if let BoundOpKind::MoeTopK {
+                routes,
+                weights,
+                weight_total,
+                ..
+            } = &computed.kind
+            {
+                for (extra_node, value) in
+                    moe_topk_extra_node_order(routes, weights, *weight_total)
+                        .zip(moe_topk_extra.iter().copied())
+                {
+                    arena.buffers[extra_node.0 as usize] = Some(vec![value]);
+                }
             }
         }
         // `evaluate_quantized_with_scratch`'s own identical fire blocks,
@@ -4970,7 +5004,9 @@ fn evaluate_quantized_with_scratch_impl(
             let epilogue_profile_started = std::time::Instant::now();
             // `state_out` (ROW 547, `docs/discipline.md`): `GatedDeltaNet`'s
             // own second output, kept empty and unread for every other kind.
+            // `moe_topk_extra` (ROW 569) is the same shape, generalized.
             let mut gdn_state = Vec::new();
+            let mut moe_topk_extra = Vec::new();
             run_node_into_with_gdn_state(
                 computed,
                 &buffers,
@@ -4980,6 +5016,7 @@ fn evaluate_quantized_with_scratch_impl(
                 exact_activations,
                 &mut output,
                 Some(&mut gdn_state),
+                Some(&mut moe_topk_extra),
             )?;
             #[cfg(feature = "epilogue-profile-probe")]
             epilogue_profile_record(
@@ -4992,6 +5029,20 @@ fn evaluate_quantized_with_scratch_impl(
             buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
             if let BoundOpKind::GatedDeltaNet { state_out, .. } = &computed.kind {
                 buffers[state_out.0 as usize] = Some(Cow::Owned(gdn_state));
+            }
+            if let BoundOpKind::MoeTopK {
+                routes,
+                weights,
+                weight_total,
+                ..
+            } = &computed.kind
+            {
+                for (extra_node, value) in
+                    moe_topk_extra_node_order(routes, weights, *weight_total)
+                        .zip(moe_topk_extra.iter().copied())
+                {
+                    buffers[extra_node.0 as usize] = Some(Cow::Owned(vec![value]));
+                }
             }
             #[cfg(feature = "std")]
             if std::env::var_os("PROXIMA_CPU_TRACE_COMPUTE").is_some()
@@ -5691,10 +5742,26 @@ pub fn evaluate_parallel(
     let mut peak_live_buffers = live_count(&buffers);
     let mut live_now = peak_live_buffers;
     for (position, computed) in resolved.iter().enumerate() {
-        let output = evaluate_node_parallel(computed, &buffers, workers)?;
+        let node_output = evaluate_node_parallel(computed, &buffers, workers)?;
         #[cfg(feature = "instrument")]
         let bookkeeping_start = instrument::read_ticks();
-        buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
+        buffers[computed.node.0 as usize] = Some(Cow::Owned(node_output.primary));
+        if let BoundOpKind::GatedDeltaNet { state_out, .. } = &computed.kind {
+            buffers[state_out.0 as usize] = Some(Cow::Owned(node_output.gdn_state));
+        }
+        if let BoundOpKind::MoeTopK {
+            routes,
+            weights,
+            weight_total,
+            ..
+        } = &computed.kind
+        {
+            for (extra_node, value) in moe_topk_extra_node_order(routes, weights, *weight_total)
+                .zip(node_output.moe_topk_extra.iter().copied())
+            {
+                buffers[extra_node.0 as usize] = Some(Cow::Owned(vec![value]));
+            }
+        }
         live_now += 1;
         peak_live_buffers = peak_live_buffers.max(live_now);
         for retired in &retires[position] {
@@ -5741,11 +5808,29 @@ pub fn evaluate_parallel(
 /// Runs one node, threaded across `workers` when [`BoundOp::split`] finds it
 /// sound and it clears [`PARALLEL_THRESHOLD`]; otherwise the plain
 /// sequential path via [`run_node_into`].
+/// [`evaluate_node_parallel`]'s own return, widened from a bare `Vec<f32>`
+/// once a resolved node could be [`BoundOpKind::GatedDeltaNet`] or
+/// [`BoundOpKind::MoeTopK`], each with extra outputs beyond `resolved.node`'s
+/// own buffer -- ROW 569 found `evaluate_parallel`'s own loop had never
+/// threaded either kind's extra outputs anywhere (the other three real
+/// dispatch points -- `Interpreter::fold`, `evaluate_quantized_with_scratch_impl`,
+/// `run_resolved_nodes_in_arena` -- already had; this one predates
+/// `GatedDeltaNet`'s own `state_out` and was simply never exercised by a
+/// test that ran a fused program through it, until this row's own MoE parity
+/// test did). Both extra-output kinds ever fire for a chunk-split node is
+/// moot: `BoundOp::split_axis` returns `None` for both, so a chunked run
+/// never reaches either kind (`evaluate_node_parallel`'s own `chunks` match).
+struct ParallelNodeOutput {
+    primary: Vec<f32>,
+    gdn_state: Vec<f32>,
+    moe_topk_extra: Vec<f32>,
+}
+
 fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
     workers: NonZeroUsize,
-) -> Result<Vec<f32>, TensorError> {
+) -> Result<ParallelNodeOutput, TensorError> {
     #[cfg(feature = "instrument")]
     let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::OutputBuffer);
     #[cfg(feature = "instrument")]
@@ -5781,6 +5866,8 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
         instrument::elapsed_ticks(split_start)
     );
 
+    let mut gdn_state = Vec::new();
+    let mut moe_topk_extra = Vec::new();
     match chunks {
         Some(chunks) => run_chunks_threaded(&chunks, buffers, &mut output, workers)?,
         None => {
@@ -5795,7 +5882,17 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
             }
             #[cfg(feature = "instrument")]
             let sequential_start = instrument::read_ticks();
-            run_node_into(resolved, buffers, None, None, None, false, &mut output)?;
+            run_node_into_with_gdn_state(
+                resolved,
+                buffers,
+                None,
+                None,
+                None,
+                false,
+                &mut output,
+                Some(&mut gdn_state),
+                Some(&mut moe_topk_extra),
+            )?;
             #[cfg(feature = "instrument")]
             counter!(
                 instrument::SERIAL_SEQUENTIAL_COMPUTE_TICKS,
@@ -5809,7 +5906,11 @@ fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
     // operand's footprint once per chunk instead of once for this node.
     #[cfg(feature = "instrument")]
     record_bound_op_operand_access(resolved, buffers);
-    Ok(output)
+    Ok(ParallelNodeOutput {
+        primary: output,
+        gdn_state,
+        moe_topk_extra,
+    })
 }
 
 /// Runs each of `chunks` through the shared [`nest_pool`] (crossbeam-deque
@@ -6570,22 +6671,24 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
         exact_activations,
         output,
         None,
+        None,
     )
 }
 
-/// [`run_node_into`]'s own body, plus the one extra seam a
-/// [`BoundOpKind::GatedDeltaNet`] dispatch needs: `gdn_state_sink`, `Some`
-/// only at the call sites that must persist the recurrence's second output
-/// (`run_gated_delta_net`'s own doc) -- `Interpreter::fold`,
+/// [`run_node_into`]'s own body, plus the two extra seams
+/// [`BoundOpKind::GatedDeltaNet`]/[`BoundOpKind::MoeTopK`] dispatch need:
+/// `gdn_state_sink` and `moe_topk_extra_sink`, each `Some` only at the call
+/// sites that must persist the op's own extra outputs
+/// (`run_gated_delta_net`'s/[`run_moe_topk`]'s own doc) -- `Interpreter::fold`,
 /// `evaluate_quantized_with_scratch_impl`'s own loop, and
 /// `run_resolved_nodes_in_arena`. Every other caller reaches
-/// [`run_node_into`] above, which always passes `None` -- correct because
-/// none of them can ever hand this a resolved `GatedDeltaNet` node (the typed
-/// executors reject the kind before dispatch).
+/// [`run_node_into`] above, which always passes `None` for both -- correct
+/// because none of them can ever hand this a resolved `GatedDeltaNet`/
+/// `MoeTopK` node (the typed executors reject both kinds before dispatch).
 ///
 /// `clippy::too_many_arguments`: this mirrors [`run_node_into`]'s own seven,
-/// plus the one seam this function adds -- splitting it further would just
-/// relocate the same seven-argument dispatch one level down.
+/// plus the two seams this function adds -- splitting it further would just
+/// relocate the same dispatch one level down.
 #[allow(clippy::too_many_arguments)]
 fn run_node_into_with_gdn_state<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
@@ -6596,6 +6699,7 @@ fn run_node_into_with_gdn_state<B: Deref<Target = [f32]> + Sync>(
     exact_activations: bool,
     output: &mut [f32],
     gdn_state_sink: Option<&mut Vec<f32>>,
+    moe_topk_extra_sink: Option<&mut Vec<f32>>,
 ) -> Result<(), TensorError> {
     let gdn_debug_q_reduce = std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
         && output.len() >= 4_096
@@ -6626,6 +6730,7 @@ fn run_node_into_with_gdn_state<B: Deref<Target = [f32]> + Sync>(
         BoundOpKind::GatedDeltaNet { .. } => {
             run_gated_delta_net(resolved, buffers, output, gdn_state_sink)
         }
+        BoundOpKind::MoeTopK { .. } => run_moe_topk(resolved, buffers, output, moe_topk_extra_sink),
         BoundOpKind::Elementwise { .. } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Elementwise);
@@ -7217,6 +7322,132 @@ fn run_gated_delta_net<B: Deref<Target = [f32]> + Sync>(
     Ok(())
 }
 
+/// The `moe-topk-fusion` sibling of [`run_gated_delta_net`]'s own
+/// `state_sink` shape, generalized from one extra output to `2 * top_k`:
+/// [`BoundOpKind::MoeTopK::routes`] (all but round 0, already this op's own
+/// `output`), every [`BoundOpKind::MoeTopK::weights`] entry, then
+/// `weight_total` -- exactly [`moe_topk_extra_node_order`]'s own order, so a
+/// caller can `zip` this sink against that order without either side naming
+/// the other's internal layout.
+fn moe_topk_extra_node_order<'routing>(
+    routes: &'routing [NodeId],
+    weights: &'routing [NodeId],
+    weight_total: NodeId,
+) -> impl Iterator<Item = NodeId> + 'routing {
+    routes
+        .iter()
+        .skip(1)
+        .copied()
+        .chain(weights.iter().copied())
+        .chain(core::iter::once(weight_total))
+}
+
+/// [`BoundOpKind::MoeTopK`]'s whole computation: `top_k` rounds of
+/// take-the-maximum-with-exclusion over `scores`, ties broken toward the
+/// HIGHER index (ROW 569, `docs/discipline.md`'s own census fixture proves
+/// this is what `mask * expert_index -> reduce(Maximum)` implements, so the
+/// `>=` comparison below -- which keeps advancing to a later index on an
+/// exact tie -- is the bit-exact match for that construction, not an
+/// arbitrary choice). `weight_r = exp(max_r - max_0)`
+/// (`ExpertGatingFunc::Softmax`'s own softmax-restricted-to-top-k shape,
+/// [`crate::spec::append_moe_ffn`]'s own doc), `weight_total =
+/// sum(weight_0..weight_{top_k-1})` -- the caller's own final
+/// `output * (1 / weight_total)` renormalization is unaffected either way,
+/// since `weight_total` is this op's own third kind of output, not
+/// recomputed downstream.
+///
+/// This slice's only supported shape is `n_tokens == 1` (decode) -- checked
+/// here defensively even though [`match_moe_topk`] already declines any
+/// other shape at bind time, the same belt-and-suspenders
+/// [`run_gated_delta_net`] applies to its own `n_tokens`.
+fn run_moe_topk<B: Deref<Target = [f32]> + Sync>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    output: &mut [f32],
+    extra_sink: Option<&mut Vec<f32>>,
+) -> Result<(), TensorError> {
+    let BoundOpKind::MoeTopK {
+        operands,
+        expert_count,
+        top_k,
+        ..
+    } = &resolved.kind
+    else {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "moe top-k runner received another bound operation",
+        });
+    };
+    let [(scores_node, _, lookup)] = operands.as_slice() else {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "moe top-k requires exactly one operand",
+        });
+    };
+    if lookup.is_some() {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "moe top-k requires a gather-free scores operand",
+        });
+    }
+    let scores = buffer_of(buffers, *scores_node)?;
+    let expert_count = *expert_count as usize;
+    let top_k = *top_k as usize;
+    if scores.len() != expert_count || output.len() != 1 {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "moe top-k executor only supports this slice's single-token decode shape",
+        });
+    }
+    let mut live = scores.to_vec();
+    let mut route0 = 0.0_f32;
+    let mut extra_routes: Vec<f32> = Vec::with_capacity(top_k.saturating_sub(1));
+    let mut extra_weights: Vec<f32> = Vec::with_capacity(top_k);
+    let mut max_selection_0 = 0.0_f32;
+    let mut weight_total = 0.0_f32;
+    for round in 0..top_k {
+        let mut best_index = 0_usize;
+        let mut best_value = f32::NEG_INFINITY;
+        for (index, value) in live.iter().enumerate() {
+            if *value >= best_value {
+                best_value = *value;
+                best_index = index;
+            }
+        }
+        if round == 0 {
+            max_selection_0 = best_value;
+            route0 = best_index as f32;
+        } else {
+            extra_routes.push(best_index as f32);
+        }
+        let weight = (best_value - max_selection_0).exp();
+        extra_weights.push(weight);
+        weight_total += weight;
+        // ROW 569: the graph's own exclusion is `mask = Equal(selection_scores,
+        // max_selection)` then `Select(mask, neg_infinity, selection_scores)`
+        // -- `mask` is `true` at EVERY position tied with this round's own
+        // max, not only the winning (highest) index, so an exact tie excludes
+        // every tied expert in the SAME round, not just the one reported as
+        // `route`. A single-index exclusion here silently diverges from the
+        // unfused chain the moment two experts tie (this executor's own
+        // parity test caught it: unfused round 1 = 255, a naive single-index
+        // exclusion gave 12).
+        for value in live.iter_mut() {
+            if *value == best_value {
+                *value = f32::NEG_INFINITY;
+            }
+        }
+    }
+    output[0] = route0;
+    if let Some(sink) = extra_sink {
+        sink.clear();
+        sink.extend(extra_routes);
+        sink.extend(extra_weights);
+        sink.push(weight_total);
+    }
+    Ok(())
+}
+
 /// [`BoundOpKind::Constant`]'s whole computation: every element is the same
 /// literal. Even simpler than [`run_iota`] — no operand reads, no body, and
 /// not even a dependence on position.
@@ -7370,6 +7601,7 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
             // leaves it untouched), and the resolved kind decides whether the
             // sink is read below, not the allocation itself.
             let mut gdn_state = Vec::new();
+            let mut moe_topk_extra = Vec::new();
             {
                 let buffers = self.buffers.borrow();
                 run_node_into_with_gdn_state(
@@ -7381,6 +7613,7 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
                     false,
                     &mut output,
                     Some(&mut gdn_state),
+                    Some(&mut moe_topk_extra),
                 )?;
                 #[cfg(feature = "instrument")]
                 record_bound_op_operand_access(resolved, *buffers);
@@ -7389,6 +7622,20 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
             (*buffers)[resolved.node.0 as usize] = Some(B::from(output));
             if let BoundOpKind::GatedDeltaNet { state_out, .. } = &resolved.kind {
                 (*buffers)[state_out.0 as usize] = Some(B::from(gdn_state));
+            }
+            if let BoundOpKind::MoeTopK {
+                routes,
+                weights,
+                weight_total,
+                ..
+            } = &resolved.kind
+            {
+                for (extra_node, value) in
+                    moe_topk_extra_node_order(routes, weights, *weight_total)
+                        .zip(moe_topk_extra.iter().copied())
+                {
+                    (*buffers)[extra_node.0 as usize] = Some(B::from(vec![value]));
+                }
             }
         }
         Ok(())
@@ -21364,6 +21611,12 @@ fn run_typed_program<T: Element>(
                     reason: "gated delta net binding is not wired into the typed executor",
                 });
             }
+            BoundOpKind::MoeTopK { .. } => {
+                return Err(TensorError::NotLowerable {
+                    node: node.node,
+                    reason: "moe top-k binding is not wired into the typed executor",
+                });
+            }
             BoundOpKind::Elementwise { .. } => {
                 run_elementwise_typed(node, &buffers, &index_buffers, &mut output)?
             }
@@ -21523,6 +21776,12 @@ where
                         reason: "gated delta net binding is not wired into the widened executor",
                     });
                 }
+                BoundOpKind::MoeTopK { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "moe top-k binding is not wired into the widened executor",
+                    });
+                }
                 BoundOpKind::Elementwise { .. } => {
                     run_elementwise_typed(node, &buffers_in, &index_buffers, &mut output)?;
                 }
@@ -21568,6 +21827,12 @@ where
                     return Err(TensorError::NotLowerable {
                         node: node.node,
                         reason: "gated delta net binding is not wired into the widened executor",
+                    });
+                }
+                BoundOpKind::MoeTopK { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "moe top-k binding is not wired into the widened executor",
                     });
                 }
                 BoundOpKind::Elementwise { .. } => {

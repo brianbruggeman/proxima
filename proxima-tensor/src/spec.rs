@@ -13145,10 +13145,15 @@ shape = ["seq"]
     }
 
     /// Independent top-`k` reference: which experts a token's `logits` route
-    /// to (descending order, ties broken toward the lower index the same
-    /// way [`append_moe_ffn`]'s `mask * iota` construction does) and their
-    /// softmax shares among only that selected set --
-    /// `weight_i = exp(logit_i - max) / sum_selected`, the same shift
+    /// to (descending order, ties broken toward the HIGHER index -- ROW 569,
+    /// `docs/discipline.md`, corrects this comment's own prior claim of
+    /// "toward the lower index": `Iterator::max_by` returns the LAST of
+    /// several equally-maximum elements, and `remaining` is built in
+    /// ascending order, so a tie resolves to the higher index here, exactly
+    /// matching [`append_moe_ffn`]'s own `mask * iota -> reduce(Maximum)`
+    /// construction -- proven by `bind::tests::moe_routing_census`'s own
+    /// exact-tie fixture) and their softmax shares among only that selected
+    /// set -- `weight_i = exp(logit_i - max) / sum_selected`, the same shift
     /// [`append_moe_ffn`]'s doc names.
     fn top_k_routes_and_weights(logits: &[f32], k: usize) -> alloc::vec::Vec<(usize, f32)> {
         let mut remaining: alloc::vec::Vec<usize> = (0..logits.len()).collect();
@@ -17426,6 +17431,12 @@ value = 1.0
                 // regardless of which program a given test walks.
                 crate::bind::BoundOpKind::GatedDeltaNet { .. } => {
                     panic!("this Mistral cached-forward program never binds a GatedDeltaNet op")
+                }
+                // This program has no MoE routing block at all (Mistral's
+                // own dense FFN), so a `moe-topk-fusion` build never
+                // produces this kind here either.
+                crate::bind::BoundOpKind::MoeTopK { .. } => {
+                    panic!("this Mistral cached-forward program never binds a MoeTopK op")
                 }
             }
         }
