@@ -30408,3 +30408,39 @@ typed `MappingExceedsResidentBudget`), unconditional prefault, `mincore`
 residency assertion with typed `MappingNotResident`, telemetry fields.
 This is also the concrete case for the bounded HOBBIT/DynaExq arm: a
 64 GB box with a 29 GB daemon cannot hold the full graph resident.
+
+## ROW 534 -- scoreboard on landed main 4ad4802c: correct text, 60-63 ms per token
+
+Landed 2026-09-13 (origin/main c2776698 → 4ad4802c, 39 commits): ROW 533's
+fit gate + prefault + `mincore` assertion (`proxima-model-interop/src/
+mapping_residency.rs`, `memory_fit.rs`), the omega parity repair (bit-exact
+policy had stranded every cooperative specialization; 39 → 0 red), the
+greedy sampler (2.79 ms → 80 µs per token with the penalty active), placed
+GDN/KV state on the full-graph path, O(1) buffer retirement through a
+per-plan last-reader table, interop clippy clean, `BoundOpKind::
+GatedDeltaNet` + GQA matcher behind the default-off `gated-delta-net-fusion`.
+
+Release `gguf_generate` (no `instrument`), root checkout on main, Ollama
+NOT resident, memory ≥ 45% free, `PROXIMA_TEMPERATURE=0`, logs
+`scratch/row534/`:
+
+| cell | dispatch | prompt / tokens | TTFT ms | TTNT mean ms | tok/s | peak RSS | text |
+|---|---|---|---|---|---|---|---|
+| A ×3 | serial | France / 16 | 1,550-1,620 | 61.6-62.9 | 15.9-16.2 | 23.3 GB | `Paris` 3/3 |
+| B ×3 | concurrent | France / 16 | 1,550-1,575 | 59.5-60.1 | 16.6-16.8 | 23.3 GB | `Paris` 3/3 |
+| C ×2 | serial | Odell + `/no_think` / 256 (EOS at 11) | 9,600-9,700 | 63.2-63.8 | 15.7-15.8 | 23.4 GB | prose |
+
+Correctness is back (8/8). Peak RSS is now the whole mapping (prefault
+makes it resident; the fit gate admits it at ≥ 45% free). The rate is 16
+tok/s -- 3.5x slower than Ollama's 57, and only 10 ms better than ROW 529's
+71.9 ms: the landed host-side removals did not move the token as the
+profile.log breakdown (ROW 530) predicted. No attribution exists for this
+binary (no `instrument`); ROW 535 re-runs with the instrumented build and
+the new per-op counters (retire scan, expert lookup, emit).
+
+Owner 2026-09-13: "10x means we're doing something stupid" -- the
+candidates are structural, not tuning: one gather+reduce dispatch pair per
+routed expert per matrix, ~40 ops per GDN layer, 72 per attention layer,
+prefill one position per evaluation, and the 24 GB no-copy mapping walked
+sparsely per token (ROW 326-329's per-token first-touch cost). Also owner:
+no more worktrees; one slice at a time on main.
