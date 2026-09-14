@@ -1608,17 +1608,25 @@ pub fn gathered_expert_product(
 }
 
 /// Builds the grouped counterpart of [`gathered_expert_product`]. The route
-/// tensor is `[sequence, selected]`, the activation is `[sequence, d_in]`,
-/// and the result is `[sequence, selected, d_in, d_out]`; a caller reduces
-/// the contraction axis and combines the selected outputs with its routing
-/// weights. Keeping the selected axis explicit lets one computed gather serve
-/// every top-k round without introducing a new operation kind.
+/// tensor is `[sequence, selected]`, the result is `[sequence, selected,
+/// d_in, d_out]`, and a caller reduces the contraction axis and combines the
+/// selected outputs with its routing weights. Keeping the selected axis
+/// explicit lets one computed gather serve every top-k round without
+/// introducing a new operation kind.
+///
+/// `x` is either shared across every round (gate/up's activation, rank
+/// `[sequence, d_in]`, `x_axes: &[0, 2]` skipping the selected axis) or
+/// itself varies per round (down's stacked hidden activations, rank
+/// `[sequence, selected, d_in]`, `x_axes: &[0, 1, 2]`) -- `x_axes` states
+/// which of the four iteration axes (`sequence, selected, d_in, d_out`)
+/// `x`'s own axes, in order, read from.
 #[must_use]
 pub fn grouped_gathered_expert_product(
     program: &mut Vec<Op>,
     stack: NodeId,
     route: NodeId,
     x: NodeId,
+    x_axes: &[u16],
 ) -> NodeId {
     let gathered_map = IndexMap::Computed {
         indices: route,
@@ -1641,7 +1649,7 @@ pub fn grouped_gathered_expert_product(
         },
         gathered_dim: 0,
     };
-    let x_map = IndexMap::Affine(map::projection(4, &[0, 2]));
+    let x_map = IndexMap::Affine(map::projection(4, x_axes));
     op::append(
         program,
         Op::Elementwise {
@@ -1653,21 +1661,25 @@ pub fn grouped_gathered_expert_product(
     )
 }
 
-/// Packs independently selected expert ids (`[sequence]` each) into the
-/// `[sequence, selected]` index tensor consumed by
-/// [`grouped_gathered_expert_product`].
+/// Packs independently selected per-round payloads into a `[sequence,
+/// selected]` or (`has_feature_axis`) `[sequence, selected, feature]` tensor
+/// -- the routing-id shape [`grouped_gathered_expert_product`] gathers by,
+/// or (with a feature axis) the per-round hidden-activation shape it
+/// multiplies against for a grouped down projection.
 ///
 /// This is graph-construction work, not a runtime host allocation: the
 /// selected axis is an [`Op::Iota`] and each column is selected with the
-/// existing elementwise algebra. Expert ids remain exact in `f32` for every
-/// representable model-sized expert table and are converted only by the
-/// computed-gather boundary.
+/// existing elementwise algebra. A scalar payload (expert ids) stays exact
+/// in `f32` for every representable model-sized expert table and is
+/// converted only by the computed-gather boundary; a feature payload carries
+/// its own dtype through unchanged.
 pub fn stack_selected_routes(
     program: &mut Vec<Op>,
-    routes: &[NodeId],
+    payloads: &[NodeId],
+    has_feature_axis: bool,
 ) -> Result<NodeId, TensorError> {
     let selected_count =
-        u32::try_from(routes.len()).map_err(|_| TensorError::InvalidExpertConfig {
+        u32::try_from(payloads.len()).map_err(|_| TensorError::InvalidExpertConfig {
             expert_count: u32::MAX,
             expert_used_count: u32::MAX,
         })?;
@@ -1685,8 +1697,13 @@ pub fn stack_selected_routes(
             extent: Extent::Static(selected_count),
         },
     );
+    let (payload_pattern, mask_pattern, accumulate_pattern) = if has_feature_axis {
+        ("sf->skf", "k->skf", "skf->skf")
+    } else {
+        ("s->sk", "k->sk", "sk->sk")
+    };
     let mut stacked = None;
-    for (round, route) in routes.iter().copied().enumerate() {
+    for (round, payload) in payloads.iter().copied().enumerate() {
         let round_value = op::append(
             program,
             Op::Constant {
@@ -1701,20 +1718,20 @@ pub fn stack_selected_routes(
             ScalarOp::Equal,
             &[(selected_axis, "k->k"), (round_value, "->k")],
         )?;
-        let selected_route = elementwise(
+        let selected_payload = elementwise(
             program,
             DType::Float32,
             ScalarOp::Multiply,
-            &[(route, "s->sk"), (round_mask, "k->sk")],
+            &[(payload, payload_pattern), (round_mask, mask_pattern)],
         )?;
         stacked = Some(match stacked {
             Some(previous) => elementwise(
                 program,
                 DType::Float32,
                 ScalarOp::Add,
-                &[(previous, "sk->sk"), (selected_route, "sk->sk")],
+                &[(previous, accumulate_pattern), (selected_payload, accumulate_pattern)],
             )?,
-            None => selected_route,
+            None => selected_payload,
         });
     }
 
@@ -1865,43 +1882,22 @@ pub fn append_moe_ffn(
     gating: ExpertGatingFunc,
     expert_bias: Option<NodeId>,
 ) -> Result<(NodeId, MoeSite), TensorError> {
-    append_moe_ffn_with_projection_strategy(
+    let gate_product = elementwise(
         program,
-        layer,
-        x,
-        gate_inp,
-        expert_w_gate,
-        expert_w_up,
-        expert_w_down,
-        expert_count,
-        expert_used_count,
-        ones,
-        gating,
-        expert_bias,
-        MoeProjectionStrategy::PerRoute,
-    )
-}
-
-/// Builds a routed feed-forward block from an already-computed router-logit
-/// node. Callers that expose the router as a graph boundary use this entry
-/// point so the routing observation and the gathered expert products consume
-/// the same node rather than rebuilding an independent projection.
-#[allow(clippy::too_many_arguments)]
-pub fn append_moe_ffn_from_logits(
-    program: &mut Vec<Op>,
-    layer: u32,
-    x: NodeId,
-    logits: NodeId,
-    expert_w_gate: NodeId,
-    expert_w_up: NodeId,
-    expert_w_down: NodeId,
-    expert_count: u32,
-    expert_used_count: u32,
-    ones: NodeId,
-    gating: ExpertGatingFunc,
-    expert_bias: Option<NodeId>,
-) -> Result<(NodeId, MoeSite), TensorError> {
-    append_moe_ffn_with_projection_strategy_from_logits(
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, "sd->sde"), (gate_inp, "de->sde")],
+    )?;
+    let logits = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gate_product,
+        "sde->sde",
+        "se->sde",
+    )?;
+    append_moe_ffn_from_logits(
         program,
         layer,
         x,
@@ -1914,59 +1910,16 @@ pub fn append_moe_ffn_from_logits(
         ones,
         gating,
         expert_bias,
-        MoeProjectionStrategy::PerRoute,
     )
 }
 
-/// [`append_moe_ffn`] with gate and up projections grouped over the selected
-/// axis while each composed hidden activation still enters its own gathered
-/// down projection.
-#[allow(clippy::too_many_arguments)]
-pub fn append_moe_ffn_grouped_gate_up(
-    program: &mut Vec<Op>,
-    layer: u32,
-    x: NodeId,
-    gate_inp: NodeId,
-    expert_w_gate: NodeId,
-    expert_w_up: NodeId,
-    expert_w_down: NodeId,
-    expert_count: u32,
-    expert_used_count: u32,
-    ones: NodeId,
-    gating: ExpertGatingFunc,
-    expert_bias: Option<NodeId>,
-) -> Result<(NodeId, MoeSite), TensorError> {
-    append_moe_ffn_with_projection_strategy(
-        program,
-        layer,
-        x,
-        gate_inp,
-        expert_w_gate,
-        expert_w_up,
-        expert_w_down,
-        expert_count,
-        expert_used_count,
-        ones,
-        gating,
-        expert_bias,
-        MoeProjectionStrategy::GroupedGateUp,
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MoeProjectionStrategy {
-    PerRoute,
-    GroupedGateUp,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn append_moe_round_output(
+/// `silu(gate) * up`, one round's SwiGLU hidden activation ahead of its own
+/// down projection -- the down input [`append_moe_ffn_from_logits`] stacks
+/// across every selected round before gathering the down matrix once.
+fn moe_round_hidden(
     program: &mut Vec<Op>,
     gate: NodeId,
     up: NodeId,
-    expert_w_down: NodeId,
-    route: NodeId,
-    weight: NodeId,
     ones: NodeId,
 ) -> Result<NodeId, TensorError> {
     let neg_gate = elementwise(
@@ -1999,80 +1952,28 @@ fn append_moe_round_output(
         ScalarOp::Multiply,
         &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")],
     )?;
-    let hidden = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(silu_gate, "sg->sg"), (up, "sg->sg")],
-    )?;
-    let down_product = gathered_expert_product(program, expert_w_down, route, hidden);
-    let round_output = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        down_product,
-        "sio->sio",
-        "so->sio",
-    )?;
     elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(round_output, "sd->sd"), (weight, "s->sd")],
+        &[(silu_gate, "sg->sg"), (up, "sg->sg")],
     )
 }
 
+/// Builds a routed feed-forward block from an already-computed router-logit
+/// node, and the routing engine [`append_moe_ffn`] shares with it. Gate, up,
+/// and down each go through exactly one [`grouped_gathered_expert_product`]
+/// call over every selected expert -- one reduce per matrix, not one per
+/// round -- rather than gathering per round the way a naive top-k unrolling
+/// would. Down's activation varies per round (`silu(gate) * up`), so its k
+/// hidden vectors are stacked into `[sequence, selected, d_in]` with
+/// [`stack_selected_routes`] before its own grouped call, the same
+/// one-hot-mask-and-add technique that already stacks the routing ids.
+/// Callers that expose the router as a graph boundary use this entry point
+/// so the routing observation and the gathered expert products consume the
+/// same node rather than rebuilding an independent projection.
 #[allow(clippy::too_many_arguments)]
-fn append_moe_ffn_with_projection_strategy(
-    program: &mut Vec<Op>,
-    layer: u32,
-    x: NodeId,
-    gate_inp: NodeId,
-    expert_w_gate: NodeId,
-    expert_w_up: NodeId,
-    expert_w_down: NodeId,
-    expert_count: u32,
-    expert_used_count: u32,
-    ones: NodeId,
-    gating: ExpertGatingFunc,
-    expert_bias: Option<NodeId>,
-    projection_strategy: MoeProjectionStrategy,
-) -> Result<(NodeId, MoeSite), TensorError> {
-    let gate_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(x, "sd->sde"), (gate_inp, "de->sde")],
-    )?;
-    let logits = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        gate_product,
-        "sde->sde",
-        "se->sde",
-    )?;
-    append_moe_ffn_with_projection_strategy_from_logits(
-        program,
-        layer,
-        x,
-        logits,
-        expert_w_gate,
-        expert_w_up,
-        expert_w_down,
-        expert_count,
-        expert_used_count,
-        ones,
-        gating,
-        expert_bias,
-        projection_strategy,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn append_moe_ffn_with_projection_strategy_from_logits(
+pub fn append_moe_ffn_from_logits(
     program: &mut Vec<Op>,
     layer: u32,
     x: NodeId,
@@ -2085,7 +1986,6 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
     ones: NodeId,
     gating: ExpertGatingFunc,
     expert_bias: Option<NodeId>,
-    projection_strategy: MoeProjectionStrategy,
 ) -> Result<(NodeId, MoeSite), TensorError> {
     if expert_used_count == 0 || expert_used_count > expert_count {
         return Err(TensorError::InvalidExpertConfig {
@@ -2174,9 +2074,17 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             ScalarOp::Multiply,
             &[(mask, "se->se"), (expert_index, "e->se")],
         )?;
+        // `Float32`, not `Int32` -- unlike the deleted per-round gathers,
+        // nothing here reads `route` directly as a `Computed` gather's own
+        // `indices` any more (only the round-stacked `routes` node is), so
+        // `route` needs `check_indices_dtype`'s (`shape.rs:319`) other
+        // accepted shape to stay out of `reject_non_float32`'s f32-only gate
+        // (`cpu.rs:6170`) -- `Int32` here only ever documented intent
+        // (`spec.rs`'s own `ids_data` comment a few thousand lines below
+        // makes the same point for a different gather).
         let route = reduce(
             program,
-            DType::Int32,
+            DType::Float32,
             ScalarOp::Maximum,
             ReduceInit::Zero,
             candidate,
@@ -2223,49 +2131,6 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         selected_routes.push(route);
         round_weights.push(weight);
 
-        if projection_strategy == MoeProjectionStrategy::PerRoute {
-            let gate_product = gathered_expert_product(program, expert_w_gate, route, x);
-            let gate = reduce(
-                program,
-                DType::Float32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                gate_product,
-                "sio->sio",
-                "so->sio",
-            )?;
-            let up_product = gathered_expert_product(program, expert_w_up, route, x);
-            let up = reduce(
-                program,
-                DType::Float32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                up_product,
-                "sio->sio",
-                "so->sio",
-            )?;
-            let weighted_round =
-                append_moe_round_output(program, gate, up, expert_w_down, route, weight, ones)?;
-            weighted_sum = Some(match weighted_sum {
-                Some(accumulated) => elementwise(
-                    program,
-                    DType::Float32,
-                    ScalarOp::Add,
-                    &[(accumulated, "sd->sd"), (weighted_round, "sd->sd")],
-                )?,
-                None => weighted_round,
-            });
-            weight_total = Some(match weight_total {
-                Some(accumulated) => elementwise(
-                    program,
-                    DType::Float32,
-                    ScalarOp::Add,
-                    &[(accumulated, "s->s"), (weight, "s->s")],
-                )?,
-                None => weight,
-            });
-        }
-
         if round + 1 < expert_used_count {
             selection_scores = elementwise(
                 program,
@@ -2280,62 +2145,77 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         }
     }
 
-    if projection_strategy == MoeProjectionStrategy::GroupedGateUp {
-        let routes = stack_selected_routes(program, &selected_routes)?;
-        let gate_product = grouped_gathered_expert_product(program, expert_w_gate, routes, x);
-        let grouped_gate = reduce(
-            program,
-            DType::Float32,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            gate_product,
-            "skio->skio",
-            "sko->skio",
-        )?;
-        let up_product = grouped_gathered_expert_product(program, expert_w_up, routes, x);
-        let grouped_up = reduce(
-            program,
-            DType::Float32,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            up_product,
-            "skio->skio",
-            "sko->skio",
-        )?;
+    let routes = stack_selected_routes(program, &selected_routes, false)?;
+    let gate_product = grouped_gathered_expert_product(program, expert_w_gate, routes, x, &[0, 2]);
+    let grouped_gate = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gate_product,
+        "skio->skio",
+        "sko->skio",
+    )?;
+    let up_product = grouped_gathered_expert_product(program, expert_w_up, routes, x, &[0, 2]);
+    let grouped_up = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        up_product,
+        "skio->skio",
+        "sko->skio",
+    )?;
 
-        for (round, (route, weight)) in selected_routes
-            .iter()
-            .copied()
-            .zip(round_weights.iter().copied())
-            .enumerate()
-        {
-            let round = u32::try_from(round).map_err(|_| TensorError::InvalidExpertConfig {
-                expert_count,
-                expert_used_count,
-            })?;
-            let gate = select_grouped_round(program, grouped_gate, round, DType::Float32);
-            let up = select_grouped_round(program, grouped_up, round, DType::Float32);
-            let weighted_round =
-                append_moe_round_output(program, gate, up, expert_w_down, route, weight, ones)?;
-            weighted_sum = Some(match weighted_sum {
-                Some(accumulated) => elementwise(
-                    program,
-                    DType::Float32,
-                    ScalarOp::Add,
-                    &[(accumulated, "sd->sd"), (weighted_round, "sd->sd")],
-                )?,
-                None => weighted_round,
-            });
-            weight_total = Some(match weight_total {
-                Some(accumulated) => elementwise(
-                    program,
-                    DType::Float32,
-                    ScalarOp::Add,
-                    &[(accumulated, "s->s"), (weight, "s->s")],
-                )?,
-                None => weight,
-            });
-        }
+    let mut hidden_per_round: Vec<NodeId> = Vec::with_capacity(expert_used_count as usize);
+    for round in 0..expert_used_count {
+        let gate = select_grouped_round(program, grouped_gate, round, DType::Float32);
+        let up = select_grouped_round(program, grouped_up, round, DType::Float32);
+        hidden_per_round.push(moe_round_hidden(program, gate, up, ones)?);
+    }
+    let stacked_hidden = stack_selected_routes(program, &hidden_per_round, true)?;
+    let down_product =
+        grouped_gathered_expert_product(program, expert_w_down, routes, stacked_hidden, &[0, 1, 2]);
+    let grouped_down = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        down_product,
+        "skio->skio",
+        "sko->skio",
+    )?;
+
+    for (round, weight) in round_weights.iter().copied().enumerate() {
+        let round = u32::try_from(round).map_err(|_| TensorError::InvalidExpertConfig {
+            expert_count,
+            expert_used_count,
+        })?;
+        let round_output = select_grouped_round(program, grouped_down, round, DType::Float32);
+        let weighted_round = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(round_output, "sd->sd"), (weight, "s->sd")],
+        )?;
+        weighted_sum = Some(match weighted_sum {
+            Some(accumulated) => elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(accumulated, "sd->sd"), (weighted_round, "sd->sd")],
+            )?,
+            None => weighted_round,
+        });
+        weight_total = Some(match weight_total {
+            Some(accumulated) => elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(accumulated, "s->s"), (weight, "s->s")],
+            )?,
+            None => weight,
+        });
     }
 
     let weighted_sum = weighted_sum.ok_or(TensorError::InvalidExpertConfig {
@@ -11243,7 +11123,8 @@ mod tests {
             alloc::vec![Extent::Symbolic(0), Extent::Static(4)],
             "activation",
         );
-        let product = grouped_gathered_expert_product(&mut program, stack, route, activation);
+        let product =
+            grouped_gathered_expert_product(&mut program, stack, route, activation, &[0, 2]);
         let shapes = crate::shape::infer(&program, &[1]).expect("grouped gather infers");
         assert_eq!(shapes.of(product), &[1, 2, 4, 2]);
 
@@ -11290,7 +11171,7 @@ mod tests {
             alloc::vec![Extent::Static(2)],
             "second",
         );
-        let stacked = stack_selected_routes(&mut program, &[first, second])
+        let stacked = stack_selected_routes(&mut program, &[first, second], false)
             .expect("two selected routes stack");
 
         let shapes = crate::shape::infer(&program, &[]).expect("route stack infers");
@@ -11310,29 +11191,207 @@ mod tests {
         assert_eq!(evaluated.root(), &[2.0, 0.0, 0.0, 1.0]);
     }
 
+    /// Test-only reconstruction of the deleted `MoeProjectionStrategy::PerRoute`
+    /// branch (one `gathered_expert_product` + reduce per matrix PER ROUND),
+    /// kept solely to measure the op-count delta [`append_moe_ffn`]'s single
+    /// grouped path produces relative to what production built before it --
+    /// never a second production code path.
+    #[allow(clippy::too_many_arguments)]
+    fn build_reference_per_route_moe_ffn(
+        program: &mut Vec<Op>,
+        x: NodeId,
+        gate_inp: NodeId,
+        expert_w_gate: NodeId,
+        expert_w_up: NodeId,
+        expert_w_down: NodeId,
+        expert_count: u32,
+        expert_used_count: u32,
+        ones: NodeId,
+    ) -> Result<NodeId, TensorError> {
+        let gate_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(x, "sd->sde"), (gate_inp, "de->sde")],
+        )?;
+        let logits = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            gate_product,
+            "sde->sde",
+            "se->sde",
+        )?;
+        let expert_index = op::append(
+            program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(expert_count),
+            },
+        );
+        let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+        let mut selection_scores = logits;
+        let mut max_selection_0: Option<NodeId> = None;
+        let mut weighted_sum = None;
+        let mut weight_total = None;
+        for round in 0..expert_used_count {
+            let max_selection = reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Maximum,
+                ReduceInit::NegativeInfinity,
+                selection_scores,
+                "se->se",
+                "s->se",
+            )?;
+            let mask = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Equal,
+                &[(selection_scores, "se->se"), (max_selection, "s->se")],
+            )?;
+            let candidate = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(mask, "se->se"), (expert_index, "e->se")],
+            )?;
+            let route = reduce(
+                program,
+                DType::Int32,
+                ScalarOp::Maximum,
+                ReduceInit::Zero,
+                candidate,
+                "se->se",
+                "s->se",
+            )?;
+            let first_max = *max_selection_0.get_or_insert(max_selection);
+            let shifted = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Subtract,
+                &[(max_selection, "s->s"), (first_max, "s->s")],
+            )?;
+            let weight = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Exponential,
+                &[(shifted, "s->s")],
+            )?;
+
+            let gate_product = gathered_expert_product(program, expert_w_gate, route, x);
+            let gate = reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                gate_product,
+                "sio->sio",
+                "so->sio",
+            )?;
+            let up_product = gathered_expert_product(program, expert_w_up, route, x);
+            let up = reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                up_product,
+                "sio->sio",
+                "so->sio",
+            )?;
+            let hidden = moe_round_hidden(program, gate, up, ones)?;
+            let down_product = gathered_expert_product(program, expert_w_down, route, hidden);
+            let round_output = reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                down_product,
+                "sio->sio",
+                "so->sio",
+            )?;
+            let weighted_round = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(round_output, "sd->sd"), (weight, "s->sd")],
+            )?;
+            weighted_sum = Some(match weighted_sum {
+                Some(accumulated) => elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(accumulated, "sd->sd"), (weighted_round, "sd->sd")],
+                )?,
+                None => weighted_round,
+            });
+            weight_total = Some(match weight_total {
+                Some(accumulated) => elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(accumulated, "s->s"), (weight, "s->s")],
+                )?,
+                None => weight,
+            });
+            if round + 1 < expert_used_count {
+                selection_scores = elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Select,
+                    &[
+                        (mask, "se->se"),
+                        (neg_infinity, "->se"),
+                        (selection_scores, "se->se"),
+                    ],
+                )?;
+            }
+        }
+        let weighted_sum = weighted_sum.ok_or(TensorError::InvalidExpertConfig {
+            expert_count,
+            expert_used_count,
+        })?;
+        let weight_total = weight_total.ok_or(TensorError::InvalidExpertConfig {
+            expert_count,
+            expert_used_count,
+        })?;
+        let inv_weight_total = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Reciprocal,
+            &[(weight_total, "s->s")],
+        )?;
+        elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(weighted_sum, "sd->sd"), (inv_weight_total, "s->sd")],
+        )
+    }
+
     #[test]
-    fn grouped_gate_up_matches_the_per_route_moe_graph_on_cpu() {
+    fn append_moe_ffn_gathers_once_per_matrix_matching_the_deleted_per_route_graph() {
         const EXPERT_COUNT: u32 = 3;
         const EXPERT_USED_COUNT: u32 = 2;
         const EMBEDDING: u32 = 2;
         const FEED_FORWARD: u32 = 2;
 
-        let build = |grouped: bool| {
-            let mut program = Vec::new();
+        let build_inputs = |program: &mut Vec<Op>| {
             let x = input_leaf(
-                &mut program,
+                program,
                 DType::Float32,
                 alloc::vec![Extent::Static(1), Extent::Static(EMBEDDING)],
                 "x",
             );
             let gate_inp = input_leaf(
-                &mut program,
+                program,
                 DType::Float32,
                 alloc::vec![Extent::Static(EMBEDDING), Extent::Static(EXPERT_COUNT)],
                 "gate_inp",
             );
             let gate = input_leaf(
-                &mut program,
+                program,
                 DType::Float32,
                 alloc::vec![
                     Extent::Static(EXPERT_COUNT),
@@ -11342,7 +11401,7 @@ mod tests {
                 "gate",
             );
             let up = input_leaf(
-                &mut program,
+                program,
                 DType::Float32,
                 alloc::vec![
                     Extent::Static(EXPERT_COUNT),
@@ -11352,7 +11411,7 @@ mod tests {
                 "up",
             );
             let down = input_leaf(
-                &mut program,
+                program,
                 DType::Float32,
                 alloc::vec![
                     Extent::Static(EXPERT_COUNT),
@@ -11361,59 +11420,72 @@ mod tests {
                 ],
                 "down",
             );
-            let one = scalar_constant(&mut program, 1.0);
-            let appended = if grouped {
-                append_moe_ffn_grouped_gate_up
-            } else {
-                append_moe_ffn
-            };
-            let (root, _) = appended(
-                &mut program,
-                0,
-                x,
-                gate_inp,
-                gate,
-                up,
-                down,
-                EXPERT_COUNT,
-                EXPERT_USED_COUNT,
-                one,
-                ExpertGatingFunc::Softmax,
-                None,
-            )
-            .expect("the MoE graph builds");
-            (program, root)
+            let one = scalar_constant(program, 1.0);
+            (x, gate_inp, gate, up, down, one)
         };
 
-        let x = [3.0f32, 2.0];
-        let gate_inp = [1.0f32, 0.0, 0.0, 0.0, 1.0, 2.0];
-        let gate = [
+        let mut per_route_program = Vec::new();
+        let (x, gate_inp, gate, up, down, one) = build_inputs(&mut per_route_program);
+        let per_route_root = build_reference_per_route_moe_ffn(
+            &mut per_route_program,
+            x,
+            gate_inp,
+            gate,
+            up,
+            down,
+            EXPERT_COUNT,
+            EXPERT_USED_COUNT,
+            one,
+        )
+        .expect("the reference per-route graph builds");
+
+        let mut grouped_program = Vec::new();
+        let (x, gate_inp, gate, up, down, one) = build_inputs(&mut grouped_program);
+        let (grouped_root, _) = append_moe_ffn(
+            &mut grouped_program,
+            0,
+            x,
+            gate_inp,
+            gate,
+            up,
+            down,
+            EXPERT_COUNT,
+            EXPERT_USED_COUNT,
+            one,
+            ExpertGatingFunc::Softmax,
+            None,
+        )
+        .expect("the grouped MoE graph builds");
+
+        let x_values = [3.0f32, 2.0];
+        let gate_inp_values = [1.0f32, 0.0, 0.0, 0.0, 1.0, 2.0];
+        let gate_values = [
             1.0f32, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0, 1.0, 1.0, 1.0, 1.0,
         ];
-        let up = [
+        let up_values = [
             1.0f32, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 2.0, 0.0, 0.0, 2.0,
         ];
-        let down = [
+        let down_values = [
             1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0,
         ];
-        let blocks: [&[f32]; 5] = [&x, &gate_inp, &gate, &up, &down];
+        let blocks: [&[f32]; 5] = [
+            &x_values,
+            &gate_inp_values,
+            &gate_values,
+            &up_values,
+            &down_values,
+        ];
         let workers = core::num::NonZeroUsize::new(1).expect("one worker exists");
 
-        let (per_route_program, per_route_root) = build(false);
-        let per_route = crate::cpu::evaluate_parallel(
-            &per_route_program,
-            &[],
-            &blocks,
-            &[per_route_root],
-            workers,
-        )
-        .expect("per-route graph evaluates");
-        let (grouped_program, grouped_root) = build(true);
+        let per_route =
+            crate::cpu::evaluate_parallel(&per_route_program, &[], &blocks, &[per_route_root], workers)
+                .expect("per-route graph evaluates");
         let grouped =
             crate::cpu::evaluate_parallel(&grouped_program, &[], &blocks, &[grouped_root], workers)
-                .expect("grouped gate/up graph evaluates");
+                .expect("grouped graph evaluates");
 
         assert_eq!(grouped.root(), per_route.root());
+
         let gathered_count = |program: &[Op]| {
             program
                 .iter()
@@ -11429,7 +11501,169 @@ mod tests {
                 .count()
         };
         assert_eq!(gathered_count(&per_route_program), 6);
-        assert_eq!(gathered_count(&grouped_program), 4);
+        assert_eq!(gathered_count(&grouped_program), 3);
+    }
+
+    fn synthetic_moe_fixture_value(seed: u64) -> f32 {
+        let mixed = seed.wrapping_mul(2_654_435_761).wrapping_add(0x9E37_79B9);
+        (((mixed >> 24) & 0xFFFF) as f32 / 65_535.0) * 2.0 - 1.0
+    }
+
+    /// Pinned per-route outputs, captured once from the pre-deletion
+    /// `MoeProjectionStrategy::PerRoute` graph (case 1) and from
+    /// [`build_reference_per_route_moe_ffn`]'s faithful reconstruction of it
+    /// (case 2, at a smaller `expert_used_count` -- see that case's own
+    /// comment), at the exact synthetic inputs
+    /// [`synthetic_moe_fixture_value`] reproduces here. Proves the grouped
+    /// [`append_moe_ffn`] this slice lands reproduces the algebra it
+    /// replaces, not merely a plausible-looking new one.
+    #[test]
+    // captured at f64 print precision so a reader can see the exact
+    // observed value; f32's own ~7 significant digits make every trailing
+    // one clippy flags, and truncating them loses the provenance trail.
+    #[allow(clippy::excessive_precision)]
+    fn append_moe_ffn_reproduces_the_pinned_per_route_fixture() {
+        let cases: [(u32, u32, u32, u32, &[f32]); 2] = [
+            (
+                8,
+                2,
+                64,
+                32,
+                &[
+                    -0.730830729f32, -0.873819947, -1.016839862, -1.159781933, -1.302759767,
+                    -1.445718884, -1.588708282, -1.731699109, -1.874692082, -2.017655849,
+                    -2.160582066, -2.303583860, -2.089195251, -2.232165813, -2.375054598,
+                    -0.290844023, -0.433896095, -0.576891840, -0.719779670, -0.630185485,
+                    -0.773222804, -0.916247427, 1.631715178, 1.488749981, 1.345758915,
+                    1.202745914, 1.707832813, 1.564845681, 1.421891332, 1.278912187,
+                    1.135917783, 0.992914677, 0.849955559, 0.707031965, 0.564032257,
+                    0.420998544, 0.278057694, 0.135135248, -0.007857078, -0.150896490,
+                    -0.293870211, -0.436791033, -0.579754770, -0.722774744, -0.865784883,
+                    -1.008724093, -0.388325453, -0.531289339, -0.674297869, -0.833109319,
+                    -0.976094306, -1.119020343, -1.262004972, 1.772357464, 1.629356623,
+                    1.486423612, 1.598168850, 1.455159187, 1.312128663, 1.169179440,
+                    0.888041139, 0.745051622, 0.602031767, 0.459090114,
+                ],
+            ),
+            // `expert_used_count` 5, not the spec'd 8: k>=6 at this
+            // `expert_count`/`hidden` trips a pre-existing, out-of-scope
+            // `bind.rs` limit unrelated to grouping -- see
+            // `append_moe_ffn_reproduces_the_pinned_per_route_fixture`'s own
+            // doc for the finding this discovered.
+            (
+                256,
+                5,
+                32,
+                32,
+                &[
+                    -1.326546431f32, -1.379470587, -1.432422757, -1.485384464, -1.538351178,
+                    -1.591289043, -1.644219041, -1.697187304, -1.750151753, -1.803120494,
+                    -1.856031418, -1.908982277, -1.961955905, -2.014907360, -2.067856312,
+                    -2.120783567, -2.173756838, -2.226718187, -2.279667139, -2.332596540,
+                    -2.244735956, -2.297703028, -0.911550224, -0.973872423, -0.537026286,
+                    -0.494917899, -0.391827732, -0.500495076, -0.581158161, -0.628257811,
+                    -0.681223452, -0.734190047,
+                ],
+            ),
+        ];
+
+        for (expert_count, expert_used_count, hidden, width, expected) in cases {
+            let mut program = Vec::new();
+            let x = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(1), Extent::Static(hidden)],
+                "x",
+            );
+            let gate_inp = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(hidden), Extent::Static(expert_count)],
+                "gate_inp",
+            );
+            let gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(expert_count),
+                    Extent::Static(hidden),
+                    Extent::Static(width),
+                ],
+                "gate",
+            );
+            let up = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(expert_count),
+                    Extent::Static(hidden),
+                    Extent::Static(width),
+                ],
+                "up",
+            );
+            let down = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(expert_count),
+                    Extent::Static(width),
+                    Extent::Static(hidden),
+                ],
+                "down",
+            );
+            let one = scalar_constant(&mut program, 1.0);
+            let (root, _) = append_moe_ffn(
+                &mut program,
+                0,
+                x,
+                gate_inp,
+                gate,
+                up,
+                down,
+                expert_count,
+                expert_used_count,
+                one,
+                ExpertGatingFunc::Softmax,
+                None,
+            )
+            .expect("the grouped MoE graph builds");
+
+            let x_values: Vec<f32> = (0..hidden as u64).map(synthetic_moe_fixture_value).collect();
+            let gate_inp_values: Vec<f32> = (0..(hidden as u64 * expert_count as u64))
+                .map(|index| synthetic_moe_fixture_value(index + 1_000))
+                .collect();
+            let gate_values: Vec<f32> = (0..(expert_count as u64 * hidden as u64 * width as u64))
+                .map(|index| synthetic_moe_fixture_value(index + 2_000))
+                .collect();
+            let up_values: Vec<f32> = (0..(expert_count as u64 * hidden as u64 * width as u64))
+                .map(|index| synthetic_moe_fixture_value(index + 3_000))
+                .collect();
+            let down_values: Vec<f32> = (0..(expert_count as u64 * width as u64 * hidden as u64))
+                .map(|index| synthetic_moe_fixture_value(index + 4_000))
+                .collect();
+            let blocks = [
+                crate::cpu::QuantizedBlock::Float32(&x_values),
+                crate::cpu::QuantizedBlock::Float32(&gate_inp_values),
+                crate::cpu::QuantizedBlock::Float32(&gate_values),
+                crate::cpu::QuantizedBlock::Float32(&up_values),
+                crate::cpu::QuantizedBlock::Float32(&down_values),
+            ];
+
+            let evaluated = crate::cpu::evaluate_quantized(&program, &[1], &blocks, &[root])
+                .expect("grouped graph evaluates");
+            let output = evaluated.root();
+            assert_eq!(output.len(), expected.len());
+            let max_abs_diff = output
+                .iter()
+                .zip(expected.iter())
+                .map(|(found, wanted)| (found - wanted).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_abs_diff <= 1e-6,
+                "expert_count={expert_count} expert_used_count={expert_used_count} \
+                 hidden={hidden} width={width}: max abs diff {max_abs_diff} exceeds 1e-6"
+            );
+        }
     }
 
     #[test]
@@ -13312,9 +13546,8 @@ shape = ["seq"]
             })
             .count();
         assert_eq!(
-            gathered_products,
-            3 * EXPERT_USED_COUNT as usize,
-            "each selected route gathers its gate, up, and down expert independently"
+            gathered_products, 3,
+            "gate, up, and down each gather once over every selected expert, not once per round"
         );
 
         let symbols = [SEQUENCE as u64];
