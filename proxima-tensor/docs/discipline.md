@@ -31910,3 +31910,143 @@ feature flag (relying on the new default) and reran: `generated_text`
 unchanged, contains "Paris"; `ttnt_mean_ms = 53.467`. Kept per the
 less-work/no-regression rule -- correctness restored, performance within
 baseline noise, all gates green.
+
+## ROW 556 -- fusing qwen35's dense-attention chain into `CachedAttention`: existing kind's operand shape cannot carry it, not landed this slice
+
+**Task:** extend `cached_attention_candidates`/`cached_attention_single_range_candidates`
+(`proxima-tensor/src/bind.rs`) to recognize
+`append_qwen35_dense_attention_only_with_taps`'s (`proxima-tensor/src/spec.rs:4724`)
+score/mask/softmax/weighted-sum chain and bind it to the existing
+`BoundOpKind::CachedAttention` op, the same way today's matchers already
+recognize `append_mistral_cached_layer`/`append_mistral_single_range_cached_layer`.
+
+**What was read, `file:line`, side by side:**
+
+- Mistral's two-range online-softmax combine (`cached_attention_candidates`,
+  `bind.rs:2739-3037`) walks backward from `attended_sum = Multiply(Add(cached_value_reduce,
+  new_value_reduce), Reciprocal(weight_sum))`, and for EACH of the cached/new
+  score branches calls `attention_score_sources` (`bind.rs:2636-2658`), which
+  requires the score to be EXACTLY `Multiply(Add(reduced(even_product),
+  reduced(odd_product)), scale)` -- a flat two-term sum, each term a direct
+  `Reduce`.
+- Qwen35's dense-attention chain (`spec.rs:4874-5067`, cached and new branches
+  both) builds `score_cached = Add(score_cached_rotated, score_cached_pass)`
+  where `score_cached_rotated = Add(score_cached_first, score_cached_second)`
+  (`spec.rs:4928-4945`) -- a THREE-term sum (`first`, `second`, `pass`) nested
+  one level deeper than the two-term shape `attention_score_sources` parses.
+  Walking `attention_score_sources` against it fails at the very first hop:
+  `reduced_source(score_sum[0], Add, Zero)` expects `score_sum[0]` to be a
+  `Reduce`, but qwen35's `score_sum[0]` (`score_cached_rotated`) is itself an
+  `Add` of two reduces, not a `Reduce`.
+  This three-term shape is real, not a degenerate zero-width edge case: qwen35
+  is **partial-rotary** -- `rotary_dim` (`rope.dimension_count`, 64 for the
+  27B checkpoint, `proxima-model-interop/src/qwen35.rs:37-38,179`) is narrower
+  than `attn_head_dim` (256, `qwen35.rs:142,182`), so the RoPE-rotated
+  `first`/`second` planes cover only 64 of 256 per-head columns and the
+  remaining 192-column `pass` plane (`spec.rs:4836-4837`,
+  `per_head_channel_range`) is untouched by rotation but still contributes to
+  the score. Mistral's builders rotate the FULL head width (two planes,
+  `attn_head_dim = pairs * 2` exactly), so they never need a third term.
+- Qwen35's cached branch additionally masks bucket padding IN-GRAPH: `score_cached_scaled`
+  (the node the online-softmax `Subtract` reads) is a `Select(is_cached_padding,
+  -inf, <the scale-Multiply node>)` (`spec.rs:4979-4997`), not the
+  scale-Multiply node itself. `cached_attention_candidates`'s cached branch
+  (`bind.rs:2803-2808`) expects `cached_score_parts[0]` (what
+  `attention_score_sources` receives) to BE that Multiply node directly --
+  the extra `Select` breaks the match one hop earlier than the three-term
+  score does. The same padding this `Select` masks is exactly what the fused
+  op's own runtime bound already excludes once bound (`cpu.rs:6929-6958`'s
+  `live_cached_key_rows` clip against the 9th `cached_len` operand,
+  `bind.rs:2990-3016`) -- functionally redundant post-fusion, but still a real
+  node the matcher today does not recognize or discard.
+- `BoundOpKind::CachedAttention`'s own field shape (`bind.rs:260-271`) has no
+  room for either difference: `operands` is exactly 8 (+ optional 9th
+  `cached_len`) fixed positions modeling TWO rotary planes per side
+  (`query_even`, `query_odd`, `cached_key_even`, `cached_key_odd`,
+  `new_key_even`, `new_key_odd`, `cached_value`, `new_value`), and `head_dim:
+  u64` is a single scalar derived as `pair_dim * 2` (`bind.rs:2908`,
+  `query_shape[3].checked_mul(2)`) -- there is no field distinguishing a
+  rotated width from a wider total head width, and no operand slot for a
+  third (pass-through) key/query plane. Qwen35's real per-head layout needs
+  three key planes (`first`, `second`, `pass`) and a `rotary_dim`/`attn_head_dim`
+  split the existing kind cannot express with its current fields.
+- Head grouping (`s,{group}*u+g,i->sugi` GQA broadcast, `spec.rs:4847-4872`)
+  and the causal-mask form (`Select(Greater(Iota, Iota), -inf, scaled)`,
+  matched by `is_exact_causal_mask`, `bind.rs:2661-2677`) ARE structurally
+  identical to mistral's own shapes -- these two axes are not the blocker.
+
+**Per the task's own instruction ("if a field cannot be expressed... say
+exactly which and stop there with the census numbers -- do not add a new
+kind"): this is that case.** The blocker is not tolerance of extra nodes in
+the matcher (a legitimate matcher-only fix) but the fixed OPERAND COUNT and
+the single `head_dim` field of `BoundOpKind::CachedAttention` itself, which
+has no existing field to carry a third K/Q plane or a rotary-vs-total-width
+split. Landing this fusion with "the existing fields" as instructed is not
+possible; carrying it would mean widening the kind's operand/field shape,
+which is out of this slice's scope.
+
+**Census (MEASURED, `cargo test -p proxima-tensor --lib
+append_qwen35_dense_attention_layer_matches_a_hand_computed_gate_and_partial_rotary_concat
+-- --nocapture`, temporary `program.len()` prints, reverted after
+measurement -- op count is shape-independent, so the tiny test fixture's
+count equals the real 16-head/2-kv/256-head-dim/2048-hidden shape's count):**
+one full `append_qwen35_dense_attention_layer` call (attention block +
+dense SwiGLU FFN) appends **145 ops** (`174 - 29`) to the program; no fusion
+candidate is produced today (`cached-attention-streaming`'s matchers both
+decline, per the mismatches above), so the fused-vs-unfused op-count
+delta this slice would have measured is **0 -- no change landed.**
+
+**Found and fixed along the way:** `cached_attention_rewrite_replaces_the_bound_attention_subgraph`
+(`bind.rs:5240`) was red on `--features cached-attention-streaming` on an
+otherwise-unmodified tree (`left: 0, right: 48` -- `bind_plain` returned
+nothing at all). Root cause: `134975f8` ("perf(tensor): bind only the ops
+reachable from the requested outputs", landed the same day) taught
+`bind_plain` to bind only nodes `live::reachable` from `outputs`, and updated
+every OTHER `outputs: &[]` call site in this file to pass `&[terminal(&program)]`
+instead (`terminal`'s own doc, `bind.rs:4926-4933`: "an empty `outputs`
+correctly binds nothing") -- except this one test, whose `outputs: &[]`
+(discarding the fixture's own `logits`/cache-root return values via `let
+(program, _, _) = ...`) now binds nothing, exactly as the new code is
+supposed to. Fixed by capturing `logits` and the per-layer `CachedLayerRoots`
+the fixture already returns and passing them as `outputs`, the same pattern
+`row_364_per_layer_bound_op_list` (`bind.rs:5340-5361`) already uses for the
+sibling single-range fixture. One node in this particular one-layer program
+turns out to be unreachable from that output set (genuinely dead code the OLD
+unconditional-bind behavior used to materialize anyway) -- `plain.len()` and
+`cached_only.len()` both shift down by exactly one (`48 -> 47`, `26 -> 25`);
+the fusion-savings delta (`22` ops removed) and the "one `CachedAttention` per
+layer" assertion are unchanged, so the two literals were the only correction
+needed. This is a distinct fix from this row's own fusion-matcher finding
+above, committed separately.
+
+**Gates run (unfused-fusion finding: unchanged tree beyond the census check):**
+- `git diff --stat` after reverting the census instrumentation: empty --
+  no source change from the fusion investigation itself.
+- `cargo test -p proxima-tensor --lib
+  append_qwen35_dense_attention_layer_matches_a_hand_computed_gate_and_partial_rotary_concat`:
+  `1 passed; 0 failed`.
+
+**Gates run (bind.rs test fix):**
+- `cargo test -p proxima-tensor --features cached-attention-streaming --lib
+  cached_attention_rewrite_replaces_the_bound_attention_subgraph`: `1 passed;
+  0 failed` (was failing before the fix, `left: 0, right: 48`).
+- `cargo nextest run -p proxima-tensor --features cached-attention-streaming
+  --test-threads 4`: `632 tests run: 632 passed, 8 skipped`.
+- `cargo nextest run -p proxima-tensor --test-threads 4` (default features):
+  `625 tests run: 625 passed, 8 skipped`.
+- `cargo clippy -p proxima-tensor --all-targets --features
+  cached-attention-streaming -j 4`: exit 0.
+- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E
+  'not test(qwen35moe_shaped_append_moe_ffn)'`: `313 tests run: 313 passed, 13
+  skipped`.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument
+  --test-threads 2 -E 'test(qwen35)'`: `20 tests run: 20 passed, 278 skipped`.
+- `cargo check --workspace --all-targets`: exit 0.
+
+**Residual, carried to the next slice:** widening `BoundOpKind::CachedAttention`
+to carry a third (pass-through) key/query plane and a `rotary_dim` field
+distinct from `head_dim` -- touching `bind.rs`'s two matchers,
+`cpu.rs::run_cached_attention`, and `omega`'s `render_cached_attention` Metal
+kernel -- is the real next step; it is new surface on the existing kind's
+shape, not a matcher-only change, and needs its own slice with CPU parity
+proven before any Metal work starts.
