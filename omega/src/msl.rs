@@ -2122,13 +2122,49 @@ fn reduce_is_cooperative_dispatch(
     if expert_source_mode
         || reduce_has_broadcast_epilogue(resolved)
         || tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
-        || packed_row_block(resolved, quantized).is_some()
+        || packed_row_block_admitted(resolved, quantized)
     {
         reduce_is_cooperative(resolved)
     } else {
         reduce_is_cooperative_for_policy(resolved, policy)
     }
 }
+
+/// [`packed_row_block`]'s own admission, plus a `debug!` naming the exact
+/// [`PackedRowBlockRejection`] on decline -- this is the one call site that
+/// decides whether a reduce ever reaches the packed-row-blocked kernel at
+/// all (every other `packed_row_block` call site downstream only ever fires
+/// on an op this admission already accepted, so logging only here names
+/// each verdict once, not once per caller). ROW 538 (`docs/discipline.md`):
+/// without this, a declined grouped-expert reduce silently fell back to
+/// `reduce-cooperative` with no record of which of the seven
+/// [`classify_packed_row_block`] conditions gave up on it.
+fn packed_row_block_admitted(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> bool {
+    // The experimental mixed-source path must use the descriptor-aware
+    // element reader; row-block pointer hoisting has a separate address ABI.
+    if std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES").is_some() {
+        return false;
+    }
+    match classify_packed_row_block(resolved, quantized) {
+        Ok(_) => true,
+        Err(reason) => {
+            debug_packed_row_block_decline(resolved.node, &reason);
+            false
+        }
+    }
+}
+
+#[cfg(feature = "instrument")]
+fn debug_packed_row_block_decline(node: NodeId, reason: &PackedRowBlockRejection) {
+    proxima_telemetry::debug!(
+        node = node.0,
+        reason = ?reason,
+        "packed-row-block admission declined; reduce falls back to cooperative dispatch"
+    );
+}
+
+#[cfg(not(feature = "instrument"))]
+fn debug_packed_row_block_decline(_node: NodeId, _reason: &PackedRowBlockRejection) {}
 
 /// A route selected by the token axis has zero stride in contracted
 /// dimensions, so one fetched expert index can be shared by all lanes. Any
