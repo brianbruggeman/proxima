@@ -107,6 +107,13 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # `state_out` write actually reaches the caller's placed buffer (`encode_op`'s
 # own `state_out_placement` doc, `omega/src/metal.rs`) -- qwen35moe real-model
 # decode reaches "Paris" with `ttnt_mean_ms=52.733` (baseline 56.9).
+# ROW 569: `moe-topk-fusion` joins default-on once the simd-group kernel
+# (`omega/src/msl.rs`'s own `render_moe_topk`) replaced the first threadgroup-
+# tree-reduction draft -- unprofiled qwen35moe real-model decode reaches
+# "Paris" at `ttnt_mean_ms` 50.727/50.727 (feature on) vs 51.933/51.333
+# (feature off, same binary), a real if modest win once the bare kernel
+# itself dropped from a 5404.5us to a 1046.9us median (`omega/tests/
+# moe_topk_bare_dispatch_timing.rs`).
 metal = [
     "dep:omega",
     "dep:libc",
@@ -120,6 +127,7 @@ metal = [
     "metal-packed-row-nsg2",
     "metal-q4k-ggml-port",
     "gated-delta-net-fusion",
+    "moe-topk-fusion",
 ]
 mlx-gdn = ["metal", "omega/mlx-gdn"]
 # Default-off passthrough to `omega/metal-horizontal-merge` (plan-time
