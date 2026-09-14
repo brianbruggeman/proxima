@@ -926,6 +926,21 @@ pub fn build_static_arena_with_constants(
     )?;
     for computed in &resolved {
         buffers[computed.node.0 as usize] = Some(vec![0.0f32; node_output_len(computed)]);
+        // `state_out` (ROW 547, `docs/discipline.md`): `GatedDeltaNet`'s own
+        // second output never appears as any resolved node's `.node`, so the
+        // loop above never sizes its slot -- size it here, once, the same
+        // way every other resolved node's own buffer is pre-sized.
+        if let BoundOpKind::GatedDeltaNet {
+            state_out,
+            head_k_dim,
+            head_v_dim,
+            num_v_heads,
+            ..
+        } = &computed.kind
+        {
+            let state_len = (*head_k_dim * *head_v_dim * *num_v_heads) as usize;
+            buffers[state_out.0 as usize] = Some(vec![0.0f32; state_len]);
+        }
     }
     let dead = dead_resolved_nodes(&resolved, &effective_outputs);
     let static_nodes = static_resolved_nodes(&resolved, &dead);
@@ -1226,9 +1241,12 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
             // Always `None`/never-taken off `aarch64` or with the bench/test
             // escape valve `set_pack_at_plan_time_enabled(false)`, since
             // `packed_width_panels` is always empty there.
+            // `state_out` (ROW 547, `docs/discipline.md`): kept empty and
+            // unread for every kind but `GatedDeltaNet`.
+            let mut gdn_state = Vec::new();
             match arena.packed_width_panels.get(&node) {
                 Some(packed) => run_reduce(computed, &arena.buffers, &mut output, Some(packed))?,
-                None => run_node_into(
+                None => run_node_into_with_gdn_state(
                     computed,
                     &arena.buffers,
                     None,
@@ -1236,6 +1254,7 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
                     None,
                     false,
                     &mut output,
+                    Some(&mut gdn_state),
                 )?,
             }
             #[cfg(feature = "epilogue-profile-probe")]
@@ -1257,6 +1276,9 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
                 instrument::elapsed_ticks(node_profile_started),
             );
             arena.buffers[node_index] = Some(output);
+            if let BoundOpKind::GatedDeltaNet { state_out, .. } = &computed.kind {
+                arena.buffers[state_out.0 as usize] = Some(gdn_state);
+            }
         }
         // `evaluate_quantized_with_scratch`'s own identical fire blocks,
         // ported verbatim onto arena buffers: same maps, same admission,
@@ -4946,7 +4968,10 @@ fn evaluate_quantized_with_scratch_impl(
             }
             #[cfg(feature = "epilogue-profile-probe")]
             let epilogue_profile_started = std::time::Instant::now();
-            run_node_into(
+            // `state_out` (ROW 547, `docs/discipline.md`): `GatedDeltaNet`'s
+            // own second output, kept empty and unread for every other kind.
+            let mut gdn_state = Vec::new();
+            run_node_into_with_gdn_state(
                 computed,
                 &buffers,
                 Some(&quantized_weights),
@@ -4954,6 +4979,7 @@ fn evaluate_quantized_with_scratch_impl(
                 session.as_ref(),
                 exact_activations,
                 &mut output,
+                Some(&mut gdn_state),
             )?;
             #[cfg(feature = "epilogue-profile-probe")]
             epilogue_profile_record(
@@ -4964,6 +4990,9 @@ fn evaluate_quantized_with_scratch_impl(
             #[cfg(feature = "instrument")]
             let bookkeeping_started = instrument::read_ticks();
             buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
+            if let BoundOpKind::GatedDeltaNet { state_out, .. } = &computed.kind {
+                buffers[state_out.0 as usize] = Some(Cow::Owned(gdn_state));
+            }
             #[cfg(feature = "std")]
             if std::env::var_os("PROXIMA_CPU_TRACE_COMPUTE").is_some()
                 && matches!(
@@ -6532,6 +6561,42 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     exact_activations: bool,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
+    run_node_into_with_gdn_state(
+        resolved,
+        buffers,
+        quantized_weights,
+        expert_sources,
+        session,
+        exact_activations,
+        output,
+        None,
+    )
+}
+
+/// [`run_node_into`]'s own body, plus the one extra seam a
+/// [`BoundOpKind::GatedDeltaNet`] dispatch needs: `gdn_state_sink`, `Some`
+/// only at the call sites that must persist the recurrence's second output
+/// (`run_gated_delta_net`'s own doc) -- `Interpreter::fold`,
+/// `evaluate_quantized_with_scratch_impl`'s own loop, and
+/// `run_resolved_nodes_in_arena`. Every other caller reaches
+/// [`run_node_into`] above, which always passes `None` -- correct because
+/// none of them can ever hand this a resolved `GatedDeltaNet` node (the typed
+/// executors reject the kind before dispatch).
+///
+/// `clippy::too_many_arguments`: this mirrors [`run_node_into`]'s own seven,
+/// plus the one seam this function adds -- splitting it further would just
+/// relocate the same seven-argument dispatch one level down.
+#[allow(clippy::too_many_arguments)]
+fn run_node_into_with_gdn_state<B: Deref<Target = [f32]> + Sync>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    quantized_weights: Option<&BTreeMap<NodeId, QuantizedBlock>>,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+    session: Option<&MatmulSession<'_>>,
+    exact_activations: bool,
+    output: &mut [f32],
+    gdn_state_sink: Option<&mut Vec<f32>>,
+) -> Result<(), TensorError> {
     let gdn_debug_q_reduce = std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
         && output.len() >= 4_096
         && matches!(
@@ -6558,7 +6623,9 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
             instrument::record_op_kind(instrument::OpKind::CachedAttention);
             run_cached_attention(resolved, buffers, output)
         }
-        BoundOpKind::GatedDeltaNet { .. } => run_gated_delta_net(resolved, buffers, output),
+        BoundOpKind::GatedDeltaNet { .. } => {
+            run_gated_delta_net(resolved, buffers, output, gdn_state_sink)
+        }
         BoundOpKind::Elementwise { .. } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Elementwise);
@@ -7005,19 +7072,23 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
 /// silently reshaped) if a caller ever binds a non-natural stride, since
 /// that would mean this slice's scope assumption stopped holding.
 ///
-/// `state` is copied into a scratch buffer rather than mutated in place:
-/// `gated_delta_net_candidates` only fuses when `state_out` is not itself a
-/// requested/effective output (its own doc), so no caller in this crate
-/// today reads the recurrence's updated state back out of this call — the
-/// interop wiring that would make the state buffer genuinely caller-shared,
-/// in place, is explicitly a later slice (design doc §2's own `state_in`/
-/// `state_out` note). One heap allocation per call, sized `head_k_dim *
-/// head_v_dim * heads` (the state's own size) — a documented, scoped
-/// exception to the zero-alloc hot-path default, not an oversight.
+/// `state` is a scratch copy of `state_in`, mutated by
+/// [`run_gdn_prefill_scan`] into this step's updated recurrence state, then
+/// handed back to `state_sink` (ROW 547, `docs/discipline.md`) whenever a
+/// caller supplies one -- the second, state-shaped output
+/// [`BoundOpKind::GatedDeltaNet::state_out`] declares. `state_sink` is
+/// `None` at every call site that cannot reach a `GatedDeltaNet` node at
+/// runtime (the typed executors reject the kind outright before dispatch);
+/// the two real dispatch points ([`Interpreter::fold`] and
+/// [`evaluate_quantized_with_scratch_impl`]'s own loop) always pass `Some`.
+/// One heap allocation per call, sized `head_k_dim * head_v_dim * heads`
+/// (the state's own size) — a documented, scoped exception to the
+/// zero-alloc hot-path default, not an oversight.
 fn run_gated_delta_net<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
     output: &mut [f32],
+    state_sink: Option<&mut Vec<f32>>,
 ) -> Result<(), TensorError> {
     let BoundOpKind::GatedDeltaNet {
         operands,
@@ -7029,6 +7100,7 @@ fn run_gated_delta_net<B: Deref<Target = [f32]> + Sync>(
         query_key_head_stride,
         query_key_dim_stride,
         inv_sqrt_key_dim,
+        state_out: _,
     } = &resolved.kind
     else {
         return Err(TensorError::NotLowerable {
@@ -7076,7 +7148,11 @@ fn run_gated_delta_net<B: Deref<Target = [f32]> + Sync>(
         inv_sqrt_key_dim: *inv_sqrt_key_dim,
         state: &mut state,
         output,
-    })
+    })?;
+    if let Some(sink) = state_sink {
+        *sink = state;
+    }
+    Ok(())
 }
 
 /// [`BoundOpKind::Constant`]'s whole computation: every element is the same
@@ -7226,14 +7302,32 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
     fn fold(&self, ready: &[BoundOp]) -> Result<(), TensorError> {
         for resolved in ready {
             let mut output = vec![0.0f32; node_output_len(resolved)];
+            // `state_out` (ROW 547, `docs/discipline.md`): `GatedDeltaNet`'s
+            // own second output. `Vec::new()` costs nothing until
+            // `run_gated_delta_net` actually fills it (every other kind
+            // leaves it untouched), and the resolved kind decides whether the
+            // sink is read below, not the allocation itself.
+            let mut gdn_state = Vec::new();
             {
                 let buffers = self.buffers.borrow();
-                run_node_into(resolved, *buffers, None, None, None, false, &mut output)?;
+                run_node_into_with_gdn_state(
+                    resolved,
+                    *buffers,
+                    None,
+                    None,
+                    None,
+                    false,
+                    &mut output,
+                    Some(&mut gdn_state),
+                )?;
                 #[cfg(feature = "instrument")]
                 record_bound_op_operand_access(resolved, *buffers);
             }
             let mut buffers = self.buffers.borrow_mut();
             (*buffers)[resolved.node.0 as usize] = Some(B::from(output));
+            if let BoundOpKind::GatedDeltaNet { state_out, .. } = &resolved.kind {
+                (*buffers)[state_out.0 as usize] = Some(B::from(gdn_state));
+            }
         }
         Ok(())
     }
