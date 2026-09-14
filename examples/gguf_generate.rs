@@ -439,6 +439,42 @@ fn parse_requested_backend(argument: Option<&String>) -> RequestedBackend {
 }
 
 fn main() {
+    // `generate.rs`'s `instrument`-gated `info!`/`debug!` calls (including
+    // `mapping_prefault_ms`/`mapping_missing_pages` on the checkpoint
+    // residency gate) are no-ops with no recorder installed -- this is the
+    // proxima-log two-precondition contract, not a bug in those call sites.
+    // `RUST_LOG` still gates the floor on top of this; harmless to install
+    // unconditionally since `proxima-model-interop/instrument` off just
+    // means there is nothing gated behind it left to emit. Same
+    // `Recorder::builder().export(Exporter::std())` shape
+    // `generate.rs`'s own test-only `install_stdout_telemetry` uses, so no
+    // extra top-level feature (`tracing-init`) is needed beyond what the
+    // gate's own build command already requests.
+    proxima_telemetry::emit::global::install_from_env();
+    let telemetry_recorder = proxima_telemetry::recorder::Recorder::builder()
+        .export(proxima_telemetry::export::Exporter::std())
+        .expect("console exporter installs for this example run")
+        .install()
+        .expect("console telemetry recorder installs for this example run");
+    // the lock-free ring buffer only reaches stdout once drained -- same
+    // background-pump shape `generate.rs`'s own test-only
+    // `install_stdout_telemetry` uses, so this example's `info!`/`debug!`
+    // lines (`mapping_prefault_ms`, `mapping_missing_pages`,
+    // `checkpoint_mapping_residency`) actually print instead of sitting
+    // unread in the ring until the process exits.
+    {
+        let pump_recorder = std::sync::Arc::clone(&telemetry_recorder);
+        std::thread::Builder::new()
+            .name("gguf-generate-telemetry-drain".to_string())
+            .spawn(move || {
+                loop {
+                    pump_recorder.drain();
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            })
+            .expect("spawn the telemetry drain thread");
+    }
+
     let settings = GenerateConfig::from_process();
     let args: Vec<String> = std::env::args().collect();
     let Some(gguf_path) = args.get(1) else {
