@@ -331,6 +331,13 @@ pub struct GridSpec {
     /// threadgroup. `None` for every other kernel, which keeps the
     /// occupancy-driven width the driver already picks.
     pub threadgroup_width: Option<u64>,
+    /// Z-extent of the dispatch grid -- `1` for every kernel today. Exists so
+    /// [`crate::metal::dispatch`] can grow a third grid axis for a future
+    /// batched dispatch (multiple independent same-shape ops sharing one
+    /// pipeline, addressed by `threadgroup_position_in_grid.z`) without a
+    /// signature change; `1` reproduces today's `MTLSize { depth: 1, .. }`
+    /// exactly, so this field is inert until a caller sets it above `1`.
+    pub depth: u64,
 }
 
 /// Emits an MSL kernel from a bound [`BoundOp`] — the GPU-emission half of
@@ -1512,6 +1519,7 @@ fn emit_inner(
         grid: GridSpec {
             threads: grid_threads(resolved, &quantized, numeric_policy, expert_source_mode)?,
             threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
+            depth: 1,
         },
     })
 }
@@ -2050,6 +2058,7 @@ pub(crate) fn kernel_dispatch_shape(
             // either) -- `false` reproduces that pre-existing scope exactly.
             threads: grid_threads(resolved, &quantized, numeric_policy, false)?,
             threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
+            depth: 1,
         },
     ))
 }
@@ -4944,6 +4953,7 @@ pub(crate) fn emit_cached_attention_merge(
         grid: GridSpec {
             threads: total_elements * SIMD_WIDTH,
             threadgroup_width: None,
+            depth: 1,
         },
     }))
 }
