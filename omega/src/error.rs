@@ -52,17 +52,31 @@ pub enum EmitError {
     )]
     ScatterNotSupported { node: NodeId },
 
-    /// `proxima_tensor::bind`'s `gated-delta-net-fusion` matcher (default-off)
-    /// is the only producer of [`proxima_tensor::BoundOpKind::GatedDeltaNet`]
-    /// -- `proxima_tensor::cpu::run_gated_delta_net` already interprets it,
-    /// but no `msl`/`wgsl`/`cuda` renderer in this crate emits a kernel for
-    /// it yet, the same CPU-ahead-of-GPU gap [`Self::ScatterNotSupported`]
-    /// names for a forward scatter.
+    /// `wgsl`/`cuda` still reject every [`proxima_tensor::BoundOpKind::GatedDeltaNet`]
+    /// bind with this error -- `crate::msl::render_gated_delta_net` is the
+    /// only renderer that emits a kernel for it so far, the same
+    /// CPU-ahead-of-GPU gap [`Self::ScatterNotSupported`] names for a
+    /// forward scatter.
     #[error(
         "node {node} is a gated delta net op, which no GPU emitter in this crate supports yet \
          -- proxima_tensor::cpu::run_gated_delta_net is CPU-only"
     )]
     GatedDeltaNetNotSupported { node: NodeId },
+
+    /// [`crate::msl::render_gated_delta_net`] keeps one `head_k_dim`-long
+    /// state row resident in registers per thread
+    /// (`omega-runtime.toml`'s `[gated_delta_net] head_k_dim_max`); a bind
+    /// above that compiled cap is rejected here rather than silently
+    /// clamped or overflowing the fixed-size register array.
+    #[error(
+        "node {node} gated delta net head_k_dim {head_k_dim} exceeds the compiled cap {cap} \
+         -- raise omega-runtime.toml's [gated_delta_net] head_k_dim_max"
+    )]
+    GatedDeltaNetHeadKDimExceedsCap {
+        node: NodeId,
+        head_k_dim: u64,
+        cap: u64,
+    },
 
     /// `omega::execute`'s own upstream gate (`reject_unsupported_gpu_dtype`)
     /// never lets anything but `Float32`/`Float16` reach [`crate::msl::emit`]

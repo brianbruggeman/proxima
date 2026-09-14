@@ -20,6 +20,13 @@ std = ["alloc", "thiserror/std", "proxima-tensor/std", "dep:conflaguration", "de
 mlx-gdn = ["std"]
 alloc = []
 cached-attention-streaming = ["proxima-tensor/cached-attention-streaming"]
+# Default-off passthrough to `proxima-tensor/gated-delta-net-fusion` (the
+# `BoundOpKind::GatedDeltaNet` bind-time matcher) -- same shape as
+# `cached-attention-streaming` above. `crate::msl::render_gated_delta_net`
+# is always compiled (like every other renderer in this crate); this flag's
+# only effect is whether `proxima_tensor::bind` ever produces the kind for
+# it to render.
+gated-delta-net-fusion = ["proxima-tensor/gated-delta-net-fusion"]
 # Default-off passthrough to `proxima-tensor/reduce-epilogue-fusion` (the
 # `BoundOpKind::Reduce::epilogue_body`/`epilogue_operands` bind-time fusion
 # pass) -- same shape as `cached-attention-streaming` above. `crate::msl`'s
