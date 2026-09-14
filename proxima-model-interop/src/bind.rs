@@ -258,6 +258,7 @@ pub fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> Result<&'a TensorI
 /// keep the old graph and do not receive synthetic zero inputs. A partial or
 /// wrongly shaped family is rejected before binding, because dropping one
 /// bias would produce a plausible but semantically incorrect model.
+#[cfg(feature = "std")]
 pub(crate) fn checkpoint_qkv_biases(
     parsed: &ParsedGguf,
     architecture: &ModelArchitecture,
