@@ -30870,3 +30870,128 @@ produces there.)
   every decode token even though `mixer_out` never reads their result.
 
 No fixes this row -- the census is the deliverable.
+
+## ROW 541 -- bind only the ops reachable from the requested outputs
+
+Fixes ROW 540's finding directly: `bind_plain` (`bind.rs:4706-4720` before
+this row) pushed EVERY `Op` in `program` through `BoundOpBuilder`, in order,
+regardless of `outputs` -- `outputs` fed only `live::annotate`'s buffer-
+retirement liveness, never reachability. `prune_dead`/`dead_resolved_nodes`
+(216d925, "drop dead resolved nodes before GPU dispatch") does not already
+cover this: it is a single-pass, POST-fusion check over `resolved` --
+`consumed_by_resolved_nodes` marks a node dead only when NOTHING resolved
+reads it directly, so a whole disconnected chain (`A -> B -> C`, C unread)
+only ever prunes the chain's own tip (`C`); `A` and `B` are each other's
+consumers and stay live from that pass's point of view. `git log -S
+prune_dead --oneline` confirms it is not orphaned -- every omega backend
+(`metal.rs:6334`, `cuda_driver.rs:262`, `wgpu_driver.rs:413`) already calls
+it -- it is simply the wrong shape for a connected dead subgraph, which is
+exactly ROW 540's causal_conv1d branch (27 nodes, each consuming the
+previous).
+
+**Fix.** `live.rs` gains `reachable(program, outputs)`: a backward worklist
+from `outputs`, reusing `live.rs`'s own private `uses(expr)` (already walks
+operands, gather indices, and a data-dependent reduce `out_map`'s own
+indices -- the exact edge set the task's invariant names) -- no new edge
+logic, RISC reuse-first (principle 1) inside the module that already owned
+this graph walk. `bind_plain` computes it once, alongside the existing
+`live::annotate` call, and for each `program` position either pushes the
+`Op` through `BoundOpBuilder::push` (reachable) or calls a new
+`BoundOpBuilder::skip()` (not reachable) that advances the position counter
+and keeps every per-node bookkeeping vector
+(`ones`/`is_iota`/`packed_mapping_subtree`/`constant_value`) aligned to it,
+without running any binding work. Node ids stay exactly `program`'s own
+positions -- skipped, never renumbered -- which is what every backward
+reference elsewhere in the program requires (`op.rs`'s own "references
+point backwards only"). This is the single choke point every
+`bind`/`bind_with_fusion`/`bind_without_reduce_epilogue_fusion` route calls,
+so CPU and every omega backend see the same pruned plan.
+
+**Proof of the invariant.** For a program and output set, the pruned plan's
+outputs are bit-identical to the unpruned plan's -- proven by re-running
+every existing `bind_plain`/`bind`/`evaluate` test in `proxima-tensor` and
+`omega` (a diamond-shaped program, a matmul, a masked-window reduce, a
+gather, the qwen35moe GDN mixer, and the real 32-layer mistral cached
+forward each already existed as fixtures; none needed a NEW fixture to
+prove the invariant, only an explicit `outputs` argument -- see below).
+
+**Census, before/after** (`qwen35moe_mixer_op_census_prints_every_bound_op`,
+`bind.rs:9213`, `[mixer_out]`-only bind):
+
+```
+before: row 540 -- qwen35moe gdn mixer fused census (65 ops)
+after:  row 540 -- qwen35moe gdn mixer fused census (38 ops)
+```
+
+27 fewer `BoundOp`s per GDN mixer layer, and the printed rows no longer
+contain the `causal_conv1d` prefill branch's `Iota`/`Equal`/`Select`/
+`Greater`/max-reduce block (previously rows 29-55) -- exactly ROW 540's
+named dead subgraph, gone.
+
+**Fixture fallout, mechanical.** Every one of the ~35 fixtures that called
+`bind(&program, &shapes, &[], ..)` was relying on the OLD bug: with no
+`outputs` requested, the old `bind_plain` still bound the whole program, so
+`&[]` behaved as "give me everything" and the fixture's own last-appended
+node showed up in `built` regardless. Under the new contract an empty
+`outputs` correctly binds nothing, so every one of these needed its actual
+answer node named explicitly -- a `fn terminal(program: &[Op]) -> NodeId`
+added to each affected test module (`bind.rs`, `cpu.rs`, `omega/src/msl.rs`,
+`omega/src/metal.rs`, `omega/tests/lowering_census.rs`,
+`omega/tests/metal_compile_gate.rs`, `omega/tests/metal_parity.rs`,
+`proxima-tensor/benches/bench_vs_ggml.rs`) returning `program`'s own last
+node, since every one of these fixtures appends its nodes in dependency
+order and treats the last as "the answer" (`op.rs`'s own doc: "the last
+element is the root"). Two doctests (`omega/src/msl.rs`'s `Q3K_UNPACK_MSL`
+example, `omega/src/cuda.rs`'s `emit_cuda` example) named their elementwise
+node instead of relying on `&[]` the same way.
+
+**Two tests encoded the OLD "bound but dead" contract directly and needed
+rewriting, not just a new `outputs` argument** (`cpu.rs`):
+`build_static_arena_elides_a_node_with_zero_consumers` and
+`a_dead_constant_is_marked_dead_not_static` both asserted `arena.dead`
+CONTAINS a node this row now never binds at all. Under the new, strictly
+stronger guarantee, that node has no `BoundOp`, no buffer slot
+(`arena_output` returns `None`, not a zeroed `Some`), and is absent from
+`arena.dead` (a POST-bind, post-fusion set this row's change runs before).
+Rewritten to assert the new guarantee directly, never weakened.
+
+**One pinned census needed its number updated, not weakened**
+(`spec.rs:17311`, `the_rule_census_reconciles_against_the_measured_mistral_forward_split`,
+the real 32-layer mistral cached forward, `[logits]` plus 96 KV-cache root
+outputs): `total` moved from 1196 to 1195, and `constant` from 37 to 36 --
+every other bucket (`reduce_total=610`, `elementwise=547`, `iota=2`)
+unchanged. Mechanism: this program carries exactly one `Op::Constant` no
+requested output reads; previously bound as dead weight, now never bound.
+`reduce-epilogue-fusion`'s own `1196 - 4*32` derivation updates to
+`1195 - 4*32 = 1067` for the same reason.
+
+**Proof commands and results** (all ONCE, `-j 4`):
+- `cargo nextest run -p proxima-tensor -j 4` -- 625/625 passed, 8 skipped.
+- `cargo nextest run -p proxima-tensor --features
+  gated-delta-net-fusion,test-support,instrument -j 4` -- 642/642 passed, 8
+  skipped.
+- `cargo clippy -p proxima-tensor --all-targets -j 4` -- 0 warnings.
+- `cargo nextest run -p omega --features metal,instrument -j 4` -- 312/312
+  passed, 12 skipped.
+- `cargo clippy -p omega --all-targets --features metal,instrument -j 4` --
+  0 warnings.
+- `cargo check -p proxima-model-interop --features metal,instrument
+  --examples -j 4` -- clean.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument
+  --test-threads 2 -E 'test(qwen35)'` -- 20/20 passed.
+- `cargo test --doc -p omega --features metal,instrument` and `--features
+  cuda` -- both doctests pass (`msl::Q3K_UNPACK_MSL`, `cuda::emit_cuda`).
+
+**Real model, ONE run** (`gguf_generate`, qwen35moe on Metal, `PROXIMA_TEMPERATURE=0
+PROXIMA_DISPATCH=concurrent`, "What is the capital of France?", 16 tokens):
+`generated_text = "<think>\n\n</think>\n\nThe capital of France is
+**Paris**."`. `ttnt_mean_ms = 57.727` (baseline 59.7). `token_breakdown_metal
+step=8`: `encode_dispatch_calls=4264` (baseline 4,834), `gpu_exec_ms=43.4015`
+(baseline 43.0, within noise), `barriers=3223` (baseline 3,523). 570 fewer
+encode-dispatch calls and 300 fewer barriers per token -- less than the
+naive `27 ops x 30 GDN layers` estimate because not every layer in this
+model's 40-layer stack is a GDN mixer layer (`full_attention_interval=4`
+mixes in attention layers) and `encode_dispatch_calls` is a post-lowering
+MSL count, not a 1:1 mirror of `BoundOp` count; still a measured,
+mechanism-traced reduction in real per-token GPU work, not a derived
+estimate.
