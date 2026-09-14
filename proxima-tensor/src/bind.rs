@@ -3849,7 +3849,16 @@ fn gated_delta_net_candidates(
             // of this fusion -- absorbing one out from under such a request
             // would silently delete a node the caller is about to read, the
             // same requested-output guard [`cached_attention_candidates`]'s
-            // own `dependencies` check already makes.
+            // own `dependencies` check already makes. This is the exact
+            // branch a caller that requests the mixer's `state_out` tap
+            // alongside its layer output lands on -- see the real-shape
+            // census test below (`gated_delta_net_tests`'s own doc on
+            // `qwen35moe_mixer_census_at_real_shape_with_gated_delta_net_fusion`).
+            debug!(
+                out = output.0,
+                state_out = found.state_out.0,
+                "gdn candidate declined: state_out (or an absorbed node) is a requested output"
+            );
             continue;
         }
         let source_nodes = [
@@ -8860,6 +8869,328 @@ mod tests {
                     .all(|bound| !matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. })),
                 "matcher must decline on a perturbed chain, got {:?}",
                 resolved_kinds(&fused)
+            );
+        }
+
+        /// The real qwen35moe GDN mixer, built through the SAME public entry
+        /// point `proxima-model-interop` calls
+        /// (`append_qwen35_ssm_mixer_with_taps_and_layout`), at the real
+        /// checkpoint shape (`kv_heads = 16`, `group = 2`, `head_k_dim =
+        /// head_v_dim = 128`) rather than this module's own synthetic
+        /// direct-`append_qwen35_delta_net_step` programs above -- the
+        /// census the matcher's own `gdn_unwrap_decode_squeeze`/
+        /// `gdn_unwrap_repeat_kv_heads` walks exist for, never exercised
+        /// until this test. `model_dim` (the mixer's own hidden-size axis)
+        /// is kept small (32) since fusion correctness does not depend on
+        /// it -- only the head geometry does, and that is the real shape.
+        #[test]
+        fn qwen35moe_mixer_census_at_real_shape_with_gated_delta_net_fusion() {
+            use crate::spec::{
+                GdnOutputGate, append_qwen35_ssm_mixer_with_taps_and_layout, input_leaf,
+                scalar_constant,
+            };
+
+            let kv_heads: u32 = 16;
+            let group: u32 = 2;
+            let head_k_dim: u32 = 128;
+            let head_v_dim: u32 = 128;
+            let num_v_heads = kv_heads * group;
+            let key_dim = kv_heads * head_k_dim;
+            let value_dim = num_v_heads * head_v_dim;
+            let model_dim: u32 = 32;
+            let l_cache: u32 = 4;
+            let qkv_dim = 2 * key_dim + value_dim;
+
+            let mut program = Vec::new();
+            let x = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0), Extent::Static(model_dim)],
+                "x",
+            );
+            let inv_dim = scalar_constant(&mut program, 1.0 / model_dim as f32);
+            let eps = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0)],
+                "eps",
+            );
+            let head_eps = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+                "head_eps",
+            );
+            let one = scalar_constant(&mut program, 1.0);
+            let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (head_k_dim as f32).sqrt());
+            let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
+            let attn_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(model_dim)],
+                "attn_norm_weight",
+            );
+            let wqkv = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(model_dim), Extent::Static(qkv_dim)],
+                "wqkv",
+            );
+            let wqkv_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(model_dim), Extent::Static(value_dim)],
+                "wqkv_gate",
+            );
+            let conv_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(qkv_dim), Extent::Static(l_cache)],
+                "conv_weight",
+            );
+            let conv_history_in = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(l_cache - 1), Extent::Static(qkv_dim)],
+                "conv_history_in",
+            );
+            let ssm_beta = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(model_dim), Extent::Static(num_v_heads)],
+                "ssm_beta",
+            );
+            let ssm_alpha = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(model_dim), Extent::Static(num_v_heads)],
+                "ssm_alpha",
+            );
+            let ssm_dt_bias = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(num_v_heads)],
+                "ssm_dt_bias",
+            );
+            let ssm_a = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(num_v_heads)],
+                "ssm_a",
+            );
+            let ssm_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(head_v_dim)],
+                "ssm_norm_weight",
+            );
+            let ssm_out = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(value_dim), Extent::Static(model_dim)],
+                "ssm_out",
+            );
+            let state_in = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(head_k_dim),
+                    Extent::Static(head_v_dim),
+                    Extent::Static(kv_heads),
+                    Extent::Static(group)
+                ],
+                "state_in",
+            );
+
+            let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps_and_layout(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                head_eps,
+                one,
+                inv_sqrt_key_dim,
+                inv_head_v_dim,
+                Some(attn_norm_weight),
+                wqkv,
+                wqkv_gate,
+                conv_weight,
+                conv_history_in,
+                ssm_beta,
+                ssm_alpha,
+                ssm_dt_bias,
+                ssm_a,
+                ssm_norm_weight,
+                ssm_out,
+                state_in,
+                key_dim,
+                value_dim,
+                kv_heads,
+                group,
+                l_cache,
+                GdnOutputGate::Silu,
+                false,
+            )
+            .expect("real-shape qwen35moe ssm mixer lowers");
+
+            let shapes = shape::infer(&program, &[1])
+                .expect("real-shape qwen35moe ssm mixer program infers");
+
+            let mut lcg = crate::test_support::Lcg(11);
+            let mut fill = |node: NodeId| -> (NodeId, Vec<f32>) {
+                let extents = shapes.of(node);
+                let len: usize = extents.iter().map(|extent| *extent as usize).product();
+                (node, (0..len).map(|_| lcg.next_unit()).collect())
+            };
+            // `eps`/`head_eps` are RMSNorm stabilizers, never arbitrary
+            // random data (guiding-principle 9 names real-looking data, and
+            // a real checkpoint's own epsilon is always a small positive
+            // constant) -- filling them from the same `[-1, 1)` LCG as every
+            // other operand let a negative or near-zero draw land under the
+            // norm's own square root, producing a NaN this test's first
+            // draft (this landing's own report) caught.
+            let fixed = |node: NodeId, value: f32| -> (NodeId, Vec<f32>) {
+                let extents = shapes.of(node);
+                let len: usize = extents.iter().map(|extent| *extent as usize).product();
+                (node, alloc::vec![value; len])
+            };
+            let inputs = alloc::vec![
+                fill(x),
+                fixed(eps, 1e-5),
+                fixed(head_eps, 1e-5),
+                fill(attn_norm_weight),
+                fill(wqkv),
+                fill(wqkv_gate),
+                fill(conv_weight),
+                fill(conv_history_in),
+                fill(ssm_beta),
+                fill(ssm_alpha),
+                fill(ssm_dt_bias),
+                fill(ssm_a),
+                fill(ssm_norm_weight),
+                fill(ssm_out),
+                fill(state_in),
+            ];
+
+            // `gated_delta_net_candidates`'s own guard (this module,
+            // `effective_outputs.contains(&found.state_out)`) declines the
+            // match whenever the caller requests the delta-step's own
+            // `state_out` as a standalone output -- exactly what happens
+            // when both `mixer_out` and `taps.state_out` are requested
+            // together, since the fused kind absorbs `state_out` into its
+            // own in-place state buffer rather than re-materializing it as
+            // a plain node. MEASURED (this test, `bind_with_fusion` over
+            // `[mixer_out, taps.state_out]`): the matcher declines,
+            // `resolved_kinds` carries no `"gated_delta_net"` entry -- see
+            // this crate's `debug!` at that guard for the live reason. This
+            // is the exact interop wiring gap this landing's own report
+            // names: a decode caller that needs `state_out` to persist
+            // across calls cannot request it as an ordinary program output
+            // and still get the fused kernel in the same bind -- it must
+            // read state back through the fused op's own aliased buffer
+            // instead, the same convention `BoundOpKind::CachedAttention`
+            // already uses for its KV cache.
+            let unfused_with_state = bind_plain(
+                &program,
+                &shapes,
+                &[mixer_out, taps.state_out],
+                NumericPolicy::bit_exact(),
+            )
+            .expect("real-shape qwen35moe ssm mixer binds unfused with both outputs");
+            let fused_with_state = bind_with_fusion(
+                &program,
+                &shapes,
+                &[mixer_out, taps.state_out],
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("real-shape qwen35moe ssm mixer binds fused with both outputs");
+            assert!(
+                !fused_with_state
+                    .iter()
+                    .any(|bound| matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. })),
+                "requesting state_out alongside mixer_out is documented to decline fusion; if \
+                 this now fires, the doc above (and the interop wiring gap it names) is stale, \
+                 got {:?}",
+                resolved_kinds(&fused_with_state)
+            );
+
+            // Requesting `mixer_out` alone -- the shape a decode caller
+            // that reads state back through the aliased buffer, not
+            // through the outputs list, actually uses -- lets the matcher
+            // fire.
+            let unfused = bind_plain(&program, &shapes, &[mixer_out], NumericPolicy::bit_exact())
+                .expect("real-shape qwen35moe ssm mixer binds unfused");
+            let fused = bind_with_fusion(
+                &program,
+                &shapes,
+                &[mixer_out],
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("real-shape qwen35moe ssm mixer binds fused");
+
+            let matcher_fired = fused
+                .iter()
+                .any(|bound| matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. }));
+            println!(
+                "qwen35moe mixer census (mixer_out only): unfused ops = {}, fused ops = {}, \
+                 matcher fired = {matcher_fired}, unfused-with-state ops = {}",
+                unfused.len(),
+                fused.len(),
+                unfused_with_state.len()
+            );
+            assert!(
+                matcher_fired,
+                "matcher must fire on the real qwen35moe mixer's own GDN chain when state_out \
+                 is not separately requested, got {:?}",
+                resolved_kinds(&fused)
+            );
+            assert!(
+                fused.len() < unfused.len(),
+                "the fused bind must collapse at least one op relative to the unfused bind \
+                 (unfused = {}, fused = {})",
+                unfused.len(),
+                fused.len()
+            );
+
+            let unfused_buffers = run_resolved(program.len(), &unfused, inputs.clone());
+            let fused_buffers = run_resolved(program.len(), &fused, inputs.clone());
+
+            let relative_error = |fused: &[f32], unfused: &[f32]| -> f32 {
+                fused
+                    .iter()
+                    .zip(unfused)
+                    .map(|(fused, unfused)| (fused - unfused).abs() / unfused.abs().max(1e-6))
+                    .fold(0.0_f32, f32::max)
+            };
+
+            let unfused_out = unfused_buffers[mixer_out.0 as usize]
+                .as_ref()
+                .expect("unfused mixer output present");
+            let fused_out = fused_buffers[mixer_out.0 as usize]
+                .as_ref()
+                .expect("fused mixer output present");
+            let output_error = relative_error(fused_out, unfused_out);
+            assert!(
+                output_error <= 1e-4,
+                "fused real-shape qwen35moe mixer output must match the unfused chain within \
+                 1e-4 relative error, got {output_error}"
+            );
+
+            // The state leaf itself: proven correct via the always-unfused
+            // `unfused_with_state` bind above (`taps.state_out` resolves
+            // through the plain elementwise/reduce chain there regardless
+            // of this feature) -- there is no fused counterpart to compare
+            // it against yet, which is exactly the gap named above.
+            let unfused_with_state_buffers =
+                run_resolved(program.len(), &unfused_with_state, inputs);
+            let state_leaf = unfused_with_state_buffers[taps.state_out.0 as usize]
+                .as_ref()
+                .expect("unfused state leaf present");
+            assert!(
+                state_leaf.iter().all(|value| value.is_finite()),
+                "the qwen35moe mixer's own state leaf must be finite"
             );
         }
     }
