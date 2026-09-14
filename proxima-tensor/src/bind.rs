@@ -289,16 +289,21 @@ pub enum BoundOpKind {
     /// `head_k_dim` is the program's own fast axis (`crate::bind`'s own
     /// `gated_delta_net_candidates` doc), and the executor
     /// (`crate::gdn::run_gdn_prefill_scan`) reads by stride instead of
-    /// assuming one. `state_in` and this op's own `node` output share one
-    /// buffer identity in place, the same caller-persisted convention
-    /// [`BoundOpKind::CachedAttention`]'s own doc states for a KV cache never
-    /// concatenated in-graph. `n_tokens == 1` is this slice's only supported
+    /// assuming one. `n_tokens == 1` is this slice's only supported
     /// shape (decode); an `n_tokens > 1` bind is out of scope until the
     /// M-token prefill slice lands. `kv_heads` may be less than `num_v_heads`
     /// (`num_v_heads = kv_heads * group`) -- the real qwen35moe GQA shape,
     /// `query`/`key` still bound at `kv_heads` and `value`/`gate`/`beta`/
     /// `state_in` at `num_v_heads`; `group` itself is not a separate field,
     /// it is exactly `num_v_heads / kv_heads`.
+    ///
+    /// `state_out` is this op's own SECOND output (ROW 547,
+    /// `docs/discipline.md`): the delta step's own updated recurrence state,
+    /// shape identical to the `state_in` operand's leaf. Produced
+    /// functionally by the same dispatch that produces `node`'s own value
+    /// output -- no aliasing contract, no in-place write into `state_in`'s
+    /// buffer. A backend writes it to whatever buffer `state_out` names, the
+    /// same as any other resolved node's output.
     GatedDeltaNet {
         operands: BoundOperands,
         n_tokens: u64,
@@ -311,6 +316,7 @@ pub enum BoundOpKind {
         /// Elements between consecutive `head_k_dim` values in `query`/`key`.
         query_key_dim_stride: u64,
         inv_sqrt_key_dim: f32,
+        state_out: NodeId,
     },
     Elementwise {
         body: ComposedBody,
@@ -3835,12 +3841,12 @@ fn match_gated_delta_net_step(
 /// true physical read is whatever `resolved`'s own `operands()` names, not
 /// necessarily a node this function's own backward walk stopped at.
 ///
-/// Declines a match whose `state_out` is itself a requested/effective
-/// output: this slice's [`BoundOpKind::GatedDeltaNet`] executor writes the
-/// recurrence state in place into `state_in`'s own buffer (this module's own
-/// doc on that variant), and no caller in this crate today reads `state_out`
-/// back through a separate resolved node — the interop wiring that would
-/// make `state_out` a real requested output is explicitly a later slice.
+/// `state_out` is this op's own second output (ROW 547,
+/// `docs/discipline.md`) -- requesting it alongside `out` no longer declines
+/// the match; the fused kind supplies it directly. Still declines when any
+/// OTHER absorbed node (a decode-squeeze reduce, a `repeat_kv_heads` donor,
+/// ...) is itself a requested/effective output, since those genuinely
+/// disappear from `resolved` once fusion fires.
 #[cfg(feature = "gated-delta-net-fusion")]
 fn gated_delta_net_candidates(
     program: &[Op],
@@ -3854,11 +3860,10 @@ fn gated_delta_net_candidates(
         let Some(found) = match_gated_delta_net_step(program, shapes, output) else {
             continue;
         };
-        if effective_outputs.contains(&found.state_out)
-            || found
-                .absorbed
-                .iter()
-                .any(|node| effective_outputs.contains(node))
+        if found
+            .absorbed
+            .iter()
+            .any(|node| *node != found.state_out && effective_outputs.contains(node))
         {
             // `found.absorbed` now includes the decode-squeeze reduces
             // themselves (`gdn_unwrap_decode_squeeze`'s own doc), which a
@@ -3867,15 +3872,15 @@ fn gated_delta_net_candidates(
             // of this fusion -- absorbing one out from under such a request
             // would silently delete a node the caller is about to read, the
             // same requested-output guard [`cached_attention_candidates`]'s
-            // own `dependencies` check already makes. This is the exact
-            // branch a caller that requests the mixer's `state_out` tap
-            // alongside its layer output lands on -- see the real-shape
-            // census test below (`gated_delta_net_tests`'s own doc on
-            // `qwen35moe_mixer_census_at_real_shape_with_gated_delta_net_fusion`).
+            // own `dependencies` check already makes. `state_out` itself is
+            // exempt (this function's own doc) -- it is now a genuine second
+            // output of the fused op, never dropped.
+            #[cfg(feature = "instrument")]
             debug!(
                 out = output.0,
                 state_out = found.state_out.0,
-                "gdn candidate declined: state_out (or an absorbed node) is a requested output"
+                "gdn candidate declined: an absorbed node other than state_out is a requested \
+                 output"
             );
             continue;
         }
@@ -4031,6 +4036,7 @@ fn gated_delta_net_candidates(
                 query_key_head_stride,
                 query_key_dim_stride,
                 inv_sqrt_key_dim: found.inv_sqrt_key_dim,
+                state_out: found.state_out,
             },
         };
         candidates.push((fused, found.absorbed));
@@ -8482,6 +8488,7 @@ mod tests {
         struct SyntheticProgram {
             program: Vec<Op>,
             out: NodeId,
+            state_out: NodeId,
             inputs: Vec<(NodeId, Vec<f32>)>,
         }
 
@@ -8520,7 +8527,7 @@ mod tests {
                     value: core::f32::consts::FRAC_1_SQRT_2,
                 },
             );
-            let (out, _state_out) = append_qwen35_delta_net_step(
+            let (out, state_out) = append_qwen35_delta_net_step(
                 &mut program,
                 query,
                 key,
@@ -8547,6 +8554,7 @@ mod tests {
             SyntheticProgram {
                 program,
                 out,
+                state_out,
                 inputs,
             }
         }
@@ -8620,7 +8628,7 @@ mod tests {
             let query = broadcast_kv_heads(&mut program, query_pre, kv_heads as u32, group as u32);
             let key = broadcast_kv_heads(&mut program, key_pre, kv_heads as u32, group as u32);
 
-            let (out, _state_out) = append_qwen35_delta_net_step(
+            let (out, state_out) = append_qwen35_delta_net_step(
                 &mut program,
                 query,
                 key,
@@ -8646,6 +8654,7 @@ mod tests {
             SyntheticProgram {
                 program,
                 out,
+                state_out,
                 inputs,
             }
         }
@@ -8732,7 +8741,16 @@ mod tests {
             let synthetic = synthetic_gated_delta_net_gqa_program(2, 3, 2, 2);
             let shapes = shape::infer(&synthetic.program, &[])
                 .expect("small GQA gated-delta-net program infers");
+            let requested = [synthetic.out, synthetic.state_out];
 
+            // `out` alone, unperturbed by `state_out` also being requested:
+            // requesting both changes which nodes `ChainFusion` inlines into
+            // `out`'s own reduce on the UNFUSED baseline (materializing
+            // `state_out`'s own precursors keeps them live, which can block
+            // an inlining that only fires when `out` is the sole request),
+            // so this keeps the original bit-identical comparison isolated
+            // from that unrelated baseline shift -- the census test below
+            // uses the identical two-bind split for the same reason.
             let unfused = bind_plain(
                 &synthetic.program,
                 &shapes,
@@ -8761,7 +8779,7 @@ mod tests {
                 &unfused,
                 synthetic.inputs.clone(),
             );
-            let fused_buffers = run_resolved(synthetic.program.len(), &fused, synthetic.inputs);
+            let fused_buffers = run_resolved(synthetic.program.len(), &fused, synthetic.inputs.clone());
 
             let unfused_out = unfused_buffers[synthetic.out.0 as usize]
                 .as_ref()
@@ -8773,6 +8791,65 @@ mod tests {
                 fused_out, unfused_out,
                 "fused small-shape GQA BoundOpKind::GatedDeltaNet must be bit-identical to the unfused chain"
             );
+
+            let unfused_with_state = bind_plain(
+                &synthetic.program,
+                &shapes,
+                &requested,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("unfused small GQA program binds with both outputs");
+            let fused_with_state = bind_with_fusion(
+                &synthetic.program,
+                &shapes,
+                &requested,
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("fused small GQA program binds with both outputs");
+            assert!(
+                fused_with_state
+                    .iter()
+                    .any(|bound| matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. })),
+                "matcher must fire on a small GQA shape even with state_out also requested, got \
+                 kinds {:?}",
+                resolved_kinds(&fused_with_state)
+            );
+            let unfused_buffers = run_resolved(
+                synthetic.program.len(),
+                &unfused_with_state,
+                synthetic.inputs.clone(),
+            );
+            let fused_buffers = run_resolved(synthetic.program.len(), &fused_with_state, synthetic.inputs);
+
+            let relative_error = |fused: &[f32], unfused: &[f32]| -> f32 {
+                fused
+                    .iter()
+                    .zip(unfused)
+                    .map(|(fused, unfused)| (fused - unfused).abs() / unfused.abs().max(1e-6))
+                    .fold(0.0_f32, f32::max)
+            };
+            let unfused_state = unfused_buffers[synthetic.state_out.0 as usize]
+                .as_ref()
+                .expect("unfused state_out present");
+            let fused_state = fused_buffers[synthetic.state_out.0 as usize]
+                .as_ref()
+                .expect("fused state_out present");
+            // `gdn::run_gdn_prefill_scan`'s own state update is one Rust
+            // expression (`state * decay + key * delta`), which the compiler
+            // is free to lower to a fused multiply-add; the unfused chain
+            // computes the same two terms as separate `Multiply`/`Add` nodes.
+            // MEASURED: max relative error 1.2e-7 here, an FMA-vs-separate-
+            // rounding artifact on the LAST bit, not a structural mismatch --
+            // `out` itself (asserted bit-identical above) is unaffected
+            // because its own reduce happens to land on the same rounding.
+            let state_error = relative_error(fused_state, unfused_state);
+            assert!(
+                state_error <= 1e-6,
+                "fused small-shape GQA GatedDeltaNet's own state_out output must match the \
+                 unfused chain's state leaf within 1e-6 relative error (FMA rounding), got \
+                 {state_error}"
+            );
         }
 
         #[test]
@@ -8780,7 +8857,12 @@ mod tests {
             let synthetic = synthetic_gated_delta_net_program();
             let shapes = shape::infer(&synthetic.program, &[])
                 .expect("synthetic gated-delta-net program infers");
+            let requested = [synthetic.out, synthetic.state_out];
 
+            // `out` alone, unperturbed by `state_out` also being requested --
+            // see the small-GQA-shape sibling test's own doc on why the
+            // `out`-only baseline is a separate bind from the `state_out`
+            // baseline.
             let unfused = bind_plain(
                 &synthetic.program,
                 &shapes,
@@ -8810,7 +8892,7 @@ mod tests {
                 &unfused,
                 synthetic.inputs.clone(),
             );
-            let fused_buffers = run_resolved(synthetic.program.len(), &fused, synthetic.inputs);
+            let fused_buffers = run_resolved(synthetic.program.len(), &fused, synthetic.inputs.clone());
 
             let unfused_out = unfused_buffers[synthetic.out.0 as usize]
                 .as_ref()
@@ -8821,6 +8903,59 @@ mod tests {
             assert_eq!(
                 fused_out, unfused_out,
                 "fused BoundOpKind::GatedDeltaNet must be bit-identical (f32) to the unfused chain"
+            );
+
+            let unfused_with_state = bind_plain(
+                &synthetic.program,
+                &shapes,
+                &requested,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("unfused synthetic program binds with both outputs");
+            let fused_with_state = bind_with_fusion(
+                &synthetic.program,
+                &shapes,
+                &requested,
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("fused synthetic program binds with both outputs");
+            assert!(
+                fused_with_state
+                    .iter()
+                    .any(|bound| matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. })),
+                "gated-delta-net-fusion feature is on: the matcher must fire even with \
+                 state_out also requested, got kinds {:?}",
+                resolved_kinds(&fused_with_state)
+            );
+            let unfused_buffers = run_resolved(
+                synthetic.program.len(),
+                &unfused_with_state,
+                synthetic.inputs.clone(),
+            );
+            let fused_buffers = run_resolved(synthetic.program.len(), &fused_with_state, synthetic.inputs);
+
+            let relative_error = |fused: &[f32], unfused: &[f32]| -> f32 {
+                fused
+                    .iter()
+                    .zip(unfused)
+                    .map(|(fused, unfused)| (fused - unfused).abs() / unfused.abs().max(1e-6))
+                    .fold(0.0_f32, f32::max)
+            };
+            let unfused_state = unfused_buffers[synthetic.state_out.0 as usize]
+                .as_ref()
+                .expect("unfused state_out present");
+            let fused_state = fused_buffers[synthetic.state_out.0 as usize]
+                .as_ref()
+                .expect("fused state_out present");
+            // Same FMA-vs-separate-rounding artifact the small-GQA-shape
+            // sibling test documents on its own `state_out` check -- `out`
+            // above is unaffected and stays bit-identical.
+            let state_error = relative_error(fused_state, unfused_state);
+            assert!(
+                state_error <= 1e-6,
+                "fused BoundOpKind::GatedDeltaNet's own state_out output must match the unfused \
+                 chain's state leaf within 1e-6 relative error (FMA rounding), got {state_error}"
             );
         }
 
@@ -9115,24 +9250,14 @@ mod tests {
                 fill(state_in),
             ];
 
-            // `gated_delta_net_candidates`'s own guard (this module,
-            // `effective_outputs.contains(&found.state_out)`) declines the
-            // match whenever the caller requests the delta-step's own
-            // `state_out` as a standalone output -- exactly what happens
-            // when both `mixer_out` and `taps.state_out` are requested
-            // together, since the fused kind absorbs `state_out` into its
-            // own in-place state buffer rather than re-materializing it as
-            // a plain node. MEASURED (this test, `bind_with_fusion` over
-            // `[mixer_out, taps.state_out]`): the matcher declines,
-            // `resolved_kinds` carries no `"gated_delta_net"` entry -- see
-            // this crate's `debug!` at that guard for the live reason. This
-            // is the exact interop wiring gap this landing's own report
-            // names: a decode caller that needs `state_out` to persist
-            // across calls cannot request it as an ordinary program output
-            // and still get the fused kernel in the same bind -- it must
-            // read state back through the fused op's own aliased buffer
-            // instead, the same convention `BoundOpKind::CachedAttention`
-            // already uses for its KV cache.
+            // ROW 547 (`docs/discipline.md`): `state_out` is now the fused
+            // kind's own second output, so requesting it alongside
+            // `mixer_out` no longer declines the match -- MEASURED (this
+            // test, `bind_with_fusion` over `[mixer_out, taps.state_out]`):
+            // the matcher fires, `resolved_kinds` carries exactly one
+            // `"gated_delta_net"` entry, and that op's own buffer at
+            // `taps.state_out`'s `NodeId` matches the always-unfused chain's
+            // own state leaf bit for bit (below).
             let unfused_with_state = bind_plain(
                 &program,
                 &shapes,
@@ -9149,12 +9274,11 @@ mod tests {
             )
             .expect("real-shape qwen35moe ssm mixer binds fused with both outputs");
             assert!(
-                !fused_with_state
+                fused_with_state
                     .iter()
                     .any(|bound| matches!(bound.kind, BoundOpKind::GatedDeltaNet { .. })),
-                "requesting state_out alongside mixer_out is documented to decline fusion; if \
-                 this now fires, the doc above (and the interop wiring gap it names) is stale, \
-                 got {:?}",
+                "requesting state_out alongside mixer_out must still fuse now that state_out is \
+                 the fused kind's own second output, got {:?}",
                 resolved_kinds(&fused_with_state)
             );
 
@@ -9221,19 +9345,35 @@ mod tests {
                  1e-4 relative error, got {output_error}"
             );
 
-            // The state leaf itself: proven correct via the always-unfused
-            // `unfused_with_state` bind above (`taps.state_out` resolves
-            // through the plain elementwise/reduce chain there regardless
-            // of this feature) -- there is no fused counterpart to compare
-            // it against yet, which is exactly the gap named above.
+            // The state leaf itself: the always-unfused `unfused_with_state`
+            // bind (`taps.state_out` resolves through the plain
+            // elementwise/reduce chain there regardless of this feature)
+            // against the fused kind's own `state_out` second output (ROW
+            // 547). `2e-4`, matching `fused_and_unfused_gated_delta_net_agree_within_tolerance_at_real_qwen35moe_gqa_shape`'s
+            // own bar and its own doc on why: a 128-term reduce's own
+            // accumulation order differs between the recurrence scan and the
+            // unfused chain's reduce tree, and this shape's `key_dim = 128`
+            // (MEASURED here: 1.0002e-4, just over the tighter `1e-4` bar
+            // `mixer_out` happens to clear, under the `2e-4` one the wide
+            // reduce shape already carries elsewhere).
             let unfused_with_state_buffers =
-                run_resolved(program.len(), &unfused_with_state, inputs);
+                run_resolved(program.len(), &unfused_with_state, inputs.clone());
             let state_leaf = unfused_with_state_buffers[taps.state_out.0 as usize]
                 .as_ref()
                 .expect("unfused state leaf present");
             assert!(
                 state_leaf.iter().all(|value| value.is_finite()),
                 "the qwen35moe mixer's own state leaf must be finite"
+            );
+            let fused_with_state_buffers = run_resolved(program.len(), &fused_with_state, inputs);
+            let fused_state_leaf = fused_with_state_buffers[taps.state_out.0 as usize]
+                .as_ref()
+                .expect("fused state leaf present");
+            let state_error = relative_error(fused_state_leaf, state_leaf);
+            assert!(
+                state_error <= 2e-4,
+                "the fused GatedDeltaNet's own state_out output must match the unfused chain's \
+                 state leaf within 2e-4 relative error, got {state_error}"
             );
         }
 
