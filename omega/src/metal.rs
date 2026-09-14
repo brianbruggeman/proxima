@@ -5899,6 +5899,12 @@ mod classify_kind_packed_row_marker_tests {
     /// a failure names which of the three expert reduces (gate/up/down)
     /// regressed, and which kind it fell to instead of
     /// `reduce-packed-row-blocked`.
+    // ROW 538: `append_moe_ffn` currently builds the PER-ROUTE graph on
+    // main (the grouped landing is reverted pending a further admission
+    // fix beyond `composed_packed_product_activation`'s computed-map
+    // check) -- this test's "exactly 3 expert reduces" shape only holds
+    // for the grouped form. Re-enable when the grouped product re-lands.
+    #[ignore = "requires the grouped expert product landing (ROW 538); per-route main builds a different reduce count"]
     #[test]
     fn qwen35moe_shaped_grouped_expert_reduces_classify_as_packed_row_blocked() {
         use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
