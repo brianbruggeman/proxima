@@ -32332,3 +32332,182 @@ either way, but the end-to-end 145/0 -> N number was not re-measured here.
 - `cargo check --workspace --all-targets -j 4`: exit 0 (one pre-existing,
   unrelated future-incompatibility warning from the third-party
   `proc-macro-error2` crate).
+
+## ROW 559 -- ROW 558's own residual is REAL but its direction was backwards: the divergence is in `bind_plain`'s GQA reduce, not the `CachedAttention` fusion
+
+**Task:** shrink ROW 558's own 4-8% divergence to the smallest failing cell,
+name the plane, dump per-key scores fused vs unfused, fix at the named site,
+restore `<= 1e-5` in
+`qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer`.
+
+**Bisection (max relative error on `residual1`, `bind::tests::
+qwen35_partial_rotary_bisect_sweep`, a diagnostic scaffold not landed --
+`cached_extent`/`live_cached_len` as shown, `rotary_dim`/`attn_head_dim` as
+shown):**
+
+| cell | rotary_dim | attn_head_dim (pass_dim) | cached_extent | live_cached_len | max_rel_error |
+|---|---|---|---|---|---|
+| pass=2 | 64 | 66 (2) | 40 | 37 | 0.0323 |
+| pass=64 | 64 | 128 (64) | 40 | 37 | 0.0189 |
+| pass=192 (real) | 64 | 256 (192) | 40 | 37 | 0.0820 |
+| rotary=2 | 2 | 194 (192) | 40 | 37 | 0.0338 |
+| keys=1, pad=0 | 64 | 256 (192) | 1 | 1 | 1.135 |
+| keys=40, pad=0 | 64 | 256 (192) | 40 | 40 | 0.0440 |
+| keys=40, pad=3 | 64 | 256 (192) | 40 | 37 | 0.0820 |
+
+`pass=0` (rotary_dim == attn_head_dim) could not run: the matcher still finds
+a zero-width pass term structurally and `cpu.rs`'s own `rotary_dim < head_dim`
+discriminator (`cpu.rs:6902`) then rejects the operand count -- a real,
+separate, un-landed degenerate-edge finding, not this row's own residual.
+
+The first nonzero cell (`pass=2`) already names the plane: **the pass plane**,
+confirming ROW 558's own suspicion. Padding (`pad=0` vs `pad=3`) does not
+change the error at the real shape, also confirming ROW 558.
+
+**Per-key trace, smallest failing cell (`pass=2`, `attn_head_dim=66`,
+`cached_extent=1`, `live_cached_len=1` -- one cached key, one new key, no
+online-softmax multi-row accumulation to confound the read):**
+
+Per-(`kv_head`, `group`) breakdown of `taps.attended` (pre-gate, the fused
+op's own output) against `bind_plain`'s unfused reference
+(`bind::tests::qwen35_partial_rotary_attended_per_head_breakdown`, a
+diagnostic scaffold not landed):
+
+- `kv_head=0`, all 8 groups: `max_abs_diff` <= 6e-8 (float rounding).
+- `kv_head=1`, all 8 groups: `max_abs_diff` in `[0.046, 0.393]` on values of
+  magnitude `~0.02-0.08` -- 50-1000% relative.
+
+**The false smoking gun, and tracing backwards from it (per this skill's own
+discipline):** the first hypothesis, matching ROW 558's own suspicion, was
+that the `CachedAttention` fused op reads the pass plane at the wrong
+offset for `kv_head=1`. Direct verification refuted it:
+
+1. Every operand `CachedAttention` actually binds for this fixture --
+   `query_even`/`query_odd` (rotated q, `NodeId(85)`/`(88)`), `q_pass`
+   (`NodeId(75)`), `k_first_cache`/`k_second_cache`/`k_pass_cache` (raw
+   inputs), `rotated_k_new_first`/`second`/`k_pass` (taps) -- is
+   **bit-identical** (`max_abs_diff == 0.0`) between `bind_plain` and `bind`'s
+   own execution.
+2. The matcher's own declared strides for the pass triple
+   (`bind.rs:3140-3167`) are exactly `[32,16,2,1]` (query) / `[0,4,2,0,1]`
+   (key) -- algebraically self-consistent with `q_pass`'s own dense
+   `[h,pass_dim]` storage (`h = 8*u+g`, `spec.rs:4836-4837`'s own
+   `per_head_channel_range`/`fused_rope_pair` chain), confirmed by direct
+   trace (`ROW559_DEBUG`, not landed) against the live `BoundOp`.
+3. Manually recomputing BOTH the rotary and pass score terms for
+   `kv_head=1, group=0` from these bit-identical raw buffers reproduces the
+   FUSED kernel's own reported score EXACTLY (`rotary_score=0.7485292`,
+   `pass_score=-0.44144723`, both to the last printed digit) -- the fused
+   `CachedAttention` op, and `physical.rs::stream_cached_attention_split_gqa`
+   underneath it, compute EXACTLY what their own operands say they should.
+4. Three new permanent unit tests
+   (`physical::tests::pass_plane_scores_each_kv_head_independently`,
+   `_each_query_group_independently`, `_cross_product_of_kv_heads_and_query_groups`)
+   hand-verify the raw kernel at `kv_heads=2`/`query_groups=2` (crossed) with
+   the rotary planes zeroed to isolate the pass term -- all pass. The kernel
+   is proven correct for every GQA shape this row could construct.
+5. Reading `score_cached_pass`'s OWN value back out of `bind_plain` (pinning
+   `NodeId(103)`, the `Reduce(Add, q_pass_grouped * k_pass_cache,
+   "stugp"->"stug")` node, as an independent output that never touches the
+   `bind()` call under test) gives **`0.17251688`** for `(u=1,g=0)` -- NOT the
+   `-0.4414472` a correct `q_pass_grouped[16:18] . k_pass_cache[2:4]` dot
+   product gives (verified: `bind_plain`'s own value for `(u=0,g=0..7)`
+   matches this dot product exactly for all 8 groups; only `u=1` disagrees).
+
+**This inverts ROW 558's own working hypothesis.** The `CachedAttention`
+fused op is not the defective side of the comparison -- `bind_plain`'s own
+generic execution of THIS reduce shape (two operands multiplied then summed
+over `p`, one broadcasting over the leading axis `t`, the other broadcasting
+over the LAST/vectorized output axis `g` while both depend on the middle
+leading axis `u`) is the one computing the wrong value for `u > 0`, and it is
+`bind_plain` (the presumed "ground truth" in every comparison test in this
+file) that is wrong, not the fusion under test.
+
+**Where the residual mechanism most likely lives (read, not yet proven by a
+passing/failing isolated test):** `cpu.rs::run_reduce`'s fast-path dispatch
+for this exact shape (`leading_output_axes = [s,t,u]`, `last_output_dim = g`,
+`reduction_dims = [p]`) selects `reduction_fast_path` (the "dot-fold" route,
+`cpu.rs:10695-10708`). `neon_tile_plan` (`cpu.rs:14249-14298`) explicitly
+declines whenever `leading_output_axes.len() != 1` (`cpu.rs:14260`) -- so the
+NEON/Accelerate GEMM tile paths (`cpu.rs:11068-11357`) are NOT reachable for
+this shape and are not the cause here, though they carry the SAME
+single-leading-axis assumption (`let leading_axis =
+leading_output_axes[0]`, `cpu.rs:11071,11231`, then
+`full_coordinate[leading_axis] = leading_flat + row`, `cpu.rs:11103,11251`)
+as a **separate, real, currently-dead latent bug**: if `neon_tile_plan`'s own
+gate is ever loosened, or a caller reaches this code with `leading_total >=
+TILE_ROWS (6)` and more than one non-unit leading axis, this line corrupts
+the row-to-row coordinate advance for every axis but the first. Not fixed
+this row (out of scope: the gate makes it unreachable today) but flagged so
+it is not rediscovered blind.
+
+With the tile paths ruled out, execution for this shape falls through to the
+scalar `reduction_fast_path` loop (`cpu.rs:11370-11427`), which re-derives
+`full_coordinate` via `unflatten_into`/`merge_coordinates_into` (the correct,
+multi-axis-safe pattern) every `leading_flat` iteration and folds via
+`reduce_dot_fast` (`cpu.rs:19055-19080`) over the contiguous `p` axis. Reading
+this path did not surface a mechanical defect in the time this row had; the
+next slice's instrumentation should confirm WHICH branch actually executes
+for this bound op (`counters.path`/`Path::DotFast` behind `feature =
+"instrument"`, `cpu.rs:10699-10708`) and, if it is this one, trace
+`fill_running_offsets`/`running`'s own per-slot increment against a
+by-hand walk of `(u=1,g=0..7)` the same way this row traced the matcher's
+operands, rather than re-reading the source a third time.
+
+**Residual, carried to the next slice:**
+1. **The exact `cpu.rs` line producing `0.17251688` instead of `-0.4414472`
+   for `score_cached_pass[u=1,g=0]` is not yet pinned.** Section above narrows
+   it to `run_reduce`'s `reduction_fast_path` scalar dot-fold loop
+   (`cpu.rs:11370-11427`) or a fast-path selection this row did not consider,
+   but did not reproduce it as an isolated hand-built `BoundOp` test the way
+   `cached_attention_bound_step_scores_the_partial_rotary_pass_plane`
+   (`cpu.rs`) does for the fused op. That isolated repro is the next slice's
+   first step, not a repeat of this row's own program-level trace.
+2. **The `≤ 1e-5` assertion in
+   `qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer`
+   is deliberately NOT restored this row.** Restoring it now would encode the
+   wrong premise (that `bind_plain` is ground truth) into a passing test.
+   Once the `cpu.rs` defect above is fixed, this row's own per-head breakdown
+   (`kv_head=0` machine-precision, `kv_head=1` matching to the same
+   precision) is the acceptance bar -- not a loosened tolerance.
+3. **A separate, real, dead-today latent bug** in the NEON tile row-remainder
+   macro's single-leading-axis assumption (`cpu.rs:11071,11103,11231,11251`,
+   named above) should get its own row once `neon_tile_plan`'s gate is ever
+   revisited.
+4. **A separate, real, minor bug**, found in passing and not fixed: with
+   `rotary_dim == head_dim` (no pass plane), the matcher still recognizes a
+   zero-width pass term and `cpu.rs`'s `rotary_dim < head_dim` operand-count
+   discriminator (`cpu.rs:6902`) then rejects the fused op outright
+   (`qwen35_partial_rotary_bisect_sweep`'s own `pass=0` cell could not run).
+5. **Hand-rolled `eprintln!` forensics already exist in `bind.rs`** at the
+   "DEBUG decline" sites inside `cached_attention_candidates`
+   (`bind.rs:3097-3100,3133-3137,3169-3173`) and in `cpu.rs::run_reduce`
+   gated on `PROXIMA_DEBUG_DENSE_DIGEST`/a hardcoded node id
+   (`cpu.rs:10592-10607`) -- both pre-date this row, neither touched here,
+   both violate this workspace's own "never hand-roll an env-gated file dump"
+   rule and should become `debug!` behind `RUST_LOG`, not unconditional
+   `eprintln!`, in whichever row next touches either function.
+
+**Landed this row:** three permanent regression tests in `physical.rs`
+proving `stream_cached_attention_split_gqa`'s pass-plane term is correct for
+`kv_heads > 1`, `query_groups > 1`, and their cross product (a real
+coverage gap: the only prior GQA+pass-plane test,
+`cached_attention_bound_step_scores_the_partial_rotary_pass_plane` in
+`cpu.rs`, only ever exercised `kv_heads: 1, query_groups: 1`). No change to
+`bind.rs` -- this row's own bisection scaffolding there was diagnostic only
+and is not landed, per this skill's own "instrumentation is either removed or
+promoted to a permanent debug!" rule; none of it met that bar this row.
+
+**Gates run:**
+- `cargo nextest run -p proxima-tensor --features cached-attention-streaming
+  -j 4`: `638 tests run: 638 passed, 8 skipped` (ROW 558's own `635`
+  baseline, +3 for this row's three new `physical.rs` tests; zero
+  regressions).
+- `cargo nextest run -p proxima-tensor -j 4` (default features):
+  `629 tests run: 629 passed, 8 skipped` (ROW 558's own `626` baseline, +3,
+  unchanged otherwise -- the new tests are not feature-gated).
+- `cargo clippy -p proxima-tensor --all-targets --features
+  cached-attention-streaming -j 4`: exit 0, 0 warnings.
+- `cargo check --workspace --all-targets -j 4`: exit 0 (the same
+  pre-existing, unrelated `proc-macro-error2` future-incompatibility
+  warning ROW 558 already noted).
