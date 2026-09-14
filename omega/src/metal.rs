@@ -1208,7 +1208,7 @@ fn handle_merged_position(
     position: usize,
     bound: &BoundOp,
     dispatch_type: DispatchType,
-    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    device_buffers: &mut BTreeMap<NodeId, DeviceBuffer>,
     hazard_state: &mut HazardState,
     output_placed: &BTreeMap<NodeId, (&PlacedBuffer, usize)>,
 ) -> Result<bool, MetalError> {
@@ -1240,6 +1240,18 @@ fn handle_merged_position(
             encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
             counter!(BARRIERS_EMITTED, 1);
         }
+    }
+    // Every member -- leader or not -- still needs its OWN node registered
+    // in `device_buffers`, the same way `encode_op`'s ordinary per-position
+    // path always registers `bound.node` at the end of every dispatch: a
+    // later position in the SAME plan may read this member's output as its
+    // OWN operand (`group_mergeable_positions` only excludes such a reader
+    // from joining THIS merge group -- it never excludes it from reading
+    // the group's output once written). Skipping this for z>0 left that
+    // read unresolvable (`MetalError::UnresolvedHazardOperand`) even though
+    // the bytes were written correctly.
+    if let Some((buffer, offset)) = output_placed.get(&bound.node).copied() {
+        device_buffers.insert(bound.node, (buffer.clone(), offset));
     }
     if z != 0 {
         return Ok(true);
@@ -1327,7 +1339,8 @@ struct ResolvedMergeStep {
 
 /// One [`ResolvedSteps::merge_candidates`] group, promoted to a real,
 /// dispatchable merged kernel: the leader's own bindings/grid (unchanged --
-/// `base_table`/`merge_tgid` are bound OUTSIDE this list, see the design
+/// `base_table` is bound OUTSIDE this list and `merge_gid` is a widened
+/// thread-position attribute, never a buffer binding at all -- see the design
 /// note's own reasoning against widening the shared [`Binding`] enum for a
 /// buffer with no `NodeId` of its own) plus the compiled `_z{n}` pipeline and
 /// the uploaded per-slice offset table.
@@ -3291,6 +3304,7 @@ fn hazard_step<Id: Eq + core::hash::Hash + Copy>(
         tracker.reset();
     }
     tracker.record(inputs, Some(output));
+    counter!(HAZARD_STEP_CALLS, 1);
     needs_barrier
 }
 
@@ -3926,7 +3940,7 @@ fn execute_plan_with_placements_inner(
             position,
             bound,
             dispatch_type,
-            &device_buffers,
+            &mut device_buffers,
             hazard_state,
             &output_placed,
         )?;
@@ -11133,6 +11147,15 @@ pub static PLAN_UNIFORM_WRITES: Counter = Counter::new("omega.metal.plan_uniform
 /// [`OUTPUT_BUFFER_ALLOCATIONS`] above -- so it reads a stable 0 on
 /// [`DispatchType::Serial`] rather than not existing at all.
 pub static BARRIERS_EMITTED: Counter = Counter::new("omega.metal.concurrent.barriers_emitted");
+
+/// Every [`hazard_step`] call -- one per bound-op position under
+/// [`DispatchType::Concurrent`], including a horizontal-merge member with
+/// `z > 0` that never dispatches: a miss there would silently drop that
+/// member's own RAW/WAW/WAR bookkeeping (`handle_merged_position`'s own
+/// doc), so this is the direct witness that every member's output was
+/// recorded regardless of how many actual dispatches [`ENCODE_DISPATCH_CALLS`]
+/// shows for the same step count.
+pub static HAZARD_STEP_CALLS: Counter = Counter::new("omega.metal.concurrent.hazard_step_calls");
 
 /// [`BARRIERS_EMITTED`]'s own hazard-cause breakdown -- ROW 539's question:
 /// of the barriers a concurrent-dispatch step pays, how many are a genuine
