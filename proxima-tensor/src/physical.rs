@@ -710,6 +710,227 @@ mod tests {
         assert!((output[3] - reverse_weighted_second).abs() < 1e-6);
     }
 
+    /// ROW 559 bisection: [`cached_attention_bound_step_scores_the_partial_rotary_pass_plane`]
+    /// (`cpu.rs`) only ever exercises `kv_heads: 1, query_groups: 1` -- no
+    /// existing test scores the pass plane across MULTIPLE `kv_heads`, the
+    /// one axis qwen35's real shape (`kv_heads: 2`) adds. The rotary planes
+    /// are zeroed out here so the score is PURELY the pass term, isolating
+    /// whether `pass_key_start`'s own `(key_row * kv_heads + kv_head) *
+    /// pass_dim` addressing (`physical.rs:484`) reads the SAME per-head slice
+    /// `pass_query_start`'s `(.. + query_head) * pass_dim` (`physical.rs:444`)
+    /// expects, hand-computed the same way this file's own reference tests
+    /// already are.
+    #[test]
+    fn pass_plane_scores_each_kv_head_independently() {
+        let extents = AttentionExtents {
+            query_rows: 1,
+            cached_key_rows: 1,
+            new_key_rows: 1,
+            kv_heads: 2,
+            query_groups: 1,
+            head_dim: 4,
+        };
+        let rotary_zero = [0.0f32, 0.0];
+        let mut output = [0.0f32; 8];
+        assert!(stream_cached_attention_split_gqa(
+            [&rotary_zero, &rotary_zero],
+            [[&rotary_zero, &rotary_zero], [&rotary_zero, &rotary_zero]],
+            [&[2.0, 3.0, 10.0, 11.0, 100.0, 101.0, 110.0, 111.0][..], &[
+                4.0, 5.0, 12.0, 13.0, 200.0, 201.0, 210.0, 211.0
+            ][..]],
+            &mut output,
+            extents,
+            CachedAttentionRotary {
+                rotary_dim: 2,
+                pass: Some(CachedAttentionPassPlane {
+                    query: &[1.0, 0.0, 0.0, 1.0],
+                    cached_key: &[1.0, 0.0, 1.0, 0.0],
+                    new_key: &[0.0, 1.0, 0.0, 1.0],
+                }),
+            },
+            CachedAttentionScore {
+                scale: 1.0,
+                bands: [
+                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+                ],
+            },
+        ));
+        // head 0: score_cached_pass = 1*1+0*0 = 1, score_new_pass = 1*0+0*1 = 0
+        // -- cached value dominates.
+        let cached_weight_head0 = 1.0f32.exp() / (1.0f32.exp() + 1.0);
+        let new_weight_head0 = 1.0 - cached_weight_head0;
+        for dimension in 0..4 {
+            let expected = cached_weight_head0 * [2.0, 3.0, 10.0, 11.0][dimension]
+                + new_weight_head0 * [4.0, 5.0, 12.0, 13.0][dimension];
+            assert!(
+                (output[dimension] - expected).abs() < 1e-4,
+                "head 0 dimension {dimension}: got {}, expected {expected}",
+                output[dimension]
+            );
+        }
+        // head 1: score_cached_pass = 0*1+1*0 = 0, score_new_pass = 0*0+1*1 = 1
+        // -- new value dominates.
+        let new_weight_head1 = 1.0f32.exp() / (1.0f32.exp() + 1.0);
+        let cached_weight_head1 = 1.0 - new_weight_head1;
+        for dimension in 0..4 {
+            let expected = cached_weight_head1 * [100.0, 101.0, 110.0, 111.0][dimension]
+                + new_weight_head1 * [200.0, 201.0, 210.0, 211.0][dimension];
+            assert!(
+                (output[4 + dimension] - expected).abs() < 1e-4,
+                "head 1 dimension {dimension}: got {}, expected {expected}",
+                output[4 + dimension]
+            );
+        }
+    }
+
+    /// [`pass_plane_scores_each_kv_head_independently`] and
+    /// [`pass_plane_scores_each_query_group_independently`] each vary ONE
+    /// GQA axis at a time -- this crosses BOTH (`kv_heads: 2, query_groups:
+    /// 2`, four query heads total) to catch a bug that only appears when
+    /// `query_head = kv_head * query_groups + query_group`'s own two terms
+    /// are BOTH non-trivial, the exact shape ROW 559's own real qwen35
+    /// divergence needs (`docs/discipline.md`).
+    #[test]
+    fn pass_plane_scores_cross_product_of_kv_heads_and_query_groups() {
+        let extents = AttentionExtents {
+            query_rows: 1,
+            cached_key_rows: 1,
+            new_key_rows: 1,
+            kv_heads: 2,
+            query_groups: 2,
+            head_dim: 4,
+        };
+        let rotary_zero_query = [0.0f32; 4];
+        let rotary_zero_key = [0.0f32; 2];
+        let mut output = [0.0f32; 16];
+        assert!(stream_cached_attention_split_gqa(
+            [&rotary_zero_query, &rotary_zero_query],
+            [
+                [&rotary_zero_key, &rotary_zero_key],
+                [&rotary_zero_key, &rotary_zero_key],
+            ],
+            [
+                &[2.0, 3.0, 10.0, 11.0, 100.0, 101.0, 110.0, 111.0][..],
+                &[4.0, 5.0, 12.0, 13.0, 200.0, 201.0, 210.0, 211.0][..],
+            ],
+            &mut output,
+            extents,
+            CachedAttentionRotary {
+                rotary_dim: 2,
+                pass: Some(CachedAttentionPassPlane {
+                    query: &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 0.0],
+                    cached_key: &[1.0, 0.0, 0.0, 2.0],
+                    new_key: &[0.0, 1.0, 1.0, 0.0],
+                }),
+            },
+            CachedAttentionScore {
+                scale: 1.0,
+                bands: [
+                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+                ],
+            },
+        ));
+        // head 0 (kv_head 0, group 0): score_cached=1, score_new=0.
+        // head 1 (kv_head 0, group 1): score_cached=0, score_new=1.
+        // head 2 (kv_head 1, group 0): score_cached=2, score_new=1.
+        // head 3 (kv_head 1, group 1): score_cached=0, score_new=2.
+        let weight = |cached: f32, new: f32| {
+            let cached_weight = cached.exp() / (cached.exp() + new.exp());
+            (cached_weight, 1.0 - cached_weight)
+        };
+        let heads: [(f32, f32, [f32; 4], [f32; 4]); 4] = [
+            (1.0, 0.0, [2.0, 3.0, 10.0, 11.0], [4.0, 5.0, 12.0, 13.0]),
+            (0.0, 1.0, [2.0, 3.0, 10.0, 11.0], [4.0, 5.0, 12.0, 13.0]),
+            (2.0, 1.0, [100.0, 101.0, 110.0, 111.0], [200.0, 201.0, 210.0, 211.0]),
+            (0.0, 2.0, [100.0, 101.0, 110.0, 111.0], [200.0, 201.0, 210.0, 211.0]),
+        ];
+        for (head, (cached_score, new_score, cached_value, new_value)) in heads.iter().enumerate() {
+            let (cached_weight, new_weight) = weight(*cached_score, *new_score);
+            for dimension in 0..4 {
+                let expected =
+                    cached_weight * cached_value[dimension] + new_weight * new_value[dimension];
+                let got = output[head * 4 + dimension];
+                assert!(
+                    (got - expected).abs() < 1e-4,
+                    "head {head} dimension {dimension}: got {got}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    /// [`pass_plane_scores_each_kv_head_independently`]'s counterpart for
+    /// the OTHER GQA axis: `query_groups: 2`, `kv_heads: 1` -- both groups
+    /// share the SAME single kv_head's key/value/pass-key data, so a
+    /// misaligned `pass_query_start` (reading the wrong group's slice) would
+    /// still show up as a wrong per-group weight, not a missing buffer.
+    #[test]
+    fn pass_plane_scores_each_query_group_independently() {
+        let extents = AttentionExtents {
+            query_rows: 1,
+            cached_key_rows: 1,
+            new_key_rows: 1,
+            kv_heads: 1,
+            query_groups: 2,
+            head_dim: 4,
+        };
+        let rotary_zero_query = [0.0f32, 0.0];
+        let rotary_zero_key = [0.0f32];
+        let mut output = [0.0f32; 8];
+        assert!(stream_cached_attention_split_gqa(
+            [&rotary_zero_query, &rotary_zero_query],
+            [
+                [&rotary_zero_key, &rotary_zero_key],
+                [&rotary_zero_key, &rotary_zero_key],
+            ],
+            [&[2.0, 3.0, 10.0, 11.0][..], &[4.0, 5.0, 12.0, 13.0][..]],
+            &mut output,
+            extents,
+            CachedAttentionRotary {
+                rotary_dim: 2,
+                pass: Some(CachedAttentionPassPlane {
+                    query: &[1.0, 0.0, 0.0, 1.0],
+                    cached_key: &[1.0, 0.0],
+                    new_key: &[0.0, 1.0],
+                }),
+            },
+            CachedAttentionScore {
+                scale: 1.0,
+                bands: [
+                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+                ],
+            },
+        ));
+        // group 0: score_cached_pass = 1*1+0*0 = 1, score_new_pass = 1*0+0*1 = 0
+        // -- cached value dominates.
+        let cached_weight_group0 = 1.0f32.exp() / (1.0f32.exp() + 1.0);
+        let new_weight_group0 = 1.0 - cached_weight_group0;
+        for dimension in 0..4 {
+            let expected = cached_weight_group0 * [2.0, 3.0, 10.0, 11.0][dimension]
+                + new_weight_group0 * [4.0, 5.0, 12.0, 13.0][dimension];
+            assert!(
+                (output[dimension] - expected).abs() < 1e-4,
+                "group 0 dimension {dimension}: got {}, expected {expected}",
+                output[dimension]
+            );
+        }
+        // group 1: score_cached_pass = 0*1+1*0 = 0, score_new_pass = 0*0+1*1 = 1
+        // -- new value dominates.
+        let new_weight_group1 = 1.0f32.exp() / (1.0f32.exp() + 1.0);
+        let cached_weight_group1 = 1.0 - new_weight_group1;
+        for dimension in 0..4 {
+            let expected = cached_weight_group1 * [2.0, 3.0, 10.0, 11.0][dimension]
+                + new_weight_group1 * [4.0, 5.0, 12.0, 13.0][dimension];
+            assert!(
+                (output[4 + dimension] - expected).abs() < 1e-4,
+                "group 1 dimension {dimension}: got {}, expected {expected}",
+                output[4 + dimension]
+            );
+        }
+    }
+
     /// Regression for the merged-KV single-range fusion bug (ROW 366): the
     /// buggy bind duplicated the same bucketed-capacity key/value range into
     /// BOTH slots and neutered the "cached" half with an unreachable
