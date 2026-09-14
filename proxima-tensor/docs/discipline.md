@@ -32841,3 +32841,117 @@ full-attention layers are fusing into `BoundOpKind::CachedAttention` at
 `bind` time at all; (2) root-cause run (b)'s degenerate all-newline output
 independent of `cached-attention-streaming` (run with the feature off, same
 prompt, to isolate whether this is pre-existing).
+
+## ROW 563 -- item (1) root-caused and fixed at `bind.rs`; item (2) not reached (time ceiling)
+
+**Task:** two facts from ROW 562's open items: why does the real qwen3.6:35b-a3b
+decode never produce a `cached_attention` kind despite 10 real full-attention
+layers, and does the Odell 128-token degeneration reproduce without
+`cached-attention-streaming`.
+
+**Instrumentation.** Added `debug!` decline-reason fields (gated
+`#[cfg(feature = "instrument")]`, matching this file's own convention) at
+every structural `continue` in `cached_attention_candidates` (`bind.rs`,
+score-source decomposition, mask form, group broadcast, pass-plane presence,
+value-weight identity, operand-lookup/stride, and the final resolved-binding
+guard), and converted the three pre-existing unconditional `std::eprintln!`
+forensics (`shape_checks`/`base_strides`/`pass_strides`, residual item 3 from
+ROW 561) to the same typed `debug!` form -- no more hand-rolled env-gated
+dumps in this function. Built `gguf_generate` with
+`proxima-model-interop/metal,instrument,cached-attention-streaming` and ran
+the France 4-token prompt (`RUST_LOG=proxima_tensor=debug`) against the real
+checkpoint (Ollama blob
+`sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d`,
+`qwen3.6:35b-a3b`).
+
+**Root cause, proven by the decline log.** Every one of 11 decline events
+across the run carried the SAME `stage`, and no other stage ever fired:
+
+```
+DEBUG proxima_tensor::bind: single-consumer elementwise composition decision -- still_live is gated by the requested output set node=1288 kind=elementwise_operand_fuse decision=fused into=1294 still_live=false
+DEBUG proxima_tensor::bind: cached_attention decline -- the candidate output node has no resolved binding node=1288 stage=output_not_resolved
+```
+repeated identically for nodes 2783, 4278, 5773, 7268, 8763, 10258 (spacing
+exactly 1495 NodeIds apart, one per full-attention-layer block). The
+candidate anchor node -- `taps.attended`, the softmax-weighted V sum, whose
+only reader is the per-head gate multiply `gated_attended = attended *
+gate_sigmoid` -- is a single-consumer chain, so `bind_plain`'s generic
+elementwise fusion (`bind.rs:993`'s `elementwise_operand_fuse`) folds it into
+its consumer whenever it is not itself a requested output. Production's real
+`outputs` list (the model's logits/residual + KV-cache write roots) never
+requests this internal tap, so it never gets a standalone `BoundOp`, and
+`cached_attention_candidates`'s own final guard (`if
+!resolved.iter().any(|bound| bound.node == output) { continue; }`) declines
+the fusion for every full-attention layer. This exact mechanism was already
+named, but only worked around inside the test fixture: the comment at
+`bind.rs`'s `qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer`
+manually adds `taps.attended` to that test's own `outputs` "or `bind_plain`
+never gives it a standalone `BoundOp` for `cached_attention_candidates` to
+find" -- a pin production's real forward-pass builder never performs.
+
+**Fix, `bind.rs`'s `cached_attention_candidates`/`bind_cached_attention_fusion`.**
+`bind_cached_attention_fusion` already ran `cached_attention_candidates`
+twice specifically to solve this class of problem: once against `built` to
+discover candidates, then once more against a `rebuilt` binding whose
+`planning_outputs` pins each candidate's dependency sources alive. It never
+pinned the candidate's own anchor node, so the pin never reached the one
+node this bug needed. `cached_attention_candidates` took a new
+`require_output_resolved: bool` (the discovery pass now passes `false`,
+skipping the exact guard above; the real, spliced-in pass keeps `true`), and
+the `planning_outputs` loop now also pushes `fused.node` alongside its
+`operands` sources. Re-ran the same France 4-token prompt: the 11 prior
+`output_not_resolved` declines are gone (zero occurrences of any decline
+stage anywhere in the log), and a new `cached_attention candidate accepted`
+debug line (added alongside the fix, permanent) fires 8 times at
+`require_output_resolved=true` for nodes 1288/2783/4278/5773 across two
+`bind()` calls -- proof `BoundOpKind::CachedAttention` is now constructed for
+4 of the real checkpoint's full-attention layers where before it was zero.
+
+**New unit test proving the fix generically (not just on this checkpoint):**
+`qwen35_partial_rotary_cached_attention_fuses_without_pinning_the_attended_tap`
+(`bind.rs`) -- the same fixture as ROW 561's own fusion test, but with
+`taps.attended` DROPPED from `outputs` (the shape production actually uses).
+Before this fix that call produced `fused_attention_count == 0`; after,
+`fused_attention_count == 1`, and the fused/unfused `residual1` parity holds
+to `<= 1e-5`.
+
+**Residual, unmeasured this row (time ceiling reached):** nodes
+7268/8763/10258/11753/13248 pass the relaxed discovery scan
+(`require_output_resolved=false`, `cached_attention candidate accepted`) but
+do NOT reappear at `require_output_resolved=true` -- a second, distinct
+decline for the later full-attention layers not yet root-caused (candidate:
+interaction between one layer's pinned `planning_outputs` and another
+layer's own liveness once `bind_plain` reruns over the full 40-layer
+program; needs its own decline-log instrumentation on the `rebuilt` pass
+specifically). Separately, `op_profile_kind` on the France 16-token rerun
+(fixed binary) still shows NO `cached_attention` kind and byte-identical
+`elementwise`/`reduce-*` op counts to the ROW 562 baseline, even though
+`bind()` now demonstrably returns `BoundOpKind::CachedAttention` for 4
+layers -- the gap between `bind()`'s return value and what
+`omega::metal::plan_named` ultimately renders/dispatches is NOT instrumented
+or explained this row; the mechanism could be a Metal-specific capability
+decline (`msl`'s own render gate), a stale-plan reuse path, or
+`classify_kind`'s attribution missing a fused op -- named, not proven. Task
+item (2) (the Odell 128-token degeneration, feature-off rerun) was not
+reached this row at all.
+
+**Gates run:** `cargo nextest run -p proxima-tensor --features
+cached-attention-streaming -j 4`: `639 tests run: 639 passed, 8 skipped`
+(ROW 561's own baseline, unchanged, plus the new test feature-gated in).
+`cargo nextest run -p proxima-tensor -j 4` (default features): `629 tests
+run: 629 passed, 8 skipped` (unchanged). `cargo clippy -p proxima-tensor
+--all-targets --features cached-attention-streaming[,instrument]`: exit 0,
+0 warnings, both feature combinations. `cargo check --workspace
+--all-targets -j 4`: exit 0 (same pre-existing `proc-macro-error2`
+future-incompat warning every prior row already notes).
+
+**Re-prove commands:**
+
+```text
+cargo nextest run -p proxima-tensor --features cached-attention-streaming -j 4 \
+  -E 'test(qwen35_partial_rotary_cached_attention_fuses_without_pinning_the_attended_tap)'
+cargo build --release --example gguf_generate --features \
+  proxima-model-interop/metal,proxima-model-interop/instrument,proxima-model-interop/cached-attention-streaming -j 4
+RUST_LOG=proxima_tensor=debug PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent \
+  target/release/examples/gguf_generate <qwen35moe.gguf> "What is the capital of France?" 4 gpu
+```
