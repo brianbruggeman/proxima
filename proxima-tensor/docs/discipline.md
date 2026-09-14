@@ -32050,3 +32050,154 @@ distinct from `head_dim` -- touching `bind.rs`'s two matchers,
 kernel -- is the real next step; it is new surface on the existing kind's
 shape, not a matcher-only change, and needs its own slice with CPU parity
 proven before any Metal work starts.
+
+## ROW 557 -- `BoundOpKind::CachedAttention` carries a pass-through plane; CPU proven, matcher and Metal render still residual
+
+**Task:** land ROW 556's own residual -- widen `BoundOpKind::CachedAttention`'s
+field/operand shape to carry qwen35's partial-rotary pass plane, prove the CPU
+executor scores it correctly, and give `omega`'s Metal renderer a typed
+rejection rather than a compile break, without changing behavior for any
+existing (full-rotary) caller.
+
+**Field/operand additions (`proxima-tensor/src/bind.rs:260-296`):**
+`BoundOpKind::CachedAttention` gains one new named field, `rotary_dim: u64`
+(the rotated width per head; `head_dim` for every caller before this row).
+`operands` (`BoundOperands = Vec<(NodeId, Layout, Option<Lookup>)>`,
+`bind.rs:141`) is unchanged in TYPE -- no new positional convention was added
+to the struct itself -- but its documented length convention widens: when
+`rotary_dim < head_dim`, three more trailing entries appear immediately after
+the existing optional ninth `cached_len` scalar -- `pass_query`,
+`pass_cached_key`, `pass_new_key` (one un-rotated, non-split plane per side,
+`spec.rs`'s own `q_pass`/`k_pass` shape) -- so `operands.len()` is one of
+`8, 9, 11, 12` (`8`/`9` byte-identical to ROW 556's own convention;
+`11`/`12` only when `rotary_dim < head_dim`, discriminated by that field, never
+by `operands.len()` alone, so the ninth-slot `cached_len`/`new_upper_inclusive`
+sharing convention `BoundOpKind::CachedAttention`'s own doc already names is
+untouched). No second `BoundOpKind` variant -- per this task's own instruction
+and this module's own `no new BoundOpKind` constraint, still the existing
+kind, wider.
+
+**Every existing construction/destructure site updated to compile
+(`cargo check` errors drove the list, not a manual audit):** three real
+construction sites (`bind.rs`'s two matchers, `cpu.rs`'s `rebase_chunk`-style
+map) set `rotary_dim: head_dim` -- byte-identical to today's only shape;
+`omega/src/metal.rs`/`omega/src/msl.rs`'s own six test-fixture builders same;
+`omega`'s ~15 other destructure sites already carried `..` and needed no
+change (Rust's own exhaustiveness check, not a grep, is what proved this --
+`cargo check -p omega --features metal,instrument --all-targets` is the
+oracle, not a search for the string `CachedAttention {`).
+
+**CPU executor (`proxima-tensor/src/cpu.rs::run_cached_attention`):**
+`pair_dim` (the rotary planes' width) now derives from `rotary_dim / 2`, not
+`head_dim / 2` -- the ONE other place partial rotary changes this executor's
+shape, since V is never rotated and already carries the full `head_dim`
+regardless. `pass_present = rotary_dim < head_dim` is the sole discriminator
+for the trailing operand triple (never `operands.len()` alone, since the
+optional `cached_len` slot already varies independently); when present, the
+three pass operands are read the same zero-based-contiguous way the base
+eight are, the cached-side plane sliced to its own `live_cached_key_rows`
+prefix exactly like `cached_key_even`/`cached_key_odd` already are.
+
+**Kernel (`proxima-tensor/src/physical.rs::stream_cached_attention_split_gqa`):**
+gained `rotary: CachedAttentionRotary<'_>` (`{ rotary_dim, pass: Option<
+CachedAttentionPassPlane> }`) and `score: CachedAttentionScore` (`{ scale,
+bands }`) in place of separate `scale`/`bands` params -- bundled, not added
+as two more positional arguments, because `clippy::too_many_arguments`
+flagged the naive 9-argument signature the same way ROW 3's addendum's
+`OperandSpan` bundling did (`docs/discipline.md` ROW 3 addendum); both are
+plain data bundles, not new algebra types. The per-key inner loop adds the
+pass plane's dot product (`pass_query . pass_key`, no even/odd split, since
+the pass plane is never rotated) to `score` before the existing single
+`* scale` multiply -- matching `spec.rs`'s own `score = (rotary + pass) *
+inv_sqrt_head_dim` shape exactly, not two separate scaled terms.
+
+**Proof at hand-computed scale (`cpu.rs::
+cached_attention_bound_step_scores_the_partial_rotary_pass_plane`, MEASURED,
+`cargo nextest run -p proxima-tensor --features cached-attention-streaming -E
+'test(cached_attention_bound_step_scores_the_partial_rotary_pass_plane)'`: `1
+passed`):** a direct `BoundOp` (mirroring the existing full-rotary
+`cached_attention_bound_step_runs_online_softmax` fixture, not a
+matcher-produced one) with `head_dim: 4`, `rotary_dim: 2`, 11 operands (base
+eight, no `cached_len`, plus the pass triple) is run through
+`run_node_into`; the expected online-softmax weights are hand-derived from
+`score_cached = 2` (`rotary` 1 + `pass` 1) vs `score_new = 0` (`rotary` 0 +
+`pass` 0) the same way the existing fixture's own comment derives its
+weights, and the executor's real output matches to `< 1e-6` on all four
+`head_dim` columns. This proves the CPU mechanism (pair_dim-from-rotary_dim,
+pass-plane extraction, kernel dot-product-plus-scale) is correct; it does
+NOT prove the real qwen35 shape end-to-end, since no matcher yet produces a
+fused op at those extents (see residual below).
+
+**Kernel identity (`omega/src/identity.rs::kernel_identity`):** the
+`CachedAttention` arm's format string gains `rotary_dim`; the appended
+`_r{rotary_dim}` token fires ONLY when `rotary_dim != head_dim`, so every
+existing full-rotary identity string is byte-identical (unchanged, not
+merely equal by coincidence -- the token is the empty string on that path).
+
+**Metal renderer (`omega/src/error.rs`, `omega/src/msl.rs::
+render_cached_attention`):** a new `EmitError::CachedAttentionPartialRotaryNotSupported
+{ node }` variant, checked immediately after the kind destructure
+(`rotary_dim != head_dim` rejects before any MSL is generated) -- the task's
+own instruction ("add that arm, do not render it in this slice"). `cuda`/
+`wgsl` already reject `BoundOpKind::CachedAttention` unconditionally and
+needed no change.
+
+**Bound-op count per attention layer:** unchanged from ROW 556's own census
+(**145 ops**, `append_qwen35_dense_attention_layer`) -- this row widened the
+KIND's shape, not the matcher, so the real qwen35 program still produces zero
+fusion candidates; the delta this row measures is the same **0** ROW 556
+measured, for the same reason (see residual below).
+
+**Gates run:**
+- `cargo nextest run -p proxima-tensor --features cached-attention-streaming
+  --test-threads 4`: `633 tests run: 633 passed, 8 skipped` (ROW 556's own
+  `632` baseline, +1 for this row's new pass-plane test; zero regressions).
+- `cargo nextest run -p proxima-tensor --test-threads 4` (default features):
+  `626 tests run: 626 passed, 8 skipped` (ROW 556's own `625` baseline, +1).
+- `cargo clippy -p proxima-tensor --all-targets --features
+  cached-attention-streaming -j 4`: exit 0, 0 warnings (after bundling
+  `CachedAttentionRotary`/`CachedAttentionScore` to clear
+  `clippy::too_many_arguments` on the widened kernel signature).
+- `cargo check -p omega --features metal,instrument`: exit 0.
+- `cargo check -p omega --features metal,instrument --all-targets`: exit 0
+  (after adding `rotary_dim` alongside every test-fixture mutation of
+  `head_dim` that shared a base fixture -- eight `*head_dim = N;` sites in
+  `omega/src/msl.rs`'s own test module needed a matching `*rotary_dim = N;`
+  or they inherited a stale `rotary_dim: 4` from their base fixture and
+  tripped the new partial-rotary rejection on an op that was never about
+  partial rotary).
+- `cargo clippy -p omega --features metal,instrument --lib -j 4`: exit 0, 0
+  warnings.
+- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E
+  'not test(qwen35moe_shaped_append_moe_ffn)'`: `313 tests run: 313 passed,
+  13 skipped` (ROW 556's own `313` baseline, unchanged -- run twice,
+  identical both times).
+- `cargo nextest run -p proxima-model-interop --features metal,instrument
+  --test-threads 2 -E 'test(qwen35)'`: `20 tests run: 20 passed, 278 skipped`
+  (ROW 556's own `20` baseline, unchanged).
+- `cargo check -p proxima-model-interop --features metal,instrument
+  --examples`: exit 0.
+- `cargo check --workspace --all-targets`: exit 0.
+
+**Residual, carried to the next slice (narrower than ROW 556's own, since the
+kind's shape and the CPU mechanism are now both proven):**
+1. **The matcher.** `attention_score_sources` (`bind.rs:2636-2658`) still
+   parses only the flat two-term score; teaching it (or a sibling matcher) to
+   recognize qwen35's nested three-term `Add(Add(first, second), pass)` shape
+   AND skip the redundant post-fusion padding `Select`
+   (`spec.rs:4979-4997`, ROW 556's own finding that the fused op's runtime
+   `cached_len` clip already excludes the same rows) is real graph-pattern
+   work this row did not attempt -- the kind can now CARRY the fusion, but
+   nothing yet PRODUCES one from the real qwen35 program, so the bound-op
+   count and fusion delta are still the unchanged 145/0 named above.
+2. **Real-shape CPU parity.** This row's own proof is a tiny hand-computed
+   fixture (`head_dim` 4, `rotary_dim` 2); the task's own real-shape target
+   (heads 16, kv 2, head_dim 256, rotary_dim 64, hidden 2048, 40 placed keys
+   with 3 padded rows) needs either the matcher above or a hand-built fused
+   `BoundOp` at those extents compared against
+   `append_qwen35_dense_attention_layer`'s own unfused output -- neither was
+   built this row.
+3. **Metal render.** `render_cached_attention` rejects partial rotary with a
+   typed `EmitError`; teaching it the pass-plane dot product (extra K/Q
+   buffer bindings, one more `simd_sum` term before the existing `* scale`)
+   is unstarted, and per the task's own instruction was not attempted here.
