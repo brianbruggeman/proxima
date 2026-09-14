@@ -74,18 +74,8 @@ pub const MAX_INLINE_RANK: usize = 4;
 /// Capacity for one [`crate::bind::BoundOpBuilder::push`] call's ready
 /// batch. Sizes an `ArrayVec` const generic
 /// ([`crate::bind::ReadyBatch`]) -- cannot be runtime config at any tier.
-/// `8`, not `4`: `materialize_node`'s Metal 31-buffer-ABI cascade
-/// (`bind.rs:1161-1219`) is not bounded by `ScalarOp::arity` -- it walks a
-/// held chain and materializes however many ancestor nodes it takes to bring
-/// one node's preview buffer count back under 31, and the grouped
-/// `append_moe_ffn` (real qwen3moe shape, 128 experts, top-8) builds a chain
-/// deep enough that one `push` for the final weighted-sum combine cascades
-/// through more than 4 still-held predecessors. Measured at the real shape
-/// via `omega::moe_topk_fused_fold_parity_sweep_on_metal`; `8` is this
-/// slice's measured floor, not a derived bound -- raise it again if a wider
-/// `expert_used_count` cascades past it.
 #[cfg(any(feature = "std", feature = "alloc"))]
-pub const READY_BATCH_CAPACITY: usize = 8;
+pub const READY_BATCH_CAPACITY: usize = 3;
 
 /// Inline capacity for one axis's term list in the index-pattern grammar
 /// ([`crate::map::AxisIndex`]). Sizes a `SmallVec` const generic -- cannot
