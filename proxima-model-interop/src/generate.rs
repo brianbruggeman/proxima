@@ -10183,7 +10183,6 @@ impl<'file> LoadedModel<'file> {
                         )?
                     } else if use_metal_output_placements(
                         !ssm_input_placements.is_empty(),
-                        expert_source_substitutions.is_some(),
                         monolithic_all_low,
                     ) {
                         runtime.evaluate_with_placements(
@@ -12058,12 +12057,16 @@ impl<'file> LoadedModel<'file> {
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-fn use_metal_output_placements(
-    has_recurrent_state: bool,
-    has_expert_source_substitutions: bool,
-    monolithic_all_low: bool,
-) -> bool {
-    monolithic_all_low || (has_recurrent_state && !has_expert_source_substitutions)
+fn use_metal_output_placements(has_recurrent_state: bool, monolithic_all_low: bool) -> bool {
+    // `evaluate_with_placements` has carried `expert_sources` since it grew
+    // `execute_plan_named_with_placements_and_expert_sources` -- excluding
+    // routed-expert steps here (ROW 549) used to send every qwen35moe
+    // (MoE + GDN) decode step through the unplaced `runtime.evaluate`
+    // fallback, so the fused `GatedDeltaNet` state_out
+    // (`omega::metal::encode_op`) never found its caller-owned buffer in
+    // `device_buffers` and silently discarded the recurrent state every
+    // step.
+    monolithic_all_low || has_recurrent_state
 }
 
 fn qwen35moe_pre_gather_enabled(configured: bool, architecture_name: Option<&str>) -> bool {
@@ -12288,13 +12291,19 @@ mod tests {
         assert!(should_release_monolithic_sources(true, false));
     }
 
+    /// ROW 549 fix: recurrent state (`ssm_input_placements` non-empty) always
+    /// requests the placed executor now, whether or not the same step also
+    /// carries routed-expert substitutions -- qwen35moe's hybrid GDN+MoE
+    /// decode step needs both together, and `evaluate_with_placements`
+    /// already threads `expert_sources` through
+    /// (`execute_plan_named_with_placements_and_expert_sources`).
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     #[test]
-    fn monolithic_expert_execution_uses_stable_buffers_without_recurrent_placements() {
-        assert!(!use_metal_output_placements(false, false, false));
-        assert!(!use_metal_output_placements(false, true, false));
-        assert!(use_metal_output_placements(true, false, false));
-        assert!(use_metal_output_placements(false, true, true));
+    fn recurrent_state_always_requests_placed_execution() {
+        assert!(!use_metal_output_placements(false, false));
+        assert!(use_metal_output_placements(true, false));
+        assert!(use_metal_output_placements(false, true));
+        assert!(use_metal_output_placements(true, true));
     }
 
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
