@@ -11662,6 +11662,7 @@ fn encode_op(
     // otherwise.
     if let BoundOpKind::GatedDeltaNet {
         state_out,
+        operands,
         num_v_heads,
         head_k_dim,
         head_v_dim,
@@ -11669,10 +11670,24 @@ fn encode_op(
     } = &bound.kind
     {
         let state_elements = (*head_k_dim * *head_v_dim * *num_v_heads) as usize;
-        let (state_buffer, state_offset) = match device_buffers.get(state_out) {
-            Some(existing) => existing.clone(),
+        let existing = device_buffers.get(state_out).cloned();
+        let placed = existing.is_some();
+        let (state_buffer, state_offset) = match existing {
+            Some(buffer) => buffer,
             None => (allocate_buffer(device, state_elements, bound.dtype)?, 0),
         };
+        // decision point: whether this node's recurrent state carried
+        // forward from the caller's placement (ROW 549 -- a stale
+        // `use_metal_output_placements` gate left this always missing for
+        // qwen35moe's routed-expert + GDN decode step, discarding state
+        // every dispatch).
+        debug!(
+            node = bound.node.0,
+            state_out = state_out.0,
+            state_in = operands[5].0.0,
+            placed,
+            "gated_delta_net state_out resolution"
+        );
         unsafe {
             encoder.setBuffer_offset_atIndex(Some(&state_buffer), state_offset, bindings.len());
         }
