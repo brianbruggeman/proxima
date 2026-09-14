@@ -2497,6 +2497,13 @@ impl<'file> LoadedModel<'file> {
             },
             query,
             key,
+            // This prefill path's own `projection_shape_is_valid` check above
+            // proves `query`/`key` are `[positions, key_dim, kv_heads]` --
+            // `kv_heads` fastest, `key_dim` slowest (`GdnPrefillScan`'s own
+            // doc on why this differs from the decode-only bound kind's
+            // pre-repeat, dim-fastest convention).
+            query_key_head_stride: 1,
+            query_key_dim_stride: kv_heads,
             value,
             gate,
             beta,

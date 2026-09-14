@@ -7026,6 +7026,8 @@ fn run_gated_delta_net<B: Deref<Target = [f32]> + Sync>(
         num_v_heads,
         head_k_dim,
         head_v_dim,
+        query_key_head_stride,
+        query_key_dim_stride,
         inv_sqrt_key_dim,
     } = &resolved.kind
     else {
@@ -7066,6 +7068,8 @@ fn run_gated_delta_net<B: Deref<Target = [f32]> + Sync>(
         shape,
         query: buffer_of(buffers, query.0)?,
         key: buffer_of(buffers, key.0)?,
+        query_key_head_stride: *query_key_head_stride as usize,
+        query_key_dim_stride: *query_key_dim_stride as usize,
         value: buffer_of(buffers, value.0)?,
         gate: buffer_of(buffers, gate.0)?,
         beta: buffer_of(buffers, beta.0)?,

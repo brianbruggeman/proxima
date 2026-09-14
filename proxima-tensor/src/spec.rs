@@ -18801,6 +18801,11 @@ value = 1.0
             },
             query: &queries,
             key: &keys,
+            // `kv_heads == 1`: only one head, so any stride pair addresses
+            // the same single row -- natural (dim-fastest) chosen for
+            // consistency with the decode-only bound kind's own convention.
+            query_key_head_stride: 2,
+            query_key_dim_stride: 1,
             value: &values,
             gate: &gates,
             beta: &betas,
@@ -18830,6 +18835,8 @@ value = 1.0
             },
             query: &[1.0],
             key: &[1.0, 0.0],
+            query_key_head_stride: 2,
+            query_key_dim_stride: 1,
             value: &[1.0, 0.0],
             gate: &[0.0],
             beta: &[1.0],
@@ -19654,6 +19661,13 @@ value = 1.0
             },
             query: sequence.get(taps.query_sequence).expect("query sequence").0,
             key: sequence.get(taps.key_sequence).expect("key sequence").0,
+            // `query_sequence`/`key_sequence`'s own `"sdug->sugd"` reduce
+            // (`append_qwen35_ssm_mixer_with_taps_and_layout`'s prefill
+            // branch) stores `kv_heads` fastest, `key_dim` next -- `key_dim
+            // == 1` here so `query_key_dim_stride`'s exact value never
+            // actually advances an index, but `kv_heads` still must.
+            query_key_head_stride: 1,
+            query_key_dim_stride: 2,
             value: sequence.get(taps.value_sequence).expect("value sequence").0,
             gate: sequence.get(taps.gate_sequence).expect("gate sequence").0,
             beta: sequence.get(taps.beta_sequence).expect("beta sequence").0,
@@ -20529,6 +20543,12 @@ value = 1.0
             },
             query: evaluated.get(taps.query).expect("query tap present").0,
             key: evaluated.get(taps.key).expect("key tap present").0,
+            // `taps.query`/`taps.key` are the SQUEEZED `"dug"`-ordered nodes
+            // (`append_qwen35_ssm_mixer_with_taps_and_layout`'s own decode
+            // squeeze): `kv_heads` fastest here (`group == 1`), `key_dim ==
+            // 1` so its own stride never actually advances an index.
+            query_key_head_stride: 1,
+            query_key_dim_stride: 2,
             value: evaluated.get(taps.value).expect("value tap present").0,
             gate: evaluated.get(taps.gate).expect("gate tap present").0,
             beta: evaluated.get(taps.beta).expect("beta tap present").0,
