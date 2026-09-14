@@ -7735,7 +7735,8 @@ fn pack_cached_attention_uniforms(
     // inside the kernel body instead of widening the dispatch or the
     // uniforms struct, so it takes the same path as the eight-operand,
     // unbucketed case below.
-    let dynamic_cached_len = bound.operands().len() == 9 && *cached_key_rows == 0;
+    let dynamic_cached_len =
+        (bound.operands().len() == 9 || bound.operands().len() == 12) && *cached_key_rows == 0;
     let context_length = *cached_key_rows + *new_key_rows;
     let chunks = crate::msl::context_chunks_for(context_length, numeric_policy) as i64;
     let splits = crate::msl::splits_for(context_length, numeric_policy) as i64;
