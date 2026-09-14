@@ -4339,6 +4339,7 @@ fn render_cached_attention(
         kv_heads,
         query_groups,
         head_dim,
+        rotary_dim,
         scale,
         cached_lower_inclusive,
         new_upper_inclusive,
@@ -4351,6 +4352,9 @@ fn render_cached_attention(
             found: resolved.kind.name(),
         });
     };
+    if rotary_dim != head_dim {
+        return Err(EmitError::CachedAttentionPartialRotaryNotSupported { node: resolved.node });
+    }
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let cached_lower = if *cached_lower_inclusive == i64::MIN {
         "-9223372036854775807L".to_string()
@@ -9534,6 +9538,7 @@ mod tests {
                 kv_heads: 1,
                 query_groups: 1,
                 head_dim: 4,
+                rotary_dim: 4,
                 scale: 0.5,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
@@ -9581,6 +9586,7 @@ mod tests {
                 kv_heads: 1,
                 query_groups: 1,
                 head_dim: 4,
+                rotary_dim: 4,
                 scale: 0.5,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
@@ -12033,13 +12039,14 @@ mod tests {
     #[test]
     fn cached_attention_two_dispatch_form_is_inert_under_bit_exact() {
         let mut bound = cached_attention_op_dynamic(200, 56);
-        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+        let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
             unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
         };
         // multiple of 8, `render_cached_attention`'s own alignment
         // requirement once `block_width_for` admits `TreeReduce`
         // (`llama_relaxed()` below) -- `AttentionBlockMisaligned`'s own doc.
         *head_dim = 8;
+        *rotary_dim = 8;
         let packed_operands = PackedOperands::new();
 
         let bit_exact_kernel = emit(&bound, &packed_operands, NumericPolicy::bit_exact())
@@ -12120,10 +12127,11 @@ mod tests {
     #[test]
     fn forty_key_plan_uses_the_per_query_head_grid_with_no_merge_under_either_policy() {
         let mut bound = cached_attention_op_dynamic(32, 8);
-        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+        let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
             unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
         };
         *head_dim = 8;
+        *rotary_dim = 8;
         let packed_operands = PackedOperands::new();
 
         for policy in [NumericPolicy::bit_exact(), NumericPolicy::llama_relaxed()] {
@@ -12161,6 +12169,7 @@ mod tests {
         let mut narrow = cached_attention_op_dynamic(32, 8);
         let BoundOpKind::CachedAttention {
             head_dim,
+            rotary_dim,
             query_groups,
             ..
         } = &mut narrow.kind
@@ -12168,6 +12177,7 @@ mod tests {
             unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
         };
         *head_dim = 8;
+        *rotary_dim = 8;
         *query_groups = 4;
 
         let mut wide = narrow.clone();
@@ -12220,10 +12230,11 @@ mod tests {
     #[test]
     fn split_kernel_emits_the_slice_formula_and_scratch_index() {
         let mut bound = cached_attention_op_dynamic(200, 56);
-        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+        let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
             unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
         };
         *head_dim = 8;
+        *rotary_dim = 8;
 
         let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
             .expect("llama_relaxed renders the split kernel for a 256-key context");
@@ -12398,10 +12409,11 @@ mod tests {
     #[test]
     fn block_width_above_one_renders_the_block_staged_body_under_llama_relaxed() {
         let mut bound = cached_attention_op_dynamic(32, 7);
-        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+        let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
             unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
         };
         *head_dim = 8; // a multiple of 8, so the float4 K/Q loads stay aligned
+        *rotary_dim = 8;
 
         let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
             .expect("llama_relaxed renders the block-staged body for an aligned head_dim");
@@ -12438,10 +12450,11 @@ mod tests {
     #[test]
     fn block_staged_v_accumulate_uses_float4_and_a_cross_ty_reduce_when_aligned() {
         let mut bound = cached_attention_op_dynamic(32, 7);
-        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+        let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
             unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
         };
         *head_dim = 32; // a multiple of 32, so the V float4 loads stay aligned
+        *rotary_dim = 32;
 
         let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
             .expect("llama_relaxed renders the block-staged body for a 32-aligned head_dim");
@@ -12479,10 +12492,11 @@ mod tests {
     #[test]
     fn block_staged_v_accumulate_falls_back_to_scalar_when_head_dim_not_32_aligned() {
         let mut bound = cached_attention_op_dynamic(32, 7);
-        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+        let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
             unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
         };
         *head_dim = 8; // multiple of 8 (Q/K stays aligned) but not of 32
+        *rotary_dim = 8;
 
         let source = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
             .expect("llama_relaxed renders the block-staged body for an unaligned head_dim");
@@ -12582,10 +12596,11 @@ mod tests {
     #[test]
     fn block_staged_attention_rejects_a_head_dim_not_a_multiple_of_eight() {
         let mut bound = cached_attention_op_dynamic(32, 7);
-        let BoundOpKind::CachedAttention { head_dim, .. } = &mut bound.kind else {
+        let BoundOpKind::CachedAttention { head_dim, rotary_dim, .. } = &mut bound.kind else {
             unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
         };
         *head_dim = 12; // not a multiple of 8
+        *rotary_dim = 12;
 
         let error = render_cached_attention(&bound, "entry", NumericPolicy::llama_relaxed())
             .expect_err("a misaligned head_dim must be rejected under the block-staged policy");

@@ -11,7 +11,10 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use proxima_tensor::physical::{AttentionExtents, CausalBand, stream_cached_attention_split_gqa};
+use proxima_tensor::physical::{
+    AttentionExtents, CachedAttentionRotary, CachedAttentionScore, CausalBand,
+    stream_cached_attention_split_gqa,
+};
 
 const KV_HEADS: usize = 8;
 const QUERY_GROUPS: usize = 4;
@@ -132,17 +135,23 @@ fn bench_cached_attention(c: &mut Criterion) {
             [&cached_value, &new_value],
             &mut streamed_output,
             extents.clone(),
-            SCALE,
-            [
-                CausalBand {
-                    lower_inclusive: i64::MIN,
-                    upper_inclusive: i64::MAX,
-                },
-                CausalBand {
-                    lower_inclusive: i64::MIN,
-                    upper_inclusive: 0,
-                },
-            ],
+            CachedAttentionRotary {
+                rotary_dim: HEAD_DIM as u64,
+                pass: None,
+            },
+            CachedAttentionScore {
+                scale: SCALE,
+                bands: [
+                    CausalBand {
+                        lower_inclusive: i64::MIN,
+                        upper_inclusive: i64::MAX,
+                    },
+                    CausalBand {
+                        lower_inclusive: i64::MIN,
+                        upper_inclusive: 0,
+                    },
+                ],
+            },
         ));
         materialized_attention(
             [&query_even, &query_odd],
@@ -182,17 +191,23 @@ fn bench_cached_attention(c: &mut Criterion) {
                         [&cached_value, &new_value],
                         &mut streamed_output,
                         extents.clone(),
-                        SCALE,
-                        [
-                            CausalBand {
-                                lower_inclusive: i64::MIN,
-                                upper_inclusive: i64::MAX,
-                            },
-                            CausalBand {
-                                lower_inclusive: i64::MIN,
-                                upper_inclusive: 0,
-                            },
-                        ],
+                        CachedAttentionRotary {
+                            rotary_dim: HEAD_DIM as u64,
+                            pass: None,
+                        },
+                        CachedAttentionScore {
+                            scale: SCALE,
+                            bands: [
+                                CausalBand {
+                                    lower_inclusive: i64::MIN,
+                                    upper_inclusive: i64::MAX,
+                                },
+                                CausalBand {
+                                    lower_inclusive: i64::MIN,
+                                    upper_inclusive: 0,
+                                },
+                            ],
+                        },
                     ));
                 });
             },

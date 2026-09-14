@@ -257,6 +257,28 @@ pub enum BoundOpKind {
     ///   exists). `cached_lower_inclusive`/`new_upper_inclusive` are
     ///   unaffected — this bound is query-independent, unlike the
     ///   single-range case's causal band.
+    ///
+    /// `rotary_dim` is the RoPE-rotated width per head (`head_dim` when
+    /// every column rotates — mistral/openchat/qwen3 today); when
+    /// `rotary_dim < head_dim`, `operands` carries THREE more trailing
+    /// entries beyond the base eight/nine described above — `pass_query`,
+    /// `pass_cached_key`, `pass_new_key` — one un-rotated, non-split plane
+    /// per side, laid out `[pass_query, pass_cached_key, pass_new_key]`
+    /// immediately after the optional `cached_len` slot (so `operands.len()`
+    /// is 8, 9, 11, or 12; the extra three are absent whenever `rotary_dim
+    /// == head_dim`, which is every existing caller — qwen35's partial-rotary
+    /// dense attention (`rotary_dim` 64 of `head_dim` 256`,
+    /// `proxima-model-interop/src/qwen35.rs:37-38,142,179,182`) is the one
+    /// caller that needs the wider shape, per `docs/discipline.md` ROW 556's
+    /// residual). The pass plane contributes one extra additive term to the
+    /// score (`score = rotary_dot * scale + pass_dot * scale`, `spec.rs`'s
+    /// own `score_cached`/`score_new` — `q_pass . k_pass`, no even/odd split
+    /// because the pass plane is never rotated) and is read over its own
+    /// `head_dim - rotary_dim` width; `pass_cached_key`/`pass_new_key` share
+    /// `cached_key_rows`/`new_key_rows` with the rotary planes. The value
+    /// planes are unaffected — V is never rotated, so `cached_value`/
+    /// `new_value` already carry the full `head_dim` width regardless of
+    /// `rotary_dim`.
     CachedAttention {
         operands: BoundOperands,
         query_rows: u64,
@@ -265,6 +287,7 @@ pub enum BoundOpKind {
         kv_heads: u64,
         query_groups: u64,
         head_dim: u64,
+        rotary_dim: u64,
         scale: f32,
         cached_lower_inclusive: i64,
         new_upper_inclusive: i64,
@@ -644,6 +667,7 @@ impl BoundOp {
                 kv_heads,
                 query_groups,
                 head_dim,
+                rotary_dim,
                 scale,
                 cached_lower_inclusive,
                 new_upper_inclusive,
@@ -655,6 +679,7 @@ impl BoundOp {
                 kv_heads: *kv_heads,
                 query_groups: *query_groups,
                 head_dim: *head_dim,
+                rotary_dim: *rotary_dim,
                 scale: *scale,
                 cached_lower_inclusive: *cached_lower_inclusive,
                 new_upper_inclusive: *new_upper_inclusive,
@@ -3026,6 +3051,10 @@ fn cached_attention_candidates(
                 kv_heads: query_shape[1],
                 query_groups: query_shape[2],
                 head_dim,
+                // this matcher recognizes only the flat two-term score
+                // (`attention_score_sources`'s own doc) -- full rotary,
+                // never a pass plane.
+                rotary_dim: head_dim,
                 scale: scale_value,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
@@ -3299,6 +3328,10 @@ fn cached_attention_single_range_candidates(
                 kv_heads: query_shape[1],
                 query_groups: query_shape[2],
                 head_dim,
+                // this matcher recognizes only the flat two-term score
+                // (`attention_score_sources`'s own doc) -- full rotary,
+                // never a pass plane.
+                rotary_dim: head_dim,
                 scale: scale_value,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
@@ -5168,6 +5201,7 @@ mod tests {
             kv_heads: 0,
             query_groups: 0,
             head_dim: 0,
+            rotary_dim: 0,
             scale: 0.0,
             cached_lower_inclusive: 0,
             new_upper_inclusive: 0,

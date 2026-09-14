@@ -279,10 +279,48 @@ pub fn stream_cached_attention_split(
     true
 }
 
+/// One un-rotated, non-split key/query plane
+/// (`proxima_tensor::bind::BoundOpKind::CachedAttention`'s own doc): a
+/// partial-rotary head (`rotary_dim < head_dim`, qwen35's dense attention)
+/// contributes this extra additive term to the score alongside the rotary
+/// planes `stream_cached_attention_split_gqa` already scores. Row-major
+/// `[rows, pass_dim]`, same row count as the matching rotary plane; no
+/// even/odd split, since the pass plane is never rotated.
+pub struct CachedAttentionPassPlane<'buffer> {
+    pub query: &'buffer [f32],
+    pub cached_key: &'buffer [f32],
+    pub new_key: &'buffer [f32],
+}
+
+/// The rotated width per head plus its optional pass-plane companion,
+/// bundled into one parameter the same way [`cpu::OperandSpan`]-style
+/// bundling cut a prior arity-limit failure (`docs/discipline.md` ROW 3
+/// addendum) — `rotary_dim` and `pass` always travel together (`pass` is
+/// `Some` if and only if `rotary_dim < extents.head_dim`), so bundling them
+/// is a data grouping, not a new algebra type.
+pub struct CachedAttentionRotary<'buffer> {
+    pub rotary_dim: u64,
+    pub pass: Option<CachedAttentionPassPlane<'buffer>>,
+}
+
+/// The scalar attention domain [`stream_cached_attention_split_gqa`] scores
+/// with — bundled with [`CachedAttentionRotary`] for the same arity reason.
+pub struct CachedAttentionScore {
+    pub scale: f32,
+    pub bands: [CausalBand; 2],
+}
+
 /// GQA form of `stream_cached_attention_split`. Each query row contains
 /// `kv_heads * query_groups` heads, while each key/value row contains one
 /// vector per KV head. The output is laid out as `[query, kv_head, group,
 /// head_dim]`, matching the cached layer's `sugd` domain.
+///
+/// `rotary.rotary_dim` is the rotated width per head, `extents.head_dim`
+/// when every caller today rotates the full head (`rotary_dim ==
+/// extents.head_dim`, byte-identical to this function's pre-partial-rotary
+/// behavior); `rotary.pass` carries the extra `extents.head_dim -
+/// rotary_dim` un-rotated columns a partial-rotary caller (qwen35) scores
+/// alongside the rotary planes, and is `None` in every existing caller.
 #[must_use]
 pub fn stream_cached_attention_split_gqa(
     queries: [&[f32]; 2],
@@ -290,17 +328,22 @@ pub fn stream_cached_attention_split_gqa(
     values: [&[f32]; 2],
     output: &mut [f32],
     extents: AttentionExtents,
-    scale: f32,
-    bands: [CausalBand; 2],
+    rotary: CachedAttentionRotary<'_>,
+    score: CachedAttentionScore,
 ) -> bool {
+    let CachedAttentionRotary { rotary_dim, pass } = rotary;
+    let CachedAttentionScore { scale, bands } = score;
     if extents.head_dim == 0
-        || !extents.head_dim.is_multiple_of(2)
+        || rotary_dim == 0
+        || rotary_dim > extents.head_dim
+        || !rotary_dim.is_multiple_of(2)
         || extents.kv_heads == 0
         || extents.query_groups == 0
     {
         return false;
     }
-    let pair_dim = extents.head_dim / 2;
+    let pair_dim = rotary_dim / 2;
+    let pass_dim = extents.head_dim - rotary_dim;
     let query_count = extents
         .query_rows
         .checked_mul(extents.kv_heads)
@@ -361,8 +404,29 @@ pub fn stream_cached_attention_split_gqa(
     {
         return false;
     }
+    let pass_query_width = query_count.checked_mul(pass_dim);
+    let pass_cached_width = cached_key_width.checked_mul(pass_dim);
+    let pass_new_width = new_key_width.checked_mul(pass_dim);
+    let (Some(pass_query_width), Some(pass_cached_width), Some(pass_new_width)) =
+        (pass_query_width, pass_cached_width, pass_new_width)
+    else {
+        return false;
+    };
+    match (pass_dim > 0, &pass) {
+        (true, None) | (false, Some(_)) => return false,
+        (true, Some(plane)) => {
+            if plane.query.len() != pass_query_width as usize
+                || (!cached_range_empty && plane.cached_key.len() != pass_cached_width as usize)
+                || plane.new_key.len() != pass_new_width as usize
+            {
+                return false;
+            }
+        }
+        (false, None) => {}
+    }
 
     let pair_dim = pair_dim as usize;
+    let pass_dim = pass_dim as usize;
     let head_dim = extents.head_dim as usize;
     let kv_heads = extents.kv_heads as usize;
     let query_groups = extents.query_groups as usize;
@@ -377,16 +441,19 @@ pub fn stream_cached_attention_split_gqa(
                 let mut running_max = f32::NEG_INFINITY;
                 let mut running_sum = 0.0;
 
-                for (range_index, (keys_even, keys_odd, values, key_rows)) in [
+                let pass_query_start = (query_row * kv_heads * query_groups + query_head) * pass_dim;
+                for (range_index, (keys_even, keys_odd, pass_key, values, key_rows)) in [
                     (
                         keys[0][0],
                         keys[0][1],
+                        pass.as_ref().map(|plane| plane.cached_key),
                         values[0],
                         extents.cached_key_rows as usize,
                     ),
                     (
                         keys[1][0],
                         keys[1][1],
+                        pass.as_ref().map(|plane| plane.new_key),
                         values[1],
                         extents.new_key_rows as usize,
                     ),
@@ -412,6 +479,13 @@ pub fn stream_cached_attention_split_gqa(
                                 * keys_even[key_start + dimension]
                                 + queries[1][query_start + dimension]
                                     * keys_odd[key_start + dimension];
+                        }
+                        if let (Some(pass_query), Some(pass_key)) = (&pass, pass_key) {
+                            let pass_key_start = (key_row * kv_heads + kv_head) * pass_dim;
+                            for dimension in 0..pass_dim {
+                                score += pass_query.query[pass_query_start + dimension]
+                                    * pass_key[pass_key_start + dimension];
+                            }
                         }
                         let score = score * scale;
                         let value_start = (key_row * kv_heads + kv_head) * head_dim;
@@ -607,17 +681,23 @@ mod tests {
             [&[2.0, 4.0][..], &[6.0, 8.0][..]],
             &mut output,
             extents,
-            1.0,
-            [
-                CausalBand {
-                    lower_inclusive: -1,
-                    upper_inclusive: 0,
-                },
-                CausalBand {
-                    lower_inclusive: -1,
-                    upper_inclusive: 0,
-                },
-            ],
+            CachedAttentionRotary {
+                rotary_dim: 2,
+                pass: None,
+            },
+            CachedAttentionScore {
+                scale: 1.0,
+                bands: [
+                    CausalBand {
+                        lower_inclusive: -1,
+                        upper_inclusive: 0,
+                    },
+                    CausalBand {
+                        lower_inclusive: -1,
+                        upper_inclusive: 0,
+                    },
+                ],
+            },
         ));
         let first_weight = 1.0f32.exp();
         let weighted_first = (first_weight * 2.0 + 6.0) / (first_weight + 1.0);
@@ -684,8 +764,14 @@ mod tests {
             [&value[..], &value[..]],
             &mut output_old,
             extents_old,
-            1.0,
-            bands_old,
+            CachedAttentionRotary {
+                rotary_dim: 2,
+                pass: None,
+            },
+            CachedAttentionScore {
+                scale: 1.0,
+                bands: bands_old,
+            },
         ));
         assert!(stream_cached_attention_split_gqa(
             [&query_even[..], &query_odd[..]],
@@ -693,8 +779,14 @@ mod tests {
             [&value[..], &value[..]],
             &mut output_new,
             extents_new,
-            1.0,
-            bands_new,
+            CachedAttentionRotary {
+                rotary_dim: 2,
+                pass: None,
+            },
+            CachedAttentionScore {
+                scale: 1.0,
+                bands: bands_new,
+            },
         ));
         assert_eq!(output_old, output_new);
     }
