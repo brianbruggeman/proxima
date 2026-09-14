@@ -31202,3 +31202,98 @@ wall-clock ceiling) -- next slice: re-run the real-model
 TRUSTWORTHY `operand_bytes` number for the grouped arm, and profile
 `gpu_exec` directly (Metal counters, not the byte estimate) to trace the
 82.1 ms.
+
+## ROW 545 -- direct addressing for the grouped gate/up reduce, re-landed and re-reverted: TTNT still regresses
+
+ROW 544's residual named the suspect: the grouped GATE/UP reduce
+(`output_extents = [1, selected=8, out=512]`, reduce axis 2048)
+has TWO surviving output axes once the reduce dim folds out, so
+`packed_row_direct_output_axis` (`msl.rs:5942`, `None` on anything but
+exactly one non-unit axis) declines and `push_packed_row_group_bases`
+(`msl.rs:6002`) falls to its general `%`/`/` decomposition arm
+(`msl.rs:6066-6118` pre-fix) instead of the single-axis fast branch
+`DOWN`'s per-route reduce already takes.
+
+**Fix** (`omega/src/msl.rs`, `omega/src/identity.rs`): added
+`packed_row_direct_grouped_axes` (`msl.rs:5971`), the two-axis sibling of
+`packed_row_direct_output_axis` -- walks `output_axes` from the innermost
+entry backward, skips unit-extent axes, and returns the `(selected, out)`
+pair when exactly two axes are non-unit. `push_packed_row_group_bases`
+now tries this before falling to the general arm: when `out %
+rows_per_simdgroup == 0` (a threadgroup never straddles two experts,
+since `group_first` is always a multiple of `rows`), `expert_slot` and
+`out_row_base` are computed ONCE per group (`expert_slot = group_first /
+out_extent`, `out_row_base = group_first % out_extent`) instead of once
+per thread via the generic decomposition, and each `q`'s `out_row =
+out_row_base + q` is a plain add. Addressing then sums exactly two stride
+terms (`expert_slot * weight_selected_stride + out_row *
+weight_out_stride`) instead of walking every output axis. Gather fetch
+(`push_cooperative_gather_fetch`) is unchanged -- it still reads
+`coord_q_cache[q]`, now populated directly instead of via `%`/`/`.
+Cache-key correctness: `packed_row_block_grouped_axes` (`msl.rs`, mirrors
+`packed_row_block_direct_axis`) and `MetalOnlyExtras::
+packed_row_block_grouped_axes` (`identity.rs:87`) fold the `(selected,
+out)` pair (as `_dg{selected}_{out}`) into `kernel_identity` so a binding
+that takes the fast path and one that falls back on the `out %
+rows_per_simdgroup != 0` check never collide in the pipeline cache --
+without this, the two would share a `kernel_cache_key` (both have
+`packed_row_block_direct_axis == None`) while emitting different MSL.
+
+**Gates:** `cargo nextest run -p omega --features metal,instrument
+--test-threads 4`: 314/314 passed, 12 skipped (including the
+`qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down`
+census test, 289 s, dominated by quantizing three 256-expert Q4_K stacks).
+`cargo clippy -p omega --features metal,instrument --all-targets`: 0
+warnings. `cargo check -p omega --features wgpu-backend,cuda
+--all-targets`: clean. Committed as `perf(omega): direct row addressing
+for grouped selected-expert packed reduces` (main).
+
+**Re-land attempt** (`git revert --no-edit 07e1fad8`, restoring
+`append_moe_ffn`'s `MoeProjectionStrategy::GroupedGateUp` default and the
+`grouped_gathered_expert_product` call site -- conflict-resolved against
+`omega/src/metal.rs`'s intervening test-rebuild commit, `spec.rs` diff
+verified byte-identical to the original `7aa23eee`): `cargo nextest run -p
+proxima-tensor --test-threads 4`: 627/627 passed, 8 skipped. `cargo build
+--release --example gguf_generate --features
+proxima-model-interop/metal,proxima-model-interop/instrument`: clean.
+
+**Real model** (same fixture/prompt/env as ROW 543):
+
+| arm | TTNT ms | gpu_exec ms (step 8) | encode_dispatch_calls (step 8) | reduce-packed-row-blocked op_count / bytes | reduce-cooperative op_count / bytes |
+|---|---|---|---|---|---|
+| baseline (ROW 542/543, per-route) | 57.818 | 43.915 | 4,264 | 1,211 / (counter bogus) | 1,281 / 257 MB |
+| ROW 543 grouped gate/up, general addressing | 76.364 | 82.1 | 4,744 | -- | -- |
+| ROW 545 grouped gate/up, direct addressing (this row) | 74.909 | 82.224 | 4,744 | 651 / 1,877,245,952 | 1,191 / 256,409,504 |
+
+Generated text: `"<think>\n\n</think>\n\nThe capital of France is
+**Paris**."` -- correct. `gpu_exec_ms` (82.224) and
+`encode_dispatch_calls` (4,744) are within noise of ROW 543's
+general-addressing run (82.1 ms / 4,744) -- the direct-axis fix removed
+the `%`/`/` decomposition from the grouped reduce's per-thread preamble
+but left both the dispatch count and the measured wall-clock cost
+unchanged at the real model's scale. The addressing scaffolding ROW
+350/351 traced as ~5 ms at the single-axis decode-matvec shape is not the
+dominant cost here; `op_profile_kind`'s own breakdown (`elementwise`
+214 ms, `reduce-cooperative` 331 ms, `reduce-packed-row-blocked` 212 ms,
+cumulative over 8 steps) points at `reduce-cooperative` and `elementwise`
+as the larger buckets, neither touched by this fix -- unexplained by this
+row, left as residual.
+
+**Decision (owner's, not asserted here as settled):** TTNT 74.909 ms is
+not < the 57.818 ms baseline threshold this row was gated on. Per the
+pre-agreed decision rule, the re-land is reverted again
+(`git revert --no-edit <reapply sha>`, clean, `spec.rs` diff against
+`07e1fad8` verified 0 lines) while the direct-addressing fix itself stays
+on main -- it is correct (314/314 omega tests, byte-identical single-axis
+DOWN path unaffected, cache-key disambiguated) and measurably removes the
+decomposition instructions it targeted, but does not move the real-model
+TTNT because the regression's dominant cost lives elsewhere.
+
+**Residual, left open:** the 82 ms `gpu_exec` / 4,744-dispatch-count
+regression from ROW 543 persists unchanged after this fix. Next
+suspect, per `op_profile_kind`'s own numbers: `reduce-cooperative`
+(331 ms cumulative, up from 257 MB/1,281 ops baseline territory) and
+`elementwise` (214 ms) rather than the packed-row addressing path. Needs
+a Metal GPU counter capture (not the byte/dispatch-count proxy) per op
+kind to trace which specific kernel's dispatch count or per-dispatch cost
+grew when gate/up switched from per-route to grouped.
