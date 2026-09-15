@@ -1395,8 +1395,33 @@ impl BoundOpBuilder {
         let Some(children) = children else {
             return Ok(());
         };
+        // `composed_packed_product_activation`'s own admission contract
+        // (ROW 431) keeps a packed-weight operand fused specifically
+        // because it is broadcast over the reduce's own leading (batch)
+        // axis -- `run_reduce_quantized`'s fast path is DESIGNED to stream
+        // that operand's rows once and reuse them across every batch
+        // position. The size-only test below cannot see that: it sees a
+        // smaller-than-reduce extent and quarantines it, undoing ROW 431's
+        // fusion and forcing the dense fallback (which then materializes
+        // the packed weight's raw bytes into a buffer addressed by its
+        // DECLARED axis order -- not the packed native row-major order
+        // `materialize_quantized_weight_output` actually writes -- a
+        // second, independent defect the fallback exposes but does not
+        // cause). `packed_and_other_operand` (not
+        // `composed_packed_product_activation` itself) because the latter
+        // additionally requires the OTHER side still be a held elementwise,
+        // which a plain activation `Op::Input` leaf never is -- irrelevant
+        // to quarantine's own question of which side must stay fused.
+        // Checked at every recursion level, not only the top, since a
+        // packed product can repeat several levels down.
+        let packed_operand = packed_and_other_operand(&self.held, &self.packed_mapping_subtree, node)
+            .map(|(packed_node, _)| packed_node);
         for (child, _map) in children {
             if !self.held.borrow().contains_key(&child) {
+                continue;
+            }
+            if packed_operand == Some(child) {
+                self.quarantine_broadcast_operands(child, reduce_extent, shapes, emitted)?;
                 continue;
             }
             let child_extent: u64 = shapes.of(child).iter().product();
@@ -1662,6 +1687,26 @@ fn composed_packed_product_activation(
     packed_mapping_subtree: &RefCell<Vec<bool>>,
     node: NodeId,
 ) -> Option<NodeId> {
+    let (_, other_node) = packed_and_other_operand(held, packed_mapping_subtree, node)?;
+    held.borrow().contains_key(&other_node).then_some(other_node)
+}
+
+/// [`composed_packed_product_activation`]'s own packed/other split, without
+/// that function's extra "the other operand is still a held elementwise"
+/// requirement -- [`BoundOpBuilder::quarantine_broadcast_operands`] needs the
+/// PACKED side (never the other side, and regardless of whether the other
+/// side is a plain leaf or its own held chain) so it can exempt exactly the
+/// operand [`crate::cpu::run_reduce_quantized`]'s fast path is designed to
+/// broadcast, at every recursion depth -- not only when
+/// `composed_packed_product_activation`'s stricter contract also happens to
+/// hold. Same one-of-two-operands-is-packed test as that function; kept as
+/// the one shared derivation so the two callers cannot drift on which side
+/// counts as "packed".
+fn packed_and_other_operand(
+    held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    packed_mapping_subtree: &RefCell<Vec<bool>>,
+    node: NodeId,
+) -> Option<(NodeId, NodeId)> {
     let (body, operands) = held
         .borrow()
         .get(&node)
@@ -1696,14 +1741,11 @@ fn composed_packed_product_activation(
     if first_packed == second_packed {
         return None;
     }
-    let other_node = if first_packed {
-        *second_node
+    Some(if first_packed {
+        (*first_node, *second_node)
     } else {
-        *first_node
-    };
-    held.borrow()
-        .contains_key(&other_node)
-        .then_some(other_node)
+        (*second_node, *first_node)
+    })
 }
 
 fn packed_mapping_in_held_tree(

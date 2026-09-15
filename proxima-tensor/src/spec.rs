@@ -20919,6 +20919,227 @@ value = 1.0
         assert_eq!(shapes.of(logits), &[1, 100]);
     }
 
+    /// Real-checkpoint regression: `qwen35moe` layer 3 (the first
+    /// full-attention layer), position 0 -- the q/gate projection chain
+    /// [`append_qwen35_dense_attention_only_with_taps`] builds (`qg_product`
+    /// -> `qg_raw` reduce -> [`per_head_channel_range`] narrow, spec.rs
+    /// 4771-4794) used to return UNRELATED row-0 values between a 13-row
+    /// prefill evaluation and a 1-row evaluation of the identical row, even
+    /// though the two evaluations' row-0 input is bit-identical --
+    /// `bind::BoundOpBuilder::quarantine_broadcast_operands`'s own
+    /// size-only heuristic (`child_extent < reduce_extent`) force-materialized
+    /// the packed `Q4_K` weight side of the product whenever the reduce's
+    /// OWN leading (batch) axis made the fused weight subtree's extent
+    /// smaller than the whole reduce's extent -- which is every multi-row
+    /// prefill -- undoing the fusion `run_reduce_quantized`'s fast path
+    /// needs and falling back to `materialize_quantized_weight_output`'s
+    /// dequantize-without-transpose, read back through the weight's
+    /// DECLARED (mismatched) axis order. Fixed in `bind.rs` by exempting the
+    /// packed operand of a `composed_packed_product_activation`-shaped
+    /// product from quarantine at every recursion depth. Real
+    /// `qwen3.6:35b-a3b` dims: `embedding = 2048`, `query_heads = 16`,
+    /// `attn_head_dim = 256` (`omega/tests/cached_attention_partial_rotary_parity.rs`'s
+    /// own `kv_heads = 2, group = 8 -> 16 query heads`), `attn_q.weight`
+    /// packed `[Q | gate]` per head, Q4_K quantized, reshaped through the
+    /// SAME broadcast-multiply-by-ones trick production uses
+    /// (`proxima-model-interop/src/qwen35moe/program.rs`'s own `wq_flat` ->
+    /// `wq_gate`) -- the real production shape, not a shrunk stand-in.
+    #[test]
+    fn qg_product_qg_raw_per_head_channel_range_matches_between_thirteen_row_and_one_row_eval() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        const EMBEDDING: usize = 2048;
+        const QUERY_HEADS: usize = 16;
+        const ATTN_HEAD_DIM: usize = 256;
+        const QG_WIDTH: usize = ATTN_HEAD_DIM * 2;
+        const ROWS: usize = 13;
+
+        let normed_data = synth_row(7, ROWS * EMBEDDING, 1.0);
+        let weight_native = synth_row(11, EMBEDDING * QUERY_HEADS * QG_WIDTH, 1.0);
+
+        let blocks_per_row = EMBEDDING / QK_K;
+        let row_bytes = blocks_per_row * BLOCK_BYTES;
+        let mut packed = alloc::vec![0u8; QUERY_HEADS * QG_WIDTH * row_bytes];
+        for (row, out_block) in weight_native
+            .as_chunks::<EMBEDDING>()
+            .0
+            .iter()
+            .zip(packed.chunks_exact_mut(row_bytes))
+        {
+            quantize(row, out_block).expect("embedding is a QK_K multiple");
+        }
+
+        fn build(program: &mut Vec<Op>, sequence: Extent) -> (NodeId, NodeId) {
+            let normed = input_leaf(
+                program,
+                DType::Float32,
+                alloc::vec![sequence, Extent::Static(EMBEDDING as u32)],
+                "normed",
+            );
+            let wq_flat = input_leaf(
+                program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EMBEDDING as u32),
+                    Extent::Static((QUERY_HEADS * QG_WIDTH) as u32)
+                ],
+                "wq_flat",
+            );
+            let qg_head_ones = op::append(
+                program,
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![
+                        Extent::Static(QUERY_HEADS as u32),
+                        Extent::Static(QG_WIDTH as u32)
+                    ],
+                    value: 1.0,
+                },
+            );
+            let wq_gate = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[
+                    (
+                        wq_flat,
+                        alloc::format!("i,{QG_WIDTH}*h+c->ihc").as_str(),
+                    ),
+                    (qg_head_ones, "hc->ihc"),
+                ],
+            )
+            .expect("wq_gate reshape lowers");
+            let qg_product = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(normed, "si->shci"), (wq_gate, "ihc->shci")],
+            )
+            .expect("qg_product lowers");
+            let qg_raw = reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                qg_product,
+                "shci->shci",
+                "shc->shci",
+            )
+            .expect("qg_raw lowers");
+            let q_split =
+                per_head_channel_range(program, qg_raw, "h", QG_WIDTH as u32, 0, ATTN_HEAD_DIM as u32)
+                    .expect("q_split lowers");
+            (qg_raw, q_split)
+        }
+
+        let mut wide_program = Vec::new();
+        let (qg_raw_wide, q_split_wide) = build(&mut wide_program, Extent::Symbolic(0));
+        let wide_result = crate::cpu::evaluate_quantized_named(
+            &wide_program,
+            &[ROWS as u64],
+            &[
+                ("normed", crate::cpu::QuantizedBlock::Float32(&normed_data)),
+                ("wq_flat", crate::cpu::QuantizedBlock::Q4K(&packed)),
+            ],
+            &[qg_raw_wide, q_split_wide],
+        )
+        .expect("13-row evaluation lowers and executes");
+        let (wide_q_split, _) = wide_result.get(q_split_wide).expect("q_split present");
+        let (wide_qg_raw, _) = wide_result.get(qg_raw_wide).expect("qg_raw present");
+
+        let per_row_width = QUERY_HEADS * ATTN_HEAD_DIM;
+        let qg_raw_row_width = QUERY_HEADS * QG_WIDTH;
+
+        for row in 0..ROWS {
+            let row_input = normed_data[row * EMBEDDING..(row + 1) * EMBEDDING].to_vec();
+            let mut single_program = Vec::new();
+            let (qg_raw_single, q_split_single) = build(&mut single_program, Extent::Symbolic(0));
+            let single_result = crate::cpu::evaluate_quantized_named(
+                &single_program,
+                &[1u64],
+                &[
+                    ("normed", crate::cpu::QuantizedBlock::Float32(&row_input)),
+                    ("wq_flat", crate::cpu::QuantizedBlock::Q4K(&packed)),
+                ],
+                &[qg_raw_single, q_split_single],
+            )
+            .expect("1-row evaluation lowers and executes");
+            let (single_q_split, _) = single_result.get(q_split_single).expect("q_split present");
+            let (single_qg_raw, _) = single_result.get(qg_raw_single).expect("qg_raw present");
+
+            // independent ground truth: `weight_native` is already in the
+            // NATIVE [row=(h*QG_WIDTH+c)][k=embedding] convention
+            // `dequantize_row`'s own physical byte order preserves (row
+            // outer, k contiguous) -- computed straight from the
+            // PRE-quantization f64 data, so this only carries Q4_K's own
+            // quantization noise (~1e-2), never the interpreter's own
+            // addressing.
+            let expected_first_four: Vec<f64> = (0..4)
+                .map(|c| {
+                    (0..EMBEDDING)
+                        .map(|embedding_index| {
+                            f64::from(row_input[embedding_index])
+                                * f64::from(weight_native[c * EMBEDDING + embedding_index])
+                        })
+                        .sum::<f64>()
+                })
+                .collect();
+
+            let wide_qg_raw_row = &wide_qg_raw[row * qg_raw_row_width..(row + 1) * qg_raw_row_width];
+            for (channel, expected) in expected_first_four.iter().enumerate() {
+                let ground_truth_relative =
+                    (f64::from(single_qg_raw[channel]) - expected).abs() / expected.abs().max(1.0);
+                assert!(
+                    ground_truth_relative <= 5e-3,
+                    "row {row} channel {channel}: single_qg_raw={} disagrees with the \
+                     independent pre-quantization hand computation expected={expected} beyond \
+                     Q4_K's own quantization noise floor (relative={ground_truth_relative})",
+                    single_qg_raw[channel]
+                );
+            }
+
+            let qg_raw_l2: f64 = wide_qg_raw_row
+                .iter()
+                .map(|value| f64::from(*value).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let qg_raw_max_abs_diff = wide_qg_raw_row
+                .iter()
+                .zip(single_qg_raw.iter())
+                .map(|(wide, single)| f64::from((wide - single).abs()))
+                .fold(0.0_f64, f64::max);
+            let qg_raw_relative = qg_raw_max_abs_diff / qg_raw_l2.max(1e-12);
+            assert!(
+                qg_raw_relative <= 1e-5,
+                "BISECT qg_raw row {row}: max_abs_diff={qg_raw_max_abs_diff} l2_norm={qg_raw_l2} \
+                 relative={qg_raw_relative} wide[..4]={:?} single[..4]={:?} -- the divergence is \
+                 already present at qg_raw, before per_head_channel_range narrows it",
+                &wide_qg_raw_row[..4],
+                &single_qg_raw[..4]
+            );
+
+            let wide_row = &wide_q_split[row * per_row_width..(row + 1) * per_row_width];
+            let l2_norm: f64 = wide_row
+                .iter()
+                .map(|value| f64::from(*value).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let max_abs_diff = wide_row
+                .iter()
+                .zip(single_q_split.iter())
+                .map(|(wide, single)| f64::from((wide - single).abs()))
+                .fold(0.0_f64, f64::max);
+            let relative = max_abs_diff / l2_norm.max(1e-12);
+            assert!(
+                relative <= 1e-5,
+                "row {row}: max_abs_diff={max_abs_diff} l2_norm={l2_norm} relative={relative} \
+                 wide[..4]={:?} single[..4]={:?}",
+                &wide_row[..4],
+                &single_q_split[..4]
+            );
+        }
+    }
+
     /// [`the_whole_qwen35_forward_pass_infers_at_real_dimensions`]'s own
     /// `(100, 8, 16, 2, 1, 4, 4, 2, 2, 2, 1, 4, 3, 1e-5)` never caught the
     /// `attn_q`/`attn_k`/`attn_v`/`attn_output` shape defect this test is
