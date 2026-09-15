@@ -2162,11 +2162,20 @@ impl<'file> LoadedModel<'file> {
                     // reopened even on an early `?` return.
                     let mut expert_slab_guard = lock_expert_slab(&self.expert_slab);
 
+                    // the routed segment plan `qwen35moe_pre_gather_plan` builds
+                    // is sliced from `self.program`'s own node ids
+                    // (`self.qwen35moe_layer_diagnostics`, `self.logits_root`);
+                    // `active_program` is a DIFFERENT graph during the
+                    // one-evaluation prefill batch, so those node ids do not
+                    // resolve against it -- ROW 591/592's `NodeId(6540)`
+                    // "operand buffer missing" (a real weight input leaf
+                    // reachable only in `active_program`'s own numbering).
                     let pre_gather = qwen35moe_pre_gather_enabled(
                         serving_config.qwen35moe_pre_gather,
                         self.architecture_impl
                             .map(|architecture| architecture.name()),
-                    ) && !monolithic_high_mmap_requested;
+                    ) && !monolithic_high_mmap_requested
+                        && !one_evaluation_prefill;
                     #[cfg(feature = "metal")]
                     let monolithic_all_low = qwen35moe_monolithic_all_low_enabled(
                         pre_gather,

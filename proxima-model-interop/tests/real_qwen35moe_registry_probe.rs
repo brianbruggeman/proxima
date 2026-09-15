@@ -101,3 +101,110 @@ async fn builtin_registry_routes_real_qwen35moe_header_with_per_layer_kv_configu
         "LoadedModel preserves every bound qwen35moe layer boundary"
     );
 }
+
+/// Header-only static-plan probe for ROW 591's `NodeId(6540)`
+/// `"operand buffer missing at evaluation time"` failure: builds the SAME
+/// width-13 one-evaluation prefill symbolic program
+/// `decode.rs`'s `one_evaluation_prefill_programs` builds
+/// (`qwen35moe_forward_program_at_width`, purely symbolic -- `input_leaf`
+/// placeholders, no tensor bytes) and runs `bind::bind` +
+/// `dead_resolved_nodes` + `node_retirement` + `node_last_reader` over it
+/// directly, the exact admission pipeline `evaluate_named`/`quantized_eval`
+/// run before ever touching a weight byte. Never faults the multi-GB expert
+/// pages -- same header-only contract as the test above.
+#[proxima::test]
+#[ignore = "requires a real, local qwen3.6:35b-a3b GGUF blob; set PROXIMA_QWEN35MOE_GGUF"]
+async fn real_qwen35moe_width_13_plan_names_node_6540() {
+    let Ok(path) = std::env::var("PROXIMA_QWEN35MOE_GGUF") else {
+        eprintln!("skipping: PROXIMA_QWEN35MOE_GGUF not set");
+        return;
+    };
+    let file = File::open(&path).unwrap_or_else(|error| panic!("open {path}: {error}"));
+    let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("mmap the real checkpoint read-only");
+    let file_bytes: &[u8] = &mapping;
+
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's own GGUF header");
+    let architecture = proxima_model_interop::qwen35moe::from_metadata(&parsed)
+        .expect("qwen35moe hparams preserve the hybrid layer configuration");
+
+    let (program, roots, _layer_roots, _moe_sites, _diagnostics) =
+        proxima_model_interop::qwen35moe::qwen35moe_forward_program_at_width(&architecture, Some(13))
+            .expect("width-13 one-evaluation prefill program builds from header-only hparams");
+    eprintln!(
+        "width-13 program: ops={} logits_root={:?}",
+        program.len(),
+        roots.logits
+    );
+
+    let second_target = proxima_tensor::NodeId(6943);
+    eprintln!(
+        "node 6943 raw op = {:?}",
+        program.get(second_target.0 as usize)
+    );
+
+    let target = proxima_tensor::NodeId(6540);
+    assert!(
+        (target.0 as usize) < program.len(),
+        "node 6540 must exist in a {}-op program",
+        program.len()
+    );
+    eprintln!("node 6540 raw op = {:?}", program[target.0 as usize]);
+
+    let symbols = [13u64, 13u64];
+    let shapes = proxima_tensor::shape::infer(&program, &symbols)
+        .expect("shape inference over the real-width program");
+    let resolved = proxima_tensor::bind::bind(
+        &program,
+        &shapes,
+        &[roots.logits],
+        proxima_tensor::NumericPolicy::bit_exact(),
+    )
+    .expect("bind admits the real width-13 program");
+    eprintln!("resolved.len() = {}", resolved.len());
+
+    let bound_position = resolved.iter().position(|computed| computed.node == target);
+    match bound_position {
+        Some(position) => {
+            eprintln!(
+                "node 6540 IS materialized at resolved position {position}: kind={:?} operands={:?}",
+                resolved[position].kind,
+                resolved[position]
+                    .operands()
+                    .iter()
+                    .map(|(source, ..)| source.0)
+                    .collect::<Vec<_>>()
+            );
+        }
+        None => {
+            eprintln!("node 6540 is NEVER materialized in `resolved` (absorbed or dead)");
+        }
+    }
+
+    let dead = proxima_tensor::dead_resolved_nodes(&resolved, &[roots.logits]);
+    eprintln!("node 6540 in dead_resolved_nodes = {}", dead.contains(&target));
+
+    let last_reader = proxima_tensor::node_last_reader(&resolved, program.len());
+    let reader_position = last_reader[target.0 as usize];
+    eprintln!(
+        "node 6540 last-reader resolved position = {} (u32::MAX means never read)",
+        reader_position
+    );
+
+    let mut producer_position = None;
+    let mut consumer_positions = Vec::new();
+    for (position, computed) in resolved.iter().enumerate() {
+        if computed.node == target {
+            producer_position = Some(position);
+        }
+        if computed
+            .operands()
+            .iter()
+            .any(|(source, ..)| *source == target)
+        {
+            consumer_positions.push(position);
+        }
+    }
+    eprintln!(
+        "node 6540 producer_position={producer_position:?} consumer_positions={consumer_positions:?}"
+    );
+}
