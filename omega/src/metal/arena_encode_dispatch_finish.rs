@@ -306,10 +306,11 @@ pub(super) fn arena_placement(
 ) -> Result<Option<(&MetalBuffer, usize)>, MetalError> {
     if plan.arena.get().is_none() {
         let (device, _queue) = device_and_queue()?;
+        let pinned_retires = resident_pinned_retires(plan);
         let arena = build_buffer_arena(
             &device,
             &plan.prepared.resolved,
-            &plan.prepared.retires,
+            &pinned_retires,
             &plan.prepared.effective_outputs,
         )?;
         // a fresh, still-empty `OnceCell` can only fail to accept this set

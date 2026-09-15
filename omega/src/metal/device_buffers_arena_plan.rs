@@ -1370,6 +1370,53 @@ impl Plan {
             .copied()
             .collect();
     }
+
+    /// Extends [`Self::resident_nodes`] with every `Op::Iota`/`Op::Constant`
+    /// leaf this plan's own `prepared.resolved` dispatches -- both are pure
+    /// functions of their own `extent`/`value` (op.rs's own doc: "nothing
+    /// external binds to it"), so the first call's real dispatch computes a
+    /// value good for the plan's whole life, the same durability promise
+    /// [`Self::mark_resident`] already gives a checkpoint weight. Joining the
+    /// SAME `resident_nodes` set (not a second one) means both consumers of
+    /// that set for free: the retirement loop's own `resident_nodes` check
+    /// (`execute_plan_with_placements`'s own doc) stops dropping this node's
+    /// `device_buffers` entry after the call that computed it, and
+    /// [`resident_pinned_retires`] stops handing its `BufferArena` slot back
+    /// to a later position -- without either site needing to know this node
+    /// is a leaf rather than a checkpoint block.
+    pub fn mark_plan_time_constants_resident(&mut self) {
+        self.resident_nodes.extend(
+            self.prepared
+                .resolved
+                .iter()
+                .filter(|bound| matches!(bound.kind, BoundOpKind::Iota | BoundOpKind::Constant { .. }))
+                .map(|bound| bound.node),
+        );
+    }
+}
+
+/// [`arena_placement`]'s own `retires` argument, filtered so a
+/// [`Plan::resident_nodes`] member (a checkpoint weight OR a
+/// [`Plan::mark_plan_time_constants_resident`] leaf) never has its
+/// `BufferArena` slot handed back to a later position -- [`build_buffer_arena`]
+/// is built exactly once, before `mark_resident`/`mark_plan_time_constants_resident`
+/// ever narrow which nodes must outlive the call that wrote them, so this
+/// filter is the one point downstream of both that actually enforces it. A
+/// plan with no resident node (today's default) allocates nothing extra: the
+/// filter still walks `retires`, but every `contains` check is a `BTreeSet`
+/// miss and the resulting `Vec` is byte-identical to the input.
+pub(super) fn resident_pinned_retires(plan: &Plan) -> Vec<Vec<NodeId>> {
+    plan.prepared
+        .retires
+        .iter()
+        .map(|retired| {
+            retired
+                .iter()
+                .copied()
+                .filter(|node| !plan.resident_nodes.contains(node))
+                .collect()
+        })
+        .collect()
 }
 
 /// The name [`Plan::mark_resident`] proved this node's block input is bound

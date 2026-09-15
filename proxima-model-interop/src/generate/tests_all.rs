@@ -2288,6 +2288,7 @@ pub(super) mod placed_plan_mode_tests {
                 math_mode: omega::metal::MathMode::Safe,
                 numeric_policy: proxima_tensor::NumericPolicy::bit_exact(),
                 dispatch_type: omega::metal::DispatchType::Serial,
+                plan_time_constants: false,
             },
         )
         .expect("plans the identity program under an explicit non-default mode");
@@ -2339,6 +2340,7 @@ pub(super) mod placed_plan_mode_tests {
                 math_mode: omega::metal::MathMode::Safe,
                 numeric_policy: proxima_tensor::NumericPolicy::llama_relaxed(),
                 dispatch_type: omega::metal::DispatchType::Serial,
+                plan_time_constants: false,
             },
         )
         .expect("Safe never needs a permission llama_relaxed() withholds, so narrowing succeeds");
@@ -2373,6 +2375,7 @@ pub(super) mod placed_plan_mode_tests {
                 math_mode: omega::metal::MathMode::Fast,
                 numeric_policy: proxima_tensor::NumericPolicy::bit_exact(),
                 dispatch_type: omega::metal::DispatchType::Serial,
+                plan_time_constants: false,
             },
         ) {
             Ok(_) => panic!(

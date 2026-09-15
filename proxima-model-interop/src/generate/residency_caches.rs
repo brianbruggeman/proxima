@@ -1088,6 +1088,9 @@ pub(super) struct PlanNumerics {
     pub(super) math_mode: omega::metal::MathMode,
     pub(super) numeric_policy: proxima_tensor::NumericPolicy,
     pub(super) dispatch_type: omega::metal::DispatchType,
+    /// `ServingConfig::plan_time_constants` -- [`BackendRuntime::build_placed_plan`]'s
+    /// own doc for how this reaches [`omega::metal::Plan::mark_plan_time_constants_resident`].
+    pub(super) plan_time_constants: bool,
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1193,6 +1196,13 @@ pub(crate) struct BackendRuntime {
     /// effect on `Engine::Gpu`: `plan_named_exact` is a no-op identity on
     /// that arm.
     pub(super) exact_activations: bool,
+    /// `ServingConfig::plan_time_constants`, read once at construction and
+    /// threaded into every freshly-built placed [`omega::metal::Plan`]
+    /// through [`PlanNumerics`] -- same pattern as `math_mode`/`dispatch_type`
+    /// above, gated the same as `placed_plans` since only
+    /// [`Self::build_placed_plan`] reads it.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) plan_time_constants: bool,
 }
 
 #[cfg(feature = "metal")]
@@ -1215,6 +1225,8 @@ impl BackendRuntime {
             plan_hits: 0,
             plan_misses: 0,
             exact_activations: config.exact_activations,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            plan_time_constants: config.plan_time_constants,
         }
     }
 
@@ -1538,6 +1550,7 @@ impl BackendRuntime {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
+            plan_time_constants: self.plan_time_constants,
         };
         let plan = Self::resolve_segment_plan(
             &mut self.placed_segment_plans,
@@ -1593,6 +1606,7 @@ impl BackendRuntime {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
             dispatch_type: omega::metal::DispatchType::Serial,
+            plan_time_constants: self.plan_time_constants,
         };
         let plan = Self::resolve_segment_plan(
             &mut self.placed_segment_plans,
@@ -1651,6 +1665,7 @@ impl BackendRuntime {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
+            plan_time_constants: self.plan_time_constants,
         };
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
@@ -1734,6 +1749,9 @@ impl BackendRuntime {
             &placed_input_nodes,
         )?;
         plan.mark_resident(resident_names);
+        if numerics.plan_time_constants {
+            plan.mark_plan_time_constants_resident();
+        }
         plan.set_math_mode(numerics.math_mode)?;
         plan.set_dispatch_type(numerics.dispatch_type);
         Ok(plan)
@@ -1771,6 +1789,7 @@ impl BackendRuntime {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
+            plan_time_constants: self.plan_time_constants,
         };
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
@@ -1841,6 +1860,7 @@ impl BackendRuntime {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
             dispatch_type: self.dispatch_type,
+            plan_time_constants: self.plan_time_constants,
         };
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
