@@ -16227,5 +16227,141 @@ mod memory_fit_gate_tests {
                 );
             }
         }
+
+        /// Structural companion to the numeric tap sweep above: no
+        /// evaluation, no weight bytes -- [`proxima_tensor::cpu::plan_trace_named`]'s
+        /// own doc ("every decision here depends on `program`/`symbols`/
+        /// `outputs` alone, never on tensor bytes"). Builds the SAME M=13
+        /// one-evaluation program under the PRODUCTION output set (per-layer
+        /// `{qkv_mixed, state_out}` for a GDN layer,
+        /// `generate.rs`'s own `Qwen35LayerRoots::Ssm` root-push, plus the
+        /// final `logits_root` -- never the diagnostic taps
+        /// `one_evaluation_prefill_layer_zero_tap_sweep_on_the_real_checkpoint`
+        /// requests) and lists every node with 2+ live consumers that a
+        /// `raw_op`/"absorbed" or `resolved_node`/"retired" decision folds
+        /// into (or retires against) one specific consumer -- the
+        /// multi-consumer-absorption defect class this whole investigation
+        /// is chasing, independent of which backend later executes the plan.
+        #[test]
+        #[ignore = "requires a real, local qwen3.6:35b-a3b GGUF blob; set PROXIMA_QWEN35MOE_GGUF"]
+        fn plan_trace_reveals_multi_consumer_absorption_at_layer_zero_m13() {
+            let model_path = crate::test_support::qwen35moe_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN35MOE_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen35moe gguf fixture");
+            let model = open_model(&mapped);
+            let hparams = model
+                .qwen35moe_hparams
+                .as_ref()
+                .expect("this checkpoint routes through the qwen35moe registry entry");
+
+            let (program, roots, layer_roots, _moe_sites, _diagnostics) =
+                crate::qwen35moe::qwen35moe_forward_program_at_width(hparams, Some(13))
+                    .expect("static-width program builds");
+
+            let mut production_outputs = alloc::vec![roots.logits];
+            for layer_root in &layer_roots {
+                match layer_root {
+                    proxima_tensor::spec::Qwen35LayerRoots::Attention((even, odd, value)) => {
+                        production_outputs.push(*even);
+                        production_outputs.push(*odd);
+                        production_outputs.push(*value);
+                    }
+                    proxima_tensor::spec::Qwen35LayerRoots::DenseAttention((
+                        first,
+                        second,
+                        pass,
+                        value,
+                    )) => {
+                        production_outputs.push(*first);
+                        production_outputs.push(*second);
+                        production_outputs.push(*pass);
+                        production_outputs.push(*value);
+                    }
+                    proxima_tensor::spec::Qwen35LayerRoots::Ssm {
+                        qkv_mixed,
+                        state_out,
+                    } => {
+                        production_outputs.push(*qkv_mixed);
+                        production_outputs.push(*state_out);
+                    }
+                }
+            }
+
+            let symbols: [u64; 2] = [13, 0];
+            let decisions = proxima_tensor::cpu::plan_trace_named(
+                &program,
+                &symbols,
+                &[],
+                &production_outputs,
+            )
+            .expect("plan traces against the production output set");
+
+            // `readers[source]` = every program position (== `NodeId.0`,
+            // this crate numbers nodes by their own `Vec<Op>` index) that
+            // reads `source` -- the same full-program scan
+            // `live::annotate`/`node_retirement` themselves run, kept as the
+            // raw position list (not just a count or the last one) so a
+            // decision's own `into` position can be checked against the
+            // TRUE last reader, not merely "does 2+ readers exist" (which is
+            // routine and not itself a defect).
+            let mut readers: alloc::collections::BTreeMap<
+                proxima_tensor::op::NodeId,
+                Vec<u32>,
+            > = alloc::collections::BTreeMap::new();
+            for (position, operation) in program.iter().enumerate() {
+                let uses = match operation {
+                    proxima_tensor::Op::Elementwise { operands, .. } => {
+                        operands.iter().map(|(node, _)| *node).collect::<Vec<_>>()
+                    }
+                    proxima_tensor::Op::Reduce(reduce) => alloc::vec![reduce.operand],
+                    proxima_tensor::Op::Input { .. } | proxima_tensor::Op::Iota { .. } => {
+                        Vec::new()
+                    }
+                    proxima_tensor::Op::Constant { .. } => Vec::new(),
+                };
+                for node in uses {
+                    readers.entry(node).or_default().push(position as u32);
+                }
+            }
+
+            let mut violations: Vec<(u32, &'static str, u32, Option<u32>, u32)> = Vec::new();
+            for decision in &decisions {
+                if !matches!(decision.decision, "absorbed" | "retired" | "fused") {
+                    continue;
+                }
+                let Some(node_readers) = readers.get(&decision.node) else {
+                    continue;
+                };
+                if node_readers.len() < 2 {
+                    continue;
+                }
+                let true_last_reader = *node_readers.iter().max().expect("non-empty");
+                let retires_at = decision.into.map_or(u32::MAX, |node| node.0);
+                if retires_at < true_last_reader {
+                    violations.push((
+                        decision.node.0,
+                        decision.decision,
+                        node_readers.len() as u32,
+                        decision.into.map(|node| node.0),
+                        true_last_reader,
+                    ));
+                }
+            }
+            violations.sort_unstable();
+            violations.dedup();
+
+            for (node, decision, consumers, into, true_last_reader) in &violations {
+                std::println!(
+                    "multi_consumer_absorption_violation node={node} decision={decision} \
+                     consumers={consumers} into={into:?} true_last_reader={true_last_reader}"
+                );
+            }
+            std::println!(
+                "multi_consumer_absorption_violation total_flagged={} decisions_scanned={}",
+                violations.len(),
+                decisions.len()
+            );
+        }
     }
 }
