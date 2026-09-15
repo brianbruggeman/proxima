@@ -49,7 +49,7 @@ use proxima_tensor::spec::{
     Qwen35GdnSequenceTail, Qwen35LayerRoots, SsmMixerTaps, append_moe_ffn_from_logits,
     append_qwen35_dense_attention_only_with_taps, append_qwen35_gdn_sequence_tail_with_taps,
     append_qwen35_ssm_mixer_with_taps_and_layout, causal_mask, elementwise, embedding_lookup,
-    input_leaf, reduce, rmsnorm, scalar_constant, symbolic_leaf,
+    input_leaf, reduce, rmsnorm, scalar_constant,
 };
 use proxima_tensor::{DType, Extent, NodeId, Op, ReduceInit, ScalarOp};
 
@@ -229,15 +229,39 @@ pub type Qwen35MoeForwardProgram = (
 pub fn qwen35moe_forward_program(
     architecture: &Architecture,
 ) -> Result<Qwen35MoeForwardProgram, InteropError> {
+    qwen35moe_forward_program_at_width(architecture, None)
+}
+
+/// [`qwen35moe_forward_program`], with the prompt-position axis pinned to a
+/// literal `Extent::Static(width)` instead of the ordinary
+/// `Extent::Symbolic(0)` (`crate::generate::symbols::NEW_COUNT`) every
+/// per-step decode call resolves dynamically. A caller that already knows
+/// the whole prompt's width up front builds THIS variant once for that
+/// width instead: `proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`'s
+/// own M>1 branch only ever fires for a literal `Extent::Static` leading
+/// axis (its own doc on why: the architecture-level symbolic program can
+/// never bake in a Rust-loop-unrolled recurrence whose length is not yet
+/// known), so this is the ONE seam that reaches it -- the ordinary
+/// `Extent::Symbolic(0)` decode program keeps taking the unchanged
+/// single-position path regardless of how many rows `new_count` ever
+/// resolves to.
+pub fn qwen35moe_forward_program_at_width(
+    architecture: &Architecture,
+    width: Option<u32>,
+) -> Result<Qwen35MoeForwardProgram, InteropError> {
     let embedding = architecture.embedding;
     let attn_head_dim = architecture.attn_head_dim;
     let rope_dims = architecture.rope_dims;
     let pairs = rope_dims / 2;
     let pass_dim = attn_head_dim - rope_dims;
+    let x_extent = match width {
+        Some(width) => Extent::Static(width),
+        None => Extent::Symbolic(0),
+    };
 
     let mut program = Vec::new();
 
-    let ids = input_leaf(&mut program, DType::Int32, vec![Extent::Symbolic(0)], "ids");
+    let ids = input_leaf(&mut program, DType::Int32, vec![x_extent], "ids");
     let table = input_leaf(
         &mut program,
         DType::Float32,
@@ -250,7 +274,7 @@ pub fn qwen35moe_forward_program(
     let mut x = embedding_lookup(&mut program, table, ids);
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let eps = input_leaf(&mut program, DType::Float32, vec![x_extent], "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let one = ones;
 
@@ -259,13 +283,13 @@ pub fn qwen35moe_forward_program(
     let cos_new = input_leaf(
         &mut program,
         DType::Float32,
-        vec![Extent::Symbolic(0), Extent::Static(pairs)],
+        vec![x_extent, Extent::Static(pairs)],
         "rope_cos",
     );
     let sin_new = input_leaf(
         &mut program,
         DType::Float32,
-        vec![Extent::Symbolic(0), Extent::Static(pairs)],
+        vec![x_extent, Extent::Static(pairs)],
         "rope_sin",
     );
 
