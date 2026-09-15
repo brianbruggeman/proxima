@@ -9429,6 +9429,19 @@ fn build_matmul_stage_plan<'weights>(
     let rows = usize::try_from(rows_total).map_err(|_| shape_error())?;
     let leading_total = usize::try_from(leading_total_u64).map_err(|_| shape_error())?;
 
+    // decision point: whether the staged-batch plan (vs the plain
+    // run_reduce_quantized path) gets built for this reduce, and the
+    // rows/k/leading it derives -- the shape a multi-row divergence between
+    // this path and run_reduce_quantized's own is diagnosed from.
+    #[cfg(feature = "instrument")]
+    debug!(
+        reduce_node = resolved.node.0,
+        rows = rows as u64,
+        k = k as u64,
+        leading_total = leading_total as u64,
+        "build_matmul_stage_plan shape resolved"
+    );
+
     if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
         && (activation.len() == 7 * 2048 || activation.len() == 2048)
     {
@@ -10211,6 +10224,19 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     }
     let rows = usize::try_from(rows_total).map_err(|_| shape_error())?;
     let leading_total = usize::try_from(leading_total_u64).map_err(|_| shape_error())?;
+
+    // decision point: rows/k/leading_total right where the wide-fold-vs-
+    // per-position branch below reads them -- the shape this reduce
+    // actually resolved to, whichever plan runs it.
+    #[cfg(feature = "instrument")]
+    debug!(
+        reduce_node = resolved.node.0,
+        rows = rows as u64,
+        k = k as u64,
+        leading_total = leading_total as u64,
+        weight_gather_present = weight_gather.is_some(),
+        "run_reduce_quantized shape resolved"
+    );
 
     if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
         && (resolved.extents.len() == 5 || activation.len() == 7 * 4096)
