@@ -14,6 +14,7 @@
 use proxima_tensor::spec::{
     GdnOutputGate, SsmMixerTaps, append_qwen35_ssm_mixer_with_taps, input_leaf, scalar_constant,
 };
+use proxima_tensor::test_support::{ParityRun, compare_rows_relative_to_norm};
 use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock};
 
 const KEY_DIM: u32 = 2048;
@@ -223,21 +224,6 @@ fn build_fixture(positions: u32) -> RealDimsFixture {
     RealDimsFixture { program, mixer_out, taps, named }
 }
 
-fn max_relative_error_per_row(found: &[f32], wanted: &[f32], rows: usize) -> Vec<f32> {
-    let row_length = wanted.len() / rows;
-    (0..rows)
-        .map(|row| {
-            let found_row = &found[row * row_length..(row + 1) * row_length];
-            let wanted_row = &wanted[row * row_length..(row + 1) * row_length];
-            found_row
-                .iter()
-                .zip(wanted_row.iter())
-                .map(|(actual, expected)| (actual - expected).abs() / expected.abs().max(1e-5))
-                .fold(0.0_f32, f32::max)
-        })
-        .collect()
-}
-
 /// Production output set: only what a serving loop actually reads back --
 /// `mixer_out` (the `[s, d]` projected residual) and the carried recurrent
 /// state.
@@ -275,25 +261,6 @@ fn wide_outputs(fixture: &RealDimsFixture) -> Vec<NodeId> {
     ]
 }
 
-/// First 4 values Metal vs CPU at the worst-diverging row -- printed only
-/// when a case fails, so a red run names the exact numbers that disagree
-/// instead of only the row index.
-fn worst_row_head(label: &str, errors: &[f32], metal: &[f32], cpu: &[f32], rows: usize) {
-    let row_length = cpu.len() / rows;
-    let (worst_row, _) = errors
-        .iter()
-        .enumerate()
-        .max_by(|left, right| left.1.total_cmp(right.1))
-        .expect("errors is non-empty for a non-empty output");
-    let start = worst_row * row_length;
-    let end = start + row_length.min(4);
-    std::println!(
-        "qwen35_mixer_multi_position tap={label} worst_row={worst_row} metal_head={:?} cpu_head={:?}",
-        &metal[start..end],
-        &cpu[start..end]
-    );
-}
-
 fn assert_production_parity(positions: u32, include_wide: bool) {
     let fixture = build_fixture(positions);
     let named: Vec<(&str, &[f32])> = fixture.named.iter().map(|(name, data)| (*name, data.as_slice())).collect();
@@ -326,28 +293,23 @@ fn assert_production_parity(positions: u32, include_wide: bool) {
     for (label, node) in [("mixer_out", fixture.mixer_out), ("state_out", fixture.taps.state_out)] {
         let cpu_values = cpu_production.get(node).expect("cpu reference produced this node").0;
         let metal_values = metal_production.get(node).expect("metal production run produced this node").0;
-        let production_errors = max_relative_error_per_row(metal_values, cpu_values, positions as usize);
+        let wide_values =
+            wide_result.as_ref().map(|wide| wide.get(node).expect("metal wide run produced this node").0);
 
-        let wide_errors = wide_result.as_ref().map(|wide| {
-            let wide_values = wide.get(node).expect("metal wide run produced this node").0;
-            max_relative_error_per_row(wide_values, cpu_values, positions as usize)
-        });
-
-        for row in 0..positions as usize {
-            std::println!(
-                "qwen35_mixer_multi_position m={positions} tap={label} row={row} metal_production_vs_cpu={:e} metal_wide_vs_cpu={}",
-                production_errors[row],
-                wide_errors.as_ref().map_or_else(|| "n/a".to_string(), |errors| format!("{:e}", errors[row]))
-            );
+        let mut candidates = vec![ParityRun { label: "metal_production", values: metal_values }];
+        if let Some(wide_values) = wide_values {
+            candidates.push(ParityRun { label: "metal_wide", values: wide_values });
         }
 
-        let production_failed = production_errors.iter().any(|&error| error > 1e-4);
-        if production_failed {
-            worst_row_head(label, &production_errors, metal_values, cpu_values, positions as usize);
-            failures.push(format!(
-                "tap={label} production-output-set metal disagrees with cpu (per-row max relative error={production_errors:?})"
-            ));
-        }
+        let case_label = format!("qwen35_mixer_multi_position m={positions} tap={label}");
+        let case_failures = compare_rows_relative_to_norm(
+            &case_label,
+            positions as usize,
+            1e-4,
+            &ParityRun { label: "cpu", values: cpu_values },
+            &candidates,
+        );
+        failures.extend(case_failures.into_iter().filter(|failure| failure.contains("metal_production")));
     }
 
     assert!(
