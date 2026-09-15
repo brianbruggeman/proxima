@@ -127,6 +127,8 @@ struct GenerateConfig {
     gated_delta_net_fusion: bool,
     #[setting(default = true)]
     moe_topk_fusion: bool,
+    #[setting(default = true)]
+    prefill_one_evaluation: bool,
     #[setting(default = 0)]
     max_command_buffers_per_token: usize,
     #[setting(default = 0)]
@@ -410,6 +412,7 @@ fn supported_serving_config<'model>(
         cached_attention_fusion: settings.cached_attention_fusion,
         gated_delta_net_fusion: settings.gated_delta_net_fusion,
         moe_topk_fusion: settings.moe_topk_fusion,
+        prefill_one_evaluation: settings.prefill_one_evaluation,
         max_command_buffers_per_token: settings.max_command_buffers_per_token,
         prefill_chunk_positions: settings.prefill_chunk_positions,
         ..ServingConfig::default()
@@ -871,7 +874,9 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::GenerateConfig;
     use super::should_attach_expert_sidecar;
+    use super::supported_serving_config;
 
     #[test]
     fn sidecar_does_not_change_full_graph_mode() {
@@ -883,5 +888,19 @@ mod tests {
         assert!(should_attach_expert_sidecar(true, true, false));
         assert!(should_attach_expert_sidecar(true, false, true));
         assert!(!should_attach_expert_sidecar(false, true, false));
+    }
+
+    // principle 4 config-mirror: the edge mapping must carry every landed
+    // research-lever field through, not silently drop it to the struct default.
+    #[test]
+    fn edge_mapping_carries_prefill_one_evaluation_both_ways() {
+        let mut settings = GenerateConfig::from_process();
+        settings.prefill_one_evaluation = true;
+        let enabled = supported_serving_config("model.gguf", 0, &settings);
+        assert!(enabled.prefill_one_evaluation);
+
+        settings.prefill_one_evaluation = false;
+        let disabled = supported_serving_config("model.gguf", 0, &settings);
+        assert!(!disabled.prefill_one_evaluation);
     }
 }
