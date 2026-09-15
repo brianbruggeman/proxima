@@ -885,16 +885,26 @@ impl<'file> LoadedModel<'file> {
             omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
             limit,
         )?;
+        let per_class_budget = crate::memory_fit::MemoryBudget::derive(
+            weights,
+            self.architecture.block_count,
+            self.architecture.kv_heads,
+            self.architecture.head_dim,
+            context_length,
+            omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
+        );
+        crate::memory_fit::fit_per_class_budgets(
+            per_class_budget,
+            crate::memory_fit::PerClassBudgets {
+                dense_weights_budget_bytes: serving_config.dense_weights_budget_bytes,
+                expert_weights_budget_bytes: serving_config.expert_weights_budget_bytes,
+                activations_budget_bytes: serving_config.activations_budget_bytes,
+                kv_cache_budget_bytes: serving_config.kv_cache_budget_bytes,
+            },
+        )?;
         #[cfg(feature = "instrument")]
         {
-            let budget = crate::memory_fit::MemoryBudget::derive(
-                weights,
-                self.architecture.block_count,
-                self.architecture.kv_heads,
-                self.architecture.head_dim,
-                context_length,
-                omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
-            );
+            let budget = per_class_budget;
             info!(
                 dense_weights_bytes = budget.dense_weights_bytes,
                 expert_weights_bytes = budget.expert_weights_bytes,

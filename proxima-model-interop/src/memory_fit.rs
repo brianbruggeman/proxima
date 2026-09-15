@@ -259,6 +259,71 @@ pub fn fit_context_length(
 ///
 /// [`InteropError::MappingExceedsResidentBudget`] naming both `mapped_bytes`
 /// and `limit.available_bytes()` when the mapping does not fit.
+/// Per-class load-time refusal caps -- `ServingConfig`'s own
+/// `dense_weights_budget_bytes`/`expert_weights_budget_bytes`/
+/// `activations_budget_bytes`/`kv_cache_budget_bytes`, carried here as a
+/// plain struct so this module keeps its no-`omega`, no-`ServingConfig`
+/// dependency shape (module doc). `0` in any field means that class is
+/// unbounded, matching today's behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PerClassBudgets {
+    pub dense_weights_budget_bytes: u64,
+    pub expert_weights_budget_bytes: u64,
+    pub activations_budget_bytes: u64,
+    pub kv_cache_budget_bytes: u64,
+}
+
+/// Checks `budget`'s own [`MemoryBudget`] classes against `caps`, one class
+/// at a time -- ROW 501/I2's "separate budgets and placement owners for
+/// expert weights, dense layers, activations, and KV; they must not
+/// collapse into one cache counter". Independent of
+/// [`fit_context_length`]'s aggregate-limit check: a class can fit the
+/// whole-host limit and still exceed its own configured cap. A `0` cap is
+/// unbounded and never refuses.
+///
+/// # Errors
+///
+/// [`InteropError::PerClassResidencyBudgetExceeded`] naming the first class
+/// (checked in `dense`, `expert`, `activations`, `kv` order) whose bytes
+/// exceed its own nonzero cap.
+pub fn fit_per_class_budgets(
+    budget: MemoryBudget,
+    caps: PerClassBudgets,
+) -> Result<(), InteropError> {
+    let classes = [
+        (
+            "dense_weights",
+            budget.dense_weights_bytes,
+            caps.dense_weights_budget_bytes,
+        ),
+        (
+            "expert_weights",
+            budget.expert_weights_bytes,
+            caps.expert_weights_budget_bytes,
+        ),
+        (
+            "activations",
+            budget.arena_allowance_bytes,
+            caps.activations_budget_bytes,
+        ),
+        (
+            "kv_cache",
+            budget.kv_cache_bytes,
+            caps.kv_cache_budget_bytes,
+        ),
+    ];
+    for (class, bytes, budget_bytes) in classes {
+        if budget_bytes > 0 && bytes > budget_bytes {
+            return Err(InteropError::PerClassResidencyBudgetExceeded {
+                class,
+                bytes,
+                budget_bytes,
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub fn fit_mapping_bytes(mapped_bytes: u64, limit: HostMemoryLimit) -> Result<(), InteropError> {
     let available_bytes = limit.available_bytes();
@@ -275,8 +340,8 @@ pub fn fit_mapping_bytes(mapped_bytes: u64, limit: HostMemoryLimit) -> Result<()
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        FitOutcome, HostMemoryLimit, MemoryBudget, WeightClassBytes, fit_context_length,
-        kv_row_bytes,
+        FitOutcome, HostMemoryLimit, MemoryBudget, PerClassBudgets, WeightClassBytes,
+        fit_context_length, fit_per_class_budgets, kv_row_bytes,
     };
     use crate::error::InteropError;
 
@@ -459,5 +524,92 @@ mod tests {
             }
             other => panic!("expected MemoryBudgetExceeded, got {other:?}"),
         }
+    }
+
+    fn budget(dense: u64, expert: u64, arena: u64, kv: u64) -> MemoryBudget {
+        MemoryBudget {
+            dense_weights_bytes: dense,
+            expert_weights_bytes: expert,
+            table_weights_bytes: 0,
+            kv_cache_bytes: kv,
+            ssm_state_bytes: 0,
+            arena_allowance_bytes: arena,
+        }
+    }
+
+    /// All caps `0` (unbounded) must never refuse, whatever the class bytes are.
+    #[test]
+    fn zero_caps_never_refuse() {
+        let over_budget = budget(1_000_000, 1_000_000, 1_000_000, 1_000_000);
+        fit_per_class_budgets(over_budget, PerClassBudgets::default())
+            .expect("a zero cap on every class must be unbounded");
+    }
+
+    /// Each class is checked independently -- a cap on one class must not
+    /// be tripped by another class's bytes, and the error must name the
+    /// class and numbers that actually exceeded its own cap.
+    #[test]
+    fn each_class_refuses_independently_and_names_itself() {
+        let cases: [(&str, MemoryBudget, PerClassBudgets); 4] = [
+            (
+                "dense_weights",
+                budget(200, 10, 10, 10),
+                PerClassBudgets {
+                    dense_weights_budget_bytes: 100,
+                    ..PerClassBudgets::default()
+                },
+            ),
+            (
+                "expert_weights",
+                budget(10, 200, 10, 10),
+                PerClassBudgets {
+                    expert_weights_budget_bytes: 100,
+                    ..PerClassBudgets::default()
+                },
+            ),
+            (
+                "activations",
+                budget(10, 10, 200, 10),
+                PerClassBudgets {
+                    activations_budget_bytes: 100,
+                    ..PerClassBudgets::default()
+                },
+            ),
+            (
+                "kv_cache",
+                budget(10, 10, 10, 200),
+                PerClassBudgets {
+                    kv_cache_budget_bytes: 100,
+                    ..PerClassBudgets::default()
+                },
+            ),
+        ];
+        for (expected_class, budget, caps) in cases {
+            let error = fit_per_class_budgets(budget, caps)
+                .expect_err("bytes of 200 must exceed a cap of 100");
+            match error {
+                InteropError::PerClassResidencyBudgetExceeded {
+                    class,
+                    bytes,
+                    budget_bytes,
+                } => {
+                    assert_eq!(class, expected_class);
+                    assert_eq!(bytes, 200);
+                    assert_eq!(budget_bytes, 100);
+                }
+                other => panic!("expected PerClassResidencyBudgetExceeded, got {other:?}"),
+            }
+        }
+    }
+
+    /// A class exactly at its own cap fits; only strictly-over refuses.
+    #[test]
+    fn a_class_exactly_at_its_cap_fits() {
+        let budget = budget(100, 10, 10, 10);
+        let caps = PerClassBudgets {
+            dense_weights_budget_bytes: 100,
+            ..PerClassBudgets::default()
+        };
+        fit_per_class_budgets(budget, caps).expect("bytes equal to the cap must fit, not refuse");
     }
 }
