@@ -20327,6 +20327,355 @@ value = 1.0
         assert_relative_rows_match(static_state, &sequential_state, "state_out");
     }
 
+    /// proxima-debugger unit oracle (qwen35moe GDN prefill-scan-vs-sequential
+    /// divergence): the SAME comparison
+    /// [`qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps`]
+    /// makes, at the real checkpoint's own head shape (`kv_heads=16`,
+    /// `group=2`, `key_dim=128`, `value_dim=128`, `l_cache=4`) instead of that
+    /// test's toy `kv_heads=1`. `kv_heads=1` degenerates the `u` axis to a
+    /// single row, so a bug that only shows up when `u` (kv head) and `g`
+    /// (group) are BOTH non-degenerate cannot be caught there -- this is that
+    /// missing case. Every intermediate `SsmMixerTaps` field that is a
+    /// per-position sequence in the M>1 static graph (`qkv_mixed`,
+    /// `query_sequence`, `key_sequence`, `value_sequence`, `beta_sequence`,
+    /// `gate_sequence`, `z_sequence`) is compared row-by-row against that same
+    /// position's own M=1 single-step tap, in addition to the final
+    /// `mixer_out`/`state_out` the toy oracle already checks -- the row that
+    /// first exceeds tolerance names the exact stage the M>1 branch diverges
+    /// at.
+    #[proxima::test]
+    async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims()
+    {
+        let key_dim = 128u32;
+        let value_dim = 128u32;
+        let kv_heads = 16u32;
+        let group = 2u32;
+        let l_cache = 4u32;
+        let embedding = 6u32;
+        let positions = 4u32;
+        let qkv_dim = 2 * key_dim + value_dim;
+        let num_v_heads = kv_heads * group;
+        let head_k_dim = key_dim / kv_heads;
+        let head_v_dim = value_dim / num_v_heads;
+
+        let deterministic_wave = |index: usize, modulus: usize, scale: f32| -> f32 {
+            ((index % modulus) as f32 + 1.0) * scale
+        };
+
+        let x_data: alloc::vec::Vec<f32> = (0..(positions * embedding) as usize)
+            .map(|index| deterministic_wave(index, 23, 0.01))
+            .collect();
+        let attn_norm_weight_data: alloc::vec::Vec<f32> = (0..embedding as usize)
+            .map(|index| 1.0 + deterministic_wave(index, 7, 0.02))
+            .collect();
+        let wqkv_data: alloc::vec::Vec<f32> = (0..(embedding * qkv_dim) as usize)
+            .map(|index| deterministic_wave(index, 29, 0.002))
+            .collect();
+        let wqkv_gate_data: alloc::vec::Vec<f32> = (0..(embedding * value_dim) as usize)
+            .map(|index| deterministic_wave(index, 31, 0.003))
+            .collect();
+        let conv_weight_data: alloc::vec::Vec<f32> = (0..(qkv_dim * l_cache) as usize)
+            .map(|index| deterministic_wave(index, 17, 0.01))
+            .collect();
+        let ssm_beta_data: alloc::vec::Vec<f32> = (0..(embedding * num_v_heads) as usize)
+            .map(|index| deterministic_wave(index, 11, 0.02) - 0.1)
+            .collect();
+        let ssm_alpha_data: alloc::vec::Vec<f32> = (0..(embedding * num_v_heads) as usize)
+            .map(|index| deterministic_wave(index, 13, 0.02) - 0.1)
+            .collect();
+        let ssm_dt_bias_data: alloc::vec::Vec<f32> = (0..num_v_heads as usize)
+            .map(|index| deterministic_wave(index, 5, 0.01))
+            .collect();
+        let ssm_a_data: alloc::vec::Vec<f32> = (0..num_v_heads as usize)
+            .map(|index| -deterministic_wave(index, 5, 0.05))
+            .collect();
+        let ssm_norm_weight_data: alloc::vec::Vec<f32> = (0..head_v_dim as usize)
+            .map(|index| 1.0 + deterministic_wave(index, 3, 0.01))
+            .collect();
+        let ssm_out_data: alloc::vec::Vec<f32> = (0..(value_dim * embedding) as usize)
+            .map(|index| deterministic_wave(index, 19, 0.004))
+            .collect();
+        let head_eps_data = alloc::vec![1e-6_f32; (kv_heads * group) as usize];
+        let initial_state = alloc::vec![0.0_f32; (head_k_dim * head_v_dim * kv_heads * group) as usize];
+        let initial_history = alloc::vec![0.0_f32; ((l_cache - 1) * qkv_dim) as usize];
+
+        let build_program = |sequence_extent: Extent| -> (Vec<Op>, NodeId, SsmMixerTaps) {
+            let mut program = Vec::new();
+            let x = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![sequence_extent, Extent::Static(embedding)],
+                "x",
+            );
+            let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+            let eps = input_leaf(&mut program, DType::Float32, alloc::vec![sequence_extent], "eps");
+            let head_eps = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+                "head_eps",
+            );
+            let one = scalar_constant(&mut program, 1.0);
+            let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (head_k_dim as f32).sqrt());
+            let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
+            let attn_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding)],
+                "attn_norm_weight",
+            );
+            let wqkv = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(qkv_dim)],
+                "wqkv",
+            );
+            let wqkv_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(value_dim)],
+                "wqkv_gate",
+            );
+            let conv_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(qkv_dim), Extent::Static(l_cache)],
+                "conv_weight",
+            );
+            let conv_history_in = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(l_cache - 1), Extent::Static(qkv_dim)],
+                "conv_history_in",
+            );
+            let ssm_beta = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(num_v_heads)],
+                "ssm_beta",
+            );
+            let ssm_alpha = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(num_v_heads)],
+                "ssm_alpha",
+            );
+            let ssm_dt_bias = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(num_v_heads)],
+                "ssm_dt_bias",
+            );
+            let ssm_a = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(num_v_heads)],
+                "ssm_a",
+            );
+            let ssm_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(head_v_dim)],
+                "ssm_norm_weight",
+            );
+            let ssm_out = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(value_dim), Extent::Static(embedding)],
+                "ssm_out",
+            );
+            let state_in = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(head_k_dim),
+                    Extent::Static(head_v_dim),
+                    Extent::Static(kv_heads),
+                    Extent::Static(group)
+                ],
+                "state_in",
+            );
+            let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                head_eps,
+                one,
+                inv_sqrt_key_dim,
+                inv_head_v_dim,
+                Some(attn_norm_weight),
+                wqkv,
+                wqkv_gate,
+                conv_weight,
+                conv_history_in,
+                ssm_beta,
+                ssm_alpha,
+                ssm_dt_bias,
+                ssm_a,
+                ssm_norm_weight,
+                ssm_out,
+                state_in,
+                key_dim,
+                value_dim,
+                kv_heads,
+                group,
+                l_cache,
+                GdnOutputGate::Silu,
+            )
+            .expect("the qwen35 ssm mixer lowers at real dims");
+            (program, mixer_out, taps)
+        };
+
+        let (static_program, static_mixer_out, static_taps) =
+            build_program(Extent::Static(positions));
+        let static_result = crate::cpu::evaluate_named(
+            &static_program,
+            &[u64::from(positions)],
+            &[
+                ("x", x_data.as_slice()),
+                ("eps", alloc::vec![1e-6_f32; positions as usize].as_slice()),
+                ("head_eps", &head_eps_data),
+                ("attn_norm_weight", &attn_norm_weight_data),
+                ("wqkv", &wqkv_data),
+                ("wqkv_gate", &wqkv_gate_data),
+                ("conv_weight", &conv_weight_data),
+                ("conv_history_in", &initial_history),
+                ("ssm_beta", &ssm_beta_data),
+                ("ssm_alpha", &ssm_alpha_data),
+                ("ssm_dt_bias", &ssm_dt_bias_data),
+                ("ssm_a", &ssm_a_data),
+                ("ssm_norm_weight", &ssm_norm_weight_data),
+                ("ssm_out", &ssm_out_data),
+                ("state_in", &initial_state),
+            ],
+            &[
+                static_mixer_out,
+                static_taps.state_out,
+                static_taps.qkv_mixed,
+                static_taps.query_sequence,
+                static_taps.key_sequence,
+                static_taps.value_sequence,
+                static_taps.beta_sequence,
+                static_taps.gate_sequence,
+                static_taps.z_sequence,
+            ],
+        )
+        .expect("the static M>1 program evaluates");
+
+        let static_mixer_rows = static_result.get(static_mixer_out).expect("mixer_out present").0;
+        let static_state = static_result.get(static_taps.state_out).expect("state_out present").0;
+        let static_qkv_mixed = static_result.get(static_taps.qkv_mixed).expect("qkv_mixed present").0;
+        let static_query = static_result.get(static_taps.query_sequence).expect("query_sequence present").0;
+        let static_key = static_result.get(static_taps.key_sequence).expect("key_sequence present").0;
+        let static_value = static_result.get(static_taps.value_sequence).expect("value_sequence present").0;
+        let static_beta = static_result.get(static_taps.beta_sequence).expect("beta_sequence present").0;
+        let static_gate = static_result.get(static_taps.gate_sequence).expect("gate_sequence present").0;
+        let static_z = static_result.get(static_taps.z_sequence).expect("z_sequence present").0;
+
+        let (single_program, single_mixer_out, single_taps) = build_program(Extent::Symbolic(0));
+        let mut sequential_state = initial_state.clone();
+        let mut sequential_history = initial_history.clone();
+        let mut sequential_mixer_rows = alloc::vec::Vec::new();
+        let mut failures: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+
+        let row_length = |total: usize| -> usize { total / positions as usize };
+        let check_row = |label: &str,
+                              position: usize,
+                              static_buffer: &[f32],
+                              single_row: &[f32],
+                              failures: &mut alloc::vec::Vec<alloc::string::String>| {
+            let length = row_length(static_buffer.len());
+            let static_row = &static_buffer[position * length..(position + 1) * length];
+            let mut max_relative_error = 0.0_f32;
+            for (found, wanted) in static_row.iter().zip(single_row.iter()) {
+                let row_norm = wanted.abs().max(1e-5);
+                let relative_error = (found - wanted).abs() / row_norm;
+                max_relative_error = max_relative_error.max(relative_error);
+            }
+            std::println!(
+                "qwen35_ssm_mixer_real_dims tap={label} position={position} max_relative_error={max_relative_error}"
+            );
+            if max_relative_error > 1e-5 {
+                failures.push(alloc::format!(
+                    "tap={label} position={position} max_relative_error={max_relative_error}"
+                ));
+            }
+        };
+
+        for position in 0..positions as usize {
+            let evaluated = crate::cpu::evaluate_named(
+                &single_program,
+                &[1],
+                &[
+                    ("x", &x_data[position * embedding as usize..(position + 1) * embedding as usize]),
+                    ("eps", &[1e-6_f32]),
+                    ("head_eps", &head_eps_data),
+                    ("attn_norm_weight", &attn_norm_weight_data),
+                    ("wqkv", &wqkv_data),
+                    ("wqkv_gate", &wqkv_gate_data),
+                    ("conv_weight", &conv_weight_data),
+                    ("conv_history_in", sequential_history.as_slice()),
+                    ("ssm_beta", &ssm_beta_data),
+                    ("ssm_alpha", &ssm_alpha_data),
+                    ("ssm_dt_bias", &ssm_dt_bias_data),
+                    ("ssm_a", &ssm_a_data),
+                    ("ssm_norm_weight", &ssm_norm_weight_data),
+                    ("ssm_out", &ssm_out_data),
+                    ("state_in", sequential_state.as_slice()),
+                ],
+                &[
+                    single_mixer_out,
+                    single_taps.state_out,
+                    single_taps.qkv_mixed,
+                    single_taps.query,
+                    single_taps.key,
+                    single_taps.value,
+                    single_taps.beta,
+                    single_taps.gate,
+                    single_taps.z_head,
+                ],
+            )
+            .expect("one sequential mixer step evaluates at real dims");
+
+            let single_mixer_row = evaluated.get(single_mixer_out).expect("single mixer_out present").0;
+            sequential_mixer_rows.extend_from_slice(single_mixer_row);
+
+            check_row("qkv_mixed", position, static_qkv_mixed, evaluated.get(single_taps.qkv_mixed).expect("qkv_mixed present").0, &mut failures);
+            check_row("query", position, static_query, evaluated.get(single_taps.query).expect("query present").0, &mut failures);
+            check_row("key", position, static_key, evaluated.get(single_taps.key).expect("key present").0, &mut failures);
+            check_row("value", position, static_value, evaluated.get(single_taps.value).expect("value present").0, &mut failures);
+            check_row("beta", position, static_beta, evaluated.get(single_taps.beta).expect("beta present").0, &mut failures);
+            check_row("gate", position, static_gate, evaluated.get(single_taps.gate).expect("gate present").0, &mut failures);
+            check_row("z_head", position, static_z, evaluated.get(single_taps.z_head).expect("z_head present").0, &mut failures);
+            check_row("mixer_out", position, static_mixer_rows, single_mixer_row, &mut failures);
+
+            sequential_state = evaluated.get(single_taps.state_out).expect("sequential state_out present").0.to_vec();
+            let newest_row = evaluated.get(single_taps.qkv_mixed).expect("sequential qkv_mixed present").0;
+            // roll the `[l_cache-1, qkv_dim]` window forward: drop the oldest row,
+            // append this position's `qkv_mixed` as the newest (oldest-first layout,
+            // matching `conv_history_in`'s own declared shape).
+            sequential_history.drain(0..qkv_dim as usize);
+            sequential_history.extend_from_slice(newest_row);
+        }
+
+        let mut state_relative_error = 0.0_f32;
+        for (found, wanted) in static_state.iter().zip(sequential_state.iter()) {
+            let row_norm = wanted.abs().max(1e-5);
+            state_relative_error = state_relative_error.max((found - wanted).abs() / row_norm);
+        }
+        std::println!("qwen35_ssm_mixer_real_dims tap=state_out final max_relative_error={state_relative_error}");
+        if state_relative_error > 1e-5 {
+            failures.push(alloc::format!("tap=state_out final max_relative_error={state_relative_error}"));
+        }
+
+        assert!(
+            failures.is_empty(),
+            "real-dims M>1 vs sequential diverged:\n{}",
+            failures.join("\n")
+        );
+    }
+
     /// A row-relative tolerance (`1e-5` of the sequential oracle row's own
     /// norm, floored at `1e-5` absolute so an exactly-zero row still
     /// tolerates float noise) -- the same shape every other cross-path
