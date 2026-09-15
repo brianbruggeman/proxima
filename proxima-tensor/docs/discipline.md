@@ -33206,3 +33206,31 @@ PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent PROXIMA_METAL_OP_PROFILE_STEP=
 # unlike moe_topk_fusion/expert_prefetch (residency_caches.rs's build_placed_plan reads it only through
 # supported_serving_config's own struct literal); add one there first, then compare op_profile op_count on/off.
 ```
+
+## ROW 576 -- reduces reclassified reduce-generic-scalar under moe-topk-fusion (ROW 569: 150 -> 240): root cause NOT located inside the 20-minute cap; NOT SEALED, no code changed
+
+**Task, verbatim intent:** the classifier decision in `omega`'s msl classify path that declines a weight/route reduce because its operand now comes from `BoundOpKind::MoeTopK` should instead admit that operand kind, returning the 90 affected reduces to `reduce-packed-row-blocked`/`reduce-cooperative`.
+
+**Reused, no new harness:** `omega::msl::emit_and_classify::{classify_packed_row_block, packed_row_block_admitted, reduce_is_cooperative, gather_is_reduction_invariant}` (the real admission gates), `omega::metal::dispatch_timed_and_classify::classify_kind` (the profiler label these 90 reduces surface as), and the existing `qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down` test (`omega/src/metal/dispatch_timed_and_classify.rs:1881`) as the census oracle -- it already binds the real `append_moe_ffn_grouped_gate_up` shape via `bind_with_fusion(.., true, ..)` and asserts every expert-weight reduce classifies `reduce-packed-row-blocked`, printing `classify_kind`/`diagnose_packed_row_block` for every reduce along the way.
+
+**What was read, not guessed:** every `BoundOpKind::MoeTopK` match arm across `omega/src` (identity.rs kernel-identity naming, msl/emit_and_classify.rs `render_moe_topk` dispatch, cuda.rs, wgsl.rs, wgpu_driver.rs, metal/*) and every operand-construction site in `proxima-tensor/src/bind/{builder_compose_window.rs,gdn_moe_fusion_apply.rs}` that builds a `Lookup`/`Layout` for a gathered operand -- none of them match on the OPERAND's PRODUCING `BoundOpKind` (only on `resolved.kind`, the current op, or on structural `Layout`/`IndexMap` shape); `classify_packed_row_block`'s seven gates (`PackedRowBlockRejection`) and `reduce_is_cooperative`'s three gates are producer-kind-blind by construction. This means either (a) the decline is structural (a `Layout`/stride/extent mismatch introduced by the fused `MoeTopK` output's shape, not a missing enum arm), or (b) the decline site is somewhere not yet located.
+
+**Attempted to observe directly, blocked by time, not code:** ran the existing census test above under `cargo test -p omega --lib --features metal,instrument,moe-topk-fusion qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down -- --nocapture`. Build finished in 12.82s; the single test itself did not complete inside a 280-second `timeout` (`EXIT=124`, test still printing "has been running for over 60 seconds" in nextest's own status line) -- at `EXPERT_COUNT=256`/`FEED_FORWARD=2048` this fixture's per-reduce `classify_kind` call renders a full MSL kernel body (`crate::msl::emit`) for every `Keep::Reduce` op in the bound program, and `moe-topk-fusion` ON changes which/how many reduces exist; whether the slowdown is the fusion path itself doing something newly expensive (a real defect worth its own row) or just this synthetic fixture's shape was not distinguished -- killed via `timeout`, no process left running (`pgrep` after clean).
+
+**Not attempted this row:** a smaller/faster repro (shrinking `EXPERT_COUNT`/`FEED_FORWARD` to isolate whether the hang is fusion-caused or fixture-scale-caused), reading `diagnose_packed_row_block`'s printed `PackedRowBlockRejection` for the touching-expert-weight reduces (the direct oracle for "why declined"), and any edit to `classify_packed_row_block`/`reduce_is_cooperative` -- none of these fit inside the time already spent locating the candidate call sites above.
+
+**No code changed. `git status --short` before and after this row: only the pre-existing untracked `agents.tsv`/`todo-2026-09-07.md`.** Nothing to revert.
+
+**Gates:** not run this row (no diff to gate).
+
+**Re-prove / continue from here:**
+
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+export CARGO_TARGET_DIR=/tmp/cargo_target_wf
+# first: shrink the fixture (EXPERT_COUNT=8, FEED_FORWARD=64) in a throwaway copy of
+# omega/src/metal/dispatch_timed_and_classify.rs:1881's test to isolate hang vs scale;
+# then read diagnose_packed_row_block's printed PackedRowBlockRejection per expert reduce:
+cargo test -p omega --lib --features metal,instrument,moe-topk-fusion \
+  qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down -- --nocapture
+```
