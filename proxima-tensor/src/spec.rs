@@ -20331,9 +20331,12 @@ value = 1.0
     /// divergence): the SAME comparison
     /// [`qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps`]
     /// makes, at the real checkpoint's own head shape (`kv_heads=16`,
-    /// `group=2`, `key_dim=128`, `value_dim=128`, `l_cache=4`) instead of that
-    /// test's toy `kv_heads=1`. `kv_heads=1` degenerates the `u` axis to a
-    /// single row, so a bug that only shows up when `u` (kv head) and `g`
+    /// `group=2`, `head_k_dim=128`, `head_v_dim=128`, `l_cache=4` --
+    /// `key_dim`/`value_dim` here are the TOTAL, pre-head-split extents this
+    /// builder's own parameters take: `key_dim=2048=head_k_dim*kv_heads`,
+    /// `value_dim=4096=head_v_dim*kv_heads*group`) instead of that test's toy
+    /// `kv_heads=1`, `head_k_dim=1`. `kv_heads=1` degenerates the `u` axis to
+    /// a single row, so a bug that only shows up when `u` (kv head) and `g`
     /// (group) are BOTH non-degenerate cannot be caught there -- this is that
     /// missing case. Every intermediate `SsmMixerTaps` field that is a
     /// per-position sequence in the M>1 static graph (`qkv_mixed`,
@@ -20346,8 +20349,8 @@ value = 1.0
     #[proxima::test]
     async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims()
     {
-        let key_dim = 128u32;
-        let value_dim = 128u32;
+        let key_dim = 2048u32;
+        let value_dim = 4096u32;
         let kv_heads = 16u32;
         let group = 2u32;
         let l_cache = 4u32;
