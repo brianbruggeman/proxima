@@ -1281,6 +1281,16 @@ struct Qwen35MoeGdnScanSegment {
     post_mixer_residual: NodeId,
     post_attention_norm_output: NodeId,
     router_logits: NodeId,
+    /// The ordinary (non-scan) `previous_output -> router_logits` segment for
+    /// this same layer -- identical to what [`Qwen35MoeLayerSegments::router`]
+    /// would hold if `gdn_scan_enabled` were false. The scan's own conv branch
+    /// (`causal_conv1d` over just this call's rows) has no cross-call history
+    /// input, so it is only valid for the one call that carries the model's
+    /// entire causal context to date (the initial multi-position prefill).
+    /// Every later single-token decode step must run through this segment
+    /// instead, which reads the persisted `ssm_cache.{layer}.conv_history`/
+    /// `.state` the ordinary [`SsmLayerCache`] already threads.
+    decode_router: crate::qwen35moe::execution::MappedLayerSegment,
 }
 
 /// Links one layer's carry set to the gather cuts consumed by later layers.
@@ -1796,6 +1806,13 @@ impl<'file> LoadedModel<'file> {
                     diagnostic.router_logits,
                 )
                 .map_err(InteropError::from)?;
+                let decode_router = crate::qwen35moe::execution::split_mapped_layer_segment(
+                    &self.program,
+                    symbols,
+                    previous_output,
+                    diagnostic.router_logits,
+                )
+                .map_err(InteropError::from)?;
                 (
                     router,
                     Some(Qwen35MoeGdnScanSegment {
@@ -1806,6 +1823,7 @@ impl<'file> LoadedModel<'file> {
                         post_mixer_residual: diagnostic.post_mixer_residual,
                         post_attention_norm_output: diagnostic.post_attention_norm_output,
                         router_logits: diagnostic.router_logits,
+                        decode_router,
                     }),
                 )
             } else {
@@ -1862,6 +1880,20 @@ impl<'file> LoadedModel<'file> {
                     proxima_tensor::op::Op::Input { .. }
                 ) {
                     prefix_required_nodes.insert(*node);
+                }
+            }
+            // The decode-router fallback (single-position calls after the
+            // initial multi-position scan) reads the SAME previous-layer
+            // outputs the ordinary non-scan router would -- register its
+            // cuts too, or a later single-token step finds them missing.
+            if let Some(scan) = &gdn_scan {
+                for (node, _) in &scan.decode_router.1 {
+                    if !matches!(
+                        self.program[node.0 as usize],
+                        proxima_tensor::op::Op::Input { .. }
+                    ) {
+                        prefix_required_nodes.insert(*node);
+                    }
                 }
             }
             layer_parts.push((router, gather, gather_next_router, gdn_scan));
@@ -2849,7 +2881,16 @@ impl<'file> LoadedModel<'file> {
             // router result. Build one union before the gather snapshot so
             // no row reads an unselected descriptor.
             let segments = &plan.layers[layer];
-            if let Some(scan) = &segments.gdn_scan {
+            // The scan's own conv branch (`causal_conv1d`) windows only
+            // within this call's own `x` axis -- correct for the one call
+            // that carries the model's entire causal context so far (the
+            // initial multi-position prefill, `symbols.first() > 1`), wrong
+            // for any later single-token step, which must fall through to
+            // `scan.decode_router` (the ordinary persisted-history branch)
+            // below instead.
+            let use_gdn_scan_this_call =
+                segments.gdn_scan.is_some() && symbols.first().copied().unwrap_or(1) > 1;
+            if use_gdn_scan_this_call && let Some(scan) = &segments.gdn_scan {
                 let state_cache = match layer_caches.get(layer) {
                     Some(LayerCacheState::Ssm(cache)) => cache.state.as_slice(),
                     _ => {
@@ -3077,7 +3118,20 @@ impl<'file> LoadedModel<'file> {
                 layer += 2;
                 continue;
             }
-            let router = &segments.router;
+            // A gdn-scan layer's `segments.router` is the SHORT post-mixer
+            // tail (already evaluated above when `use_gdn_scan_this_call`);
+            // a single-token call after the initial prefill instead needs
+            // the layer's full `decode_router` (`previous_output ->
+            // router_logits`), which reads the persisted conv history/state
+            // this same layer's scan call just seeded.
+            let router = if use_gdn_scan_this_call {
+                &segments.router
+            } else {
+                segments
+                    .gdn_scan
+                    .as_ref()
+                    .map_or(&segments.router, |scan| &scan.decode_router)
+            };
             let gather = &segments.gather;
             let next_cuts = &segments.next_cuts;
             let future_gather_cuts = &segments.future_gather_cuts;
@@ -3161,7 +3215,7 @@ impl<'file> LoadedModel<'file> {
                         diagnostic.block_output,
                     )
                 };
-                if is_router && segments.gdn_scan.is_some() {
+                if is_router && use_gdn_scan_this_call {
                     continue;
                 }
                 let mut segment_named: Vec<(&str, QuantizedBlock<'_>)> = named
