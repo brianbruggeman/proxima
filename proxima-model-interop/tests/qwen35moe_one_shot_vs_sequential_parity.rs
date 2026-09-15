@@ -178,7 +178,7 @@ fn relative_error(found: &[f32], wanted: &[f32]) -> f32 {
 /// plus `logits`, and returns `(per_layer_block_output, logits,
 /// layer0_state_out, layer0_qkv_mixed_row12)` for the two extra root
 /// comparisons the coordinator asked for.
-fn run_one_shot() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>) {
+fn run_one_shot() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<Vec<f32>>) {
     let architecture = synthetic_architecture(LAYERS);
     let (program, roots, layer_roots, _moe_sites, diagnostics) =
         qwen35moe_forward_program_at_width(&architecture, Some(WIDTH))
@@ -193,6 +193,12 @@ fn run_one_shot() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>) {
     let layer0_ssm_taps = diagnostics[0].ssm_taps.clone().expect("layer 0 is a synthetic GDN layer");
     outputs.push(layer0_ssm_taps.state_out);
     outputs.push(layer0_ssm_taps.qkv_mixed);
+    assert_eq!(
+        layer0_ssm_taps.per_position_state_out.len(),
+        WIDTH as usize,
+        "the width-13 program unrolls one recurrence step per position"
+    );
+    outputs.extend(layer0_ssm_taps.per_position_state_out.iter().copied());
 
     let evaluated = proxima_tensor::cpu::evaluate_named(&program, &symbols, &blocks, &outputs)
         .expect("cpu evaluates the one-shot program's diagnostics and logits");
@@ -202,9 +208,14 @@ fn run_one_shot() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>) {
     let logits = evaluated.get(roots.logits).expect("logits produced").0.to_vec();
     let state_out = evaluated.get(layer0_ssm_taps.state_out).expect("layer 0 state_out produced").0.to_vec();
     let qkv_mixed = evaluated.get(layer0_ssm_taps.qkv_mixed).expect("layer 0 qkv_mixed produced").0.to_vec();
+    let per_position_state_out: Vec<Vec<f32>> = layer0_ssm_taps
+        .per_position_state_out
+        .iter()
+        .map(|node| evaluated.get(*node).expect("per-position state_out produced").0.to_vec())
+        .collect();
 
     assert_eq!(layer_roots.len(), diagnostics.len(), "one layer_roots entry per diagnostics entry");
-    (per_layer_block_output, logits, state_out, qkv_mixed)
+    (per_layer_block_output, logits, state_out, qkv_mixed, per_position_state_out)
 }
 
 /// The 13-step sequential program: builds `qwen35moe_forward_program_at_
@@ -216,7 +227,7 @@ fn run_one_shot() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>) {
 /// returns the same four-tuple `run_one_shot` does, PLUS layer 0's final
 /// `state_out` and its 13th call's own `qkv_mixed` row for the coordinator's
 /// two extra root comparisons.
-fn run_sequential() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>) {
+fn run_sequential() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<Vec<f32>>) {
     let architecture = synthetic_architecture(LAYERS);
     // `ssm_cache.{layer}.conv_history`/`.state` are declared over the FULL
     // per-row width (`qkv_dim`/the recurrent state's own 4 axes), never a
@@ -244,6 +255,7 @@ fn run_sequential() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut logits_last = Vec::new();
     let mut layer0_final_state_out = Vec::new();
     let mut layer0_last_qkv_mixed = Vec::new();
+    let mut layer0_per_position_state_out: Vec<Vec<f32>> = Vec::new();
 
     for absolute_position in 0..WIDTH {
         let (program, roots, layer_roots, _moe_sites, diagnostics) =
@@ -310,6 +322,7 @@ fn run_sequential() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>) {
                     if layer == 0 {
                         layer0_final_state_out = state_new.to_vec();
                         layer0_last_qkv_mixed = qkv_mixed_new.to_vec();
+                        layer0_per_position_state_out.push(state_new.to_vec());
                     }
                 }
                 (
@@ -326,7 +339,7 @@ fn run_sequential() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>) {
         }
     }
 
-    (per_layer_block_output, logits_last, layer0_final_state_out, layer0_last_qkv_mixed)
+    (per_layer_block_output, logits_last, layer0_final_state_out, layer0_last_qkv_mixed, layer0_per_position_state_out)
 }
 
 /// The decisive, checkpoint-free comparison: does the width-13 ONE-SHOT
@@ -334,16 +347,46 @@ fn run_sequential() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>) {
 /// cache threaded exactly as the production decode loop threads it -- on a
 /// single CPU engine, with no Metal/executor involved at all.
 #[test]
-#[ignore = "RED, checkpoint-free, CPU-only: layer0_qkv_mixed_row12 matches the sequential decode \
-            EXACTLY (0e0) but layer 0 block_output already diverges 54% and layer0_state_out 60% -- \
-            the M-position mixer's causal-conv/projection stage (qkv_mixed) is correct, but its \
-            internal recurrent state scan across the M rows produces a different final state/output \
-            than 13 true sequential folds, and that divergence compounds through layers 1-3 (63-82%) \
-            and into logits (69%); the width-13 PROGRAM's own SSM recurrence is the first diverging \
-            quantity, not the executor. Unresolved, tracked for the qwen35moe checkpoint-prefill bug"]
+#[ignore = "RED, checkpoint-free, CPU-only, ROOT CAUSE FOUND (not yet fixed): \
+            SsmMixerTaps::per_position_state_out on the width-13 program has length 1, not 13 -- \
+            append_qwen35_ssm_mixer_with_taps_and_layout's prefill_width detection (spec.rs:8541) \
+            only recognizes an M>1 prefill when `x` is LITERALLY an Op::Input/Op::Constant node; \
+            the full qwen35moe_forward_program_at_width builder always passes a computed `x` \
+            (embedding_lookup/residual chain, program.rs ~line 705), so the M>1 unrolled-recurrence \
+            branch (spec.rs:8879-8944) NEVER fires in the real forward program, even at width 13 -- \
+            only the mixer-only unit oracle (qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims::production_args_m13, \
+            which builds x as a literal Input) ever exercises it, which is why that oracle is exact \
+            while the full program is not. The M=1 (else) branch instead runs unconditionally and \
+            reduces (`ScalarOp::Add`) query/key/value/beta/gate over the `s` axis (spec.rs:8993-9040) \
+            to squeeze what it assumes is a size-1 decode step -- against a real width-13 `x` this \
+            silently SUMS all 13 positions into one row, which is exactly the divergence measured: \
+            qkv_mixed (computed before this squeeze) matches sequential decode EXACTLY (0e0), but \
+            state_out/block_output diverge 54-82% and logits 69% from that point on. Fix is to make \
+            prefill_width detection resolve x's actual static extent (e.g. via shape inference) \
+            instead of requiring x be a literal Input/Constant op. Unresolved, tracked for the \
+            qwen35moe checkpoint-prefill bug"]
 fn one_shot_program_matches_sequential_decode_on_synthetic_layers() {
-    let (one_shot_layers, one_shot_logits, one_shot_state_out, one_shot_qkv_mixed) = run_one_shot();
-    let (sequential_layers, sequential_logits, sequential_state_out, sequential_qkv_mixed) = run_sequential();
+    let (one_shot_layers, one_shot_logits, one_shot_state_out, one_shot_qkv_mixed, one_shot_per_position_state_out) =
+        run_one_shot();
+    let (sequential_layers, sequential_logits, sequential_state_out, sequential_qkv_mixed, sequential_per_position_state_out) =
+        run_sequential();
+
+    assert_eq!(
+        one_shot_per_position_state_out.len(),
+        sequential_per_position_state_out.len(),
+        "one row per prompt position on both sides"
+    );
+    let mut first_state_divergence: Option<u32> = None;
+    for (position, (one_shot_row, sequential_row)) in
+        one_shot_per_position_state_out.iter().zip(sequential_per_position_state_out.iter()).enumerate()
+    {
+        let error = relative_error(sequential_row, one_shot_row);
+        std::println!("one_shot_vs_sequential position={position} layer0_state_out_relative_error={error:e}");
+        if error > 1e-3 && first_state_divergence.is_none() {
+            first_state_divergence = Some(position as u32);
+        }
+    }
+    std::println!("one_shot_vs_sequential first_diverging_position={first_state_divergence:?}");
 
     let embedding = 8usize;
     let vocab = 16usize;
