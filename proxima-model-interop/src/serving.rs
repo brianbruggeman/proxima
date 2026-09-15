@@ -403,6 +403,16 @@ pub struct ServingConfig<'model> {
     /// kernel for it every token. `false` (this field's default) is today's
     /// shipped behavior, unchanged.
     pub plan_time_constants: bool,
+    /// Not an upstream llama-server flag -- a hard ceiling on
+    /// `omega::metal::MetalStageTotals::gpu_exec_calls` (Metal command
+    /// buffers committed) per decode step, checked in
+    /// `generate::decode::run_decode_loop_placed_kv` against that step's
+    /// own `metal_stage_totals()` snapshot. `0` (this field's default)
+    /// disables the check -- unmeasured until a caller opts in. `N > 0`
+    /// returns [`InteropError::TooManyCommandBuffers`] the first step that
+    /// exceeds it, instead of silently letting a future full-graph
+    /// regression multiply command-buffer submissions per token.
+    pub max_command_buffers_per_token: usize,
 }
 
 impl<'model> ServingConfig<'model> {
@@ -491,6 +501,7 @@ impl Default for ServingConfig<'static> {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: false,
+            max_command_buffers_per_token: 0,
         }
     }
 }
@@ -799,6 +810,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: false,
+            max_command_buffers_per_token: 0,
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -954,6 +966,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: false,
+            max_command_buffers_per_token: 0,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -1037,6 +1050,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: false,
+            max_command_buffers_per_token: 0,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(
@@ -1110,6 +1124,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: false,
+            max_command_buffers_per_token: 0,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);
@@ -1173,6 +1188,7 @@ mod tests {
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
             plan_time_constants: false,
+            max_command_buffers_per_token: 0,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.prefill_one_evaluation);

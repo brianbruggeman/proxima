@@ -3833,6 +3833,19 @@ impl<'file> LoadedModel<'file> {
                 // one-time cost after step 0, never a hardcoded zero.
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 let metal_stage = metal_stage_totals();
+                // `max_command_buffers_per_token == 0` (the default) leaves this
+                // step's command-buffer count unmeasured -- ROW invariant 1 is a
+                // caller-opted-in ceiling, not an unconditional assertion.
+                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                if serving_config.max_command_buffers_per_token > 0
+                    && metal_stage.gpu_exec_calls > serving_config.max_command_buffers_per_token as u64
+                {
+                    return Err(InteropError::TooManyCommandBuffers {
+                        step: _step,
+                        committed: metal_stage.gpu_exec_calls,
+                        limit: serving_config.max_command_buffers_per_token,
+                    });
+                }
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 if std::env::var_os("PROXIMA_DEBUG_TOKEN_STAGES").is_some() {
                     eprintln!(
