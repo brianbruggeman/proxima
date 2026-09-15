@@ -106,4 +106,5 @@ pub use gdn_moe_fusion_apply::*;
 pub use cached_attention_epilogue_liveness::*;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

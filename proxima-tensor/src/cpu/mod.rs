@@ -234,4 +234,5 @@ use width_kernels::*;
 pub use typed_eval::*;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
