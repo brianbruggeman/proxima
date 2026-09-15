@@ -1543,8 +1543,9 @@ impl<'file> LoadedModel<'file> {
                     .into(),
             ));
         }
-        let one_evaluation_prefill_requested = serving_config.prefill_one_evaluation
-            || std::env::var_os("PROXIMA_PREFILL_ONE_EVALUATION").is_some();
+        let one_evaluation_prefill_requested = (serving_config.prefill_one_evaluation
+            || std::env::var_os("PROXIMA_PREFILL_ONE_EVALUATION").is_some())
+            && std::env::var_os("PROXIMA_PREFILL_SEQUENTIAL").is_none();
         // Sarathi/chunked-prefill (I9): split the prompt into
         // `serving_config.prefill_chunk_positions`-sized windows instead of
         // one whole-prompt evaluation, so peak activation memory is bounded

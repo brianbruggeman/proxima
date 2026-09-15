@@ -432,11 +432,11 @@ pub struct ServingConfig<'model> {
     /// `single_position_step` prefill's alt one-evaluation program
     /// (`generate/decode.rs`'s `one_evaluation_prefill_requested`), in place
     /// of that call site's own `PROXIMA_PREFILL_ONE_EVALUATION` env var
-    /// (`5a4ac2c5`). `false` (this field's default) keeps the proven
-    /// split-loop behavior; the env var still opts a caller in without a
-    /// `ServingConfig` in hand, so the call site treats either as
-    /// requesting the alt path (see that field's own doc for why it is not
-    /// implemented end to end yet on the real checkpoint).
+    /// (`5a4ac2c5`). `true` (this field's default, `dec68d40`'s width fix
+    /// having landed the real-checkpoint oracle) evaluates the whole prompt
+    /// in one call; `PROXIMA_PREFILL_SEQUENTIAL=1` is the opt-out back to
+    /// the old `next_ids.len()`-way split loop, checked at the same call
+    /// site regardless of this field's own value.
     pub prefill_one_evaluation: bool,
     /// Not an upstream llama-server flag -- caps how many prompt positions
     /// [`Self::prefill_one_evaluation`]'s alt program evaluates in one call
@@ -590,7 +590,7 @@ impl Default for ServingConfig<'static> {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
-            prefill_one_evaluation: false,
+            prefill_one_evaluation: true,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
@@ -1080,7 +1080,7 @@ mod tests {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
-            prefill_one_evaluation: false,
+            prefill_one_evaluation: true,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
@@ -1172,7 +1172,7 @@ mod tests {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
-            prefill_one_evaluation: false,
+            prefill_one_evaluation: true,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
@@ -1254,7 +1254,7 @@ mod tests {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
-            prefill_one_evaluation: false,
+            prefill_one_evaluation: true,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
