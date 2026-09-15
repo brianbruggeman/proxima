@@ -150,6 +150,52 @@ pub enum GdnPrefillBackend {
 /// unmodified when no caller supplies their own checkpoint.
 pub const DEFAULT_MODEL_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
 
+/// I11's request-admission scheduling level: whether a request is accepted
+/// at all before it occupies a sequence slot. Consulted at exactly one
+/// site, [`apply_serving_config`]'s own top-level walk, independent of how
+/// an admitted request is later phase-scheduled ([`PhaseSchedule`]) or how
+/// its experts are kept resident ([`ExpertResidencySchedule`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AdmissionSchedule {
+    /// Hard ceiling on `ServingConfig::parallel_sequences`. `0` (this
+    /// field's default) disables the check, matching today's behavior
+    /// byte-for-byte -- unmeasured until a caller opts in.
+    pub max_concurrent_requests: usize,
+}
+
+/// I11's phase-scheduling level: prefill vs decode ordering within one
+/// sequence's step loop. Consulted at exactly one site,
+/// `generate/decode.rs`'s `one_evaluation_prefill_requested` computation,
+/// independent of [`AdmissionSchedule`] and [`ExpertResidencySchedule`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhaseSchedule {
+    /// `true` (this field's default) keeps today's behavior byte-for-byte:
+    /// a sequence's own prefill runs to completion before its decode loop
+    /// starts. `false` requests interleaving prefill and decode steps
+    /// across sequences sharing a batch -- not yet implemented.
+    pub prefill_before_decode: bool,
+}
+
+impl Default for PhaseSchedule {
+    fn default() -> Self {
+        Self { prefill_before_decode: true }
+    }
+}
+
+/// I11's per-layer expert-residency level, distinct from
+/// [`ServingConfig::qwen35moe_residency_budget_bytes`]'s single pool shared
+/// across every qwen35moe layer. Consulted at exactly one site,
+/// `generate/decode.rs`'s residency-pool construction, independent of
+/// [`AdmissionSchedule`] and [`PhaseSchedule`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExpertResidencySchedule {
+    /// Byte budget applied independently to each qwen35moe layer's own
+    /// resident expert set, rather than one pool shared across all layers.
+    /// `0` (this field's default) disables the per-layer cap, matching
+    /// today's behavior byte-for-byte -- unmeasured until a caller opts in.
+    pub per_layer_budget_bytes: u64,
+}
+
 /// One field per llama-server flag the repo owner's invocation sets,
 /// plus `model_path`. See the module doc for why each field's shape is
 /// what it is and why none of this crate's dependencies grew to carry it.
@@ -447,6 +493,16 @@ pub struct ServingConfig<'model> {
     /// exceeds it, instead of silently letting a future full-graph
     /// regression multiply command-buffer submissions per token.
     pub max_command_buffers_per_token: usize,
+    /// I11 scheduling level 1 of 3: request admission. See
+    /// [`AdmissionSchedule`]'s own doc for the one site that consults it.
+    pub admission_schedule: AdmissionSchedule,
+    /// I11 scheduling level 2 of 3: phase scheduling (prefill vs decode).
+    /// See [`PhaseSchedule`]'s own doc for the one site that consults it.
+    pub phase_schedule: PhaseSchedule,
+    /// I11 scheduling level 3 of 3: per-layer expert residency. See
+    /// [`ExpertResidencySchedule`]'s own doc for the one site that
+    /// consults it.
+    pub expert_residency_schedule: ExpertResidencySchedule,
 }
 
 impl<'model> ServingConfig<'model> {
@@ -541,6 +597,9 @@ impl Default for ServingConfig<'static> {
             moe_topk_fusion: true,
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
+            admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
+            phase_schedule: PhaseSchedule { prefill_before_decode: true },
+            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
         }
     }
 }
@@ -572,6 +631,15 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
             sequence,
             context_length: config.context_length,
         });
+    }
+
+    let max_concurrent_requests = config.admission_schedule.max_concurrent_requests;
+    if max_concurrent_requests != 0 && config.parallel_sequences as usize > max_concurrent_requests {
+        return Err(InteropError::UnsupportedServingConfig(format!(
+            "admission_schedule.max_concurrent_requests={max_concurrent_requests}: \
+             parallel_sequences={} exceeds the request-admission ceiling",
+            config.parallel_sequences
+        )));
     }
 
     if config.parallel_sequences != 1 {
@@ -855,6 +923,9 @@ mod tests {
             moe_topk_fusion: true,
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
+            admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
+            phase_schedule: PhaseSchedule { prefill_before_decode: true },
+            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -1016,6 +1087,9 @@ mod tests {
             moe_topk_fusion: true,
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
+            admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
+            phase_schedule: PhaseSchedule { prefill_before_decode: true },
+            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -1105,6 +1179,9 @@ mod tests {
             moe_topk_fusion: true,
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
+            admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
+            phase_schedule: PhaseSchedule { prefill_before_decode: true },
+            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(
@@ -1184,6 +1261,9 @@ mod tests {
             moe_topk_fusion: true,
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
+            admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
+            phase_schedule: PhaseSchedule { prefill_before_decode: true },
+            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);
@@ -1253,6 +1333,9 @@ mod tests {
             moe_topk_fusion: true,
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
+            admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
+            phase_schedule: PhaseSchedule { prefill_before_decode: true },
+            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.prefill_one_evaluation);
@@ -1274,5 +1357,53 @@ mod tests {
         let error =
             apply_serving_config(&config, 6).expect_err("kv_bucket_tokens=0 must be rejected");
         assert!(error.to_string().contains("kv_bucket_tokens"));
+    }
+
+    /// I11: the three scheduling levels are independent structs consulted
+    /// at independent sites -- changing one level's field must not move
+    /// either of the other two levels' own values, and each level's
+    /// non-default value must be rejected on its own terms
+    /// (`admission_schedule`'s rejection names `parallel_sequences`, not
+    /// `phase_schedule` or `expert_residency_schedule`).
+    #[test]
+    fn scheduling_levels_are_independent() {
+        let baseline = ServingConfig::default();
+
+        let admission_changed = ServingConfig {
+            admission_schedule: AdmissionSchedule { max_concurrent_requests: 4 },
+            ..baseline
+        };
+        assert_eq!(admission_changed.phase_schedule, baseline.phase_schedule);
+        assert_eq!(
+            admission_changed.expert_residency_schedule,
+            baseline.expert_residency_schedule
+        );
+
+        let phase_changed = ServingConfig {
+            phase_schedule: PhaseSchedule { prefill_before_decode: false },
+            ..baseline
+        };
+        assert_eq!(phase_changed.admission_schedule, baseline.admission_schedule);
+        assert_eq!(
+            phase_changed.expert_residency_schedule,
+            baseline.expert_residency_schedule
+        );
+
+        let residency_changed = ServingConfig {
+            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 1024 },
+            ..baseline
+        };
+        assert_eq!(residency_changed.admission_schedule, baseline.admission_schedule);
+        assert_eq!(residency_changed.phase_schedule, baseline.phase_schedule);
+
+        let over_admission = ServingConfig {
+            admission_schedule: AdmissionSchedule { max_concurrent_requests: 1 },
+            parallel_sequences: 2,
+            ..baseline
+        };
+        let error = apply_serving_config(&over_admission, 6)
+            .expect_err("parallel_sequences over the admission ceiling must be rejected");
+        assert!(error.to_string().contains("max_concurrent_requests"));
+        assert!(!error.to_string().contains("phase_schedule"));
     }
 }
