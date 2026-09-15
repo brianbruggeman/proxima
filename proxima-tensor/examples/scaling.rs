@@ -136,6 +136,7 @@ fn reduce_output_len(chunk: &proxima_tensor::BoundOp) -> usize {
         proxima_tensor::BoundOpKind::Elementwise { .. }
         | proxima_tensor::BoundOpKind::CachedAttention { .. }
         | proxima_tensor::BoundOpKind::GatedDeltaNet { .. }
+        | proxima_tensor::BoundOpKind::MoeTopK { .. }
         | proxima_tensor::BoundOpKind::Iota
         | proxima_tensor::BoundOpKind::Constant { .. } => {
             chunk.extents.iter().product::<u64>() as usize
