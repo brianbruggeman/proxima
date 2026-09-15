@@ -1,5 +1,39 @@
 use super::*;
 
+/// Measurement-only edge switch: mirrors `ServingConfig`'s three fusion
+/// bools into the process env vars `proxima_tensor::bind::bind_with_fusion`
+/// already reads (`PROXIMA_DISABLE_CACHED_ATTENTION_FUSION` pre-existing;
+/// `PROXIMA_DISABLE_GATED_DELTA_NET_FUSION`/`PROXIMA_DISABLE_MOE_TOPK_FUSION`
+/// new), so a caller can flip a compiled-in fusion off per invocation
+/// through `ServingConfig` rather than only via process env directly.
+#[cfg(feature = "std")]
+fn apply_fusion_env_switches(serving_config: &ServingConfig) {
+    set_fusion_disable_env_var(
+        "PROXIMA_DISABLE_CACHED_ATTENTION_FUSION",
+        !serving_config.cached_attention_fusion,
+    );
+    set_fusion_disable_env_var(
+        "PROXIMA_DISABLE_GATED_DELTA_NET_FUSION",
+        !serving_config.gated_delta_net_fusion,
+    );
+    set_fusion_disable_env_var(
+        "PROXIMA_DISABLE_MOE_TOPK_FUSION",
+        !serving_config.moe_topk_fusion,
+    );
+}
+
+#[cfg(feature = "std")]
+fn set_fusion_disable_env_var(name: &str, disable: bool) {
+    // single-threaded CLI/bench call sites only; no concurrent env reader.
+    unsafe {
+        if disable {
+            std::env::set_var(name, "1");
+        } else {
+            std::env::remove_var(name);
+        }
+    }
+}
+
 impl<'file> LoadedModel<'file> {
     /// [`Self::generate_with_serving_config`] against
     /// [`supported_serving_config`] -- the reachable path every existing
@@ -653,6 +687,8 @@ impl<'file> LoadedModel<'file> {
             self.apply_memory_fit_gate(&mut serving_config)?;
             serving_config
         };
+        #[cfg(feature = "std")]
+        apply_fusion_env_switches(&serving_config);
         let mut runtime = BackendRuntime::new(&serving_config);
         self.run_decode_loop(prompt, max_tokens, &serving_config, &mut runtime)
     }

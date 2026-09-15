@@ -372,6 +372,27 @@ pub struct ServingConfig<'model> {
     /// requesting the alt path (see that field's own doc for why it is not
     /// implemented end to end yet on the real checkpoint).
     pub prefill_one_evaluation: bool,
+    /// Not an upstream llama-server flag -- runtime toggle for
+    /// `proxima_tensor::bind::bind_with_fusion`'s cached-attention fused
+    /// kind, mirroring that function's own
+    /// `PROXIMA_DISABLE_CACHED_ATTENTION_FUSION` env-var escape hatch so a
+    /// caller can flip it per invocation without setting process env.
+    /// `true` (this field's default) matches today's shipped behavior.
+    pub cached_attention_fusion: bool,
+    /// Not an upstream llama-server flag -- runtime toggle for
+    /// `bind_with_fusion`'s `gated-delta-net-fusion` rewrite, mirroring the
+    /// new `PROXIMA_DISABLE_GATED_DELTA_NET_FUSION` env var. `true` (this
+    /// field's default) matches today's shipped behavior on a build with
+    /// the `gated-delta-net-fusion` feature compiled in (`metal`'s own
+    /// default set); has no effect when that feature is absent.
+    pub gated_delta_net_fusion: bool,
+    /// Not an upstream llama-server flag -- runtime toggle for
+    /// `bind_with_fusion`'s `moe-topk-fusion` rewrite, mirroring the new
+    /// `PROXIMA_DISABLE_MOE_TOPK_FUSION` env var. `true` (this field's
+    /// default) matches today's shipped behavior on a build with the
+    /// `moe-topk-fusion` feature compiled in (`metal`'s own default set);
+    /// has no effect when that feature is absent.
+    pub moe_topk_fusion: bool,
 }
 
 impl<'model> ServingConfig<'model> {
@@ -456,6 +477,9 @@ impl Default for ServingConfig<'static> {
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
+            cached_attention_fusion: true,
+            gated_delta_net_fusion: true,
+            moe_topk_fusion: true,
         }
     }
 }
@@ -760,6 +784,9 @@ mod tests {
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
+            cached_attention_fusion: true,
+            gated_delta_net_fusion: true,
+            moe_topk_fusion: true,
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -911,6 +938,9 @@ mod tests {
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
+            cached_attention_fusion: true,
+            gated_delta_net_fusion: true,
+            moe_topk_fusion: true,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -990,6 +1020,9 @@ mod tests {
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
+            cached_attention_fusion: true,
+            gated_delta_net_fusion: true,
+            moe_topk_fusion: true,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(
@@ -1059,6 +1092,9 @@ mod tests {
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
+            cached_attention_fusion: true,
+            gated_delta_net_fusion: true,
+            moe_topk_fusion: true,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);
@@ -1118,6 +1154,9 @@ mod tests {
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: true,
+            cached_attention_fusion: true,
+            gated_delta_net_fusion: true,
+            moe_topk_fusion: true,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.prefill_one_evaluation);

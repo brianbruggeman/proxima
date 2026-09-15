@@ -125,6 +125,12 @@ struct GenerateConfig {
     expert_sidecar: String,
     #[setting(default_str = "")]
     expert_sidecar_source: String,
+    #[setting(default = true)]
+    cached_attention_fusion: bool,
+    #[setting(default = true)]
+    gated_delta_net_fusion: bool,
+    #[setting(default = true)]
+    moe_topk_fusion: bool,
 }
 
 impl GenerateConfig {
@@ -403,6 +409,9 @@ fn supported_serving_config<'model>(
         frequency_penalty: settings.frequency_penalty,
         presence_penalty: settings.presence_penalty,
         seed: settings.seed,
+        cached_attention_fusion: settings.cached_attention_fusion,
+        gated_delta_net_fusion: settings.gated_delta_net_fusion,
+        moe_topk_fusion: settings.moe_topk_fusion,
         ..ServingConfig::default()
     };
     if let Some(kv_bucket_tokens) = kv_bucket_tokens {
