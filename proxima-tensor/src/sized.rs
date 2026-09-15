@@ -74,8 +74,14 @@ pub const MAX_INLINE_RANK: usize = 4;
 /// Capacity for one [`crate::bind::BoundOpBuilder::push`] call's ready
 /// batch. Sizes an `ArrayVec` const generic
 /// ([`crate::bind::ReadyBatch`]) -- cannot be runtime config at any tier.
+/// Raised from 3 to 32: the multi-position qwen35 mixer at real dims
+/// (M=13/16, `omega/tests/qwen35_mixer_multi_position_metal_parity.rs`)
+/// readies more `BoundOp`s per push than 3 allows once a program carries
+/// several fused positions, and every write into the batch already returns
+/// `TensorError::NotLowerable` on overflow via `push_ready` rather than
+/// panicking -- this only widens the ceiling that error fires past.
 #[cfg(any(feature = "std", feature = "alloc"))]
-pub const READY_BATCH_CAPACITY: usize = 3;
+pub const READY_BATCH_CAPACITY: usize = 32;
 
 /// Inline capacity for one axis's term list in the index-pattern grammar
 /// ([`crate::map::AxisIndex`]). Sizes a `SmallVec` const generic -- cannot

@@ -360,25 +360,8 @@ fn assert_production_parity(positions: u32, include_wide: bool) {
 #[proxima::test]
 #[case::m4(4)]
 #[case::m8(8)]
+#[case::m13(13)]
+#[case::m16(16)]
 async fn metal_multi_position_qwen35_mixer_matches_cpu_at_real_dims_on_production_outputs(#[case] positions: u32) {
     assert_production_parity(positions, false);
-}
-
-/// M=13: the CPU reference evaluator itself rejects this program before any
-/// Metal comparison is possible -- `NotLowerable { reason: "one push
-/// readied more BoundOps than the no-alloc batch capacity allows" }`. This is
-/// a `proxima-tensor` CPU static-arena batch-capacity ceiling, not a
-/// Metal-vs-CPU parity defect; re-run without `--ignored` filtering once that
-/// ceiling is raised or the mixer's node count per push is reduced.
-#[test]
-#[ignore = "cpu no-alloc batch capacity ceiling at M=13 (NotLowerable: one push readied more BoundOps than the no-alloc batch capacity allows), not a metal/cpu disagreement"]
-fn metal_multi_position_qwen35_mixer_m13_blocked_on_cpu_batch_capacity() {
-    assert_production_parity(13, true);
-}
-
-/// Same defect as M=13's ignored case, confirmed to also block M=16.
-#[test]
-#[ignore = "cpu no-alloc batch capacity ceiling at M=16 (NotLowerable: one push readied more BoundOps than the no-alloc batch capacity allows), not a metal/cpu disagreement"]
-fn metal_multi_position_qwen35_mixer_m16_blocked_on_cpu_batch_capacity() {
-    assert_production_parity(16, false);
 }

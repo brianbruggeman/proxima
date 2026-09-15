@@ -1447,9 +1447,9 @@ impl BoundOpBuilder {
 }
 
 /// Appends one ready [`BoundOp`] to a [`ReadyBatch`], turning an overflow
-/// (never observed for today's `ScalarOp` variants — see
-/// [`READY_BATCH_CAPACITY`]'s own doc) into a [`TensorError`] instead of a
-/// panic.
+/// into a [`TensorError`] instead of a panic -- the multi-position qwen35
+/// mixer at real dims (M=13/16) did observe one at the old capacity of 3;
+/// see [`READY_BATCH_CAPACITY`]'s own doc.
 fn push_ready(emitted: &mut ReadyBatch, node: NodeId, op: BoundOp) -> Result<(), TensorError> {
     emitted.try_push(op).map_err(|_| TensorError::NotLowerable {
         node,
@@ -8684,7 +8684,9 @@ mod tests {
     /// predecessors: a single `push` must materialize all three in one
     /// call, proving `push` can ready more than the two `BoundOp`s this
     /// module's docs once claimed as its ceiling — the true bound tracks
-    /// `ScalarOp::arity()`, which is why `READY_BATCH_CAPACITY` is 3, not 2.
+    /// `ScalarOp::arity()`, one reason `READY_BATCH_CAPACITY` must exceed 2
+    /// (widened further to 32 for multi-position programs — see that
+    /// constant's own doc).
     #[test]
     fn select_push_emits_three_when_all_three_operands_are_held_and_non_fusing() {
         let mut program = Vec::new();
