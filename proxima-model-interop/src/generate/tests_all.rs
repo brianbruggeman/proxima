@@ -18,7 +18,7 @@ use super::{
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(super) mod tests {
     #[cfg(feature = "qwen35moe-expert-prefetch")]
-    use super::qwen35moe_expert_prefetch_requested;
+    use super::super::qwen35moe_expert_prefetch_requested;
     use super::{
         RouterExpertCounts, RouterLogits, SsmLayerCache, begin_expert_gather_phase,
         collect_future_gather_cuts, first_nonfinite_node_value, kv_extent, lock_expert_slab,
