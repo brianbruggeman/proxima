@@ -46,10 +46,9 @@
 
 use proxima_tensor::spec::{
     ExpertGatingFunc, ForwardRoots, GdnOutputGate, MoeSite, MoeSites, Qwen35DenseAttentionTaps,
-    Qwen35GdnSequenceTail, Qwen35LayerRoots, SsmMixerTaps, append_moe_ffn_from_logits,
-    append_qwen35_dense_attention_only_with_taps, append_qwen35_gdn_sequence_tail_with_taps,
-    append_qwen35_ssm_mixer_with_taps_and_layout, causal_mask, elementwise, embedding_lookup,
-    input_leaf, reduce, rmsnorm, scalar_constant,
+    Qwen35LayerRoots, SsmMixerTaps, append_moe_ffn_from_logits,
+    append_qwen35_dense_attention_only_with_taps, append_qwen35_ssm_mixer_with_taps_and_layout,
+    causal_mask, elementwise, embedding_lookup, input_leaf, reduce, rmsnorm, scalar_constant,
 };
 use proxima_tensor::{DType, Extent, NodeId, Op, ReduceInit, ScalarOp};
 
@@ -192,18 +191,6 @@ pub struct Qwen35MoeLayerDiagnostics {
     pub routed_output: NodeId,
     pub shared_output: NodeId,
     pub block_output: NodeId,
-    pub gdn_prefill: Option<Qwen35MoeGdnPrefillTaps>,
-}
-
-/// Sequence-preserving roots used by the caller-driven GDN prefill scan.
-#[derive(Debug, Clone, Copy)]
-pub struct Qwen35MoeGdnPrefillTaps {
-    pub delta_out_input: NodeId,
-    pub gated_value: NodeId,
-    pub projected: NodeId,
-    pub post_mixer_residual: NodeId,
-    pub post_attention_norm_output: NodeId,
-    pub router_logits: NodeId,
 }
 
 /// Builds `qwen35moe`'s whole-model forward program -- see the module doc
@@ -347,7 +334,7 @@ pub fn qwen35moe_forward_program_at_width(
             &format!("blk.{layer}.ffn_gate_inp.weight"),
         );
 
-        let (mixer_out, ssm_taps, dense_attention_taps, mixer_output_pre_residual, gdn_prefill) =
+        let (mixer_out, ssm_taps, dense_attention_taps, mixer_output_pre_residual) =
             match kind {
                 LayerKind::Attention => {
                     let kv_heads = architecture.kv_heads_by_layer[layer as usize];
@@ -603,7 +590,7 @@ pub fn qwen35moe_forward_program_at_width(
                         dense_taps.v_new,
                     )));
                     let o_proj_out = dense_taps.o_proj_out;
-                    (residual1, None, Some(dense_taps), o_proj_out, None)
+                    (residual1, None, Some(dense_taps), o_proj_out)
                 }
                 LayerKind::Gdn => {
                     let qkv_dim = 2 * ssm_key_dim + architecture.ssm_inner_size;
@@ -737,59 +724,7 @@ pub fn qwen35moe_forward_program_at_width(
                         state_out: taps.state_out,
                     });
                     let ssm_out_result = taps.ssm_out_result;
-                    if std::env::var_os("PROXIMA_QWEN35MOE_GDN_PREFILL_SCAN").is_some() {
-                        let delta_out_input = input_leaf(
-                            &mut program,
-                            DType::Float32,
-                            vec![
-                                Extent::Symbolic(0),
-                                Extent::Static(head_v_dim),
-                                Extent::Static(architecture.ssm_group_count),
-                                Extent::Static(ssm_group),
-                            ],
-                            &format!("gdn_prefill.{layer}.delta_out"),
-                        );
-                        let prefill_tail = append_qwen35_gdn_sequence_tail_with_taps(
-                            &mut program,
-                            Qwen35GdnSequenceTail {
-                                x,
-                                delta_out: delta_out_input,
-                                z: taps.z_sequence,
-                                head_eps,
-                                inv_head_v_dim,
-                                norm_weight: ssm_norm_weight,
-                                out_weight: ssm_out,
-                                head_v_dim,
-                                kv_heads: architecture.ssm_group_count,
-                                group: ssm_group,
-                            },
-                        )?;
-                        let prefill_mixer_out = prefill_tail.output;
-                        let (prefill_normed, prefill_router_logits) = append_qwen35moe_router(
-                            &mut program,
-                            prefill_mixer_out,
-                            post_attention_norm_weight,
-                            inv_dim,
-                            eps,
-                            gate_inp,
-                        )?;
-                        (
-                            mixer_out,
-                            Some(taps),
-                            None,
-                            ssm_out_result,
-                            Some(Qwen35MoeGdnPrefillTaps {
-                                delta_out_input,
-                                gated_value: prefill_tail.gated_value,
-                                projected: prefill_tail.projected,
-                                post_mixer_residual: prefill_mixer_out,
-                                post_attention_norm_output: prefill_normed,
-                                router_logits: prefill_router_logits,
-                            }),
-                        )
-                    } else {
-                        (mixer_out, Some(taps), None, ssm_out_result, None)
-                    }
+                    (mixer_out, Some(taps), None, ssm_out_result)
                 }
             };
 
@@ -894,7 +829,6 @@ pub fn qwen35moe_forward_program_at_width(
             routed_output,
             shared_output,
             block_output: residual,
-            gdn_prefill,
         });
         x = residual;
         moe_sites.push(moe_site);
@@ -1042,19 +976,6 @@ mod tests {
             gdn_taps.z_head.0 < gdn_taps.delta_out.0 && gdn_taps.state_in.0 < gdn_taps.state_out.0,
             "the production scan cut must expose its carried inputs before recurrence"
         );
-        let Some(gdn_prefill) = diagnostics[0].gdn_prefill else {
-            assert!(
-                std::env::var_os("PROXIMA_QWEN35MOE_GDN_PREFILL_SCAN").is_none(),
-                "the diagnostic prefill flag was set but no taps were emitted"
-            );
-            return;
-        };
-        let shapes = proxima_tensor::shape::infer(&program, &[2, 2])
-            .expect("two-position prefill shapes infer");
-        assert_eq!(shapes.of(gdn_prefill.delta_out_input), &[2, 2, 1, 2]);
-        assert_eq!(shapes.of(gdn_prefill.post_mixer_residual), &[2, 8]);
-        assert_eq!(shapes.of(gdn_prefill.post_attention_norm_output), &[2, 8]);
-        assert_eq!(shapes.of(gdn_prefill.router_logits), &[2, 2]);
         assert_ne!(
             roots.logits, roots.hidden,
             "logits follow the output projection"

@@ -7,7 +7,7 @@ use super::{
     first_nonfinite_node_value, kv_extent, lock_expert_slab, map_expert_sources_to_segment,
     phys_footprint_bytes, qwen35_dense_attention_placed_byte_length,
     qwen35_dense_attention_placement_enabled, qwen35moe_admit_low_copy,
-    qwen35moe_gdn_prefill_scan_requested, qwen35moe_monolithic_all_low_enabled,
+    qwen35moe_monolithic_all_low_enabled,
     qwen35moe_pre_gather_enabled, retain_qwen35_segment_readbacks,
     should_release_monolithic_sources, step_batch_needs_logits, supported_serving_config,
     use_metal_output_placements, visit_qwen35moe_router_boundary,
@@ -22,7 +22,7 @@ pub(super) mod tests {
     use super::{
         RouterExpertCounts, RouterLogits, SsmLayerCache, begin_expert_gather_phase,
         collect_future_gather_cuts, first_nonfinite_node_value, kv_extent, lock_expert_slab,
-        qwen35moe_admit_low_copy, qwen35moe_gdn_prefill_scan_requested,
+        qwen35moe_admit_low_copy,
         qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
         should_release_monolithic_sources, step_batch_needs_logits,
         visit_qwen35moe_router_boundary, visit_qwen35moe_router_selections,
@@ -88,30 +88,6 @@ pub(super) mod tests {
         assert!(!qwen35moe_pre_gather_enabled(false, Some("qwen35moe")));
         assert!(!qwen35moe_pre_gather_enabled(true, Some("qwen3")));
         assert!(!qwen35moe_pre_gather_enabled(true, None));
-    }
-
-    #[test]
-    fn qwen35moe_gdn_scan_admission_is_config_driven() {
-        assert!(qwen35moe_gdn_prefill_scan_requested(
-            true,
-            true,
-            Some("qwen35moe")
-        ));
-        assert!(!qwen35moe_gdn_prefill_scan_requested(
-            false,
-            true,
-            Some("qwen35moe")
-        ));
-        assert!(!qwen35moe_gdn_prefill_scan_requested(
-            true,
-            false,
-            Some("qwen35moe")
-        ));
-        assert!(!qwen35moe_gdn_prefill_scan_requested(
-            true,
-            true,
-            Some("qwen3")
-        ));
     }
 
     #[test]

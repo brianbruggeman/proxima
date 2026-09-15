@@ -979,7 +979,6 @@ pub struct LoadedModel<'file> {
 /// inference before it can execute the same router/residency/gather phases.
 pub(super) struct Qwen35MoePreGatherPlan {
     pub(super) symbols: Vec<u64>,
-    pub(super) gdn_scan_enabled: bool,
     pub(super) gdn_backend: GdnPrefillBackend,
     pub(super) persistent_cuts: bool,
     pub(super) layers: Vec<Qwen35MoeLayerSegments>,
@@ -1099,7 +1098,6 @@ pub(super) struct Qwen35MoeLayerSegments {
     /// Exact two-layer window, present on the first layer of each pair when
     /// the caller requests `qwen35moe_layer_window=2`.
     pub(super) layer_window: Option<crate::qwen35moe::execution::MappedLayerSegment>,
-    pub(super) gdn_scan: Option<Qwen35MoeGdnScanSegment>,
     pub(super) router_future_cuts: Vec<(NodeId, String)>,
     pub(super) next_cuts: Vec<(NodeId, String)>,
     /// Original gather cuts owned by later layers.  This is part of the
@@ -1107,27 +1105,6 @@ pub(super) struct Qwen35MoeLayerSegments {
     /// values keeps a layer's router/gather boundary connected to the next
     /// consumer without rebuilding a suffix vector for every prompt row.
     pub(super) future_gather_cuts: Vec<NodeId>,
-}
-
-#[derive(Clone)]
-pub(super) struct Qwen35MoeGdnScanSegment {
-    pub(super) producer: crate::qwen35moe::execution::MappedLayerSegment,
-    pub(super) tail: crate::qwen35moe::execution::MappedLayerSegment,
-    pub(super) taps: proxima_tensor::spec::SsmMixerTaps,
-    pub(super) prefill: crate::qwen35moe::Qwen35MoeGdnPrefillTaps,
-    pub(super) post_mixer_residual: NodeId,
-    pub(super) post_attention_norm_output: NodeId,
-    pub(super) router_logits: NodeId,
-    /// The ordinary (non-scan) `previous_output -> router_logits` segment for
-    /// this same layer -- identical to what [`Qwen35MoeLayerSegments::router`]
-    /// would hold if `gdn_scan_enabled` were false. The scan's own conv branch
-    /// (`causal_conv1d` over just this call's rows) has no cross-call history
-    /// input, so it is only valid for the one call that carries the model's
-    /// entire causal context to date (the initial multi-position prefill).
-    /// Every later single-token decode step must run through this segment
-    /// instead, which reads the persisted `ssm_cache.{layer}.conv_history`/
-    /// `.state` the ordinary [`SsmLayerCache`] already threads.
-    pub(super) decode_router: crate::qwen35moe::execution::MappedLayerSegment,
 }
 
 /// Links one layer's carry set to the gather cuts consumed by later layers.
@@ -1356,13 +1333,11 @@ pub(super) struct PreGatherContext<'context, 'mapping, 'file> {
     pub(super) named: &'context [(&'context str, QuantizedBlock<'context>)],
     pub(super) outputs: &'context [NodeId],
     pub(super) resident_names: &'context BTreeSet<&'context str>,
-    pub(super) layer_caches: &'context [LayerCacheState],
     pub(super) expert_slab: &'context mut crate::expert_slab::ExpertSlab<'file>,
     pub(super) sidecar_read_scratch: &'context mut crate::expert_sidecar::ExpertSidecarReadScratch,
     pub(super) current_sources: &'context RefCell<CurrentExpertSources>,
     pub(super) position_offset: usize,
     pub(super) layer_window: usize,
-    pub(super) gdn_backend: GdnPrefillBackend,
     // `'mapping` is only borrowed by metal-gated fields below; this marker
     // keeps the lifetime parameter used on every feature combination.
     pub(super) marker: PhantomData<&'mapping ()>,
@@ -1374,19 +1349,5 @@ pub(super) struct PreGatherContext<'context, 'mapping, 'file> {
     pub(super) ssm_placement: Option<&'context Qwen35SsmPlacement<'context>>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) dense_attention_placement: Option<&'context Qwen35DenseAttentionPlacement<'context>>,
-}
-
-/// The per-call evaluation inputs for one GDN scan segment, grouped so the
-/// method they feed keeps its argument count under clippy's threshold.
-pub(super) struct GdnScanSegmentContext<'context, 'data> {
-    pub(super) state_cache: &'context [f32],
-    pub(super) gdn_backend: GdnPrefillBackend,
-    pub(super) future_cuts: &'context [(NodeId, String)],
-    pub(super) symbols: &'context [u64],
-    pub(super) named: &'context [(&'context str, QuantizedBlock<'data>)],
-    pub(super) outputs: &'context [NodeId],
-    pub(super) resident_names: &'context BTreeSet<&'context str>,
-    pub(super) carried: &'context mut BTreeMap<NodeId, (Vec<u64>, Vec<f32>)>,
-    pub(super) results: &'context mut BTreeMap<NodeId, (Vec<u64>, Vec<f32>)>,
 }
 

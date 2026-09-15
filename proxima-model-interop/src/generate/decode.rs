@@ -1491,23 +1491,6 @@ impl<'file> LoadedModel<'file> {
                 usize::try_from(residency_budget).unwrap_or(0),
                 mapped_window_capacity,
             )?;
-        let gdn_prefill_scan_requested = qwen35moe_gdn_prefill_scan_requested(
-            serving_config.qwen35moe_gdn_prefill_scan,
-            serving_config.qwen35moe_pre_gather,
-            self.architecture_impl
-                .map(|architecture| architecture.name()),
-        );
-        let gdn_prefill_scan_enabled =
-            gdn_prefill_scan_requested && serving_config.debug_gdn_compare;
-        if gdn_prefill_scan_requested && !gdn_prefill_scan_enabled {
-            return Err(InteropError::PreGatherExecutionUnsupported {
-                architecture: String::from("qwen35moe"),
-                reason: String::from(
-                    "gdn prefill scan output projection differs from the ordinary recurrent path on the real checkpoint",
-                ),
-            });
-        }
-
         // ROW 427 named the reason a `single_position_step` architecture's
         // `new_count > 1` prefill used to split into `prompt_token_count`
         // one-position evaluations: the compiled decode program's own `s`
@@ -1629,13 +1612,10 @@ impl<'file> LoadedModel<'file> {
                 // AND the alt program actually built.
                 let one_evaluation_prefill = self.single_position_step
                     && next_ids.len() > 1
-                    && !gdn_prefill_scan_enabled
                     && one_evaluation_prefill_requested
                     && !one_evaluation_prefill_programs.is_empty();
-                let split_prefill = self.single_position_step
-                    && next_ids.len() > 1
-                    && !gdn_prefill_scan_enabled
-                    && !one_evaluation_prefill;
+                let split_prefill =
+                    self.single_position_step && next_ids.len() > 1 && !one_evaluation_prefill;
                 let batch_count = if one_evaluation_prefill {
                     one_evaluation_chunks.len()
                 } else if split_prefill {
@@ -1818,7 +1798,7 @@ impl<'file> LoadedModel<'file> {
                         &mut qwen35_dense_pad_scratch,
                         &mut step_input_scratch,
                         &mut named_blocks,
-                        active_single_position_step && !(gdn_prefill_scan_enabled && new_count > 1),
+                        active_single_position_step,
                     )?;
                     if active_program.iter().any(|operation| {
                         operation.name().is_some_and(|name| {
@@ -1969,14 +1949,6 @@ impl<'file> LoadedModel<'file> {
                             diagnostic.post_mixer_residual,
                             diagnostic.router_logits,
                         ]);
-                    }
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_DIGEST").is_some() {
-                        for diagnostic in &self.qwen35moe_layer_diagnostics {
-                            if diagnostic.gdn_prefill.is_some() {
-                                roots.push(diagnostic.post_mixer_residual);
-                                roots.push(diagnostic.router_logits);
-                            }
-                        }
                     }
                     if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_BLOCKS").is_some() {
                         roots.extend(
@@ -2180,7 +2152,6 @@ impl<'file> LoadedModel<'file> {
                     );
                     #[cfg(not(feature = "metal"))]
                     let monolithic_all_low = false;
-                    let gdn_prefill_scan = pre_gather && gdn_prefill_scan_enabled;
                     if pre_gather {
                         expert_slab_guard.clear_selected_experts_for_step();
                     }
@@ -2253,14 +2224,12 @@ impl<'file> LoadedModel<'file> {
                         && !monolithic_all_low
                         && qwen35moe_pre_gather_plan.as_ref().is_none_or(|plan| {
                             plan.symbols != symbols
-                                || plan.gdn_scan_enabled != gdn_prefill_scan
                                 || plan.gdn_backend != serving_config.gdn_prefill_backend
                                 || plan.persistent_cuts != serving_config.qwen35moe_persistent_cuts
                         })
                     {
                         qwen35moe_pre_gather_plan = Some(self.qwen35moe_pre_gather_plan(
                             &symbols,
-                            gdn_prefill_scan,
                             serving_config.gdn_prefill_backend,
                             serving_config.qwen35moe_persistent_cuts,
                         )?);
@@ -2471,13 +2440,11 @@ impl<'file> LoadedModel<'file> {
                                 named: &named_blocks,
                                 outputs: &roots,
                                 resident_names: &resident_names,
-                                layer_caches: &layer_caches,
                                 expert_slab: &mut expert_slab_guard,
                                 sidecar_read_scratch: &mut sidecar_read_scratch,
                                 current_sources: &current_sources,
                                 position_offset: cached_len,
                                 layer_window: serving_config.qwen35moe_layer_window,
-                                gdn_backend: pre_gather_plan.gdn_backend,
                                 marker: PhantomData,
                                 #[cfg(feature = "metal")]
                                 sidecar: self.expert_sidecar.as_ref(),
@@ -2560,13 +2527,11 @@ impl<'file> LoadedModel<'file> {
                                 named: &named_blocks,
                                 outputs: &roots,
                                 resident_names: &resident_names,
-                                layer_caches: &layer_caches,
                                 expert_slab: &mut expert_slab_guard,
                                 sidecar_read_scratch: &mut sidecar_read_scratch,
                                 current_sources: &current_sources,
                                 position_offset: cached_len,
                                 layer_window: serving_config.qwen35moe_layer_window,
-                                gdn_backend: pre_gather_plan.gdn_backend,
                                 marker: PhantomData,
                                 #[cfg(feature = "metal")]
                                 sidecar: self.expert_sidecar.as_ref(),
@@ -4418,14 +4383,6 @@ pub(super) fn use_metal_output_placements(has_recurrent_state: bool, monolithic_
 
 pub(super) fn qwen35moe_pre_gather_enabled(configured: bool, architecture_name: Option<&str>) -> bool {
     configured && architecture_name == Some("qwen35moe")
-}
-
-pub(super) fn qwen35moe_gdn_prefill_scan_requested(
-    configured: bool,
-    pre_gather: bool,
-    architecture_name: Option<&str>,
-) -> bool {
-    configured && pre_gather && architecture_name == Some("qwen35moe")
 }
 
 pub(super) fn qwen35moe_admit_low_copy(source: PackedOwnedKind, target: PackedOwnedKind) -> bool {
