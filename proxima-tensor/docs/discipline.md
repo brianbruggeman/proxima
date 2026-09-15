@@ -33572,3 +33572,45 @@ BLOB=/Users/brianbruggeman/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b
 PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent "$BIN" "$BLOB" "What is the capital of France?" 16 gpu
 PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent "$BIN" "$BLOB" "The capital of France is" 16 gpu
 ```
+
+## ROW 591 -- real GPU replay of ROW 590's own residual: both bisect endpoints (78a313d7 AND HEAD) fail identically; the "regression" premise is falsified, not confirmed
+
+Idea/claim (ROW 590's own residual item 1): once Ollama frees the GPU, re-run `PROXIMA_PREFILL_ONE_EVALUATION=1` on the France-16 checkpoint at `HEAD` and at `78a313d7` and expect `78a313d7` to print Paris while `HEAD` fails, confirming `a8943daf` (the only candidate ROW 590 could not exonerate by static reading) as the cause.
+
+**Instrumented** (`proxima-model-interop/src/generate/decode.rs`, both gated `#[cfg(feature = "instrument")]`, kept as permanent `debug!` rows): (1) `apply_memory_fit_gate`'s own live decision (`requested_context_length`, resulting `context_length`, `available_bytes`, `outcome`) right after `fit_context_length` returns; (2) the one-evaluation prefill batch's logits shape immediately before sampling, extended with `non_finite_count` and the first five raw values.
+
+**Real data, `RUST_LOG=debug`, Ollama confirmed idle (`ollama ps` empty) via the model-lock protocol, GPU weight load succeeded (`peak_rss_bytes` ~28 GiB):**
+
+At `HEAD` (`1868eb91`, `PROXIMA_PREFILL_ONE_EVALUATION=1` forced, `PROXIMA_DISPATCH=concurrent`, "The capital of France is"):
+```
+apply_memory_fit_gate: live fit decision requested_context_length=131072 fit_context_length=131072 available_bytes=42949672960 outcome=Fits
+one_evaluation_prefill_batch: logits shape before sampling step=0 batch_index=0 new_count=13 logits_len=248320 vocab_size=248320 non_finite_count=248320 first_five=[NaN, NaN, NaN, NaN, NaN]
+METAL RUN FAILED: greedy_pick: logits slice is empty
+GENERATION FAILED: node %6540 cannot be bound to an executable op: operand buffer missing at evaluation time
+```
+`outcome=Fits` proves `a8943daf`'s `apply_memory_fit_gate` wiring is a genuine, measured no-op on this checkpoint (matches ROW 586's isolated numbers, now confirmed live) -- it changes nothing `generate_streaming` sees. `non_finite_count=248320` of `248320` is not a partial numerical drift, it is total corruption of every logit; `sample_next_token`'s only path that reaches `EmptyLogits` on a non-empty slice is `greedy_fast_path_is_safe` returning `false` on a non-finite value, falling to `sample_general`, whose `apply_min_p` (default `0.15`) then empties the candidate set entirely because every comparison against an all-NaN `max_logit`-derived threshold is false (`NaN >= x` is always false) -- this is a full trace of the sampling code doing the CORRECT thing with garbage input, not a sampling bug.
+
+Re-ran with `PROXIMA_DISPATCH=serial` (same binary): byte-identical `non_finite_count=248320`, same `METAL RUN FAILED`, same CPU-fallback `node %6540` error -- rules out the concurrent-dispatch hazard `examples/gguf_generate.rs`'s own `dispatch` field doc names ("alternated between exact and corrupted token sequences") as the mechanism; this corruption is deterministic per checkpoint/shape, not a scheduling race.
+
+**Then replayed the SAME command at `78a313d7`** (working tree swapped via `git checkout 78a313d7 -- .` / restored via `git checkout HEAD -- .`, no branch move, `ServingConfig::default().prefill_one_evaluation` is `true` natively there, no env override needed): **identical failure**, same node id:
+```
+METAL RUN FAILED: greedy_pick: logits slice is empty
+GENERATION FAILED: node %6540 cannot be bound to an executable op: operand buffer missing at evaluation time
+```
+
+**Fupan, numbers-only:**
+1. Predicted (ROW 590's own residual item 1): `78a313d7` would decode Paris on this exact command, proving the regression sits somewhere in `78a313d7..HEAD` and narrowing to `a8943daf`.
+2. Actual: `78a313d7` fails identically to `HEAD` -- same error text, same failing node id (`%6540`), same CPU-fallback error shape -- on the same host, same checkpoint, same command, run back-to-back in the same session.
+3. Decision wrong given the information at the time: ROW 590 never itself ran `78a313d7`'s binary against the real checkpoint (its own "78a313d7 itself printed Paris" line was carried forward from the task brief, never re-verified); a claim that decides which commit to blame is exactly the class of claim guiding-principle 14/18 require a measurement artifact for, and none existed until this row.
+4. Mechanism at file:line: not yet isolated to one line -- the corruption is upstream of `decode.rs`'s sampling code, inside the one-evaluation prefill's compiled program/execution for a real 13-token, 48-layer (mixed `Attention`/`Gdn`) checkpoint; the CPU-fallback error (`NotLowerable { node: NodeId(6540), reason: "operand buffer missing at evaluation time" }`) at the SAME node id on both commits points at the one-evaluation prefill program construction or its `one_evaluation_prefill_programs` width-keyed lookup (`decode.rs`'s `.find(|(built_width, ..)| *built_width == width)`), not at anything either bisect candidate touched. Does not reproduce on the CPU synthetic-4-layer oracle (`qwen35moe_one_shot_vs_sequential_parity`, still 1/1 green) -- the defect needs the real checkpoint's actual layer mix/width, which the synthetic fixture never covers.
+5. Falsifiable rule that would have caught it, added this row: `one_evaluation_prefill_through_generate_streaming_matches_sequential_on_the_real_checkpoint` (`proxima-model-interop/src/generate/tests_all.rs`, `#[ignore]`d, same real-checkpoint gate as its siblings) -- drives `generate_streaming` itself (not a hand-built `BackendRuntime`, closing ROW 590's own named gap) and asserts non-empty, sequential-matching ids/text. It is expected to FAIL today given this row's own data, which is the point: it is the missing gate that turns "printed Paris once" into a re-provable claim.
+
+**Conclusion:** ROW 590's fallback (`prefill_one_evaluation` default `false` in both `ServingConfig::default()` and the example's own setting) is the CORRECT state and stays as-is -- flipping it back to `true` per the task brief's request would ship a default now PROVEN broken by direct execution on the real checkpoint, at both the accused commit and its accused parent. No commit in `78a313d7..HEAD` is implicated; the defect is older, real-checkpoint-shape-specific, and still open.
+
+Gates, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`:
+- `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0.
+- `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0, 0 errors.
+- `cargo nextest run -p proxima-model-interop --features std --test qwen35moe_one_shot_vs_sequential_parity -j 4`: 1 run, 1 passed.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed (same named set as ROW 577/586/588/590), 65 skipped.
+
+Residual: the real defect (node `%6540`, one-evaluation prefill program/lookup for a real multi-layer checkpoint) is unisolated to a file:line and still open; next step is a `PROXIMA_DEBUG_GDN_ALL_BLOCKS`-style per-node dump of the one-evaluation prefill program at width 13 against the sequential program's own per-position graph, diffed node-for-node, to find where NodeId(6540) or its producer first stops matching.
