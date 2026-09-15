@@ -143,6 +143,8 @@ struct GenerateConfig {
     prefill_chunk_positions: usize,
     #[setting(default = false)]
     plan_time_constants: bool,
+    #[setting(default = false)]
+    overlap_transfer_compute: bool,
 }
 
 impl GenerateConfig {
@@ -430,6 +432,7 @@ fn supported_serving_config<'model>(
         max_command_buffers_per_token: settings.max_command_buffers_per_token,
         prefill_chunk_positions: settings.prefill_chunk_positions,
         plan_time_constants: settings.plan_time_constants,
+        overlap_transfer_compute: settings.overlap_transfer_compute,
         ..ServingConfig::default()
     };
     if let Some(kv_bucket_tokens) = kv_bucket_tokens {
