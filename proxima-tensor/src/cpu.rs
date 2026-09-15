@@ -5204,13 +5204,16 @@ fn evaluate_quantized_with_scratch_impl(
                 continue;
             }
             if retire_into(&mut buffers, *retired, free_buffers) {
-                live_now -= 1;
+                // a segmented (gdn-scan producer/tail split) evaluation can retire a
+                // node this diagnostic counter never saw incremented; the counter is
+                // report-only (`peak_live_buffers`), so clamp rather than trap.
+                live_now = live_now.saturating_sub(1);
             }
         }
         if let Some(deferred) = layer_norm_cluster_retire_at.get(&position) {
             for node in deferred {
                 if retire_into(&mut buffers, *node, free_buffers) {
-                    live_now -= 1;
+                    live_now = live_now.saturating_sub(1);
                 }
             }
         }
