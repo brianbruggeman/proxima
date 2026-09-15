@@ -33614,3 +33614,48 @@ Gates, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`:
 - `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed (same named set as ROW 577/586/588/590), 65 skipped.
 
 Residual: the real defect (node `%6540`, one-evaluation prefill program/lookup for a real multi-layer checkpoint) is unisolated to a file:line and still open; next step is a `PROXIMA_DEBUG_GDN_ALL_BLOCKS`-style per-node dump of the one-evaluation prefill program at width 13 against the sequential program's own per-position graph, diffed node-for-node, to find where NodeId(6540) or its producer first stops matching.
+
+## ROW 592 -- node %6540 root-caused: `qwen35moe_pre_gather_plan` reads `self.program`'s own node ids while `active_program` (the one-evaluation program) is a different graph; fixed, a second, distinct defect now blocks the acceptance bar
+
+Idea/claim (ROW 591's own residual): a header-only static-plan probe -- no weight bytes, no GPU, no model lock needed -- against the REAL checkpoint's own architecture would name node `%6540` and the pass that drops it, without a per-node dump diff.
+
+**Instrumented** (`proxima-model-interop/tests/real_qwen35moe_registry_probe.rs`, a new `#[ignore]`d test reusing this file's existing mmap/`parse_complete` pattern, header-only, never faults the expert pages): builds the SAME width-13 one-evaluation program `decode.rs`'s `one_evaluation_prefill_programs` builds (`qwen35moe_forward_program_at_width(&architecture, Some(13))`, purely symbolic), then runs `proxima_tensor::shape::infer` + `bind::bind` + `dead_resolved_nodes` + `node_last_reader` over it directly -- the identical admission pipeline `quantized_eval` runs before touching a weight byte.
+
+**Real data** (`PROXIMA_QWEN35MOE_GGUF` = the real blob, `cargo test -p proxima-model-interop --features std --test real_qwen35moe_registry_probe -- --ignored --nocapture`):
+```
+width-13 program: ops=25392 logits_root=NodeId(25391)
+node 6540 raw op = Input { dtype: Float32, shape: [Static(2048)], name: Some("blk.10.attn_norm.weight") }
+resolved.len() = 9785
+node 6540 is NEVER materialized in `resolved` (absorbed or dead)
+node 6540 in dead_resolved_nodes = false
+node 6540 last-reader resolved position = 2520
+node 6540 producer_position=None consumer_positions=[2520]
+```
+Node `%6540` is not a computed node at all -- it is the RAW WEIGHT INPUT LEAF for `blk.10.attn_norm.weight`, reachable (not dead) with exactly one real reader at resolved position 2520. A leaf's own buffer is filled by NAME through `resolve_named_blocks`/`push_step_named_blocks`, never through `resolved`, so "operand buffer missing" at this node means the READER at position 2520 executed against a buffer table that never got this weight bound into it.
+
+**Mechanism, `proxima-model-interop/src/generate/decode.rs:2165-2169` (pre-fix):** `let pre_gather = qwen35moe_pre_gather_enabled(serving_config.qwen35moe_pre_gather, ...) && !monolithic_high_mmap_requested;` -- unconditional on which program is active this batch. When `pre_gather` is true (qwen35moe's own default), execution takes the `evaluate_qwen35moe_pre_gather` branch (`decode.rs:2446`/`2534`) instead of `runtime.evaluate(active_program, ...)`. `evaluate_qwen35moe_pre_gather`'s own plan (`pregather.rs:188`, `qwen35moe_pre_gather_plan`) is built ENTIRELY from `&self.program`, `self.logits_root`, and `self.qwen35moe_layer_diagnostics` -- the ORDINARY sequential program's own node numbering -- with no parameter naming which program is actually active. During the one-evaluation prefill batch, `active_program` (built separately by `qwen35moe_forward_program_at_width` at width 13) is a DIFFERENT graph with a different node-id assignment for the same tensors; the routed segment plan's node ids do not resolve against it, so the executor reads a buffer table built for the wrong graph and finds node 6540 (a real, needed weight) never bound.
+
+**Fix** (`decode.rs:2165`): `&& !one_evaluation_prefill` added to the `pre_gather` condition -- the routed pre-gather fast path is valid only when `self.program` is the graph actually executing; the one-evaluation batch falls through to the plain `runtime.evaluate(active_program, ...)` arm, which resolves named blocks fresh against whichever program is passed to it and needs no per-program-identity parameter.
+
+**Re-ran the exact ROW 591 regression** (`generate::tests_all::memory_fit_gate_tests::qwen35moe_one_evaluation_prefill_real_model::one_evaluation_prefill_through_generate_streaming_matches_sequential_on_the_real_checkpoint`, same real blob, `--features metal,instrument`): the `NodeId(6540)` "operand buffer missing" failure is GONE -- proving the mechanism above was the cause -- replaced by a DIFFERENT, LATER failure:
+```
+one-evaluation prefill through generate_streaming: Metal(Tensor(GatherIndexOutOfRange { node: NodeId(6943), index: 0, extent: 256 }))
+```
+`extent: 256` is this checkpoint's own `expert_count`; this reads as a MoE router/gather index defect, not a buffer-lifetime defect -- a SECOND, distinct class of bug this fix's own repair exposed by getting past the first one. The reported `NodeId(6943)` is NOT `active_program[6943]` (confirmed via the same header-only probe: that raw op is an unrelated `Elementwise { body: Multiply, .. }`), so this id is Metal's own lowered-plan numbering, not the symbolic program's -- unisolated to a file:line this row, genuinely new, and out of this row's scope.
+
+**Fupan, numbers-only:**
+1. Predicted: disabling the pre-gather routed segment plan for the one-evaluation batch (whose plan is proven built from the wrong graph's node ids) would eliminate the `NodeId(6540)` failure.
+2. Actual: it did -- the exact same real-checkpoint regression test now fails at a different node, a different error variant (`GatherIndexOutOfRange` vs `NotLowerable`), at a later point in execution (Metal MoE gather vs. the interpreter's own operand-buffer read).
+3. Decision wrong given the information at the time (ROW 591): treating `%6540` as unisolated and reaching for a per-node graph diff was the right NEXT step named, but the graph diff was never needed -- a header-only static-plan probe against the real architecture's own hparams (no weights, no GPU, no lock) named the node and its one reader directly.
+4. Mechanism at file:line: `proxima-model-interop/src/generate/decode.rs:2165` (`pre_gather` computed without checking which program is active) feeding `decode.rs:2446`/`2534` (`evaluate_qwen35moe_pre_gather` dispatch) into `pregather.rs:188` (`qwen35moe_pre_gather_plan` hardcoded to `&self.program`).
+5. The falsifiable test that would have caught it: ROW 591's own `one_evaluation_prefill_through_generate_streaming_matches_sequential_on_the_real_checkpoint` already IS that test -- it caught this defect the moment `pre_gather` stopped masking it behind an earlier crash, and it remains RED today (now on `GatherIndexOutOfRange`, not `NotLowerable`), so the fix does not close it and `prefill_one_evaluation` stays default OFF (step 5 of this row's own brief, flipping the default, is NOT done -- its own acceptance bar, "both prompts print Paris," is unmet).
+
+Gates, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`:
+- `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0.
+- `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0, 0 errors.
+- `cargo nextest run -p proxima-model-interop --features std --test qwen35moe_one_shot_vs_sequential_parity -j 4`: 1 run, 1 passed (unchanged from ROW 591).
+- `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed (identical named set: `capability_matrix::dense_cpu_unrepresentable_codec_load_returns_a_typed_error` x3, `external_architecture_hybrid_cache` x4, `external_expert_paging::q2k_paging_actually_changes_the_decoded_ids` x1), 66 skipped -- no new regression.
+- `cargo nextest run -p proxima-tensor --lib -j 4`: 616 run, 616 passed, 7 skipped.
+- CPU backend was NOT reached this row: the real-checkpoint regression test requires `metal` to even compile (pre-existing on `main`, confirmed via `git stash`: `--features std --all-targets` fails on unrelated `metal-output-placement`-gated items with or without this row's diff), and `greedy_serving_config`'s `GPU_LAYERS_ALL` routes it through Metal; a CPU-forced variant of this same test is the cleanest next step, ahead of chasing `NodeId(6943)` on Metal's own plan numbering.
+
+Residual: `GatherIndexOutOfRange { node: NodeId(6943), index: 0, extent: 256 }` is open, unisolated to file:line, and is a DIFFERENT defect class (MoE router/gather index, Metal-plan-numbered) than this row's own fix. `prefill_one_evaluation` stays default OFF. Next step: force the regression test's `ServingConfig` onto the CPU backend (0 GPU layers) to get the deterministic, no-Metal repro this row's own brief asked for first, then map Metal's `NodeId(6943)` back to a symbolic-program node through whatever lowering pass assigns it.
