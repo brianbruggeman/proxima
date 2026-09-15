@@ -70,6 +70,14 @@ struct GenerateConfig {
     gpu_memory_limit_bytes: u64,
     #[setting(default = 0)]
     qwen35moe_residency_budget_bytes: u64,
+    #[setting(default = 0)]
+    dense_weights_budget_bytes: u64,
+    #[setting(default = 0)]
+    expert_weights_budget_bytes: u64,
+    #[setting(default = 0)]
+    activations_budget_bytes: u64,
+    #[setting(default = 0)]
+    kv_cache_budget_bytes: u64,
     #[setting(default = false)]
     qwen35moe_pre_gather: bool,
     #[setting(default = false)]
@@ -394,6 +402,10 @@ fn supported_serving_config<'model>(
         qwen35moe_persistent_cuts: settings.qwen35moe_persistent_cuts,
         gdn_prefill_backend: gdn_prefill_backend(&settings.gdn_prefill_backend),
         qwen35moe_residency_budget_bytes: settings.qwen35moe_residency_budget_bytes,
+        dense_weights_budget_bytes: settings.dense_weights_budget_bytes,
+        expert_weights_budget_bytes: settings.expert_weights_budget_bytes,
+        activations_budget_bytes: settings.activations_budget_bytes,
+        kv_cache_budget_bytes: settings.kv_cache_budget_bytes,
         qwen35moe_expert_prefetch: settings.qwen35moe_expert_prefetch,
         qwen35moe_layer_window: settings.qwen35moe_layer_window,
         qwen35moe_monolithic_all_low: settings.qwen35moe_monolithic_all_low,
