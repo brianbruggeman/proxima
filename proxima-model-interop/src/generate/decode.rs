@@ -1473,8 +1473,8 @@ impl<'file> LoadedModel<'file> {
         // the proven split-loop behavior): built once here, never per step,
         // since `prompt_token_count > 1` is only ever true on the prompt's
         // own first step.
-        let one_evaluation_prefill_requested =
-            std::env::var_os("PROXIMA_PREFILL_ONE_EVALUATION").is_some();
+        let one_evaluation_prefill_requested = serving_config.prefill_one_evaluation
+            || std::env::var_os("PROXIMA_PREFILL_ONE_EVALUATION").is_some();
         let one_evaluation_prefill_program = if self.single_position_step
             && prompt_token_count > 1
             && one_evaluation_prefill_requested

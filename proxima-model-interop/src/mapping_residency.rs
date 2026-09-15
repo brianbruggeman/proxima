@@ -261,7 +261,17 @@ fn lock_resident(bytes: &[u8]) {
 /// 542: the retry-only ladder still lost to a concurrent evictor at 81-82%
 /// memory free (11.7-8.5 GB missing of 24 GB), a false refusal that is worse
 /// than the silent zero-read it guards against (ROW 533), so `mlock` is the
-/// rung that can never lose that race.
+/// last rung tried. `lock_resident`'s own `mlock(2)` return value is
+/// discarded (surfaced only as an `instrument`-gated debug log, never an
+/// error) -- a process under the common default `RLIMIT_MEMLOCK` (often a
+/// few MiB, well under a multi-GB checkpoint) gets `ENOMEM`/`EAGAIN` from
+/// this call silently, with no lock actually taken. Whatever this function
+/// returns still comes from the `mincore(2)` probe immediately after, so a
+/// caller still gets [`InteropError::MappingNotResident`] rather than a
+/// false "resident" result on a mapping this rung failed to lock; what it
+/// cannot guarantee is that a page found resident at that probe stays
+/// resident afterward -- mlock still failed, so nothing here holds it
+/// against a later evictor.
 ///
 /// # Errors
 ///
