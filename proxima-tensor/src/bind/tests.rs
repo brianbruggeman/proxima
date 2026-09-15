@@ -5193,6 +5193,7 @@ mod gated_delta_net_tests {
             l_cache,
             GdnOutputGate::Silu,
             false,
+            None,
         )
         .expect("real-shape qwen35moe ssm mixer lowers");
 
@@ -5524,6 +5525,7 @@ mod gated_delta_net_tests {
             l_cache,
             GdnOutputGate::Silu,
             false,
+            None,
         )
         .expect("real-shape qwen35moe ssm mixer lowers");
 

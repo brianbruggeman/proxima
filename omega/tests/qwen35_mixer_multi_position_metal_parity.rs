@@ -200,6 +200,7 @@ fn build_fixture(positions: u32) -> RealDimsFixture {
         GROUP,
         L_CACHE,
         GdnOutputGate::Silu,
+        Some(positions),
     )
     .expect("the qwen35 ssm mixer lowers at real dims");
 

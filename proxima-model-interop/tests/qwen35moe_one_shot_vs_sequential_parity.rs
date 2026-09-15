@@ -109,10 +109,15 @@ fn rope_row(is_cos: bool, absolute_position: u32, pairs: usize) -> Vec<f32> {
 /// history length, `0` on the one-shot program and every sequential call's
 /// own `t`), and `kv_cache.*`/`ssm_cache.*` leaves are overwritten by the
 /// caller afterward with the actual threaded cache (`cache_overrides`).
+/// `local_width` is this call's own new-row count (`WIDTH` for the one-shot
+/// program, `1` for every sequential call) -- `lm_head_row` is keyed off it
+/// the same way production's own `generate.rs` supplies it: the last new
+/// row this call itself computed, `local_width - 1`, never a global index.
 fn seed_named_inputs(
     program: &[Op],
     symbols: &[u64],
     absolute_position: u32,
+    local_width: u32,
     cache_overrides: &std::collections::HashMap<String, Vec<f32>>,
 ) -> Vec<(String, Vec<f32>)> {
     let shapes = infer(program, symbols).expect("qwen35moe forward program infers its own shapes");
@@ -133,12 +138,19 @@ fn seed_named_inputs(
                 vec![1e-6_f32; count]
             } else if name == "cached_len" {
                 vec![absolute_position as f32]
+            } else if name == "lm_head_row" {
+                vec![(local_width - 1) as f32]
             } else if name == "rope_cos" || name == "rope_sin" {
                 let pairs = *extents.last().expect("rope tables have a trailing pair axis");
                 let width = count / pairs.max(1);
                 (0..width)
                     .flat_map(|row| rope_row(name == "rope_cos", absolute_position + row as u32, pairs))
                     .collect()
+            } else if name.starts_with("ssm_cache.") || name.starts_with("kv_cache.") {
+                // no override means "no prior history" (a fresh prefill, or
+                // `run_sequential`'s own step 0) -- the caller-threaded cache
+                // starts blank, never random noise.
+                vec![0.0_f32; count]
             } else {
                 random_vec(seed_for_name(&name), count)
             };
@@ -185,7 +197,7 @@ fn run_one_shot() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<Vec<f32>>
             .expect("the one-shot qwen35moe forward program lowers");
     let symbols = vec![u64::from(WIDTH), 0];
     let empty_caches = std::collections::HashMap::new();
-    let named = seed_named_inputs(&program, &symbols, 0, &empty_caches);
+    let named = seed_named_inputs(&program, &symbols, 0, WIDTH, &empty_caches);
     let blocks = named_f32(&named);
 
     let mut outputs: Vec<_> = diagnostics.iter().map(|layer: &Qwen35MoeLayerDiagnostics| layer.block_output).collect();
@@ -278,7 +290,7 @@ fn run_sequential() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<Vec<f32
                 }
             }
         }
-        let named = seed_named_inputs(&program, &symbols, absolute_position, &overrides);
+        let named = seed_named_inputs(&program, &symbols, absolute_position, 1, &overrides);
         let blocks = named_f32(&named);
 
         let mut outputs: Vec<_> = diagnostics.iter().map(|layer| layer.block_output).collect();
@@ -347,24 +359,6 @@ fn run_sequential() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<Vec<f32
 /// cache threaded exactly as the production decode loop threads it -- on a
 /// single CPU engine, with no Metal/executor involved at all.
 #[test]
-#[ignore = "RED, checkpoint-free, CPU-only, ROOT CAUSE FOUND (not yet fixed): \
-            SsmMixerTaps::per_position_state_out on the width-13 program has length 1, not 13 -- \
-            append_qwen35_ssm_mixer_with_taps_and_layout's prefill_width detection (spec.rs:8541) \
-            only recognizes an M>1 prefill when `x` is LITERALLY an Op::Input/Op::Constant node; \
-            the full qwen35moe_forward_program_at_width builder always passes a computed `x` \
-            (embedding_lookup/residual chain, program.rs ~line 705), so the M>1 unrolled-recurrence \
-            branch (spec.rs:8879-8944) NEVER fires in the real forward program, even at width 13 -- \
-            only the mixer-only unit oracle (qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims::production_args_m13, \
-            which builds x as a literal Input) ever exercises it, which is why that oracle is exact \
-            while the full program is not. The M=1 (else) branch instead runs unconditionally and \
-            reduces (`ScalarOp::Add`) query/key/value/beta/gate over the `s` axis (spec.rs:8993-9040) \
-            to squeeze what it assumes is a size-1 decode step -- against a real width-13 `x` this \
-            silently SUMS all 13 positions into one row, which is exactly the divergence measured: \
-            qkv_mixed (computed before this squeeze) matches sequential decode EXACTLY (0e0), but \
-            state_out/block_output diverge 54-82% and logits 69% from that point on. Fix is to make \
-            prefill_width detection resolve x's actual static extent (e.g. via shape inference) \
-            instead of requiring x be a literal Input/Constant op. Unresolved, tracked for the \
-            qwen35moe checkpoint-prefill bug"]
 fn one_shot_program_matches_sequential_decode_on_synthetic_layers() {
     let (one_shot_layers, one_shot_logits, one_shot_state_out, one_shot_qkv_mixed, one_shot_per_position_state_out) =
         run_one_shot();

@@ -730,6 +730,7 @@ pub fn qwen35moe_forward_program_at_width(
                         architecture.ssm_conv_kernel,
                         GdnOutputGate::Silu,
                         architecture.v_head_reordered,
+                        width,
                     )?;
                     layer_roots.push(Qwen35LayerRoots::Ssm {
                         qkv_mixed: taps.qkv_mixed,

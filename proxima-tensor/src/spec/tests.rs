@@ -8580,6 +8580,7 @@ async fn qwen35_ssm_mixer_rejects_a_static_zero_width_step() {
         1,
         1,
         GdnOutputGate::Silu,
+        Some(0),
     );
 
     match result {
@@ -8760,6 +8761,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps(
         group,
         l_cache,
         GdnOutputGate::Silu,
+        Some(positions),
     )
     .expect("the M>1 branch lowers");
 
@@ -9071,6 +9073,10 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
             l_cache,
             output_gate,
             v_head_reordered,
+            match sequence_extent {
+                Extent::Static(width) => Some(width),
+                Extent::Symbolic(_) => None,
+            },
         )
         .expect("the qwen35 ssm mixer lowers at real dims");
         (program, mixer_out, taps)
@@ -9398,6 +9404,7 @@ fn build_ssm_mixer_test_program(output_gate: GdnOutputGate) -> (Vec<Op>, NodeId,
         group,
         l_cache,
         output_gate,
+        None,
     )
     .expect("ssm mixer lowers");
 
