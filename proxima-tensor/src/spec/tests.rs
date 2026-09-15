@@ -6055,9 +6055,9 @@ async fn causal_conv1d_matches_a_hand_computed_causal_window() {
 /// proxima-debugger unit oracle (qwen35moe GDN prefill-scan-vs-sequential
 /// divergence), narrowed to the one row this comparison is actually
 /// valid for: [`causal_conv1d`] evaluated on a `[13, 4]` batch's row 0
-/// (the shape the GDN prefill scan's own `evaluate_segment` feeds it,
-/// `generate.rs`'s `evaluate_qwen35moe_gdn_scan_segment`) MUST match a
-/// standalone `[1, 4]` call on that same row's data. Row 0 alone: for
+/// MUST match a standalone `[1, 4]` call on that same row's data
+/// (the interop crate's own since-removed prefill-scan path fed
+/// `causal_conv1d` this same shape). Row 0 alone: for
 /// `position >= 1`, a fresh `[1, 4]` call is NOT the same computation as
 /// that row read out of the `[13, 4]` batch -- `causal_conv1d`'s own
 /// `sequence_index` iota starts a length-1 input at its own position 0,

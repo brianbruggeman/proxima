@@ -71,8 +71,7 @@ use proxima_primitives::pipe::Pipe;
 ))]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts;
 use proxima_tensor::cpu::{
-    Evaluated, ExpertSource, GdnPrefillScan, GdnPrefillShape, QuantizedBlock,
-    evaluate_quantized_named_exact_with_scratch_and_experts, run_gdn_prefill_scan,
+    Evaluated, ExpertSource, QuantizedBlock, evaluate_quantized_named_exact_with_scratch_and_experts,
 };
 use proxima_tensor::op::{Extent, NodeId, Op};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

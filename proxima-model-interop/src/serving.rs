@@ -407,10 +407,6 @@ pub struct ServingConfig<'model> {
     pub kv_cache_budget_bytes: u64,
     /// Enables route-history advice for HOBBIT prefetching.
     pub qwen35moe_expert_prefetch: bool,
-    /// Requests the GDN prefill scan instead of the ordinary recurrent path.
-    pub qwen35moe_gdn_prefill_scan: bool,
-    /// Enables the explicit GDN comparison gate for the prefill scan.
-    pub debug_gdn_compare: bool,
     /// Allows the all-low monolithic pre-gather diagnostic path.
     pub qwen35moe_monolithic_all_low: bool,
     /// Number of adjacent qwen35moe layers to execute in one exact
@@ -585,8 +581,6 @@ impl Default for ServingConfig<'static> {
             kv_cache_budget_bytes: 0,
             qwen35moe_expert_prefetch: false,
             qwen35moe_layer_window: 1,
-            qwen35moe_gdn_prefill_scan: false,
-            debug_gdn_compare: false,
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
@@ -783,12 +777,6 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
             "qwen35moe_layer_window=2 currently requires qwen35moe_persistent_cuts=false because the pair window returns both router roots after one command buffer".into(),
         ));
     }
-    if config.qwen35moe_layer_window == 2 && config.qwen35moe_gdn_prefill_scan {
-        return Err(InteropError::UnsupportedServingConfig(
-            "qwen35moe_layer_window=2 currently excludes the GDN prefill scan; its recurrent producer remains sequential by position".into(),
-        ));
-    }
-
     Ok(())
 }
 
@@ -911,8 +899,6 @@ mod tests {
             kv_cache_budget_bytes: 0,
             qwen35moe_expert_prefetch: false,
             qwen35moe_layer_window: 1,
-            qwen35moe_gdn_prefill_scan: false,
-            debug_gdn_compare: false,
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
@@ -1075,8 +1061,6 @@ mod tests {
             kv_cache_budget_bytes: 0,
             qwen35moe_expert_prefetch: false,
             qwen35moe_layer_window: 1,
-            qwen35moe_gdn_prefill_scan: false,
-            debug_gdn_compare: false,
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
@@ -1167,8 +1151,6 @@ mod tests {
             kv_cache_budget_bytes: 0,
             qwen35moe_expert_prefetch: false,
             qwen35moe_layer_window: 1,
-            qwen35moe_gdn_prefill_scan: false,
-            debug_gdn_compare: false,
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
@@ -1249,8 +1231,6 @@ mod tests {
             kv_cache_budget_bytes: 0,
             qwen35moe_expert_prefetch: false,
             qwen35moe_layer_window: 1,
-            qwen35moe_gdn_prefill_scan: false,
-            debug_gdn_compare: false,
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
@@ -1321,8 +1301,6 @@ mod tests {
             kv_cache_budget_bytes: 0,
             qwen35moe_expert_prefetch: false,
             qwen35moe_layer_window: 1,
-            qwen35moe_gdn_prefill_scan: false,
-            debug_gdn_compare: false,
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,

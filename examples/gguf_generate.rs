@@ -79,10 +79,6 @@ struct GenerateConfig {
     #[setting(default = 1)]
     qwen35moe_layer_window: usize,
     #[setting(default = false)]
-    qwen35moe_gdn_prefill_scan: bool,
-    #[setting(default = false)]
-    debug_gdn_compare: bool,
-    #[setting(default = false)]
     qwen35moe_monolithic_all_low: bool,
     #[setting(default = false)]
     qwen35moe_monolithic_high_mmap: bool,
@@ -396,8 +392,6 @@ fn supported_serving_config<'model>(
         qwen35moe_residency_budget_bytes: settings.qwen35moe_residency_budget_bytes,
         qwen35moe_expert_prefetch: settings.qwen35moe_expert_prefetch,
         qwen35moe_layer_window: settings.qwen35moe_layer_window,
-        qwen35moe_gdn_prefill_scan: settings.qwen35moe_gdn_prefill_scan,
-        debug_gdn_compare: settings.debug_gdn_compare,
         qwen35moe_monolithic_all_low: settings.qwen35moe_monolithic_all_low,
         qwen35moe_monolithic_high_mmap: settings.qwen35moe_monolithic_high_mmap,
         #[cfg(target_os = "macos")]
