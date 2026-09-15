@@ -489,6 +489,14 @@ pub struct ServingConfig<'model> {
     /// exceeds it, instead of silently letting a future full-graph
     /// regression multiply command-buffer submissions per token.
     pub max_command_buffers_per_token: usize,
+    /// I3 (ROW 501 HeteGen/FlexGen): issue the next layer's expert-source
+    /// uploads while the current layer's dispatches still run, instead of
+    /// waiting for the dispatches to finish first. Gated on a lifetime
+    /// trace proving no overlap exists today (`instrument::layer_transfer_compute_overlap`'s
+    /// own doc) -- `false` (this field's default) is today's shipped
+    /// serial ordering, unchanged; the overlap arm is not wired to any
+    /// call site yet (ROW 587's own residual).
+    pub overlap_transfer_compute: bool,
     /// I11 scheduling level 1 of 3: request admission. See
     /// [`AdmissionSchedule`]'s own doc for the one site that consults it.
     pub admission_schedule: AdmissionSchedule,
@@ -591,6 +599,7 @@ impl Default for ServingConfig<'static> {
             moe_topk_fusion: true,
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
+            overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
             phase_schedule: PhaseSchedule { prefill_before_decode: true },
             expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
@@ -909,6 +918,7 @@ mod tests {
             moe_topk_fusion: true,
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
+            overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
             phase_schedule: PhaseSchedule { prefill_before_decode: true },
             expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
@@ -1071,6 +1081,7 @@ mod tests {
             moe_topk_fusion: true,
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
+            overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
             phase_schedule: PhaseSchedule { prefill_before_decode: true },
             expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
@@ -1161,6 +1172,7 @@ mod tests {
             moe_topk_fusion: true,
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
+            overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
             phase_schedule: PhaseSchedule { prefill_before_decode: true },
             expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
@@ -1241,6 +1253,7 @@ mod tests {
             moe_topk_fusion: true,
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
+            overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
             phase_schedule: PhaseSchedule { prefill_before_decode: true },
             expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
@@ -1311,6 +1324,7 @@ mod tests {
             moe_topk_fusion: true,
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
+            overlap_transfer_compute: false,
             admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
             phase_schedule: PhaseSchedule { prefill_before_decode: true },
             expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },

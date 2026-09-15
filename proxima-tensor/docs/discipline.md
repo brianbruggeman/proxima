@@ -33427,3 +33427,39 @@ RUST_LOG=info "$BIN" "$BLOB" "What is the capital of France?" 16 gpu 2>&1 | grep
 PROXIMA_EXPERT_WEIGHTS_BUDGET_BYTES=20000000000 "$BIN" "$BLOB" "What is the capital of France?" 16 gpu 2>&1 | grep -i "PerClassResidencyBudgetExceeded\|expert_weights"
 ```
 Re-prove (verification-only baseline): `cd /Users/brianbruggeman/repos/slot-0/proxima && export CARGO_TARGET_DIR=/tmp/cargo_target_wf && cargo check -p proxima-tensor --no-default-features --features alloc -j 4 && cargo nextest run -p proxima-tensor --lib --features std -j 4 && cargo clippy -p proxima-tensor --features std --all-targets -j 4`.
+
+## ROW 587 -- I3 overlap_transfer_compute (ROW 501 HeteGen/FlexGen): flag landed and wired end to end, default off; lifetime trace and the overlap dispatch itself NOT built inside the 20-minute cap -- NOT SEALED on the measurement
+
+Idea/claim: issue the next layer's expert-source uploads while the current layer's dispatches still run, gated on a lifetime trace proving today's ordering is serial (no overlap of upload interval vs read-dispatch interval), per this task's own brief.
+
+Field: `overlap_transfer_compute: bool` on `ServingConfig` (`proxima-model-interop/src/serving.rs:507-513`), default `false`. Threaded through the existing conflaguration edge (`examples/gguf_generate.rs`'s `GenerateConfig`/`supported_serving_config`, `PROXIMA_OVERLAP_TRANSFER_COMPUTE`), mirroring the `plan_time_constants` field's own shape exactly -- no second mapping added.
+
+**Not built this row:** the lifetime trace itself (per-plan record of each expert-source upload interval vs the dispatches reading it, `expert_slab.rs`/`expert_sidecar.rs`'s `sources_for_layer*`/`page_expert*` against `decode.rs`'s per-layer dispatch loop and omega's `pipeline_buffers_upload.rs`) and the overlap issuance it would gate. Both require reading `decode.rs`'s ~3600-line per-layer loop and omega's Metal command-buffer/encoder ordering closely enough to place a correct instrument-only boundary without corrupting dispatch ordering -- not safe to attempt with under 10 minutes remaining in the cap. The field exists, unused by any call site (same shape as `admission_schedule` before its own consumer landed).
+
+on/off ttnt_mean_ms/ttft_ms/encode_dispatch_calls: NOT MEASURED -- no overlap code path exists yet to differ from the flag off, so an "on" run is byte-identical to "off" (both take the untouched serial path); no real-checkpoint run was attempted this row for that reason, not fabricated.
+
+**Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`, only the two touched files (`proxima-model-interop/src/serving.rs`, `examples/gguf_generate.rs`) exercised:**
+- `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0.
+- `cargo check --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0.
+- `cargo check -p proxima-tensor --no-default-features --features alloc -j 4` (tier alloc gate): EXIT=0.
+- `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0, 0 errors.
+- `cargo clippy -p proxima-tensor --features std --all-targets -j 4`: EXIT=0, 0 errors.
+- `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616 run, 616 passed, 0 failed, 7 skipped -- matches ROW 586 baseline exactly.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed, 64 skipped -- same 8 named failures as ROW 586, no new failure.
+- `cargo nextest run -p omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed, 17 skipped -- same 2 named failures as ROW 586, no new failure.
+
+**Reused, no new harness:** the `ServingConfig`/`GenerateConfig`/`supported_serving_config` conflaguration edge (extended by one field, mirroring `plan_time_constants`'s exact shape); no new trace, bench, or fixture written.
+
+**Residual, flagged for whoever picks up `overlap_transfer_compute` next:** (1) build `instrument::layer_transfer_compute_overlap` (or equivalent) as an instrument-only event recording each expert-source upload's start/end timestamp against the dispatch interval reading it, per plan, per layer -- proxima-log's existing `Counter`/`Gauge`/span shapes, no new type; (2) run it once with `RUST_LOG=info` on the France-16 real checkpoint to get the actual before-state (I3's own brief requires this before any overlap code is written); (3) only if the trace shows no overlap today, wire the next-layer upload issuance behind this row's flag; (4) then take the on/off `ttnt_mean_ms` (two runs each)/`ttft_ms` pair plus one profiled `encode_dispatch_calls` reading, per this task's own template.
+
+**Re-prove command:**
+
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+export CARGO_TARGET_DIR=/tmp/cargo_target_wf
+cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4
+cargo check --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4
+cargo nextest run -p proxima-tensor --lib --features std -j 4
+cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast
+cargo nextest run -p omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'
+```
