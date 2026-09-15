@@ -1351,6 +1351,19 @@ impl<'file> LoadedModel<'file> {
             })
             .collect::<Result<_, _>>()?;
 
+        // I11 scheduling level 3: per-layer expert residency, independent
+        // of the pool-wide budget below (`ServingConfig::
+        // expert_residency_schedule`'s own doc names this as the one site
+        // that consults it).
+        let per_layer_residency_budget = serving_config.expert_residency_schedule.per_layer_budget_bytes;
+        if per_layer_residency_budget != 0 {
+            return Err(InteropError::UnsupportedServingConfig(format!(
+                "expert_residency_schedule.per_layer_budget_bytes={per_layer_residency_budget}: \
+                 a per-layer residency pool separate from qwen35moe_residency_budget_bytes is \
+                 not implemented yet"
+            )));
+        }
+
         // DynaExq observes the real routed expert ids produced by the graph.
         // The fixed matrix keeps policy state bounded and is enabled only
         // when the model owns a low-codec sidecar and the caller supplies a
@@ -1519,6 +1532,17 @@ impl<'file> LoadedModel<'file> {
         // the proven split-loop behavior): built once here, never per step,
         // since `prompt_token_count > 1` is only ever true on the prompt's
         // own first step.
+        // I11 scheduling level 2: phase scheduling, independent of the
+        // admission and residency levels above (`ServingConfig::
+        // phase_schedule`'s own doc names this as the one site that
+        // consults it).
+        if !serving_config.phase_schedule.prefill_before_decode {
+            return Err(InteropError::UnsupportedServingConfig(
+                "phase_schedule.prefill_before_decode=false: interleaving prefill and decode \
+                 steps across sequences is not implemented yet"
+                    .into(),
+            ));
+        }
         let one_evaluation_prefill_requested = serving_config.prefill_one_evaluation
             || std::env::var_os("PROXIMA_PREFILL_ONE_EVALUATION").is_some();
         // Sarathi/chunked-prefill (I9): split the prompt into
