@@ -22,7 +22,6 @@ const KV_HEADS: u32 = 16;
 const GROUP: u32 = 2;
 const L_CACHE: u32 = 4;
 const EMBEDDING: u32 = 6;
-const POSITIONS: u32 = 4;
 
 fn deterministic_wave(index: usize, modulus: usize, scale: f32) -> f32 {
     ((index % modulus) as f32 + 1.0) * scale
@@ -37,14 +36,14 @@ struct RealDimsFixture {
 
 /// Reproduces the real-dims oracle's `build_program`/seeded-fill exactly
 /// (`proxima-tensor/src/spec.rs`, `qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims`),
-/// static `s = POSITIONS` rather than that test's symbolic single-step form.
-fn build_fixture() -> RealDimsFixture {
+/// static `s = positions` rather than that test's symbolic single-step form.
+fn build_fixture(positions: u32) -> RealDimsFixture {
     let qkv_dim = 2 * KEY_DIM + VALUE_DIM;
     let num_v_heads = KV_HEADS * GROUP;
     let head_k_dim = KEY_DIM / KV_HEADS;
     let head_v_dim = VALUE_DIM / num_v_heads;
 
-    let x_data: Vec<f32> = (0..(POSITIONS * EMBEDDING) as usize)
+    let x_data: Vec<f32> = (0..(positions * EMBEDDING) as usize)
         .map(|index| deterministic_wave(index, 23, 0.01))
         .collect();
     let attn_norm_weight_data: Vec<f32> = (0..EMBEDDING as usize)
@@ -80,17 +79,17 @@ fn build_fixture() -> RealDimsFixture {
     let head_eps_data = vec![1e-6_f32; (KV_HEADS * GROUP) as usize];
     let initial_state = vec![0.0_f32; (head_k_dim * head_v_dim * KV_HEADS * GROUP) as usize];
     let initial_history = vec![0.0_f32; ((L_CACHE - 1) * qkv_dim) as usize];
-    let eps_data = vec![1e-6_f32; POSITIONS as usize];
+    let eps_data = vec![1e-6_f32; positions as usize];
 
     let mut program = Vec::new();
     let x = input_leaf(
         &mut program,
         DType::Float32,
-        vec![Extent::Static(POSITIONS), Extent::Static(EMBEDDING)],
+        vec![Extent::Static(positions), Extent::Static(EMBEDDING)],
         "x",
     );
     let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
-    let eps = input_leaf(&mut program, DType::Float32, vec![Extent::Static(POSITIONS)], "eps");
+    let eps = input_leaf(&mut program, DType::Float32, vec![Extent::Static(positions)], "eps");
     let head_eps = input_leaf(
         &mut program,
         DType::Float32,
@@ -276,9 +275,27 @@ fn wide_outputs(fixture: &RealDimsFixture) -> Vec<NodeId> {
     ]
 }
 
-#[test]
-fn metal_multi_position_qwen35_mixer_matches_cpu_at_real_dims_on_production_outputs() {
-    let fixture = build_fixture();
+/// First 4 values Metal vs CPU at the worst-diverging row -- printed only
+/// when a case fails, so a red run names the exact numbers that disagree
+/// instead of only the row index.
+fn worst_row_head(label: &str, errors: &[f32], metal: &[f32], cpu: &[f32], rows: usize) {
+    let row_length = cpu.len() / rows;
+    let (worst_row, _) = errors
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .expect("errors is non-empty for a non-empty output");
+    let start = worst_row * row_length;
+    let end = start + row_length.min(4);
+    std::println!(
+        "qwen35_mixer_multi_position tap={label} worst_row={worst_row} metal_head={:?} cpu_head={:?}",
+        &metal[start..end],
+        &cpu[start..end]
+    );
+}
+
+fn assert_production_parity(positions: u32, include_wide: bool) {
+    let fixture = build_fixture(positions);
     let named: Vec<(&str, &[f32])> = fixture.named.iter().map(|(name, data)| (*name, data.as_slice())).collect();
     let quantized_named: Vec<(&str, QuantizedBlock<'_>)> = fixture
         .named
@@ -287,57 +304,81 @@ fn metal_multi_position_qwen35_mixer_matches_cpu_at_real_dims_on_production_outp
         .collect();
 
     let production = production_outputs(&fixture);
-    let wide = wide_outputs(&fixture);
+    let symbols = [u64::from(positions)];
 
-    let cpu_production = proxima_tensor::cpu::evaluate_named(&fixture.program, &[u64::from(POSITIONS)], &named, &production)
+    let cpu_production = proxima_tensor::cpu::evaluate_named(&fixture.program, &symbols, &named, &production)
         .expect("cpu reference evaluates the production output set");
-
-    let production_plan = omega::plan_named(
-        &fixture.program,
-        &[u64::from(POSITIONS)],
-        &quantized_named,
-        &production,
-        NumericPolicy::default(),
-    )
-    .expect("metal plan builds for the production output set");
+    let production_plan =
+        omega::plan_named(&fixture.program, &symbols, &quantized_named, &production, NumericPolicy::default())
+            .expect("metal plan builds for the production output set");
     let metal_production = omega::execute_plan_named(&production_plan, &quantized_named)
         .expect("metal evaluates the production output set");
 
-    let wide_plan = omega::plan_named(&fixture.program, &[u64::from(POSITIONS)], &quantized_named, &wide, NumericPolicy::default())
-        .expect("metal plan builds for the wide output set");
-    let metal_wide =
-        omega::execute_plan_named(&wide_plan, &quantized_named).expect("metal evaluates the wide output set");
+    let wide_result = include_wide.then(|| {
+        let wide = wide_outputs(&fixture);
+        let wide_plan =
+            omega::plan_named(&fixture.program, &symbols, &quantized_named, &wide, NumericPolicy::default())
+                .expect("metal plan builds for the wide output set");
+        omega::execute_plan_named(&wide_plan, &quantized_named).expect("metal evaluates the wide output set")
+    });
 
-    let mut production_failures = Vec::new();
+    let mut failures = Vec::new();
     for (label, node) in [("mixer_out", fixture.mixer_out), ("state_out", fixture.taps.state_out)] {
         let cpu_values = cpu_production.get(node).expect("cpu reference produced this node").0;
-        let metal_production_values = metal_production.get(node).expect("metal production run produced this node").0;
-        let metal_wide_values = metal_wide.get(node).expect("metal wide run produced this node").0;
+        let metal_values = metal_production.get(node).expect("metal production run produced this node").0;
+        let production_errors = max_relative_error_per_row(metal_values, cpu_values, positions as usize);
 
-        let production_errors = max_relative_error_per_row(metal_production_values, cpu_values, POSITIONS as usize);
-        let wide_errors = max_relative_error_per_row(metal_wide_values, cpu_values, POSITIONS as usize);
+        let wide_errors = wide_result.as_ref().map(|wide| {
+            let wide_values = wide.get(node).expect("metal wide run produced this node").0;
+            max_relative_error_per_row(wide_values, cpu_values, positions as usize)
+        });
 
-        for row in 0..POSITIONS as usize {
+        for row in 0..positions as usize {
             std::println!(
-                "qwen35_mixer_multi_position tap={label} row={row} metal_production_vs_cpu={:e} metal_wide_vs_cpu={:e}",
+                "qwen35_mixer_multi_position m={positions} tap={label} row={row} metal_production_vs_cpu={:e} metal_wide_vs_cpu={}",
                 production_errors[row],
-                wide_errors[row]
+                wide_errors.as_ref().map_or_else(|| "n/a".to_string(), |errors| format!("{:e}", errors[row]))
             );
         }
 
         let production_failed = production_errors.iter().any(|&error| error > 1e-4);
-        let wide_failed = wide_errors.iter().any(|&error| error > 1e-4);
         if production_failed {
-            production_failures.push(format!(
-                "tap={label} production-output-set metal disagrees with cpu (per-row max relative error={production_errors:?}); wide-output-set per-row max relative error={wide_errors:?}, wide_failed={wide_failed}"
+            worst_row_head(label, &production_errors, metal_values, cpu_values, positions as usize);
+            failures.push(format!(
+                "tap={label} production-output-set metal disagrees with cpu (per-row max relative error={production_errors:?})"
             ));
         }
     }
 
     assert!(
-        production_failures.is_empty(),
-        "metal disagrees with cpu on the production output set for the multi-position (M={POSITIONS}) qwen35 mixer at real dims -- \
-         if the wide-output-set row above the failure is clean, this is a planner node-retirement/absorption bug, not a kernel bug:\n{}",
-        production_failures.join("\n")
+        failures.is_empty(),
+        "metal disagrees with cpu on the production output set for the multi-position (M={positions}) qwen35 mixer at real dims:\n{}",
+        failures.join("\n")
     );
+}
+
+#[proxima::test]
+#[case::m4(4)]
+#[case::m8(8)]
+async fn metal_multi_position_qwen35_mixer_matches_cpu_at_real_dims_on_production_outputs(#[case] positions: u32) {
+    assert_production_parity(positions, false);
+}
+
+/// M=13: the CPU reference evaluator itself rejects this program before any
+/// Metal comparison is possible -- `NotLowerable { reason: "one push
+/// readied more BoundOps than the no-alloc batch capacity allows" }`. This is
+/// a `proxima-tensor` CPU static-arena batch-capacity ceiling, not a
+/// Metal-vs-CPU parity defect; re-run without `--ignored` filtering once that
+/// ceiling is raised or the mixer's node count per push is reduced.
+#[test]
+#[ignore = "cpu no-alloc batch capacity ceiling at M=13 (NotLowerable: one push readied more BoundOps than the no-alloc batch capacity allows), not a metal/cpu disagreement"]
+fn metal_multi_position_qwen35_mixer_m13_blocked_on_cpu_batch_capacity() {
+    assert_production_parity(13, true);
+}
+
+/// Same defect as M=13's ignored case, confirmed to also block M=16.
+#[test]
+#[ignore = "cpu no-alloc batch capacity ceiling at M=16 (NotLowerable: one push readied more BoundOps than the no-alloc batch capacity allows), not a metal/cpu disagreement"]
+fn metal_multi_position_qwen35_mixer_m16_blocked_on_cpu_batch_capacity() {
+    assert_production_parity(16, false);
 }
