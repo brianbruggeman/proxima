@@ -1046,6 +1046,10 @@ fn ensure_merged_dispatches(
             match build_merged_dispatch(device, plan, &subgroup)? {
                 Some(dispatch) => {
                     let merge_index = groups.len();
+                    debug!(
+                        group_len = subgroup_len,
+                        merge_index, "horizontal-merge candidate accepted"
+                    );
                     for (z, &position) in dispatch.members.iter().enumerate() {
                         position_merge[position] = Some((merge_index, z as u32));
                     }
@@ -1094,6 +1098,33 @@ fn build_merged_dispatch(
     let weight_node = operands[0].0;
     let activation_node = operands[1].0;
     if !plan.packed_operands.contains_key(&weight_node) {
+        return Ok(None);
+    }
+    // A gathered operand's kernel binds a `Binding::Fault` slot
+    // (`encode_op`'s own `gather_count(bound) > 0` branch allocates it);
+    // `handle_merged_position` never resolves one (it always passes `fault:
+    // None` to `bind_buffers`), so admitting a gathered candidate here
+    // compiled and dispatched a kernel `bind_buffers` then rejected outright
+    // ("kernel binds a fault buffer but none was allocated") -- refused
+    // here instead, the same "not a shape this landing covers" refusal as
+    // every other structural mismatch this function already declines.
+    if gather_count(leader) > 0 {
+        return Ok(None);
+    }
+    // A routed-expert weight stack (`execute_plan_named_with_placements_and_
+    // expert_sources`'s own naming convention, `execute_plan_with_placements_
+    // inner`'s `_exps.weight` check just above this function's own call
+    // site) is bound via a PER-CALL substitution (`Binding::ExpertPayloads`/
+    // `ExpertDescriptors`, resolved in `encode_op` from that call's own
+    // `expert_buffers` argument, which this plan-resolution-time function
+    // never sees) -- `crate::msl::emit` here compiles the ORDINARY,
+    // non-substituted kernel for it, which reads the wrong buffer entirely.
+    // Refused, the same "not a shape this landing covers" refusal as every
+    // other structural mismatch.
+    if plan.program[weight_node.0 as usize]
+        .name()
+        .is_some_and(|name| name.contains("_exps.weight"))
+    {
         return Ok(None);
     }
     let mut kernel = crate::msl::emit(leader, &plan.packed_operands, plan.numeric_policy)?;
@@ -1147,6 +1178,13 @@ fn build_merged_dispatch(
 #[cfg(feature = "metal-horizontal-merge")]
 struct ResolvedMergedGroup {
     base_table: MetalBuffer,
+    /// `Some` for the fresh-allocation branch (member `i`'s own
+    /// `device_buffers` entry is `(output, i * member_bytes)`, re-derivable
+    /// on every call without touching `output_placed` again); `None` for the
+    /// caller-placed branch, whose per-member entries are re-read from
+    /// `output_placed` fresh on every call instead, since that map is
+    /// already a per-call argument with nothing to cache.
+    output: Option<MetalBuffer>,
 }
 
 /// Resolves (once) or reuses (every call after) [`MergedDispatch::resolved`]
@@ -1173,6 +1211,17 @@ fn ensure_merged_group_resolved(
     device_buffers: &mut BTreeMap<NodeId, DeviceBuffer>,
     output_placed: &BTreeMap<NodeId, (&PlacedBuffer, usize)>,
 ) -> Result<(), MetalError> {
+    // `device_buffers` is retired every position by the SAME `node_retirement`
+    // liveness analysis every other node uses -- a merge member's own output
+    // entry is gone again the step after its last reader consumed it, exactly
+    // like any other intermediate. Caching the group's own allocation and
+    // base table (the expensive half) across steps is safe -- their OWN
+    // offsets are structural and never change -- but re-registering every
+    // member's `device_buffers` entry from that cached buffer must run EVERY
+    // call, not just the first, or a later step's own reader of a NON-leader
+    // member's output fails exactly the way a caller-placed output never
+    // could (`MetalError::UnresolvedHazardOperand`, measured against the
+    // real qwen35moe decode graph's own second-and-later decode step).
     let already_resolved = {
         let merged_guard = plan.merged.borrow();
         let dispatch = &merged_guard.as_ref().ok_or(MetalError::CompileFailed {
@@ -1181,6 +1230,31 @@ fn ensure_merged_group_resolved(
         dispatch.resolved.borrow().is_some()
     };
     if already_resolved {
+        let merged_guard = plan.merged.borrow();
+        let merged_state = merged_guard.as_ref().ok_or(MetalError::CompileFailed {
+            log: "horizontal-merge position_merge named a group but Plan::merged is empty".to_string(),
+        })?;
+        let dispatch = &merged_state.groups[merge_index];
+        let resolved_guard = dispatch.resolved.borrow();
+        let resolved = resolved_guard.as_ref().ok_or(MetalError::CompileFailed {
+            log: "row 572: already_resolved just confirmed Some".to_string(),
+        })?;
+        for (index, &position) in dispatch.members.iter().enumerate() {
+            let node = plan.prepared.resolved[position].node;
+            let entry = match &resolved.output {
+                Some(buffer) => (buffer.clone(), index * dispatch.member_bytes),
+                None => output_placed
+                    .get(&node)
+                    .copied()
+                    .map(|(buffer, offset)| (buffer.clone(), offset))
+                    .ok_or(MetalError::CompileFailed {
+                        log: "row 572: a caller-placed group's own placement must still be \
+                              supplied on every call"
+                            .to_string(),
+                    })?,
+            };
+            device_buffers.insert(node, entry);
+        }
         return Ok(());
     }
     let merged_guard = plan.merged.borrow();
@@ -1267,7 +1341,10 @@ fn ensure_merged_group_resolved(
         offsets.push(relative_byte_offset(output_offset, leader_output_offset));
     }
     let base_table = upload_base_table(device, &offsets)?;
-    *dispatch.resolved.borrow_mut() = Some(ResolvedMergedGroup { base_table });
+    *dispatch.resolved.borrow_mut() = Some(ResolvedMergedGroup {
+        base_table,
+        output: allocated_output,
+    });
     Ok(())
 }
 
