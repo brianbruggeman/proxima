@@ -8044,8 +8044,13 @@ pub enum GdnOutputGate {
 /// multiplies in (still per-head, pre-projection); `ssm_out_result` is
 /// the `ssm_out` projection's reduce, before the residual add that
 /// produces `mixer_out`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SsmMixerTaps {
+    /// Every unrolled position's own recurrence `state_out`, in position
+    /// order (`per_position_state_out[0]` is position 0's carried state) --
+    /// the M=1 branch below fills this with its own single `state_out` so
+    /// callers never need to special-case decode vs. prefill width.
+    pub per_position_state_out: Vec<NodeId>,
     pub qkv_mixed: NodeId,
     pub query_sequence: NodeId,
     pub key_sequence: NodeId,
@@ -8910,6 +8915,7 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
         )?;
         let mut delta_out_stacked =
             qwen35_gdn_place_position(program, last_step.delta_out, position_axis, 0)?;
+        let mut per_position_state_out = alloc::vec![last_step.state_out];
 
         for position in 1..width {
             let step = qwen35_gdn_recurrence_step(
@@ -8931,6 +8937,7 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
                 ScalarOp::Add,
                 &[(delta_out_stacked, "sjug->sjug"), (placed, "sjug->sjug")],
             )?;
+            per_position_state_out.push(step.state_out);
             last_step = step;
         }
 
@@ -8960,6 +8967,7 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
         )?;
 
         let taps = SsmMixerTaps {
+            per_position_state_out,
             qkv_mixed,
             query_sequence,
             key_sequence,
@@ -9184,6 +9192,7 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
         )?;
 
         let taps = SsmMixerTaps {
+            per_position_state_out: alloc::vec![state_out],
             qkv_mixed,
             query_sequence,
             key_sequence,

@@ -180,7 +180,7 @@ fn append_qwen35moe_ffn(
 /// `o_proj` reduce before its own residual add); `post_mixer_residual` is
 /// that result added back onto this layer's `block_input` (what the mixer
 /// builders themselves call `mixer_out`/`x_next`/`residual1`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Qwen35MoeLayerDiagnostics {
     pub block_input: NodeId,
     pub ssm_taps: Option<SsmMixerTaps>,
@@ -1027,6 +1027,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 2, "one diagnostic record per layer");
         let gdn_taps = diagnostics[0]
             .ssm_taps
+            .clone()
             .expect("the first synthetic layer is the gdn layer");
         assert!(
             gdn_taps.query_sequence.0 < gdn_taps.state_out.0

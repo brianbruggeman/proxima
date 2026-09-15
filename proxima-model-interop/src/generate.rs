@@ -1779,7 +1779,7 @@ impl<'file> LoadedModel<'file> {
         let mut previous_output = None;
         for diagnostic in &self.qwen35moe_layer_diagnostics {
             let (router, gdn_scan) = if let (Some(taps), Some(prefill)) =
-                (diagnostic.ssm_taps, diagnostic.gdn_prefill)
+                (diagnostic.ssm_taps.clone(), diagnostic.gdn_prefill)
                 && gdn_scan_enabled
             {
                 let producer = crate::qwen35moe::execution::split_mapped_layer_segment(
@@ -2092,7 +2092,7 @@ impl<'file> LoadedModel<'file> {
             })?;
             let mut boundary_nodes = BTreeSet::new();
             for (layer, segments) in layers.iter().enumerate() {
-                let diagnostic = self.qwen35moe_layer_diagnostics[layer];
+                let diagnostic = &self.qwen35moe_layer_diagnostics[layer];
                 boundary_nodes.insert(diagnostic.router_logits);
                 boundary_nodes.insert(diagnostic.block_output);
                 boundary_nodes.extend(segments.router.1.iter().map(|(node, _)| *node));
@@ -2300,7 +2300,7 @@ impl<'file> LoadedModel<'file> {
             segment_named.push((name.as_str(), QuantizedBlock::Float32(values)));
         }
 
-        let taps = scan.taps;
+        let taps = scan.taps.clone();
         let scan_inputs = [
             taps.query_sequence,
             taps.key_sequence,
@@ -3196,7 +3196,7 @@ impl<'file> LoadedModel<'file> {
                     && !is_router
                     && layer + 1 < self.qwen35moe_layer_diagnostics.len();
                 let phase_layer = if fused_gather { layer + 1 } else { layer };
-                let diagnostic = self.qwen35moe_layer_diagnostics[phase_layer];
+                let diagnostic = self.qwen35moe_layer_diagnostics[phase_layer].clone();
                 let (program, cuts, mapping, future_cuts, segment_output) = if fused_gather {
                     let fused = segments.gather_next_router.as_ref().ok_or_else(|| {
                         InteropError::PreGatherExecutionUnsupported {
@@ -9808,7 +9808,7 @@ impl<'file> LoadedModel<'file> {
                     }
                     if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
                         && let Some(diagnostic) = self.qwen35moe_layer_diagnostics.first()
-                        && let Some(taps) = diagnostic.ssm_taps
+                        && let Some(taps) = diagnostic.ssm_taps.clone()
                     {
                         roots.extend([
                             taps.query_sequence,
@@ -10751,7 +10751,7 @@ impl<'file> LoadedModel<'file> {
                     if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
                         && _step == 0
                         && let Some(diagnostic) = self.qwen35moe_layer_diagnostics.first()
-                        && let Some(taps) = diagnostic.ssm_taps
+                        && let Some(taps) = diagnostic.ssm_taps.clone()
                     {
                         for (label, node) in [
                             ("query_sequence", taps.query_sequence),
@@ -15910,9 +15910,11 @@ mod memory_fit_gate_tests {
             let layer0_decode = &model.qwen35moe_layer_diagnostics[0];
             let static_ssm_taps = layer0_static
                 .ssm_taps
+                .clone()
                 .expect("layer 0 is a GDN layer on this checkpoint");
             let decode_ssm_taps = layer0_decode
                 .ssm_taps
+                .clone()
                 .expect("layer 0 is a GDN layer on this checkpoint");
 
             let names = ["qkv_mixed", "state_out"];
@@ -16060,9 +16062,11 @@ mod memory_fit_gate_tests {
             let layer0_decode = &model.qwen35moe_layer_diagnostics[0];
             let static_ssm_taps = layer0_static
                 .ssm_taps
+                .clone()
                 .expect("layer 0 is a GDN layer on this checkpoint");
             let decode_ssm_taps = layer0_decode
                 .ssm_taps
+                .clone()
                 .expect("layer 0 is a GDN layer on this checkpoint");
 
             let names = [
