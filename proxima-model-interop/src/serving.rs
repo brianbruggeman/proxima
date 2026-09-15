@@ -393,6 +393,16 @@ pub struct ServingConfig<'model> {
     /// `moe-topk-fusion` feature compiled in (`metal`'s own default set);
     /// has no effect when that feature is absent.
     pub moe_topk_fusion: bool,
+    /// Not an upstream llama-server flag -- marks every plan's own
+    /// `Op::Iota`/`Op::Constant` leaf (`omega::metal::Plan::
+    /// mark_plan_time_constants_resident`'s own doc) resident the same way
+    /// [`crate::generate::BackendRuntime::build_placed_plan`]'s
+    /// `resident_names` already marks checkpoint weights: computed once by
+    /// its first real dispatch, then read back from [`Plan::device_buffers`]
+    /// on every later call against that plan instead of re-dispatching a
+    /// kernel for it every token. `false` (this field's default) is today's
+    /// shipped behavior, unchanged.
+    pub plan_time_constants: bool,
 }
 
 impl<'model> ServingConfig<'model> {
@@ -480,6 +490,7 @@ impl Default for ServingConfig<'static> {
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
+            plan_time_constants: false,
         }
     }
 }
@@ -787,6 +798,7 @@ mod tests {
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
+            plan_time_constants: false,
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -941,6 +953,7 @@ mod tests {
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
+            plan_time_constants: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -1023,6 +1036,7 @@ mod tests {
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
+            plan_time_constants: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(
@@ -1095,6 +1109,7 @@ mod tests {
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
+            plan_time_constants: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);
@@ -1157,6 +1172,7 @@ mod tests {
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
+            plan_time_constants: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.prefill_one_evaluation);

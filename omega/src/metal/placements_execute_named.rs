@@ -333,6 +333,20 @@ pub(super) fn execute_plan_with_placements_inner(
         #[cfg(not(feature = "instrument"))]
         let ablation_skip = false;
 
+        // `Plan::mark_plan_time_constants_resident`'s own doc: a resident
+        // `Iota`/`Constant` leaf's first real dispatch already wrote a value
+        // good for the plan's whole life into a `BufferArena` slot
+        // [`resident_pinned_retires`] now refuses to ever hand back -- once
+        // `device_buffers` carries that entry (a warm call, never the plan's
+        // very first), re-dispatching it here would recompute the identical
+        // bytes into the identical buffer for nothing. `output_placed`
+        // excluded: a caller-owned output buffer is refreshed every call by
+        // its own contract, not this plan's residency promise.
+        let resident_skip = plan.resident_nodes.contains(&bound.node)
+            && matches!(bound.kind, BoundOpKind::Iota | BoundOpKind::Constant { .. })
+            && !output_placed.contains_key(&bound.node)
+            && device_buffers.contains_key(&bound.node);
+
         #[cfg(feature = "metal-horizontal-merge")]
         let merged_this_position = handle_merged_position(
             &device,
@@ -360,6 +374,11 @@ pub(super) fn execute_plan_with_placements_inner(
             // does not exist to call outside it.
             #[cfg(feature = "instrument")]
             register_skipped_output(&device, &mut device_buffers, bound, placement)?;
+        } else if resident_skip {
+            // `device_buffers[bound.node]` already holds this call's correct
+            // value from a prior call -- no dispatch, no hazard bookkeeping
+            // (a resident leaf has no operands to read and its own buffer is
+            // never rewritten again, so no WAW/WAR edge can exist for it).
         } else {
             // A skipped op above never reaches this hazard tracking either
             // -- it neither reads nor writes a buffer THIS command buffer
