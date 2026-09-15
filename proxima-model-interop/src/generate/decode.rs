@@ -989,6 +989,12 @@ impl<'file> LoadedModel<'file> {
         serving_config: ServingConfig,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        let serving_config = {
+            let mut serving_config = serving_config;
+            self.apply_memory_fit_gate(&mut serving_config)?;
+            serving_config
+        };
         let mut runtime = BackendRuntime::new(&serving_config);
         #[cfg(feature = "metal")]
         if std::env::var_os("PROXIMA_WARMUP_BEFORE_GENERATE").is_some() {
