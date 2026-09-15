@@ -362,6 +362,16 @@ pub struct ServingConfig<'model> {
     /// f32 trajectory is not token-equivalent; the default keeps the GPU
     /// path selected so its performance remains measurable.
     pub gpu_correctness_fallback: bool,
+    /// Not an upstream llama-server flag -- runtime switch for the
+    /// `single_position_step` prefill's alt one-evaluation program
+    /// (`generate/decode.rs`'s `one_evaluation_prefill_requested`), in place
+    /// of that call site's own `PROXIMA_PREFILL_ONE_EVALUATION` env var
+    /// (`5a4ac2c5`). `false` (this field's default) keeps the proven
+    /// split-loop behavior; the env var still opts a caller in without a
+    /// `ServingConfig` in hand, so the call site treats either as
+    /// requesting the alt path (see that field's own doc for why it is not
+    /// implemented end to end yet on the real checkpoint).
+    pub prefill_one_evaluation: bool,
 }
 
 impl<'model> ServingConfig<'model> {
@@ -445,6 +455,7 @@ impl Default for ServingConfig<'static> {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
+            prefill_one_evaluation: false,
         }
     }
 }
@@ -748,6 +759,7 @@ mod tests {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
+            prefill_one_evaluation: false,
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -898,6 +910,7 @@ mod tests {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
+            prefill_one_evaluation: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -976,6 +989,7 @@ mod tests {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
+            prefill_one_evaluation: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(
@@ -1044,9 +1058,69 @@ mod tests {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
+            prefill_one_evaluation: false,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);
+    }
+
+    /// Guiding-principle 4's config-as-mirror, `prefill_one_evaluation`'s own
+    /// case -- same interoperability
+    /// [`exact_activations_agrees_across_literal_and_default_override`]
+    /// already proves for that field.
+    #[test]
+    fn prefill_one_evaluation_agrees_across_literal_and_default_override() {
+        let via_default_override = ServingConfig {
+            prefill_one_evaluation: true,
+            ..ServingConfig::default()
+        };
+        let via_full_literal = ServingConfig {
+            model_path: DEFAULT_MODEL_PATH,
+            context_length: 131_072,
+            parallel_sequences: 1,
+            kv_cache_key_quant: GgmlType::Q8_0,
+            kv_cache_value_quant: GgmlType::Q8_0,
+            flash_attention: true,
+            batch_size: 32,
+            ubatch_size: 32,
+            gpu_layers: GPU_LAYERS_ALL,
+            gpu_memory_fit: true,
+            gpu_memory_limit_bytes: None,
+            kv_offload: false,
+            multimodal_projector: false,
+            reasoning_budget: 1024,
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            repeat_last_n: 64,
+            repeat_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            seed: 0,
+            kv_bucket_tokens: 32,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            math_mode: MathMode::Relaxed,
+            numeric_policy: NumericPolicy::llama_relaxed(),
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            dispatch_type: DispatchType::Serial,
+            exact_activations: true,
+            weight_precision: &[],
+            qwen35moe_pre_gather: false,
+            qwen35moe_persistent_cuts: false,
+            gdn_prefill_backend: GdnPrefillBackend::Cpu,
+            qwen35moe_residency_budget_bytes: 0,
+            qwen35moe_expert_prefetch: false,
+            qwen35moe_layer_window: 1,
+            qwen35moe_gdn_prefill_scan: false,
+            debug_gdn_compare: false,
+            qwen35moe_monolithic_all_low: false,
+            qwen35moe_monolithic_high_mmap: false,
+            gpu_correctness_fallback: false,
+            prefill_one_evaluation: true,
+        };
+        assert_eq!(via_default_override, via_full_literal);
+        assert!(via_default_override.prefill_one_evaluation);
     }
 
     #[test]
