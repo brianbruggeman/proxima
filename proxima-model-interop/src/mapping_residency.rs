@@ -257,11 +257,14 @@ fn lock_resident(bytes: &[u8]) {
 /// residency with `mincore(2)`. A hole after the first prefault retries by
 /// re-touching ONLY [`missing_byte_ranges`]' holes (this module's own doc on
 /// why), then re-checks; a hole that survives the retry gets one more rung
-/// -- [`lock_resident`]'s whole-mapping `mlock(2)` -- before giving up. ROW
-/// 542: the retry-only ladder still lost to a concurrent evictor at 81-82%
-/// memory free (11.7-8.5 GB missing of 24 GB), a false refusal that is worse
-/// than the silent zero-read it guards against (ROW 533), so `mlock` is the
-/// last rung tried. `lock_resident`'s own `mlock(2)` return value is
+/// -- [`lock_resident`]'s attempted whole-mapping `mlock(2)`, which a
+/// process under the common default `RLIMIT_MEMLOCK` cannot actually hold
+/// for a multi-GB checkpoint (see below) -- before giving up. ROW 542: the
+/// retry-only ladder still lost to a concurrent evictor at 81-82% memory
+/// free (11.7-8.5 GB missing of 24 GB), a false refusal that is worse than
+/// the silent zero-read it guards against (ROW 533), so `mlock` is the
+/// last rung tried even though it is a no-op under that common limit.
+/// `lock_resident`'s own `mlock(2)` return value is
 /// discarded (surfaced only as an `instrument`-gated debug log, never an
 /// error) -- a process under the common default `RLIMIT_MEMLOCK` (often a
 /// few MiB, well under a multi-GB checkpoint) gets `ENOMEM`/`EAGAIN` from
