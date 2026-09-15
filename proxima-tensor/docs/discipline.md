@@ -33275,3 +33275,39 @@ RUST_LOG=info "$BIN" "$BLOB" "What is the capital of France?" 16 gpu 2>&1 | grep
 # how qwen35moe_residency_budget_bytes is already threaded there) just below one class's real
 # bytes, and confirm InteropError::PerClassResidencyBudgetExceeded fires naming that exact class.
 ```
+
+## ROW 578 -- I13 gated_delta_net_fusion: NOT SEALED, GPU real-checkpoint run blocked by ollama GPU residency
+
+Claim: fusing the GDN gate+conv kernel path lowers encode_dispatch_calls and ttnt_mean_ms on France-16 gpu vs unfused.
+Flag: `ServingConfig.gated_delta_net_fusion: bool`, default `true` (serving.rs:464,591). Edge verified real, not new: examples/gguf_generate.rs:127 `PROXIMA_GATED_DELTA_NET_FUSION` -> decode.rs:10-23 `apply_fusion_env_switches` -> `PROXIMA_DISABLE_GATED_DELTA_NET_FUSION` -> gdn_moe_fusion_apply.rs:95-113, gated by default-on feature `gated-delta-net-fusion` (proxima-model-interop/Cargo.toml:129,167-170).
+on (=true) France-16 gpu: ttnt_mean_ms run1=BLANK run2=BLANK; ttft_ms=BLANK.
+off (=false): ttnt_mean_ms run1=BLANK run2=BLANK; ttft_ms=BLANK.
+profiled on-run encode_dispatch_calls=BLANK.
+Block, measured not assumed: probe run at unix 1789500130 (`PROXIMA_GATED_DELTA_NET_FUSION=true`) exited with `WEIGHT LOAD FAILED: MappingNotResident { bytes_missing: 5935775744, bytes_total: 23938321664 }`; `ollama ps` at +172s/+208s/+339s each showed `qwen3.6:35b-a3b` 29GB + `qwen3:0.6b` 5.6GB both 100% GPU, never draining; instruction forbids stopping/killing ollama, so this is a real access blocker, not skipped.
+Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (77s). `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo check -p proxima --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0.
+Not sealed: 3 of 3 measurement cells blank.
+Re-prove: `cd /Users/brianbruggeman/repos/slot-0/proxima && export CARGO_TARGET_DIR=/tmp/cargo_target_wf`; wait for `ollama ps` to print only its header line, take the model lock, then `PROXIMA_TEMPERATURE=0 PROXIMA_DISPATCH=concurrent PROXIMA_GATED_DELTA_NET_FUSION=<true|false> /tmp/cargo_target_wf/release/examples/gguf_generate /Users/brianbruggeman/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d "What is the capital of France?" 16 gpu`, twice per value for `ttnt_mean_ms`/`ttft_ms`, plus one `=true` run with `PROXIMA_METAL_OP_PROFILE_STEP=8` for `encode_dispatch_calls`.
+
+## ROW 579 -- I15 cached_attention_fusion: NOT SEALED, GPU real-checkpoint run blocked by ollama GPU residency
+
+Claim: fusing the cached-attention epilogue lowers encode_dispatch_calls and ttnt_mean_ms on France-16 gpu vs unfused.
+Flag: `ServingConfig.cached_attention_fusion: bool`, default `true` (serving.rs:457,589). Edge verified real, not new: examples/gguf_generate.rs:125 `PROXIMA_CACHED_ATTENTION_FUSION` -> decode.rs:10-14 `apply_fusion_env_switches` -> `PROXIMA_DISABLE_CACHED_ATTENTION_FUSION` -> gdn_moe_fusion_apply.rs:77-78 (`fuse_cached_attention &&= env.is_none()`) -> cached_attention_epilogue_liveness.rs:3 `bind_cached_attention_fusion`; unconditional at compile time, no cargo feature gate on this one.
+on (=true) France-16 gpu: ttnt_mean_ms run1=BLANK run2=BLANK; ttft_ms=BLANK.
+off (=false): ttnt_mean_ms run1=BLANK run2=BLANK; ttft_ms=BLANK.
+profiled on-run encode_dispatch_calls=BLANK.
+Block, measured not assumed: same probe run and `ollama ps` evidence as ROW 578 (unix 1789500130 `MappingNotResident { bytes_missing: 5935775744, bytes_total: 23938321664 }`, 29GB+5.6GB models 100% GPU across all three polls); one shared GPU, one blocker for all three flags this session.
+Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (77s, shared build artifact with ROW 578). `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo check -p proxima --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0.
+Not sealed: 3 of 3 measurement cells blank.
+Re-prove: same command shape as ROW 578 with `PROXIMA_CACHED_ATTENTION_FUSION=<true|false>` in place of the gated-delta-net env var, twice per value plus one profiled `=true` run.
+
+## ROW 580 -- I20 moe_topk_fusion: NOT SEALED, GPU real-checkpoint run blocked by ollama GPU residency
+
+Claim: fusing the MoE top-k router selection lowers encode_dispatch_calls and ttnt_mean_ms on France-16 gpu vs unfused.
+Flag: `ServingConfig.moe_topk_fusion: bool`, default `true` (serving.rs:471,591). Edge verified real, not new: examples/gguf_generate.rs:129 `PROXIMA_MOE_TOPK_FUSION` -> decode.rs:10,19-22 `apply_fusion_env_switches` -> `PROXIMA_DISABLE_MOE_TOPK_FUSION` -> gdn_moe_fusion_apply.rs:115-126 `apply_moe_topk_fusion`, gated by default-on feature `moe-topk-fusion` (proxima-model-interop/Cargo.toml:130,176-179; ROW 569/576 already exercise this feature).
+on (=true) France-16 gpu: ttnt_mean_ms run1=BLANK run2=BLANK; ttft_ms=BLANK.
+off (=false): ttnt_mean_ms run1=BLANK run2=BLANK; ttft_ms=BLANK.
+profiled on-run encode_dispatch_calls=BLANK.
+Block, measured not assumed: same probe run and `ollama ps` evidence as ROW 578/579 (unix 1789500130 `MappingNotResident { bytes_missing: 5935775744, bytes_total: 23938321664 }`, 29GB+5.6GB models 100% GPU across all three polls).
+Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (77s, shared build artifact with ROW 578/579). `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo check -p proxima --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0.
+Not sealed: 3 of 3 measurement cells blank.
+Re-prove: same command shape as ROW 578 with `PROXIMA_MOE_TOPK_FUSION=<true|false>` in place of the gated-delta-net env var, twice per value plus one profiled `=true` run.
