@@ -133,6 +133,8 @@ struct GenerateConfig {
     max_command_buffers_per_token: usize,
     #[setting(default = 0)]
     prefill_chunk_positions: usize,
+    #[setting(default = false)]
+    plan_time_constants: bool,
 }
 
 impl GenerateConfig {
@@ -415,6 +417,7 @@ fn supported_serving_config<'model>(
         prefill_one_evaluation: settings.prefill_one_evaluation,
         max_command_buffers_per_token: settings.max_command_buffers_per_token,
         prefill_chunk_positions: settings.prefill_chunk_positions,
+        plan_time_constants: settings.plan_time_constants,
         ..ServingConfig::default()
     };
     if let Some(kv_bucket_tokens) = kv_bucket_tokens {
