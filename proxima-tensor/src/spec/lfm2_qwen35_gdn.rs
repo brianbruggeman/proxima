@@ -1319,6 +1319,9 @@ pub fn append_qwen35_ssm_mixer(
     l_cache: u32,
     output_gate: GdnOutputGate,
 ) -> Result<(NodeId, NodeId, NodeId), TensorError> {
+    // This wrapper's own callers (`attention_forward.rs`'s decode-only
+    // forward programs) never build `x` at a known static width -- `s` stays
+    // `Extent::Symbolic` end to end -- so there is no width to state here.
     let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps(
         program,
         x,
@@ -1346,6 +1349,7 @@ pub fn append_qwen35_ssm_mixer(
         group,
         l_cache,
         output_gate,
+        None,
     )?;
     Ok((mixer_out, taps.qkv_mixed, taps.state_out))
 }
@@ -1382,6 +1386,7 @@ pub fn append_qwen35_ssm_mixer_with_taps(
     group: u32,
     l_cache: u32,
     output_gate: GdnOutputGate,
+    prefill_width: Option<u32>,
 ) -> Result<(NodeId, SsmMixerTaps), TensorError> {
     append_qwen35_ssm_mixer_with_taps_and_layout(
         program,
@@ -1411,6 +1416,7 @@ pub fn append_qwen35_ssm_mixer_with_taps(
         l_cache,
         output_gate,
         false,
+        prefill_width,
     )
 }
 
@@ -1582,21 +1588,26 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
     l_cache: u32,
     output_gate: GdnOutputGate,
     v_head_reordered: bool,
+    prefill_width: Option<u32>,
 ) -> Result<(NodeId, SsmMixerTaps), TensorError> {
-    // `x`'s leading axis is `s` (sequence position) -- when it is a
-    // statically-known extent (a synthetic caller, or a per-request bound
-    // graph once the prompt length is resolved; the architecture-level
-    // spec itself leaves `s` as `Extent::Symbolic`, see
-    // `proxima-model-interop::bind_symbols`), a width of `0` can never
-    // feed the recurrence below, so it still rejects here rather than
-    // let the loop underflow.
-    let prefill_width = match &program[x.0 as usize] {
-        Op::Input { shape, .. } | Op::Constant { shape, .. } => match shape.first() {
-            Some(Extent::Static(width)) => Some(*width),
-            _ => None,
-        },
-        _ => None,
-    };
+    // `prefill_width` is the caller's own already-known leading (`s`) extent
+    // of `x` -- `None` for the ordinary decode program, where the
+    // architecture-level spec leaves `s` as `Extent::Symbolic` (see
+    // `proxima-model-interop::bind_symbols`), `Some(width)` for a
+    // per-request bound graph (or a synthetic test) built with `x`'s leading
+    // axis pinned to a literal `Extent::Static(width)`. Every caller already
+    // has this value -- it is the same `width`/`positions` argument the
+    // caller used to choose `x`'s own declared shape -- so the caller states
+    // it rather than this function re-deriving it from `x`'s op kind (only
+    // works when `x` is a literal `Input`/`Constant`, which it almost never
+    // is: `x` is a computed embedding-lookup/residual chain) or from shape
+    // inference over `x`'s dependency closure (fails whenever that closure
+    // includes an internal helper's own `Extent::Symbolic(0)` leaf, e.g.
+    // [`causal_conv1d`]'s `sequence_index`/`zero_wide`, which legitimately
+    // resolves through the real `symbols` table at evaluation time but has
+    // no shape to offer a symbol-free probe). A width of `0` can never feed
+    // the recurrence below, so it still rejects here rather than let the
+    // loop underflow.
     if prefill_width == Some(0) {
         return Err(TensorError::SingleTokenStepOnly {
             op: "qwen35_ssm_mixer",
