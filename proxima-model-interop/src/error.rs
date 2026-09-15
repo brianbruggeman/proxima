@@ -231,6 +231,19 @@ pub enum InteropError {
     #[error("unsupported serving config: {0}")]
     UnsupportedServingConfig(String),
 
+    /// `generate::decode::run_decode_loop_placed_kv`'s per-step
+    /// `omega::metal::MetalStageTotals::gpu_exec_calls` reading exceeded
+    /// [`crate::serving::ServingConfig::max_command_buffers_per_token`].
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    #[error(
+        "step {step}: {committed} metal command buffers committed, exceeds max_command_buffers_per_token={limit}"
+    )]
+    TooManyCommandBuffers {
+        step: usize,
+        committed: u64,
+        limit: usize,
+    },
+
     /// The requested routed execution phase is not available for the bound
     /// architecture or its forward graph.  This is preferable to silently
     /// running the single-pass graph when a caller requires a residency
