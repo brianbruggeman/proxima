@@ -20346,16 +20346,34 @@ value = 1.0
     /// `mixer_out`/`state_out` the toy oracle already checks -- the row that
     /// first exceeds tolerance names the exact stage the M>1 branch diverges
     /// at.
+    ///
+    /// Parametrized over exactly the arguments
+    /// [`proxima_model_interop::qwen35moe::program`] passes that this
+    /// oracle's un-parametrized form did not: `v_head_reordered`, whether
+    /// `attn_norm_weight` is present, the output gate, and the prefill
+    /// width -- the full program builds with `Some(attn_norm_weight)`,
+    /// `GdnOutputGate::Silu`, `architecture.v_head_reordered`, and
+    /// `M=13`; every other combination is here to bisect which single
+    /// argument (if any) the M>1 branch mishandles.
     #[proxima::test]
-    async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims()
-    {
+    #[case::baseline(false, true, GdnOutputGate::Silu, 4u32)]
+    #[case::v_head_reordered_m4(true, true, GdnOutputGate::Silu, 4u32)]
+    #[case::v_head_reordered_m13(true, true, GdnOutputGate::Silu, 13u32)]
+    #[case::no_attn_norm_m4(false, false, GdnOutputGate::Silu, 4u32)]
+    #[case::sigmoid_gate_m4(false, true, GdnOutputGate::Sigmoid, 4u32)]
+    #[case::production_args_m13(true, true, GdnOutputGate::Silu, 13u32)]
+    async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_at_real_dims(
+        #[case] v_head_reordered: bool,
+        #[case] attn_norm_present: bool,
+        #[case] output_gate: GdnOutputGate,
+        #[case] positions: u32,
+    ) {
         let key_dim = 2048u32;
         let value_dim = 4096u32;
         let kv_heads = 16u32;
         let group = 2u32;
         let l_cache = 4u32;
         let embedding = 6u32;
-        let positions = 4u32;
         let qkv_dim = 2 * key_dim + value_dim;
         let num_v_heads = kv_heads * group;
         let head_k_dim = key_dim / kv_heads;
@@ -20498,7 +20516,7 @@ value = 1.0
                 ],
                 "state_in",
             );
-            let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps(
+            let (mixer_out, taps) = append_qwen35_ssm_mixer_with_taps_and_layout(
                 &mut program,
                 x,
                 inv_dim,
@@ -20507,7 +20525,7 @@ value = 1.0
                 one,
                 inv_sqrt_key_dim,
                 inv_head_v_dim,
-                Some(attn_norm_weight),
+                if attn_norm_present { Some(attn_norm_weight) } else { None },
                 wqkv,
                 wqkv_gate,
                 conv_weight,
@@ -20524,7 +20542,8 @@ value = 1.0
                 kv_heads,
                 group,
                 l_cache,
-                GdnOutputGate::Silu,
+                output_gate,
+                v_head_reordered,
             )
             .expect("the qwen35 ssm mixer lowers at real dims");
             (program, mixer_out, taps)
