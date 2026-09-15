@@ -662,6 +662,26 @@ pub enum InteropError {
         available_bytes: u64,
     },
 
+    /// `crate::memory_fit::fit_per_class_budgets`'s load-time gate: one of
+    /// `ServingConfig`'s four per-class caps (`dense_weights_budget_bytes`,
+    /// `expert_weights_budget_bytes`, `activations_budget_bytes`,
+    /// `kv_cache_budget_bytes` -- ROW 501/I2's "separate budgets and
+    /// placement owners for expert weights, dense layers, activations, and
+    /// KV; they must not collapse into one cache counter") is nonzero and
+    /// `class`'s own computed bytes exceed it, independent of
+    /// [`Self::MemoryBudgetExceeded`]'s aggregate-limit check -- a class can
+    /// fit the whole-host limit and still blow its own configured cap.
+    #[cfg(any(test, all(feature = "std", feature = "metal")))]
+    #[error(
+        "load-time per-class residency budget exceeded: class={class} bytes={bytes} \
+         budget_bytes={budget_bytes}"
+    )]
+    PerClassResidencyBudgetExceeded {
+        class: &'static str,
+        bytes: u64,
+        budget_bytes: u64,
+    },
+
     /// `crate::mapping_residency::prove_resident` touched every page of the
     /// checkpoint mapping ([`crate::loader::prefault`]) and re-checked with
     /// `mincore(2)` once, and `bytes_missing` of `bytes_total` mapped bytes

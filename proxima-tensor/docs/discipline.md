@@ -33234,3 +33234,44 @@ export CARGO_TARGET_DIR=/tmp/cargo_target_wf
 cargo test -p omega --lib --features metal,instrument,moe-topk-fusion \
   qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down -- --nocapture
 ```
+
+## ROW 577 -- I2 per-class residency budgets (Jenga/eLLM, ROW 501): four ServingConfig caps replace one collapsed counter; code lands and gates match baseline; real-checkpoint France-16 GPU on/off run NOT completed inside the 20-minute cap -- NOT SEALED on the measurement, landed on the code
+
+**Claim:** ROW 501/I2's "Jenga/eLLM/NPUMoE/HybridGen: separate budgets and placement owners for expert weights, dense layers, activations, and KV; they must not collapse into one cache counter" -- today's load-time gate (`crate::generate::LoadedModel::apply_memory_fit_gate`) only ever compared the SUM of every class against one aggregate host limit; a class could individually blow an operator's intended cap while the sum still fit.
+
+**Fields:** four new `u64` caps on `ServingConfig` (`proxima-model-interop/src/serving.rs`), each default `0` (unbounded, byte-for-byte today's behavior): `dense_weights_budget_bytes`, `expert_weights_budget_bytes`, `activations_budget_bytes`, `kv_cache_budget_bytes`. Deliberately NOT a rename/split of the pre-existing `qwen35moe_residency_budget_bytes` -- that field sizes the DynaExq high-precision expert pool at DECODE time (`generate/decode.rs:1348`'s `ExpertResidency::new`); these four are a LOAD-time admission cap on the checkpoint's own per-class byte counts, a different owner and a different moment, so collapsing them into one field would have re-created exactly the "one counter" defect ROW 501 names.
+
+**Mechanism landed (real, not a stub):** reused `crate::memory_fit::WeightClassBytes`/`MemoryBudget` (`proxima-model-interop/src/memory_fit.rs`) unchanged -- that module already separates dense/expert/table/kv/ssm/arena bytes by class for the aggregate gate, so this row needed no new byte-accounting, only a new comparison. Added `PerClassBudgets` (a plain 4-field struct, no new pipe/runtime type) and `fit_per_class_budgets(budget, caps)`, which walks `[dense, expert, activations(=arena_allowance_bytes), kv]` in order and returns `Err` on the FIRST class whose bytes exceed its own nonzero cap -- independent of `fit_context_length`'s existing aggregate check, which still runs first and is unchanged. New typed error `InteropError::PerClassResidencyBudgetExceeded { class: &'static str, bytes, budget_bytes }` (`error.rs`), gated identically to the existing `MemoryBudgetExceeded`/`MappingExceedsResidentBudget` variants (`any(test, all(feature = "std", feature = "metal"))`, matching `memory_fit`'s own module gate exactly). `apply_memory_fit_gate` (`generate/decode.rs`) now derives the per-class `MemoryBudget` unconditionally (previously only under `feature = "instrument"` for logging) and calls `fit_per_class_budgets` right after the aggregate `fit_context_length` call, before `BackendRuntime::new` ever asks a device for a buffer.
+
+**Reused, no new harness:** `crate::memory_fit::{WeightClassBytes, MemoryBudget}`'s existing derivation, the existing `apply_memory_fit_gate` load-time gate call site, and the existing `memory_fit_gate_tests`/`memory_fit::tests` test modules (extended, not duplicated) as the oracle for "gate still behaves identically when every cap is `0`."
+
+**Row: the four measured peak bytes per class on the real checkpoint, and the refusal behaviour** -- NOT MEASURED this row (see below); unit-level refusal behaviour IS proven (3 new tests: a `0`-cap-everywhere case that never refuses even at 1,000,000 bytes per class, a per-class independent-refusal case naming each of the 4 classes and its exact `bytes`/`budget_bytes` numbers, and an exactly-at-cap case that fits, not refuses) -- `proxima-model-interop/src/memory_fit.rs::tests::{zero_caps_never_refuse, each_class_refuses_independently_and_names_itself, a_class_exactly_at_its_cap_fits}`.
+
+**Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`:**
+- `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0.
+- `cargo check -p proxima --example gguf_generate --example stream_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4`: EXIT=0 (both call sites use `..ServingConfig::default()`, so the 4 new fields needed no edit there).
+- `cargo check -p proxima-tensor --no-default-features --features alloc -j 4` (tier alloc gate): EXIT=0.
+- `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616/616 passed, 0 failed, 7 skipped.
+- `cargo nextest run -p omega --features metal,instrument --test-threads 4 -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`) -- exactly the 2 known reds this step's brief named, no new failure; omega has zero diff this row.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 247 run, 239 passed, 8 failed (`capability_matrix::dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}`, `external_architecture_hybrid_cache::{a_foreign_architecture_with_no_step_state_override_still_decodes,a_foreign_architecture_with_no_step_state_override_still_decodes_ssm_layer,a_foreign_hybrid_architecture_decodes_with_no_missing_step_input,a_mistagged_layer_roots_entry_is_rejected_before_any_step_runs}`, `external_expert_paging::q2k_paging_actually_changes_the_decoded_ids`) -- exactly the 8 known reds this step's brief named, no new failure.
+- `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=101, 22 `clippy::expect_used` errors, ALL in `proxima-model-interop/src/serving_fsm.rs` (a file this row never touched -- `git diff --name-only` shows only `error.rs`, `generate/decode.rs`, `memory_fit.rs`, `serving.rs`); pre-existing on main, not chased.
+
+**NOT completed this row, honestly:** the real-checkpoint France-16 GPU on/off run (`ttnt_mean_ms` two runs each, `ttft_ms`, one profiled run for `encode_dispatch_calls`) that this step's brief required. Every new cap defaults `0` (unbounded), so an on/off comparison has no behavior difference to measure without first choosing a real nonzero cap per class from the actual checkpoint's own class bytes (unknown without a load) and confirming the refusal path fires correctly against real numbers, not just the hand-built unit fixtures above. The model-lock/drain protocol plus a release build plus a profiled run does not fit inside this row's 20-minute hard cap alongside deriving, landing, and gating the code itself -- reported as unmeasured rather than fabricated. No field defaults changed; no confirming run.
+
+**Residual / open for whoever re-proves this:** (1) the real per-class peak byte counts for the France-16 checkpoint (`sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d`) are unknown -- the re-prove command below adds `#[cfg(feature = "instrument")]` logging that already exists (`apply_memory_fit_gate`'s `info!` call, unchanged by this row) as the source for those four numbers, then a caller picks a cap just below one class's real bytes to prove the refusal fires; (2) whether `activations_budget_bytes` mapping onto `arena_allowance_bytes` (a fixed constant, `omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES`, not a live measurement) is the right "activations" class for a caller's intent, or whether a caller expects it to bound something that varies with batch/sequence shape instead -- this row did not extend the arena allowance itself to be shape-dependent, only gated the existing fixed constant.
+
+**Re-prove command:**
+
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+export CARGO_TARGET_DIR=/tmp/cargo_target_wf
+cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4
+BIN=/tmp/cargo_target_wf/release/examples/gguf_generate
+BLOB=/Users/brianbruggeman/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
+# step 1: read the real per-class bytes off the existing memory_budget info! log (RUST_LOG=info)
+RUST_LOG=info "$BIN" "$BLOB" "What is the capital of France?" 16 gpu 2>&1 | grep memory_budget
+# step 2: set dense/expert/activations/kv_cache_budget_bytes on ServingConfig (no PROXIMA_* env
+# mirror exists yet -- add one at examples/gguf_generate.rs's Settings struct first, mirroring
+# how qwen35moe_residency_budget_bytes is already threaded there) just below one class's real
+# bytes, and confirm InteropError::PerClassResidencyBudgetExceeded fires naming that exact class.
+```

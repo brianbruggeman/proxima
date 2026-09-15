@@ -339,6 +339,26 @@ pub struct ServingConfig<'model> {
     pub gdn_prefill_backend: GdnPrefillBackend,
     /// Byte budget for the DynaExq high-precision expert residency pool.
     pub qwen35moe_residency_budget_bytes: u64,
+    /// Load-time refusal cap for `crate::memory_fit::WeightClassBytes::dense_bytes`
+    /// (`crate::generate::LoadedModel::apply_memory_fit_gate`'s per-class
+    /// gate; ROW 501/I2 -- "separate budgets and placement owners for
+    /// expert weights, dense layers, activations, and KV; they must not
+    /// collapse into one cache counter"). `0` (this field's default) is
+    /// unbounded, matching today's behavior byte-for-byte.
+    pub dense_weights_budget_bytes: u64,
+    /// Load-time refusal cap for `crate::memory_fit::WeightClassBytes::expert_bytes`,
+    /// checked independently of [`Self::qwen35moe_residency_budget_bytes`]
+    /// (that field sizes the DynaExq high-precision pool at decode time;
+    /// this one is the load-time admission cap on the checkpoint's own
+    /// on-disk expert weight bytes). `0` is unbounded.
+    pub expert_weights_budget_bytes: u64,
+    /// Load-time refusal cap for `crate::memory_fit::MemoryBudget::arena_allowance_bytes`
+    /// -- the fixed `BufferArena` scratch allotment activations are placed
+    /// into. `0` is unbounded.
+    pub activations_budget_bytes: u64,
+    /// Load-time refusal cap for `crate::memory_fit::MemoryBudget::kv_cache_bytes`
+    /// at the requested context length. `0` is unbounded.
+    pub kv_cache_budget_bytes: u64,
     /// Enables route-history advice for HOBBIT prefetching.
     pub qwen35moe_expert_prefetch: bool,
     /// Requests the GDN prefill scan instead of the ordinary recurrent path.
@@ -489,6 +509,10 @@ impl Default for ServingConfig<'static> {
             qwen35moe_persistent_cuts: false,
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
             qwen35moe_residency_budget_bytes: 0,
+            dense_weights_budget_bytes: 0,
+            expert_weights_budget_bytes: 0,
+            activations_budget_bytes: 0,
+            kv_cache_budget_bytes: 0,
             qwen35moe_expert_prefetch: false,
             qwen35moe_layer_window: 1,
             qwen35moe_gdn_prefill_scan: false,
@@ -798,6 +822,10 @@ mod tests {
             qwen35moe_pre_gather: false,
             qwen35moe_persistent_cuts: false,
             qwen35moe_residency_budget_bytes: 0,
+            dense_weights_budget_bytes: 0,
+            expert_weights_budget_bytes: 0,
+            activations_budget_bytes: 0,
+            kv_cache_budget_bytes: 0,
             qwen35moe_expert_prefetch: false,
             qwen35moe_layer_window: 1,
             qwen35moe_gdn_prefill_scan: false,
@@ -954,6 +982,10 @@ mod tests {
             qwen35moe_pre_gather: false,
             qwen35moe_persistent_cuts: false,
             qwen35moe_residency_budget_bytes: 0,
+            dense_weights_budget_bytes: 0,
+            expert_weights_budget_bytes: 0,
+            activations_budget_bytes: 0,
+            kv_cache_budget_bytes: 0,
             qwen35moe_expert_prefetch: false,
             qwen35moe_layer_window: 1,
             qwen35moe_gdn_prefill_scan: false,
@@ -1038,6 +1070,10 @@ mod tests {
             qwen35moe_pre_gather: false,
             qwen35moe_persistent_cuts: false,
             qwen35moe_residency_budget_bytes: 0,
+            dense_weights_budget_bytes: 0,
+            expert_weights_budget_bytes: 0,
+            activations_budget_bytes: 0,
+            kv_cache_budget_bytes: 0,
             qwen35moe_expert_prefetch: false,
             qwen35moe_layer_window: 1,
             qwen35moe_gdn_prefill_scan: false,
@@ -1112,6 +1148,10 @@ mod tests {
             qwen35moe_persistent_cuts: false,
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
             qwen35moe_residency_budget_bytes: 0,
+            dense_weights_budget_bytes: 0,
+            expert_weights_budget_bytes: 0,
+            activations_budget_bytes: 0,
+            kv_cache_budget_bytes: 0,
             qwen35moe_expert_prefetch: false,
             qwen35moe_layer_window: 1,
             qwen35moe_gdn_prefill_scan: false,
@@ -1176,6 +1216,10 @@ mod tests {
             qwen35moe_persistent_cuts: false,
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
             qwen35moe_residency_budget_bytes: 0,
+            dense_weights_budget_bytes: 0,
+            expert_weights_budget_bytes: 0,
+            activations_budget_bytes: 0,
+            kv_cache_budget_bytes: 0,
             qwen35moe_expert_prefetch: false,
             qwen35moe_layer_window: 1,
             qwen35moe_gdn_prefill_scan: false,
