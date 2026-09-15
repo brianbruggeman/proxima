@@ -1521,27 +1521,56 @@ impl<'file> LoadedModel<'file> {
         // own first step.
         let one_evaluation_prefill_requested = serving_config.prefill_one_evaluation
             || std::env::var_os("PROXIMA_PREFILL_ONE_EVALUATION").is_some();
-        let one_evaluation_prefill_program = if self.single_position_step
-            && prompt_token_count > 1
-            && one_evaluation_prefill_requested
+        // Sarathi/chunked-prefill (I9): split the prompt into
+        // `serving_config.prefill_chunk_positions`-sized windows instead of
+        // one whole-prompt evaluation, so peak activation memory is bounded
+        // by the chunk width rather than `prompt_token_count`. `0` (the
+        // field's own default) keeps the single whole-prompt chunk, byte-
+        // for-byte the prior behavior. `cached_len` (below) already carries
+        // KV state across these chunks the same way it carries it across
+        // the one-position split loop.
+        let one_evaluation_chunks: Vec<(usize, usize)> =
+            if self.single_position_step && prompt_token_count > 1 && one_evaluation_prefill_requested {
+                let chunk_width = serving_config.prefill_chunk_positions;
+                if chunk_width > 0 && chunk_width < prompt_token_count {
+                    let mut chunks = Vec::new();
+                    let mut offset = 0;
+                    while offset < prompt_token_count {
+                        let width = chunk_width.min(prompt_token_count - offset);
+                        chunks.push((offset, width));
+                        offset += width;
+                    }
+                    chunks
+                } else {
+                    alloc::vec![(0, prompt_token_count)]
+                }
+            } else {
+                Vec::new()
+            };
+        let mut one_evaluation_prefill_programs: Vec<(usize, Vec<Op>, NodeId, Vec<Qwen35LayerRoots>)> =
+            Vec::new();
+        if self.single_position_step
             && let Some(hparams) = self.qwen35moe_hparams.as_ref()
         {
-            let (program, roots, layer_roots, _moe_sites, _diagnostics) =
-                crate::qwen35moe::qwen35moe_forward_program_at_width(
-                    hparams,
-                    Some(prompt_token_count as u32),
-                )
-                .map_err(|error| InteropError::PreGatherExecutionUnsupported {
-                    architecture: String::from("qwen35moe"),
-                    reason: alloc::format!(
-                        "one-evaluation prefill program at width {prompt_token_count} failed to \
-                         build: {error}"
-                    ),
-                })?;
-            Some((program, roots.logits, layer_roots))
-        } else {
-            None
-        };
+            for &(_offset, width) in &one_evaluation_chunks {
+                if one_evaluation_prefill_programs
+                    .iter()
+                    .any(|(built_width, ..)| *built_width == width)
+                {
+                    continue;
+                }
+                let (program, roots, layer_roots, _moe_sites, _diagnostics) =
+                    crate::qwen35moe::qwen35moe_forward_program_at_width(hparams, Some(width as u32))
+                        .map_err(|error| InteropError::PreGatherExecutionUnsupported {
+                            architecture: String::from("qwen35moe"),
+                            reason: alloc::format!(
+                                "one-evaluation prefill program at width {width} failed to build: \
+                                 {error}"
+                            ),
+                        })?;
+                one_evaluation_prefill_programs.push((width, program, roots.logits, layer_roots));
+            }
+        }
 
         let decode_result = decode_until_stop_or_budget(
             &self.vocab,
@@ -1577,43 +1606,59 @@ impl<'file> LoadedModel<'file> {
                     && next_ids.len() > 1
                     && !gdn_prefill_scan_enabled
                     && one_evaluation_prefill_requested
-                    && one_evaluation_prefill_program.is_some();
+                    && !one_evaluation_prefill_programs.is_empty();
                 let split_prefill = self.single_position_step
                     && next_ids.len() > 1
                     && !gdn_prefill_scan_enabled
                     && !one_evaluation_prefill;
-                let batch_count = if split_prefill { next_ids.len() } else { 1 };
-                let last_batch_index = batch_count - 1;
-
-                // A SHARED borrow of the precomputed alt program
-                // (`one_evaluation_prefill_program`, built once before this
-                // closure from `prompt_token_count` -- never per step,
-                // since `next_ids.len() > 1` is only ever true on `_step ==
-                // 0`) rather than a swap into `self`'s own fields: this
-                // closure only holds `&self`, and `self.resident_names()`'s
-                // own borrowed `BTreeSet<&str>` (computed once, above) is
-                // already live across every step, so nothing here may take
-                // `&mut self`.
-                let (active_program, active_layer_roots, active_single_position_step) =
-                    match &one_evaluation_prefill_program {
-                        Some((program, _logits_root, layer_roots)) if one_evaluation_prefill => {
-                            (program, layer_roots, false)
-                        }
-                        _ => (&self.program, &self.layer_roots, self.single_position_step),
-                    };
-                let active_logits_root = match &one_evaluation_prefill_program {
-                    Some((_program, logits_root, _layer_roots)) if one_evaluation_prefill => {
-                        *logits_root
-                    }
-                    _ => self.logits_root,
+                let batch_count = if one_evaluation_prefill {
+                    one_evaluation_chunks.len()
+                } else if split_prefill {
+                    next_ids.len()
+                } else {
+                    1
                 };
+                let last_batch_index = batch_count - 1;
 
                 let mut token_id: u32 = 0;
                 for batch_index in 0..batch_count {
-                    let ids_for_step: &[u32] = if split_prefill {
+                    let ids_for_step: &[u32] = if one_evaluation_prefill {
+                        let (offset, width) = one_evaluation_chunks[batch_index];
+                        &next_ids[offset..offset + width]
+                    } else if split_prefill {
                         core::slice::from_ref(&next_ids[batch_index])
                     } else {
                         next_ids.as_slice()
+                    };
+                    // A SHARED borrow of the precomputed alt program(s)
+                    // (`one_evaluation_prefill_programs`, built once before
+                    // this closure, one per distinct chunk width -- never
+                    // per step, since `next_ids.len() > 1` is only ever true
+                    // on `_step == 0`) rather than a swap into `self`'s own
+                    // fields: this closure only holds `&self`, and
+                    // `self.resident_names()`'s own borrowed `BTreeSet<&str>`
+                    // (computed once, above) is already live across every
+                    // step, so nothing here may take `&mut self`.
+                    let (active_program, active_layer_roots, active_single_position_step) =
+                        if one_evaluation_prefill {
+                            let (_offset, width) = one_evaluation_chunks[batch_index];
+                            let (_, program, _logits_root, layer_roots) = one_evaluation_prefill_programs
+                                .iter()
+                                .find(|(built_width, ..)| *built_width == width)
+                                .expect("chunk width program built above for every chunk width");
+                            (program, layer_roots, false)
+                        } else {
+                            (&self.program, &self.layer_roots, self.single_position_step)
+                        };
+                    let active_logits_root = if one_evaluation_prefill {
+                        let (_offset, width) = one_evaluation_chunks[batch_index];
+                        one_evaluation_prefill_programs
+                            .iter()
+                            .find(|(built_width, ..)| *built_width == width)
+                            .expect("chunk width program built above for every chunk width")
+                            .2
+                    } else {
+                        self.logits_root
                     };
                     let is_last_step_batch = batch_index == last_batch_index;
                     #[cfg(feature = "instrument")]

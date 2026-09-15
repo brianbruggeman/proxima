@@ -133,6 +133,8 @@ struct GenerateConfig {
     moe_topk_fusion: bool,
     #[setting(default = 0)]
     max_command_buffers_per_token: usize,
+    #[setting(default = 0)]
+    prefill_chunk_positions: usize,
 }
 
 impl GenerateConfig {
@@ -415,6 +417,7 @@ fn supported_serving_config<'model>(
         gated_delta_net_fusion: settings.gated_delta_net_fusion,
         moe_topk_fusion: settings.moe_topk_fusion,
         max_command_buffers_per_token: settings.max_command_buffers_per_token,
+        prefill_chunk_positions: settings.prefill_chunk_positions,
         ..ServingConfig::default()
     };
     if let Some(kv_bucket_tokens) = kv_bucket_tokens {
