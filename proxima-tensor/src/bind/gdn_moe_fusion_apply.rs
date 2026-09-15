@@ -93,16 +93,37 @@ pub fn bind_with_fusion(
         "bind_with_fusion: fused-op-kind count per stage, catches a later stage silently discarding an earlier fusion"
     );
     #[cfg(feature = "gated-delta-net-fusion")]
-    let built = apply_gated_delta_net_fusion(
-        built,
-        program,
-        shapes,
-        outputs,
-        fuse_cached_attention,
-        numeric_policy,
-    )?;
+    #[cfg(feature = "std")]
+    let gated_delta_net_fusion_disabled =
+        std::env::var_os("PROXIMA_DISABLE_GATED_DELTA_NET_FUSION").is_some();
+    #[cfg(feature = "gated-delta-net-fusion")]
+    #[cfg(not(feature = "std"))]
+    let gated_delta_net_fusion_disabled = false;
+    #[cfg(feature = "gated-delta-net-fusion")]
+    let built = if gated_delta_net_fusion_disabled {
+        built
+    } else {
+        apply_gated_delta_net_fusion(
+            built,
+            program,
+            shapes,
+            outputs,
+            fuse_cached_attention,
+            numeric_policy,
+        )?
+    };
     #[cfg(feature = "moe-topk-fusion")]
-    let built = apply_moe_topk_fusion(built, program, shapes, outputs)?;
+    #[cfg(feature = "std")]
+    let moe_topk_fusion_disabled = std::env::var_os("PROXIMA_DISABLE_MOE_TOPK_FUSION").is_some();
+    #[cfg(feature = "moe-topk-fusion")]
+    #[cfg(not(feature = "std"))]
+    let moe_topk_fusion_disabled = false;
+    #[cfg(feature = "moe-topk-fusion")]
+    let built = if moe_topk_fusion_disabled {
+        built
+    } else {
+        apply_moe_topk_fusion(built, program, shapes, outputs)?
+    };
     #[cfg(feature = "reduce-epilogue-fusion")]
     {
         admit(numeric_policy, NumericRewrite::ReduceEpilogueFusion)?;
