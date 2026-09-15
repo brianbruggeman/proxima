@@ -8357,6 +8357,144 @@ pub fn append_qwen35_ssm_mixer_with_taps(
     )
 }
 
+/// Reads one literal position `p` out of a `[s, ..rest]` sequence-preserving
+/// tensor and squeezes the resulting size-1 `s` back off, the same
+/// slice-then-sum-of-one technique [`channel_slice`] already uses on a
+/// channel axis, applied here to the leading position axis instead: a
+/// caller-known-at-build-time `p` (this exists only inside the M>1 branch
+/// [`append_qwen35_ssm_mixer_with_taps_and_layout`] unrolls, never on the
+/// symbolic architecture-level graph), so it is a plain affine offset, not a
+/// gather.
+fn qwen35_gdn_sequence_position(
+    program: &mut Vec<Op>,
+    node: NodeId,
+    rest_letters: &str,
+    position: u32,
+) -> Result<NodeId, TensorError> {
+    let rest_terms = rest_letters
+        .chars()
+        .map(|letter| letter.to_string())
+        .collect::<alloc::vec::Vec<_>>()
+        .join(",");
+    let iteration = alloc::format!("s{rest_letters}");
+    let sliced = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Identity,
+        &[(
+            node,
+            alloc::format!("s+{position}@1,{rest_terms}->{iteration}").as_str(),
+        )],
+    )?;
+    reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        sliced,
+        alloc::format!("{iteration}->{iteration}").as_str(),
+        alloc::format!("{rest_letters}->{iteration}").as_str(),
+    )
+}
+
+/// One position's outputs from the M>1 branch
+/// [`append_qwen35_ssm_mixer_with_taps_and_layout`] unrolls -- grouped so the
+/// state-threading loop and the stacked-`delta_out` accumulation share one
+/// call per position instead of two.
+struct Qwen35GdnRecurrenceStep {
+    query: NodeId,
+    key: NodeId,
+    value: NodeId,
+    beta: NodeId,
+    gate: NodeId,
+    z_head: NodeId,
+    delta_out: NodeId,
+    state_out: NodeId,
+}
+
+/// Slices position `p` out of every sequence-preserving tap and runs one
+/// [`append_qwen35_delta_net_step`] against the caller-threaded `state_in`,
+/// the per-position body [`append_qwen35_ssm_mixer_with_taps_and_layout`]'s
+/// M>1 branch calls once per prompt position, threading `state_out` into the
+/// next call's `state_in` the same way the decode path threads it call to
+/// call.
+#[allow(clippy::too_many_arguments)]
+fn qwen35_gdn_recurrence_step(
+    program: &mut Vec<Op>,
+    query_sequence: NodeId,
+    key_sequence: NodeId,
+    value_sequence: NodeId,
+    beta_split: NodeId,
+    gate_split: NodeId,
+    z_split: NodeId,
+    state_in: NodeId,
+    inv_sqrt_key_dim: NodeId,
+    position: u32,
+) -> Result<Qwen35GdnRecurrenceStep, TensorError> {
+    let query = qwen35_gdn_sequence_position(program, query_sequence, "dug", position)?;
+    let key = qwen35_gdn_sequence_position(program, key_sequence, "dug", position)?;
+    let value = qwen35_gdn_sequence_position(program, value_sequence, "jug", position)?;
+    let beta = qwen35_gdn_sequence_position(program, beta_split, "ug", position)?;
+    let gate = qwen35_gdn_sequence_position(program, gate_split, "ug", position)?;
+    let z_head = qwen35_gdn_sequence_position(program, z_split, "ugj", position)?;
+    let (delta_out, state_out) = append_qwen35_delta_net_step(
+        program,
+        query,
+        key,
+        value,
+        gate,
+        beta,
+        state_in,
+        inv_sqrt_key_dim,
+        "ug",
+    )?;
+    Ok(Qwen35GdnRecurrenceStep {
+        query,
+        key,
+        value,
+        beta,
+        gate,
+        z_head,
+        delta_out,
+        state_out,
+    })
+}
+
+/// Writes one position's `[j,u,g]` step output into its own row of the
+/// stacked `[s,j,u,g]` sequence, everywhere else zero -- [`stack_selected_routes`]'s
+/// own Iota-`Equal`-mask-then-`Add` technique, applied to this function's own
+/// `s`/`jug` axes instead of `stack_selected_routes`'s `s`/`k`.
+fn qwen35_gdn_place_position(
+    program: &mut Vec<Op>,
+    delta_out_at_position: NodeId,
+    position_axis: NodeId,
+    position: u32,
+) -> Result<NodeId, TensorError> {
+    let position_value = op::append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec::Vec::new(),
+            value: position as f32,
+        },
+    );
+    let position_mask = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Equal,
+        &[(position_axis, "s->s"), (position_value, "->s")],
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (delta_out_at_position, "jug->sjug"),
+            (position_mask, "s->sjug"),
+        ],
+    )
+}
+
 /// Builds the Qwen3.5 SSM mixer while selecting the checkpoint's V-head order.
 #[allow(clippy::too_many_arguments)]
 pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
@@ -8389,18 +8527,23 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
     v_head_reordered: bool,
 ) -> Result<(NodeId, SsmMixerTaps), TensorError> {
     // `x`'s leading axis is `s` (sequence position) -- when it is a
-    // statically-known extent (a synthetic caller, never the compiled
-    // qwen35 program itself, whose `s` is `Extent::Symbolic` and only
-    // resolved at bind time; see `proxima-model-interop::bind_symbols`
-    // for that check), reject anything but a single position here rather
-    // than let the reduce below silently sum across positions.
-    if let Op::Input { shape, .. } | Op::Constant { shape, .. } = &program[x.0 as usize]
-        && let Some(Extent::Static(width)) = shape.first()
-        && *width != 1
-    {
+    // statically-known extent (a synthetic caller, or a per-request bound
+    // graph once the prompt length is resolved; the architecture-level
+    // spec itself leaves `s` as `Extent::Symbolic`, see
+    // `proxima-model-interop::bind_symbols`), a width of `0` can never
+    // feed the recurrence below, so it still rejects here rather than
+    // let the loop underflow.
+    let prefill_width = match &program[x.0 as usize] {
+        Op::Input { shape, .. } | Op::Constant { shape, .. } => match shape.first() {
+            Some(Extent::Static(width)) => Some(*width),
+            _ => None,
+        },
+        _ => None,
+    };
+    if prefill_width == Some(0) {
         return Err(TensorError::SingleTokenStepOnly {
             op: "qwen35_ssm_mixer",
-            s: u64::from(*width),
+            s: 0,
         });
     }
 
@@ -8734,227 +8877,335 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
         "sjug->sugj",
     )?;
 
-    // squeeze the size-1 decode-step `s` axis away -- `append_qwen35_delta_net_step`
-    // has no `s` letter at all (a single already-selected token per its own
-    // doc), and reordering the surviving letters here (`dug`, not `ugd`)
-    // doubles as the transpose `append_qwen35_delta_net_step`'s own
-    // `i{head}`/`j{head}` maps expect.
-    let query = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        q_repeated,
-        "sugd->sugd",
-        "dug->sugd",
-    )?;
-    let key = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        k_repeated,
-        "sugd->sugd",
-        "dug->sugd",
-    )?;
-    let value = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        v_split,
-        "sugj->sugj",
-        "jug->sugj",
-    )?;
-    let beta = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        beta_split,
-        "sug->sug",
-        "ug->sug",
-    )?;
-    let gate = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        gate_split,
-        "sug->sug",
-        "ug->sug",
-    )?;
-    let z_head = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        z_split,
-        "sugj->sugj",
-        "ugj->sugj",
-    )?;
+    let (mixer_out, taps) = if let Some(width) = prefill_width
+        && width > 1
+    {
+        // A prefill-width recurrence: elementwise/reduce cannot express the
+        // state-dependent scan over `s` in one vectorized pass (each
+        // position's state depends on every earlier position's decayed
+        // state), so this Rust loop unrolls it -- legitimate because `width`
+        // is a plain build-time `u32` here, never the symbolic `s` the
+        // architecture-level spec carries (see the `prefill_width` guard
+        // above). Each iteration threads `state_out` into the next
+        // `state_in` exactly as the decode path threads it call to call.
+        let position_axis = op::append(
+            program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(width),
+            },
+        );
 
-    let (delta_out, state_out) = append_qwen35_delta_net_step(
-        program,
-        query,
-        key,
-        value,
-        gate,
-        beta,
-        state_in,
-        inv_sqrt_key_dim,
-        "ug",
-    )?;
+        let mut last_step = qwen35_gdn_recurrence_step(
+            program,
+            query_sequence,
+            key_sequence,
+            value_sequence,
+            beta_split,
+            gate_split,
+            z_split,
+            state_in,
+            inv_sqrt_key_dim,
+            0,
+        )?;
+        let mut delta_out_stacked =
+            qwen35_gdn_place_position(program, last_step.delta_out, position_axis, 0)?;
 
-    // gated RMSNorm over the per-head value axis `j`, `head_eps`/`inv_head_v_dim`
-    // matched to the surviving `u,g` head space -- `build_norm_gated`
-    // (`qwen35.cpp:243-250`): `rmsnorm(out, weight) * output_gate(z)`,
-    // `output_gate` per [`GdnOutputGate`] (silu for qwen35, sigmoid for
-    // qwen4exp, reference: PR 27742 line 2896-2899).
-    let squared = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(delta_out, "jug->jug"), (delta_out, "jug->jug")],
-    )?;
-    let sum_squares = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        squared,
-        "jug->jug",
-        "ug->jug",
-    )?;
-    let mean_square = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(sum_squares, "ug->ug"), (inv_head_v_dim, "->ug")],
-    )?;
-    let mean_square_eps = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(mean_square, "ug->ug"), (head_eps, "ug->ug")],
-    )?;
-    let rms = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::SquareRoot,
-        &[(mean_square_eps, "ug->ug")],
-    )?;
-    let inv_rms = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Reciprocal,
-        &[(rms, "ug->ug")],
-    )?;
-    let normed_out = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(delta_out, "jug->jug"), (inv_rms, "ug->jug")],
-    )?;
-    let normed_out_gamma = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed_out, "jug->jug"), (ssm_norm_weight, "j->jug")],
-    )?;
-    let gated_out_map = if v_head_reordered {
-        "jug->guj"
+        for position in 1..width {
+            let step = qwen35_gdn_recurrence_step(
+                program,
+                query_sequence,
+                key_sequence,
+                value_sequence,
+                beta_split,
+                gate_split,
+                z_split,
+                last_step.state_out,
+                inv_sqrt_key_dim,
+                position,
+            )?;
+            let placed = qwen35_gdn_place_position(program, step.delta_out, position_axis, position)?;
+            delta_out_stacked = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(delta_out_stacked, "sjug->sjug"), (placed, "sjug->sjug")],
+            )?;
+            last_step = step;
+        }
+
+        let delta_out = delta_out_stacked;
+        let state_out = last_step.state_out;
+
+        // `append_qwen35_gdn_sequence_tail_with_taps` is the same
+        // RMSNorm-gate-out-proj-residual tail the M=1 branch below computes
+        // inline: reused rather than duplicated, per its own doc ("a
+        // sans-IO executor supplies its caller-owned `[s,j,u,g]` scan
+        // output as `delta_out`") -- this recurrence is exactly that
+        // caller.
+        let tail = append_qwen35_gdn_sequence_tail_with_taps(
+            program,
+            Qwen35GdnSequenceTail {
+                x,
+                delta_out,
+                z: z_split,
+                head_eps,
+                inv_head_v_dim,
+                norm_weight: ssm_norm_weight,
+                out_weight: ssm_out,
+                head_v_dim,
+                kv_heads,
+                group,
+            },
+        )?;
+
+        let taps = SsmMixerTaps {
+            qkv_mixed,
+            query_sequence,
+            key_sequence,
+            value_sequence,
+            gate_sequence: gate_split,
+            beta_sequence: beta_split,
+            z_sequence: z_split,
+            query: last_step.query,
+            key: last_step.key,
+            value: last_step.value,
+            gate: last_step.gate,
+            beta: last_step.beta,
+            state_in,
+            z_head: last_step.z_head,
+            state_out,
+            delta_out: last_step.delta_out,
+            z,
+            gated_rmsnorm_out: tail.gated_value,
+            gated_value: tail.gated_value,
+            ssm_out_result: tail.projected,
+        };
+        (tail.output, taps)
     } else {
-        "jug->jug"
-    };
-    let gated_gate_map = if v_head_reordered {
-        "ugj->guj"
-    } else {
-        "ugj->jug"
-    };
-    let gated_product_map = if v_head_reordered {
-        "guj->gujd"
-    } else {
-        "jug->gujd"
-    };
-    let gated_out = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed_out_gamma, gated_out_map), (z_head, gated_gate_map)],
-    )?;
+        // squeeze the size-1 decode-step `s` axis away -- `append_qwen35_delta_net_step`
+        // has no `s` letter at all (a single already-selected token per its own
+        // doc), and reordering the surviving letters here (`dug`, not `ugd`)
+        // doubles as the transpose `append_qwen35_delta_net_step`'s own
+        // `i{head}`/`j{head}` maps expect.
+        let query = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            q_repeated,
+            "sugd->sugd",
+            "dug->sugd",
+        )?;
+        let key = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            k_repeated,
+            "sugd->sugd",
+            "dug->sugd",
+        )?;
+        let value = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            v_split,
+            "sugj->sugj",
+            "jug->sugj",
+        )?;
+        let beta = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            beta_split,
+            "sug->sug",
+            "ug->sug",
+        )?;
+        let gate = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            gate_split,
+            "sug->sug",
+            "ug->sug",
+        )?;
+        let z_head = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            z_split,
+            "sugj->sugj",
+            "ugj->sugj",
+        )?;
 
-    // output projection: `ssm_out`'s declared `[value_dim, n_embd]` layout
-    // decomposed the same read-side way `q_split_map`/`v_split_map` already
-    // decompose a flat checkpoint axis -- never a write-side merge. UNLIKE
-    // `v_split_map`'s own `(u*group+g)*head_v_dim+j` nesting (u outer, g
-    // mid, j inner -- verified correct against real Q4_K bytes through
-    // `gated_value`, within noise), the checkpoint's real `ssm_out.weight`
-    // contraction axis nests `(j*kv_heads+u)*group+g` (j outer, u mid, g
-    // inner) -- proven on real `qwen3.6:35b-a3b` bytes (a model-crate
-    // `qwen35moe_layer0_stage_by_stage_position0_matches_tapped_reference`'s
-    // own `ssm_out_weight_layout_sweep`: this order scores
-    // `scaled_rel_err=1.5e-2`, at the Q4_K noise floor, against every other
-    // (u,g,j)-role permutation scoring `>=1.2`) -- this weight was saved
-    // with a different head/value nesting than the value/`z`/qkv weights,
-    // not the same convention reused.
-    let out_weight_split_map = alloc::format!("{}*j+{group}*u+g,d->ugjd", kv_heads * group);
-    let ssm_out_split = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[
-            (ssm_out, out_weight_split_map.as_str()),
-            (value_head_ones, "ugj->ugjd"),
-        ],
-    )?;
-    let cur_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[
-            (gated_out, gated_product_map),
-            (ssm_out_split, "ugjd->gujd"),
-        ],
-    )?;
-    let cur = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        cur_product,
-        "gujd->gujd",
-        "d->gujd",
-    )?;
+        let (delta_out, state_out) = append_qwen35_delta_net_step(
+            program,
+            query,
+            key,
+            value,
+            gate,
+            beta,
+            state_in,
+            inv_sqrt_key_dim,
+            "ug",
+        )?;
 
-    let mixer_out = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(x, "sd->sd"), (cur, "d->sd")],
-    )?;
+        // gated RMSNorm over the per-head value axis `j`, `head_eps`/`inv_head_v_dim`
+        // matched to the surviving `u,g` head space -- `build_norm_gated`
+        // (`qwen35.cpp:243-250`): `rmsnorm(out, weight) * output_gate(z)`,
+        // `output_gate` per [`GdnOutputGate`] (silu for qwen35, sigmoid for
+        // qwen4exp, reference: PR 27742 line 2896-2899).
+        let squared = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(delta_out, "jug->jug"), (delta_out, "jug->jug")],
+        )?;
+        let sum_squares = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            squared,
+            "jug->jug",
+            "ug->jug",
+        )?;
+        let mean_square = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(sum_squares, "ug->ug"), (inv_head_v_dim, "->ug")],
+        )?;
+        let mean_square_eps = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            &[(mean_square, "ug->ug"), (head_eps, "ug->ug")],
+        )?;
+        let rms = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::SquareRoot,
+            &[(mean_square_eps, "ug->ug")],
+        )?;
+        let inv_rms = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Reciprocal,
+            &[(rms, "ug->ug")],
+        )?;
+        let normed_out = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(delta_out, "jug->jug"), (inv_rms, "ug->jug")],
+        )?;
+        let normed_out_gamma = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed_out, "jug->jug"), (ssm_norm_weight, "j->jug")],
+        )?;
+        let gated_out_map = if v_head_reordered {
+            "jug->guj"
+        } else {
+            "jug->jug"
+        };
+        let gated_gate_map = if v_head_reordered {
+            "ugj->guj"
+        } else {
+            "ugj->jug"
+        };
+        let gated_product_map = if v_head_reordered {
+            "guj->gujd"
+        } else {
+            "jug->gujd"
+        };
+        let gated_out = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed_out_gamma, gated_out_map), (z_head, gated_gate_map)],
+        )?;
 
-    let taps = SsmMixerTaps {
-        qkv_mixed,
-        query_sequence,
-        key_sequence,
-        value_sequence,
-        gate_sequence: gate_split,
-        beta_sequence: beta_split,
-        z_sequence: z_split,
-        query,
-        key,
-        value,
-        gate,
-        beta,
-        state_in,
-        z_head,
-        state_out,
-        delta_out,
-        z,
-        gated_rmsnorm_out: normed_out_gamma,
-        gated_value: gated_out,
-        ssm_out_result: cur,
+        // output projection: `ssm_out`'s declared `[value_dim, n_embd]` layout
+        // decomposed the same read-side way `q_split_map`/`v_split_map` already
+        // decompose a flat checkpoint axis -- never a write-side merge. UNLIKE
+        // `v_split_map`'s own `(u*group+g)*head_v_dim+j` nesting (u outer, g
+        // mid, j inner -- verified correct against real Q4_K bytes through
+        // `gated_value`, within noise), the checkpoint's real `ssm_out.weight`
+        // contraction axis nests `(j*kv_heads+u)*group+g` (j outer, u mid, g
+        // inner) -- proven on real `qwen3.6:35b-a3b` bytes (a model-crate
+        // `qwen35moe_layer0_stage_by_stage_position0_matches_tapped_reference`'s
+        // own `ssm_out_weight_layout_sweep`: this order scores
+        // `scaled_rel_err=1.5e-2`, at the Q4_K noise floor, against every other
+        // (u,g,j)-role permutation scoring `>=1.2`) -- this weight was saved
+        // with a different head/value nesting than the value/`z`/qkv weights,
+        // not the same convention reused.
+        let out_weight_split_map = alloc::format!("{}*j+{group}*u+g,d->ugjd", kv_heads * group);
+        let ssm_out_split = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[
+                (ssm_out, out_weight_split_map.as_str()),
+                (value_head_ones, "ugj->ugjd"),
+            ],
+        )?;
+        let cur_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[
+                (gated_out, gated_product_map),
+                (ssm_out_split, "ugjd->gujd"),
+            ],
+        )?;
+        let cur = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            cur_product,
+            "gujd->gujd",
+            "d->gujd",
+        )?;
+
+        let mixer_out = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            &[(x, "sd->sd"), (cur, "d->sd")],
+        )?;
+
+        let taps = SsmMixerTaps {
+            qkv_mixed,
+            query_sequence,
+            key_sequence,
+            value_sequence,
+            gate_sequence: gate_split,
+            beta_sequence: beta_split,
+            z_sequence: z_split,
+            query,
+            key,
+            value,
+            gate,
+            beta,
+            state_in,
+            z_head,
+            state_out,
+            delta_out,
+            z,
+            gated_rmsnorm_out: normed_out_gamma,
+            gated_value: gated_out,
+            ssm_out_result: cur,
+        };
+        (mixer_out, taps)
     };
     Ok((mixer_out, taps))
 }
@@ -19757,22 +20008,21 @@ value = 1.0
         );
     }
 
-    /// [`append_qwen35_ssm_mixer_with_taps`]'s own `s`-axis guard: a caller
-    /// whose `x` declares a STATIC `s = 2` (a batched multi-token step,
-    /// never what the compiled `qwen35` program itself does -- see
-    /// `proxima-model-interop::bind_symbols` for the symbolic-`s` case,
-    /// checked at bind time instead) must be refused before any op after
-    /// the guard runs, not silently summed across positions by the reduces
-    /// at `spec.rs:7009-7014`. Every non-`x` argument reuses `x` itself: the
-    /// guard is the function's first statement, so nothing downstream of it
-    /// ever reads them.
+    /// [`append_qwen35_ssm_mixer_with_taps`]'s own `s`-axis guard: a static
+    /// `s = 0` can never feed the recurrence (there is no position zero to
+    /// seed `state_out`), so it is refused before any op after the guard
+    /// runs -- unlike `s > 1`, which the M>1 branch
+    /// [`qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps`]
+    /// covers now unrolls rather than rejects. Every non-`x` argument reuses
+    /// `x` itself: the guard is the function's first statement, so nothing
+    /// downstream of it ever reads them.
     #[proxima::test]
-    async fn qwen35_ssm_mixer_rejects_a_static_multi_position_step() {
+    async fn qwen35_ssm_mixer_rejects_a_static_zero_width_step() {
         let mut program = Vec::new();
         let x = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(2), Extent::Static(1)],
+            alloc::vec![Extent::Static(0), Extent::Static(1)],
             "x",
         );
 
@@ -19808,9 +20058,293 @@ value = 1.0
         match result {
             Err(TensorError::SingleTokenStepOnly { op, s }) => {
                 assert_eq!(op, "qwen35_ssm_mixer");
-                assert_eq!(s, 2);
+                assert_eq!(s, 0);
             }
             other => panic!("expected SingleTokenStepOnly, got {other:?}"),
+        }
+    }
+
+    /// The M>1 branch [`append_qwen35_ssm_mixer_with_taps_and_layout`] takes
+    /// when `x`'s leading axis is a literal `Extent::Static(width)` above 1
+    /// (a per-request bound graph once the prompt length is known, per that
+    /// function's own doc) unrolls the delta-rule recurrence across the
+    /// prompt in one program, rather than through the caller-driven scan
+    /// [`qwen35_prefill_scan_and_tail_match_repeated_mixer_steps`] already
+    /// covers. The oracle is the same shape both tests already trust: one
+    /// evaluation of a static-`M` program against `M` sequential
+    /// single-position evaluations of the SAME (unchanged, `M=1`-branch)
+    /// builder, threading `state_out` into the next call's `state_in` and
+    /// `qkv_mixed` into the next call's `conv_history_in` exactly the way a
+    /// real decode loop already does.
+    #[proxima::test]
+    async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps() {
+        let key_dim = 1u32;
+        let value_dim = 2u32;
+        let kv_heads = 1u32;
+        let group = 2u32;
+        let l_cache = 2u32;
+        let qkv_dim = 2 * key_dim + value_dim;
+        let positions = 3u32;
+
+        let x_data = [1.0_f32, -1.0, 0.5];
+        let attn_norm_weight_data = [1.0_f32];
+        let wqkv_data = [1.0_f32, 2.0, 3.0, 4.0];
+        let wqkv_gate_data = [0.5_f32, -0.25];
+        let conv_weight_data = [
+            0.5_f32, 1.0, // q
+            -0.25, 0.75, // k
+            1.5, -0.5, // v0
+            0.25, 2.0, // v1
+        ];
+        let ssm_beta_data = [0.25_f32, -0.5];
+        let ssm_alpha_data = [0.75_f32, 0.125];
+        let ssm_dt_bias_data = [0.1_f32, -0.2];
+        let ssm_a_data = [-0.5_f32, -0.25];
+        let ssm_norm_weight_data = [1.0_f32];
+        let ssm_out_data = [0.75_f32, -0.5];
+        let head_eps_data = [0.0_f32, 0.0];
+        let initial_state = [0.0_f32, 0.0];
+        let initial_history = [0.0_f32; 4];
+
+        let mut static_program = Vec::new();
+        let x = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(positions), Extent::Static(1)],
+            "x",
+        );
+        let inv_dim = scalar_constant(&mut static_program, 1.0);
+        let eps = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(positions)],
+            "eps",
+        );
+        let head_eps = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+            "head_eps",
+        );
+        let one = scalar_constant(&mut static_program, 1.0);
+        let inv_sqrt_key_dim = scalar_constant(&mut static_program, 1.0);
+        let inv_head_v_dim = scalar_constant(&mut static_program, 1.0);
+        let attn_norm_weight = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1)],
+            "attn_norm_weight",
+        );
+        let wqkv = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1), Extent::Static(qkv_dim)],
+            "wqkv",
+        );
+        let wqkv_gate = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1), Extent::Static(value_dim)],
+            "wqkv_gate",
+        );
+        let conv_weight = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(qkv_dim), Extent::Static(l_cache)],
+            "conv_weight",
+        );
+        let conv_history_in = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(l_cache - 1), Extent::Static(qkv_dim)],
+            "conv_history_in",
+        );
+        let ssm_beta = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1), Extent::Static(kv_heads * group)],
+            "ssm_beta",
+        );
+        let ssm_alpha = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1), Extent::Static(kv_heads * group)],
+            "ssm_alpha",
+        );
+        let ssm_dt_bias = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(kv_heads * group)],
+            "ssm_dt_bias",
+        );
+        let ssm_a = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(kv_heads * group)],
+            "ssm_a",
+        );
+        let ssm_norm_weight = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1)],
+            "ssm_norm_weight",
+        );
+        let ssm_out = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![Extent::Static(value_dim), Extent::Static(1)],
+            "ssm_out",
+        );
+        let state_in = input_leaf(
+            &mut static_program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(1),
+                Extent::Static(1),
+                Extent::Static(kv_heads),
+                Extent::Static(group)
+            ],
+            "state_in",
+        );
+        let (static_mixer_out, static_taps) = append_qwen35_ssm_mixer_with_taps(
+            &mut static_program,
+            x,
+            inv_dim,
+            eps,
+            head_eps,
+            one,
+            inv_sqrt_key_dim,
+            inv_head_v_dim,
+            Some(attn_norm_weight),
+            wqkv,
+            wqkv_gate,
+            conv_weight,
+            conv_history_in,
+            ssm_beta,
+            ssm_alpha,
+            ssm_dt_bias,
+            ssm_a,
+            ssm_norm_weight,
+            ssm_out,
+            state_in,
+            key_dim,
+            value_dim,
+            kv_heads,
+            group,
+            l_cache,
+            GdnOutputGate::Silu,
+        )
+        .expect("the M>1 branch lowers");
+
+        let static_result = crate::cpu::evaluate_named(
+            &static_program,
+            &[u64::from(positions)],
+            &[
+                ("x", x_data.as_slice()),
+                ("eps", &[0.0_f32; 3]),
+                ("head_eps", &head_eps_data),
+                ("attn_norm_weight", &attn_norm_weight_data),
+                ("wqkv", &wqkv_data),
+                ("wqkv_gate", &wqkv_gate_data),
+                ("conv_weight", &conv_weight_data),
+                ("conv_history_in", &initial_history[..qkv_dim as usize]),
+                ("ssm_beta", &ssm_beta_data),
+                ("ssm_alpha", &ssm_alpha_data),
+                ("ssm_dt_bias", &ssm_dt_bias_data),
+                ("ssm_a", &ssm_a_data),
+                ("ssm_norm_weight", &ssm_norm_weight_data),
+                ("ssm_out", &ssm_out_data),
+                ("state_in", &initial_state),
+            ],
+            &[static_mixer_out, static_taps.state_out],
+        )
+        .expect("the M>1 program evaluates");
+        let static_mixer_rows = static_result
+            .get(static_mixer_out)
+            .expect("static mixer_out present")
+            .0;
+        let static_state = static_result
+            .get(static_taps.state_out)
+            .expect("static state_out present")
+            .0;
+
+        let (repeated_program, repeated_mixer_out, repeated_taps) =
+            build_ssm_mixer_test_program(GdnOutputGate::Silu);
+        let mut sequential_state = initial_state.to_vec();
+        let mut sequential_history = initial_history[..qkv_dim as usize].to_vec();
+        let mut sequential_mixer_rows = alloc::vec::Vec::new();
+        for position in 0..positions as usize {
+            let evaluated = crate::cpu::evaluate_named(
+                &repeated_program,
+                &[1],
+                &[
+                    ("x", &x_data[position..position + 1]),
+                    ("eps", &[0.0_f32]),
+                    ("head_eps", &head_eps_data),
+                    ("attn_norm_weight", &attn_norm_weight_data),
+                    ("wqkv", &wqkv_data),
+                    ("wqkv_gate", &wqkv_gate_data),
+                    ("conv_weight", &conv_weight_data),
+                    ("conv_history_in", sequential_history.as_slice()),
+                    ("ssm_beta", &ssm_beta_data),
+                    ("ssm_alpha", &ssm_alpha_data),
+                    ("ssm_dt_bias", &ssm_dt_bias_data),
+                    ("ssm_a", &ssm_a_data),
+                    ("ssm_norm_weight", &ssm_norm_weight_data),
+                    ("ssm_out", &ssm_out_data),
+                    ("state_in", sequential_state.as_slice()),
+                ],
+                &[
+                    repeated_mixer_out,
+                    repeated_taps.state_out,
+                    repeated_taps.qkv_mixed,
+                ],
+            )
+            .expect("one sequential mixer step evaluates");
+            sequential_mixer_rows.extend_from_slice(
+                evaluated
+                    .get(repeated_mixer_out)
+                    .expect("sequential mixer_out present")
+                    .0,
+            );
+            sequential_state = evaluated
+                .get(repeated_taps.state_out)
+                .expect("sequential state_out present")
+                .0
+                .to_vec();
+            sequential_history = evaluated
+                .get(repeated_taps.qkv_mixed)
+                .expect("sequential qkv_mixed present")
+                .0
+                .to_vec();
+        }
+
+        assert_relative_rows_match(
+            static_mixer_rows,
+            &sequential_mixer_rows,
+            "mixer_out",
+        );
+        assert_relative_rows_match(static_state, &sequential_state, "state_out");
+    }
+
+    /// A row-relative tolerance (`1e-5` of the sequential oracle row's own
+    /// norm, floored at `1e-5` absolute so an exactly-zero row still
+    /// tolerates float noise) -- the same shape every other cross-path
+    /// numeric oracle in this module already asserts, spelled once since
+    /// this test compares two multi-row buffers position by position.
+    fn assert_relative_rows_match(actual: &[f32], expected: &[f32], label: &str) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{label} row count must match"
+        );
+        for (index, (found, wanted)) in actual.iter().zip(expected.iter()).enumerate() {
+            let row_norm = wanted.abs().max(1e-5);
+            let relative_error = (found - wanted).abs() / row_norm;
+            assert!(
+                relative_error <= 1e-5,
+                "{label}[{index}] = {found}, expected {wanted}, relative_error = {relative_error}"
+            );
         }
     }
 
