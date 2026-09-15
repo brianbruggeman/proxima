@@ -996,12 +996,37 @@ fn split_by_shared_buffers(
             continue;
         }
         let Some((weight_buffer, _)) = device_buffers.get(&operands[0].0) else {
+            #[cfg(feature = "instrument")]
+            counter!(MERGE_CANDIDATE_UNRESOLVED_WEIGHT, 1);
             continue;
         };
         let Some((activation_buffer, _)) = device_buffers.get(&operands[1].0) else {
+            // ROW 571: this is the production admission gap, measured, not
+            // argued -- a real qwen35moe decode plan's own packed-row
+            // candidates are 100% refused here, because `activation` is an
+            // INTERMEDIATE (arena-materialized) hidden state, never resolved
+            // in `device_buffers` this early (`ensure_merged_dispatches`
+            // runs ONCE, before the per-position encode loop that would
+            // otherwise populate it). `metal_output_placement.rs`'s own
+            // caller-placed shape (and this crate's own merge test fixture)
+            // never hits this arm because every operand there IS an
+            // `Op::Input` leaf, resolved up front -- production's own hidden
+            // states never are.
+            #[cfg(feature = "instrument")]
+            counter!(MERGE_CANDIDATE_UNRESOLVED_ACTIVATION, 1);
             continue;
         };
         let Some((output_buffer, _)) = output_placed.get(&bound.node) else {
+            // ROW 571: the second half of the same gap -- a real decode
+            // plan's own intermediate output lives in the `BufferArena`,
+            // never in `output_placed` (caller placements only). Admitting
+            // an arena-backed output here would need the arena to
+            // pre-allocate one CONTIGUOUS, group-sized region before any
+            // member of the group encodes (today it allocates lazily, per
+            // position, at encode time) -- a real redesign, not a hazard fix,
+            // left for the row that takes it on.
+            #[cfg(feature = "instrument")]
+            counter!(MERGE_CANDIDATE_UNPLACED_OUTPUT, 1);
             continue;
         };
         let key = (
@@ -11156,6 +11181,31 @@ pub static BARRIERS_EMITTED: Counter = Counter::new("omega.metal.concurrent.barr
 /// recorded regardless of how many actual dispatches [`ENCODE_DISPATCH_CALLS`]
 /// shows for the same step count.
 pub static HAZARD_STEP_CALLS: Counter = Counter::new("omega.metal.concurrent.hazard_step_calls");
+
+/// ROW 571's own production finding, standing telemetry: how many
+/// `split_by_shared_buffers` candidates were refused because the WEIGHT
+/// operand had no `device_buffers` entry yet -- rare, weight is normally a
+/// checkpoint leaf resolved up front.
+#[cfg(feature = "metal-horizontal-merge")]
+#[cfg(feature = "instrument")]
+pub static MERGE_CANDIDATE_UNRESOLVED_WEIGHT: Counter =
+    Counter::new("omega.metal.horizontal_merge.candidate_unresolved_weight");
+/// How many candidates were refused because the ACTIVATION operand had no
+/// `device_buffers` entry yet -- the real qwen35moe decode graph's own
+/// number here is 100% of its packed-row candidates: the activation is an
+/// intermediate, arena-materialized hidden state, never an `Op::Input` leaf.
+#[cfg(feature = "metal-horizontal-merge")]
+#[cfg(feature = "instrument")]
+pub static MERGE_CANDIDATE_UNRESOLVED_ACTIVATION: Counter =
+    Counter::new("omega.metal.horizontal_merge.candidate_unresolved_activation");
+/// How many candidates were refused because `bound.node` had no
+/// `output_placed` entry -- production intermediate outputs live in the
+/// `BufferArena`, never in a caller placement, so this is the second half
+/// of the same admission gap `MERGE_CANDIDATE_UNRESOLVED_ACTIVATION` names.
+#[cfg(feature = "metal-horizontal-merge")]
+#[cfg(feature = "instrument")]
+pub static MERGE_CANDIDATE_UNPLACED_OUTPUT: Counter =
+    Counter::new("omega.metal.horizontal_merge.candidate_unplaced_output");
 
 /// [`BARRIERS_EMITTED`]'s own hazard-cause breakdown -- ROW 539's question:
 /// of the barriers a concurrent-dispatch step pays, how many are a genuine
