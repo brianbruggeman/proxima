@@ -392,6 +392,20 @@ pub struct ServingConfig<'model> {
     /// requesting the alt path (see that field's own doc for why it is not
     /// implemented end to end yet on the real checkpoint).
     pub prefill_one_evaluation: bool,
+    /// Not an upstream llama-server flag -- caps how many prompt positions
+    /// [`Self::prefill_one_evaluation`]'s alt program evaluates in one call
+    /// (`generate/decode.rs`'s prefill batch loop, I9/Sarathi-style chunked
+    /// prefill): the prompt is split into chunks of this many positions,
+    /// each built at its own width via
+    /// `crate::qwen35moe::qwen35moe_forward_program_at_width`, with
+    /// `cached_len` carried across chunks the same way the existing
+    /// one-position split loop already carries it. Bounds peak activation
+    /// memory for a long prompt instead of the whole-prompt evaluation
+    /// growing activations linearly with `prompt_token_count`. `0` (this
+    /// field's default) evaluates the whole prompt in one call, matching
+    /// today's `prefill_one_evaluation` behavior byte-for-byte; has no
+    /// effect unless `prefill_one_evaluation` is also set.
+    pub prefill_chunk_positions: usize,
     /// Not an upstream llama-server flag -- runtime toggle for
     /// `proxima_tensor::bind::bind_with_fusion`'s cached-attention fused
     /// kind, mirroring that function's own
@@ -521,6 +535,7 @@ impl Default for ServingConfig<'static> {
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
+            prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
@@ -834,6 +849,7 @@ mod tests {
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
+            prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
@@ -994,6 +1010,7 @@ mod tests {
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
+            prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
@@ -1082,6 +1099,7 @@ mod tests {
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
+            prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
@@ -1160,6 +1178,7 @@ mod tests {
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: false,
+            prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
@@ -1228,6 +1247,7 @@ mod tests {
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
             prefill_one_evaluation: true,
+            prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
             moe_topk_fusion: true,
