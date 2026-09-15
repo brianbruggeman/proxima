@@ -244,6 +244,10 @@ impl<Cache> ServingState<Cache> {
 }
 
 #[cfg(test)]
+// every transition here returns a typed error the assertions above it already
+// prove unreachable; `expect` documents which one, `unwrap_used`/`expect_used`
+// stay denied outside `#[cfg(test)]`
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
