@@ -9427,19 +9427,28 @@ impl<'file> LoadedModel<'file> {
         // `proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`'s
         // squeeze-reduce silently sums across positions for anything but a
         // literal `Extent::Static` axis. `self.qwen35moe_hparams`
-        // (`Self::load`'s registry bind site) is the seam that fixes it:
+        // (`Self::load`'s registry bind site) is the seam meant to fix it:
         // `qwen35moe_forward_program_at_width` builds a SECOND program with
         // `s` pinned to `Extent::Static(prompt_token_count)`, which reaches
-        // that same builder's M>1 branch instead (`spec.rs`'s own oracle,
-        // `qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps`).
-        // Built once here, never per step: `prompt_token_count > 1` is only
-        // ever true on the prompt's own first step. `PROXIMA_PREFILL_SEQUENTIAL=1`
-        // keeps the old split loop, for a side-by-side comparison against a
-        // real checkpoint.
-        let sequential_prefill_override = std::env::var_os("PROXIMA_PREFILL_SEQUENTIAL").is_some();
+        // that same builder's M>1 branch instead. That branch is proven
+        // correct in isolation (`spec.rs`'s own oracle,
+        // `qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps`,
+        // exact agreement at a synthetic shape) but NOT YET on the real
+        // `qwen3.6:35b-a3b` checkpoint at real GQA width: the real-checkpoint
+        // oracle (`qwen35moe_one_evaluation_prefill_real_model`, this
+        // module, below) currently measures the decoded text diverging and
+        // the first GDN layer's own `block_output` already off by ~5x
+        // relative to its own row norm -- a real numeric defect, not yet
+        // root-caused. `PROXIMA_PREFILL_ONE_EVALUATION=1` is therefore the
+        // OPT-IN escape hatch (default OFF, so every existing caller keeps
+        // the proven split-loop behavior): built once here, never per step,
+        // since `prompt_token_count > 1` is only ever true on the prompt's
+        // own first step.
+        let one_evaluation_prefill_requested =
+            std::env::var_os("PROXIMA_PREFILL_ONE_EVALUATION").is_some();
         let one_evaluation_prefill_program = if self.single_position_step
             && prompt_token_count > 1
-            && !sequential_prefill_override
+            && one_evaluation_prefill_requested
             && let Some(hparams) = self.qwen35moe_hparams.as_ref()
         {
             let (program, roots, layer_roots, _moe_sites, _diagnostics) =
@@ -9486,12 +9495,13 @@ impl<'file> LoadedModel<'file> {
                 // which reaches that same builder's M>1 branch instead
                 // (`spec.rs`'s own oracle,
                 // `qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps`).
-                // `PROXIMA_PREFILL_SEQUENTIAL=1` keeps the old split loop,
-                // for a side-by-side comparison against a real checkpoint.
+                // Default OFF (this module's own doc, above, on why): only
+                // active when `PROXIMA_PREFILL_ONE_EVALUATION=1` was set
+                // AND the alt program actually built.
                 let one_evaluation_prefill = self.single_position_step
                     && next_ids.len() > 1
                     && !gdn_prefill_scan_enabled
-                    && !sequential_prefill_override
+                    && one_evaluation_prefill_requested
                     && one_evaluation_prefill_program.is_some();
                 let split_prefill = self.single_position_step
                     && next_ids.len() > 1
@@ -15521,6 +15531,492 @@ mod memory_fit_gate_tests {
                 )
                 .expect("greedy-decode 8 tokens for cross-feature-set identity comparison");
             std::println!("prefill_ttft_850 greedy_eight_token_ids={generated_ids:?}");
+        }
+    }
+
+    /// Real-checkpoint oracle for the one-evaluation prefill
+    /// (`Self::run_decode_loop_observed_seeded`'s own `one_evaluation_prefill`
+    /// doc): a `new_count > 1` qwen35moe prefill built once through
+    /// `qwen35moe_forward_program_at_width`'s `Extent::Static` branch must
+    /// agree with the OLD `next_ids.len()`-way split, still reachable via
+    /// `PROXIMA_PREFILL_SEQUENTIAL=1`, at both the decoded text AND the
+    /// last prompt position's own logits.
+    mod qwen35moe_one_evaluation_prefill_real_model {
+        use core::ffi::c_void;
+        use std::os::fd::AsFd;
+
+        use proxima_tensor::op::NodeId;
+
+        use super::super::{
+            BackendRuntime, Control, LoadedModel, LogitsSink, NodeValuesSink,
+            supported_serving_config,
+        };
+        use crate::serving::GPU_LAYERS_ALL;
+
+        struct MappedGguf {
+            base: *mut u8,
+            len: usize,
+            _file: std::fs::File,
+        }
+
+        impl MappedGguf {
+            fn open(path: &std::path::Path) -> std::io::Result<Self> {
+                let file = std::fs::File::open(path)?;
+                let len = usize::try_from(file.metadata()?.len())
+                    .expect("fixture file length fits in usize");
+                // SAFETY: `len` matches the just-opened file's own length;
+                // `file` is kept alive in `_file` for as long as `base` is
+                // used, and the mapping is read-only/private so no writer
+                // can observe or race it.
+                let base = unsafe {
+                    rustix::mm::mmap(
+                        core::ptr::null_mut(),
+                        len,
+                        rustix::mm::ProtFlags::READ,
+                        rustix::mm::MapFlags::PRIVATE,
+                        file.as_fd(),
+                        0,
+                    )
+                }
+                .expect("mmap host-local qwen35moe gguf fixture")
+                .cast::<u8>();
+                Ok(Self {
+                    base,
+                    len,
+                    _file: file,
+                })
+            }
+
+            fn as_slice(&self) -> &[u8] {
+                // SAFETY: `base` points at `len` bytes mapped for `self`'s
+                // whole lifetime; this borrows `self` immutably, so nothing
+                // can unmap the region while the returned slice is alive.
+                unsafe { core::slice::from_raw_parts(self.base, self.len) }
+            }
+        }
+
+        impl Drop for MappedGguf {
+            fn drop(&mut self) {
+                // SAFETY: `base`/`len` are exactly what `open`'s `mmap`
+                // call returned; nothing else unmaps this region.
+                let _ = unsafe { rustix::mm::munmap(self.base.cast::<c_void>(), self.len) };
+            }
+        }
+
+        fn open_model(mapped: &MappedGguf) -> LoadedModel<'_> {
+            let file_bytes = mapped.as_slice();
+            let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+                .expect("parse host-local qwen35moe gguf fixture");
+            LoadedModel::load(&parsed, file_bytes)
+                .expect("load real qwen35moe checkpoint through the public path")
+        }
+
+        /// Greedy (`temperature: 0.0`) so the one-evaluation and sequential
+        /// prefill paths are directly comparable token-for-token -- any
+        /// sampling randomness would make a mismatch ambiguous between "the
+        /// recurrence is wrong" and "the rng streams diverged".
+        fn greedy_serving_config() -> super::super::ServingConfig<'static> {
+            let mut config =
+                supported_serving_config(GPU_LAYERS_ALL, crate::test_support::math_mode_from_env());
+            config.temperature = 0.0;
+            config
+        }
+
+        /// # Safety
+        ///
+        /// Single-threaded within this one `#[ignore]`d test's own process
+        /// (`cargo nextest` isolates every test in its own process by
+        /// default) -- no other thread reads or writes
+        /// `PROXIMA_PREFILL_ONE_EVALUATION` while this holds it set.
+        unsafe fn with_one_evaluation_prefill_forced<T>(body: impl FnOnce() -> T) -> T {
+            // SAFETY: see this function's own doc.
+            unsafe {
+                std::env::set_var("PROXIMA_PREFILL_ONE_EVALUATION", "1");
+            }
+            let result = body();
+            // SAFETY: see this function's own doc.
+            unsafe {
+                std::env::remove_var("PROXIMA_PREFILL_ONE_EVALUATION");
+            }
+            result
+        }
+
+        #[test]
+        #[ignore = "requires a real, local qwen3.6:35b-a3b GGUF blob; set PROXIMA_QWEN35MOE_GGUF"]
+        fn one_evaluation_prefill_matches_sequential_prefill_on_the_real_checkpoint() {
+            let model_path = crate::test_support::qwen35moe_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN35MOE_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen35moe gguf fixture");
+            let model = open_model(&mapped);
+            let serving_config = greedy_serving_config();
+            let prompt = "The capital of France is";
+            let steps = 16;
+
+            let mut sequential_runtime = BackendRuntime::new(&serving_config);
+            let mut sequential_logits: Vec<Vec<f32>> = Vec::new();
+            let (sequential_ids, sequential_text, _, _) = model
+                .run_decode_loop_observed_seeded(
+                    prompt,
+                    steps,
+                    &serving_config,
+                    &mut sequential_runtime,
+                    None,
+                    &mut LogitsSink::Collect(&mut sequential_logits),
+                    &mut NodeValuesSink::Discard,
+                    &mut |_event| Control::Continue,
+                    None,
+                    false,
+                )
+                .expect("sequential prefill greedy generate");
+
+            // SAFETY: no other thread touches `PROXIMA_PREFILL_ONE_EVALUATION`
+            // during this call (this function's own doc).
+            let (one_evaluation_ids, one_evaluation_text, one_evaluation_logits) =
+                unsafe {
+                    with_one_evaluation_prefill_forced(|| {
+                        let mut one_evaluation_runtime = BackendRuntime::new(&serving_config);
+                        let mut one_evaluation_logits: Vec<Vec<f32>> = Vec::new();
+                        let (ids, text, _, _) = model
+                            .run_decode_loop_observed_seeded(
+                                prompt,
+                                steps,
+                                &serving_config,
+                                &mut one_evaluation_runtime,
+                                None,
+                                &mut LogitsSink::Collect(&mut one_evaluation_logits),
+                                &mut NodeValuesSink::Discard,
+                                &mut |_event| Control::Continue,
+                                None,
+                                false,
+                            )
+                            .expect("one-evaluation prefill greedy generate");
+                        (ids, text, one_evaluation_logits)
+                    })
+                };
+
+            std::println!(
+                "one_evaluation_prefill: ids={one_evaluation_ids:?} text={one_evaluation_text:?}"
+            );
+            std::println!("sequential_prefill: ids={sequential_ids:?} text={sequential_text:?}");
+
+            let last_position_max_abs_diff = one_evaluation_logits
+                .first()
+                .zip(sequential_logits.first())
+                .map(|(one_evaluation, sequential)| {
+                    one_evaluation
+                        .iter()
+                        .zip(sequential.iter())
+                        .map(|(left, right)| (left - right).abs())
+                        .fold(0.0_f32, f32::max)
+                })
+                .expect("both paths capture the prompt's own first-step logits");
+            std::println!(
+                "one_evaluation_prefill vs sequential_prefill last_position_max_abs_diff={last_position_max_abs_diff}"
+            );
+
+            assert_eq!(
+                one_evaluation_ids, sequential_ids,
+                "one-evaluation and sequential prefill must decode the same ids"
+            );
+            assert_eq!(
+                one_evaluation_text, sequential_text,
+                "one-evaluation and sequential prefill must decode the same text"
+            );
+            assert!(
+                last_position_max_abs_diff <= 1e-3,
+                "one-evaluation vs sequential prefill last-position logits must agree within \
+                 1e-3, got {last_position_max_abs_diff}"
+            );
+        }
+
+        /// Diagnostic companion to the oracle above: when it fails, this
+        /// names the first layer whose own `block_output` (post-residual,
+        /// after FFN -- [`crate::qwen35moe::Qwen35MoeLayerDiagnostics::block_output`])
+        /// disagrees between the one-evaluation and sequential prefill
+        /// paths, at the prompt's own last position, relative to that
+        /// row's own norm.
+        #[test]
+        #[ignore = "requires a real, local qwen3.6:35b-a3b GGUF blob; set PROXIMA_QWEN35MOE_GGUF"]
+        fn one_evaluation_prefill_first_diverging_layer_on_the_real_checkpoint() {
+            let model_path = crate::test_support::qwen35moe_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN35MOE_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen35moe gguf fixture");
+            let model = open_model(&mapped);
+            let serving_config = greedy_serving_config();
+            let prompt = "The capital of France is";
+
+            let hparams = model
+                .qwen35moe_hparams
+                .as_ref()
+                .expect("this checkpoint routes through the qwen35moe registry entry");
+            let prompt_ids = proxima_tokenizer::encode_with_bos_eos(
+                prompt,
+                &model.vocab,
+                super::super::wants_bos(&model.vocab),
+                model.vocab.add_eos_token().unwrap_or(false),
+            )
+            .expect("tokenize the oracle prompt");
+            let prompt_len = prompt_ids.len();
+            let embedding = model.architecture.embedding as usize;
+
+            let (_program, _roots, static_layer_roots, _moe_sites, static_diagnostics) =
+                crate::qwen35moe::qwen35moe_forward_program_at_width(
+                    hparams,
+                    Some(prompt_len as u32),
+                )
+                .expect("static-width program builds");
+            let _ = static_layer_roots;
+            let one_evaluation_nodes: Vec<NodeId> = static_diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.block_output)
+                .collect();
+            let sequential_nodes: Vec<NodeId> = model
+                .qwen35moe_layer_diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.block_output)
+                .collect();
+
+            let mut sequential_runtime = BackendRuntime::new(&serving_config);
+            let mut sequential_steps: Vec<Vec<Vec<f32>>> = Vec::new();
+            let mut sequential_sink = NodeValuesSink::Collect {
+                nodes: &sequential_nodes,
+                steps: &mut sequential_steps,
+            };
+            let _ = model
+                .run_decode_loop_observed_seeded(
+                    prompt,
+                    1,
+                    &serving_config,
+                    &mut sequential_runtime,
+                    None,
+                    &mut LogitsSink::Discard,
+                    &mut sequential_sink,
+                    &mut |_event| Control::Continue,
+                    None,
+                    false,
+                )
+                .expect("sequential prefill diagnostic run");
+
+            // SAFETY: no other thread touches `PROXIMA_PREFILL_ONE_EVALUATION`
+            // during this call (`with_one_evaluation_prefill_forced`'s own
+            // doc).
+            let one_evaluation_steps: Vec<Vec<Vec<f32>>> = unsafe {
+                with_one_evaluation_prefill_forced(|| {
+                    let mut one_evaluation_runtime = BackendRuntime::new(&serving_config);
+                    let mut one_evaluation_steps: Vec<Vec<Vec<f32>>> = Vec::new();
+                    let mut one_evaluation_sink = NodeValuesSink::Collect {
+                        nodes: &one_evaluation_nodes,
+                        steps: &mut one_evaluation_steps,
+                    };
+                    let _ = model
+                        .run_decode_loop_observed_seeded(
+                            prompt,
+                            1,
+                            &serving_config,
+                            &mut one_evaluation_runtime,
+                            None,
+                            &mut LogitsSink::Discard,
+                            &mut one_evaluation_sink,
+                            &mut |_event| Control::Continue,
+                            None,
+                            false,
+                        )
+                        .expect("one-evaluation prefill diagnostic run");
+                    one_evaluation_steps
+                })
+            };
+
+            let one_evaluation_last_position = one_evaluation_steps
+                .first()
+                .expect("one-evaluation prefill observes exactly one batch");
+            let sequential_last_position = sequential_steps
+                .last()
+                .expect("sequential prefill observes at least one batch");
+
+            let mut first_diverging_layer: Option<(usize, f32)> = None;
+            for (layer, (one_evaluation_output, sequential_output)) in one_evaluation_last_position
+                .iter()
+                .zip(sequential_last_position.iter())
+                .enumerate()
+            {
+                let last_row = &one_evaluation_output[one_evaluation_output.len() - embedding..];
+                let row_norm = sequential_output
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    .sqrt()
+                    .max(1e-6);
+                let max_abs_diff = last_row
+                    .iter()
+                    .zip(sequential_output.iter())
+                    .map(|(left, right)| (left - right).abs())
+                    .fold(0.0_f32, f32::max);
+                let relative_diff = max_abs_diff / row_norm;
+                std::println!(
+                    "layer={layer} block_output max_abs_diff={max_abs_diff} row_norm={row_norm} \
+                     relative_diff={relative_diff}"
+                );
+                if relative_diff > 1e-3 && first_diverging_layer.is_none() {
+                    first_diverging_layer = Some((layer, relative_diff));
+                }
+            }
+            match first_diverging_layer {
+                Some((layer, relative_diff)) => std::println!(
+                    "first_diverging_layer={layer} relative_diff={relative_diff}"
+                ),
+                None => std::println!("no layer's block_output diverged past 1e-3 relative"),
+            }
+        }
+
+        /// Bisects layer 0 itself: `qkv_mixed` (shared code, computed
+        /// identically on both branches of
+        /// [`proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`])
+        /// vs `state_out`/`mixer_output` (the M>1 branch's own recurrence
+        /// and tail) vs `post_mixer_residual`/`block_output` (the shared
+        /// FFN after it).
+        #[test]
+        #[ignore = "requires a real, local qwen3.6:35b-a3b GGUF blob; set PROXIMA_QWEN35MOE_GGUF"]
+        fn one_evaluation_prefill_layer_zero_bisection_on_the_real_checkpoint() {
+            let model_path = crate::test_support::qwen35moe_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN35MOE_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen35moe gguf fixture");
+            let model = open_model(&mapped);
+            let serving_config = greedy_serving_config();
+            let prompt = "The capital of France is";
+
+            let hparams = model
+                .qwen35moe_hparams
+                .as_ref()
+                .expect("this checkpoint routes through the qwen35moe registry entry");
+            let prompt_ids = proxima_tokenizer::encode_with_bos_eos(
+                prompt,
+                &model.vocab,
+                super::super::wants_bos(&model.vocab),
+                model.vocab.add_eos_token().unwrap_or(false),
+            )
+            .expect("tokenize the oracle prompt");
+            let prompt_len = prompt_ids.len();
+
+            let (_program, _roots, _static_layer_roots, _moe_sites, static_diagnostics) =
+                crate::qwen35moe::qwen35moe_forward_program_at_width(
+                    hparams,
+                    Some(prompt_len as u32),
+                )
+                .expect("static-width program builds");
+            let layer0_static = &static_diagnostics[0];
+            let layer0_decode = &model.qwen35moe_layer_diagnostics[0];
+            let static_ssm_taps = layer0_static
+                .ssm_taps
+                .expect("layer 0 is a GDN layer on this checkpoint");
+            let decode_ssm_taps = layer0_decode
+                .ssm_taps
+                .expect("layer 0 is a GDN layer on this checkpoint");
+
+            let names = ["qkv_mixed", "state_out"];
+            let one_evaluation_nodes = [static_ssm_taps.qkv_mixed, static_ssm_taps.state_out];
+            let sequential_nodes = [decode_ssm_taps.qkv_mixed, decode_ssm_taps.state_out];
+            let _ = (layer0_static.mixer_output, layer0_decode.mixer_output);
+            let _ = (
+                layer0_static.post_mixer_residual,
+                layer0_decode.post_mixer_residual,
+            );
+            let _ = (layer0_static.block_output, layer0_decode.block_output);
+
+            let mut sequential_runtime = BackendRuntime::new(&serving_config);
+            let mut sequential_steps: Vec<Vec<Vec<f32>>> = Vec::new();
+            let mut sequential_sink = NodeValuesSink::Collect {
+                nodes: &sequential_nodes,
+                steps: &mut sequential_steps,
+            };
+            let _ = model
+                .run_decode_loop_observed_seeded(
+                    prompt,
+                    1,
+                    &serving_config,
+                    &mut sequential_runtime,
+                    None,
+                    &mut LogitsSink::Discard,
+                    &mut sequential_sink,
+                    &mut |_event| Control::Continue,
+                    None,
+                    false,
+                )
+                .expect("sequential prefill layer-zero bisection run");
+
+            // SAFETY: no other thread touches `PROXIMA_PREFILL_ONE_EVALUATION`
+            // during this call (`with_one_evaluation_prefill_forced`'s own
+            // doc).
+            let one_evaluation_steps: Vec<Vec<Vec<f32>>> = unsafe {
+                with_one_evaluation_prefill_forced(|| {
+                    let mut one_evaluation_runtime = BackendRuntime::new(&serving_config);
+                    let mut one_evaluation_steps: Vec<Vec<Vec<f32>>> = Vec::new();
+                    let mut one_evaluation_sink = NodeValuesSink::Collect {
+                        nodes: &one_evaluation_nodes,
+                        steps: &mut one_evaluation_steps,
+                    };
+                    let _ = model
+                        .run_decode_loop_observed_seeded(
+                            prompt,
+                            1,
+                            &serving_config,
+                            &mut one_evaluation_runtime,
+                            None,
+                            &mut LogitsSink::Discard,
+                            &mut one_evaluation_sink,
+                            &mut |_event| Control::Continue,
+                            None,
+                            false,
+                        )
+                        .expect("one-evaluation prefill layer-zero bisection run");
+                    one_evaluation_steps
+                })
+            };
+
+            let one_evaluation_values = one_evaluation_steps
+                .first()
+                .expect("one-evaluation prefill observes exactly one batch");
+            let sequential_last_position = sequential_steps
+                .last()
+                .expect("sequential prefill observes at least one batch");
+
+            for (name, one_evaluation_value, sequential_value) in
+                itertools_zip3(&names, one_evaluation_values, sequential_last_position)
+            {
+                let embedding = sequential_value.len();
+                let last_row = &one_evaluation_value[one_evaluation_value.len() - embedding..];
+                let row_norm = sequential_value
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    .sqrt()
+                    .max(1e-6);
+                let max_abs_diff = last_row
+                    .iter()
+                    .zip(sequential_value.iter())
+                    .map(|(left, right)| (left - right).abs())
+                    .fold(0.0_f32, f32::max);
+                std::println!(
+                    "layer0 {name} max_abs_diff={max_abs_diff} row_norm={row_norm} \
+                     relative_diff={}",
+                    max_abs_diff / row_norm
+                );
+            }
+        }
+
+        fn itertools_zip3<'a, T>(
+            names: &'a [&'a str],
+            left: &'a [T],
+            right: &'a [T],
+        ) -> impl Iterator<Item = (&'a str, &'a T, &'a T)> {
+            names
+                .iter()
+                .copied()
+                .zip(left.iter())
+                .zip(right.iter())
+                .map(|((name, left_value), right_value)| (name, left_value, right_value))
         }
     }
 }

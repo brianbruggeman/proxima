@@ -83,6 +83,20 @@ pub(crate) fn qwen3moe_30b_gguf_path() -> String {
     })
 }
 
+/// `PROXIMA_QWEN35MOE_GGUF` read the same way [`qwen3moe_30b_gguf_path`]
+/// reads `PROXIMA_QWEN3MOE_GGUF`: unset keeps a qwen35moe fixture test
+/// pointed at this host-local `qwen3.6:35b-a3b` (`general.architecture =
+/// qwen35moe`) checkpoint -- the one `real_qwen35moe_registry_probe.rs`'s
+/// own doc already names as the real blob every qwen35moe-specific
+/// diagnostic in this crate resolves against.
+pub(crate) fn qwen35moe_gguf_path() -> String {
+    std::env::var("PROXIMA_QWEN35MOE_GGUF").unwrap_or_else(|_| {
+        "/Users/brianbruggeman/.ollama/models/blobs/\
+         sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d"
+            .to_string()
+    })
+}
+
 /// Fails the calling `#[ignore]`d fixture test loudly, naming `env_var`
 /// (when the caller resolves `path` through one) and `path` itself, when
 /// the host-local checkpoint the test needs is absent -- an `#[ignore]`d
