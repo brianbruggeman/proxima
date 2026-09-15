@@ -135,7 +135,9 @@ struct GenerateConfig {
     gated_delta_net_fusion: bool,
     #[setting(default = true)]
     moe_topk_fusion: bool,
-    #[setting(default = true)]
+    // default flipped false alongside ServingConfig::default() -- see that
+    // field's own comment for why.
+    #[setting(default = false)]
     prefill_one_evaluation: bool,
     #[setting(default = 0)]
     max_command_buffers_per_token: usize,

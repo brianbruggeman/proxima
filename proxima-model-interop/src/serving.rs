@@ -592,7 +592,10 @@ impl Default for ServingConfig<'static> {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
-            prefill_one_evaluation: true,
+            // default flipped false: main's default path regressed on the
+            // France checkpoint (garbage tokens / EmptyLogits) somewhere in
+            // 78a313d7..HEAD; see proxima-tensor/docs/discipline.md ROW 590.
+            prefill_one_evaluation: false,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
@@ -1074,7 +1077,7 @@ mod tests {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
-            prefill_one_evaluation: true,
+            prefill_one_evaluation: false,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
@@ -1165,7 +1168,7 @@ mod tests {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
-            prefill_one_evaluation: true,
+            prefill_one_evaluation: false,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
@@ -1246,7 +1249,7 @@ mod tests {
             qwen35moe_monolithic_all_low: false,
             qwen35moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
-            prefill_one_evaluation: true,
+            prefill_one_evaluation: false,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,
             gated_delta_net_fusion: true,
