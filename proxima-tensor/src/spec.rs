@@ -17274,6 +17274,506 @@ value = 1.0
         assert_eq!(result, [100.0, 210.0, 321.0, 432.0]);
     }
 
+    /// proxima-debugger unit oracle (qwen35moe GDN prefill-scan-vs-sequential
+    /// divergence), narrowed to the one row this comparison is actually
+    /// valid for: [`causal_conv1d`] evaluated on a `[13, 4]` batch's row 0
+    /// (the shape the GDN prefill scan's own `evaluate_segment` feeds it,
+    /// `generate.rs`'s `evaluate_qwen35moe_gdn_scan_segment`) MUST match a
+    /// standalone `[1, 4]` call on that same row's data. Row 0 alone: for
+    /// `position >= 1`, a fresh `[1, 4]` call is NOT the same computation as
+    /// that row read out of the `[13, 4]` batch -- `causal_conv1d`'s own
+    /// `sequence_index` iota starts a length-1 input at its own position 0,
+    /// so it has no way to see the earlier rows the batch's causal window
+    /// legitimately reads; only row 0 (the model's own first token, no
+    /// history either way) is comparable this way, matching what the real
+    /// checkpoint's own layer-0/position-0 comparison already established.
+    /// `l_cache=4`/`embedding=4` and non-uniform `x`/`weight` values (never
+    /// a repeated constant) are deliberate: a repeated value cannot catch a
+    /// transposed axis or an off-by-one window offset, only a genuinely
+    /// varying value per `(position, channel, tap)` can.
+    #[proxima::test]
+    async fn causal_conv1d_multi_row_batch_row_zero_matches_a_single_row_call() {
+        const POSITIONS: usize = 13;
+        const EMBEDDING: usize = 4;
+        const L_CACHE: usize = 4;
+
+        let x_data: Vec<f32> = (0..POSITIONS * EMBEDDING)
+            .map(|index| (index as f32 + 1.0) * 0.1)
+            .collect();
+        let weight_data: Vec<f32> = (0..EMBEDDING * L_CACHE)
+            .map(|index| (index as f32 + 1.0) * 0.01)
+            .collect();
+
+        let mut batch_program = Vec::new();
+        let batch_x = op::append(
+            &mut batch_program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+                name: Some("x".into()),
+            },
+        );
+        let batch_weight = op::append(
+            &mut batch_program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![
+                    Extent::Static(EMBEDDING as u32),
+                    Extent::Static(L_CACHE as u32)
+                ],
+                name: Some("weight".into()),
+            },
+        );
+        let batch_output = causal_conv1d(&mut batch_program, batch_x, batch_weight, L_CACHE as u32)
+            .expect("causal conv lowers for the batched program");
+        let batch_evaluated = crate::cpu::evaluate_named(
+            &batch_program,
+            &[POSITIONS as u64],
+            &[("x", &x_data), ("weight", &weight_data)],
+            &[batch_output],
+        )
+        .expect("batched causal conv evaluates");
+        let (batch_result, batch_shape) = batch_evaluated
+            .get(batch_output)
+            .expect("batched conv output present");
+        assert_eq!(batch_shape, [POSITIONS as u64, EMBEDDING as u64]);
+
+        let mut row_program = Vec::new();
+        let row_x = op::append(
+            &mut row_program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+                name: Some("x".into()),
+            },
+        );
+        let row_weight = op::append(
+            &mut row_program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![
+                    Extent::Static(EMBEDDING as u32),
+                    Extent::Static(L_CACHE as u32)
+                ],
+                name: Some("weight".into()),
+            },
+        );
+        let row_output = causal_conv1d(&mut row_program, row_x, row_weight, L_CACHE as u32)
+            .expect("causal conv lowers for a single-row program");
+        let row_x_data = &x_data[0..EMBEDDING];
+        let row_evaluated = crate::cpu::evaluate_named(
+            &row_program,
+            &[1],
+            &[("x", row_x_data), ("weight", &weight_data)],
+            &[row_output],
+        )
+        .expect("single-row causal conv evaluates");
+        let (row_result, row_shape) = row_evaluated
+            .get(row_output)
+            .expect("single-row conv output present");
+        assert_eq!(row_shape, [1u64, EMBEDDING as u64]);
+
+        let batch_row = &batch_result[0..EMBEDDING];
+        for (channel, (&batched, &single)) in batch_row.iter().zip(row_result).enumerate() {
+            let relative_error = (batched - single).abs() / single.abs().max(1e-6);
+            std::println!(
+                "causal_conv1d_row_zero_check channel={channel} batched={batched} single={single} relative_error={relative_error}"
+            );
+            assert!(
+                relative_error <= 1e-5,
+                "channel {channel}: batched={batched} single={single} relative_error={relative_error} exceeds 1e-5"
+            );
+        }
+    }
+
+    /// proxima-debugger unit oracle (qwen35moe GDN prefill-scan-vs-sequential
+    /// divergence), the stage [`causal_conv1d_multi_row_batch_row_zero_matches_a_single_row_call`]
+    /// clears: [`l2norm_with_eps_map`] on the SAME `[s, u, i]` shape
+    /// `append_qwen35_ssm_mixer`'s own `query_prefill`/`key_prefill` calls
+    /// use (`kv_heads=16`, `key_dim=128`, matching the real checkpoint's own
+    /// GQA head count/head width) -- every row is independent (no causal
+    /// window, no cross-row recurrence at all), so EVERY position's `[13,
+    /// u, i]`-batched output must equal that same row's own `[1, u, i]`
+    /// call, not just row 0. `x` is a non-uniform, deterministic pattern
+    /// (never a repeated constant) so a transposed axis or a stride bug
+    /// cannot hide behind symmetric data.
+    #[proxima::test]
+    async fn l2norm_multi_row_batch_matches_thirteen_single_row_calls() {
+        const POSITIONS: usize = 13;
+        const KV_HEADS: usize = 16;
+        const KEY_DIM: usize = 128;
+        const ROW_ELEMENTS: usize = KV_HEADS * KEY_DIM;
+
+        let x_data: Vec<f32> = (0..POSITIONS * ROW_ELEMENTS)
+            .map(|index| ((index % 97) as f32 + 1.0) * 0.01)
+            .collect();
+
+        let build_and_run = |symbol: u64, x_slice: &[f32]| -> Vec<f32> {
+            let mut program = Vec::new();
+            let x = op::append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![
+                        Extent::Symbolic(0),
+                        Extent::Static(KV_HEADS as u32),
+                        Extent::Static(KEY_DIM as u32)
+                    ],
+                    name: Some("x".into()),
+                },
+            );
+            // matches every real caller (`append_qwen35_ssm_mixer`'s own
+            // `eps`): a rank-1 `[s]`-shaped input, one value per position,
+            // never a rank-0 `scalar_constant` -- `l2norm_with_eps_map`'s
+            // own `eps_map` ("s->su") reads `eps` through a real `s` axis.
+            let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+            let output = l2norm_with_eps_map(&mut program, x, eps, "sui->sui", "su->sui", "s->su")
+                .expect("l2norm lowers");
+            let eps_data = alloc::vec![1e-6f32; symbol as usize];
+            let evaluated = crate::cpu::evaluate_named(
+                &program,
+                &[symbol],
+                &[("x", x_slice), ("eps", &eps_data)],
+                &[output],
+            )
+            .expect("l2norm evaluates");
+            let (result, shape) = evaluated.get(output).expect("l2norm output present");
+            assert_eq!(
+                shape,
+                [symbol, KV_HEADS as u64, KEY_DIM as u64],
+                "l2norm output shape"
+            );
+            result.to_vec()
+        };
+
+        let batch_result = build_and_run(POSITIONS as u64, &x_data);
+
+        for position in 0..POSITIONS {
+            let row_slice = &x_data[position * ROW_ELEMENTS..(position + 1) * ROW_ELEMENTS];
+            let row_result = build_and_run(1, row_slice);
+            let batch_row = &batch_result[position * ROW_ELEMENTS..(position + 1) * ROW_ELEMENTS];
+            let max_relative_error = batch_row
+                .iter()
+                .zip(&row_result)
+                .map(|(&batched, &single)| (batched - single).abs() / single.abs().max(1e-6))
+                .fold(0.0f32, f32::max);
+            std::println!(
+                "l2norm_row_check position={position} max_relative_error={max_relative_error}"
+            );
+            assert!(
+                max_relative_error <= 1e-5,
+                "position {position}: max_relative_error={max_relative_error} exceeds 1e-5"
+            );
+        }
+    }
+
+    /// proxima-debugger unit oracle (qwen35moe GDN prefill-scan-vs-sequential
+    /// divergence), the next stage after [`l2norm_multi_row_batch_matches_thirteen_single_row_calls`]:
+    /// [`repeat_kv_heads`] multiplies a genuinely `s`-varying operand
+    /// (`x`, shape `[s,u,d]`) against a broadcast, `s`-INVARIANT donor
+    /// (`group_ones`, shape `[u,g]`) -- exactly the shape
+    /// `docs/discipline.md` ROW 561 named (`neon_tile_plan`'s GEMM tile
+    /// silently reusing row 0's base address for every later row when the
+    /// "row-invariant" operand secretly still varies along the leading
+    /// axis). ROW 561's own fix added the `row_stride_b != 0` decline
+    /// (`cpu.rs:14557-14562`); this test re-proves that fix holds for THIS
+    /// call site rather than assuming it, on a `[13, u, d]` batch vs the
+    /// same 13 rows one at a time.
+    #[proxima::test]
+    async fn repeat_kv_heads_multi_row_batch_matches_thirteen_single_row_calls() {
+        const POSITIONS: usize = 13;
+        const KV_HEADS: u32 = 16;
+        const GROUP: u32 = 3;
+        const KEY_DIM: usize = 128;
+        const ROW_ELEMENTS: usize = KV_HEADS as usize * KEY_DIM;
+
+        let x_data: Vec<f32> = (0..POSITIONS * ROW_ELEMENTS)
+            .map(|index| ((index % 89) as f32 + 1.0) * 0.01)
+            .collect();
+
+        let build_and_run = |symbol: u64, x_slice: &[f32]| -> Vec<f32> {
+            let mut program = Vec::new();
+            let x = op::append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![
+                        Extent::Symbolic(0),
+                        Extent::Static(KV_HEADS),
+                        Extent::Static(KEY_DIM as u32)
+                    ],
+                    name: Some("x".into()),
+                },
+            );
+            let output = repeat_kv_heads(&mut program, x, KV_HEADS, GROUP)
+                .expect("repeat_kv_heads lowers");
+            let evaluated =
+                crate::cpu::evaluate_named(&program, &[symbol], &[("x", x_slice)], &[output])
+                    .expect("repeat_kv_heads evaluates");
+            let (result, shape) = evaluated.get(output).expect("repeat_kv_heads output present");
+            assert_eq!(
+                shape,
+                [symbol, u64::from(KV_HEADS), u64::from(GROUP), KEY_DIM as u64],
+                "repeat_kv_heads output shape"
+            );
+            result.to_vec()
+        };
+
+        let batch_result = build_and_run(POSITIONS as u64, &x_data);
+        let output_row_elements = ROW_ELEMENTS * GROUP as usize;
+
+        for position in 0..POSITIONS {
+            let row_slice = &x_data[position * ROW_ELEMENTS..(position + 1) * ROW_ELEMENTS];
+            let row_result = build_and_run(1, row_slice);
+            let batch_row = &batch_result
+                [position * output_row_elements..(position + 1) * output_row_elements];
+            let max_relative_error = batch_row
+                .iter()
+                .zip(&row_result)
+                .map(|(&batched, &single)| (batched - single).abs() / single.abs().max(1e-6))
+                .fold(0.0f32, f32::max);
+            std::println!(
+                "repeat_kv_heads_row_check position={position} max_relative_error={max_relative_error}"
+            );
+            assert!(
+                max_relative_error <= 1e-5,
+                "position {position}: max_relative_error={max_relative_error} exceeds 1e-5"
+            );
+        }
+    }
+
+    /// proxima-debugger unit oracle (qwen35moe GDN prefill-scan-vs-sequential
+    /// divergence), the exact chain `query_sequence` itself is defined by
+    /// (`spec.rs:8698-8717`): [`repeat_kv_heads`] feeding DIRECTLY into the
+    /// zero-reduced-axis permute `reduce(.., "sugd->sugd", "sdug->sugd")`,
+    /// requesting ONLY the final node as output so the binder fuses the two
+    /// exactly as it does in the real graph -- the two prior tests each
+    /// requested their own op's output directly, which forces
+    /// materialization and can decline a fusion the real multi-op chain
+    /// takes. `[13, u, d]` batch vs the same 13 rows one at a time.
+    #[proxima::test]
+    async fn repeat_kv_heads_then_permute_reduce_multi_row_matches_single_row() {
+        const POSITIONS: usize = 13;
+        const KV_HEADS: u32 = 16;
+        const GROUP: u32 = 3;
+        const KEY_DIM: usize = 128;
+        const ROW_ELEMENTS: usize = KV_HEADS as usize * KEY_DIM;
+
+        let x_data: Vec<f32> = (0..POSITIONS * ROW_ELEMENTS)
+            .map(|index| ((index % 83) as f32 + 1.0) * 0.01)
+            .collect();
+
+        let build_and_run = |symbol: u64, x_slice: &[f32]| -> Vec<f32> {
+            let mut program = Vec::new();
+            let x = op::append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![
+                        Extent::Symbolic(0),
+                        Extent::Static(KV_HEADS),
+                        Extent::Static(KEY_DIM as u32)
+                    ],
+                    name: Some("x".into()),
+                },
+            );
+            let repeated = repeat_kv_heads(&mut program, x, KV_HEADS, GROUP)
+                .expect("repeat_kv_heads lowers");
+            let output = reduce(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                repeated,
+                "sugd->sugd",
+                "sdug->sugd",
+            )
+            .expect("permute reduce lowers");
+            let evaluated =
+                crate::cpu::evaluate_named(&program, &[symbol], &[("x", x_slice)], &[output])
+                    .expect("chain evaluates");
+            let (result, shape) = evaluated.get(output).expect("chain output present");
+            // out_map "sdug->sugd" names the output's own axes `s,d,u,g` in
+            // that literal order -- NOT `s,u,g,d` (`repeat_kv_heads`'s own
+            // shape); a genuine reduce output-axis permute, confirmed by
+            // reading the shape back rather than assumed.
+            assert_eq!(
+                shape,
+                [symbol, KEY_DIM as u64, u64::from(KV_HEADS), u64::from(GROUP)],
+                "chain output shape"
+            );
+            result.to_vec()
+        };
+
+        let batch_result = build_and_run(POSITIONS as u64, &x_data);
+        let output_row_elements = ROW_ELEMENTS * GROUP as usize;
+
+        for position in 0..POSITIONS {
+            let row_slice = &x_data[position * ROW_ELEMENTS..(position + 1) * ROW_ELEMENTS];
+            let row_result = build_and_run(1, row_slice);
+            let batch_row = &batch_result
+                [position * output_row_elements..(position + 1) * output_row_elements];
+            let max_relative_error = batch_row
+                .iter()
+                .zip(&row_result)
+                .map(|(&batched, &single)| (batched - single).abs() / single.abs().max(1e-6))
+                .fold(0.0f32, f32::max);
+            std::println!(
+                "repeat_then_permute_row_check position={position} max_relative_error={max_relative_error}"
+            );
+            assert!(
+                max_relative_error <= 1e-5,
+                "position {position}: max_relative_error={max_relative_error} exceeds 1e-5"
+            );
+        }
+    }
+
+    /// proxima-debugger unit oracle (qwen35moe GDN prefill-scan-vs-sequential
+    /// divergence): the head-split multiply `query_prefill_split` itself is
+    /// defined by (`spec.rs:8664-8671`) -- a MULTI-TERM read
+    /// (`"s,{head_k_dim}*u+i->sui"`, decomposing one flat `key_dim` axis
+    /// into `u,i` via an affine combination, unlike [`repeat_kv_heads`]'s
+    /// plain per-axis `"sud->sugd"`) against the SAME row-invariant
+    /// `key_head_ones` donor shape ROW 561 named, chained straight into
+    /// [`l2norm_with_eps_map`] exactly as the real graph does. `[13,
+    /// head_k_dim*u]` batch vs the same 13 rows one at a time.
+    #[proxima::test]
+    async fn query_prefill_split_then_l2norm_multi_row_matches_single_row() {
+        const POSITIONS: usize = 13;
+        const KV_HEADS: u32 = 16;
+        const HEAD_K_DIM: u32 = 8;
+        const KEY_DIM: usize = KV_HEADS as usize * HEAD_K_DIM as usize;
+
+        let x_data: Vec<f32> = (0..POSITIONS * KEY_DIM)
+            .map(|index| ((index % 79) as f32 + 1.0) * 0.01)
+            .collect();
+
+        let build_and_run = |symbol: u64, x_slice: &[f32]| -> Vec<f32> {
+            let mut program = Vec::new();
+            let x = op::append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Symbolic(0), Extent::Static(KEY_DIM as u32)],
+                    name: Some("x".into()),
+                },
+            );
+            let key_head_ones = op::append(
+                &mut program,
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(KV_HEADS), Extent::Static(HEAD_K_DIM)],
+                    value: 1.0,
+                },
+            );
+            let split_map = alloc::format!("s,{HEAD_K_DIM}*u+i->sui");
+            let split = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(x, split_map.as_str()), (key_head_ones, "ui->sui")],
+            )
+            .expect("head split lowers");
+            let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+            let output = l2norm_with_eps_map(&mut program, split, eps, "sui->sui", "su->sui", "s->su")
+                .expect("l2norm lowers");
+            let eps_data = alloc::vec![1e-6f32; symbol as usize];
+            let evaluated = crate::cpu::evaluate_named(
+                &program,
+                &[symbol],
+                &[("x", x_slice), ("eps", &eps_data)],
+                &[output],
+            )
+            .expect("chain evaluates");
+            let (result, shape) = evaluated.get(output).expect("chain output present");
+            assert_eq!(
+                shape,
+                [symbol, u64::from(KV_HEADS), u64::from(HEAD_K_DIM)],
+                "chain output shape"
+            );
+            result.to_vec()
+        };
+
+        let batch_result = build_and_run(POSITIONS as u64, &x_data);
+
+        for position in 0..POSITIONS {
+            let row_slice = &x_data[position * KEY_DIM..(position + 1) * KEY_DIM];
+            let row_result = build_and_run(1, row_slice);
+            let batch_row = &batch_result[position * KEY_DIM..(position + 1) * KEY_DIM];
+            let max_relative_error = batch_row
+                .iter()
+                .zip(&row_result)
+                .map(|(&batched, &single)| (batched - single).abs() / single.abs().max(1e-6))
+                .fold(0.0f32, f32::max);
+            std::println!(
+                "query_prefill_split_row_check position={position} max_relative_error={max_relative_error}"
+            );
+            assert!(
+                max_relative_error <= 1e-5,
+                "position {position}: max_relative_error={max_relative_error} exceeds 1e-5"
+            );
+        }
+    }
+
+    /// proxima-debugger unit oracle (qwen35moe GDN prefill-scan-vs-sequential
+    /// divergence): [`silu`] at the REAL checkpoint's own width
+    /// (`qkv_dim = 2*key_dim + value_dim*heads` for `qwen35moe`'s GDN mixer
+    /// is on the order of `8192`, not the earlier tests' narrow 4/128-wide
+    /// fixtures) -- an elementwise op's own kernel selection
+    /// (`run_elementwise_range`'s width-tile path) can differ by SIZE, not
+    /// just by shape, from the narrower ops already cleared above, so this
+    /// re-runs the same multi-row-vs-single-row check at production scale.
+    /// `[13, 8192]` batch vs the same 13 rows one at a time.
+    #[proxima::test]
+    async fn silu_multi_row_batch_at_production_width_matches_single_row() {
+        const POSITIONS: usize = 13;
+        const WIDTH: usize = 8192;
+
+        let x_data: Vec<f32> = (0..POSITIONS * WIDTH)
+            .map(|index| (((index % 251) as f32) - 125.0) * 0.037)
+            .collect();
+
+        let build_and_run = |symbol: u64, x_slice: &[f32]| -> Vec<f32> {
+            let mut program = Vec::new();
+            let x = op::append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Symbolic(0), Extent::Static(WIDTH as u32)],
+                    name: Some("x".into()),
+                },
+            );
+            let one = scalar_constant(&mut program, 1.0);
+            let output = silu(&mut program, x, one, "sd->sd").expect("silu lowers");
+            let evaluated =
+                crate::cpu::evaluate_named(&program, &[symbol], &[("x", x_slice)], &[output])
+                    .expect("silu evaluates");
+            let (result, shape) = evaluated.get(output).expect("silu output present");
+            assert_eq!(shape, [symbol, WIDTH as u64], "silu output shape");
+            result.to_vec()
+        };
+
+        let batch_result = build_and_run(POSITIONS as u64, &x_data);
+
+        for position in 0..POSITIONS {
+            let row_slice = &x_data[position * WIDTH..(position + 1) * WIDTH];
+            let row_result = build_and_run(1, row_slice);
+            let batch_row = &batch_result[position * WIDTH..(position + 1) * WIDTH];
+            let max_relative_error = batch_row
+                .iter()
+                .zip(&row_result)
+                .map(|(&batched, &single)| (batched - single).abs() / single.abs().max(1e-6))
+                .fold(0.0f32, f32::max);
+            std::println!(
+                "silu_row_check position={position} max_relative_error={max_relative_error}"
+            );
+            assert!(
+                max_relative_error <= 1e-5,
+                "position {position}: max_relative_error={max_relative_error} exceeds 1e-5"
+            );
+        }
+    }
+
     /// **The rule census.** For the real Mistral/OpenChat cached-forward
     /// program, names every rewrite [`crate::bind::bind`] actually applies
     /// and counts how many times each fired, reconciling against
