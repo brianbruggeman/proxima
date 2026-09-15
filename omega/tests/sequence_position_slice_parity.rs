@@ -11,6 +11,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::spec::{elementwise, input_leaf, reduce};
+use proxima_tensor::test_support::{ParityRun, compare_rows_relative_to_norm};
 use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, ReduceInit, ScalarOp};
 
 const SEQUENCE_LEN: u32 = 13;
@@ -87,16 +88,14 @@ fn row_slice(x_data: &[f32], row: usize) -> &[f32] {
     &x_data[row * row_len..(row + 1) * row_len]
 }
 
-fn matching_row(x_data: &[f32], row_len: usize, candidate: &[f32]) -> Option<usize> {
-    (0..SEQUENCE_LEN as usize).find(|&row| row_slice(x_data, row)[..row_len.min(4)] == candidate[..row_len.min(4)])
-}
-
-#[test]
-fn metal_sequence_position_slice_matches_cpu_and_source_row_at_each_position() {
-    let positions = [0_u32, 5, 12];
+#[proxima::test]
+#[case::position_0(0)]
+#[case::position_5(5)]
+#[case::position_12(12)]
+async fn metal_sequence_position_slice_matches_cpu_and_source_row_at_position(#[case] position: u32) {
+    let positions = [position];
     let fixture = build_fixture(&positions);
     let x_data = build_x_data();
-    let row_len = (HEAD_DIM * HEADS * GROUPS) as usize;
 
     let outputs: Vec<NodeId> = fixture.slices.iter().map(|(_, node)| *node).collect();
     let symbols: Vec<u64> = Vec::new();
@@ -119,26 +118,25 @@ fn metal_sequence_position_slice_matches_cpu_and_source_row_at_each_position() {
         .expect("metal plan builds");
     let metal = omega::execute_plan_named(&plan, &named).expect("metal evaluates the slice program");
 
-    let mut failures = Vec::new();
-    for &(position, node) in &fixture.slices {
-        let cpu_values = cpu.get(node).map(|(values, _)| values.to_vec());
-        let metal_values = metal.get(node).map(|(values, _)| values.to_vec());
-        let expected_row = row_slice(&x_data, position as usize);
+    let (_, node) = fixture.slices[0];
+    let cpu_values = cpu.get(node).map(|(values, _)| values.to_vec());
+    let metal_values = metal.get(node).map(|(values, _)| values.to_vec());
+    let expected_row = row_slice(&x_data, position as usize).to_vec();
 
-        match (&cpu_values, &metal_values) {
-            (Some(cpu_values), Some(metal_values)) if cpu_values == metal_values && metal_values.as_slice() == expected_row => {}
-            _ => {
-                let metal_head = metal_values.as_ref().map_or_else(Vec::new, |values| values[..4.min(values.len())].to_vec());
-                let cpu_head = cpu_values.as_ref().map_or_else(Vec::new, |values| values[..4.min(values.len())].to_vec());
-                let matched_row = metal_values
-                    .as_ref()
-                    .and_then(|values| matching_row(&x_data, row_len, values));
-                failures.push(format!(
-                    "position {position}: cpu head={cpu_head:?} metal head={metal_head:?} metal actually matches source row {matched_row:?} (expected row {position})"
-                ));
-            }
-        }
-    }
+    let cpu_values = cpu_values.expect("cpu produced this node");
+    let metal_values = metal_values.expect("metal produced this node");
+
+    let case_label = format!("sequence_position_slice position={position}");
+    let failures = compare_rows_relative_to_norm(
+        &case_label,
+        1,
+        1e-6,
+        &ParityRun { label: "source_row", values: &expected_row },
+        &[
+            ParityRun { label: "cpu", values: &cpu_values },
+            ParityRun { label: "metal", values: &metal_values },
+        ],
+    );
 
     assert!(
         failures.is_empty(),

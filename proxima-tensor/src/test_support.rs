@@ -11,6 +11,64 @@
 /// module existed.
 pub struct Lcg(pub u64);
 
+/// One named backend's flat row-major output for a parity comparison --
+/// `label` names the backend (e.g. `"cpu"`, `"metal_production"`,
+/// `"metal_wide"`) for the printed table and any failure message.
+pub struct ParityRun<'a> {
+    pub label: &'a str,
+    pub values: &'a [f32],
+}
+
+/// The shared row-by-row parity loop every CPU/Metal (or width/width)
+/// differential test in this workspace was hand-rolling: each candidate's
+/// row is compared against the matching baseline row, relative to that
+/// row's own L2 norm (immune to a row's absolute scale varying case to
+/// case, per guiding-principle 9 -- never all-zero/all-one filler). Prints
+/// one line per (row, candidate) so a red run names the exact numbers that
+/// disagree, and returns the formatted failures whose relative error
+/// exceeds `tolerance` for the caller to assert on.
+#[cfg(feature = "std")]
+#[must_use]
+pub fn compare_rows_relative_to_norm(
+    case_label: &str,
+    rows: usize,
+    tolerance: f32,
+    baseline: &ParityRun<'_>,
+    candidates: &[ParityRun<'_>],
+) -> Vec<String> {
+    let row_length = baseline.values.len() / rows.max(1);
+    let mut failures = Vec::new();
+    for row in 0..rows {
+        let expected_row = &baseline.values[row * row_length..(row + 1) * row_length];
+        let row_norm = expected_row
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt()
+            .max(1e-6);
+        for candidate in candidates {
+            let actual_row = &candidate.values[row * row_length..(row + 1) * row_length];
+            let relative_error = expected_row
+                .iter()
+                .zip(actual_row.iter())
+                .map(|(expected, actual)| (actual - expected).abs())
+                .fold(0.0_f32, f32::max)
+                / row_norm;
+            std::println!(
+                "{case_label} row={row} backend={} vs {} relative_error={relative_error:e}",
+                candidate.label, baseline.label
+            );
+            if relative_error > tolerance {
+                failures.push(std::format!(
+                    "{case_label} row={row} backend={} vs {} exceeds tolerance {tolerance:e}: relative_error={relative_error:e}",
+                    candidate.label, baseline.label
+                ));
+            }
+        }
+    }
+    failures
+}
+
 impl Lcg {
     /// Uniform in `[-1, 1)`. Uses the top 32 bits of the 64-bit LCG state
     /// (an LCG's low bits have short periods; the high bits do not) divided
