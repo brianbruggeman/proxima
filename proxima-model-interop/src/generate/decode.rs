@@ -1647,6 +1647,9 @@ impl<'file> LoadedModel<'file> {
                     let (active_program, active_layer_roots, active_single_position_step) =
                         if one_evaluation_prefill {
                             let (_offset, width) = one_evaluation_chunks[batch_index];
+                            // every width in `one_evaluation_chunks` was built into
+                            // `one_evaluation_prefill_programs` above, in the same loop.
+                            #[allow(clippy::expect_used)]
                             let (_, program, _logits_root, layer_roots) = one_evaluation_prefill_programs
                                 .iter()
                                 .find(|(built_width, ..)| *built_width == width)
@@ -1657,11 +1660,15 @@ impl<'file> LoadedModel<'file> {
                         };
                     let active_logits_root = if one_evaluation_prefill {
                         let (_offset, width) = one_evaluation_chunks[batch_index];
-                        one_evaluation_prefill_programs
+                        // every width in `one_evaluation_chunks` was built into
+                        // `one_evaluation_prefill_programs` above, in the same loop.
+                        #[allow(clippy::expect_used)]
+                        let logits_root = one_evaluation_prefill_programs
                             .iter()
                             .find(|(built_width, ..)| *built_width == width)
                             .expect("chunk width program built above for every chunk width")
-                            .2
+                            .2;
+                        logits_root
                     } else {
                         self.logits_root
                     };

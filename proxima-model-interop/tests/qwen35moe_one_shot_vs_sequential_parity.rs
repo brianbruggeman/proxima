@@ -18,6 +18,11 @@ use proxima_model_interop::qwen35moe::hparams::{Architecture, LayerKind};
 use proxima_model_interop::qwen35moe::{Qwen35MoeLayerDiagnostics, qwen35moe_forward_program_at_width};
 use proxima_tensor::spec::Qwen35LayerRoots;
 use proxima_tensor::test_support::Lcg;
+
+/// `(per_layer_block_output, logits, layer0_state_out, layer0_qkv_mixed,
+/// layer0_per_position_state_out)`, shared by [`run_one_shot`] and
+/// [`run_sequential`] -- see their own docs for what each field is.
+type ParitySample = (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<Vec<f32>>);
 use proxima_tensor::{Op, block_node_ids, infer};
 
 const LAYERS: u32 = 4;
@@ -190,7 +195,7 @@ fn relative_error(found: &[f32], wanted: &[f32]) -> f32 {
 /// plus `logits`, and returns `(per_layer_block_output, logits,
 /// layer0_state_out, layer0_qkv_mixed_row12)` for the two extra root
 /// comparisons the coordinator asked for.
-fn run_one_shot() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<Vec<f32>>) {
+fn run_one_shot() -> ParitySample {
     let architecture = synthetic_architecture(LAYERS);
     let (program, roots, layer_roots, _moe_sites, diagnostics) =
         qwen35moe_forward_program_at_width(&architecture, Some(WIDTH))
@@ -239,7 +244,7 @@ fn run_one_shot() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<Vec<f32>>
 /// returns the same four-tuple `run_one_shot` does, PLUS layer 0's final
 /// `state_out` and its 13th call's own `qkv_mixed` row for the coordinator's
 /// two extra root comparisons.
-fn run_sequential() -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<Vec<f32>>) {
+fn run_sequential() -> ParitySample {
     let architecture = synthetic_architecture(LAYERS);
     // `ssm_cache.{layer}.conv_history`/`.state` are declared over the FULL
     // per-row width (`qkv_dim`/the recurrent state's own 4 axes), never a

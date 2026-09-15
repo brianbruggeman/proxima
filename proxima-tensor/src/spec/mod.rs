@@ -87,4 +87,5 @@ pub use lfm2_qwen35_gdn::*;
 pub use attention_forward::*;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

@@ -106,4 +106,5 @@ use packed_row_blocked_ggml::*;
 use tiled_gemm_cooperative_scan::*;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

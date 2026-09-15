@@ -1468,8 +1468,15 @@ pub(super) fn block_buffer_reusable(
     resident && previous == Some(current)
 }
 
+// file-split artifact: this test module sits mid-file here (it trailed
+// more code in the pre-split metal.rs); the items after it are unchanged
+// production code, not newly misplaced.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::items_after_test_module
+)]
 pub(super) mod block_buffer_reusable_tests {
     //! Pure, GPU-free proof of the reuse decision
     //! [`execute_plan_with_placements`]'s block-upload loop relies on --
