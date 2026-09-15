@@ -63,6 +63,8 @@ mod quality;
 #[cfg(feature = "std")]
 mod qwen35;
 mod serving;
+#[cfg(feature = "std")]
+mod serving_fsm;
 #[cfg(all(feature = "std", feature = "proxima-storage"))]
 mod source;
 pub mod task;
