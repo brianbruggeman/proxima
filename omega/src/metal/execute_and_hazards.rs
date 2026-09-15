@@ -852,15 +852,36 @@ pub fn execute_plan_with_expert_sources(
     let expert_stage_started = std::time::Instant::now();
     let buffers = stage_expert_sources(plan, blocks, expert_sources)?;
     #[cfg(feature = "instrument")]
+    let upload_elapsed = expert_stage_started.elapsed();
+    #[cfg(feature = "instrument")]
     if std::env::var_os("PROXIMA_DEBUG_METAL_STAGES").is_some() {
         eprintln!(
             "expert_source_stage_ms={} source_nodes={} staged_nodes={}",
-            expert_stage_started.elapsed().as_secs_f64() * 1e3,
+            upload_elapsed.as_secs_f64() * 1e3,
             expert_sources.len(),
             buffers.len(),
         );
     }
-    execute_plan_inner(plan, blocks, &buffers)
+    #[cfg(feature = "instrument")]
+    let dispatch_started = std::time::Instant::now();
+    let result = execute_plan_inner(plan, blocks, &buffers);
+    // I3 lifetime trace (ROW 501 HeteGen/FlexGen): upload and dispatch are
+    // recorded as adjacent, non-overlapping intervals on the current serial
+    // path -- this is the baseline an overlap gate must show has changed
+    // before issuing a next-layer upload during this layer's dispatch.
+    #[cfg(feature = "instrument")]
+    {
+        let dispatch_elapsed = dispatch_started.elapsed();
+        trace!(
+            upload_start_us = 0u64,
+            upload_end_us = upload_elapsed.as_micros() as u64,
+            dispatch_start_us = upload_elapsed.as_micros() as u64,
+            dispatch_end_us = (upload_elapsed + dispatch_elapsed).as_micros() as u64,
+            source_nodes = expert_sources.len(),
+            "expert source upload/dispatch lifetime interval"
+        );
+    }
+    result
 }
 
 pub(super) fn stage_expert_sources(
