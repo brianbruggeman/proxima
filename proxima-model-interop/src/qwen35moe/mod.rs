@@ -11,5 +11,5 @@ pub use bind::{QWEN35MOE, Qwen35MoeArch, bind_qwen35moe_weights, qwen35moe_tenso
 pub use hparams::{Architecture, LayerKind, from_metadata};
 pub use program::{
     Qwen35MoeForwardProgram, Qwen35MoeGdnPrefillTaps, Qwen35MoeLayerDiagnostics,
-    qwen35moe_forward_program,
+    qwen35moe_forward_program, qwen35moe_forward_program_at_width,
 };

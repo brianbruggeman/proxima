@@ -1073,6 +1073,19 @@ pub struct LoadedModel<'file> {
     /// batches its whole prompt into one evaluation or feeds it one
     /// position at a time.
     single_position_step: bool,
+    /// This checkpoint's own qwen35moe hparams, re-derived from `parsed`'s
+    /// metadata alone (no weight bytes -- `crate::qwen35moe::hparams::from_metadata`'s
+    /// own doc) at the same registry bind site that already called it once
+    /// inside `crate::qwen35moe::qwen35moe_forward_program`. `None` for
+    /// every other architecture. [`Self::run_decode_loop_observed_seeded`]'s
+    /// own prefill batch reads this to build a SECOND, `Extent::Static`-width
+    /// program via `crate::qwen35moe::qwen35moe_forward_program_at_width`
+    /// on demand -- see `proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`'s
+    /// own doc on why only a literal static width ever reaches its M>1
+    /// branch -- and swaps it into `program`/`logits_root`/`layer_roots`/
+    /// `single_position_step` for exactly that one evaluation, restoring
+    /// the ordinary `Extent::Symbolic(0)` decode program right after.
+    qwen35moe_hparams: Option<crate::qwen35moe::hparams::Architecture>,
     /// The single-range, device-resident-KV counterpart of `program`/
     /// `logits_root`/`layer_roots` above -- `None` unless this build was
     /// compiled with `metal-output-placement` AND this checkpoint took the
@@ -4941,6 +4954,9 @@ impl<'file> LoadedModel<'file> {
                 router_roots: bound.router_roots,
                 moe_sites: bound.moe_sites,
                 single_position_step: bound.single_position_step,
+                qwen35moe_hparams: (resolved.name() == "qwen35moe")
+                    .then(|| crate::qwen35moe::hparams::from_metadata(parsed).ok())
+                    .flatten(),
                 model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
                 checkpoint_bytes: file_bytes.len(),
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -5056,6 +5072,7 @@ impl<'file> LoadedModel<'file> {
             router_roots: Vec::new(),
             moe_sites,
             single_position_step: false,
+            qwen35moe_hparams: None,
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
             checkpoint_bytes: file_bytes.len(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -5156,6 +5173,7 @@ impl<'file> LoadedModel<'file> {
             router_roots: Vec::new(),
             moe_sites,
             single_position_step: false,
+            qwen35moe_hparams: None,
             // safetensors carries no `general.name`-equivalent key this
             // crate reads (`Self::model_name`'s own doc).
             model_name: None,
@@ -9402,6 +9420,45 @@ impl<'file> LoadedModel<'file> {
             });
         }
 
+        // ROW 427 named the reason a `single_position_step` architecture's
+        // `new_count > 1` prefill used to split into `prompt_token_count`
+        // one-position evaluations: the compiled decode program's own `s`
+        // axis is `Extent::Symbolic(0)`, and
+        // `proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`'s
+        // squeeze-reduce silently sums across positions for anything but a
+        // literal `Extent::Static` axis. `self.qwen35moe_hparams`
+        // (`Self::load`'s registry bind site) is the seam that fixes it:
+        // `qwen35moe_forward_program_at_width` builds a SECOND program with
+        // `s` pinned to `Extent::Static(prompt_token_count)`, which reaches
+        // that same builder's M>1 branch instead (`spec.rs`'s own oracle,
+        // `qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps`).
+        // Built once here, never per step: `prompt_token_count > 1` is only
+        // ever true on the prompt's own first step. `PROXIMA_PREFILL_SEQUENTIAL=1`
+        // keeps the old split loop, for a side-by-side comparison against a
+        // real checkpoint.
+        let sequential_prefill_override = std::env::var_os("PROXIMA_PREFILL_SEQUENTIAL").is_some();
+        let one_evaluation_prefill_program = if self.single_position_step
+            && prompt_token_count > 1
+            && !sequential_prefill_override
+            && let Some(hparams) = self.qwen35moe_hparams.as_ref()
+        {
+            let (program, roots, layer_roots, _moe_sites, _diagnostics) =
+                crate::qwen35moe::qwen35moe_forward_program_at_width(
+                    hparams,
+                    Some(prompt_token_count as u32),
+                )
+                .map_err(|error| InteropError::PreGatherExecutionUnsupported {
+                    architecture: String::from("qwen35moe"),
+                    reason: alloc::format!(
+                        "one-evaluation prefill program at width {prompt_token_count} failed to \
+                         build: {error}"
+                    ),
+                })?;
+            Some((program, roots.logits, layer_roots))
+        } else {
+            None
+        };
+
         let decode_result = decode_until_stop_or_budget(
             &self.vocab,
             max_tokens,
@@ -9416,20 +9473,56 @@ impl<'file> LoadedModel<'file> {
                 // is exact for the integer counts ROW 129 used it for, and NOT
                 // for timings -- ROW 130's own postmortem on why it produced a
                 // sub-bucket larger than its parent and a negative duration).
-                // ROW 427: a `single_position_step` architecture (qwen35's
-                // GDN mixer -- `TensorError::SingleTokenStepOnly`'s own doc)
-                // refuses any `new_count != 1` bind, so a `new_count > 1`
-                // prefill is split unless the sequence-preserving scan and
-                // router handoff own the recurrence for this whole batch.
-                // The sequence scan is retained as a diagnostic implementation, but it
-                // has not passed byte-level parity against the ordinary recurrent
-                // path on the real checkpoint. Keep serving on the proven one-position
-                // transition until that parity gate passes; correctness outranks the
-                // prefill shortcut.
-                let split_prefill =
-                    self.single_position_step && next_ids.len() > 1 && !gdn_prefill_scan_enabled;
+                // ROW 427 named the reason a `single_position_step`
+                // architecture's `new_count > 1` prefill used to split into
+                // `next_ids.len()` one-position evaluations: the compiled
+                // decode program's own `s` axis is `Extent::Symbolic(0)`,
+                // and `proxima_tensor::spec::append_qwen35_ssm_mixer_with_taps_and_layout`'s
+                // squeeze-reduce silently sums across positions for
+                // anything but a literal `Extent::Static` axis. `self.qwen35moe_hparams`
+                // (`Self::load`'s registry bind site) is the seam that
+                // fixes it: `qwen35moe_forward_program_at_width` builds a
+                // SECOND program with `s` pinned to `Extent::Static(new_count)`,
+                // which reaches that same builder's M>1 branch instead
+                // (`spec.rs`'s own oracle,
+                // `qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps`).
+                // `PROXIMA_PREFILL_SEQUENTIAL=1` keeps the old split loop,
+                // for a side-by-side comparison against a real checkpoint.
+                let one_evaluation_prefill = self.single_position_step
+                    && next_ids.len() > 1
+                    && !gdn_prefill_scan_enabled
+                    && !sequential_prefill_override
+                    && one_evaluation_prefill_program.is_some();
+                let split_prefill = self.single_position_step
+                    && next_ids.len() > 1
+                    && !gdn_prefill_scan_enabled
+                    && !one_evaluation_prefill;
                 let batch_count = if split_prefill { next_ids.len() } else { 1 };
                 let last_batch_index = batch_count - 1;
+
+                // A SHARED borrow of the precomputed alt program
+                // (`one_evaluation_prefill_program`, built once before this
+                // closure from `prompt_token_count` -- never per step,
+                // since `next_ids.len() > 1` is only ever true on `_step ==
+                // 0`) rather than a swap into `self`'s own fields: this
+                // closure only holds `&self`, and `self.resident_names()`'s
+                // own borrowed `BTreeSet<&str>` (computed once, above) is
+                // already live across every step, so nothing here may take
+                // `&mut self`.
+                let (active_program, active_layer_roots, active_single_position_step) =
+                    match &one_evaluation_prefill_program {
+                        Some((program, _logits_root, layer_roots)) if one_evaluation_prefill => {
+                            (program, layer_roots, false)
+                        }
+                        _ => (&self.program, &self.layer_roots, self.single_position_step),
+                    };
+                let active_logits_root = match &one_evaluation_prefill_program {
+                    Some((_program, logits_root, _layer_roots)) if one_evaluation_prefill => {
+                        *logits_root
+                    }
+                    _ => self.logits_root,
+                };
+
                 let mut token_id: u32 = 0;
                 for batch_index in 0..batch_count {
                     let ids_for_step: &[u32] = if split_prefill {
@@ -9570,9 +9663,9 @@ impl<'file> LoadedModel<'file> {
                         &mut qwen35_dense_pad_scratch,
                         &mut step_input_scratch,
                         &mut named_blocks,
-                        self.single_position_step && !(gdn_prefill_scan_enabled && new_count > 1),
+                        active_single_position_step && !(gdn_prefill_scan_enabled && new_count > 1),
                     )?;
-                    if self.program.iter().any(|operation| {
+                    if active_program.iter().any(|operation| {
                         operation.name().is_some_and(|name| {
                             gdn_prefill_names.iter().any(|candidate| candidate == name)
                         })
@@ -9582,7 +9675,7 @@ impl<'file> LoadedModel<'file> {
                         // host scan is not selected; leaving the leaf absent
                         // makes the proven single-position path fail before
                         // it can execute.
-                        let shapes = proxima_tensor::shape::infer(&self.program, &symbols)
+                        let shapes = proxima_tensor::shape::infer(active_program, &symbols)
                             .map_err(|error| InteropError::PreGatherExecutionUnsupported {
                                 architecture: String::from("qwen35moe"),
                                 reason: alloc::format!(
@@ -9624,7 +9717,7 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(feature = "instrument")]
                     let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
 
-                    let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.layer_roots.len() * 3);
+                    let mut roots: Vec<NodeId> = Vec::with_capacity(1 + active_layer_roots.len() * 3);
                     let monolithic_prefill_requested = qwen35moe_pre_gather_enabled(
                         serving_config.qwen35moe_pre_gather,
                         self.architecture_impl
@@ -9633,13 +9726,13 @@ impl<'file> LoadedModel<'file> {
                         && _step == 0
                         && serving_config.qwen35moe_monolithic_all_low;
                     if step_batch_needs_logits(split_prefill, is_last_step_batch) {
-                        roots.push(self.logits_root);
+                        roots.push(active_logits_root);
                     }
                     roots.extend_from_slice(node_values_sink.nodes());
                     if monolithic_prefill_requested {
                         roots.extend(self.router_roots.iter().copied());
                     }
-                    for (_layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
+                    for (_layer, roots_for_layer) in active_layer_roots.iter().enumerate() {
                         match roots_for_layer {
                             Qwen35LayerRoots::Attention((even, odd, value)) => {
                                 roots.push(*even);
@@ -9742,14 +9835,14 @@ impl<'file> LoadedModel<'file> {
                             self.qwen35moe_layer_diagnostics.iter().enumerate()
                         {
                             if let Some(taps) = diagnostic.dense_attention_taps {
-                                if let Some(operation) = self.program.get(taps.q_split.0 as usize) {
+                                if let Some(operation) = active_program.get(taps.q_split.0 as usize) {
                                     eprintln!(
                                         "dense_nodes layer={} normed={} q_split={} q_op={operation:?}",
                                         layer, taps.normed.0, taps.q_split.0,
                                     );
                                     if let proxima_tensor::Op::Reduce(reduce) = operation
                                         && let Some(product) =
-                                            self.program.get(reduce.operand.0 as usize)
+                                            active_program.get(reduce.operand.0 as usize)
                                     {
                                         eprintln!(
                                             "dense_nodes_q_product layer={} node={} op={product:?}",
@@ -9759,23 +9852,23 @@ impl<'file> LoadedModel<'file> {
                                             && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH")
                                                 .is_some()
                                             && let Some(Op::Elementwise { operands, .. }) =
-                                                self.program.get(reduce.operand.0 as usize)
+                                                active_program.get(reduce.operand.0 as usize)
                                             && let Some((q_product, _)) = operands.first()
                                         {
                                             roots.push(*q_product);
                                             if let Some(Op::Reduce(qg_reduce)) =
-                                                self.program.get(q_product.0 as usize)
+                                                active_program.get(q_product.0 as usize)
                                             {
                                                 roots.push(qg_reduce.operand);
                                                 if let Some(Op::Elementwise { operands, .. }) =
-                                                    self.program.get(qg_reduce.operand.0 as usize)
+                                                    active_program.get(qg_reduce.operand.0 as usize)
                                                 {
                                                     for (operand, _) in operands {
                                                         roots.push(*operand);
                                                         if let Some(Op::Elementwise {
                                                             operands: weight_operands,
                                                             ..
-                                                        }) = self.program.get(operand.0 as usize)
+                                                        }) = active_program.get(operand.0 as usize)
                                                         {
                                                             roots.extend(
                                                                 weight_operands
@@ -9828,7 +9921,7 @@ impl<'file> LoadedModel<'file> {
                     }
 
                     if let Some(name) =
-                        missing_program_input(&self.program, &named_blocks).filter(|name| {
+                        missing_program_input(active_program, &named_blocks).filter(|name| {
                             !(serving_config.qwen35moe_pre_gather
                                 && self
                                     .architecture_impl
@@ -9853,7 +9946,7 @@ impl<'file> LoadedModel<'file> {
                         usize,
                     )> = Vec::new();
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    for (layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
+                    for (layer, roots_for_layer) in active_layer_roots.iter().enumerate() {
                         if ssm_placement_enabled
                             && ssm_placement_max_layer.is_none_or(|maximum| layer <= maximum)
                             && let (
@@ -10172,19 +10265,19 @@ impl<'file> LoadedModel<'file> {
                             if let Some(expert_sources) = expert_source_substitutions {
                                 let (evaluated, timings) = runtime
                                     .evaluate_op_timed_with_expert_sources(
-                                        &self.program,
+                                        active_program,
                                         &symbols,
                                         &named_blocks,
                                         &roots,
                                         &resident_names,
                                         expert_sources,
                                     )?;
-                                report_op_timings(_step, &timings, &self.program);
+                                report_op_timings(_step, &timings, active_program);
                                 evaluated
                             } else {
                                 let (evaluated, timings, sampling_mode, _split_ns) = runtime
                                     .evaluate_dispatch_timed_with_placements(
-                                        &self.program,
+                                        active_program,
                                         &symbols,
                                         &named_blocks,
                                         &roots,
@@ -10196,7 +10289,7 @@ impl<'file> LoadedModel<'file> {
                                     step = _step as u64,
                                     sampling_mode, "dispatch_profile: qwen35moe full graph"
                                 );
-                                report_op_timings(_step, &timings, &self.program);
+                                report_op_timings(_step, &timings, active_program);
                                 evaluated
                             }
                         }
@@ -10261,7 +10354,7 @@ impl<'file> LoadedModel<'file> {
                         monolithic_all_low,
                     ) {
                         runtime.evaluate_with_placements(
-                            &self.program,
+                            active_program,
                             &symbols,
                             &named_blocks,
                             &roots,
@@ -10272,7 +10365,7 @@ impl<'file> LoadedModel<'file> {
                         )?
                     } else {
                         runtime.evaluate(
-                            &self.program,
+                            active_program,
                             &symbols,
                             &named_blocks,
                             &roots,
@@ -10329,7 +10422,7 @@ impl<'file> LoadedModel<'file> {
                         )?
                     } else {
                         runtime.evaluate(
-                            &self.program,
+                            active_program,
                             &symbols,
                             &named_blocks,
                             &roots,
@@ -10435,9 +10528,9 @@ impl<'file> LoadedModel<'file> {
                                 continue;
                             };
                             if let Some(Op::Reduce(reduce)) =
-                                self.program.get(taps.q_split.0 as usize)
+                                active_program.get(taps.q_split.0 as usize)
                                 && let Some(Op::Elementwise { operands, .. }) =
-                                    self.program.get(reduce.operand.0 as usize)
+                                    active_program.get(reduce.operand.0 as usize)
                                 && let Some((q_product, _)) = operands.first()
                                 && let Some((values, shape)) = evaluated.get(*q_product)
                             {
@@ -10756,7 +10849,7 @@ impl<'file> LoadedModel<'file> {
                     if observe_routing {
                         for site in &self.moe_sites.0 {
                             let weight_total_node =
-                                site.weights.last().copied().unwrap_or(self.logits_root);
+                                site.weights.last().copied().unwrap_or(active_logits_root);
                             let Some((weight_total, _)) = evaluated.get(weight_total_node) else {
                                 continue;
                             };
@@ -10821,7 +10914,7 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(feature = "instrument")]
                     let (layer3_before_len, layer3_before_checksum) =
                         layer_caches.get(3).map_or((0, 0.0), layer_cache_checksum);
-                    for (layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
+                    for (layer, roots_for_layer) in active_layer_roots.iter().enumerate() {
                         match (roots_for_layer, &mut layer_caches[layer]) {
                             (
                                 Qwen35LayerRoots::Attention((even, odd, value)),
@@ -11003,9 +11096,9 @@ impl<'file> LoadedModel<'file> {
                     // actually samples, exactly like a `new_count == 1` decode
                     // step always has.
                     if is_last_step_batch {
-                        let (logits, _shape) = evaluated.get(self.logits_root).ok_or(
+                        let (logits, _shape) = evaluated.get(active_logits_root).ok_or(
                             InteropError::MissingEvaluatedNode {
-                                node: self.logits_root,
+                                node: active_logits_root,
                             },
                         )?;
                         // `logits_root` must be the `lm_head_row`-gathered LAST row
@@ -14677,6 +14770,7 @@ mod memory_fit_gate_tests {
             router_roots: Vec::new(),
             moe_sites: proxima_tensor::spec::MoeSites::default(),
             single_position_step: false,
+            qwen35moe_hparams: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range: None,
             expert_slab: std::sync::Mutex::new(crate::expert_slab::ExpertSlab::new()),
