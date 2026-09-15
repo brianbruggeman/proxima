@@ -885,6 +885,17 @@ impl<'file> LoadedModel<'file> {
             omega::sized::LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES,
             limit,
         )?;
+        // does the caller's live memory state (e.g. another process holding
+        // GPU-resident weights) push this gate to actually shrink
+        // context_length, versus a static reading of the isolated numbers.
+        #[cfg(feature = "instrument")]
+        debug!(
+            requested_context_length,
+            fit_context_length = context_length,
+            available_bytes = limit.available_bytes(),
+            outcome = ?outcome,
+            "apply_memory_fit_gate: live fit decision"
+        );
         let per_class_budget = crate::memory_fit::MemoryBudget::derive(
             weights,
             self.architecture.block_count,
@@ -3239,6 +3250,18 @@ impl<'file> LoadedModel<'file> {
                         // -- exactly one row of `vocab_size`. A foreign `Architecture`
                         // that hands back the full `[new_count, vocab]` buffer is
                         // rejected here rather than silently sampled at row 0.
+                        #[cfg(feature = "instrument")]
+                        debug!(
+                            step = _step as u64,
+                            batch_index = batch_index as u64,
+                            new_count = new_count as u64,
+                            logits_len = logits.len() as u64,
+                            vocab_size = vocab_size as u64,
+                            non_finite_count =
+                                logits.iter().filter(|value| !value.is_finite()).count() as u64,
+                            first_five = ?&logits[..logits.len().min(5)],
+                            "one_evaluation_prefill_batch: logits shape before sampling"
+                        );
                         if logits.len() != vocab_size {
                             return Err(InteropError::LogitsShapeMismatch {
                                 expected_rows: 1,

@@ -3396,6 +3396,67 @@ pub(super) mod memory_fit_gate_tests {
             );
         }
 
+        /// The oracle above drives `run_decode_loop_observed_seeded` off a
+        /// hand-built `BackendRuntime`, never `generate_streaming` --
+        /// `gguf_generate` and every other real caller's own entry point
+        /// (`decode.rs`'s own `apply_memory_fit_gate` wiring only fires
+        /// there, metal+macos gated). ROW 590's own fupan named this gap:
+        /// the config-mirror test proves the FLAG plumbs through, not that
+        /// the entry point real callers use still decodes through it.
+        #[test]
+        #[ignore = "requires a real, local qwen3.6:35b-a3b GGUF blob; set PROXIMA_QWEN35MOE_GGUF"]
+        fn one_evaluation_prefill_through_generate_streaming_matches_sequential_on_the_real_checkpoint()
+        {
+            let model_path = crate::test_support::qwen35moe_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN35MOE_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen35moe gguf fixture");
+            let model = open_model(&mapped);
+            let serving_config = greedy_serving_config();
+            let prompt = "The capital of France is";
+            let steps = 16;
+
+            let (sequential_ids, sequential_text, _) = model
+                .generate_streaming(prompt, steps, serving_config, &mut |_event| {
+                    Control::Continue
+                })
+                .expect("sequential prefill through generate_streaming");
+
+            // SAFETY: no other thread touches `PROXIMA_PREFILL_ONE_EVALUATION`
+            // during this call (this function's own doc).
+            let (one_evaluation_ids, one_evaluation_text, _) = unsafe {
+                with_one_evaluation_prefill_forced(|| {
+                    model
+                        .generate_streaming(prompt, steps, serving_config, &mut |_event| {
+                            Control::Continue
+                        })
+                        .expect("one-evaluation prefill through generate_streaming")
+                })
+            };
+
+            std::println!(
+                "generate_streaming one_evaluation: ids={one_evaluation_ids:?} text={one_evaluation_text:?}"
+            );
+            std::println!(
+                "generate_streaming sequential: ids={sequential_ids:?} text={sequential_text:?}"
+            );
+
+            assert!(
+                !one_evaluation_ids.is_empty(),
+                "generate_streaming must not return an empty id sequence for one-evaluation prefill"
+            );
+            assert_eq!(
+                one_evaluation_ids, sequential_ids,
+                "generate_streaming must decode the same ids through the one-evaluation and \
+                 sequential prefill paths"
+            );
+            assert_eq!(
+                one_evaluation_text, sequential_text,
+                "generate_streaming must decode the same text through the one-evaluation and \
+                 sequential prefill paths"
+            );
+        }
+
         /// Diagnostic companion to the oracle above: when it fails, this
         /// names the first layer whose own `block_output` (post-residual,
         /// after FFN -- [`crate::qwen35moe::Qwen35MoeLayerDiagnostics::block_output`])
