@@ -16018,5 +16018,214 @@ mod memory_fit_gate_tests {
                 .zip(right.iter())
                 .map(|((name, left_value), right_value)| (name, left_value, right_value))
         }
+
+        /// Finer bisection than [`one_evaluation_prefill_layer_zero_bisection_on_the_real_checkpoint`]
+        /// (which hits `MissingEvaluatedNode` requesting `state_out` alone):
+        /// walks `block_input` (embedding row) -> `qkv_mixed` (shared code,
+        /// pre-recurrence) -> `delta_out` (the recurrence's own per-position
+        /// output) -> `mixer_output` -> `post_mixer_residual` -> `block_output`
+        /// at layer 0's own last prompt position, one-evaluation vs
+        /// sequential, each row's relative diff against that row's own norm.
+        #[test]
+        #[ignore = "requires a real, local qwen3.6:35b-a3b GGUF blob; set PROXIMA_QWEN35MOE_GGUF"]
+        fn one_evaluation_prefill_layer_zero_tap_sweep_on_the_real_checkpoint() {
+            let model_path = crate::test_support::qwen35moe_gguf_path();
+            crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN35MOE_GGUF"));
+            let mapped = MappedGguf::open(std::path::Path::new(&model_path))
+                .expect("mmap host-local qwen35moe gguf fixture");
+            let model = open_model(&mapped);
+            let serving_config = greedy_serving_config();
+            let prompt = "The capital of France is";
+
+            let hparams = model
+                .qwen35moe_hparams
+                .as_ref()
+                .expect("this checkpoint routes through the qwen35moe registry entry");
+            let prompt_ids = proxima_tokenizer::encode_with_bos_eos(
+                prompt,
+                &model.vocab,
+                super::super::wants_bos(&model.vocab),
+                model.vocab.add_eos_token().unwrap_or(false),
+            )
+            .expect("tokenize the oracle prompt");
+            let prompt_len = prompt_ids.len();
+
+            let (_program, _roots, _static_layer_roots, _moe_sites, static_diagnostics) =
+                crate::qwen35moe::qwen35moe_forward_program_at_width(
+                    hparams,
+                    Some(prompt_len as u32),
+                )
+                .expect("static-width program builds");
+            let layer0_static = &static_diagnostics[0];
+            let layer0_decode = &model.qwen35moe_layer_diagnostics[0];
+            let static_ssm_taps = layer0_static
+                .ssm_taps
+                .expect("layer 0 is a GDN layer on this checkpoint");
+            let decode_ssm_taps = layer0_decode
+                .ssm_taps
+                .expect("layer 0 is a GDN layer on this checkpoint");
+
+            let names = [
+                "block_input",
+                "qkv_mixed",
+                "query",
+                "key",
+                "value",
+                "beta",
+                "gate",
+                "z_head",
+                "delta_out",
+                "mixer_output",
+                "post_mixer_residual",
+                "block_output",
+            ];
+            let one_evaluation_nodes = [
+                layer0_static.block_input,
+                static_ssm_taps.qkv_mixed,
+                static_ssm_taps.query,
+                static_ssm_taps.key,
+                static_ssm_taps.value,
+                static_ssm_taps.beta,
+                static_ssm_taps.gate,
+                static_ssm_taps.z_head,
+                static_ssm_taps.delta_out,
+                layer0_static.mixer_output,
+                layer0_static.post_mixer_residual,
+                layer0_static.block_output,
+                // extra, one-evaluation-only self-check (no sequential
+                // counterpart requested): does the M>1 branch's own
+                // per-position slice (`query`, index 2 above) actually equal
+                // the LAST row of the shared multi-position tensor it was
+                // sliced from (`query_sequence`)? Both come from the SAME
+                // evaluation of the SAME graph, so any mismatch here is a
+                // buffer-lifetime/aliasing bug in the interpreter, not a
+                // wiring or algebra defect.
+                static_ssm_taps.query_sequence,
+                static_ssm_taps.beta_sequence,
+            ];
+            let sequential_nodes = [
+                layer0_decode.block_input,
+                decode_ssm_taps.qkv_mixed,
+                decode_ssm_taps.query,
+                decode_ssm_taps.key,
+                decode_ssm_taps.value,
+                decode_ssm_taps.beta,
+                decode_ssm_taps.gate,
+                decode_ssm_taps.z_head,
+                decode_ssm_taps.delta_out,
+                layer0_decode.mixer_output,
+                layer0_decode.post_mixer_residual,
+                layer0_decode.block_output,
+            ];
+
+            let mut sequential_runtime = BackendRuntime::new(&serving_config);
+            let mut sequential_steps: Vec<Vec<Vec<f32>>> = Vec::new();
+            let mut sequential_sink = NodeValuesSink::Collect {
+                nodes: &sequential_nodes,
+                steps: &mut sequential_steps,
+            };
+            let _ = model
+                .run_decode_loop_observed_seeded(
+                    prompt,
+                    1,
+                    &serving_config,
+                    &mut sequential_runtime,
+                    None,
+                    &mut LogitsSink::Discard,
+                    &mut sequential_sink,
+                    &mut |_event| Control::Continue,
+                    None,
+                    false,
+                )
+                .expect("sequential prefill layer-zero tap sweep run");
+
+            // SAFETY: no other thread touches `PROXIMA_PREFILL_ONE_EVALUATION`
+            // during this call (`with_one_evaluation_prefill_forced`'s own
+            // doc).
+            let one_evaluation_steps: Vec<Vec<Vec<f32>>> = unsafe {
+                with_one_evaluation_prefill_forced(|| {
+                    let mut one_evaluation_runtime = BackendRuntime::new(&serving_config);
+                    let mut one_evaluation_steps: Vec<Vec<Vec<f32>>> = Vec::new();
+                    let mut one_evaluation_sink = NodeValuesSink::Collect {
+                        nodes: &one_evaluation_nodes,
+                        steps: &mut one_evaluation_steps,
+                    };
+                    let _ = model
+                        .run_decode_loop_observed_seeded(
+                            prompt,
+                            1,
+                            &serving_config,
+                            &mut one_evaluation_runtime,
+                            None,
+                            &mut LogitsSink::Discard,
+                            &mut one_evaluation_sink,
+                            &mut |_event| Control::Continue,
+                            None,
+                            false,
+                        )
+                        .expect("one-evaluation prefill layer-zero tap sweep run");
+                    one_evaluation_steps
+                })
+            };
+
+            let one_evaluation_values = one_evaluation_steps
+                .first()
+                .expect("one-evaluation prefill observes exactly one batch");
+            let sequential_last_position = sequential_steps
+                .last()
+                .expect("sequential prefill observes at least one batch");
+
+            for (name, one_evaluation_value, sequential_value) in
+                itertools_zip3(&names, one_evaluation_values, sequential_last_position)
+            {
+                let row_length = sequential_value.len();
+                let last_row = &one_evaluation_value[one_evaluation_value.len() - row_length..];
+                let row_norm = sequential_value
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    .sqrt()
+                    .max(1e-6);
+                let max_abs_diff = last_row
+                    .iter()
+                    .zip(sequential_value.iter())
+                    .map(|(left, right)| (left - right).abs())
+                    .fold(0.0_f32, f32::max);
+                std::println!(
+                    "layer0 {name} row_length={row_length} max_abs_diff={max_abs_diff} \
+                     row_norm={row_norm} relative_diff={}",
+                    max_abs_diff / row_norm
+                );
+            }
+
+            // self-check: `query`/`beta` (index 2/5) MUST equal the last row
+            // of `query_sequence`/`beta_sequence` (index 12/13) -- both read
+            // from the SAME one-evaluation execution of the SAME graph.
+            for (self_check_name, sliced_index, sequence_index) in
+                [("query", 2usize, 12usize), ("beta", 5usize, 13usize)]
+            {
+                let sliced = &one_evaluation_values[sliced_index];
+                let sequence = &one_evaluation_values[sequence_index];
+                let row_length = sliced.len();
+                let sequence_last_row = &sequence[sequence.len() - row_length..];
+                let row_norm = sliced
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    .sqrt()
+                    .max(1e-6);
+                let max_abs_diff = sliced
+                    .iter()
+                    .zip(sequence_last_row.iter())
+                    .map(|(left, right)| (left - right).abs())
+                    .fold(0.0_f32, f32::max);
+                std::println!(
+                    "layer0 self_check {self_check_name}_vs_{self_check_name}_sequence_last_row \
+                     row_length={row_length} max_abs_diff={max_abs_diff} row_norm={row_norm} \
+                     relative_diff={}",
+                    max_abs_diff / row_norm
+                );
+            }
+        }
     }
 }
