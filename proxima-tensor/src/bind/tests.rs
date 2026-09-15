@@ -1673,7 +1673,8 @@ fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
             | BoundOpKind::Reduce { operands, .. } => operands,
             BoundOpKind::Iota
             | BoundOpKind::Constant { .. }
-            | BoundOpKind::GatedDeltaNet { .. } => continue,
+            | BoundOpKind::GatedDeltaNet { .. }
+            | BoundOpKind::MoeTopK { .. } => continue,
         };
         for (node, layout, lookup) in operands.iter_mut() {
             if *node == gathered_source {
