@@ -628,3 +628,162 @@ fn ladder_eight_dispatches_vs_one_merged_dispatch_gpu_time() {
         cfg!(feature = "metal-horizontal-merge")
     );
 }
+
+const LAZY_SIZE: usize = QK_K;
+const LAZY_ROUNDS: usize = 4;
+
+/// ROW 572's own missing case: neither the shared activation NOR any
+/// member's output is a caller placement here -- the activation is an
+/// intermediate (`raw_activation + raw_activation`, computed by an earlier
+/// position, never an `Op::Input` leaf) and every output is a plain plan
+/// root, read back through `Evaluated::get` the way a real qwen35moe decode
+/// step's own MoE projection is. This exercises BOTH halves of ROW 572's fix
+/// at once: `split_by_shared_buffers` admitting on the activation's NODE
+/// identity alone (its buffer does not exist until the intermediate's own
+/// position executes, one position before the group's leader), and
+/// `ensure_merged_group_resolved`'s fresh-allocation branch (no member is
+/// caller-placed, so the group's shared output is allocated at the leader's
+/// own first encode, not read from `output_placed`).
+#[test]
+fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
+    let mut program = Vec::new();
+    let weight_nodes: Vec<NodeId> = (0..LAZY_ROUNDS)
+        .map(|round| {
+            append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::UInt8,
+                    shape: vec![Extent::Static(LAZY_SIZE as u32), Extent::Static(LAZY_SIZE as u32)],
+                    name: Some(format!("lazy_weight_{round}")),
+                },
+            )
+        })
+        .collect();
+    let raw_activation_node = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(LAZY_SIZE as u32)],
+            name: Some("raw_activation".into()),
+        },
+    );
+    // A genuine intermediate: multiple reduces below read it, so `bind`'s
+    // own last-use fusion rule cannot absorb it into any one of them --
+    // `append_matvec`'s own doc names this exact rule.
+    let activation_node = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            operands: vec![
+                (raw_activation_node, IndexMap::Affine(projection(1, &[0]))),
+                (raw_activation_node, IndexMap::Affine(projection(1, &[0]))),
+            ],
+            name: None,
+        },
+    );
+    let output_nodes: Vec<NodeId> = weight_nodes
+        .iter()
+        .map(|&weight| append_matvec(&mut program, weight, activation_node))
+        .collect();
+
+    let raw_activation = random_vec(23, LAZY_SIZE);
+    let activation: Vec<f32> = raw_activation.iter().map(|value| value * 2.0).collect();
+    let mut placed_input_nodes = vec![raw_activation_node];
+    placed_input_nodes.extend(weight_nodes.iter().copied());
+    let weight_names: Vec<String> = (0..LAZY_ROUNDS).map(|round| format!("lazy_weight_{round}")).collect();
+    let mut named: Vec<(&str, proxima_tensor::QuantizedBlock<'_>)> =
+        vec![("raw_activation", proxima_tensor::QuantizedBlock::Float32(&[]))];
+    named.extend(weight_names.iter().map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Q4K(&[]))));
+
+    let plan = omega::plan_named_with_placed_inputs(
+        &program,
+        &[],
+        &named,
+        &output_nodes,
+        NumericPolicy::default(),
+        &placed_input_nodes,
+    )
+    .expect("plans the lazy-activation matvecs");
+
+    let weight_bytes_per_round = (LAZY_SIZE / QK_K) * BLOCK_BYTES * LAZY_SIZE;
+    let weight_buffer = omega::allocate_placed_buffer(weight_bytes_per_round * LAZY_ROUNDS)
+        .expect("allocates the shared lazy weight buffer");
+    let raw_activation_buffer =
+        omega::allocate_placed_buffer(LAZY_SIZE * size_of::<f32>()).expect("allocates the raw activation buffer");
+
+    unsafe {
+        write_placed_buffer(
+            &raw_activation_buffer,
+            0,
+            core::slice::from_raw_parts(
+                raw_activation.as_ptr().cast::<u8>(),
+                core::mem::size_of_val(raw_activation.as_slice()),
+            ),
+        );
+    }
+
+    let mut expected = Vec::with_capacity(LAZY_ROUNDS);
+    for round in 0..LAZY_ROUNDS {
+        let rows: Vec<Vec<f32>> = (0..LAZY_SIZE)
+            .map(|row| random_vec(3_000_000 + round as u64 * 10_000 + row as u64, LAZY_SIZE))
+            .collect();
+        let mut packed = vec![0u8; LAZY_SIZE / QK_K * BLOCK_BYTES];
+        for (row, row_packed) in rows.iter().zip(packed.as_chunks_mut::<BLOCK_BYTES>().0) {
+            quantize(row, row_packed).expect("LAZY_SIZE is a whole multiple of QK_K");
+        }
+        unsafe {
+            write_placed_buffer(&weight_buffer, round * weight_bytes_per_round, &packed);
+        }
+        let mut round_expected: Vec<f32> = Vec::with_capacity(LAZY_SIZE);
+        for row_packed in packed.as_chunks::<BLOCK_BYTES>().0 {
+            let mut row = vec![0.0f32; LAZY_SIZE];
+            dequantize(row_packed, &mut row).expect("packed row dequantizes");
+            round_expected.push(row.iter().zip(activation.iter()).map(|(weight, value)| weight * value).sum());
+        }
+        expected.push(round_expected);
+    }
+
+    let input_placements: Vec<(NodeId, &omega::PlacedBuffer, usize)> = {
+        let mut placements = vec![(raw_activation_node, &raw_activation_buffer, 0usize)];
+        placements.extend(
+            weight_nodes
+                .iter()
+                .enumerate()
+                .map(|(round, &node)| (node, &weight_buffer, round * weight_bytes_per_round)),
+        );
+        placements
+    };
+    // No `output_placements` at all -- every output is a plain plan root,
+    // read back through `Evaluated::get` exactly like a real decode step's
+    // own MoE projection, never a caller-placed buffer.
+    #[cfg(feature = "instrument")]
+    let _ = omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset();
+    let evaluated = omega::execute_plan_named_with_placements(&plan, &named, &input_placements, &[])
+        .expect("the lazy-activation program executes");
+    #[cfg(feature = "instrument")]
+    {
+        // +1 for the intermediate activation's own dispatch
+        // (`raw_activation + raw_activation`), materialized because
+        // multiple reduces below read it.
+        let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") { 2 } else { 5 };
+        assert_eq!(
+            omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
+            expected_dispatches,
+            "metal-horizontal-merge={}: an intermediate activation and unplaced outputs must still merge",
+            cfg!(feature = "metal-horizontal-merge")
+        );
+    }
+
+    for (round, &node) in output_nodes.iter().enumerate() {
+        let (actual, _shape) = evaluated.get(node).expect("this round's output is a plan root");
+        for (index, (&value, &reference)) in actual.iter().zip(expected[round].iter()).enumerate() {
+            let scale = reference.abs().max(f32::MIN_POSITIVE);
+            let relative = (value - reference).abs() / scale;
+            assert!(
+                relative < 1e-2,
+                "round {round} row {index}: got={value} reference={reference} relative={relative}"
+            );
+        }
+    }
+}
