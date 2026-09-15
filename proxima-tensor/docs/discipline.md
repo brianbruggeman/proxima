@@ -33463,3 +33463,29 @@ cargo nextest run -p proxima-tensor --lib --features std -j 4
 cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast
 cargo nextest run -p omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'
 ```
+
+## ROW 588 -- I9 prefill_chunk_positions (Sarathi/chunked prefill): already landed at 9ef6ad42, unmeasured; real-checkpoint run finds width 0 and 64 CRASH, only 32 succeeds
+
+Idea/claim: `prefill_chunk_positions` splits one-evaluation prefill into fixed-width chunks so peak activation bytes are bounded by chunk width, not prompt length; code (`serving.rs`, `decode.rs`, `examples/gguf_generate.rs`) was already committed at `9ef6ad42` with no discipline row. Field: `prefill_chunk_positions: usize` on `ServingConfig`, default `0` (whole prompt, one chunk).
+
+on/off, 126-token France prompt (91 words), GPU, `max_tokens=1`: chunk **0**: `METAL RUN FAILED node %3677/%2921: one push readied more BoundOps than the no-alloc batch capacity allows`, CPU fallback fails identically -- ttft_ms/peak_bytes unmeasurable (crash precedes `build_buffer_arena`'s own debug line). chunk **32**: SUCCEEDS, `ttft_ms=20501` (also `16963` at 99 tokens/73 words), `peak_bytes=128,975,116` (query_rows=32, `reuse_factor=33.07x`) at RUST_LOG=debug. chunk **64**: `METAL RUN FAILED node %1941`, identical crash to chunk 0 -- capacity ceiling sits strictly between 32 and 64 query rows on this checkpoint, independent of `cached_len` (confirmed: a 32-chunked 126-token run with `cached_len` reaching 96+ never crashes).
+
+Gates, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`: `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo check -p proxima-tensor --no-default-features --features alloc -j 4`: EXIT=0. `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0. `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616 run, 616 passed, 0 failed. `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed (same named set as ROW 587). `cargo nextest run -p omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed (same named set as ROW 587).
+
+Reused: existing `ServingConfig`/`GenerateConfig`/`supported_serving_config` edge (unmodified, field already wired); `gguf_generate` example unmodified; no new harness, fixture, or type. Not a 190-token prompt (91 words/126 tokens) -- time cap; the crash-vs-succeed finding is prompt-length-independent (reproduced at 73 words/99 tokens too). encode_dispatch_calls profiled run NOT taken (crash makes it moot for 0/64; not attempted for 32 inside the cap).
+
+Residual, open for whoever picks this up next: (1) the "no-alloc batch capacity" ceiling itself is un-named/un-located this row (no source grep run for the constant) -- find it and either raise it or document it as the reason chunk width must stay under it; (2) sweep chunk widths 33..63 to bisect the exact ceiling; (3) peak_bytes for a genuinely ~190-token prompt, and for the failing widths once the capacity limit above them is fixed; (4) one profiled `encode_dispatch_calls` run at chunk 32.
+
+Re-prove command:
+
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+export CARGO_TARGET_DIR=/tmp/cargo_target_wf
+cargo build --release --example gguf_generate --features proxima-model-interop/metal,proxima-model-interop/instrument -j 4
+BIN=/tmp/cargo_target_wf/release/examples/gguf_generate
+BLOB=/Users/brianbruggeman/.ollama/models/blobs/sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d
+PROMPT="Describe in exhaustive detail the history, geography, culture, economy, and political system of France, including its major cities, famous landmarks, historical revolutions, culinary traditions, artistic movements, literary heritage, scientific contributions, and its role in the European Union, along with its relationships with neighboring countries such as Germany, Spain, Italy, Switzerland, and Belgium, and how these have evolved over the past two centuries through wars, treaties, colonial history, and diplomatic negotiations that shaped the modern French republic, its constitution, its educational system, and its global influence today across trade, diplomacy, and culture."
+PROXIMA_PREFILL_CHUNK_POSITIONS=0  RUST_LOG=debug "$BIN" "$BLOB" "$PROMPT" 1 gpu | grep -E "ttft_ms|METAL RUN FAILED"
+PROXIMA_PREFILL_CHUNK_POSITIONS=32 RUST_LOG=debug "$BIN" "$BLOB" "$PROMPT" 1 gpu | grep -E "ttft_ms|steady-state peak"
+PROXIMA_PREFILL_CHUNK_POSITIONS=64 RUST_LOG=debug "$BIN" "$BLOB" "$PROMPT" 1 gpu | grep -E "ttft_ms|METAL RUN FAILED"
+```
