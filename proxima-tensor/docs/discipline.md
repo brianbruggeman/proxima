@@ -33489,3 +33489,45 @@ PROXIMA_PREFILL_CHUNK_POSITIONS=0  RUST_LOG=debug "$BIN" "$BLOB" "$PROMPT" 1 gpu
 PROXIMA_PREFILL_CHUNK_POSITIONS=32 RUST_LOG=debug "$BIN" "$BLOB" "$PROMPT" 1 gpu | grep -E "ttft_ms|steady-state peak"
 PROXIMA_PREFILL_CHUNK_POSITIONS=64 RUST_LOG=debug "$BIN" "$BLOB" "$PROMPT" 1 gpu | grep -E "ttft_ms|METAL RUN FAILED"
 ```
+
+## ROW 589 -- I11 three scheduling levels (request admission, phase scheduling, per-layer expert residency) already landed at 73f968e6; re-verified this row, NOT SEALED on GPU measurement -- ollama holds the GPU
+
+Idea/claim: request admission, prefill-vs-decode phase scheduling, and per-layer expert residency are three independent `ServingConfig` sub-structs, each consulted at exactly one site, so a change to one level's field cannot move another level's decision -- no global FIFO collapsing the three.
+
+Field: not new this row. `admission_schedule: AdmissionSchedule` / `phase_schedule: PhaseSchedule` / `expert_residency_schedule: ExpertResidencySchedule` on `ServingConfig` (`proxima-model-interop/src/serving.rs:501-509`), types defined at `serving.rs:153-197`, all three default off/no-op (`max_concurrent_requests: 0`, `prefill_before_decode: true`, `per_layer_budget_bytes: 0`) -- byte-identical to pre-I11 behavior. Landed at `73f968e6` ("feat: split scheduling into three independent ServingConfig levels (I11)"), before this task was dispatched; this row is verification, not new code.
+
+Three sites, confirmed by direct read this row:
+1. admission -- `proxima-model-interop/src/serving.rs:639-644` (`apply_serving_config`'s top-level walk rejects `parallel_sequences` over `admission_schedule.max_concurrent_requests`, naming that field in the error).
+2. phase -- `proxima-model-interop/src/generate/decode.rs:1526-1531` (`one_evaluation_prefill_requested` rejects `phase_schedule.prefill_before_decode == false`, interleaving not yet implemented).
+3. residency -- `proxima-model-interop/src/generate/decode.rs:1362-1368` (residency-pool construction reads `expert_residency_schedule.per_layer_budget_bytes` independently of `qwen35moe_residency_budget_bytes`'s shared pool).
+
+Independence test: `proxima-model-interop/src/serving.rs:1358-1394`, `scheduling_levels_are_independent` -- changes `admission_schedule`, `phase_schedule`, and `expert_residency_schedule` one at a time off a shared baseline and asserts the other two fields stay at baseline value each time, plus asserts an admission-ceiling violation's error message names `max_concurrent_requests` and not `phase_schedule`. Ran green this row (`serving::tests::scheduling_levels_are_independent`, PASS in the interop nextest run below).
+
+on/off ttnt_mean_ms/ttft_ms/encode_dispatch_calls: NOT MEASURED. `ollama ps` showed `qwen3.6:35b-a3b` resident at 100% GPU with 4 minutes left when this row started -- the real-checkpoint run needs the same GPU the France-16 harness targets, and "ONE GPU USER"/"never stop or kill Ollama" rule means waiting for it to clear, which this row's time cap does not allow. No fabricated numbers substituted.
+
+**Gates run, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`, warm target dir:**
+- `cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0.
+- `cargo check -p proxima-tensor --no-default-features --features alloc -j 4` (tier alloc gate): EXIT=0.
+- `cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4`: EXIT=0, 0 errors.
+- `cargo clippy -p proxima-tensor --features std --all-targets -j 4`: EXIT=0, 0 errors.
+- `cargo nextest run -p proxima-tensor --lib --features std -j 4`: 616 run, 616 passed, 0 failed, 7 skipped -- matches ROW 587/588 baseline exactly.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed, 64 skipped -- same 8 named failures as ROW 587 (`dense_cpu_unrepresentable_codec_load_returns_a_typed_error::{q2_k,q4_0,q5_0}`, four `external_architecture_hybrid_cache` cases, `external_expert_paging::q2k_paging_actually_changes_the_decoded_ids`), no new failure.
+- `cargo nextest run -p omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'`: 339 run, 337 passed, 2 failed, 17 skipped -- same 2 named failures as ROW 587 (`cached_attention_coop_load_parity::{m_greater_than_one_prefill_holds_parity_past_the_split_knee,the_single_range_fused_kernel_holds_parity_at_every_kv_capacity_bucket_padding}`), no new failure.
+
+**Reused, no new harness:** the existing `ServingConfig` struct and its `apply_serving_config`/`decode.rs` consulting sites (all pre-existing from `73f968e6`); the existing `scheduling_levels_are_independent` unit test (pre-existing, re-run not rewritten); the same nextest/clippy/check gate commands as ROW 587/588. No new type, no new test, no new fixture added this row.
+
+**Residual:** none of the three fields are wired to the `examples/gguf_generate.rs`/conflaguration edge yet (`grep -rn "admission_schedule\|phase_schedule\|expert_residency_schedule" proxima-model-interop/examples/` finds nothing) -- a caller can only reach non-default values by constructing `ServingConfig` in Rust, not via the CLI/env surface `plan_time_constants` and siblings already have. Real-checkpoint on/off numbers remain unmeasured for all three levels since none has been flipped non-default against France-16 yet.
+
+**Re-prove command:**
+
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+export CARGO_TARGET_DIR=/tmp/cargo_target_wf
+cargo check -p proxima-model-interop --features metal,instrument --all-targets -j 4
+cargo check -p proxima-tensor --no-default-features --features alloc -j 4
+cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -j 4
+cargo clippy -p proxima-tensor --features std --all-targets -j 4
+cargo nextest run -p proxima-tensor --lib --features std -j 4
+cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast
+cargo nextest run -p omega --features metal,instrument --test-threads 4 --no-fail-fast -E 'not test(qwen35moe_shaped_append_moe_ffn)'
+```
