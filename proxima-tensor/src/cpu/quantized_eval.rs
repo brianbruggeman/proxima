@@ -201,6 +201,31 @@ pub fn evaluate_quantized_exact_with_scratch_and_experts(
     )
 }
 
+// every `NodeId` the fused kernel dereferences at `fire_position` --
+// `x` plus the tail's own four operand slots -- resolved from the tail
+// `BoundOp`'s operand list rather than assumed contiguous with `x_node`,
+// since `compose_body`'s canonicalization does not guarantee any fixed
+// layout (`LayerNormClusterPlan`'s own doc on `tail_gamma_slot` et al.).
+pub(super) fn layer_norm_cluster_operand_nodes(
+    resolved: &[BoundOp],
+    cluster: &LayerNormClusterPlan,
+) -> Option<[NodeId; 5]> {
+    let BoundOpKind::Elementwise {
+        operands: tail_operands,
+        ..
+    } = &resolved[cluster.tail_index].kind
+    else {
+        return None;
+    };
+    Some([
+        cluster.x_node,
+        tail_operands.get(cluster.tail_reciprocal_n_slot)?.0,
+        tail_operands.get(cluster.tail_epsilon_slot)?.0,
+        tail_operands.get(cluster.tail_gamma_slot)?.0,
+        tail_operands.get(cluster.tail_beta_slot)?.0,
+    ])
+}
+
 // `expert_sources` is this slice's own addition, pushing this shared body
 // one argument past clippy's default threshold; every one of its five
 // public callers already threads its own six/seven positional arguments
@@ -455,10 +480,20 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
     let layer_norm_cluster_keepalive: BTreeMap<NodeId, usize> = {
         let mut keepalive: BTreeMap<NodeId, usize> = BTreeMap::new();
         for cluster in layer_norm_cluster_plan.values() {
-            keepalive
-                .entry(cluster.x_node)
-                .and_modify(|existing| *existing = (*existing).max(cluster.fire_position))
-                .or_insert(cluster.fire_position);
+            // the fused tail at `fire_position` reads `x` AND all four tail
+            // operand slots straight out of `buffers` -- keying this map on
+            // `x_node` alone left `gamma`/`beta`/`reciprocal_n`/`epsilon`
+            // free to retire at their own pre-fusion last use, before the
+            // deferred read (ROW 204 follow-up, node 6540).
+            let Some(nodes) = layer_norm_cluster_operand_nodes(&resolved, cluster) else {
+                continue;
+            };
+            for node in nodes {
+                keepalive
+                    .entry(node)
+                    .and_modify(|existing| *existing = (*existing).max(cluster.fire_position))
+                    .or_insert(cluster.fire_position);
+            }
         }
         keepalive
     };
