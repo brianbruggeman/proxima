@@ -7862,6 +7862,21 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
         })
         .collect();
 
+    let attention_configs: Vec<LayerAttentionConfig> = (0..24)
+        .map(|_| LayerAttentionConfig {
+            head_dim: 64,
+            kv_heads: 8,
+            mask_window: None,
+            value_source_kind: ValueSourceKind::ProjectedV,
+            rope_table: RopeTableSel {
+                cos_name: "rope_cos",
+                sin_name: "rope_sin",
+            },
+            rope_pairing: RopePairing::Interleaved,
+        })
+        .collect();
+    let ffn_configs: Vec<LayerFfnConfig> = (0..24).map(|_| LayerFfnConfig::exclusive()).collect();
+
     let build_start = std::time::Instant::now();
     let (program, _logits, _moe_sites) = lfm2_forward_program_with_experts(
         128_000,
@@ -7869,14 +7884,16 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
         7168,
         1792,
         32,
-        8,
-        64,
         24,
         32,
         4,
         2,
         3,
         &layer_kinds,
+        &attention_configs,
+        &ffn_configs,
+        None,
+        None,
     )
     .expect("the hybrid forward pass lowers to a program");
     let build_elapsed = build_start.elapsed();
@@ -7900,20 +7917,47 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
 #[proxima::test]
 async fn lfm2_forward_program_rejects_a_layer_kinds_length_mismatch() {
     let layer_kinds = [LayerKind::Attention, LayerKind::ShortConv];
+    let attention_configs = [
+        LayerAttentionConfig {
+            head_dim: 64,
+            kv_heads: 8,
+            mask_window: None,
+            value_source_kind: ValueSourceKind::ProjectedV,
+            rope_table: RopeTableSel {
+                cos_name: "rope_cos",
+                sin_name: "rope_sin",
+            },
+            rope_pairing: RopePairing::Interleaved,
+        },
+        LayerAttentionConfig {
+            head_dim: 64,
+            kv_heads: 8,
+            mask_window: None,
+            value_source_kind: ValueSourceKind::ProjectedV,
+            rope_table: RopeTableSel {
+                cos_name: "rope_cos",
+                sin_name: "rope_sin",
+            },
+            rope_pairing: RopePairing::Interleaved,
+        },
+    ];
+    let ffn_configs = [LayerFfnConfig::exclusive(), LayerFfnConfig::exclusive()];
     let error = lfm2_forward_program_with_experts(
         128_000,
         2048,
         7168,
         1792,
         32,
-        8,
-        64,
         24,
         32,
         4,
         2,
         3,
         &layer_kinds,
+        &attention_configs,
+        &ffn_configs,
+        None,
+        None,
     )
     .expect_err("2 layer_kinds against block_count=24 must be rejected");
     assert!(
@@ -11411,5 +11455,116 @@ fn swapping_gate_and_up_order_keeps_dataflow_identical() {
         gate_first_signatures, up_first_signatures,
         "the two programs must carry the identical multiset of op kinds -- \
          the swap must reorder nodes, never add, drop, or retype one"
+    );
+}
+
+/// Hand-worked 6-query x 6-key sliding-window causal mask, window = 3: a
+/// query at `s` attends keys `s`, `s-1`, `s-2` (clamped at 0) and nothing
+/// else. `true` marks a masked (disallowed) cell.
+///
+/// ```text
+///        k=0    k=1    k=2    k=3    k=4    k=5
+/// q=0  allow  mask   mask   mask   mask   mask
+/// q=1  allow  allow  mask   mask   mask   mask
+/// q=2  allow  allow  allow  mask   mask   mask
+/// q=3  mask   allow  allow  allow  mask   mask
+/// q=4  mask   mask   allow  allow  allow  mask
+/// q=5  mask   mask   mask   allow  allow  allow
+/// ```
+#[test]
+fn causal_mask_windowed_matches_the_hand_worked_six_by_six_window_three_table() {
+    const SEQUENCE: usize = 6;
+    const WINDOW: u32 = 3;
+    #[rustfmt::skip]
+    let expected_masked: [[bool; SEQUENCE]; SEQUENCE] = [
+        [false, true,  true,  true,  true,  true ],
+        [false, false, true,  true,  true,  true ],
+        [false, false, false, true,  true,  true ],
+        [true,  false, false, false, true,  true ],
+        [true,  true,  false, false, false, true ],
+        [true,  true,  true,  false, false, false],
+    ];
+
+    let mut program = Vec::new();
+    let (is_masked, _neg_infinity) =
+        causal_mask_windowed(&mut program, Some(WINDOW)).expect("windowed causal mask lowers");
+
+    let symbols = [SEQUENCE as u64];
+    let blocks: [&[f32]; 0] = [];
+    let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+    let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[is_masked], workers)
+        .expect("the windowed causal mask evaluates");
+
+    let (mask, _shape) = evaluated
+        .get(is_masked)
+        .expect("the mask node was requested");
+    assert_eq!(mask.len(), SEQUENCE * SEQUENCE, "a vacuous mask proves nothing");
+
+    let mut checked = 0usize;
+    for (query, row) in mask.as_chunks::<SEQUENCE>().0.iter().enumerate() {
+        for (key, &value) in row.iter().enumerate() {
+            let masked = value != 0.0;
+            assert_eq!(
+                masked, expected_masked[query][key],
+                "query {query} key {key}: expected masked={}, found masked={masked}",
+                expected_masked[query][key]
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, SEQUENCE * SEQUENCE, "every cell must be checked, not a subset");
+}
+
+/// `window = None` must reproduce [`causal_mask`]'s own program and output
+/// byte-for-byte -- the existing full-causal mask is the oracle, and the
+/// windowed builder's `None` branch must not diverge from it even by an
+/// algebraically-equivalent rewrite.
+#[test]
+fn causal_mask_windowed_with_no_window_matches_causal_mask_exactly() {
+    const SEQUENCE: usize = 6;
+
+    let mut plain_program = Vec::new();
+    let (plain_is_future, _plain_neg_infinity) =
+        causal_mask(&mut plain_program).expect("causal mask lowers");
+
+    let mut windowed_program = Vec::new();
+    let (windowed_is_future, _windowed_neg_infinity) =
+        causal_mask_windowed(&mut windowed_program, None).expect("windowed causal mask lowers");
+
+    assert_eq!(
+        plain_program, windowed_program,
+        "window=None must build the identical program, not merely an equivalent one"
+    );
+    assert_eq!(plain_is_future, windowed_is_future);
+
+    let symbols = [SEQUENCE as u64];
+    let blocks: [&[f32]; 0] = [];
+    let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+    let plain_evaluated = crate::cpu::evaluate_parallel(
+        &plain_program,
+        &symbols,
+        &blocks,
+        &[plain_is_future],
+        workers,
+    )
+    .expect("the plain causal mask evaluates");
+    let windowed_evaluated = crate::cpu::evaluate_parallel(
+        &windowed_program,
+        &symbols,
+        &blocks,
+        &[windowed_is_future],
+        workers,
+    )
+    .expect("the windowed causal mask evaluates");
+
+    let (plain_mask, _) = plain_evaluated
+        .get(plain_is_future)
+        .expect("the plain mask node was requested");
+    let (windowed_mask, _) = windowed_evaluated
+        .get(windowed_is_future)
+        .expect("the windowed mask node was requested");
+    assert_eq!(
+        plain_mask, windowed_mask,
+        "window=None must evaluate to byte-identical values as causal_mask"
     );
 }

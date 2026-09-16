@@ -38,7 +38,10 @@ use proxima_gguf::types::GgmlType;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
 use proxima_tensor::op::NodeId;
-use proxima_tensor::spec::{LayerKind, lfm2_forward_program_with_experts};
+use proxima_tensor::spec::{
+    LayerAttentionConfig, LayerFfnConfig, LayerKind, RopePairing, RopeTableSel, ValueSourceKind,
+    lfm2_forward_program_with_experts,
+};
 use proxima_tokenizer::Vocab;
 
 use crate::bind::{
@@ -607,6 +610,40 @@ fn build_lfm2_position_inputs(
 /// Whatever `bind_lfm2_weights`, [`lfm2_forward_program_with_experts`],
 /// tokenizing `prompt`, or evaluating the program can fail with.
 #[allow(clippy::too_many_arguments)]
+/// [`Lfm2Architecture`]'s own uniform attention shape, repeated once per
+/// block -- every LFM2 checkpoint bound by this module has exactly one
+/// `head_dim`/`kv_heads` pair and one RoPE table across every attention
+/// layer, so this reproduces [`lfm2_forward_program_with_experts`]'s prior
+/// crate-wide-constant behaviour node-for-node rather than genuinely
+/// varying anything per layer.
+pub fn uniform_lfm2_attention_configs(architecture: &Lfm2Architecture) -> Vec<LayerAttentionConfig> {
+    vec![
+        LayerAttentionConfig {
+            head_dim: architecture.head_dim,
+            kv_heads: architecture.kv_heads,
+            mask_window: None,
+            value_source_kind: ValueSourceKind::ProjectedV,
+            rope_table: RopeTableSel {
+                cos_name: "rope_cos",
+                sin_name: "rope_sin",
+            },
+            rope_pairing: RopePairing::Interleaved,
+        };
+        architecture.block_count as usize
+    ]
+}
+
+/// [`Lfm2Architecture`]'s own uniform post-attention/FFN shape, repeated
+/// once per block -- every LFM2 checkpoint bound by this module selects its
+/// FFN branch by [`Lfm2Architecture::leading_dense_block_count`] alone, has
+/// no `post_attention_norm.weight` tensor, and never combines the dense and
+/// routed FFN in parallel, so [`LayerFfnConfig::exclusive`] reproduces
+/// [`lfm2_forward_program_with_experts`]'s prior fixed behaviour
+/// node-for-node.
+pub fn uniform_lfm2_ffn_configs(architecture: &Lfm2Architecture) -> Vec<LayerFfnConfig> {
+    vec![LayerFfnConfig::exclusive(); architecture.block_count as usize]
+}
+
 pub fn run_lfm2_prefill(
     parsed: &ParsedGguf,
     file_bytes: &[u8],
@@ -622,14 +659,16 @@ pub fn run_lfm2_prefill(
         architecture.feed_forward,
         architecture.expert_feed_forward,
         architecture.query_heads,
-        architecture.kv_heads,
-        architecture.head_dim,
         architecture.block_count,
         architecture.expert_count,
         architecture.expert_used_count,
         architecture.leading_dense_block_count,
         architecture.l_cache,
         &architecture.layer_kinds,
+        &uniform_lfm2_attention_configs(architecture),
+        &uniform_lfm2_ffn_configs(architecture),
+        None,
+        None,
     )?;
 
     let mut ids = proxima_tokenizer::encode_with_bos_eos(
@@ -733,14 +772,16 @@ pub fn lfm2_forward_values(
         architecture.feed_forward,
         architecture.expert_feed_forward,
         architecture.query_heads,
-        architecture.kv_heads,
-        architecture.head_dim,
         architecture.block_count,
         architecture.expert_count,
         architecture.expert_used_count,
         architecture.leading_dense_block_count,
         architecture.l_cache,
         &architecture.layer_kinds,
+        &uniform_lfm2_attention_configs(architecture),
+        &uniform_lfm2_ffn_configs(architecture),
+        None,
+        None,
     )?;
 
     let inputs = build_lfm2_position_inputs(
