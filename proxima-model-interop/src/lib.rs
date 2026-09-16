@@ -39,6 +39,8 @@ pub mod expert_slab;
 #[cfg(feature = "std")]
 mod generate;
 #[cfg(feature = "std")]
+pub mod gemma4;
+#[cfg(feature = "std")]
 mod hf_bind;
 mod hf_config;
 #[cfg(feature = "std")]
@@ -118,6 +120,8 @@ pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, qua
 pub use qwen35::{
     Qwen35Arch, Qwen35Architecture, Qwen35LayerKind, Qwen35SsmShape, bind_qwen35_checkpoint,
 };
+#[cfg(feature = "std")]
+pub use gemma4::{GEMMA4, Gemma4Arch};
 #[cfg(feature = "std")]
 pub use qwen35moe::{QWEN35MOE, Qwen35MoeArch};
 #[cfg(feature = "std")]

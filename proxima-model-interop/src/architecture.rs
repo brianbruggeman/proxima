@@ -383,6 +383,7 @@ impl ArchitectureRegistry {
         };
         registry.register(&crate::qwen35::QWEN35);
         registry.register(&crate::qwen35moe::QWEN35MOE);
+        registry.register(&crate::gemma4::GEMMA4);
         registry.register(&crate::dense::DENSE);
         registry.default = Some(&crate::dense::DENSE);
         registry
@@ -589,7 +590,7 @@ mod tests {
         let registry = ArchitectureRegistry::with_builtin();
         assert_eq!(
             registry.names(),
-            alloc::vec!["qwen35", "qwen35moe", "dense"]
+            alloc::vec!["qwen35", "qwen35moe", "gemma4", "dense"]
         );
     }
 }

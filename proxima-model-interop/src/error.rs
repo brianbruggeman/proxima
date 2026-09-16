@@ -148,6 +148,26 @@ pub enum InteropError {
     #[error("architecture {name:?} needs its own hybrid MoE forward program")]
     HybridMoeProgramUnsupported { name: String },
 
+    /// `crate::gemma4::bind::bind_gemma4_weights`'s fused
+    /// `blk.{layer}.ffn_gate_up_exps.weight` cannot be split into the two
+    /// separate `ffn_gate_exps.weight`/`ffn_up_exps.weight` leaves
+    /// [`proxima_tensor::spec::lfm2_forward_program_with_experts`]'s routed
+    /// FFN declares without a full dequant first: the real checkpoint's
+    /// `expert_feed_forward` (the split boundary) is not a whole multiple of
+    /// the tensor's own codec `block_elements`, so no packed byte offset
+    /// lands on a block boundary. A full dequant of this tensor is
+    /// tens-of-GB (measured: ~90 GB for the real 128-expert checkpoint) and
+    /// is refused here rather than attempted.
+    #[error(
+        "blk.{layer}.ffn_gate_up_exps.weight has ggml type {ggml_type:?}, whose block size ({block_elements}) does not evenly divide expert_feed_forward={expert_feed_forward}; a packed split is not possible and a full dequant is refused"
+    )]
+    Gemma4FusedExpertNotBlockAligned {
+        layer: u32,
+        ggml_type: GgmlType,
+        block_elements: u64,
+        expert_feed_forward: u32,
+    },
+
     /// `crate::generate`'s cached forward program failed to build or
     /// evaluate -- propagated from `proxima_tensor` rather than re-derived.
     #[error(transparent)]
