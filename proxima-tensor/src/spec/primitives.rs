@@ -588,7 +588,7 @@ impl RopePairing {
     /// coefficient-2 term already never qualifies as a size-definer (only a
     /// `coeff == 1` single term does), so it was never in tension with
     /// `cos_new`/`sin_new` the way a bare `"i"` was.
-    fn offsets(self) -> (alloc::string::String, alloc::string::String) {
+    pub(super) fn offsets(self) -> (alloc::string::String, alloc::string::String) {
         match self {
             Self::Interleaved => (
                 alloc::string::String::from("2*i"),
@@ -1016,6 +1016,23 @@ pub fn rmsnorm_per_head(
 /// number that never varies. It is now one rank-0 [`Op::Constant`], which
 /// is also why it broadcasts as `"->stug"` rather than `"s->stug"`.
 pub fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorError> {
+    let (query_index, key_index) = causal_index_pair(program);
+    let is_future = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(key_index, "t->st"), (query_index, "s->st")],
+    )?;
+    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+    Ok((is_future, neg_infinity))
+}
+
+/// The two block-local position [`Op::Iota`]s [`causal_mask`] and
+/// [`causal_mask_windowed`] both build: `query_index` and `key_index` over
+/// the same axis (symbol 0), since a block's key range is exactly its own
+/// query range. Factored out so the windowed variant doesn't re-litigate
+/// `causal_mask`'s own iota shapes.
+fn causal_index_pair(program: &mut Vec<Op>) -> (NodeId, NodeId) {
     let query_index = op::append(
         program,
         Op::Iota {
@@ -1030,14 +1047,57 @@ pub fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorErro
             extent: Extent::Symbolic(0),
         },
     );
+    (query_index, key_index)
+}
+
+/// [`causal_mask`]'s sliding-window counterpart — Gemma 3's local-attention
+/// layers (25 of its 30) restrict each query to the most recent `window`
+/// keys instead of the whole causal prefix. A cell is masked iff
+/// `key_index > query_index` (exactly [`causal_mask`]'s own `is_future`) OR
+/// `query_index - key_index >= window` (too far in the past). The two
+/// `{0.0, 1.0}`-valued booleans are combined with `ScalarOp::Maximum`, which
+/// is OR over that domain — no new `ScalarOp` variant needed, the same
+/// closed set [`causal_mask`] already uses.
+///
+/// `window` of `None` or `Some(0)` delegates straight to [`causal_mask`]
+/// rather than building an always-false `too_old` and OR-ing it in, so the
+/// unwindowed path is byte-for-byte [`causal_mask`]'s own program, not an
+/// algebraically-equivalent one.
+pub fn causal_mask_windowed(
+    program: &mut Vec<Op>,
+    window: Option<u32>,
+) -> Result<(NodeId, NodeId), TensorError> {
+    let Some(window) = window.filter(|&window| window > 0) else {
+        return causal_mask(program);
+    };
+    let (query_index, key_index) = causal_index_pair(program);
     let is_future = elementwise(
         program,
         DType::Float32,
         ScalarOp::Greater,
         &[(key_index, "t->st"), (query_index, "s->st")],
     )?;
+    let distance = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(query_index, "s->st"), (key_index, "t->st")],
+    )?;
+    let window_ceiling = scalar_constant(program, window as f32 - 1.0);
+    let too_old = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(distance, "st->st"), (window_ceiling, "->st")],
+    )?;
+    let is_masked = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        &[(is_future, "st->st"), (too_old, "st->st")],
+    )?;
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
-    Ok((is_future, neg_infinity))
+    Ok((is_masked, neg_infinity))
 }
 
 /// [`causal_mask`]'s single-range-attention counterpart:
@@ -1082,4 +1142,3 @@ pub fn causal_mask_merged(
         &[(key_index, "t->st"), (query_absolute, "s->st")],
     )
 }
-

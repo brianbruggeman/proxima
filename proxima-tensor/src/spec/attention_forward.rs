@@ -1,5 +1,201 @@
 use super::*;
 
+/// Where [`append_attention_mixer`] reads its per-head `V` tensor from.
+/// [`Self::Projected`] is every existing caller's behaviour today -- `V` is
+/// its own weight-projected tensor, computed here node-for-node the way this
+/// function always has. [`Self::SharedWithKey`] is the shape Gemma 3n/4's
+/// shared-KV layers need (no `attn_v.weight` tensor at all; the key
+/// projection's own raw output stands in as `V`) -- unused by any caller in
+/// this crate yet, added here so the caller that needs it does not have to
+/// fork this function to get it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueSource {
+    Projected(NodeId),
+    SharedWithKey,
+}
+
+/// [`ValueSource`] without the resolved weight [`NodeId`] -- a schedule
+/// entry names WHICH shape a layer's `V` takes, but the actual `wv` leaf (if
+/// any) is only known once [`lfm2_forward_program_with_experts`]'s own loop
+/// reaches that layer and can build (or skip) its `attn_v.weight` leaf, so
+/// [`LayerAttentionConfig`] carries this kind rather than a [`ValueSource`]
+/// itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueSourceKind {
+    ProjectedV,
+    SharedWithKey,
+}
+
+/// Names one RoPE table a layer reads its `cos`/`sin` from, by the exact
+/// [`Op::Input`] leaf names [`lfm2_forward_program_with_experts`] declares
+/// for it -- e.g. `("rope_cos", "rope_sin")`. Every layer naming the SAME
+/// pair shares the SAME declared leaf (declared once, at first use), so a
+/// heterogeneous schedule with two distinct windows (Gemma 4's sliding vs
+/// full layers) declares two leaf pairs total, not one per layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RopeTableSel {
+    pub cos_name: &'static str,
+    pub sin_name: &'static str,
+}
+
+/// A multiplier applied to the embedding lookup's own output before the
+/// first layer ever reads it -- Gemma's `hidden_states = hidden_states *
+/// sqrt(embedding)` step, absent from every architecture
+/// [`lfm2_forward_program_with_experts`] served before this knob existed.
+/// `None` (every caller in this crate today) reproduces the prior
+/// unscaled embedding node-for-node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingScale {
+    /// Multiply by `sqrt(embedding)`.
+    Sqrt,
+}
+
+/// How a layer's post-attention output and its feed-forward output combine
+/// -- [`FfnCombination::Exclusive`] is [`lfm2_forward_program_with_experts`]'s
+/// prior behaviour (a layer runs the dense-triple FFN XOR
+/// [`append_moe_ffn`], selected by `leading_dense_block_count`).
+/// [`FfnCombination::ParallelDenseMoe`] is Gemma 4's shape: BOTH FFNs run
+/// over the same normalized input and their outputs are summed, each
+/// (optionally) normalized on its own before the sum, and the sum
+/// (optionally) normalized again -- see [`LayerFfnConfig`]'s own fields for
+/// which sub-norms apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfnCombination {
+    Exclusive,
+    ParallelDenseMoe,
+}
+
+/// One layer's post-attention/feed-forward knobs -- generalizes
+/// [`lfm2_forward_program_with_experts`]'s previously-uniform "ffn_norm,
+/// then dense-triple XOR routed FFN, then residual add" sequence the same
+/// way [`LayerAttentionConfig`] generalized the attention sub-block, so a
+/// heterogeneous schedule (Gemma 4's parallel dense+MoE, its
+/// `post_attention_norm`, its per-layer `layer_output_scale`) can vary
+/// these per layer while every uniform caller in this crate today
+/// reproduces the prior program byte-for-byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerFfnConfig {
+    /// `true` builds and applies `blk.{layer}.post_attention_norm.weight`
+    /// to the attention sub-block's output before its residual add
+    /// (threaded into [`append_attention_mixer`]). `false` (every caller
+    /// today) reproduces the prior unnormalized residual add.
+    pub post_attention_norm: bool,
+    /// [`FfnCombination::Exclusive`] for every caller in this crate today.
+    pub combination: FfnCombination,
+    /// Sub-norm placement [`FfnCombination::ParallelDenseMoe`] applies --
+    /// ignored under [`FfnCombination::Exclusive`]. Gemma names these
+    /// `blk.{layer}.post_ffw_norm_1.weight` (dense branch),
+    /// `blk.{layer}.post_ffw_norm_2.weight` (routed branch), and
+    /// `blk.{layer}.post_ffw_norm.weight` (post-sum).
+    pub dense_post_norm: bool,
+    pub routed_post_norm: bool,
+    pub combined_post_norm: bool,
+    /// `true` builds `blk.{layer}.layer_output_scale.weight` (a rank-0
+    /// leaf) and multiplies it into this layer's output right after the
+    /// FFN residual add. `false` (every caller today) reproduces the prior
+    /// unscaled residual.
+    pub output_scale: bool,
+    /// Gating function [`append_routed_expert_ffn`] applies to the routed
+    /// branch's router logits. `Sigmoid` (every caller in this crate today,
+    /// [`FfnCombination::Exclusive`]'s own prior hardcoded choice) reproduces
+    /// LFM2's own MoE softmax-free routing; Gemma 4 uses `Softmax`.
+    pub routed_gating: ExpertGatingFunc,
+    /// `true` (every caller today) binds `blk.{layer}.exp_probs_b.bias` and
+    /// adds it into the router logits before argmax selection, exactly
+    /// [`append_routed_expert_ffn`]'s prior hardcoded leaf. Gemma 4 has no
+    /// such bias on its routed branch and sets `false`.
+    pub routed_expert_bias: bool,
+    /// `true` normalizes the routed branch's own input through
+    /// `blk.{layer}.pre_ffw_norm_2.weight` instead of reusing the dense
+    /// branch's `ffn_norm`-normed input -- [`FfnCombination::ParallelDenseMoe`]
+    /// only; ignored under [`FfnCombination::Exclusive`]. `false` (every
+    /// caller today) reproduces the prior shared-input behaviour. Gemma 4
+    /// sets `true`.
+    pub routed_pre_norm: bool,
+}
+
+impl LayerFfnConfig {
+    /// [`lfm2_forward_program_with_experts`]'s prior fixed behaviour: no
+    /// post-attention norm, exclusive dense/routed FFN selection, no
+    /// sub-norms, no output scale.
+    #[must_use]
+    pub const fn exclusive() -> Self {
+        LayerFfnConfig {
+            post_attention_norm: false,
+            combination: FfnCombination::Exclusive,
+            dense_post_norm: false,
+            routed_post_norm: false,
+            combined_post_norm: false,
+            output_scale: false,
+            routed_gating: ExpertGatingFunc::Sigmoid,
+            routed_expert_bias: true,
+            routed_pre_norm: false,
+        }
+    }
+}
+
+/// One [`LayerKind::Attention`] block's own attention shape --
+/// [`lfm2_forward_program_with_experts`]'s per-layer generalization of the
+/// single crate-wide `head_dim`/`kv_heads` it used to compute once outside
+/// its layer loop. Every field here is exactly what varies across Gemma 4's
+/// sliding (`head_dim=256, kv_heads=8`) vs full (`head_dim=512, kv_heads=2`)
+/// layers today, plus [`ValueSource`]'s and [`RopePairing`]'s own per-call
+/// knobs [`append_attention_mixer`] already generalized in the slice before
+/// this one -- `query_heads` stays a top-level uniform parameter because
+/// every caller in this crate still needs it uniform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerAttentionConfig {
+    pub head_dim: u32,
+    pub kv_heads: u32,
+    /// `None`/`Some(0)` is [`causal_mask_windowed`]'s own unwindowed
+    /// (whole-prefix causal) case.
+    pub mask_window: Option<u32>,
+    pub value_source_kind: ValueSourceKind,
+    pub rope_table: RopeTableSel,
+    pub rope_pairing: RopePairing,
+}
+
+/// [`lfm2_forward_program_with_experts`]'s own per-attention-layer bundle:
+/// the shared nodes ONE [`LayerAttentionConfig`] resolves to, already
+/// deduplicated against every other layer's own config. Kept separate from
+/// [`LayerAttentionConfig`] itself since these are [`NodeId`]s already
+/// placed in the program, never a caller-facing description.
+struct AttentionLayerResources {
+    group: u32,
+    inv_sqrt_head_dim: NodeId,
+    inv_head_dim: NodeId,
+    cos: NodeId,
+    sin: NodeId,
+    group_ones: NodeId,
+    is_future: NodeId,
+    neg_infinity: NodeId,
+}
+
+/// Returns `cache`'s existing value for `key` if one is already there,
+/// otherwise runs `build`, appends `(key, value)`, and returns the fresh
+/// value -- the linear-scan dedup [`lfm2_forward_program_with_experts`]'s
+/// pre-pass uses for every shared per-attention-config resource except the
+/// RoPE table (one extra field) and the causal mask (fallible), which
+/// inline the same scan-then-insert shape directly.
+fn find_or_insert<Key, Value>(
+    cache: &mut Vec<(Key, Value)>,
+    key: Key,
+    build: impl FnOnce() -> Value,
+) -> Value
+where
+    Key: PartialEq,
+    Value: Copy,
+{
+    for (candidate, value) in cache.iter() {
+        if *candidate == key {
+            return *value;
+        }
+    }
+    let value = build();
+    cache.push((key, value));
+    value
+}
+
 /// [`append_mistral_layer`]'s attention sub-block in isolation (RoPE + GQA +
 /// causal mask + residual, no FFN) -- the piece [`lfm2_forward_program_with_experts`]
 /// needs on its own, since an attention block there sits beside
@@ -9,6 +205,20 @@ use super::*;
 /// rather than shared by refactoring that function, so the dense Mistral/Llama
 /// path's own generated program bytes never change shape because this
 /// function exists next to it.
+///
+/// `value_source` ([`ValueSource`]), `rope_pairing` ([`RopePairing`]), the
+/// `is_future`/`neg_infinity` pair (built by [`causal_mask`] or
+/// [`causal_mask_windowed`] at the call site), and `post_attention_norm_weight`
+/// are this mixer's per-call knobs -- the heterogeneous-layer building
+/// block a caller composes per layer, rather than this function guessing a
+/// model's shape from its own parameters. Every caller in this crate today
+/// passes `ValueSource::Projected(wv)`, `RopePairing::Interleaved`,
+/// `causal_mask_windowed(program, None)`'s output, and `None` for
+/// `post_attention_norm_weight`, which reproduces this function's prior
+/// fixed behaviour node-for-node. `Some(gamma)` normalizes the attention
+/// sub-block's output ([`rmsnorm`] with `gamma`) BEFORE the residual add
+/// below -- Gemma 4's `post_attention_norm.weight`, absent from every
+/// architecture this function served before this knob existed.
 #[allow(clippy::too_many_arguments)]
 pub fn append_attention_mixer(
     program: &mut Vec<Op>,
@@ -28,8 +238,10 @@ pub fn append_attention_mixer(
     k_norm_weight: NodeId,
     wq: NodeId,
     wk: NodeId,
-    wv: NodeId,
+    value_source: ValueSource,
     wo: NodeId,
+    rope_pairing: RopePairing,
+    post_attention_norm_weight: Option<NodeId>,
 ) -> Result<NodeId, TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
@@ -70,33 +282,44 @@ pub fn append_attention_mixer(
     )?;
     let k = rmsnorm_per_head(program, k_raw, k_norm_weight, inv_head_dim, eps, "u")?;
 
-    let v_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed, "si->sudi"), (wv, "iud->sudi")],
-    )?;
-    let v = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        v_product,
-        "sudi->sudi",
-        "sud->sudi",
-    )?;
+    let v = match value_source {
+        ValueSource::Projected(wv) => {
+            let v_product = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(normed, "si->sudi"), (wv, "iud->sudi")],
+            )?;
+            reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                v_product,
+                "sudi->sudi",
+                "sud->sudi",
+            )?
+        }
+        ValueSource::SharedWithKey => k_raw,
+    };
+
+    let (q_same_offset, q_partner_offset) = rope_pairing.offsets();
+    let q_same_pattern = alloc::format!("s,h,{q_same_offset}->shi");
+    let q_partner_pattern = alloc::format!("s,h,{q_partner_offset}->shi");
+    let k_same_pattern = alloc::format!("s,u,{q_same_offset}->sui");
+    let k_partner_pattern = alloc::format!("s,u,{q_partner_offset}->sui");
 
     let q_even_cos = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(q, "s,h,2*i->shi"), (cos, "si->shi")],
+        &[(q, q_same_pattern.as_str()), (cos, "si->shi")],
     )?;
     let q_odd_sin = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(q, "s,h,2*i+1->shi"), (sin, "si->shi")],
+        &[(q, q_partner_pattern.as_str()), (sin, "si->shi")],
     )?;
     let rotated_q_even = elementwise(
         program,
@@ -108,13 +331,13 @@ pub fn append_attention_mixer(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(q, "s,h,2*i->shi"), (sin, "si->shi")],
+        &[(q, q_same_pattern.as_str()), (sin, "si->shi")],
     )?;
     let q_odd_cos = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(q, "s,h,2*i+1->shi"), (cos, "si->shi")],
+        &[(q, q_partner_pattern.as_str()), (cos, "si->shi")],
     )?;
     let rotated_q_odd = elementwise(
         program,
@@ -127,13 +350,13 @@ pub fn append_attention_mixer(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(k, "s,u,2*i->sui"), (cos, "si->sui")],
+        &[(k, k_same_pattern.as_str()), (cos, "si->sui")],
     )?;
     let k_odd_sin = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(k, "s,u,2*i+1->sui"), (sin, "si->sui")],
+        &[(k, k_partner_pattern.as_str()), (sin, "si->sui")],
     )?;
     let rotated_k_even = elementwise(
         program,
@@ -145,13 +368,13 @@ pub fn append_attention_mixer(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(k, "s,u,2*i->sui"), (sin, "si->sui")],
+        &[(k, k_same_pattern.as_str()), (sin, "si->sui")],
     )?;
     let k_odd_cos = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(k, "s,u,2*i+1->sui"), (cos, "si->sui")],
+        &[(k, k_partner_pattern.as_str()), (cos, "si->sui")],
     )?;
     let rotated_k_odd = elementwise(
         program,
@@ -316,12 +539,223 @@ pub fn append_attention_mixer(
         "so->sugdo",
     )?;
 
+    let attn_out = match post_attention_norm_weight {
+        Some(gamma) => rmsnorm(program, attn_out, gamma, inv_dim, eps)?,
+        None => attn_out,
+    };
+
     elementwise(
         program,
         DType::Float32,
         ScalarOp::Add,
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )
+}
+
+/// The dense-triple SwiGLU FFN branch [`lfm2_forward_program_with_experts`]
+/// ran inline before [`FfnCombination::ParallelDenseMoe`] needed the same
+/// six-op sequence available a second time (once for its own dense branch,
+/// once for [`FfnCombination::Exclusive`]'s leading dense blocks) --
+/// extracted node-for-node, so [`FfnCombination::Exclusive`]'s own call
+/// site reproduces the prior inline program unchanged.
+fn append_dense_swiglu_ffn(
+    program: &mut Vec<Op>,
+    layer: u32,
+    normed: NodeId,
+    embedding: u32,
+    feed_forward: u32,
+    ones: NodeId,
+) -> Result<NodeId, TensorError> {
+    let w_gate = input_leaf(
+        program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+        &alloc::format!("blk.{layer}.ffn_gate.weight"),
+    );
+    let w_up = input_leaf(
+        program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+        &alloc::format!("blk.{layer}.ffn_up.weight"),
+    );
+    let w_down = input_leaf(
+        program,
+        DType::Float32,
+        alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
+        &alloc::format!("blk.{layer}.ffn_down.weight"),
+    );
+    let gate_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "sd->sdg"), (w_gate, "dg->sdg")],
+    )?;
+    let gate = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gate_product,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
+    let up_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "sd->sdg"), (w_up, "dg->sdg")],
+    )?;
+    let up = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        up_product,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
+
+    let neg_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Negate,
+        &[(gate, "sg->sg")],
+    )?;
+    let exp_neg_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(neg_gate, "sg->sg")],
+    )?;
+    let one_plus_exp = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(exp_neg_gate, "sg->sg"), (ones, "->sg")],
+    )?;
+    let sigmoid_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(one_plus_exp, "sg->sg")],
+    )?;
+    let silu_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")],
+    )?;
+    let ffn_hidden = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(silu_gate, "sg->sg"), (up, "sg->sg")],
+    )?;
+
+    let down_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
+    )?;
+    reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        down_product,
+        "sgd->sgd",
+        "sd->sgd",
+    )
+}
+
+/// The routed MoE FFN branch [`lfm2_forward_program_with_experts`] ran
+/// inline before [`FfnCombination::ParallelDenseMoe`] needed the same
+/// weight leaves and [`append_moe_ffn`] call available beside
+/// [`append_dense_swiglu_ffn`] -- extracted node-for-node, so
+/// [`FfnCombination::Exclusive`]'s own call site (passing
+/// [`LayerFfnConfig::exclusive`]'s `routed_gating: Sigmoid` and
+/// `routed_expert_bias: true`) reproduces the prior inline program
+/// unchanged. `gating`/`use_expert_bias` are [`LayerFfnConfig`]'s own
+/// `routed_gating`/`routed_expert_bias` fields threaded straight through --
+/// Gemma 4's own [`FfnCombination::ParallelDenseMoe`] caller sets
+/// `Softmax`/`false`.
+#[allow(clippy::too_many_arguments)]
+fn append_routed_expert_ffn(
+    program: &mut Vec<Op>,
+    layer: u32,
+    normed: NodeId,
+    embedding: u32,
+    expert_feed_forward: u32,
+    expert_count: u32,
+    expert_used_count: u32,
+    ones: NodeId,
+    gating: ExpertGatingFunc,
+    use_expert_bias: bool,
+    moe_sites: &mut Vec<MoeSite>,
+) -> Result<NodeId, TensorError> {
+    let gate_inp = input_leaf(
+        program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding), Extent::Static(expert_count)],
+        &alloc::format!("blk.{layer}.ffn_gate_inp.weight"),
+    );
+    let expert_w_gate = input_leaf(
+        program,
+        DType::Float32,
+        alloc::vec![
+            Extent::Static(expert_count),
+            Extent::Static(embedding),
+            Extent::Static(expert_feed_forward)
+        ],
+        &alloc::format!("blk.{layer}.ffn_gate_exps.weight"),
+    );
+    let expert_w_up = input_leaf(
+        program,
+        DType::Float32,
+        alloc::vec![
+            Extent::Static(expert_count),
+            Extent::Static(embedding),
+            Extent::Static(expert_feed_forward)
+        ],
+        &alloc::format!("blk.{layer}.ffn_up_exps.weight"),
+    );
+    let expert_w_down = input_leaf(
+        program,
+        DType::Float32,
+        alloc::vec![
+            Extent::Static(expert_count),
+            Extent::Static(expert_feed_forward),
+            Extent::Static(embedding)
+        ],
+        &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
+    );
+    let expert_bias = if use_expert_bias {
+        Some(input_leaf(
+            program,
+            DType::Float32,
+            alloc::vec![Extent::Static(expert_count)],
+            &alloc::format!("blk.{layer}.exp_probs_b.bias"),
+        ))
+    } else {
+        None
+    };
+    let (ffn_out, site) = append_moe_ffn(
+        program,
+        layer,
+        normed,
+        gate_inp,
+        expert_w_gate,
+        expert_w_up,
+        expert_w_down,
+        expert_count,
+        expert_used_count,
+        ones,
+        gating,
+        expert_bias,
+    )?;
+    moe_sites.push(site);
+    Ok(ffn_out)
 }
 
 /// LFM2.5-8B-A1B's hybrid forward pass: `block_count` blocks, each either
@@ -342,6 +776,16 @@ pub fn append_attention_mixer(
 /// function's own doc does not claim -- `causal_conv1d`'s masked-gather
 /// composition only needs the whole sequence to be present at once, which a
 /// one-token-at-a-time decode call does not have.
+///
+/// `ffn_configs` ([`LayerFfnConfig`]) generalizes the per-layer
+/// post-attention/FFN sequence the same way `attention_configs`
+/// generalized the attention sub-block -- every element
+/// [`LayerFfnConfig::exclusive`] (every caller in this crate today)
+/// reproduces this function's prior fixed FFN-selection and unnormalized
+/// residual behaviour node-for-node. `embedding_scale`
+/// ([`EmbeddingScale`]) and `logit_softcap` are `None` for every caller
+/// today, reproducing the prior unscaled embedding and untransformed
+/// final logits.
 #[allow(clippy::too_many_arguments)]
 pub fn lfm2_forward_program_with_experts(
     vocab: u32,
@@ -349,14 +793,16 @@ pub fn lfm2_forward_program_with_experts(
     feed_forward: u32,
     expert_feed_forward: u32,
     query_heads: u32,
-    kv_heads: u32,
-    head_dim: u32,
     block_count: u32,
     expert_count: u32,
     expert_used_count: u32,
     leading_dense_block_count: u32,
     l_cache: u32,
     layer_kinds: &[LayerKind],
+    attention_configs: &[LayerAttentionConfig],
+    ffn_configs: &[LayerFfnConfig],
+    embedding_scale: Option<EmbeddingScale>,
+    logit_softcap: Option<f32>,
 ) -> Result<(Vec<Op>, NodeId, MoeSites), TensorError> {
     if layer_kinds.len() != block_count as usize {
         return Err(TensorError::LayerKindCountMismatch {
@@ -364,9 +810,18 @@ pub fn lfm2_forward_program_with_experts(
             found: layer_kinds.len(),
         });
     }
-
-    let group = query_heads / kv_heads;
-    let pairs = head_dim / 2;
+    if attention_configs.len() != block_count as usize {
+        return Err(TensorError::AttentionConfigCountMismatch {
+            expected: block_count,
+            found: attention_configs.len(),
+        });
+    }
+    if ffn_configs.len() != block_count as usize {
+        return Err(TensorError::FfnConfigCountMismatch {
+            expected: block_count,
+            found: ffn_configs.len(),
+        });
+    }
 
     let mut program = Vec::new();
 
@@ -383,37 +838,120 @@ pub fn lfm2_forward_program_with_experts(
         "token_embd.weight",
     );
     let mut x = embedding_lookup(&mut program, table, ids);
+    if let Some(scale) = embedding_scale {
+        let multiplier = match scale {
+            EmbeddingScale::Sqrt => (embedding as f32).sqrt(),
+        };
+        let multiplier = scalar_constant(&mut program, multiplier);
+        x = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(x, "sd->sd"), (multiplier, "->sd")],
+        )?;
+    }
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
     let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
-    let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
-    let inv_head_dim = scalar_constant(&mut program, 1.0 / head_dim as f32);
-    let cos = input_leaf(
-        &mut program,
-        DType::Float32,
-        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
-        "rope_cos",
-    );
-    let sin = input_leaf(
-        &mut program,
-        DType::Float32,
-        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
-        "rope_sin",
-    );
-    let group_ones = op::append(
-        &mut program,
-        Op::Constant {
-            dtype: DType::Float32,
-            shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
-            value: 1.0,
-        },
-    );
-    let (is_future, neg_infinity) = causal_mask(&mut program)?;
+
+    // Every shared per-attention-config resource (RoPE table, causal mask,
+    // GQA broadcast constant, per-head scaling scalars) is declared ONCE per
+    // DISTINCT value, at the first layer that needs it, walked in schedule
+    // order -- so a uniform schedule (every caller in this crate today)
+    // declares each resource exactly once, in exactly the same relative
+    // order [`lfm2_forward_program_with_experts`] always declared them in,
+    // before this loop existed: `inv_sqrt_head_dim`, `inv_head_dim`,
+    // `rope_cos`/`rope_sin`, `group_ones`, then the causal mask. A
+    // heterogeneous schedule instead grows each cache to one entry per
+    // distinct value actually referenced. `attention_resources[index]` is
+    // that same attention layer's own resolved bundle, in schedule order --
+    // the main loop below reads it by a running counter rather than
+    // searching these caches a second time.
+    let mut inv_sqrt_head_dim_cache: Vec<(u32, NodeId)> = Vec::new();
+    let mut inv_head_dim_cache: Vec<(u32, NodeId)> = Vec::new();
+    let mut rope_table_cache: Vec<(RopeTableSel, u32, NodeId, NodeId)> = Vec::new();
+    let mut group_ones_cache: Vec<((u32, u32), NodeId)> = Vec::new();
+    let mut mask_cache: Vec<(Option<u32>, NodeId, NodeId)> = Vec::new();
+    let mut attention_resources: Vec<AttentionLayerResources> = Vec::new();
+
+    for (layer, kind) in layer_kinds.iter().enumerate() {
+        if *kind != LayerKind::Attention {
+            continue;
+        }
+        let config = &attention_configs[layer];
+        let group = query_heads / config.kv_heads;
+
+        let inv_sqrt_head_dim = find_or_insert(&mut inv_sqrt_head_dim_cache, config.head_dim, || {
+            scalar_constant(&mut program, 1.0 / (config.head_dim as f32).sqrt())
+        });
+        let inv_head_dim = find_or_insert(&mut inv_head_dim_cache, config.head_dim, || {
+            scalar_constant(&mut program, 1.0 / config.head_dim as f32)
+        });
+        let (cos, sin) = match rope_table_cache
+            .iter()
+            .find(|(table, ..)| *table == config.rope_table)
+        {
+            Some((_, _, cos, sin)) => (*cos, *sin),
+            None => {
+                let pairs = config.head_dim / 2;
+                let cos = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+                    config.rope_table.cos_name,
+                );
+                let sin = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+                    config.rope_table.sin_name,
+                );
+                rope_table_cache.push((config.rope_table, pairs, cos, sin));
+                (cos, sin)
+            }
+        };
+        let group_ones = find_or_insert(&mut group_ones_cache, (config.kv_heads, group), || {
+            op::append(
+                &mut program,
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(config.kv_heads), Extent::Static(group)],
+                    value: 1.0,
+                },
+            )
+        });
+        // `None` delegates straight to `causal_mask` (that function's own
+        // doc), so a uniform never-windowed schedule reproduces the prior
+        // program byte-for-byte.
+        let mask_result: Result<(NodeId, NodeId), TensorError> =
+            match mask_cache.iter().find(|(window, ..)| *window == config.mask_window) {
+                Some((_, is_future, neg_infinity)) => Ok((*is_future, *neg_infinity)),
+                None => {
+                    let built = causal_mask_windowed(&mut program, config.mask_window)?;
+                    mask_cache.push((config.mask_window, built.0, built.1));
+                    Ok(built)
+                }
+            };
+        let (is_future, neg_infinity) = mask_result?;
+
+        attention_resources.push(AttentionLayerResources {
+            group,
+            inv_sqrt_head_dim,
+            inv_head_dim,
+            cos,
+            sin,
+            group_ones,
+            is_future,
+            neg_infinity,
+        });
+    }
+    let mut attention_layer_index: usize = 0;
     let mut moe_sites: Vec<MoeSite> = Vec::new();
 
     for (layer, kind) in layer_kinds.iter().enumerate() {
         let layer = layer as u32;
+        let ffn_config = &ffn_configs[layer as usize];
         let attn_norm_weight = input_leaf(
             &mut program,
             DType::Float32,
@@ -426,9 +964,34 @@ pub fn lfm2_forward_program_with_experts(
             alloc::vec![Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.ffn_norm.weight"),
         );
+        let post_attention_norm_weight = if ffn_config.post_attention_norm {
+            Some(input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.post_attention_norm.weight"),
+            ))
+        } else {
+            None
+        };
 
         let post_mixer = match kind {
             LayerKind::Attention => {
+                let config = &attention_configs[layer as usize];
+                let head_dim = config.head_dim;
+                let kv_heads = config.kv_heads;
+
+                let resources = &attention_resources[attention_layer_index];
+                attention_layer_index += 1;
+                let group = resources.group;
+                let inv_sqrt_head_dim = resources.inv_sqrt_head_dim;
+                let inv_head_dim = resources.inv_head_dim;
+                let cos = resources.cos;
+                let sin = resources.sin;
+                let group_ones = resources.group_ones;
+                let is_future = resources.is_future;
+                let neg_infinity = resources.neg_infinity;
+
                 let wq = input_leaf(
                     &mut program,
                     DType::Float32,
@@ -449,16 +1012,22 @@ pub fn lfm2_forward_program_with_experts(
                     ],
                     &alloc::format!("blk.{layer}.attn_k.weight"),
                 );
-                let wv = input_leaf(
-                    &mut program,
-                    DType::Float32,
-                    alloc::vec![
-                        Extent::Static(embedding),
-                        Extent::Static(kv_heads),
-                        Extent::Static(head_dim)
-                    ],
-                    &alloc::format!("blk.{layer}.attn_v.weight"),
-                );
+                let value_source = match config.value_source_kind {
+                    ValueSourceKind::ProjectedV => {
+                        let wv = input_leaf(
+                            &mut program,
+                            DType::Float32,
+                            alloc::vec![
+                                Extent::Static(embedding),
+                                Extent::Static(kv_heads),
+                                Extent::Static(head_dim)
+                            ],
+                            &alloc::format!("blk.{layer}.attn_v.weight"),
+                        );
+                        ValueSource::Projected(wv)
+                    }
+                    ValueSourceKind::SharedWithKey => ValueSource::SharedWithKey,
+                };
                 let wo = input_leaf(
                     &mut program,
                     DType::Float32,
@@ -500,8 +1069,10 @@ pub fn lfm2_forward_program_with_experts(
                     k_norm_weight,
                     wq,
                     wk,
-                    wv,
+                    value_source,
                     wo,
+                    config.rope_pairing,
+                    post_attention_norm_weight,
                 )?
             }
             LayerKind::ShortConv => {
@@ -566,167 +1137,95 @@ pub fn lfm2_forward_program_with_experts(
 
         let normed2 = rmsnorm(&mut program, post_mixer, ffn_norm_weight, inv_dim, eps)?;
 
-        let ffn_out = if layer < leading_dense_block_count {
-            let w_gate = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-                &alloc::format!("blk.{layer}.ffn_gate.weight"),
-            );
-            let w_up = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-                &alloc::format!("blk.{layer}.ffn_up.weight"),
-            );
-            let w_down = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
-                &alloc::format!("blk.{layer}.ffn_down.weight"),
-            );
-            let gate_product = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
-            )?;
-            let gate = reduce(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                gate_product,
-                "sdg->sdg",
-                "sg->sdg",
-            )?;
-            let up_product = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
-            )?;
-            let up = reduce(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                up_product,
-                "sdg->sdg",
-                "sg->sdg",
-            )?;
+        let ffn_out = match ffn_config.combination {
+            FfnCombination::Exclusive => {
+                if layer < leading_dense_block_count {
+                    append_dense_swiglu_ffn(&mut program, layer, normed2, embedding, feed_forward, ones)?
+                } else {
+                    append_routed_expert_ffn(
+                        &mut program,
+                        layer,
+                        normed2,
+                        embedding,
+                        expert_feed_forward,
+                        expert_count,
+                        expert_used_count,
+                        ones,
+                        ffn_config.routed_gating,
+                        ffn_config.routed_expert_bias,
+                        &mut moe_sites,
+                    )?
+                }
+            }
+            FfnCombination::ParallelDenseMoe => {
+                let dense_out =
+                    append_dense_swiglu_ffn(&mut program, layer, normed2, embedding, feed_forward, ones)?;
+                let dense_out = if ffn_config.dense_post_norm {
+                    let gamma = input_leaf(
+                        &mut program,
+                        DType::Float32,
+                        alloc::vec![Extent::Static(embedding)],
+                        &alloc::format!("blk.{layer}.post_ffw_norm_1.weight"),
+                    );
+                    rmsnorm(&mut program, dense_out, gamma, inv_dim, eps)?
+                } else {
+                    dense_out
+                };
 
-            let neg_gate = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Negate,
-                &[(gate, "sg->sg")],
-            )?;
-            let exp_neg_gate = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Exponential,
-                &[(neg_gate, "sg->sg")],
-            )?;
-            let one_plus_exp = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Add,
-                &[(exp_neg_gate, "sg->sg"), (ones, "->sg")],
-            )?;
-            let sigmoid_gate = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Reciprocal,
-                &[(one_plus_exp, "sg->sg")],
-            )?;
-            let silu_gate = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")],
-            )?;
-            let ffn_hidden = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(silu_gate, "sg->sg"), (up, "sg->sg")],
-            )?;
+                let routed_input = if ffn_config.routed_pre_norm {
+                    let gamma = input_leaf(
+                        &mut program,
+                        DType::Float32,
+                        alloc::vec![Extent::Static(embedding)],
+                        &alloc::format!("blk.{layer}.pre_ffw_norm_2.weight"),
+                    );
+                    rmsnorm(&mut program, post_mixer, gamma, inv_dim, eps)?
+                } else {
+                    normed2
+                };
+                let routed_out = append_routed_expert_ffn(
+                    &mut program,
+                    layer,
+                    routed_input,
+                    embedding,
+                    expert_feed_forward,
+                    expert_count,
+                    expert_used_count,
+                    ones,
+                    ffn_config.routed_gating,
+                    ffn_config.routed_expert_bias,
+                    &mut moe_sites,
+                )?;
+                let routed_out = if ffn_config.routed_post_norm {
+                    let gamma = input_leaf(
+                        &mut program,
+                        DType::Float32,
+                        alloc::vec![Extent::Static(embedding)],
+                        &alloc::format!("blk.{layer}.post_ffw_norm_2.weight"),
+                    );
+                    rmsnorm(&mut program, routed_out, gamma, inv_dim, eps)?
+                } else {
+                    routed_out
+                };
 
-            let down_product = elementwise(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Multiply,
-                &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
-            )?;
-            reduce(
-                &mut program,
-                DType::Float32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                down_product,
-                "sgd->sgd",
-                "sd->sgd",
-            )?
-        } else {
-            let gate_inp = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(expert_count)],
-                &alloc::format!("blk.{layer}.ffn_gate_inp.weight"),
-            );
-            let expert_w_gate = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Static(expert_count),
-                    Extent::Static(embedding),
-                    Extent::Static(expert_feed_forward)
-                ],
-                &alloc::format!("blk.{layer}.ffn_gate_exps.weight"),
-            );
-            let expert_w_up = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Static(expert_count),
-                    Extent::Static(embedding),
-                    Extent::Static(expert_feed_forward)
-                ],
-                &alloc::format!("blk.{layer}.ffn_up_exps.weight"),
-            );
-            let expert_w_down = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![
-                    Extent::Static(expert_count),
-                    Extent::Static(expert_feed_forward),
-                    Extent::Static(embedding)
-                ],
-                &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
-            );
-            let expert_bias = input_leaf(
-                &mut program,
-                DType::Float32,
-                alloc::vec![Extent::Static(expert_count)],
-                &alloc::format!("blk.{layer}.exp_probs_b.bias"),
-            );
-            let (ffn_out, site) = append_moe_ffn(
-                &mut program,
-                layer,
-                normed2,
-                gate_inp,
-                expert_w_gate,
-                expert_w_up,
-                expert_w_down,
-                expert_count,
-                expert_used_count,
-                ones,
-                ExpertGatingFunc::Sigmoid,
-                Some(expert_bias),
-            )?;
-            moe_sites.push(site);
-            ffn_out
+                let combined = elementwise(
+                    &mut program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(dense_out, "sd->sd"), (routed_out, "sd->sd")],
+                )?;
+                if ffn_config.combined_post_norm {
+                    let gamma = input_leaf(
+                        &mut program,
+                        DType::Float32,
+                        alloc::vec![Extent::Static(embedding)],
+                        &alloc::format!("blk.{layer}.post_ffw_norm.weight"),
+                    );
+                    rmsnorm(&mut program, combined, gamma, inv_dim, eps)?
+                } else {
+                    combined
+                }
+            }
         };
 
         x = elementwise(
@@ -735,6 +1234,21 @@ pub fn lfm2_forward_program_with_experts(
             ScalarOp::Add,
             &[(ffn_out, "sd->sd"), (post_mixer, "sd->sd")],
         )?;
+
+        if ffn_config.output_scale {
+            let output_scale = input_leaf(
+                &mut program,
+                DType::Float32,
+                Vec::new(),
+                &alloc::format!("blk.{layer}.layer_output_scale.weight"),
+            );
+            x = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(x, "sd->sd"), (output_scale, "->sd")],
+            )?;
+        }
     }
 
     let output_norm_weight = input_leaf(
@@ -766,6 +1280,31 @@ pub fn lfm2_forward_program_with_experts(
         "sdv->sdv",
         "sv->sdv",
     )?;
+
+    let logits = match logit_softcap {
+        Some(cap) => {
+            let cap_node = scalar_constant(&mut program, cap);
+            let scaled = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Divide,
+                &[(logits, "sv->sv"), (cap_node, "->sv")],
+            )?;
+            let tanh = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Tanh,
+                &[(scaled, "sv->sv")],
+            )?;
+            elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(tanh, "sv->sv"), (cap_node, "->sv")],
+            )?
+        }
+        None => logits,
+    };
 
     Ok((program, logits, MoeSites(moe_sites)))
 }

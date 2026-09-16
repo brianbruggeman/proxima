@@ -286,6 +286,20 @@ pub enum TensorError {
     #[error("layer_kinds has {found} entries but block_count is {expected}")]
     LayerKindCountMismatch { expected: u32, found: usize },
 
+    /// [`crate::spec::lfm2_forward_program_with_experts`]'s `attention_configs`
+    /// must name exactly one [`crate::spec::LayerAttentionConfig`] per block,
+    /// mirroring [`Self::LayerKindCountMismatch`] -- non-`Attention` blocks
+    /// carry an entry too, simply unread, so the two slices always line up
+    /// by index.
+    #[error("attention_configs has {found} entries but block_count is {expected}")]
+    AttentionConfigCountMismatch { expected: u32, found: usize },
+
+    /// [`crate::spec::lfm2_forward_program_with_experts`]'s `ffn_configs`
+    /// must name exactly one [`crate::spec::LayerFfnConfig`] per block,
+    /// mirroring [`Self::AttentionConfigCountMismatch`].
+    #[error("ffn_configs has {found} entries but block_count is {expected}")]
+    FfnConfigCountMismatch { expected: u32, found: usize },
+
     /// [`crate::spec::qwen35_forward_program`]'s own dense/SSM layer split
     /// (`(layer + 1) % full_attention_interval != 0`, `qwen35.cpp`'s own
     /// `load_arch_hparams` default) divides by this value; zero has no

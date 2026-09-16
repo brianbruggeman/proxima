@@ -678,7 +678,7 @@ pub fn metadata_u32_optional_or(parsed: &ParsedGguf, key: &str, default: u32) ->
 /// unsupported wire type, or carries a negative signed value;
 /// [`InteropError::MetadataArrayLengthMismatch`] when the array length is not
 /// the declared block count.
-fn metadata_u32_per_layer(
+pub(crate) fn metadata_u32_per_layer(
     parsed: &ParsedGguf,
     key: &str,
     block_count: u32,
@@ -704,6 +704,39 @@ fn metadata_u32_per_layer(
                     .into_iter(),
                 block_count,
             )
+        }
+        _ => Err(InteropError::MissingMetadataKey { key: key.into() }),
+    }
+}
+
+/// Same per-layer contract as [`metadata_u32_per_layer`], for a GGUF
+/// [`MetadataArray::Bool`] key (e.g. `gemma4.attention.sliding_window_pattern`) --
+/// no scalar-expansion arm, since a checkpoint declaring an alternating
+/// per-layer attention pattern always ships it as an array, never a single
+/// bool meant to apply to every layer.
+///
+/// # Errors
+///
+/// [`InteropError::MissingMetadataKey`] when the key is absent or is not a
+/// bool array; [`InteropError::MetadataArrayLengthMismatch`] when the array
+/// length is not the declared block count.
+pub(crate) fn metadata_bool_per_layer(
+    parsed: &ParsedGguf,
+    key: &str,
+    block_count: u32,
+) -> Result<Vec<bool>, InteropError> {
+    use proxima_gguf::value::MetadataArray;
+
+    match parsed.metadata_value(key) {
+        Some(MetadataValue::Array(MetadataArray::Bool(values))) => {
+            if values.len() != block_count as usize {
+                return Err(InteropError::MetadataArrayLengthMismatch {
+                    key: key.into(),
+                    expected: block_count as usize,
+                    found: values.len(),
+                });
+            }
+            Ok(values.clone())
         }
         _ => Err(InteropError::MissingMetadataKey { key: key.into() }),
     }
@@ -1679,7 +1712,7 @@ fn bind_matmul_weight_private_copy<'file>(
 /// declared element count, so a malformed or adversarial file can disagree
 /// with it; caught here rather than sliced past.
 #[cfg(feature = "std")]
-fn transpose_expert_stack(
+pub(crate) fn transpose_expert_stack(
     flat: &[f32],
     tensor: &str,
     expert_count: usize,
