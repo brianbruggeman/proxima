@@ -1,18 +1,25 @@
 #[cfg(test)]
 use super::{
-    BackendRuntime, Control, DecodeMetrics, InteropError, LoadedModel, LogitsSink,
-    NodeValuesSink, Phase, PlanNumerics, PrefixState, RouterExpertCounts, RouterLogits,
-    ServingConfig, SsmLayerCache, TokenEvent, begin_expert_gather_phase,
-    build_position_inputs, collect_future_gather_cuts, decode_until_stop_or_budget,
-    first_nonfinite_node_value, kv_extent, lock_expert_slab, map_expert_sources_to_segment,
-    phys_footprint_bytes, qwen35_dense_attention_placed_byte_length,
-    qwen35_dense_attention_placement_enabled, qwen35moe_admit_low_copy,
-    qwen35moe_monolithic_all_low_enabled,
-    qwen35moe_pre_gather_enabled, retain_qwen35_segment_readbacks,
-    should_release_monolithic_sources, step_batch_needs_logits, supported_serving_config,
-    use_metal_output_placements, visit_qwen35moe_router_boundary,
-    visit_qwen35moe_router_selections, wants_bos,
+    Control, DecodeMetrics, LoadedModel, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache,
+    TokenEvent, begin_expert_gather_phase, build_position_inputs, collect_future_gather_cuts,
+    decode_until_stop_or_budget, first_nonfinite_node_value, kv_extent, lock_expert_slab,
+    qwen35moe_admit_low_copy, qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
+    should_release_monolithic_sources, step_batch_needs_logits, visit_qwen35moe_router_boundary,
+    visit_qwen35moe_router_selections,
 };
+#[cfg(all(test, feature = "metal"))]
+use super::{
+    BackendRuntime, InteropError, LogitsSink, NodeValuesSink, PrefixState, ServingConfig,
+    map_expert_sources_to_segment, supported_serving_config, wants_bos,
+};
+#[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
+use super::{
+    PlanNumerics, qwen35_dense_attention_placed_byte_length,
+    qwen35_dense_attention_placement_enabled, retain_qwen35_segment_readbacks,
+    use_metal_output_placements,
+};
+#[cfg(all(test, feature = "instrument", feature = "metal", target_os = "macos"))]
+use super::phys_footprint_bytes;
 
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

@@ -1891,7 +1891,7 @@ impl<'file> LoadedModel<'file> {
                     if monolithic_prefill_requested {
                         roots.extend(self.router_roots.iter().copied());
                     }
-                    for (_layer, roots_for_layer) in active_layer_roots.iter().enumerate() {
+                    for roots_for_layer in active_layer_roots.iter() {
                         match roots_for_layer {
                             Qwen35LayerRoots::Attention((even, odd, value)) => {
                                 roots.push(*even);
