@@ -2498,8 +2498,12 @@ impl<'file> LoadedModel<'file> {
         // is the gate that turns that into a typed refusal instead --
         // `PROXIMA_MAPPING_FIT_OVERRIDE=1` skips only the size-vs-host-limit
         // half of it, for a measurement run.
+        // carried past this block into `Self`'s own `mapping_residency_rung`
+        // field, so `run_decode_loop_observed_seeded`/
+        // `run_decode_loop_placed_kv` can thread THIS load's rung into
+        // `emit_token_breakdown_metal` instead of reading a shared global.
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        {
+        let mapping_residency_rung = {
             if std::env::var_os("PROXIMA_MAPPING_FIT_OVERRIDE").is_none()
                 && let Ok(facts) = omega::metal::system_memory_facts()
             {
@@ -2511,8 +2515,6 @@ impl<'file> LoadedModel<'file> {
                 };
                 crate::memory_fit::fit_mapping_bytes(file_bytes.len() as u64, limit)?;
             }
-            // only read by the `instrument`-gated log line below.
-            #[cfg_attr(not(feature = "instrument"), allow(unused_variables))]
             let residency_report = crate::mapping_residency::prove_resident(file_bytes)?;
             #[cfg(feature = "instrument")]
             info!(
@@ -2521,7 +2523,8 @@ impl<'file> LoadedModel<'file> {
                 mapping_missing_pages = residency_report.missing_pages,
                 "checkpoint_mapping_residency: proved resident before metal no-copy registration"
             );
-        }
+            residency_report.rung
+        };
         // registers `file_bytes` -- the checkpoint's own mmap, page-aligned
         // at its base by construction -- as the single mapping every packed
         // tensor's borrowed slice can be addressed into by OFFSET instead of
@@ -2595,6 +2598,8 @@ impl<'file> LoadedModel<'file> {
                     table_bytes: table_weight_bytes,
                     ssm_state_bytes: step_state.as_ref().map_or(0, |state| state.ssm_state_bytes),
                 },
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                mapping_residency_rung,
                 vocab,
                 program: bound.program,
                 logits_root: bound.logits_root,
@@ -2710,6 +2715,8 @@ impl<'file> LoadedModel<'file> {
                 table_bytes: table_weight_bytes,
                 ssm_state_bytes: 0,
             },
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            mapping_residency_rung,
             vocab,
             program,
             logits_root,
@@ -2811,6 +2818,13 @@ impl<'file> LoadedModel<'file> {
                 table_bytes: 0,
                 ssm_state_bytes: 0,
             },
+            // this load path never calls `mapping_residency::prove_resident`
+            // (no no-copy `MTLBuffer` registration to guard here -- see
+            // `checkpoint_mapping`'s own doc), so there is no achieved rung
+            // to report; `Prefault` matches what the ladder's own lowest
+            // rung means: nothing needed retrying.
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            mapping_residency_rung: crate::mapping_residency::ResidencyRung::Prefault,
             vocab,
             program,
             logits_root,
