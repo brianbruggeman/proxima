@@ -196,19 +196,7 @@ fn relative_error(found: &[f32], wanted: &[f32]) -> f32 {
 /// reference (self-check on the oracle), then CPU vs Metal (the actual
 /// parity this file's top-level doc's PROVEN cause predicts will diverge).
 #[test]
-#[ignore = "RED, PROVEN CAUSE: metal has no Q5_1 unpack kernel (msl::PackedCodec, \
-            kernel_types_identity.rs, has no Q5_1 arm) yet placements_execute_named.rs uploads \
-            Q5_1's raw packed bytes unchanged anyway (upload_packed_bytes, the same no-copy path \
-            every genuinely-supported codec takes) -- the generated kernel reads those bytes as \
-            literal f32 with no unpack step. Empirically confirmed on real gemma4 checkpoint bytes \
-            (blk.0.ffn_down.weight, Q5_1): cpu=[2.085, -0.684, 1.832, -0.731] (matches an \
-            independent dequant-then-f32 reference at 8.5e-7), metal=[NaN, -252.22, 0.0, 0.0]. \
-            Every gemma4 down-projection on every layer (ffn_down.weight AND ffn_down_exps.weight, \
-            all 30 layers) is Q5_1 -- this is why gemma4 decodes garbage on Metal from layer 0. Fix \
-            needs a real Q5_1 MSL unpack kernel + PackedCodec::Q5_1 arm (or dequantize Q5_1 weights \
-            to Float32 at bind time as an interim mitigation) -- tracked, unresolved, out of this \
-            slice's budget"]
-fn metal_diverges_from_cpu_on_real_q5_1_down_projection_bytes() {
+fn metal_matches_cpu_on_real_q5_1_down_projection_bytes() {
     let rows = 4_usize;
     let (weight_bytes, k) = real_q5_1_down_projection_rows(rows);
 

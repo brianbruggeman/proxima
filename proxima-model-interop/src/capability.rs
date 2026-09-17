@@ -297,12 +297,13 @@ pub mod quant_format {
             PackedCodec::Q6K => "Q6_K",
             PackedCodec::Q8_0 => "Q8_0",
             PackedCodec::Q4_0 => "Q4_0",
+            PackedCodec::Q5_1 => "Q5_1",
             PackedCodec::Float16 => "F16",
             PackedCodec::BFloat16 => "BF16",
         }
     }
 
-    /// The 9 [`PackedCodec`] variants, exhaustively -- adding a 10th to
+    /// The 10 [`PackedCodec`] variants, exhaustively -- adding an 11th to
     /// `omega::msl::PackedCodec` without adding it here is a compile error,
     /// not a silently stale doc.
     const ALL_CODECS: &[PackedCodec] = &[
@@ -313,14 +314,18 @@ pub mod quant_format {
         PackedCodec::Q6K,
         PackedCodec::Q8_0,
         PackedCodec::Q4_0,
+        PackedCodec::Q5_1,
         PackedCodec::Float16,
         PackedCodec::BFloat16,
     ];
 
-    /// `Q3_K` is metal-only so far -- see [`codec_name`]'s own doc.
+    /// `Q3_K` and `Q5_1` are metal-only so far -- see [`codec_name`]'s own
+    /// doc; `Q5_1` has no `omega::wgsl`/`omega::cuda` emitter yet (only
+    /// `omega::msl::Q5_1_UNPACK_MSL` exists), same posture `Q3_K` already
+    /// has.
     fn emitter_support_columns(codec: PackedCodec) -> (&'static str, &'static str, &'static str) {
         match codec {
-            PackedCodec::Q3K => ("supported", "unsupported", "unsupported"),
+            PackedCodec::Q3K | PackedCodec::Q5_1 => ("supported", "unsupported", "unsupported"),
             _ => ("supported", "supported", "supported"),
         }
     }
@@ -403,12 +408,12 @@ mod quant_format_tests {
     use super::quant_format::render_markdown;
 
     #[test]
-    fn renders_exactly_nine_packed_codec_rows_plus_the_header() {
+    fn renders_exactly_ten_packed_codec_rows_plus_the_header() {
         let rendered = render_markdown();
         assert_eq!(
             rendered.lines().count(),
-            11,
-            "9 PackedCodec variants, 1 header row, 1 separator row"
+            12,
+            "10 PackedCodec variants, 1 header row, 1 separator row"
         );
     }
 
@@ -420,6 +425,17 @@ mod quant_format_tests {
             q3k_row,
             Some("| Q3_K | supported | supported | unsupported | unsupported |"),
             "Q3_K has a metal kernel but no wgsl/cuda emitter yet"
+        );
+    }
+
+    #[test]
+    fn q5_1_row_is_metal_only() {
+        let rendered = render_markdown();
+        let q5_1_row = rendered.lines().find(|line| line.starts_with("| Q5_1 "));
+        assert_eq!(
+            q5_1_row,
+            Some("| Q5_1 | supported | supported | unsupported | unsupported |"),
+            "Q5_1 has a metal kernel but no wgsl/cuda emitter yet"
         );
     }
 }

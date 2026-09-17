@@ -119,6 +119,7 @@ fn codec_marker(codec: PackedCodec) -> &'static str {
         PackedCodec::Q2K
         | PackedCodec::Q8_0
         | PackedCodec::Q4_0
+        | PackedCodec::Q5_1
         | PackedCodec::Float16
         | PackedCodec::BFloat16 => {
             unreachable!("WEIGHT_FAMILIES never assigns a non-K-quant codec")
