@@ -1,0 +1,96 @@
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
+
+use proxima_gguf::value::{MetadataArray, MetadataValue};
+use proxima_tokenizer::vocab::Vocab;
+
+/// `unigram::escape` with `add_space_prefix = false` honored: substitute
+/// spaces for the SentencePiece marker but do not prepend one, matching
+/// gemma4's real `tokenizer.ggml.add_space_prefix = false` metadata.
+fn escape_no_prefix(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character == ' ' {
+                '\u{2581}'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+fn main() {
+    let candidate = Path::new(
+        "/Users/brianbruggeman/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129",
+    );
+    let mut file = File::open(candidate).expect("open gemma4 gguf");
+    let mut header_buf = Vec::new();
+    let parsed = 'grow: {
+        for cap in [4usize << 20, 16 << 20, 64 << 20, 256 << 20] {
+            header_buf.resize(cap, 0);
+            file.seek(SeekFrom::Start(0)).expect("seek");
+            let read = file.read(&mut header_buf).expect("read");
+            header_buf.truncate(read);
+            if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header_buf) {
+                break 'grow parsed;
+            }
+        }
+        panic!("gguf metadata region did not fit");
+    };
+
+    let vocab_bpe_path = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("builds vocab via the current gemma4 dispatch (merges-driven)");
+
+    let tokens = match parsed.metadata_value("tokenizer.ggml.tokens") {
+        Some(MetadataValue::Array(MetadataArray::String(tokens))) => tokens.clone(),
+        _ => panic!("tokens missing"),
+    };
+    let scores = match parsed.metadata_value("tokenizer.ggml.scores") {
+        Some(MetadataValue::Array(MetadataArray::F32(scores))) => scores.clone(),
+        _ => panic!("scores missing"),
+    };
+    let bos = match parsed.metadata_value("tokenizer.ggml.bos_token_id") {
+        Some(MetadataValue::U32(value)) => Some(*value),
+        _ => None,
+    };
+    let eos = match parsed.metadata_value("tokenizer.ggml.eos_token_id") {
+        Some(MetadataValue::U32(value)) => Some(*value),
+        _ => None,
+    };
+    let unk = match parsed.metadata_value("tokenizer.ggml.unknown_token_id") {
+        Some(MetadataValue::U32(value)) => Some(*value),
+        _ => None,
+    };
+    let vocab_spm_path =
+        Vocab::new_unigram(tokens, scores, bos, eos, unk).expect("builds scores-driven vocab");
+
+    let test_strings = [
+        "The capital of France is Paris",
+        "Hello world",
+        "def foo():",
+    ];
+
+    for text in test_strings {
+        let bpe_ids = proxima_tokenizer::encode(text, &vocab_bpe_path).expect("bpe encode");
+        let normalized = escape_no_prefix(text);
+        let spm_ids = proxima_tokenizer::unigram::encode_fragment(&normalized, &vocab_spm_path)
+            .expect("spm encode, no leading prefix");
+        println!("=== {text:?} ===");
+        println!(
+            "  current (gpt2-regex, merges-rank)         ids = {bpe_ids:?} pieces = {:?}",
+            bpe_ids
+                .iter()
+                .map(|id| vocab_bpe_path.token_str(*id))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "  spm, add_space_prefix=false (no-regex)    ids = {spm_ids:?} pieces = {:?}",
+            spm_ids
+                .iter()
+                .map(|id| vocab_spm_path.token_str(*id))
+                .collect::<Vec<_>>()
+        );
+        println!("  ids match: {}", bpe_ids == spm_ids);
+    }
+}
