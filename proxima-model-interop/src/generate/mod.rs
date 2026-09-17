@@ -184,6 +184,7 @@ mod pregather;
 mod residency_caches;
 #[macro_use]
 mod decode;
+mod serving_backend;
 mod tests_all;
 use decode::*;
 pub use load_model::*;
