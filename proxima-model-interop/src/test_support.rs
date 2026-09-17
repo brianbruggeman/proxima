@@ -89,12 +89,7 @@ pub(crate) fn qwen3moe_30b_gguf_path() -> String {
 /// qwen35moe`) checkpoint -- the one `real_qwen35moe_registry_probe.rs`'s
 /// own doc already names as the real blob every qwen35moe-specific
 /// diagnostic in this crate resolves against.
-#[cfg(all(
-    test,
-    feature = "metal-output-placement",
-    feature = "instrument",
-    target_os = "macos"
-))]
+#[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 pub(crate) fn qwen35moe_gguf_path() -> String {
     std::env::var("PROXIMA_QWEN35MOE_GGUF").unwrap_or_else(|_| {
         "/Users/brianbruggeman/.ollama/models/blobs/\
