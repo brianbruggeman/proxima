@@ -23,16 +23,18 @@ use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
-    EmbeddingScale, ExpertGatingFunc, FfnCombination, LayerAttentionConfig, LayerFfnConfig, LayerKind,
-    RopePairing, RopeTableSel, ValueSourceKind, lfm2_forward_program_with_experts,
+    Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
+    LayerAttentionConfig, LayerFfnConfig, LayerKind, RopePairing, RopeTableSel, ValueSourceKind,
+    lfm2_forward_program_with_experts,
 };
 
 use crate::architecture::{
     Architecture as ArchitectureTrait, BoundProgram, StepInput, StepInputContext,
 };
 use crate::bind::{
-    BoundWeights, ModelArchitecture, bind_dense, bind_matmul_weight, bind_matmul_weight_as,
-    bind_matmul_weight_transposed_f32, find_tensor, gguf_tensor_as_f32,
+    BoundWeights, ModelArchitecture, PackedOwnedKind, bind_dense, bind_matmul_weight,
+    bind_matmul_weight_as, bind_matmul_weight_transposed_f32, bind_moe_expert_weights, find_tensor,
+    gguf_tensor_as_f32,
 };
 use crate::error::InteropError;
 
@@ -89,21 +91,59 @@ pub fn gemma4_tensor_names(architecture: &Architecture) -> Vec<String> {
     names
 }
 
-/// Decodes `name` to `f32` and adds `1.0` to every element -- Gemma's own
-/// `(1 + weight)` RMSNorm convention, applied once here at bind time so the
-/// generic engine's `rmsnorm` (`gamma * x`, no offset) stays unaware of it.
-/// Every norm this checkpoint carries is small (`embedding` or `head_dim`
-/// wide), so a full decode is the right shape here -- unlike the fused
-/// expert tensors below, there is no packed-and-huge case to avoid.
-fn bind_norm_plus_one<'file>(
+/// Binds `rope_freqs.weight` (GGUF `ROPE_FREQS`) as raw, unmodified `f32`
+/// values -- the per-pair frequency-scaling factor
+/// [`Gemma4Arch::rope_freq_factors`] hands back to
+/// `crate::generate::build_position_inputs`, which divides each full-layer
+/// RoPE pair's angle by it. Unlike [`bind_norm`]'s norms this is not an
+/// RMSNorm gamma shift, and it declares no `Op::Input` leaf the
+/// forward program consumes -- it rides in [`BoundWeights::owned`] purely
+/// as a lookup table [`Gemma4Arch::rope_freq_factors`] reads back out by
+/// name, the same way every other bound weight is name-tagged there.
+fn bind_rope_freqs<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    let values = gguf_tensor_as_f32(parsed, file_bytes, "rope_freqs.weight")?;
+    state.resident_bytes += values.len() * core::mem::size_of::<f32>();
+    state.owned.push((String::from("rope_freqs.weight"), values));
+    Ok(())
+}
+
+/// The RMSNorm gamma shift this checkpoint family stores on disk, added to
+/// every norm weight at bind time so the generic engine's `rmsnorm`
+/// (`gamma * x`, no offset) stays unaware of the convention.
+/// `modeling_gemma4.py`'s `Gemma4RMSNorm` is ones-init and applies
+/// `normed * weight` directly (no `+ 1`) -- unlike gemma3's zero-init
+/// `(1 + weight)` convention, whose shift is `1.0`. Gemma 4's GGUF already
+/// stores the full effective gamma, so this is `0.0`: shifting by it is a
+/// byte-identical no-op, keeping the convention explicit data instead of a
+/// baked-in function name.
+const GEMMA4_NORM_SHIFT: f32 = 0.0;
+
+/// Decodes `name` to `f32` and adds `norm_shift` to every element -- the
+/// RMSNorm gamma convention this checkpoint family uses, applied once here
+/// at bind time so the generic engine's `rmsnorm` (`gamma * x`, no offset)
+/// stays unaware of it. Every norm this checkpoint carries is small
+/// (`embedding` or `head_dim` wide), so a full decode is the right shape
+/// here -- unlike the fused expert tensors below, there is no
+/// packed-and-huge case to avoid. Gemma 4 passes [`GEMMA4_NORM_SHIFT`]
+/// (`0.0`, ones-init `normed * weight`); Gemma 3's zero-init
+/// `(1 + weight)` convention would pass `1.0` here instead -- the shift is
+/// a config value, not a hard-coded convention.
+fn bind_norm<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     name: String,
+    norm_shift: f32,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
     let mut values = gguf_tensor_as_f32(parsed, file_bytes, &name)?;
-    for value in &mut values {
-        *value += 1.0;
+    if norm_shift != 0.0 {
+        for value in &mut values {
+            *value += norm_shift;
+        }
     }
     state.resident_bytes += values.len() * core::mem::size_of::<f32>();
     state.owned.push((name, values));
@@ -112,30 +152,25 @@ fn bind_norm_plus_one<'file>(
 
 /// Binds every weight [`lfm2_forward_program_with_experts`]'s `Input` leaves
 /// declare for gemma4's own [`Gemma4Arch::bind`] descriptor.
-/// `blk.{layer}.pre_ffw_norm_2.weight` is bound (via `bind_norm_plus_one`,
-/// Gemma's `(1 + weight)` convention) and consumed by the engine's
+/// `blk.{layer}.pre_ffw_norm_2.weight` is bound (via [`bind_norm`] with
+/// [`GEMMA4_NORM_SHIFT`]) and consumed by the engine's
 /// `routed_pre_norm` knob (`gemma4_ffn_configs` sets it), which normalizes
 /// the routed branch's input separately from the dense branch's shared
 /// `ffn_norm`-normed one -- matching the real Gemma 4 graph.
 ///
-/// One remaining gap this function does NOT paper over:
-///
-/// - the fused `blk.{layer}.ffn_gate_up_exps.weight` cannot be split into
-///   the two separate `ffn_gate_exps.weight`/`ffn_up_exps.weight` leaves the
-///   engine's routed FFN declares without a full dequant: `expert_feed_forward`
-///   is not a whole multiple of the tensor's own quantization block size, so
-///   no packed byte offset is block-aligned. A full dequant of this tensor
-///   is measured at ~90 GB for the real checkpoint. Rather than allocate
-///   that, this function returns
-///   [`InteropError::Gemma4FusedExpertNotBlockAligned`] as soon as it
-///   detects the misalignment, before touching the tensor's bytes at all.
+/// The fused `blk.{layer}.ffn_gate_up_exps.weight` splits into the two
+/// separate `ffn_gate_exps.weight`/`ffn_up_exps.weight` leaves the engine's
+/// routed FFN declares WITHOUT a dequant -- see
+/// [`bind_gemma4_fused_gate_up_experts`]'s own doc for the confirmed axis
+/// (the real checkpoint's `ne[0]`=2816 embedding is the quantization block
+/// axis; `ne[1]`=1408=2*`expert_feed_forward` is the row axis the split
+/// cuts, orthogonal to blocks) and the packed-memcpy implementation.
 ///
 /// # Errors
 ///
 /// Whatever [`find_tensor`]/[`gguf_tensor_as_f32`]/[`bind_dense`]/
-/// [`bind_matmul_weight`] can fail with, plus
-/// [`InteropError::Gemma4FusedExpertNotBlockAligned`] for the fused-expert
-/// gap above.
+/// [`bind_matmul_weight`]/[`bind_gemma4_fused_gate_up_experts`]/
+/// [`bind_moe_expert_weights`] can fail with.
 #[cfg(feature = "std")]
 pub fn bind_gemma4_weights<'file>(
     parsed: &ParsedGguf,
@@ -148,7 +183,14 @@ pub fn bind_gemma4_weights<'file>(
     let feed_forward = architecture.feed_forward as usize;
 
     bind_dense(parsed, file_bytes, "token_embd.weight".into(), &mut state)?;
-    bind_norm_plus_one(parsed, file_bytes, "output_norm.weight".into(), &mut state)?;
+    bind_norm(
+        parsed,
+        file_bytes,
+        "output_norm.weight".into(),
+        GEMMA4_NORM_SHIFT,
+        &mut state,
+    )?;
+    bind_rope_freqs(parsed, file_bytes, &mut state)?;
 
     if find_tensor(parsed, "output.weight").is_ok() {
         bind_matmul_weight(
@@ -181,28 +223,32 @@ pub fn bind_gemma4_weights<'file>(
         let kv_heads = architecture.kv_heads_by_layer[layer_index] as usize;
         let query_heads = architecture.head_count as usize;
 
-        bind_norm_plus_one(
+        bind_norm(
             parsed,
             file_bytes,
             format!("blk.{layer}.attn_norm.weight"),
+            GEMMA4_NORM_SHIFT,
             &mut state,
         )?;
-        bind_norm_plus_one(
+        bind_norm(
             parsed,
             file_bytes,
             format!("blk.{layer}.post_attention_norm.weight"),
+            GEMMA4_NORM_SHIFT,
             &mut state,
         )?;
-        bind_norm_plus_one(
+        bind_norm(
             parsed,
             file_bytes,
             format!("blk.{layer}.attn_q_norm.weight"),
+            GEMMA4_NORM_SHIFT,
             &mut state,
         )?;
-        bind_norm_plus_one(
+        bind_norm(
             parsed,
             file_bytes,
             format!("blk.{layer}.attn_k_norm.weight"),
+            GEMMA4_NORM_SHIFT,
             &mut state,
         )?;
         bind_matmul_weight(
@@ -246,34 +292,39 @@ pub fn bind_gemma4_weights<'file>(
             &mut state,
         )?;
 
-        bind_norm_plus_one(
+        bind_norm(
             parsed,
             file_bytes,
             format!("blk.{layer}.ffn_norm.weight"),
+            GEMMA4_NORM_SHIFT,
             &mut state,
         )?;
-        bind_norm_plus_one(
+        bind_norm(
             parsed,
             file_bytes,
             format!("blk.{layer}.post_ffw_norm_1.weight"),
+            GEMMA4_NORM_SHIFT,
             &mut state,
         )?;
-        bind_norm_plus_one(
+        bind_norm(
             parsed,
             file_bytes,
             format!("blk.{layer}.post_ffw_norm_2.weight"),
+            GEMMA4_NORM_SHIFT,
             &mut state,
         )?;
-        bind_norm_plus_one(
+        bind_norm(
             parsed,
             file_bytes,
             format!("blk.{layer}.post_ffw_norm.weight"),
+            GEMMA4_NORM_SHIFT,
             &mut state,
         )?;
-        bind_norm_plus_one(
+        bind_norm(
             parsed,
             file_bytes,
             format!("blk.{layer}.pre_ffw_norm_2.weight"),
+            GEMMA4_NORM_SHIFT,
             &mut state,
         )?;
         bind_matmul_weight(
@@ -309,31 +360,137 @@ pub fn bind_gemma4_weights<'file>(
             embedding,
             &mut state,
         )?;
+        // `[embedding]` F32, NOT a dequant scale -- `ffn_gate_inp.weight`
+        // is already F32 with its own values; this is the SEPARATE
+        // architectural router-input scale. `append_routed_expert_ffn`'s
+        // `router_scale` knob binds this raw (no `1 +` offset) as the
+        // gamma of a `with_scale=False` RMSNorm over the router's own
+        // input, then multiplies by the constant `embedding**-0.5`, before
+        // the router projection (`Gemma4TextRouter.forward`). Confirmed
+        // via `gemma4_dump` (`examples/gemma4_dump.rs`): `ggml_type=F32`,
+        // `dims=[2816]`.
+        bind_dense(
+            parsed,
+            file_bytes,
+            format!("blk.{layer}.ffn_gate_inp.scale"),
+            &mut state,
+        )?;
 
-        let gate_up_name = format!("blk.{layer}.ffn_gate_up_exps.weight");
-        let gate_up_tensor = find_tensor(parsed, &gate_up_name)?;
-        let layout = gate_up_tensor.ggml_type.block_layout();
-        if layout.block_elements == 0
-            || !u64::from(architecture.expert_feed_forward).is_multiple_of(layout.block_elements)
-        {
-            return Err(InteropError::Gemma4FusedExpertNotBlockAligned {
-                layer,
-                ggml_type: gate_up_tensor.ggml_type,
-                block_elements: layout.block_elements,
-                expert_feed_forward: architecture.expert_feed_forward,
-            });
-        }
-
-        // A block-aligned split (and the matching `ffn_down_exps.weight`
-        // bind, unaffected by this alignment check since `append_moe_ffn`'s
-        // OWN split boundary is `expert_feed_forward` on its OWN `in_dim`
-        // axis) is the remaining step once a caller needs to reach past the
-        // check above -- not implemented here, since every real checkpoint's
-        // `expert_feed_forward` (704) fails it and this function returns
-        // before this point, so no per-expert dequant of this tensor runs.
+        let expert_feed_forward = architecture.expert_feed_forward as usize;
+        bind_gemma4_fused_gate_up_experts(
+            parsed,
+            file_bytes,
+            layer,
+            expert_count,
+            expert_feed_forward,
+            embedding,
+            &mut state,
+        )?;
+        bind_moe_expert_weights(
+            parsed,
+            file_bytes,
+            layer,
+            "ffn_down",
+            architecture.expert_count,
+            embedding,
+            expert_feed_forward,
+            &mut state,
+        )?;
+        // `[expert_count]` F32, ARCHITECTURAL (not a dequant scale --
+        // `ffn_down_exps.weight` is Q5_1 with its own block scales). Folded
+        // into each selected expert's combination weight,
+        // [`append_moe_ffn_with_expert_scale`]'s own doc.
+        bind_dense(
+            parsed,
+            file_bytes,
+            format!("blk.{layer}.ffn_down_exps.scale"),
+            &mut state,
+        )?;
     }
 
     Ok(state)
+}
+
+/// Splits the real checkpoint's fused `blk.{layer}.ffn_gate_up_exps.weight`
+/// into the two separate `ffn_gate_exps.weight`/`ffn_up_exps.weight` leaves
+/// [`lfm2_forward_program_with_experts`]'s routed FFN declares, by a packed
+/// byte memcpy -- no dequantize, no new kernel.
+///
+/// Axis confirmed against the real checkpoint (`examples/gemma4_dump.rs`,
+/// `cargo run --release --example gemma4_dump`): the fused tensor's
+/// `dims = [2816, 1408, 128]` (`ne0`=embedding, `ne1`=2*`expert_feed_forward`,
+/// `ne2`=expert_count), `Q3_K`, `block_elements=256`. `ne0` (2816 = 11*256)
+/// is the quantization block axis; `ne1` (1408) is the row axis the
+/// gate/up split cuts at row `expert_feed_forward` (704), which is
+/// orthogonal to `ne0`'s blocks -- every row is a whole number of blocks
+/// regardless of where the row-axis split falls, so the split never crosses
+/// a block boundary. `ggml`/GGUF layout is row-major with `ne0` fastest, so
+/// one expert's `ne1` rows are contiguous in the packed buffer: gate rows
+/// `[0, expert_feed_forward)` and up rows
+/// `[expert_feed_forward, 2*expert_feed_forward)` are each one contiguous
+/// byte span per expert. Experts themselves are NOT contiguous across that
+/// boundary (expert `e+1`'s gate bytes follow expert `e`'s up bytes, not
+/// expert `e`'s gate bytes), so the two halves cannot be exposed as a
+/// single strided borrow the way [`bind_moe_expert_weights`]'s
+/// already-native-stacked fast path does -- each half is assembled into its
+/// own owned packed buffer, one packed memcpy per expert per half, matching
+/// the two `Q3_K`-tagged [`PackedOwnedKind::Q3K`] buffers
+/// [`BoundWeights::packed_owned`] already carries for every other MoE
+/// family's restack fallback ([`bind_moe_expert_weights`]).
+///
+/// # Errors
+///
+/// [`InteropError::UnknownTensor`] if the fused tensor is absent;
+/// [`InteropError::UnrepresentableGgmlType`] if its `ggml_type` has no
+/// [`PackedOwnedKind`] (every codec a real gemma4 checkpoint ships does);
+/// whatever [`ParsedGguf::tensor_data_range`] can fail with if the tensor's
+/// declared byte range does not fit `file_bytes`.
+fn bind_gemma4_fused_gate_up_experts<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    layer: u32,
+    expert_count: usize,
+    expert_feed_forward: usize,
+    embedding: usize,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    let name = format!("blk.{layer}.ffn_gate_up_exps.weight");
+    let tensor = find_tensor(parsed, &name)?;
+    let layout = tensor.ggml_type.block_layout();
+    let kind = PackedOwnedKind::from_ggml_type(tensor.ggml_type).ok_or_else(|| {
+        InteropError::UnrepresentableGgmlType {
+            tensor: name.clone(),
+            ggml_type: tensor.ggml_type,
+        }
+    })?;
+
+    let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
+    let source = &file_bytes[range.start as usize..range.end as usize];
+
+    let bytes_per_row = (embedding as u64 / layout.block_elements) * layout.block_bytes;
+    let gate_bytes = expert_feed_forward as u64 * bytes_per_row;
+    let per_expert_bytes = 2 * gate_bytes;
+
+    let mut gate_buf = Vec::with_capacity(gate_bytes as usize * expert_count);
+    let mut up_buf = Vec::with_capacity(gate_bytes as usize * expert_count);
+
+    for expert in 0..expert_count {
+        let expert_start = expert as u64 * per_expert_bytes;
+        let gate_start = expert_start as usize;
+        let gate_end = gate_start + gate_bytes as usize;
+        let up_end = gate_end + gate_bytes as usize;
+        gate_buf.extend_from_slice(&source[gate_start..gate_end]);
+        up_buf.extend_from_slice(&source[gate_end..up_end]);
+    }
+
+    state.resident_bytes += gate_buf.len() + up_buf.len();
+    state
+        .packed_owned
+        .push((format!("blk.{layer}.ffn_gate_exps.weight"), gate_buf, kind));
+    state
+        .packed_owned
+        .push((format!("blk.{layer}.ffn_up_exps.weight"), up_buf, kind));
+    Ok(())
 }
 
 /// Marker registered for `general.architecture = "gemma4"`.
@@ -368,6 +525,15 @@ fn gemma4_attention_configs(architecture: &Architecture) -> Vec<LayerAttentionCo
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: architecture.key_length_swa / 2,
                     },
+                    // `Gemma4TextAttention.forward`: `self.scaling = 1.0` for
+                    // every layer, sliding included -- gemma4 has no
+                    // `query_pre_attn_scalar` at all (that is a gemma2/3
+                    // convention this architecture does not inherit).
+                    score_scale: AttentionScoreScale::Unscaled,
+                    // `Gemma4TextAttention.forward` (`modeling_gemma4.py:1256-1265`):
+                    // `v_norm` applies to EVERY layer's `V`, sliding and full
+                    // alike -- `self.v_norm` has no per-layer-type branch.
+                    value_norm: true,
                 }
             } else {
                 LayerAttentionConfig {
@@ -382,6 +548,10 @@ fn gemma4_attention_configs(architecture: &Architecture) -> Vec<LayerAttentionCo
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: architecture.key_length / 2,
                     },
+                    // same `self.scaling = 1.0` as the sliding branch above --
+                    // HF applies no per-layer-type distinction here.
+                    score_scale: AttentionScoreScale::Unscaled,
+                    value_norm: true,
                 }
             }
         })
@@ -408,6 +578,9 @@ fn gemma4_ffn_configs(architecture: &Architecture) -> Vec<LayerFfnConfig> {
             routed_gating: ExpertGatingFunc::Softmax,
             routed_expert_bias: false,
             routed_pre_norm: true,
+            router_scale: true,
+            expert_output_scale: true,
+            activation: Activation::GeluTanh,
         };
         architecture.block_count as usize
     ]
@@ -449,6 +622,7 @@ impl ArchitectureTrait for Gemma4Arch {
             &ffn_configs,
             Some(EmbeddingScale::Sqrt),
             logit_softcap,
+            true,
         )?;
 
         let tied_embeddings = find_tensor(parsed, "output.weight").is_err();
@@ -526,5 +700,41 @@ impl ArchitectureTrait for Gemma4Arch {
             values: sin,
             symbol: None,
         });
+    }
+
+    /// llama.cpp's authoritative gemma4 graph (`src/models/gemma4.cpp`)
+    /// applies `ggml_rope_ext` to full/global-attention layers with
+    /// `n_rot=head_dim` (matching this checkpoint's `rope.dimension_count`
+    /// metadata) but ALSO a per-pair `freq_factors` tensor
+    /// (`rope_freqs.weight`, GGUF `ROPE_FREQS`) that ggml divides each
+    /// pair's angle by -- [`bind_rope_freqs`] binds that tensor's own values
+    /// verbatim into [`BoundWeights::owned`] at bind time, and this method
+    /// hands the same slice straight back to
+    /// [`crate::generate::build_position_inputs`], which does the dividing.
+    /// The real checkpoint's `rope_freqs.weight` holds `[1.0]*64 +
+    /// [1e30]*192` (confirmed shape: 256 = `head_dim/2` pair entries):
+    /// dividing by `1.0` is a no-op for the first 64 pairs, and dividing by
+    /// `1e30` collapses the remaining 192 pairs' `theta` far enough below
+    /// one radian that `cos` rounds to exactly `1.0f32` and `sin` rounds to
+    /// float noise -- the data-driven replacement for what this method used
+    /// to do by returning the literal `64` and letting
+    /// `build_position_inputs` truncate its loop there. `rope.
+    /// dimension_count=512` is `head_dim`, i.e. `n_rot`, NOT the rotary
+    /// count -- the earlier `head_dim / 2` (full rotation of every pair)
+    /// read that metadata field as the rotary width, which was the
+    /// original bug this checkpoint's own `rope_freqs.weight` now fixes
+    /// directly, with no hard-coded pair count anywhere in this crate. The
+    /// SWA table ([`Self::step_inputs`]/[`gemma4_sliding_rope_table`])
+    /// carries no `freq_factors` in the real graph and is untouched --
+    /// `rope_freqs.weight` is never bound into its own separate table.
+    fn rope_freq_factors<'weights>(
+        &self,
+        weights: &'weights BoundWeights<'_>,
+    ) -> Option<&'weights [f32]> {
+        weights
+            .owned
+            .iter()
+            .find(|(name, _)| name == "rope_freqs.weight")
+            .map(|(_, values)| values.as_slice())
     }
 }

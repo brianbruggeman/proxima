@@ -55,6 +55,22 @@ struct MergeRule {
     merged_id: u32,
 }
 
+/// Which character a vocab's own tokens use to spell a literal space --
+/// derived once at construction ([`Vocab::assemble`]) by probing the vocab
+/// itself, never from the model name or which constructor built it
+/// (`is_unigram` conflates "which engine" with "which alphabet", the exact
+/// bug this type exists to split apart -- see `pipe::decode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpaceMarker {
+    /// SentencePiece's `▁` (U+2581), a real vocab entry outside the gpt2
+    /// byte-level alphabet -- llama (unigram) and gemma4 (merges) both
+    /// spell space this way.
+    SentencePiece,
+    /// GPT-2 byte-level's `Ġ` (U+0120), inside `byte_to_char`'s own private
+    /// alphabet remap.
+    Gpt2ByteLevel,
+}
+
 /// One node of the byte-trie over "added token" markers (vocab entries
 /// [`TokenType::Control`]/[`TokenType::UserDefined`] -- see
 /// [`Vocab::with_token_types`]) -- built once, walked once per scan
@@ -95,6 +111,7 @@ pub struct Vocab {
     added_token_trie: AddedTokenNode,
     add_bos_token: Option<bool>,
     add_eos_token: Option<bool>,
+    space_marker: SpaceMarker,
 }
 
 impl Vocab {
@@ -183,6 +200,21 @@ impl Vocab {
 
         let id_to_bytes: Vec<Vec<u8>> = tokens.iter().map(|token| token_bytes_for(token)).collect();
 
+        // Probed once, here, against the vocab's own token list -- never the
+        // model name or which constructor (`new`/`new_unigram`) built it.
+        // `▁` resolving to a real entry means this vocab's merges/scores are
+        // keyed on it (llama, gemma4); otherwise it spells space the gpt2
+        // way (`Ġ`).
+        let space_marker = {
+            let mut marker = String::new();
+            marker.push(crate::unigram::SPACE_MARKER);
+            if token_to_id.contains_key(&marker) {
+                SpaceMarker::SentencePiece
+            } else {
+                SpaceMarker::Gpt2ByteLevel
+            }
+        };
+
         // A real HF byte-level BPE vocab is NOT guaranteed to carry all 256
         // single-byte display tokens explicitly -- confirmed against the
         // real, on-disk `HuggingFaceTB/SmolLM2-135M-Instruct/tokenizer.json`
@@ -202,12 +234,32 @@ impl Vocab {
         // input contains one of these specific rare bytes.
         let mut base_byte_token_id = [None; 256];
         for byte in 0..=255u8 {
+            // A SentencePiece byte-BPE vocab (e.g. `gemma4`) spells the
+            // space byte as `crate::unigram::SPACE_MARKER` (`▁`, U+2581),
+            // never GPT-2's own private-alphabet marker (`Ġ`, U+0120,
+            // `byte_to_char(b' ')` below) -- and its merges are keyed on
+            // `▁`, not `Ġ`. Tried first, ahead of the GPT-2 candidate, so a
+            // vocab that happens to also carry an unrelated literal `Ġ`
+            // entry (a real, if merge-orphaned, token in gemma4's actual
+            // 262144-token vocab, verified against the real checkpoint)
+            // never shadows the marker the vocab's own merge rules
+            // actually resolve through -- confirmed against
+            // `gguf::tests::real_gemma4_vocab_merges_space_into_the_following_word`,
+            // which showed every space byte seeded via `Ġ` (id 245237)
+            // instead surviving unmerged between every word.
+            let space_marker_id = if byte == b' ' && space_marker == SpaceMarker::SentencePiece {
+                let mut marker = String::new();
+                marker.push(crate::unigram::SPACE_MARKER);
+                token_to_id.get(&marker).copied()
+            } else {
+                None
+            };
+
             let display = byte_to_char(byte);
             let mut single_char = String::new();
             single_char.push(display);
-            let token_id = token_to_id
-                .get(&single_char)
-                .copied()
+            let token_id = space_marker_id
+                .or_else(|| token_to_id.get(&single_char).copied())
                 .or_else(|| token_to_id.get(hex_fallback_token(byte).as_str()).copied());
             base_byte_token_id[byte as usize] = token_id;
         }
@@ -272,6 +324,7 @@ impl Vocab {
             added_token_trie: AddedTokenNode::default(),
             add_bos_token: None,
             add_eos_token: None,
+            space_marker,
         })
     }
 
@@ -414,6 +467,19 @@ impl Vocab {
         !self.scores.is_empty()
     }
 
+    /// Which character this vocab's own tokens spell a literal space with
+    /// ([`SpaceMarker`]) -- derived once at construction by probing the
+    /// vocab, independent of which constructor built it. [`crate::pipe::decode`]
+    /// reads this to decide whether to run [`crate::unigram::unescape`],
+    /// replacing a gate on [`Vocab::is_unigram`] that conflated "which
+    /// engine built this vocab" with "which alphabet it spells space in" --
+    /// gemma4 is merges-engine + SentencePiece-space, the cell that
+    /// conflation could not represent.
+    #[must_use]
+    pub(crate) fn space_marker(&self) -> SpaceMarker {
+        self.space_marker
+    }
+
     /// The unigram log-probability score for a token id, if this is a
     /// scores-driven vocab. Higher (less negative) means "merge this pair
     /// first" in [`crate::unigram::encode_fragment`]'s greedy loop.
@@ -553,6 +619,40 @@ pub(crate) mod tests {
         }
         Vocab::new_unigram(tokens, scores, Some(1), Some(2), None)
             .expect("tiny unigram vocab builds")
+    }
+
+    /// A tiny gemma4-shaped vocab: merges-driven ([`Vocab::new`], no
+    /// scores) but SentencePiece-spelled (`▁` present, hex-fallback byte
+    /// alphabet) -- the cell `is_unigram()` could not represent, since
+    /// merges-engine + SentencePiece-space are independent axes.
+    pub(crate) fn tiny_gemma4_vocab() -> Vocab {
+        let mut tokens: Vec<String> = (0..=255u8).map(hex_fallback_token).collect();
+        tokens.push(String::from("\u{2581}"));
+        tokens.push(String::from("hi"));
+        tokens.push(String::from("\u{2581}hi"));
+
+        let merges = vec![String::from("\u{2581} hi")];
+        Vocab::new(tokens, &merges, None, None, None).expect("tiny gemma4 vocab builds")
+    }
+
+    #[test]
+    fn gemma4_shaped_vocab_derives_sentence_piece_space_marker() {
+        let vocab = tiny_gemma4_vocab();
+        assert!(!vocab.is_unigram(), "gemma4 is merges-driven, not unigram");
+        assert_eq!(vocab.space_marker(), SpaceMarker::SentencePiece);
+    }
+
+    #[test]
+    fn gpt2_shaped_vocab_derives_gpt2_byte_level_space_marker() {
+        assert_eq!(tiny_vocab().space_marker(), SpaceMarker::Gpt2ByteLevel);
+    }
+
+    #[test]
+    fn llama_shaped_vocab_derives_sentence_piece_space_marker() {
+        assert_eq!(
+            tiny_unigram_vocab().space_marker(),
+            SpaceMarker::SentencePiece
+        );
     }
 
     /// A vocab missing one of the 256 base byte tokens must still build --

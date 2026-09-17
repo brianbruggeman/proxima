@@ -740,7 +740,11 @@ impl BoundOp {
     }
 }
 
-pub(super) fn rebase_operands(operands: &BoundOperands, split_axis: u16, chunk_start: u64) -> BoundOperands {
+pub(super) fn rebase_operands(
+    operands: &BoundOperands,
+    split_axis: u16,
+    chunk_start: u64,
+) -> BoundOperands {
     operands
         .iter()
         .map(|(node, layout, lookup)| {
@@ -765,7 +769,11 @@ pub(super) fn rebase_operands(operands: &BoundOperands, split_axis: u16, chunk_s
 /// unaligned width is kept), and the last absorbs whatever remains — the
 /// only one that can be a different (ragged) size. `alignment <= 1` is a
 /// no-op: the rounding step is skipped entirely.
-pub(super) fn chunk_ranges(extent: u64, parts: usize, alignment: u64) -> impl Iterator<Item = (u64, u64)> {
+pub(super) fn chunk_ranges(
+    extent: u64,
+    parts: usize,
+    alignment: u64,
+) -> impl Iterator<Item = (u64, u64)> {
     let raw_len = extent / parts as u64;
     let chunk_len = if alignment > 1 && raw_len >= alignment {
         raw_len - (raw_len % alignment)
@@ -797,4 +805,3 @@ pub(super) struct HeldElementwise {
     pub(super) body: ScalarOp,
     pub(super) operands: Vec<(NodeId, IndexMap)>,
 }
-

@@ -68,8 +68,8 @@ fn selected_scalar_routes_stack_in_token_then_selected_order() {
         alloc::vec![Extent::Static(2)],
         "second",
     );
-    let stacked = stack_selected_routes(&mut program, &[first, second])
-        .expect("two selected routes stack");
+    let stacked =
+        stack_selected_routes(&mut program, &[first, second]).expect("two selected routes stack");
 
     let shapes = crate::shape::infer(&program, &[]).expect("route stack infers");
     assert_eq!(shapes.of(stacked), &[2, 2]);
@@ -158,6 +158,7 @@ fn grouped_gate_up_matches_the_per_route_moe_graph_on_cpu() {
             one,
             ExpertGatingFunc::Softmax,
             None,
+            Activation::Silu,
         )
         .expect("the MoE graph builds");
         (program, root)
@@ -178,14 +179,9 @@ fn grouped_gate_up_matches_the_per_route_moe_graph_on_cpu() {
     let workers = core::num::NonZeroUsize::new(1).expect("one worker exists");
 
     let (per_route_program, per_route_root) = build(false);
-    let per_route = crate::cpu::evaluate_parallel(
-        &per_route_program,
-        &[],
-        &blocks,
-        &[per_route_root],
-        workers,
-    )
-    .expect("per-route graph evaluates");
+    let per_route =
+        crate::cpu::evaluate_parallel(&per_route_program, &[], &blocks, &[per_route_root], workers)
+            .expect("per-route graph evaluates");
     let (grouped_program, grouped_root) = build(true);
     let grouped =
         crate::cpu::evaluate_parallel(&grouped_program, &[], &blocks, &[grouped_root], workers)
@@ -728,11 +724,10 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
         32_000, 256, 128, 4, 2, 64, 1, 0, 0, false, false, false, false,
     )
     .expect("qwen2 program lowers");
-    let (generic_program, _, _, _, _) =
-        mistral_cached_forward_program_with_experts_and_layer_taps(
-            32_000, 256, 128, 4, 2, 64, 1, 0, 0, false, false, false, false, false,
-        )
-        .expect("generic program lowers");
+    let (generic_program, _, _, _, _) = mistral_cached_forward_program_with_experts_and_layer_taps(
+        32_000, 256, 128, 4, 2, 64, 1, 0, 0, false, false, false, false, false,
+    )
+    .expect("generic program lowers");
     assert!(
         qwen2_program != generic_program,
         "Qwen2's explicit split-half graph must differ from the generic interleaved graph"
@@ -790,11 +785,10 @@ fn layer_taps_variant_matches_the_plain_program_and_returns_one_tap_per_layer() 
 /// before any real-checkpoint embedding test would even hint at it.
 #[test]
 fn forward_roots_hidden_is_an_operand_of_the_lm_head_product() {
-    let (program, roots, _cache_roots, _moe_sites) =
-        mistral_cached_forward_program_with_experts(
-            32_002, 4096, 14336, 32, 8, 128, 2, 0, 0, false, false, false, false,
-        )
-        .expect("the dense cached forward pass lowers to a program");
+    let (program, roots, _cache_roots, _moe_sites) = mistral_cached_forward_program_with_experts(
+        32_002, 4096, 14336, 32, 8, 128, 2, 0, 0, false, false, false, false,
+    )
+    .expect("the dense cached forward pass lowers to a program");
 
     let Op::Reduce(logits_reduce) = &program[roots.logits.0 as usize] else {
         panic!("ForwardRoots::logits must name an Op::Reduce (the vocab-projection sum)");
@@ -1097,8 +1091,7 @@ async fn a_len_declaration_parses_regardless_of_address_shape(#[case] notation: 
 /// shape inference, over a program already built).
 #[test]
 fn a_len_on_two_unit_coefficient_terms_is_rejected_at_parse_time() {
-    let error =
-        parse_operand_pattern("s,i+j@2->sij").expect_err("len has no unambiguous target");
+    let error = parse_operand_pattern("s,i+j@2->sij").expect_err("len has no unambiguous target");
     assert!(matches!(error, TensorError::MalformedMap(_)), "{error}");
 }
 
@@ -1245,14 +1238,9 @@ fn an_attention_block_written_as_toml_evaluates() {
     let root = NodeId(program.len() as u32 - 1);
 
     let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
-    let evaluated = crate::cpu::evaluate_parallel(
-        &program,
-        &symbols,
-        &blocks,
-        &[root, probabilities],
-        workers,
-    )
-    .expect("the block evaluates");
+    let evaluated =
+        crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root, probabilities], workers)
+            .expect("the block evaluates");
 
     let output = evaluated.root();
     assert_eq!(
@@ -1420,14 +1408,9 @@ fn a_causal_attention_block_written_as_toml_masks_future_positions() {
     let root = NodeId(program.len() as u32 - 1);
 
     let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
-    let evaluated = crate::cpu::evaluate_parallel(
-        &program,
-        &symbols,
-        &blocks,
-        &[root, probabilities],
-        workers,
-    )
-    .expect("the causal block evaluates");
+    let evaluated =
+        crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root, probabilities], workers)
+            .expect("the causal block evaluates");
 
     let output = evaluated.root();
     assert_eq!(
@@ -1759,9 +1742,8 @@ fn a_moe_block_written_as_toml_routes_each_token_to_its_own_experts_weights() {
     ];
     let blocks: [&[f32]; 3] = [&x, &gate_w, &expert_w];
 
-    let evaluated =
-        crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
-            .expect("the moe block evaluates");
+    let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+        .expect("the moe block evaluates");
     let output = evaluated.root();
     assert_eq!(
         output.len(),
@@ -1880,9 +1862,8 @@ fn a_topk2_probe_unrolls_two_argmax_rounds_with_exclusion() {
     ];
     let blocks: [&[f32]; 3] = [&x, &gate_w, &expert_w];
 
-    let evaluated =
-        crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
-            .expect("the top-2 probe evaluates");
+    let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+        .expect("the top-2 probe evaluates");
     let output = evaluated.root();
     assert_eq!(output.len(), D_OUT, "a vacuous output proves nothing");
 
@@ -2010,10 +1991,9 @@ fn a_routed_ffn_built_by_append_moe_ffn_matches_an_independent_topk_swiglu_refer
         [0.0, 1.0, 1.0, 0.0],
     ];
 
-    let stack_experts =
-        |weights: &[[f32; EMBEDDING * FEED_FORWARD]; 3]| -> alloc::vec::Vec<f32> {
-            weights.iter().flatten().copied().collect()
-        };
+    let stack_experts = |weights: &[[f32; EMBEDDING * FEED_FORWARD]; 3]| -> alloc::vec::Vec<f32> {
+        weights.iter().flatten().copied().collect()
+    };
     let expert_w_gate = stack_experts(&gate_weights);
     let expert_w_up = stack_experts(&up_weights);
     let expert_w_down: alloc::vec::Vec<f32> = down_weights.iter().flatten().copied().collect();
@@ -2079,6 +2059,7 @@ fn a_routed_ffn_built_by_append_moe_ffn_matches_an_independent_topk_swiglu_refer
         ones,
         ExpertGatingFunc::Softmax,
         None,
+        Activation::Silu,
     )
     .expect("the routed ffn lowers");
 
@@ -2105,9 +2086,8 @@ fn a_routed_ffn_built_by_append_moe_ffn_matches_an_independent_topk_swiglu_refer
 
     let blocks: [&[f32]; 5] = [&x, &gate_inp, &expert_w_gate, &expert_w_up, &expert_w_down];
     let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
-    let evaluated =
-        crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
-            .expect("the routed ffn evaluates");
+    let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+        .expect("the routed ffn evaluates");
     let output = evaluated.root();
     assert_eq!(
         output.len(),
@@ -2289,10 +2269,9 @@ fn a_routed_ffn_built_by_append_moe_ffn_with_sigmoid_gating_and_bias_matches_an_
         [0.0, 1.0, 1.0, 0.0],
     ];
 
-    let stack_experts =
-        |weights: &[[f32; EMBEDDING * FEED_FORWARD]; 3]| -> alloc::vec::Vec<f32> {
-            weights.iter().flatten().copied().collect()
-        };
+    let stack_experts = |weights: &[[f32; EMBEDDING * FEED_FORWARD]; 3]| -> alloc::vec::Vec<f32> {
+        weights.iter().flatten().copied().collect()
+    };
     let expert_w_gate = stack_experts(&gate_weights);
     let expert_w_up = stack_experts(&up_weights);
     let expert_w_down: alloc::vec::Vec<f32> = down_weights.iter().flatten().copied().collect();
@@ -2364,6 +2343,7 @@ fn a_routed_ffn_built_by_append_moe_ffn_with_sigmoid_gating_and_bias_matches_an_
         ones,
         ExpertGatingFunc::Sigmoid,
         Some(bias_node),
+        Activation::Silu,
     )
     .expect("the sigmoid-gated routed ffn lowers");
 
@@ -2379,9 +2359,8 @@ fn a_routed_ffn_built_by_append_moe_ffn_with_sigmoid_gating_and_bias_matches_an_
         &bias,
     ];
     let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
-    let evaluated =
-        crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
-            .expect("the sigmoid-gated routed ffn evaluates");
+    let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+        .expect("the sigmoid-gated routed ffn evaluates");
     let output = evaluated.root();
     assert_eq!(
         output.len(),
@@ -2397,8 +2376,7 @@ fn a_routed_ffn_built_by_append_moe_ffn_with_sigmoid_gating_and_bias_matches_an_
                     .sum()
             })
             .collect();
-        let routes =
-            sigmoid_topk_routes_and_weights(&logits, &bias, EXPERT_USED_COUNT as usize);
+        let routes = sigmoid_topk_routes_and_weights(&logits, &bias, EXPERT_USED_COUNT as usize);
         let mut expected = alloc::vec![0.0f32; EMBEDDING];
         for (expert, weight) in &routes {
             let expert_out = swiglu_ffn(
@@ -2723,8 +2701,7 @@ fn matmul_q4k_active(weights: &[u8], rows: usize, activation: &[f32]) -> alloc::
     }
     #[cfg(not(feature = "q4k-int8-dot"))]
     {
-        crate::cpu::matmul_q4k_f32(weights, rows, activation)
-            .expect("packed q4k matmul evaluates")
+        crate::cpu::matmul_q4k_f32(weights, rows, activation).expect("packed q4k matmul evaluates")
     }
 }
 
@@ -2900,23 +2877,17 @@ fn quantized_moe_ffn_over_a_packed_q4k_expert_stack_matches_the_routed_experts_o
     let gate_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> = expert_scales
         .iter()
         .enumerate()
-        .map(|(expert, &scale)| {
-            synth_row(1_001 + expert as u64, FEED_FORWARD * EMBEDDING, scale)
-        })
+        .map(|(expert, &scale)| synth_row(1_001 + expert as u64, FEED_FORWARD * EMBEDDING, scale))
         .collect();
     let up_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> = expert_scales
         .iter()
         .enumerate()
-        .map(|(expert, &scale)| {
-            synth_row(2_002 + expert as u64, FEED_FORWARD * EMBEDDING, scale)
-        })
+        .map(|(expert, &scale)| synth_row(2_002 + expert as u64, FEED_FORWARD * EMBEDDING, scale))
         .collect();
     let down_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> = expert_scales
         .iter()
         .enumerate()
-        .map(|(expert, &scale)| {
-            synth_row(3_003 + expert as u64, EMBEDDING * FEED_FORWARD, scale)
-        })
+        .map(|(expert, &scale)| synth_row(3_003 + expert as u64, EMBEDDING * FEED_FORWARD, scale))
         .collect();
 
     let gate_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> = gate_matrices
@@ -3011,6 +2982,7 @@ fn quantized_moe_ffn_over_a_packed_q4k_expert_stack_matches_the_routed_experts_o
         ones,
         ExpertGatingFunc::Softmax,
         None,
+        Activation::Silu,
     )
     .expect("the packed-stack routed ffn lowers");
 
@@ -3024,9 +2996,8 @@ fn quantized_moe_ffn_over_a_packed_q4k_expert_stack_matches_the_routed_experts_o
         crate::cpu::QuantizedBlock::Q4K(&stacked_up),
         crate::cpu::QuantizedBlock::Q4K(&stacked_down),
     ];
-    let evaluated =
-        crate::cpu::evaluate_quantized(&program, &symbols, &quantized_blocks, &[root])
-            .expect("the packed-stack routed ffn evaluates over Q4_K");
+    let evaluated = crate::cpu::evaluate_quantized(&program, &symbols, &quantized_blocks, &[root])
+        .expect("the packed-stack routed ffn evaluates over Q4_K");
     let output = evaluated.root();
     assert_eq!(
         output.len(),
@@ -3159,8 +3130,7 @@ fn project(
                 let mut accumulator = 0.0f32;
                 for input_dim in 0..dim_in {
                     let activation = x[position * dim_in + input_dim];
-                    let coefficient =
-                        weight[input_dim * heads * head_dim + head * head_dim + dim];
+                    let coefficient = weight[input_dim * heads * head_dim + head * head_dim + dim];
                     accumulator += activation * coefficient;
                 }
                 projected[(position * heads + head) * head_dim + dim] = accumulator;
@@ -3239,13 +3209,11 @@ fn expected_gqa_attended(
                     let mut accumulator = 0.0f32;
                     for key_position in 0..sequence {
                         let probability = exponentials[key_position] / total;
-                        let value_value =
-                            v[(key_position * kv_heads + kv_head) * head_dim + dim];
+                        let value_value = v[(key_position * kv_heads + kv_head) * head_dim + dim];
                         accumulator += probability * value_value;
                     }
-                    let index = ((query_position * kv_heads + kv_head) * group + offset)
-                        * head_dim
-                        + dim;
+                    let index =
+                        ((query_position * kv_heads + kv_head) * group + offset) * head_dim + dim;
                     output[index] = accumulator;
                 }
             }
@@ -3317,14 +3285,9 @@ fn run_gqa_case(text: &str, dims: GqaDims, seed: u64) {
 
     let blocks: [&[f32]; 5] = [&x, &wq, &wk, &wv, &group_ones];
     let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
-    let evaluated = crate::cpu::evaluate_parallel(
-        &program,
-        &symbols,
-        &blocks,
-        &[root, probabilities],
-        workers,
-    )
-    .expect("the gqa block evaluates");
+    let evaluated =
+        crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root, probabilities], workers)
+            .expect("the gqa block evaluates");
 
     let output = evaluated.root();
     let expected_len = sequence * kv_heads * group * head_dim;
@@ -3366,8 +3329,7 @@ fn run_gqa_case(text: &str, dims: GqaDims, seed: u64) {
             for offset in 0..group {
                 let mut total = 0.0f32;
                 for key_position in 0..sequence {
-                    let index = ((query_position * sequence + key_position) * kv_heads
-                        + kv_head)
+                    let index = ((query_position * sequence + key_position) * kv_heads + kv_head)
                         * group
                         + offset;
                     let probability = rows[index];
@@ -3419,8 +3381,7 @@ fn a_gqa_attention_block_groups_query_heads_onto_shared_kv_heads() {
 /// `coeff=3` behaves identically to `coeff=2`, not an assumption resting
 /// on the power-of-two case alone.
 #[test]
-fn a_gqa_attention_block_with_a_non_power_of_two_group_groups_query_heads_onto_shared_kv_heads()
-{
+fn a_gqa_attention_block_with_a_non_power_of_two_group_groups_query_heads_onto_shared_kv_heads() {
     let text = include_str!("../../specs/gqa_attention_group3.toml");
     let dims = GqaDims {
         sequence: 4,
@@ -3498,8 +3459,7 @@ fn scaling_attention_scores_by_inverse_sqrt_head_dim_prevents_softmax_saturation
         )
         .expect("scores reduce builds");
         let scores = if scaled {
-            let inv_sqrt_head_dim =
-                scalar_constant(&mut program, 1.0 / (HEAD_DIM as f32).sqrt());
+            let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (HEAD_DIM as f32).sqrt());
             elementwise(
                 &mut program,
                 DType::Float32,
@@ -3569,8 +3529,7 @@ fn scaling_attention_scores_by_inverse_sqrt_head_dim_prevents_softmax_saturation
 
     let evaluate = |scaled: bool| -> Vec<f32> {
         let (program, probabilities) = build(scaled);
-        crate::shape::infer(&program, &symbols)
-            .expect("the isolated score/softmax slice infers");
+        crate::shape::infer(&program, &symbols).expect("the isolated score/softmax slice infers");
         let root = NodeId(program.len() as u32 - 1);
         assert_eq!(
             root, probabilities,
@@ -3746,9 +3705,8 @@ fn a_mistral_layer_written_as_toml_evaluates_at_its_real_dimensions() {
 
     let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
     let wall_start = std::time::Instant::now();
-    let evaluated =
-        crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
-            .expect("the real mistral layer evaluates");
+    let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+        .expect("the real mistral layer evaluates");
     let wall = wall_start.elapsed();
     std::println!("wall_clock={wall:?}");
 
@@ -3827,14 +3785,9 @@ fn a_mistral_layer_written_as_toml_evaluates() {
     let root = NodeId(program.len() as u32 - 1);
 
     let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
-    let evaluated = crate::cpu::evaluate_parallel(
-        &program,
-        &symbols,
-        &blocks,
-        &[root, probabilities],
-        workers,
-    )
-    .expect("the small mistral layer evaluates");
+    let evaluated =
+        crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root, probabilities], workers)
+            .expect("the small mistral layer evaluates");
 
     let output = evaluated.root();
     assert_eq!(
@@ -3862,8 +3815,7 @@ fn a_mistral_layer_written_as_toml_evaluates() {
             for offset in 0..GROUP {
                 let mut total = 0.0f32;
                 for key_position in 0..SEQUENCE {
-                    let index = ((query_position * SEQUENCE + key_position) * KV_HEADS
-                        + kv_head)
+                    let index = ((query_position * SEQUENCE + key_position) * KV_HEADS + kv_head)
                         * GROUP
                         + offset;
                     total += rows[index];
@@ -4463,8 +4415,7 @@ fn a_single_range_decode_step_matches_the_two_range_decode_step() {
                 names[1].as_str(),
                 merged_k_odd_cache[layer_index].as_slice(),
             ));
-            single_range_named
-                .push((names[2].as_str(), merged_v_cache[layer_index].as_slice()));
+            single_range_named.push((names[2].as_str(), merged_v_cache[layer_index].as_slice()));
         }
         let single_range_symbols = [new_count as u64, sequence as u64];
         let single_range_evaluated = crate::cpu::evaluate_named(
@@ -4779,8 +4730,7 @@ fn a_single_range_decode_step_with_qk_norm_matches_the_two_range_decode_step() {
                 names[1].as_str(),
                 merged_k_odd_cache[layer_index].as_slice(),
             ));
-            single_range_named
-                .push((names[2].as_str(), merged_v_cache[layer_index].as_slice()));
+            single_range_named.push((names[2].as_str(), merged_v_cache[layer_index].as_slice()));
         }
         let single_range_symbols = [new_count as u64, sequence as u64];
         let single_range_evaluated = crate::cpu::evaluate_named(
@@ -4853,8 +4803,7 @@ fn cached_attention_single_range_fused_matches_the_unfused_program() {
     use core::task::{Context, Poll, Waker};
 
     use crate::bind::{
-        BoundOp, BoundOpKind, READY_BATCH_CAPACITY, ReadyBatch, bind_with_fusion,
-        block_node_ids,
+        BoundOp, BoundOpKind, READY_BATCH_CAPACITY, ReadyBatch, bind_with_fusion, block_node_ids,
     };
     use crate::cpu::Interpreter;
     use crate::numeric::NumericPolicy;
@@ -4976,8 +4925,7 @@ fn cached_attention_single_range_fused_matches_the_unfused_program() {
             k_even.resize(sequence * KV_HEADS as usize * pairs, 0.0);
             let mut k_odd = random_vec(seed + 8, MERGED_LEN * KV_HEADS as usize * pairs);
             k_odd.resize(sequence * KV_HEADS as usize * pairs, 0.0);
-            let mut v =
-                random_vec(seed + 9, MERGED_LEN * KV_HEADS as usize * HEAD_DIM as usize);
+            let mut v = random_vec(seed + 9, MERGED_LEN * KV_HEADS as usize * HEAD_DIM as usize);
             v.resize(sequence * KV_HEADS as usize * HEAD_DIM as usize, 0.0);
             owned.push((alloc::format!("kv_cache.{layer}.k_even"), k_even));
             owned.push((alloc::format!("kv_cache.{layer}.k_odd"), k_odd));
@@ -5020,9 +4968,8 @@ fn cached_attention_single_range_fused_matches_the_unfused_program() {
 
         let fused = bind_with_fusion(program, &shapes, &[root], true, NumericPolicy::default())
             .expect("fused single-range bind succeeds");
-        let unfused =
-            bind_with_fusion(program, &shapes, &[root], false, NumericPolicy::default())
-                .expect("unfused single-range bind succeeds");
+        let unfused = bind_with_fusion(program, &shapes, &[root], false, NumericPolicy::default())
+            .expect("unfused single-range bind succeeds");
 
         assert!(
             fused
@@ -5361,8 +5308,8 @@ fn bound_ops_are_classified_variant_or_invariant_in_cached_len() {
         outputs.extend_from_slice(&[*even, *odd, *value]);
     }
 
-    let shapes_a = crate::shape::infer(&program, &[NEW_COUNT, CACHED_LEN_A])
-        .expect("cached_len=50 infers");
+    let shapes_a =
+        crate::shape::infer(&program, &[NEW_COUNT, CACHED_LEN_A]).expect("cached_len=50 infers");
     let resolved_a = crate::bind::bind(
         &program,
         &shapes_a,
@@ -5370,8 +5317,8 @@ fn bound_ops_are_classified_variant_or_invariant_in_cached_len() {
         crate::numeric::NumericPolicy::bit_exact(),
     )
     .expect("cached_len=50 binds");
-    let shapes_b = crate::shape::infer(&program, &[NEW_COUNT, CACHED_LEN_B])
-        .expect("cached_len=51 infers");
+    let shapes_b =
+        crate::shape::infer(&program, &[NEW_COUNT, CACHED_LEN_B]).expect("cached_len=51 infers");
     let resolved_b = crate::bind::bind(
         &program,
         &shapes_b,
@@ -5503,8 +5450,7 @@ fn the_interpreter_per_node_dispatch_floor_is_measured() {
     let mut samples: Vec<f64> = Vec::with_capacity(REPEATS);
     for _ in 0..REPEATS {
         let started = std::time::Instant::now();
-        crate::cpu::evaluate_named(&program, &[1], &named, &[root])
-            .expect("the tree evaluates");
+        crate::cpu::evaluate_named(&program, &[1], &named, &[root]).expect("the tree evaluates");
         samples.push(started.elapsed().as_secs_f64() * 1e9 / total as f64);
     }
     samples.sort_by(|left, right| left.partial_cmp(right).expect("no nan timings"));
@@ -5552,8 +5498,8 @@ fn the_evaluator_survives_a_dependency_chain_of_a_given_depth() {
 
     let seed_data = alloc::vec![1.0f32];
     let named: [(&str, &[f32]); 1] = [("seed", seed_data.as_slice())];
-    let evaluated = crate::cpu::evaluate_named(&program, &[1], &named, &[tip])
-        .expect("the chain evaluates");
+    let evaluated =
+        crate::cpu::evaluate_named(&program, &[1], &named, &[tip]).expect("the chain evaluates");
     let (data, _) = evaluated.get(tip).expect("chain tip present");
 
     std::println!(
@@ -5656,9 +5602,8 @@ fn the_whole_mistral_forward_pass_evaluates_at_real_dimensions() {
     let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
 
     let wall_start = std::time::Instant::now();
-    let evaluated =
-        crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
-            .expect("the whole real-dimension mistral forward pass evaluates");
+    let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+        .expect("the whole real-dimension mistral forward pass evaluates");
     let wall = wall_start.elapsed();
     std::println!(
         "whole_forward_pass: wall_clock={wall:?} per_layer={:?}",
@@ -5695,12 +5640,7 @@ fn the_whole_mistral_forward_pass_evaluates_at_real_dimensions() {
 /// computes per call, generalized with a start offset so a decode
 /// step's lone new position gets its true absolute angle instead of
 /// position 0.
-fn rope_angles(
-    start: usize,
-    count: usize,
-    pairs: usize,
-    head_dim: usize,
-) -> (Vec<f32>, Vec<f32>) {
+fn rope_angles(start: usize, count: usize, pairs: usize, head_dim: usize) -> (Vec<f32>, Vec<f32>) {
     let mut cos = alloc::vec![0.0f32; count * pairs];
     let mut sin = alloc::vec![0.0f32; count * pairs];
     for offset in 0..count {
@@ -6283,15 +6223,22 @@ async fn repeat_kv_heads_multi_row_batch_matches_thirteen_single_row_calls() {
                 name: Some("x".into()),
             },
         );
-        let output = repeat_kv_heads(&mut program, x, KV_HEADS, GROUP)
-            .expect("repeat_kv_heads lowers");
+        let output =
+            repeat_kv_heads(&mut program, x, KV_HEADS, GROUP).expect("repeat_kv_heads lowers");
         let evaluated =
             crate::cpu::evaluate_named(&program, &[symbol], &[("x", x_slice)], &[output])
                 .expect("repeat_kv_heads evaluates");
-        let (result, shape) = evaluated.get(output).expect("repeat_kv_heads output present");
+        let (result, shape) = evaluated
+            .get(output)
+            .expect("repeat_kv_heads output present");
         assert_eq!(
             shape,
-            [symbol, u64::from(KV_HEADS), u64::from(GROUP), KEY_DIM as u64],
+            [
+                symbol,
+                u64::from(KV_HEADS),
+                u64::from(GROUP),
+                KEY_DIM as u64
+            ],
             "repeat_kv_heads output shape"
         );
         result.to_vec()
@@ -6303,8 +6250,8 @@ async fn repeat_kv_heads_multi_row_batch_matches_thirteen_single_row_calls() {
     for position in 0..POSITIONS {
         let row_slice = &x_data[position * ROW_ELEMENTS..(position + 1) * ROW_ELEMENTS];
         let row_result = build_and_run(1, row_slice);
-        let batch_row = &batch_result
-            [position * output_row_elements..(position + 1) * output_row_elements];
+        let batch_row =
+            &batch_result[position * output_row_elements..(position + 1) * output_row_elements];
         let max_relative_error = batch_row
             .iter()
             .zip(&row_result)
@@ -6355,8 +6302,8 @@ async fn repeat_kv_heads_then_permute_reduce_multi_row_matches_single_row() {
                 name: Some("x".into()),
             },
         );
-        let repeated = repeat_kv_heads(&mut program, x, KV_HEADS, GROUP)
-            .expect("repeat_kv_heads lowers");
+        let repeated =
+            repeat_kv_heads(&mut program, x, KV_HEADS, GROUP).expect("repeat_kv_heads lowers");
         let output = reduce(
             &mut program,
             DType::Float32,
@@ -6377,7 +6324,12 @@ async fn repeat_kv_heads_then_permute_reduce_multi_row_matches_single_row() {
         // reading the shape back rather than assumed.
         assert_eq!(
             shape,
-            [symbol, KEY_DIM as u64, u64::from(KV_HEADS), u64::from(GROUP)],
+            [
+                symbol,
+                KEY_DIM as u64,
+                u64::from(KV_HEADS),
+                u64::from(GROUP)
+            ],
             "chain output shape"
         );
         result.to_vec()
@@ -6389,8 +6341,8 @@ async fn repeat_kv_heads_then_permute_reduce_multi_row_matches_single_row() {
     for position in 0..POSITIONS {
         let row_slice = &x_data[position * ROW_ELEMENTS..(position + 1) * ROW_ELEMENTS];
         let row_result = build_and_run(1, row_slice);
-        let batch_row = &batch_result
-            [position * output_row_elements..(position + 1) * output_row_elements];
+        let batch_row =
+            &batch_result[position * output_row_elements..(position + 1) * output_row_elements];
         let max_relative_error = batch_row
             .iter()
             .zip(&row_result)
@@ -6542,9 +6494,7 @@ async fn silu_multi_row_batch_at_production_width_matches_single_row() {
             .zip(&row_result)
             .map(|(&batched, &single)| (batched - single).abs() / single.abs().max(1e-6))
             .fold(0.0f32, f32::max);
-        std::println!(
-            "silu_row_check position={position} max_relative_error={max_relative_error}"
-        );
+        std::println!("silu_row_check position={position} max_relative_error={max_relative_error}");
         assert!(
             max_relative_error <= 1e-5,
             "position {position}: max_relative_error={max_relative_error} exceeds 1e-5"
@@ -6692,9 +6642,9 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
             crate::bind::BoundOpKind::Elementwise { .. } => elementwise += 1,
             crate::bind::BoundOpKind::Reduce { .. } => {
                 let operands = op.operands();
-                let is_two_operand = operands.first().is_some_and(|(first, _, _)| {
-                    operands.iter().any(|(node, _, _)| node != first)
-                });
+                let is_two_operand = operands
+                    .first()
+                    .is_some_and(|(first, _, _)| operands.iter().any(|(node, _, _)| node != first));
                 if is_two_operand {
                     reduce_two_operand += 1;
                 } else {
@@ -6728,8 +6678,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
 
     let (fuse_elementwise_fired, fuse_reduce_fired, fuse_distinct_declines) =
         crate::instrument::fuse_totals();
-    let (window_reduce_fired, window_reduce_declined) =
-        crate::instrument::window_reduce_totals();
+    let (window_reduce_fired, window_reduce_declined) = crate::instrument::window_reduce_totals();
 
     std::println!(
         "rule_census total={total} reduce_total={reduce_total} reduce_two_operand={reduce_two_operand} reduce_one_operand={reduce_one_operand} elementwise={elementwise} constant={constant} iota={iota}"
@@ -6825,8 +6774,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
     for (node, label) in [(7_u32, "rope_cos"), (8, "rope_sin")] {
         let mut costing = 0_u64;
         let mut free = 0_u64;
-        for (decline_node, _site, _reason, calls) in crate::instrument::fuse_decline_snapshot()
-        {
+        for (decline_node, _site, _reason, calls) in crate::instrument::fuse_decline_snapshot() {
             if decline_node != node {
                 continue;
             }
@@ -6948,8 +6896,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
             costing_phase_example_node.entry(phase).or_insert(node);
         }
     }
-    let still_live_costing_total =
-        still_live_costing_in_block + still_live_costing_out_of_block;
+    let still_live_costing_total = still_live_costing_in_block + still_live_costing_out_of_block;
     std::println!(
         "rule_census still_live_costing_in_block={still_live_costing_in_block} still_live_costing_outside_block={still_live_costing_out_of_block} still_live_costing_total={still_live_costing_total}"
     );
@@ -6985,9 +6932,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
         (6, "weights_new"),
     ] {
         let calls = costing_phase_totals.get(&phase).copied().unwrap_or(0);
-        std::println!(
-            "rule_census still_live_costing_phase={phase} label={label} calls={calls}"
-        );
+        std::println!("rule_census still_live_costing_phase={phase} label={label} calls={calls}");
     }
 
     let mut ranked_costing_phases: alloc::vec::Vec<(u32, u64)> =
@@ -7130,9 +7075,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
         *consumer_histogram.entry(count).or_insert(0) += 1;
     }
     for (consumers, nodes) in &consumer_histogram {
-        std::println!(
-            "rule_census rematerialize_histogram consumers={consumers} nodes={nodes}"
-        );
+        std::println!("rule_census rematerialize_histogram consumers={consumers} nodes={nodes}");
     }
     assert!(
         consumer_histogram.keys().all(|&count| count >= 2),
@@ -7821,8 +7764,8 @@ async fn layer_kind_derives_from_the_real_checkpoints_own_tensor_marker(
     #[case] expected: LayerKind,
 ) {
     let names = ["token_embd.weight", marker, "output_norm.weight"];
-    let derived = LayerKind::from_tensor_names(names, layer)
-        .expect("a real block names exactly one marker");
+    let derived =
+        LayerKind::from_tensor_names(names, layer).expect("a real block names exactly one marker");
     assert_eq!(derived, expected);
 }
 
@@ -7873,6 +7816,8 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
                 sin_name: "rope_sin",
             },
             rope_pairing: RopePairing::Interleaved,
+            score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
+            value_norm: false,
         })
         .collect();
     let ffn_configs: Vec<LayerFfnConfig> = (0..24).map(|_| LayerFfnConfig::exclusive()).collect();
@@ -7894,6 +7839,7 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
         &ffn_configs,
         None,
         None,
+        false,
     )
     .expect("the hybrid forward pass lowers to a program");
     let build_elapsed = build_start.elapsed();
@@ -7928,6 +7874,8 @@ async fn lfm2_forward_program_rejects_a_layer_kinds_length_mismatch() {
                 sin_name: "rope_sin",
             },
             rope_pairing: RopePairing::Interleaved,
+            score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
+            value_norm: false,
         },
         LayerAttentionConfig {
             head_dim: 64,
@@ -7939,6 +7887,8 @@ async fn lfm2_forward_program_rejects_a_layer_kinds_length_mismatch() {
                 sin_name: "rope_sin",
             },
             rope_pairing: RopePairing::Interleaved,
+            score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
+            value_norm: false,
         },
     ];
     let ffn_configs = [LayerFfnConfig::exclusive(), LayerFfnConfig::exclusive()];
@@ -7958,6 +7908,7 @@ async fn lfm2_forward_program_rejects_a_layer_kinds_length_mismatch() {
         &ffn_configs,
         None,
         None,
+        false,
     )
     .expect_err("2 layer_kinds against block_count=24 must be rejected");
     assert!(
@@ -7991,8 +7942,8 @@ async fn causal_conv1d_rejects_a_zero_width_window() {
             name: Some("weight".into()),
         },
     );
-    let error = causal_conv1d(&mut program, x, weight, 0)
-        .expect_err("l_cache=0 has no window to convolve");
+    let error =
+        causal_conv1d(&mut program, x, weight, 0).expect_err("l_cache=0 has no window to convolve");
     assert!(
         matches!(error, TensorError::InvalidConvConfig { l_cache: 0 }),
         "got {error:?}"
@@ -8322,13 +8273,9 @@ async fn l2norm_matches_a_hand_computed_unit_vector() {
 
     let x_data = [3.0f32, 4.0];
     let eps_data = [0.0f32];
-    let evaluated = crate::cpu::evaluate_named(
-        &program,
-        &[],
-        &[("x", &x_data), ("eps", &eps_data)],
-        &[out],
-    )
-    .expect("l2norm evaluates");
+    let evaluated =
+        crate::cpu::evaluate_named(&program, &[], &[("x", &x_data), ("eps", &eps_data)], &[out])
+            .expect("l2norm evaluates");
     let (out_values, _) = evaluated.get(out).expect("out present");
 
     assert!((out_values[0] - 0.6).abs() < 1e-5, "got {}", out_values[0]);
@@ -8892,11 +8839,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps(
             .to_vec();
     }
 
-    assert_relative_rows_match(
-        static_mixer_rows,
-        &sequential_mixer_rows,
-        "mixer_out",
-    );
+    assert_relative_rows_match(static_mixer_rows, &sequential_mixer_rows, "mixer_out");
     assert_relative_rows_match(static_state, &sequential_state, "state_out");
 }
 
@@ -9002,7 +8945,12 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
             "x",
         );
         let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
-        let eps = input_leaf(&mut program, DType::Float32, alloc::vec![sequence_extent], "eps");
+        let eps = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![sequence_extent],
+            "eps",
+        );
         let head_eps = input_leaf(
             &mut program,
             DType::Float32,
@@ -9098,7 +9046,11 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
             one,
             inv_sqrt_key_dim,
             inv_head_v_dim,
-            if attn_norm_present { Some(attn_norm_weight) } else { None },
+            if attn_norm_present {
+                Some(attn_norm_weight)
+            } else {
+                None
+            },
             wqkv,
             wqkv_gate,
             conv_weight,
@@ -9126,8 +9078,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
         (program, mixer_out, taps)
     };
 
-    let (static_program, static_mixer_out, static_taps) =
-        build_program(Extent::Static(positions));
+    let (static_program, static_mixer_out, static_taps) = build_program(Extent::Static(positions));
     let static_result = crate::cpu::evaluate_named(
         &static_program,
         &[u64::from(positions)],
@@ -9162,15 +9113,42 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
     )
     .expect("the static M>1 program evaluates");
 
-    let static_mixer_rows = static_result.get(static_mixer_out).expect("mixer_out present").0;
-    let static_state = static_result.get(static_taps.state_out).expect("state_out present").0;
-    let static_qkv_mixed = static_result.get(static_taps.qkv_mixed).expect("qkv_mixed present").0;
-    let static_query = static_result.get(static_taps.query_sequence).expect("query_sequence present").0;
-    let static_key = static_result.get(static_taps.key_sequence).expect("key_sequence present").0;
-    let static_value = static_result.get(static_taps.value_sequence).expect("value_sequence present").0;
-    let static_beta = static_result.get(static_taps.beta_sequence).expect("beta_sequence present").0;
-    let static_gate = static_result.get(static_taps.gate_sequence).expect("gate_sequence present").0;
-    let static_z = static_result.get(static_taps.z_sequence).expect("z_sequence present").0;
+    let static_mixer_rows = static_result
+        .get(static_mixer_out)
+        .expect("mixer_out present")
+        .0;
+    let static_state = static_result
+        .get(static_taps.state_out)
+        .expect("state_out present")
+        .0;
+    let static_qkv_mixed = static_result
+        .get(static_taps.qkv_mixed)
+        .expect("qkv_mixed present")
+        .0;
+    let static_query = static_result
+        .get(static_taps.query_sequence)
+        .expect("query_sequence present")
+        .0;
+    let static_key = static_result
+        .get(static_taps.key_sequence)
+        .expect("key_sequence present")
+        .0;
+    let static_value = static_result
+        .get(static_taps.value_sequence)
+        .expect("value_sequence present")
+        .0;
+    let static_beta = static_result
+        .get(static_taps.beta_sequence)
+        .expect("beta_sequence present")
+        .0;
+    let static_gate = static_result
+        .get(static_taps.gate_sequence)
+        .expect("gate_sequence present")
+        .0;
+    let static_z = static_result
+        .get(static_taps.z_sequence)
+        .expect("z_sequence present")
+        .0;
 
     let (single_program, single_mixer_out, single_taps) = build_program(Extent::Symbolic(0));
     let mut sequential_state = initial_state.clone();
@@ -9180,10 +9158,10 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
 
     let row_length = |total: usize| -> usize { total / positions as usize };
     let check_row = |label: &str,
-                          position: usize,
-                          static_buffer: &[f32],
-                          single_row: &[f32],
-                          failures: &mut alloc::vec::Vec<alloc::string::String>| {
+                     position: usize,
+                     static_buffer: &[f32],
+                     single_row: &[f32],
+                     failures: &mut alloc::vec::Vec<alloc::string::String>| {
         let length = row_length(static_buffer.len());
         let static_row = &static_buffer[position * length..(position + 1) * length];
         let mut max_relative_error = 0.0_f32;
@@ -9207,7 +9185,10 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
             &single_program,
             &[1],
             &[
-                ("x", &x_data[position * embedding as usize..(position + 1) * embedding as usize]),
+                (
+                    "x",
+                    &x_data[position * embedding as usize..(position + 1) * embedding as usize],
+                ),
                 ("eps", &[1e-6_f32]),
                 ("head_eps", &head_eps_data),
                 ("attn_norm_weight", &attn_norm_weight_data),
@@ -9237,20 +9218,81 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
         )
         .expect("one sequential mixer step evaluates at real dims");
 
-        let single_mixer_row = evaluated.get(single_mixer_out).expect("single mixer_out present").0;
+        let single_mixer_row = evaluated
+            .get(single_mixer_out)
+            .expect("single mixer_out present")
+            .0;
         sequential_mixer_rows.extend_from_slice(single_mixer_row);
 
-        check_row("qkv_mixed", position, static_qkv_mixed, evaluated.get(single_taps.qkv_mixed).expect("qkv_mixed present").0, &mut failures);
-        check_row("query", position, static_query, evaluated.get(single_taps.query).expect("query present").0, &mut failures);
-        check_row("key", position, static_key, evaluated.get(single_taps.key).expect("key present").0, &mut failures);
-        check_row("value", position, static_value, evaluated.get(single_taps.value).expect("value present").0, &mut failures);
-        check_row("beta", position, static_beta, evaluated.get(single_taps.beta).expect("beta present").0, &mut failures);
-        check_row("gate", position, static_gate, evaluated.get(single_taps.gate).expect("gate present").0, &mut failures);
-        check_row("z_head", position, static_z, evaluated.get(single_taps.z_head).expect("z_head present").0, &mut failures);
-        check_row("mixer_out", position, static_mixer_rows, single_mixer_row, &mut failures);
+        check_row(
+            "qkv_mixed",
+            position,
+            static_qkv_mixed,
+            evaluated
+                .get(single_taps.qkv_mixed)
+                .expect("qkv_mixed present")
+                .0,
+            &mut failures,
+        );
+        check_row(
+            "query",
+            position,
+            static_query,
+            evaluated.get(single_taps.query).expect("query present").0,
+            &mut failures,
+        );
+        check_row(
+            "key",
+            position,
+            static_key,
+            evaluated.get(single_taps.key).expect("key present").0,
+            &mut failures,
+        );
+        check_row(
+            "value",
+            position,
+            static_value,
+            evaluated.get(single_taps.value).expect("value present").0,
+            &mut failures,
+        );
+        check_row(
+            "beta",
+            position,
+            static_beta,
+            evaluated.get(single_taps.beta).expect("beta present").0,
+            &mut failures,
+        );
+        check_row(
+            "gate",
+            position,
+            static_gate,
+            evaluated.get(single_taps.gate).expect("gate present").0,
+            &mut failures,
+        );
+        check_row(
+            "z_head",
+            position,
+            static_z,
+            evaluated.get(single_taps.z_head).expect("z_head present").0,
+            &mut failures,
+        );
+        check_row(
+            "mixer_out",
+            position,
+            static_mixer_rows,
+            single_mixer_row,
+            &mut failures,
+        );
 
-        sequential_state = evaluated.get(single_taps.state_out).expect("sequential state_out present").0.to_vec();
-        let newest_row = evaluated.get(single_taps.qkv_mixed).expect("sequential qkv_mixed present").0;
+        sequential_state = evaluated
+            .get(single_taps.state_out)
+            .expect("sequential state_out present")
+            .0
+            .to_vec();
+        let newest_row = evaluated
+            .get(single_taps.qkv_mixed)
+            .expect("sequential qkv_mixed present")
+            .0;
         // roll the `[l_cache-1, qkv_dim]` window forward: drop the oldest row,
         // append this position's `qkv_mixed` as the newest (oldest-first layout,
         // matching `conv_history_in`'s own declared shape).
@@ -9263,9 +9305,13 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
         let row_norm = wanted.abs().max(1e-5);
         state_relative_error = state_relative_error.max((found - wanted).abs() / row_norm);
     }
-    std::println!("qwen35_ssm_mixer_real_dims tap=state_out final max_relative_error={state_relative_error}");
+    std::println!(
+        "qwen35_ssm_mixer_real_dims tap=state_out final max_relative_error={state_relative_error}"
+    );
     if state_relative_error > 1e-5 {
-        failures.push(alloc::format!("tap=state_out final max_relative_error={state_relative_error}"));
+        failures.push(alloc::format!(
+            "tap=state_out final max_relative_error={state_relative_error}"
+        ));
     }
 
     assert!(
@@ -9281,11 +9327,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
 /// numeric oracle in this module already asserts, spelled once since
 /// this test compares two multi-row buffers position by position.
 fn assert_relative_rows_match(actual: &[f32], expected: &[f32], label: &str) {
-    assert_eq!(
-        actual.len(),
-        expected.len(),
-        "{label} row count must match"
-    );
+    assert_eq!(actual.len(), expected.len(), "{label} row count must match");
     for (index, (found, wanted)) in actual.iter().zip(expected.iter()).enumerate() {
         let row_norm = wanted.abs().max(1e-5);
         let relative_error = (found - wanted).abs() / row_norm;
@@ -9591,9 +9633,7 @@ async fn qwen35_prefill_sequence_taps_match_repeated_cached_conv_steps() {
             repeated.len(),
             "{label} lengths must agree"
         );
-        for (index, (found, expected)) in
-            sequence_values.iter().zip(repeated.iter()).enumerate()
-        {
+        for (index, (found, expected)) in sequence_values.iter().zip(repeated.iter()).enumerate() {
             assert!(
                 (found - expected).abs() < 1e-6,
                 "{label}[{index}] differs: sequence={found} repeated={expected}"
@@ -9812,8 +9852,7 @@ async fn qwen35_prefill_scan_and_tail_match_repeated_mixer_steps() {
         ),
     ] {
         assert_eq!(found.len(), expected.len(), "{label} lengths must agree");
-        for (index, (found_value, expected_value)) in
-            found.iter().zip(expected.iter()).enumerate()
+        for (index, (found_value, expected_value)) in found.iter().zip(expected.iter()).enumerate()
         {
             assert!(
                 (found_value - expected_value).abs() < 1e-5,
@@ -9855,8 +9894,7 @@ async fn qwen35_prefill_scan_and_tail_match_repeated_mixer_steps() {
 /// 1 * sigmoid(1) ≈ 0.7310586`, `ffn_hidden = 0.7310586 * 1`,
 /// `ffn_out = 0.7310586`, `x_next = 0.7310586 + 4.0 ≈ 4.7310586`.
 #[test]
-fn append_qwen35_dense_attention_layer_matches_a_hand_computed_gate_and_partial_rotary_concat()
-{
+fn append_qwen35_dense_attention_layer_matches_a_hand_computed_gate_and_partial_rotary_concat() {
     let (x_next, ..) = evaluate_dense_attention_test_program(0.0, [0.0f32, 0.0, 0.0, 0.0]);
 
     assert!(
@@ -9874,8 +9912,7 @@ fn append_qwen35_dense_attention_layer_matches_a_hand_computed_gate_and_partial_
 /// code's dropped gate either.
 #[test]
 fn append_qwen35_dense_attention_layer_hand_computed_check_actually_detects_a_dropped_gate() {
-    let (x_next_no_gate, ..) =
-        evaluate_dense_attention_test_program(0.0, [0.0f32, 0.0, 0.0, 0.0]);
+    let (x_next_no_gate, ..) = evaluate_dense_attention_test_program(0.0, [0.0f32, 0.0, 0.0, 0.0]);
     let (x_next_gated, ..) =
         evaluate_dense_attention_test_program(0.0, [10.0f32, 10.0, 10.0, 10.0]);
 
@@ -9900,8 +9937,7 @@ fn evaluate_dense_attention_test_program(
     let rotary_shape = alloc::vec![Extent::Symbolic(0), Extent::Static(1)];
     let head4_shape = alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4)];
     let cache4_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(1)];
-    let cache_pass_shape =
-        alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(2)];
+    let cache_pass_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(2)];
     let cache_v_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(4)];
     let norm_shape = alloc::vec![Extent::Static(4)];
     let ffn_shape = alloc::vec![Extent::Static(1), Extent::Static(1)];
@@ -9973,8 +10009,7 @@ fn evaluate_dense_attention_test_program(
         cache4_shape.clone(),
         "k_first_cache",
     );
-    let k_second_cache =
-        input_leaf(&mut program, DType::Float32, cache4_shape, "k_second_cache");
+    let k_second_cache = input_leaf(&mut program, DType::Float32, cache4_shape, "k_second_cache");
     let k_pass_cache = input_leaf(
         &mut program,
         DType::Float32,
@@ -10127,8 +10162,7 @@ fn dense_attention_only_test_inputs(
     let head4_shape = alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4)];
     let head8_shape = alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(8)];
     let cache4_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(1)];
-    let cache_pass_shape =
-        alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(2)];
+    let cache_pass_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(2)];
     let cache_v_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(4)];
     let norm_shape = alloc::vec![Extent::Static(4)];
 
@@ -10162,8 +10196,7 @@ fn dense_attention_only_test_inputs(
         alloc::vec![Extent::Static(1)],
         "attn_norm_weight",
     );
-    let q_norm_weight =
-        input_leaf(program, DType::Float32, norm_shape.clone(), "q_norm_weight");
+    let q_norm_weight = input_leaf(program, DType::Float32, norm_shape.clone(), "q_norm_weight");
     let k_norm_weight = input_leaf(program, DType::Float32, norm_shape, "k_norm_weight");
     let wq_gate = input_leaf(program, DType::Float32, head8_shape, "wq_gate");
     let wk = input_leaf(program, DType::Float32, head4_shape.clone(), "wk");
@@ -10484,10 +10517,7 @@ fn qg_product_qg_raw_per_head_channel_range_matches_between_thirteen_row_and_one
             DType::Float32,
             ScalarOp::Multiply,
             &[
-                (
-                    wq_flat,
-                    alloc::format!("i,{QG_WIDTH}*h+c->ihc").as_str(),
-                ),
+                (wq_flat, alloc::format!("i,{QG_WIDTH}*h+c->ihc").as_str()),
                 (qg_head_ones, "hc->ihc"),
             ],
         )
@@ -10509,9 +10539,15 @@ fn qg_product_qg_raw_per_head_channel_range_matches_between_thirteen_row_and_one
             "shc->shci",
         )
         .expect("qg_raw lowers");
-        let q_split =
-            per_head_channel_range(program, qg_raw, "h", QG_WIDTH as u32, 0, ATTN_HEAD_DIM as u32)
-                .expect("q_split lowers");
+        let q_split = per_head_channel_range(
+            program,
+            qg_raw,
+            "h",
+            QG_WIDTH as u32,
+            0,
+            ATTN_HEAD_DIM as u32,
+        )
+        .expect("q_split lowers");
         (qg_raw, q_split)
     }
 
@@ -11343,8 +11379,8 @@ fn single_range_layer_with_order(
 /// establishes those two reduces are the ENTIRE cost of this feature).
 #[test]
 fn single_range_layer_binds_qk_norm_with_two_extra_per_head_norm_reduces() {
-    let (plain, _, _) = single_range_layer_with_order(true, false)
-        .expect("a plain interleaved layer still builds");
+    let (plain, _, _) =
+        single_range_layer_with_order(true, false).expect("a plain interleaved layer still builds");
     let (normed, _, _) =
         single_range_layer_with_order(true, true).expect("a qk-norm layer now builds");
 
@@ -11445,12 +11481,10 @@ fn swapping_gate_and_up_order_keeps_dataflow_identical() {
     };
     let mut gate_first_signatures: Vec<_> = gate_first.iter().map(signature).collect();
     let mut up_first_signatures: Vec<_> = up_first.iter().map(signature).collect();
-    gate_first_signatures.sort_by_key(|(discriminant, dtype)| {
-        (format!("{discriminant:?}"), format!("{dtype:?}"))
-    });
-    up_first_signatures.sort_by_key(|(discriminant, dtype)| {
-        (format!("{discriminant:?}"), format!("{dtype:?}"))
-    });
+    gate_first_signatures
+        .sort_by_key(|(discriminant, dtype)| (format!("{discriminant:?}"), format!("{dtype:?}")));
+    up_first_signatures
+        .sort_by_key(|(discriminant, dtype)| (format!("{discriminant:?}"), format!("{dtype:?}")));
     assert_eq!(
         gate_first_signatures, up_first_signatures,
         "the two programs must carry the identical multiset of op kinds -- \
@@ -11492,13 +11526,18 @@ fn causal_mask_windowed_matches_the_hand_worked_six_by_six_window_three_table() 
     let symbols = [SEQUENCE as u64];
     let blocks: [&[f32]; 0] = [];
     let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
-    let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[is_masked], workers)
-        .expect("the windowed causal mask evaluates");
+    let evaluated =
+        crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[is_masked], workers)
+            .expect("the windowed causal mask evaluates");
 
     let (mask, _shape) = evaluated
         .get(is_masked)
         .expect("the mask node was requested");
-    assert_eq!(mask.len(), SEQUENCE * SEQUENCE, "a vacuous mask proves nothing");
+    assert_eq!(
+        mask.len(),
+        SEQUENCE * SEQUENCE,
+        "a vacuous mask proves nothing"
+    );
 
     let mut checked = 0usize;
     for (query, row) in mask.as_chunks::<SEQUENCE>().0.iter().enumerate() {
@@ -11512,7 +11551,11 @@ fn causal_mask_windowed_matches_the_hand_worked_six_by_six_window_three_table() 
             checked += 1;
         }
     }
-    assert_eq!(checked, SEQUENCE * SEQUENCE, "every cell must be checked, not a subset");
+    assert_eq!(
+        checked,
+        SEQUENCE * SEQUENCE,
+        "every cell must be checked, not a subset"
+    );
 }
 
 /// `window = None` must reproduce [`causal_mask`]'s own program and output
@@ -11567,4 +11610,1964 @@ fn causal_mask_windowed_with_no_window_matches_causal_mask_exactly() {
         plain_mask, windowed_mask,
         "window=None must evaluate to byte-identical values as causal_mask"
     );
+}
+
+/// Tiny synthetic parity harness localizing gemma4's remaining forward bug.
+/// `embedding=8, head_dim=4, 2 q heads, 1 kv head`, one sliding layer
+/// (window=2, `ProjectedV`), one full layer (`K=V`, `SharedWithKey`), a
+/// 4-expert top-2 MoE (`expert_feed_forward=4`) -- millisecond-fast, no
+/// checkpoint. Compares the ENGINE (the exact
+/// [`append_attention_mixer`]/[`append_dense_swiglu_ffn`]/
+/// [`append_routed_expert_ffn`]/[`lfm2_forward_program_with_experts`]
+/// functions [`crate::gemma4::bind::Gemma4Arch::bind`]'s real construction
+/// calls, gemma4-interop crate not needed here -- this crate owns every one
+/// of those functions) against an INDEPENDENT reference computed by plain
+/// array math in this module, from the authoritative gemma4 graph description
+/// (norm placement, GeGLU, RoPE, QK-norm, MoE routing/renorm, scales) --
+/// never by reading the engine's own graph back. Isolated primitive calls
+/// (attention mixer alone, dense FFN alone, routed FFN alone) feed the
+/// REFERENCE's own upstream activation as engine input, so a divergence
+/// there is caused entirely by that one primitive, not accumulated drift;
+/// the final full-graph run (`lfm2_forward_program_with_experts`, gemma4's
+/// real composition) is compared end-to-end to catch a composition-level bug
+/// the isolated primitive calls cannot see.
+mod gemma4_synthetic_parity {
+    use super::*;
+
+    const EMBEDDING: usize = 8;
+    const VOCAB: usize = 6;
+    const HEAD_DIM: usize = 4;
+    const PAIRS: usize = HEAD_DIM / 2;
+    /// HF gemma4 full/global layers: `rope_type="proportional"`,
+    /// `partial_rotary_factor=0.25` -- only the first
+    /// `int(0.25 * head_dim/2)` frequency pairs rotate; the rest carry
+    /// `inv_freq=0` (identity). This harness's `PAIRS=2` is too small to
+    /// reproduce the real `0.25` fraction exactly (`0.25 * 2 = 0.5`, not an
+    /// integer); `ROTARY_PAIRS_FULL=1` instead exercises the SAME
+    /// mechanism at the smallest non-degenerate split this harness's
+    /// dimensions allow -- one real pair, one identity pair -- without
+    /// resizing every other hand-written literal in this module.
+    const ROTARY_PAIRS_FULL: usize = 1;
+    const QUERY_HEADS: usize = 2;
+    const KV_HEADS: usize = 1;
+    const GROUP: usize = QUERY_HEADS / KV_HEADS;
+    const FEED_FORWARD: usize = 4;
+    const EXPERT_FF: usize = 4;
+    const EXPERT_COUNT: usize = 4;
+    const EXPERT_USED: usize = 2;
+    const SEQ: usize = 3;
+    const EPS: f32 = 1.0e-6;
+    const SWA_WINDOW: usize = 2;
+    const ROPE_BASE_FULL: f32 = 1_000_000.0;
+    const ROPE_BASE_SWA: f32 = 10_000.0;
+    const SOFTCAP: f32 = 30.0;
+    const TOLERANCE: f32 = 1.0e-4;
+
+    /// FNV-seeded deterministic pseudo-random floats in `[-0.1, 0.1]` -- one
+    /// call per named tensor gives every weight/table a distinct, stable,
+    /// reproducible value with no RNG dependency.
+    fn wave(name: &str, count: usize) -> Vec<f32> {
+        let mut hash: u64 = 1_469_598_103_934_665_603;
+        for byte in name.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+        (0..count)
+            .map(|index| {
+                let mixed = hash
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add((index as u64).wrapping_mul(1_442_695_040_888_963_407));
+                let bucket = (mixed >> 40) % 2001;
+                (bucket as f32 - 1000.0) / 10_000.0
+            })
+            .collect()
+    }
+
+    /// [`wave`] for a norm weight leaf, with gemma's own `(1 + w)` RMSNorm
+    /// offset baked in at generation time -- mirrors
+    /// `crate::gemma4::bind::bind_norm_plus_one` (proxima-model-interop),
+    /// which does the identical `+= 1.0` at real-checkpoint bind time before
+    /// ever handing the engine's generic `rmsnorm()` a gamma leaf. Every
+    /// `*_norm`/`output_norm` weight in this harness MUST be generated
+    /// through this helper, never bare [`wave`], or the engine and
+    /// [`rmsnorm_ref`] silently disagree on what "gamma" means.
+    fn norm_wave(name: &str, count: usize) -> Vec<f32> {
+        wave(name, count)
+            .into_iter()
+            .map(|value| value + 1.0)
+            .collect()
+    }
+
+    fn gelu_tanh(x: f32) -> f32 {
+        0.5 * x * (1.0 + (0.797_884_6 * (x + 0.044_715 * x * x * x)).tanh())
+    }
+
+    /// Gemma's `(1 + weight)` RMSNorm convention is baked into `gamma` at
+    /// GENERATION time by [`norm_wave`] (mirroring
+    /// `bind_norm_plus_one` -- see that function's own doc: the engine's
+    /// generic `rmsnorm()` primitive takes a gamma that ALREADY has `1.0`
+    /// added, never a raw on-disk weight), so this is a plain
+    /// `gamma * normalized` -- the identical formula the engine's own
+    /// `rmsnorm()` applies, both sides fed the same already-offset value.
+    fn rmsnorm_ref(x: &[f32], gamma: &[f32], eps: f32) -> Vec<f32> {
+        let mean_square = x.iter().map(|value| value * value).sum::<f32>() / x.len() as f32;
+        let inv_rms = 1.0 / (mean_square + eps).sqrt();
+        x.iter()
+            .zip(gamma)
+            .map(|(&value, &gamma)| value * inv_rms * gamma)
+            .collect()
+    }
+
+    /// [`rmsnorm_ref`] without the learned scale -- gemma4's `v_norm`
+    /// (`Gemma4RMSNorm(head_dim, eps, with_scale=False)`,
+    /// `modeling_gemma4.py:1256-1265`) has no gamma tensor at all.
+    fn rmsnorm_ref_no_scale(x: &[f32], eps: f32) -> Vec<f32> {
+        let mean_square = x.iter().map(|value| value * value).sum::<f32>() / x.len() as f32;
+        let inv_rms = 1.0 / (mean_square + eps).sqrt();
+        x.iter().map(|&value| value * inv_rms).collect()
+    }
+
+    /// Split-half/NEOX/rotate_half RoPE: `(same, partner) = (x[i],
+    /// x[i+pairs])`, `out_same = same*cos - partner*sin`, `out_partner =
+    /// same*sin + partner*cos` -- llama.cpp's `kernel_rope_neox`, the
+    /// convention gemma/llama use, NOT GPT-J interleaved `(2*i, 2*i+1)`.
+    fn rope_split_half(head: &[f32], cos: &[f32], sin: &[f32]) -> Vec<f32> {
+        let mut out = alloc::vec![0.0f32; head.len()];
+        for pair in 0..PAIRS {
+            let same = head[pair];
+            let partner = head[pair + PAIRS];
+            out[pair] = same * cos[pair] - partner * sin[pair];
+            out[pair + PAIRS] = same * sin[pair] + partner * cos[pair];
+        }
+        out
+    }
+
+    fn rope_table(
+        positions: &[usize],
+        freq_base: f32,
+        dim: usize,
+    ) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        let pairs = dim / 2;
+        let mut cos_table = Vec::with_capacity(positions.len());
+        let mut sin_table = Vec::with_capacity(positions.len());
+        for &position in positions {
+            let mut cos_row = alloc::vec![0.0f32; pairs];
+            let mut sin_row = alloc::vec![0.0f32; pairs];
+            for pair in 0..pairs {
+                let theta = position as f32 * freq_base.powf(-((2 * pair) as f32) / dim as f32);
+                cos_row[pair] = theta.cos();
+                sin_row[pair] = theta.sin();
+            }
+            cos_table.push(cos_row);
+            sin_table.push(sin_row);
+        }
+        (cos_table, sin_table)
+    }
+
+    /// [`rope_table`], but only the first `rotary_pairs` columns carry a
+    /// real angle -- HF gemma4's full/global layers (`partial_rotary_factor
+    /// = 0.25`, `inv_freq=0` past the rotated fraction). Columns at or past
+    /// `rotary_pairs` are left at `cos=1, sin=0`: fed through the SAME
+    /// [`rope_split_half`]/`append_attention_mixer` rotation everything else
+    /// uses, that identity pair makes `out_same = same`, `out_partner =
+    /// partner` -- an unrotated pass-through, never a separate code path.
+    fn rope_table_partial(
+        positions: &[usize],
+        freq_base: f32,
+        dim: usize,
+        rotary_pairs: usize,
+    ) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        let pairs = dim / 2;
+        let mut cos_table = Vec::with_capacity(positions.len());
+        let mut sin_table = Vec::with_capacity(positions.len());
+        for &position in positions {
+            let mut cos_row = alloc::vec![1.0f32; pairs];
+            let mut sin_row = alloc::vec![0.0f32; pairs];
+            for pair in 0..rotary_pairs.min(pairs) {
+                let theta = position as f32 * freq_base.powf(-((2 * pair) as f32) / dim as f32);
+                cos_row[pair] = theta.cos();
+                sin_row[pair] = theta.sin();
+            }
+            cos_table.push(cos_row);
+            sin_table.push(sin_row);
+        }
+        (cos_table, sin_table)
+    }
+
+    fn max_abs_diff(engine: &[f32], reference: &[f32]) -> f32 {
+        engine
+            .iter()
+            .zip(reference)
+            .map(|(&found, &wanted)| (found - wanted).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Every weight bundle this harness's two layers need, generated once by
+    /// [`wave`] and reused by BOTH the engine build (flat, row-major, last
+    /// axis fastest -- exactly the shapes [`lfm2_forward_program_with_experts`]
+    /// declares) and the reference (indexed by hand off the SAME flat
+    /// buffers), so the two sides never see different bytes.
+    struct LayerWeights {
+        attn_norm: Vec<f32>,
+        post_attention_norm: Vec<f32>,
+        q_norm: Vec<f32>,
+        k_norm: Vec<f32>,
+        wq: Vec<f32>,
+        wk: Vec<f32>,
+        wv: Option<Vec<f32>>,
+        wo: Vec<f32>,
+        ffn_norm: Vec<f32>,
+        post_ffw_norm_1: Vec<f32>,
+        post_ffw_norm_2: Vec<f32>,
+        post_ffw_norm: Vec<f32>,
+        pre_ffw_norm_2: Vec<f32>,
+        ffn_gate: Vec<f32>,
+        ffn_up: Vec<f32>,
+        ffn_down: Vec<f32>,
+        gate_inp: Vec<f32>,
+        gate_inp_scale: Vec<f32>,
+        down_exps_scale: Vec<f32>,
+        gate_exps: Vec<f32>,
+        up_exps: Vec<f32>,
+        down_exps: Vec<f32>,
+        output_scale: f32,
+    }
+
+    fn layer_weights(layer: usize, sliding: bool) -> LayerWeights {
+        let tag = |suffix: &str| alloc::format!("blk.{layer}.{suffix}");
+        LayerWeights {
+            attn_norm: norm_wave(&tag("attn_norm"), EMBEDDING),
+            post_attention_norm: norm_wave(&tag("post_attention_norm"), EMBEDDING),
+            q_norm: norm_wave(&tag("attn_q_norm"), HEAD_DIM),
+            k_norm: norm_wave(&tag("attn_k_norm"), HEAD_DIM),
+            wq: wave(&tag("attn_q"), EMBEDDING * QUERY_HEADS * HEAD_DIM),
+            wk: wave(&tag("attn_k"), EMBEDDING * KV_HEADS * HEAD_DIM),
+            wv: sliding.then(|| wave(&tag("attn_v"), EMBEDDING * KV_HEADS * HEAD_DIM)),
+            wo: wave(&tag("attn_output"), KV_HEADS * GROUP * HEAD_DIM * EMBEDDING),
+            ffn_norm: norm_wave(&tag("ffn_norm"), EMBEDDING),
+            post_ffw_norm_1: norm_wave(&tag("post_ffw_norm_1"), EMBEDDING),
+            post_ffw_norm_2: norm_wave(&tag("post_ffw_norm_2"), EMBEDDING),
+            post_ffw_norm: norm_wave(&tag("post_ffw_norm"), EMBEDDING),
+            pre_ffw_norm_2: norm_wave(&tag("pre_ffw_norm_2"), EMBEDDING),
+            ffn_gate: wave(&tag("ffn_gate"), EMBEDDING * FEED_FORWARD),
+            ffn_up: wave(&tag("ffn_up"), EMBEDDING * FEED_FORWARD),
+            ffn_down: wave(&tag("ffn_down"), FEED_FORWARD * EMBEDDING),
+            gate_inp: wave(&tag("ffn_gate_inp.weight"), EMBEDDING * EXPERT_COUNT),
+            gate_inp_scale: wave(&tag("ffn_gate_inp.scale"), EMBEDDING),
+            down_exps_scale: wave(&tag("ffn_down_exps.scale"), EXPERT_COUNT),
+            gate_exps: wave(&tag("ffn_gate_exps"), EXPERT_COUNT * EMBEDDING * EXPERT_FF),
+            up_exps: wave(&tag("ffn_up_exps"), EXPERT_COUNT * EMBEDDING * EXPERT_FF),
+            down_exps: wave(&tag("ffn_down_exps"), EXPERT_COUNT * EXPERT_FF * EMBEDDING),
+            output_scale: wave(&tag("layer_output_scale"), 1)[0],
+        }
+    }
+
+    /// Reference attention sub-block for one layer, taking `resid` (the
+    /// layer's own input residual, `[seq][embedding]`) and returning
+    /// `post_mixer = post_attention_norm(attn_out) + resid`, matching
+    /// [`append_attention_mixer`]'s own op sequence exactly.
+    fn attention_reference(
+        resid: &[Vec<f32>],
+        weights: &LayerWeights,
+        cos: &[Vec<f32>],
+        sin: &[Vec<f32>],
+        window: Option<usize>,
+        value_norm: bool,
+    ) -> Vec<Vec<f32>> {
+        let seq = resid.len();
+        let normed: Vec<Vec<f32>> = resid
+            .iter()
+            .map(|row| rmsnorm_ref(row, &weights.attn_norm, EPS))
+            .collect();
+
+        let mut q_rot = alloc::vec![alloc::vec![alloc::vec![0.0f32; HEAD_DIM]; QUERY_HEADS]; seq];
+        let mut k_rot = alloc::vec![alloc::vec![alloc::vec![0.0f32; HEAD_DIM]; KV_HEADS]; seq];
+        let mut v_val = alloc::vec![alloc::vec![alloc::vec![0.0f32; HEAD_DIM]; KV_HEADS]; seq];
+
+        for s in 0..seq {
+            for h in 0..QUERY_HEADS {
+                let mut raw = alloc::vec![0.0f32; HEAD_DIM];
+                for d in 0..HEAD_DIM {
+                    let mut acc = 0.0f32;
+                    for i in 0..EMBEDDING {
+                        acc += normed[s][i] * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
+                    }
+                    raw[d] = acc;
+                }
+                let head_normed = rmsnorm_ref(&raw, &weights.q_norm, EPS);
+                q_rot[s][h] = rope_split_half(&head_normed, &cos[s], &sin[s]);
+            }
+            for u in 0..KV_HEADS {
+                let mut raw = alloc::vec![0.0f32; HEAD_DIM];
+                for d in 0..HEAD_DIM {
+                    let mut acc = 0.0f32;
+                    for i in 0..EMBEDDING {
+                        acc += normed[s][i] * weights.wk[(i * KV_HEADS + u) * HEAD_DIM + d];
+                    }
+                    raw[d] = acc;
+                }
+                let head_normed = rmsnorm_ref(&raw, &weights.k_norm, EPS);
+                k_rot[s][u] = rope_split_half(&head_normed, &cos[s], &sin[s]);
+                let v_raw = match &weights.wv {
+                    Some(wv_data) => {
+                        let mut out = alloc::vec![0.0f32; HEAD_DIM];
+                        for d in 0..HEAD_DIM {
+                            let mut acc = 0.0f32;
+                            for i in 0..EMBEDDING {
+                                acc += normed[s][i] * wv_data[(i * KV_HEADS + u) * HEAD_DIM + d];
+                            }
+                            out[d] = acc;
+                        }
+                        out
+                    }
+                    // full/K=V layer: V is the RAW key projection, before
+                    // qk-norm and before rope.
+                    None => raw,
+                };
+                // Gemma4TextAttention.forward, modeling_gemma4.py:1256-1265:
+                // v_norm applies to V AFTER projection/sharing, un-roped, no
+                // learned scale.
+                v_val[s][u] = if value_norm {
+                    rmsnorm_ref_no_scale(&v_raw, EPS)
+                } else {
+                    v_raw
+                };
+            }
+        }
+
+        // gemma4 `self.scaling = 1.0`: HF applies no query-side scaling.
+        let scale = 1.0;
+        let mut attn_out = alloc::vec![alloc::vec![0.0f32; EMBEDDING]; seq];
+        for s in 0..seq {
+            for h in 0..QUERY_HEADS {
+                let u = h / GROUP;
+                let lo = match window {
+                    Some(w) if s + 1 > w => s + 1 - w,
+                    _ => 0,
+                };
+                let mut scores = alloc::vec![f32::NEG_INFINITY; seq];
+                for score in scores.iter_mut().take(s + 1).skip(lo) {
+                    *score = 0.0;
+                }
+                for t in lo..=s {
+                    let mut dot = 0.0f32;
+                    for d in 0..HEAD_DIM {
+                        dot += q_rot[s][h][d] * k_rot[t][u][d];
+                    }
+                    scores[t] = dot * scale;
+                }
+                let max_score = scores[lo..=s]
+                    .iter()
+                    .cloned()
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let mut weight_row = alloc::vec![0.0f32; seq];
+                let mut total = 0.0f32;
+                for t in lo..=s {
+                    let w = (scores[t] - max_score).exp();
+                    weight_row[t] = w;
+                    total += w;
+                }
+                let mut attended = alloc::vec![0.0f32; HEAD_DIM];
+                for t in lo..=s {
+                    let probability = weight_row[t] / total;
+                    for d in 0..HEAD_DIM {
+                        attended[d] += probability * v_val[t][u][d];
+                    }
+                }
+                let g = h % GROUP;
+                for o in 0..EMBEDDING {
+                    let mut acc = attn_out[s][o];
+                    for d in 0..HEAD_DIM {
+                        acc += attended[d]
+                            * weights.wo[((u * GROUP + g) * HEAD_DIM + d) * EMBEDDING + o];
+                    }
+                    attn_out[s][o] = acc;
+                }
+            }
+        }
+
+        attn_out
+            .iter()
+            .zip(resid.iter())
+            .map(|(out, res)| {
+                let normed_out = rmsnorm_ref(out, &weights.post_attention_norm, EPS);
+                normed_out
+                    .iter()
+                    .zip(res)
+                    .map(|(&value, &residual)| value + residual)
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn dense_ffn_reference(x: &[f32], weights: &LayerWeights) -> Vec<f32> {
+        let mut gate = alloc::vec![0.0f32; FEED_FORWARD];
+        let mut up = alloc::vec![0.0f32; FEED_FORWARD];
+        for g in 0..FEED_FORWARD {
+            let mut gate_acc = 0.0f32;
+            let mut up_acc = 0.0f32;
+            for i in 0..EMBEDDING {
+                gate_acc += x[i] * weights.ffn_gate[i * FEED_FORWARD + g];
+                up_acc += x[i] * weights.ffn_up[i * FEED_FORWARD + g];
+            }
+            gate[g] = gate_acc;
+            up[g] = up_acc;
+        }
+        let mut out = alloc::vec![0.0f32; EMBEDDING];
+        for o in 0..EMBEDDING {
+            let mut acc = 0.0f32;
+            for g in 0..FEED_FORWARD {
+                acc += gelu_tanh(gate[g]) * up[g] * weights.ffn_down[g * EMBEDDING + o];
+            }
+            out[o] = acc;
+        }
+        out
+    }
+
+    /// `router_input` (raw `post_mixer`) and `expert_input`
+    /// (`pre_ffw_norm_2`-normed) are DELIBERATELY separate slices -- gemma4's
+    /// authoritative graph routes on the raw residual but gathers expert
+    /// gate/up/down projections from the routed branch's own normed input;
+    /// this reference call keeps them distinct so a bug threading the wrong
+    /// one into the wrong role would show up as a divergence here.
+    fn moe_reference(
+        router_input: &[f32],
+        expert_input: &[f32],
+        weights: &LayerWeights,
+    ) -> Vec<f32> {
+        // Gemma4TextRouter.forward: norm(x, with_scale=False) * scale *
+        // hidden_size**-0.5, before the router projection.
+        let normed_router = rmsnorm_ref(router_input, &weights.gate_inp_scale, EPS);
+        let inv_sqrt_embedding = (EMBEDDING as f32).sqrt().recip();
+        let scaled: Vec<f32> = normed_router
+            .iter()
+            .map(|&value| value * inv_sqrt_embedding)
+            .collect();
+        let mut logits = alloc::vec![0.0f32; EXPERT_COUNT];
+        for e in 0..EXPERT_COUNT {
+            let mut acc = 0.0f32;
+            for i in 0..EMBEDDING {
+                acc += scaled[i] * weights.gate_inp[i * EXPERT_COUNT + e];
+            }
+            logits[e] = acc;
+        }
+
+        let mut scores = logits.clone();
+        let mut first_max: Option<f32> = None;
+        let mut weighted_sum = alloc::vec![0.0f32; EMBEDDING];
+        let mut weight_total = 0.0f32;
+        for _round in 0..EXPERT_USED {
+            let max_val = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            // ties break toward the HIGHEST expert index -- `Maximum` over
+            // `mask * expert_index` in the engine's own selection reduce.
+            let route = (0..EXPERT_COUNT)
+                .rev()
+                .find(|&candidate| scores[candidate] == max_val)
+                .expect("softmax scores always have a finite maximum while any expert remains");
+            let weight = (max_val - *first_max.get_or_insert(max_val)).exp();
+            weight_total += weight;
+            let combine_weight = weight * weights.down_exps_scale[route];
+
+            let mut gate = alloc::vec![0.0f32; EXPERT_FF];
+            let mut up = alloc::vec![0.0f32; EXPERT_FF];
+            for g in 0..EXPERT_FF {
+                let mut gate_acc = 0.0f32;
+                let mut up_acc = 0.0f32;
+                for i in 0..EMBEDDING {
+                    let index = (route * EMBEDDING + i) * EXPERT_FF + g;
+                    gate_acc += expert_input[i] * weights.gate_exps[index];
+                    up_acc += expert_input[i] * weights.up_exps[index];
+                }
+                gate[g] = gate_acc;
+                up[g] = up_acc;
+            }
+            for o in 0..EMBEDDING {
+                let mut acc = 0.0f32;
+                for g in 0..EXPERT_FF {
+                    acc += gelu_tanh(gate[g])
+                        * up[g]
+                        * weights.down_exps[(route * EXPERT_FF + g) * EMBEDDING + o];
+                }
+                weighted_sum[o] += combine_weight * acc;
+            }
+            scores[route] = f32::NEG_INFINITY;
+        }
+        weighted_sum
+            .iter()
+            .map(|&value| value / weight_total)
+            .collect()
+    }
+
+    /// One full layer's reference forward: attention, then
+    /// [`FfnCombination::ParallelDenseMoe`]'s exact norm/residual sequence
+    /// (`shared = post_ffw_norm_1(geglu(ffn_norm(resid)))`, `routed =
+    /// post_ffw_norm_2(moe(pre_ffw_norm_2(resid)))`, `hidden =
+    /// post_ffw_norm(shared+routed) + resid`, scaled by
+    /// `layer_output_scale`).
+    fn layer_reference(
+        resid: Vec<Vec<f32>>,
+        weights: &LayerWeights,
+        cos: &[Vec<f32>],
+        sin: &[Vec<f32>],
+        window: Option<usize>,
+    ) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        let post_mixer = attention_reference(&resid, weights, cos, sin, window, true);
+        let next: Vec<Vec<f32>> = post_mixer
+            .iter()
+            .map(|post_mixer_row| {
+                let normed2 = rmsnorm_ref(post_mixer_row, &weights.ffn_norm, EPS);
+                let dense_raw = dense_ffn_reference(&normed2, weights);
+                let dense_out = rmsnorm_ref(&dense_raw, &weights.post_ffw_norm_1, EPS);
+
+                let routed_input = rmsnorm_ref(post_mixer_row, &weights.pre_ffw_norm_2, EPS);
+                let routed_raw = moe_reference(post_mixer_row, &routed_input, weights);
+                let routed_out = rmsnorm_ref(&routed_raw, &weights.post_ffw_norm_2, EPS);
+
+                let combined: Vec<f32> = dense_out
+                    .iter()
+                    .zip(&routed_out)
+                    .map(|(&d, &r)| d + r)
+                    .collect();
+                let combined_normed = rmsnorm_ref(&combined, &weights.post_ffw_norm, EPS);
+
+                combined_normed
+                    .iter()
+                    .zip(post_mixer_row)
+                    .map(|(&ffn_value, &residual)| (ffn_value + residual) * weights.output_scale)
+                    .collect()
+            })
+            .collect();
+        (next, post_mixer)
+    }
+
+    fn flatten(rows: &[Vec<f32>]) -> Vec<f32> {
+        rows.iter().flat_map(|row| row.iter().copied()).collect()
+    }
+
+    /// Isolated-primitive check: feeds the REFERENCE's own `resid` into the
+    /// ENGINE's real [`append_attention_mixer`] call (the exact function
+    /// [`lfm2_forward_program_with_experts`] uses per attention layer) and
+    /// compares against [`attention_reference`] computed from the same
+    /// `resid` -- a divergence here is caused ENTIRELY by the attention
+    /// primitive (RoPE convention / QK-norm order / assembly / K=V), not by
+    /// upstream drift.
+    fn engine_attention_only(
+        resid: &[Vec<f32>],
+        weights: &LayerWeights,
+        cos_table: &[Vec<f32>],
+        sin_table: &[Vec<f32>],
+        window: Option<u32>,
+        value_source_kind: ValueSourceKind,
+    ) -> Vec<f32> {
+        let seq = resid.len();
+        let mut program = Vec::new();
+        let x = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+            "x",
+        );
+        let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0);
+        let inv_head_dim = scalar_constant(&mut program, 1.0 / HEAD_DIM as f32);
+        let cos = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(PAIRS as u32)],
+            "cos",
+        );
+        let sin = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(PAIRS as u32)],
+            "sin",
+        );
+        let group_ones = op::append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![
+                    Extent::Static(KV_HEADS as u32),
+                    Extent::Static(GROUP as u32)
+                ],
+                value: 1.0,
+            },
+        );
+        let (is_future, neg_infinity) =
+            causal_mask_windowed(&mut program, window).expect("causal mask lowers");
+        let attn_norm = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EMBEDDING as u32)],
+            "attn_norm",
+        );
+        let q_norm = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(HEAD_DIM as u32)],
+            "q_norm",
+        );
+        let k_norm = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(HEAD_DIM as u32)],
+            "k_norm",
+        );
+        let wq = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(QUERY_HEADS as u32),
+                Extent::Static(HEAD_DIM as u32)
+            ],
+            "wq",
+        );
+        let wk = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(HEAD_DIM as u32)
+            ],
+            "wk",
+        );
+        let value_source = match value_source_kind {
+            ValueSourceKind::ProjectedV => {
+                let wv = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![
+                        Extent::Static(EMBEDDING as u32),
+                        Extent::Static(KV_HEADS as u32),
+                        Extent::Static(HEAD_DIM as u32)
+                    ],
+                    "wv",
+                );
+                ValueSource::Projected(wv)
+            }
+            ValueSourceKind::SharedWithKey => ValueSource::SharedWithKey,
+        };
+        let wo = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(GROUP as u32),
+                Extent::Static(HEAD_DIM as u32),
+                Extent::Static(EMBEDDING as u32),
+            ],
+            "wo",
+        );
+        let post_attn_norm = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EMBEDDING as u32)],
+            "post_attn_norm",
+        );
+
+        let output = append_attention_mixer(
+            &mut program,
+            x,
+            inv_dim,
+            eps,
+            inv_sqrt_head_dim,
+            inv_head_dim,
+            cos,
+            sin,
+            group_ones,
+            is_future,
+            neg_infinity,
+            GROUP as u32,
+            attn_norm,
+            q_norm,
+            k_norm,
+            wq,
+            wk,
+            value_source,
+            wo,
+            RopePairing::SplitHalf {
+                pairs: PAIRS as u32,
+            },
+            Some(post_attn_norm),
+            true,
+        )
+        .expect("isolated attention mixer lowers");
+
+        let x_data = flatten(resid);
+        let eps_data = alloc::vec![EPS; seq];
+        let cos_data = flatten(cos_table);
+        let sin_data = flatten(sin_table);
+        let mut named: Vec<(&str, &[f32])> = alloc::vec![
+            ("x", x_data.as_slice()),
+            ("eps", eps_data.as_slice()),
+            ("cos", cos_data.as_slice()),
+            ("sin", sin_data.as_slice()),
+            ("attn_norm", weights.attn_norm.as_slice()),
+            ("q_norm", weights.q_norm.as_slice()),
+            ("k_norm", weights.k_norm.as_slice()),
+            ("wq", weights.wq.as_slice()),
+            ("wk", weights.wk.as_slice()),
+            ("wo", weights.wo.as_slice()),
+            ("post_attn_norm", weights.post_attention_norm.as_slice()),
+        ];
+        if let Some(wv_data) = &weights.wv {
+            named.push(("wv", wv_data.as_slice()));
+        }
+
+        let evaluated = crate::cpu::evaluate_named(&program, &[seq as u64], &named, &[output])
+            .expect("isolated attention mixer evaluates");
+        evaluated
+            .get(output)
+            .expect("attention output present")
+            .0
+            .to_vec()
+    }
+
+    /// Isolated-primitive check for [`append_routed_expert_ffn`] -- the
+    /// exact function [`lfm2_forward_program_with_experts`]'s
+    /// `ParallelDenseMoe` branch calls. `router_x`/`expert_x` are fed as
+    /// DIFFERENT tensors (matching gemma4's real call, where the router
+    /// consumes the raw residual and the experts consume the
+    /// `pre_ffw_norm_2`-normed value) so a bug swapping the two roles would
+    /// show up here.
+    fn engine_moe_only(
+        router_x: &[Vec<f32>],
+        expert_x: &[Vec<f32>],
+        weights: &LayerWeights,
+    ) -> Vec<f32> {
+        let seq = router_x.len();
+        let mut program = Vec::new();
+        let router_input = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+            "router_x",
+        );
+        let expert_input = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+            "expert_x",
+        );
+        let ones = scalar_constant(&mut program, 1.0);
+        let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+        // `eps` carries its own `s` (token) axis, matching every rmsnorm
+        // caller's own fixture -- a rank-0 constant here mismatches
+        // `rmsnorm`'s own `(eps, "s->s")` exact-shape operand.
+        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let mut moe_sites = Vec::new();
+        let output = append_routed_expert_ffn(
+            &mut program,
+            0,
+            router_input,
+            expert_input,
+            EMBEDDING as u32,
+            EXPERT_FF as u32,
+            EXPERT_COUNT as u32,
+            EXPERT_USED as u32,
+            ones,
+            ExpertGatingFunc::Softmax,
+            false,
+            true,
+            true,
+            Activation::GeluTanh,
+            inv_dim,
+            eps,
+            &mut moe_sites,
+        )
+        .expect("isolated routed expert ffn lowers");
+
+        let router_data = flatten(router_x);
+        let expert_data = flatten(expert_x);
+        let eps_data = alloc::vec![EPS; seq];
+        let named: Vec<(&str, &[f32])> = alloc::vec![
+            ("router_x", router_data.as_slice()),
+            ("expert_x", expert_data.as_slice()),
+            ("eps", eps_data.as_slice()),
+            ("blk.0.ffn_gate_inp.weight", weights.gate_inp.as_slice()),
+            (
+                "blk.0.ffn_gate_inp.scale",
+                weights.gate_inp_scale.as_slice()
+            ),
+            (
+                "blk.0.ffn_down_exps.scale",
+                weights.down_exps_scale.as_slice()
+            ),
+            ("blk.0.ffn_gate_exps.weight", weights.gate_exps.as_slice()),
+            ("blk.0.ffn_up_exps.weight", weights.up_exps.as_slice()),
+            ("blk.0.ffn_down_exps.weight", weights.down_exps.as_slice()),
+        ];
+        let evaluated = crate::cpu::evaluate_named(&program, &[seq as u64], &named, &[output])
+            .expect("isolated routed expert ffn evaluates");
+        evaluated
+            .get(output)
+            .expect("moe output present")
+            .0
+            .to_vec()
+    }
+
+    #[test]
+    fn gemma4_synthetic_parity_localizes_first_divergence() {
+        let ids = [1usize, 3, 2];
+        let embedding_table = wave("token_embd.weight", VOCAB * EMBEDDING);
+        let output_norm = norm_wave("output_norm.weight", EMBEDDING);
+
+        // -- stage 0: embedding lookup * sqrt(embedding) --
+        let mut resid: Vec<Vec<f32>> = ids
+            .iter()
+            .map(|&id| {
+                let row = &embedding_table[id * EMBEDDING..(id + 1) * EMBEDDING];
+                row.iter()
+                    .map(|&value| value * (EMBEDDING as f32).sqrt())
+                    .collect()
+            })
+            .collect();
+        std::println!("stage=embedding row0={:?}", resid[0]);
+
+        let positions: Vec<usize> = (0..SEQ).collect();
+        let (cos_full, sin_full) =
+            rope_table_partial(&positions, ROPE_BASE_FULL, HEAD_DIM, ROTARY_PAIRS_FULL);
+        let (cos_swa, sin_swa) = rope_table(&positions, ROPE_BASE_SWA, HEAD_DIM);
+
+        let layer0 = layer_weights(0, true);
+        let layer1 = layer_weights(1, false);
+
+        // -- stage 1: layer 0 (sliding), attention primitive isolated --
+        let engine_attn0 = engine_attention_only(
+            &resid,
+            &layer0,
+            &cos_swa,
+            &sin_swa,
+            Some(SWA_WINDOW as u32),
+            ValueSourceKind::ProjectedV,
+        );
+        let (layer0_next, layer0_post_mixer) =
+            layer_reference(resid.clone(), &layer0, &cos_swa, &sin_swa, Some(SWA_WINDOW));
+        let reference_attn0 = flatten(&layer0_post_mixer);
+        let attn0_diff = max_abs_diff(&engine_attn0, &reference_attn0);
+        std::println!(
+            "stage=layer0_attention(sliding) engine={engine_attn0:?} reference={reference_attn0:?} max_abs_diff={attn0_diff}"
+        );
+
+        // -- stage 2: layer 0 FFN primitive isolated (dense + MoE) --
+        let normed2: Vec<Vec<f32>> = layer0_post_mixer
+            .iter()
+            .map(|row| rmsnorm_ref(row, &layer0.ffn_norm, EPS))
+            .collect();
+        let engine_dense0: Vec<f32> = normed2
+            .iter()
+            .flat_map(|row| {
+                let mut program = Vec::new();
+                let x = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+                    "x",
+                );
+                let ones = scalar_constant(&mut program, 1.0);
+                let output = append_dense_swiglu_ffn(
+                    &mut program,
+                    0,
+                    x,
+                    EMBEDDING as u32,
+                    FEED_FORWARD as u32,
+                    ones,
+                    Activation::GeluTanh,
+                )
+                .expect("isolated dense ffn lowers");
+                let named: Vec<(&str, &[f32])> = alloc::vec![
+                    ("x", row.as_slice()),
+                    ("blk.0.ffn_gate.weight", layer0.ffn_gate.as_slice()),
+                    ("blk.0.ffn_up.weight", layer0.ffn_up.as_slice()),
+                    ("blk.0.ffn_down.weight", layer0.ffn_down.as_slice()),
+                ];
+                let evaluated = crate::cpu::evaluate_named(&program, &[1], &named, &[output])
+                    .expect("isolated dense ffn evaluates");
+                evaluated
+                    .get(output)
+                    .expect("dense ffn output present")
+                    .0
+                    .to_vec()
+            })
+            .collect();
+        let reference_dense0 = flatten(
+            &normed2
+                .iter()
+                .map(|row| dense_ffn_reference(row, &layer0))
+                .collect::<Vec<_>>(),
+        );
+        let dense0_diff = max_abs_diff(&engine_dense0, &reference_dense0);
+        std::println!(
+            "stage=layer0_dense_ffn engine={engine_dense0:?} reference={reference_dense0:?} max_abs_diff={dense0_diff}"
+        );
+
+        let routed_input0: Vec<Vec<f32>> = layer0_post_mixer
+            .iter()
+            .map(|row| rmsnorm_ref(row, &layer0.pre_ffw_norm_2, EPS))
+            .collect();
+        let engine_moe0 = engine_moe_only(&layer0_post_mixer, &routed_input0, &layer0);
+        let reference_moe0 = flatten(
+            &layer0_post_mixer
+                .iter()
+                .zip(&routed_input0)
+                .map(|(router_row, expert_row)| moe_reference(router_row, expert_row, &layer0))
+                .collect::<Vec<_>>(),
+        );
+        let moe0_diff = max_abs_diff(&engine_moe0, &reference_moe0);
+        std::println!(
+            "stage=layer0_routed_moe engine={engine_moe0:?} reference={reference_moe0:?} max_abs_diff={moe0_diff}"
+        );
+
+        // -- stage 3: layer 1 (full, K=V), attention primitive isolated --
+        resid = layer0_next;
+        let engine_attn1 = engine_attention_only(
+            &resid,
+            &layer1,
+            &cos_full,
+            &sin_full,
+            None,
+            ValueSourceKind::SharedWithKey,
+        );
+        let (layer1_next, layer1_post_mixer) =
+            layer_reference(resid.clone(), &layer1, &cos_full, &sin_full, None);
+        let reference_attn1 = flatten(&layer1_post_mixer);
+        let attn1_diff = max_abs_diff(&engine_attn1, &reference_attn1);
+        std::println!(
+            "stage=layer1_attention(full,K=V) engine={engine_attn1:?} reference={reference_attn1:?} max_abs_diff={attn1_diff}"
+        );
+
+        // -- stage 4: full end-to-end engine graph (gemma4's real
+        // composition via lfm2_forward_program_with_experts) vs the fully
+        // independent reference, final logits --
+        let attention_configs = alloc::vec![
+            LayerAttentionConfig {
+                head_dim: HEAD_DIM as u32,
+                kv_heads: KV_HEADS as u32,
+                mask_window: Some(SWA_WINDOW as u32),
+                value_source_kind: ValueSourceKind::ProjectedV,
+                rope_table: RopeTableSel {
+                    cos_name: "rope_cos_swa",
+                    sin_name: "rope_sin_swa"
+                },
+                rope_pairing: RopePairing::SplitHalf {
+                    pairs: PAIRS as u32
+                },
+                score_scale: AttentionScoreScale::Unscaled,
+                value_norm: true,
+            },
+            LayerAttentionConfig {
+                head_dim: HEAD_DIM as u32,
+                kv_heads: KV_HEADS as u32,
+                mask_window: None,
+                value_source_kind: ValueSourceKind::SharedWithKey,
+                rope_table: RopeTableSel {
+                    cos_name: "rope_cos",
+                    sin_name: "rope_sin"
+                },
+                rope_pairing: RopePairing::SplitHalf {
+                    pairs: PAIRS as u32
+                },
+                score_scale: AttentionScoreScale::Unscaled,
+                value_norm: true,
+            },
+        ];
+        let ffn_config = LayerFfnConfig {
+            post_attention_norm: true,
+            combination: FfnCombination::ParallelDenseMoe,
+            dense_post_norm: true,
+            routed_post_norm: true,
+            combined_post_norm: true,
+            output_scale: true,
+            routed_gating: ExpertGatingFunc::Softmax,
+            routed_expert_bias: false,
+            routed_pre_norm: true,
+            router_scale: true,
+            expert_output_scale: true,
+            activation: Activation::GeluTanh,
+        };
+        let (program, logits, _moe_sites) = lfm2_forward_program_with_experts(
+            VOCAB as u32,
+            EMBEDDING as u32,
+            FEED_FORWARD as u32,
+            EXPERT_FF as u32,
+            QUERY_HEADS as u32,
+            2,
+            EXPERT_COUNT as u32,
+            EXPERT_USED as u32,
+            0,
+            0,
+            &[LayerKind::Attention, LayerKind::Attention],
+            &attention_configs,
+            &alloc::vec![ffn_config; 2],
+            Some(EmbeddingScale::Sqrt),
+            Some(SOFTCAP),
+            false,
+        )
+        .expect("the real gemma4-shaped forward program lowers");
+
+        let ids_i32: Vec<i32> = ids.iter().map(|&id| id as i32).collect();
+        let ids_f32: Vec<f32> = ids_i32.iter().map(|&id| id as f32).collect();
+        let eps_data = alloc::vec![EPS; SEQ];
+        let tied_lm_head = {
+            let mut out = alloc::vec![0.0f32; EMBEDDING * VOCAB];
+            for v in 0..VOCAB {
+                for i in 0..EMBEDDING {
+                    out[i * VOCAB + v] = embedding_table[v * EMBEDDING + i];
+                }
+            }
+            out
+        };
+        let named: Vec<(&str, &[f32])> = alloc::vec![
+            ("ids", ids_f32.as_slice()),
+            ("eps", eps_data.as_slice()),
+            ("token_embd.weight", embedding_table.as_slice()),
+            ("output_norm.weight", output_norm.as_slice()),
+            ("output.weight", tied_lm_head.as_slice()),
+            ("rope_cos_swa", flatten(&cos_swa).leak()),
+            ("rope_sin_swa", flatten(&sin_swa).leak()),
+            ("rope_cos", flatten(&cos_full).leak()),
+            ("rope_sin", flatten(&sin_full).leak()),
+            ("blk.0.attn_norm.weight", layer0.attn_norm.as_slice()),
+            (
+                "blk.0.post_attention_norm.weight",
+                layer0.post_attention_norm.as_slice()
+            ),
+            ("blk.0.attn_q_norm.weight", layer0.q_norm.as_slice()),
+            ("blk.0.attn_k_norm.weight", layer0.k_norm.as_slice()),
+            ("blk.0.attn_q.weight", layer0.wq.as_slice()),
+            ("blk.0.attn_k.weight", layer0.wk.as_slice()),
+            (
+                "blk.0.attn_v.weight",
+                layer0
+                    .wv
+                    .as_ref()
+                    .expect("sliding layer carries attn_v")
+                    .as_slice()
+            ),
+            ("blk.0.attn_output.weight", layer0.wo.as_slice()),
+            (
+                "blk.0.layer_output_scale.weight",
+                core::slice::from_ref(&layer0.output_scale)
+            ),
+            ("blk.0.ffn_norm.weight", layer0.ffn_norm.as_slice()),
+            (
+                "blk.0.post_ffw_norm_1.weight",
+                layer0.post_ffw_norm_1.as_slice()
+            ),
+            (
+                "blk.0.post_ffw_norm_2.weight",
+                layer0.post_ffw_norm_2.as_slice()
+            ),
+            (
+                "blk.0.post_ffw_norm.weight",
+                layer0.post_ffw_norm.as_slice()
+            ),
+            (
+                "blk.0.pre_ffw_norm_2.weight",
+                layer0.pre_ffw_norm_2.as_slice()
+            ),
+            ("blk.0.ffn_gate.weight", layer0.ffn_gate.as_slice()),
+            ("blk.0.ffn_up.weight", layer0.ffn_up.as_slice()),
+            ("blk.0.ffn_down.weight", layer0.ffn_down.as_slice()),
+            ("blk.0.ffn_gate_inp.weight", layer0.gate_inp.as_slice()),
+            ("blk.0.ffn_gate_inp.scale", layer0.gate_inp_scale.as_slice()),
+            ("blk.0.ffn_gate_exps.weight", layer0.gate_exps.as_slice()),
+            ("blk.0.ffn_up_exps.weight", layer0.up_exps.as_slice()),
+            ("blk.0.ffn_down_exps.weight", layer0.down_exps.as_slice()),
+            (
+                "blk.0.ffn_down_exps.scale",
+                layer0.down_exps_scale.as_slice()
+            ),
+            ("blk.1.attn_norm.weight", layer1.attn_norm.as_slice()),
+            (
+                "blk.1.post_attention_norm.weight",
+                layer1.post_attention_norm.as_slice()
+            ),
+            ("blk.1.attn_q_norm.weight", layer1.q_norm.as_slice()),
+            ("blk.1.attn_k_norm.weight", layer1.k_norm.as_slice()),
+            ("blk.1.attn_q.weight", layer1.wq.as_slice()),
+            ("blk.1.attn_k.weight", layer1.wk.as_slice()),
+            ("blk.1.attn_output.weight", layer1.wo.as_slice()),
+            (
+                "blk.1.layer_output_scale.weight",
+                core::slice::from_ref(&layer1.output_scale)
+            ),
+            ("blk.1.ffn_norm.weight", layer1.ffn_norm.as_slice()),
+            (
+                "blk.1.post_ffw_norm_1.weight",
+                layer1.post_ffw_norm_1.as_slice()
+            ),
+            (
+                "blk.1.post_ffw_norm_2.weight",
+                layer1.post_ffw_norm_2.as_slice()
+            ),
+            (
+                "blk.1.post_ffw_norm.weight",
+                layer1.post_ffw_norm.as_slice()
+            ),
+            (
+                "blk.1.pre_ffw_norm_2.weight",
+                layer1.pre_ffw_norm_2.as_slice()
+            ),
+            ("blk.1.ffn_gate.weight", layer1.ffn_gate.as_slice()),
+            ("blk.1.ffn_up.weight", layer1.ffn_up.as_slice()),
+            ("blk.1.ffn_down.weight", layer1.ffn_down.as_slice()),
+            ("blk.1.ffn_gate_inp.weight", layer1.gate_inp.as_slice()),
+            ("blk.1.ffn_gate_inp.scale", layer1.gate_inp_scale.as_slice()),
+            ("blk.1.ffn_gate_exps.weight", layer1.gate_exps.as_slice()),
+            ("blk.1.ffn_up_exps.weight", layer1.up_exps.as_slice()),
+            ("blk.1.ffn_down_exps.weight", layer1.down_exps.as_slice()),
+            (
+                "blk.1.ffn_down_exps.scale",
+                layer1.down_exps_scale.as_slice()
+            ),
+        ];
+        let evaluated = crate::cpu::evaluate_named(&program, &[SEQ as u64], &named, &[logits])
+            .expect("the full gemma4-shaped program evaluates");
+        let engine_logits = evaluated.get(logits).expect("logits present").0.to_vec();
+
+        // -- fully independent final-logits reference --
+        let final_normed: Vec<Vec<f32>> = layer1_next
+            .iter()
+            .map(|row| rmsnorm_ref(row, &output_norm, EPS))
+            .collect();
+        let reference_logits: Vec<f32> = final_normed
+            .iter()
+            .flat_map(|row| {
+                (0..VOCAB)
+                    .map(|v| {
+                        let raw: f32 = (0..EMBEDDING)
+                            .map(|i| row[i] * tied_lm_head[i * VOCAB + v])
+                            .sum();
+                        SOFTCAP * (raw / SOFTCAP).tanh()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let logits_diff = max_abs_diff(&engine_logits, &reference_logits);
+        std::println!(
+            "stage=final_logits engine={engine_logits:?} reference={reference_logits:?} max_abs_diff={logits_diff}"
+        );
+
+        std::println!(
+            "SUMMARY attn0={attn0_diff} dense0={dense0_diff} moe0={moe0_diff} attn1={attn1_diff} logits={logits_diff}"
+        );
+
+        assert!(
+            attn0_diff < TOLERANCE,
+            "layer0 sliding attention diverges: {attn0_diff}"
+        );
+        assert!(
+            dense0_diff < TOLERANCE,
+            "layer0 dense GeGLU FFN diverges: {dense0_diff}"
+        );
+        assert!(
+            moe0_diff < TOLERANCE,
+            "layer0 routed MoE diverges: {moe0_diff}"
+        );
+        assert!(
+            attn1_diff < TOLERANCE,
+            "layer1 full/K=V attention diverges: {attn1_diff}"
+        );
+        assert!(
+            logits_diff < TOLERANCE,
+            "final logits diverge: {logits_diff}"
+        );
+    }
+
+    /// Bisects [`gemma4_synthetic_parity_localizes_first_divergence`]'s
+    /// `attn0` divergence: ONE token means softmax is trivially `1.0` over a
+    /// single key and no masking arithmetic engages at all -- if THIS still
+    /// diverges, the bug is upstream of masking/softmax (projection,
+    /// per-head QK-norm, RoPE, or the output projection), narrowing the
+    /// culprit set the full multi-token case cannot separate.
+    #[test]
+    fn single_token_attention_isolates_projection_norm_rope_from_masking() {
+        let resid = alloc::vec![alloc::vec![0.3f32, -0.2, 0.1, 0.4, -0.1, 0.05, -0.25, 0.2]];
+        let weights = layer_weights(0, true);
+        let (cos_table, sin_table) = rope_table(&[0], ROPE_BASE_SWA, HEAD_DIM);
+
+        let engine = engine_attention_only(
+            &resid,
+            &weights,
+            &cos_table,
+            &sin_table,
+            None,
+            ValueSourceKind::ProjectedV,
+        );
+        let (_next, reference_post_mixer) =
+            layer_reference(resid.clone(), &weights, &cos_table, &sin_table, None);
+        let reference = flatten(&reference_post_mixer);
+        let diff = max_abs_diff(&engine, &reference);
+        std::println!(
+            "stage=single_token_attention engine={engine:?} reference={reference:?} max_abs_diff={diff}"
+        );
+        assert!(
+            diff < TOLERANCE,
+            "single-token attention (no masking/softmax competition) still diverges by {diff} -- \
+             the bug is upstream of masking/softmax, in projection/qk-norm/rope/o_proj"
+        );
+    }
+
+    /// Bisects further: reproduces ONLY [`append_attention_mixer`]'s own
+    /// `q_product`/`q_raw` node pair (lines building `wq`'s
+    /// `"si->shdi"`/`"ihd->shdi"` einsum and its `"shdi->shdi"->"shd->shdi"`
+    /// reduce) in isolation, fed an ALREADY-normed `x` so `attn_norm`/RMSNorm
+    /// cannot be the source of any divergence found here -- if this raw
+    /// per-head Q projection alone diverges, the bug is the projection's own
+    /// einsum/reduce, not qk-norm, rope, grouping, or o_proj.
+    #[test]
+    fn raw_query_projection_alone_isolates_the_wq_einsum() {
+        let normed_x = alloc::vec![0.11f32, -0.22, 0.05, 0.33, -0.09, 0.14, -0.27, 0.18];
+        let weights = layer_weights(0, true);
+
+        let mut program = Vec::new();
+        let normed = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+            "normed",
+        );
+        let wq = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(QUERY_HEADS as u32),
+                Extent::Static(HEAD_DIM as u32)
+            ],
+            "wq",
+        );
+        let q_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed, "si->shdi"), (wq, "ihd->shdi")],
+        )
+        .expect("q_product lowers");
+        let q_raw = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            q_product,
+            "shdi->shdi",
+            "shd->shdi",
+        )
+        .expect("q_raw reduce lowers");
+
+        let named: [(&str, &[f32]); 2] = [
+            ("normed", normed_x.as_slice()),
+            ("wq", weights.wq.as_slice()),
+        ];
+        let evaluated =
+            crate::cpu::evaluate_named(&program, &[1], &named, &[q_raw]).expect("q_raw evaluates");
+        let engine_q = evaluated.get(q_raw).expect("q_raw present").0.to_vec();
+
+        let mut reference_q = alloc::vec![0.0f32; QUERY_HEADS * HEAD_DIM];
+        for h in 0..QUERY_HEADS {
+            for d in 0..HEAD_DIM {
+                let mut acc = 0.0f32;
+                for i in 0..EMBEDDING {
+                    acc += normed_x[i] * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
+                }
+                reference_q[h * HEAD_DIM + d] = acc;
+            }
+        }
+
+        let diff = max_abs_diff(&engine_q, &reference_q);
+        std::println!(
+            "stage=raw_q_projection engine={engine_q:?} reference={reference_q:?} max_abs_diff={diff}"
+        );
+        assert!(diff < TOLERANCE, "raw Q projection diverges: {diff}");
+    }
+
+    /// Bisects further still: reproduces ONLY [`append_attention_mixer`]'s
+    /// `wo_product`/`attn_out` node pair -- the `"sugdo->sugdo"->"so->sugdo"`
+    /// contraction over an ALREADY-attended `[kv_heads, group, head_dim]`
+    /// tensor -- against a hand-indexed reference contraction over the SAME
+    /// fed values. Bypasses Q/K/V projection, qk-norm, rope, and softmax
+    /// entirely, so a divergence here is caused ONLY by the output
+    /// projection's own einsum (the `wo` layout/contraction), not anything
+    /// upstream (already separately proven correct by
+    /// `raw_query_projection_alone_isolates_the_wq_einsum` and
+    /// `rmsnorm_per_head_matches_a_hand_computed_rms_norm`).
+    #[test]
+    fn output_projection_alone_isolates_the_wo_einsum() {
+        let weights = layer_weights(0, true);
+        // attended[u][g][d], KV_HEADS=1, GROUP=2, HEAD_DIM=4.
+        let attended: Vec<f32> = wave("attended-probe", KV_HEADS * GROUP * HEAD_DIM);
+
+        let mut program = Vec::new();
+        let attended_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(GROUP as u32),
+                Extent::Static(HEAD_DIM as u32)
+            ],
+            "attended",
+        );
+        let wo = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(GROUP as u32),
+                Extent::Static(HEAD_DIM as u32),
+                Extent::Static(EMBEDDING as u32),
+            ],
+            "wo",
+        );
+        let wo_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(attended_node, "sugd->sugdo"), (wo, "ugdo->sugdo")],
+        )
+        .expect("wo_product lowers");
+        let attn_out = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            wo_product,
+            "sugdo->sugdo",
+            "so->sugdo",
+        )
+        .expect("attn_out reduce lowers");
+
+        let named: [(&str, &[f32]); 2] = [
+            ("attended", attended.as_slice()),
+            ("wo", weights.wo.as_slice()),
+        ];
+        let evaluated = crate::cpu::evaluate_named(&program, &[1], &named, &[attn_out])
+            .expect("attn_out evaluates");
+        let engine_out = evaluated
+            .get(attn_out)
+            .expect("attn_out present")
+            .0
+            .to_vec();
+
+        let mut reference_out = alloc::vec![0.0f32; EMBEDDING];
+        for u in 0..KV_HEADS {
+            for g in 0..GROUP {
+                for d in 0..HEAD_DIM {
+                    let value = attended[(u * GROUP + g) * HEAD_DIM + d];
+                    for o in 0..EMBEDDING {
+                        reference_out[o] +=
+                            value * weights.wo[((u * GROUP + g) * HEAD_DIM + d) * EMBEDDING + o];
+                    }
+                }
+            }
+        }
+
+        let diff = max_abs_diff(&engine_out, &reference_out);
+        std::println!(
+            "stage=wo_projection engine={engine_out:?} reference={reference_out:?} max_abs_diff={diff}"
+        );
+        assert!(
+            diff < TOLERANCE,
+            "output projection (wo einsum) diverges: {diff}"
+        );
+    }
+
+    /// Bisects the LAST unverified segment: reproduces
+    /// [`append_attention_mixer`]'s `group_map`/score/mask/softmax/`attended`
+    /// node chain (lines 536-666 of `attention_forward.rs`) in isolation,
+    /// fed ALREADY-rotated `q`/`k` and a raw `v` as Inputs -- bypassing
+    /// projection, qk-norm, and rope entirely (all three already
+    /// individually proven correct above). A divergence here is caused ONLY
+    /// by the GQA group broadcast / split-score-sum / softmax / attend chain
+    /// itself.
+    #[test]
+    fn score_softmax_attend_chain_alone_isolates_the_group_broadcast() {
+        let q_even = alloc::vec![0.05f32, -0.12, 0.08, 0.20];
+        let q_odd = alloc::vec![0.03f32, -0.07, 0.11, -0.02];
+        let k_even = alloc::vec![-0.04f32, 0.09];
+        let k_odd = alloc::vec![0.06f32, -0.15];
+        let v = alloc::vec![0.22f32, -0.31, 0.14, -0.08];
+
+        let mut program = Vec::new();
+        let rotated_q_even = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(QUERY_HEADS as u32),
+                Extent::Static(PAIRS as u32)
+            ],
+            "q_even",
+        );
+        let rotated_q_odd = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(QUERY_HEADS as u32),
+                Extent::Static(PAIRS as u32)
+            ],
+            "q_odd",
+        );
+        let rotated_k_even = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(PAIRS as u32)
+            ],
+            "k_even",
+        );
+        let rotated_k_odd = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(PAIRS as u32)
+            ],
+            "k_odd",
+        );
+        let v_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(HEAD_DIM as u32)
+            ],
+            "v",
+        );
+        let group_ones = op::append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![
+                    Extent::Static(KV_HEADS as u32),
+                    Extent::Static(GROUP as u32)
+                ],
+                value: 1.0,
+            },
+        );
+        let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0);
+        let (is_future, neg_infinity) = causal_mask(&mut program).expect("causal mask lowers");
+
+        let group_map = alloc::format!("s,{GROUP}*u+g,i->sugi");
+        let q_even_grouped = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[
+                (rotated_q_even, group_map.as_str()),
+                (group_ones, "ug->sugi"),
+            ],
+        )
+        .expect("q_even_grouped lowers");
+        let q_odd_grouped = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[
+                (rotated_q_odd, group_map.as_str()),
+                (group_ones, "ug->sugi"),
+            ],
+        )
+        .expect("q_odd_grouped lowers");
+        let score_even_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[
+                (q_even_grouped, "sugi->stugi"),
+                (rotated_k_even, "tui->stugi"),
+            ],
+        )
+        .expect("score_even_product lowers");
+        let score_even = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            score_even_product,
+            "stugi->stugi",
+            "stug->stugi",
+        )
+        .expect("score_even reduce lowers");
+        let score_odd_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[
+                (q_odd_grouped, "sugi->stugi"),
+                (rotated_k_odd, "tui->stugi"),
+            ],
+        )
+        .expect("score_odd_product lowers");
+        let score_odd = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            score_odd_product,
+            "stugi->stugi",
+            "stug->stugi",
+        )
+        .expect("score_odd reduce lowers");
+        let scores = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            &[(score_even, "stug->stug"), (score_odd, "stug->stug")],
+        )
+        .expect("scores lowers");
+        let scores_scaled = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
+        )
+        .expect("scores_scaled lowers");
+        let scores_masked = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Select,
+            &[
+                (is_future, "st->stug"),
+                (neg_infinity, "->stug"),
+                (scores_scaled, "stug->stug"),
+            ],
+        )
+        .expect("scores_masked lowers");
+        let score_max = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Maximum,
+            ReduceInit::NegativeInfinity,
+            scores_masked,
+            "stug->stug",
+            "sug->stug",
+        )
+        .expect("score_max reduce lowers");
+        let shifted = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Subtract,
+            &[(scores_masked, "stug->stug"), (score_max, "sug->stug")],
+        )
+        .expect("shifted lowers");
+        let weights_exp = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Exponential,
+            &[(shifted, "stug->stug")],
+        )
+        .expect("weights_exp lowers");
+        let weight_sum = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            weights_exp,
+            "stug->stug",
+            "sug->stug",
+        )
+        .expect("weight_sum reduce lowers");
+        let inv_weight_sum = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Reciprocal,
+            &[(weight_sum, "sug->sug")],
+        )
+        .expect("inv_weight_sum lowers");
+        let probabilities = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(weights_exp, "stug->stug"), (inv_weight_sum, "sug->stug")],
+        )
+        .expect("probabilities lowers");
+        let attended_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(probabilities, "stug->stugd"), (v_node, "tud->stugd")],
+        )
+        .expect("attended_product lowers");
+        let attended = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            attended_product,
+            "stugd->stugd",
+            "sugd->stugd",
+        )
+        .expect("attended reduce lowers");
+
+        let named: [(&str, &[f32]); 5] = [
+            ("q_even", q_even.as_slice()),
+            ("q_odd", q_odd.as_slice()),
+            ("k_even", k_even.as_slice()),
+            ("k_odd", k_odd.as_slice()),
+            ("v", v.as_slice()),
+        ];
+        let evaluated = crate::cpu::evaluate_named(&program, &[1], &named, &[attended])
+            .expect("attended evaluates");
+        let engine_attended = evaluated
+            .get(attended)
+            .expect("attended present")
+            .0
+            .to_vec();
+
+        // reference: single token, single key -> softmax trivially 1.0 ->
+        // attended[u][g][d] = v[u][d] for every g sharing that kv head.
+        let mut reference_attended = alloc::vec![0.0f32; KV_HEADS * GROUP * HEAD_DIM];
+        for u in 0..KV_HEADS {
+            for g in 0..GROUP {
+                for d in 0..HEAD_DIM {
+                    reference_attended[(u * GROUP + g) * HEAD_DIM + d] = v[u * HEAD_DIM + d];
+                }
+            }
+        }
+
+        let diff = max_abs_diff(&engine_attended, &reference_attended);
+        std::println!(
+            "stage=score_softmax_attend engine={engine_attended:?} reference={reference_attended:?} max_abs_diff={diff}"
+        );
+        assert!(
+            diff < TOLERANCE,
+            "score/softmax/attend chain diverges: {diff}"
+        );
+    }
+
+    /// Every sub-op tested individually above matches the engine exactly,
+    /// yet the FULL `append_attention_mixer` single-token case still
+    /// diverges -- this test builds THREE variant references (qk-norm
+    /// skipped, rope skipped, both skipped) from the SAME resid/weights and
+    /// prints which variant (if any) the real engine output actually
+    /// matches, pinpointing which piece the engine's real composition
+    /// applies differently than the authoritative graph.
+    #[test]
+    fn single_token_attention_variant_sweep_finds_what_the_engine_actually_computed() {
+        let resid = alloc::vec![alloc::vec![0.3f32, -0.2, 0.1, 0.4, -0.1, 0.05, -0.25, 0.2]];
+        let weights = layer_weights(0, true);
+        let (cos_table, sin_table) = rope_table(&[0], ROPE_BASE_SWA, HEAD_DIM);
+
+        let engine = engine_attention_only(
+            &resid,
+            &weights,
+            &cos_table,
+            &sin_table,
+            None,
+            ValueSourceKind::ProjectedV,
+        );
+
+        let normed = rmsnorm_ref(&resid[0], &weights.attn_norm, EPS);
+
+        let mut raw_q = alloc::vec![0.0f32; QUERY_HEADS * HEAD_DIM];
+        for h in 0..QUERY_HEADS {
+            for d in 0..HEAD_DIM {
+                let mut acc = 0.0f32;
+                for i in 0..EMBEDDING {
+                    acc += normed[i] * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
+                }
+                raw_q[h * HEAD_DIM + d] = acc;
+            }
+        }
+        let mut raw_k = alloc::vec![0.0f32; HEAD_DIM];
+        let mut raw_v = alloc::vec![0.0f32; HEAD_DIM];
+        let wv_data = weights.wv.as_ref().expect("sliding layer carries attn_v");
+        for d in 0..HEAD_DIM {
+            let mut k_acc = 0.0f32;
+            let mut v_acc = 0.0f32;
+            for i in 0..EMBEDDING {
+                k_acc += normed[i] * weights.wk[i * HEAD_DIM + d];
+                v_acc += normed[i] * wv_data[i * HEAD_DIM + d];
+            }
+            raw_k[d] = k_acc;
+            raw_v[d] = v_acc;
+        }
+
+        let q_norm_h0 = rmsnorm_ref(&raw_q[..HEAD_DIM], &weights.q_norm, EPS);
+        let q_norm_h1 = rmsnorm_ref(&raw_q[HEAD_DIM..], &weights.q_norm, EPS);
+        let k_norm = rmsnorm_ref(&raw_k, &weights.k_norm, EPS);
+
+        let variant = |q_h0: &[f32], q_h1: &[f32], k: &[f32], v: &[f32]| -> Vec<f32> {
+            // gemma4 `self.scaling = 1.0`: HF applies no query-side scaling.
+            let scale = 1.0;
+            let mut out = alloc::vec![0.0f32; EMBEDDING];
+            for (h, q_head) in [q_h0, q_h1].into_iter().enumerate() {
+                let score: f32 = (0..HEAD_DIM).map(|d| q_head[d] * k[d]).sum::<f32>() * scale;
+                let _ = score; // single key -> softmax always 1.0, score value is inert here.
+                let g = h % GROUP;
+                for o in 0..EMBEDDING {
+                    for d in 0..HEAD_DIM {
+                        out[o] +=
+                            v[d] * weights.wo[((0 * GROUP + g) * HEAD_DIM + d) * EMBEDDING + o];
+                    }
+                }
+            }
+            let normed_out = rmsnorm_ref(&out, &weights.post_attention_norm, EPS);
+            normed_out
+                .iter()
+                .zip(&resid[0])
+                .map(|(&value, &residual)| value + residual)
+                .collect()
+        };
+
+        let both = variant(
+            &rope_split_half(&q_norm_h0, &cos_table[0], &sin_table[0]),
+            &rope_split_half(&q_norm_h1, &cos_table[0], &sin_table[0]),
+            &rope_split_half(&k_norm, &cos_table[0], &sin_table[0]),
+            &raw_v,
+        );
+        let no_qk_norm = variant(
+            &rope_split_half(&raw_q[..HEAD_DIM], &cos_table[0], &sin_table[0]),
+            &rope_split_half(&raw_q[HEAD_DIM..], &cos_table[0], &sin_table[0]),
+            &rope_split_half(&raw_k, &cos_table[0], &sin_table[0]),
+            &raw_v,
+        );
+        let no_rope = variant(&q_norm_h0, &q_norm_h1, &k_norm, &raw_v);
+        let neither = variant(&raw_q[..HEAD_DIM], &raw_q[HEAD_DIM..], &raw_k, &raw_v);
+
+        std::println!("engine                ={engine:?}");
+        std::println!(
+            "variant qk-norm+rope  ={both:?} diff={}",
+            max_abs_diff(&engine, &both)
+        );
+        std::println!(
+            "variant rope-only     ={no_qk_norm:?} diff={}",
+            max_abs_diff(&engine, &no_qk_norm)
+        );
+        std::println!(
+            "variant qk-norm-only  ={no_rope:?} diff={}",
+            max_abs_diff(&engine, &no_rope)
+        );
+        std::println!(
+            "variant neither       ={neither:?} diff={}",
+            max_abs_diff(&engine, &neither)
+        );
+    }
+
+    /// Every sub-op tested in isolation above matches the engine exactly,
+    /// yet the FULL `append_attention_mixer` still diverges by ~1.8 on a
+    /// single token. This test builds `append_attention_mixer`'s EXACT node
+    /// sequence inline (copied verbatim from `attention_forward.rs:396-454`,
+    /// not reimplemented), requesting `q_raw`/`q`/`k_raw`/`k`/`v` as
+    /// ADDITIONAL outputs alongside the final result -- so every
+    /// intermediate value inside the REAL program is directly observable and
+    /// comparable to the reference, closing the gap the black-box calls
+    /// above could not see into.
+    #[test]
+    fn single_token_attention_intermediate_taps_localize_the_exact_node() {
+        let resid = alloc::vec![alloc::vec![0.3f32, -0.2, 0.1, 0.4, -0.1, 0.05, -0.25, 0.2]];
+        let weights = layer_weights(0, true);
+
+        let mut program = Vec::new();
+        let x = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+            "x",
+        );
+        let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let inv_head_dim = scalar_constant(&mut program, 1.0 / HEAD_DIM as f32);
+        let attn_norm = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EMBEDDING as u32)],
+            "attn_norm",
+        );
+        let q_norm = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(HEAD_DIM as u32)],
+            "q_norm",
+        );
+        let k_norm = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(HEAD_DIM as u32)],
+            "k_norm",
+        );
+        let wq = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(QUERY_HEADS as u32),
+                Extent::Static(HEAD_DIM as u32)
+            ],
+            "wq",
+        );
+        let wk = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(HEAD_DIM as u32)
+            ],
+            "wk",
+        );
+        let wv = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(HEAD_DIM as u32)
+            ],
+            "wv",
+        );
+
+        let normed = rmsnorm(&mut program, x, attn_norm, inv_dim, eps).expect("normed lowers");
+        let q_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed, "si->shdi"), (wq, "ihd->shdi")],
+        )
+        .expect("q_product lowers");
+        let q_raw = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            q_product,
+            "shdi->shdi",
+            "shd->shdi",
+        )
+        .expect("q_raw lowers");
+        let q = rmsnorm_per_head(&mut program, q_raw, q_norm, inv_head_dim, eps, "h")
+            .expect("q norm lowers");
+
+        let k_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed, "si->sudi"), (wk, "iud->sudi")],
+        )
+        .expect("k_product lowers");
+        let k_raw = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            k_product,
+            "sudi->sudi",
+            "sud->sudi",
+        )
+        .expect("k_raw lowers");
+        let k = rmsnorm_per_head(&mut program, k_raw, k_norm, inv_head_dim, eps, "u")
+            .expect("k norm lowers");
+
+        let v_product = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed, "si->sudi"), (wv, "iud->sudi")],
+        )
+        .expect("v_product lowers");
+        let v = reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            v_product,
+            "sudi->sudi",
+            "sud->sudi",
+        )
+        .expect("v lowers");
+
+        let x_data = flatten(&resid);
+        let eps_data = alloc::vec![EPS; 1];
+        let named: [(&str, &[f32]); 8] = [
+            ("x", x_data.as_slice()),
+            ("eps", eps_data.as_slice()),
+            ("attn_norm", weights.attn_norm.as_slice()),
+            ("q_norm", weights.q_norm.as_slice()),
+            ("k_norm", weights.k_norm.as_slice()),
+            ("wq", weights.wq.as_slice()),
+            ("wk", weights.wk.as_slice()),
+            ("wv", weights.wv.as_ref().expect("sliding").as_slice()),
+        ];
+        let evaluated =
+            crate::cpu::evaluate_named(&program, &[1], &named, &[normed, q_raw, q, k_raw, k, v])
+                .expect("intermediate taps evaluate");
+
+        let engine_normed = evaluated.get(normed).expect("normed present").0.to_vec();
+        let engine_q_raw = evaluated.get(q_raw).expect("q_raw present").0.to_vec();
+        let engine_q = evaluated.get(q).expect("q present").0.to_vec();
+        let engine_k_raw = evaluated.get(k_raw).expect("k_raw present").0.to_vec();
+        let engine_k = evaluated.get(k).expect("k present").0.to_vec();
+        let engine_v = evaluated.get(v).expect("v present").0.to_vec();
+
+        let reference_normed = rmsnorm_ref(&resid[0], &weights.attn_norm, EPS);
+        let mut reference_q_raw = alloc::vec![0.0f32; QUERY_HEADS * HEAD_DIM];
+        for h in 0..QUERY_HEADS {
+            for d in 0..HEAD_DIM {
+                let mut acc = 0.0f32;
+                for i in 0..EMBEDDING {
+                    acc += reference_normed[i] * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
+                }
+                reference_q_raw[h * HEAD_DIM + d] = acc;
+            }
+        }
+        let reference_q: Vec<f32> = (0..QUERY_HEADS)
+            .flat_map(|h| {
+                rmsnorm_ref(
+                    &reference_q_raw[h * HEAD_DIM..(h + 1) * HEAD_DIM],
+                    &weights.q_norm,
+                    EPS,
+                )
+            })
+            .collect();
+        let mut reference_k_raw = alloc::vec![0.0f32; HEAD_DIM];
+        let mut reference_v = alloc::vec![0.0f32; HEAD_DIM];
+        let wv_data = weights.wv.as_ref().expect("sliding");
+        for d in 0..HEAD_DIM {
+            let mut k_acc = 0.0f32;
+            let mut v_acc = 0.0f32;
+            for i in 0..EMBEDDING {
+                k_acc += reference_normed[i] * weights.wk[i * HEAD_DIM + d];
+                v_acc += reference_normed[i] * wv_data[i * HEAD_DIM + d];
+            }
+            reference_k_raw[d] = k_acc;
+            reference_v[d] = v_acc;
+        }
+        let reference_k = rmsnorm_ref(&reference_k_raw, &weights.k_norm, EPS);
+
+        std::println!(
+            "normed  engine={engine_normed:?} reference={reference_normed:?} diff={}",
+            max_abs_diff(&engine_normed, &reference_normed)
+        );
+        std::println!(
+            "q_raw   engine={engine_q_raw:?} reference={reference_q_raw:?} diff={}",
+            max_abs_diff(&engine_q_raw, &reference_q_raw)
+        );
+        std::println!(
+            "q       engine={engine_q:?} reference={reference_q:?} diff={}",
+            max_abs_diff(&engine_q, &reference_q)
+        );
+        std::println!(
+            "k_raw   engine={engine_k_raw:?} reference={reference_k_raw:?} diff={}",
+            max_abs_diff(&engine_k_raw, &reference_k_raw)
+        );
+        std::println!(
+            "k       engine={engine_k:?} reference={reference_k:?} diff={}",
+            max_abs_diff(&engine_k, &reference_k)
+        );
+        std::println!(
+            "v       engine={engine_v:?} reference={reference_v:?} diff={}",
+            max_abs_diff(&engine_v, &reference_v)
+        );
+    }
 }

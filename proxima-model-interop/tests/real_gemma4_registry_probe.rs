@@ -77,8 +77,7 @@ async fn builtin_registry_routes_real_gemma4_header_with_exact_tensor_directory(
         architecture.sliding_window_pattern, expected_sliding_window_pattern,
         "real header marks every 6th layer (5, 11, 17, 23, 29) as full attention"
     );
-    let computed_names: BTreeSet<String> =
-        gemma4_tensor_names(&architecture).into_iter().collect();
+    let computed_names: BTreeSet<String> = gemma4_tensor_names(&architecture).into_iter().collect();
     let real_names: BTreeSet<String> = parsed
         .tensors
         .iter()

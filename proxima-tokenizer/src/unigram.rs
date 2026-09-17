@@ -27,7 +27,7 @@ use crate::vocab::Vocab;
 /// `tokenizer.ggml.model = "llama"` vocabs store every space-containing
 /// piece with spaces already substituted for this codepoint
 /// (`llama_escape_whitespace`, `llama-vocab.cpp:2372-2374`).
-const SPACE_MARKER: char = '\u{2581}';
+pub(crate) const SPACE_MARKER: char = '\u{2581}';
 
 /// Normalizes raw text the way llama.cpp's SPM path does before segmenting:
 /// prepends one literal space (`add_space_prefix`, the default for

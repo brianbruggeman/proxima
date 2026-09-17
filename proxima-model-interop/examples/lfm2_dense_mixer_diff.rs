@@ -227,6 +227,7 @@ fn main() {
         &uniform_lfm2_ffn_configs(&architecture),
         None,
         None,
+        false,
     )
     .expect("build full lfm2 program to walk this layer's node ids");
 

@@ -275,6 +275,26 @@ pub trait Architecture: Send + Sync {
         let _ = context;
         let _ = out;
     }
+
+    /// The checkpoint's own per-pair RoPE frequency-scaling factor
+    /// (GGUF `ROPE_FREQS`, e.g. `rope_freqs.weight`) for the builtin
+    /// `rope_cos`/`rope_sin` table's `head_dim / 2` frequency pairs --
+    /// [`crate::generate::build_position_inputs`] divides each pair's angle
+    /// by `factors[pair]` before taking `cos`/`sin` when this returns
+    /// `Some`. Default `None`: every pair rotates undivided, this crate's
+    /// prior full-rotation behaviour for every architecture except gemma4's
+    /// full/global layers, which override this to look up its own bound
+    /// `rope_freqs.weight` in `weights` (`[1.0]*64 + [1e30]*192` on the real
+    /// checkpoint -- `1e30` makes the division collapse that pair's angle
+    /// to `cos=1, sin=0`, HF's `inv_freq=0` convention for a partial-rotary
+    /// model, with no separate identity code path).
+    fn rope_freq_factors<'weights>(
+        &self,
+        weights: &'weights BoundWeights<'_>,
+    ) -> Option<&'weights [f32]> {
+        let _ = weights;
+        None
+    }
 }
 
 /// What [`Architecture::step_inputs`] reads to derive its own per-step

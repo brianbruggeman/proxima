@@ -85,16 +85,16 @@ impl BoundOpBuilder {
             .push(matches!(expr, Op::Iota { .. }));
         let packed_mapping = match expr {
             Op::Elementwise { operands, .. } => {
-                let direct = operands.iter().any(|(_, map)| {
-                    map.affine()
-                        .axes
-                        .iter()
-                        .any(|axis| axis.terms.len() > 1)
-                });
+                let direct = operands
+                    .iter()
+                    .any(|(_, map)| map.affine().axes.iter().any(|axis| axis.terms.len() > 1));
                 let descendants = self.packed_mapping_subtree.borrow();
                 direct
                     || operands.iter().any(|(operand, _)| {
-                        descendants.get(operand.0 as usize).copied().unwrap_or(false)
+                        descendants
+                            .get(operand.0 as usize)
+                            .copied()
+                            .unwrap_or(false)
                     })
             }
             _ => false,
@@ -241,12 +241,11 @@ impl BoundOpBuilder {
                 let not_held = !self.held.borrow().contains_key(&reduce.operand);
                 let fuses = !still_live && !non_identity && !not_held;
                 if fuses
-                    && let Some(activation_node) =
-                        composed_packed_product_activation(
-                            &self.held,
-                            &self.packed_mapping_subtree,
-                            reduce.operand,
-                        )
+                    && let Some(activation_node) = composed_packed_product_activation(
+                        &self.held,
+                        &self.packed_mapping_subtree,
+                        reduce.operand,
+                    )
                 {
                     // ROW 431 (`docs/discipline.md`): materialize ONLY the
                     // composed activation side of `Multiply(packed, a)` so
@@ -528,8 +527,9 @@ impl BoundOpBuilder {
         // to quarantine's own question of which side must stay fused.
         // Checked at every recursion level, not only the top, since a
         // packed product can repeat several levels down.
-        let packed_operand = packed_and_other_operand(&self.held, &self.packed_mapping_subtree, node)
-            .map(|(packed_node, _)| packed_node);
+        let packed_operand =
+            packed_and_other_operand(&self.held, &self.packed_mapping_subtree, node)
+                .map(|(packed_node, _)| packed_node);
         for (child, _map) in children {
             if !self.held.borrow().contains_key(&child) {
                 continue;
@@ -564,7 +564,11 @@ impl BoundOpBuilder {
 /// into a [`TensorError`] instead of a panic -- the multi-position qwen35
 /// mixer at real dims (M=13/16) did observe one at the old capacity of 3;
 /// see [`READY_BATCH_CAPACITY`]'s own doc.
-pub(super) fn push_ready(emitted: &mut ReadyBatch, node: NodeId, op: BoundOp) -> Result<(), TensorError> {
+pub(super) fn push_ready(
+    emitted: &mut ReadyBatch,
+    node: NodeId,
+    op: BoundOp,
+) -> Result<(), TensorError> {
     emitted.try_push(op).map_err(|_| TensorError::NotLowerable {
         node,
         reason: "one push readied more BoundOps than the no-alloc batch capacity allows",
@@ -802,7 +806,9 @@ pub(super) fn composed_packed_product_activation(
     node: NodeId,
 ) -> Option<NodeId> {
     let (_, other_node) = packed_and_other_operand(held, packed_mapping_subtree, node)?;
-    held.borrow().contains_key(&other_node).then_some(other_node)
+    held.borrow()
+        .contains_key(&other_node)
+        .then_some(other_node)
 }
 
 /// [`composed_packed_product_activation`]'s own packed/other split, without
@@ -1027,7 +1033,10 @@ pub(super) fn compose(
     (ComposedBody { steps }, resolved_operands)
 }
 
-pub(super) fn drop_absorbed(held: &RefCell<BTreeMap<NodeId, HeldElementwise>>, absorbed: Vec<NodeId>) {
+pub(super) fn drop_absorbed(
+    held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    absorbed: Vec<NodeId>,
+) {
     let mut held_mut = held.borrow_mut();
     for node in absorbed {
         held_mut.remove(&node);
@@ -1373,7 +1382,9 @@ pub(super) const fn identity_element_signed_zero_nan(op: ScalarOp) -> Option<f32
 /// `nan_assumptions` alone. The two are independent permissions (a caller
 /// may grant one without the other), so this is never a single shared
 /// rewrite classification.
-pub(super) const fn identity_element_signed_zero_nan_rewrite(op: ScalarOp) -> Option<NumericRewrite> {
+pub(super) const fn identity_element_signed_zero_nan_rewrite(
+    op: ScalarOp,
+) -> Option<NumericRewrite> {
     match op {
         ScalarOp::Add => Some(NumericRewrite::IdentityEliminationSignedZero),
         ScalarOp::Maximum | ScalarOp::Minimum => {
@@ -1563,7 +1574,11 @@ pub(super) fn axis_correspondence(map: &IndexMap) -> Vec<u16> {
         .collect()
 }
 
-pub(super) fn remap_pattern(pattern: &IndexPattern, axis_map: &[u16], outer_iter_rank: u16) -> IndexPattern {
+pub(super) fn remap_pattern(
+    pattern: &IndexPattern,
+    axis_map: &[u16],
+    outer_iter_rank: u16,
+) -> IndexPattern {
     let axes = pattern
         .axes
         .iter()
@@ -1646,4 +1661,3 @@ pub(super) fn row_major_strides(shape: &[u64]) -> Vec<i64> {
     }
     strides
 }
-

@@ -229,7 +229,10 @@ pub(super) fn find_epilogue_source(consumer: &BoundOp, reduce_flags: &[bool]) ->
 /// from the two [`BoundOp`]s' own recorded extents, never from a name or
 /// shape special-cased in this match.
 #[cfg(feature = "reduce-epilogue-fusion")]
-pub(super) fn reduce_epilogue_candidates(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<(NodeId, NodeId)> {
+pub(super) fn reduce_epilogue_candidates(
+    resolved: &[BoundOp],
+    outputs: &[NodeId],
+) -> Vec<(NodeId, NodeId)> {
     let reduce_flags = reduce_epilogue_source_flags(resolved);
     let reference_counts = resolved_reference_counts(resolved);
     let mut candidates = Vec::new();
@@ -389,7 +392,10 @@ pub(super) fn reduce_epilogue_fusion(
     Ok(resolved)
 }
 
-pub(super) fn metal_buffer_binding_count(operands: &BoundOperands, epilogue: &BoundOperands) -> usize {
+pub(super) fn metal_buffer_binding_count(
+    operands: &BoundOperands,
+    epilogue: &BoundOperands,
+) -> usize {
     let gather_count = operands
         .iter()
         .chain(epilogue.iter())
@@ -480,7 +486,11 @@ pub(super) fn reads_reduce_output_identically(
 /// broadcast prior epilogue's own operands are already recorded at the same
 /// rank the fold's `extents` always carries.
 #[cfg(feature = "reduce-epilogue-fusion")]
-pub(super) fn broadcast_extend_operand(layout: &Layout, output_axes: &[u16], full_rank: usize) -> Layout {
+pub(super) fn broadcast_extend_operand(
+    layout: &Layout,
+    output_axes: &[u16],
+    full_rank: usize,
+) -> Layout {
     if layout.strides.len() == full_rank {
         return layout.clone();
     }
@@ -796,4 +806,3 @@ pub fn node_last_reader(resolved: &[BoundOp], node_count: usize) -> Vec<u32> {
     });
     last_reader
 }
-

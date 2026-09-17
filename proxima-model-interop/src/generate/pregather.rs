@@ -808,9 +808,10 @@ impl<'file> LoadedModel<'file> {
             // trip per layer while retaining the explicit router/gather
             // transition. Placed recurrent/dense buffers still fall back to
             // the unfused segments below.
-            let fused_boundary_requested = segments.gather_next_router.as_ref().is_some_and(
-                |segment| fused_segment_experts_are_current_layer(segment, layer),
-            );
+            let fused_boundary_requested = segments
+                .gather_next_router
+                .as_ref()
+                .is_some_and(|segment| fused_segment_experts_are_current_layer(segment, layer));
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             let has_ssm_placement = ssm_placement
                 .is_some_and(|placement| placement.buffers.iter().any(Option::is_some));
@@ -2510,6 +2511,8 @@ impl<'file> LoadedModel<'file> {
                 };
                 crate::memory_fit::fit_mapping_bytes(file_bytes.len() as u64, limit)?;
             }
+            // only read by the `instrument`-gated log line below.
+            #[cfg_attr(not(feature = "instrument"), allow(unused_variables))]
             let residency_report = crate::mapping_residency::prove_resident(file_bytes)?;
             #[cfg(feature = "instrument")]
             info!(
@@ -2844,4 +2847,3 @@ pub(crate) enum LogitsSink<'sink> {
     #[cfg(all(test, feature = "metal"))]
     SumBarriers(&'sink mut u64),
 }
-

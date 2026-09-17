@@ -620,7 +620,10 @@ pub struct StaticArena {
 /// `dead` (no reason to run a dead constant even once) since callers pass
 /// `dead` alongside this set to build the union `run_resolved_nodes_in_arena`
 /// skips. See `docs/discipline.md` ROW 174.
-pub(super) fn static_resolved_nodes(resolved: &[BoundOp], dead: &BTreeSet<NodeId>) -> BTreeSet<NodeId> {
+pub(super) fn static_resolved_nodes(
+    resolved: &[BoundOp],
+    dead: &BTreeSet<NodeId>,
+) -> BTreeSet<NodeId> {
     resolved
         .iter()
         .filter(|computed| {
@@ -1108,9 +1111,8 @@ pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(),
                 ..
             } = &computed.kind
             {
-                for (extra_node, value) in
-                    moe_topk_extra_node_order(routes, weights, *weight_total)
-                        .zip(moe_topk_extra.iter().copied())
+                for (extra_node, value) in moe_topk_extra_node_order(routes, weights, *weight_total)
+                    .zip(moe_topk_extra.iter().copied())
                 {
                     arena.buffers[extra_node.0 as usize] = Some(vec![value]);
                 }
@@ -1372,7 +1374,12 @@ pub(super) fn checkout_arena(
 /// re-offering that arena for reuse would turn one call's failure into every
 /// later call's — dropping it and rebuilding fresh on the next miss is the
 /// safe, self-healing choice (see [`checkout_arena`]'s own callers).
-pub(super) fn checkin_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId], arena: StaticArena) {
+pub(super) fn checkin_arena(
+    program: &[Op],
+    symbols: &[u64],
+    outputs: &[NodeId],
+    arena: StaticArena,
+) {
     let mut cache = lock_arena_cache();
     if cache.len() >= ARENA_CACHE_CAPACITY {
         cache.remove(0);
@@ -1559,7 +1566,10 @@ pub(super) fn is_post_reduce_epilogue_broadcast_reduce(
 /// [`epilogue_is_contiguous_row_major`], which validates the DIFFERENT
 /// shape the other three [`EpilogueKind`]s need (full-rank contiguous, no
 /// dropped axis).
-pub(super) fn epilogue_reduce_operand_matches_leading_axes(layout: &bind::Layout, extents: &[u64]) -> bool {
+pub(super) fn epilogue_reduce_operand_matches_leading_axes(
+    layout: &bind::Layout,
+    extents: &[u64],
+) -> bool {
     if layout.base != 0 || layout.strides.len() != extents.len() {
         return false;
     }
@@ -1661,7 +1671,10 @@ pub(super) fn edge(body: &ComposedBody, arg: StepArg) -> Option<(ScalarOp, &[Ste
 /// are all built entirely from unary (`SquareRoot`) and binary
 /// (`Add`/`Subtract`/`Multiply`/`Divide`/`Maximum`) scalar steps, never a
 /// three-arg `Select`.
-pub(super) fn binary_edge(body: &ComposedBody, arg: StepArg) -> Option<(ScalarOp, StepArg, StepArg)> {
+pub(super) fn binary_edge(
+    body: &ComposedBody,
+    arg: StepArg,
+) -> Option<(ScalarOp, StepArg, StepArg)> {
     let (op, args) = edge(body, arg)?;
     let [left, right] = args else { return None };
     Some((op, *left, *right))
@@ -2332,7 +2345,8 @@ pub fn set_epilogue_fuse_enabled(enabled: bool) {
 /// off until the full stack wins" discipline, applied to a platform-cfg
 /// route rather than a Cargo feature.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(super) static ACCELERATE_GEMM_ENABLED: EpilogueFuseAtomicBool = EpilogueFuseAtomicBool::new(false);
+pub(super) static ACCELERATE_GEMM_ENABLED: EpilogueFuseAtomicBool =
+    EpilogueFuseAtomicBool::new(false);
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(super) static ACCELERATE_GEMM_HITS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -2373,4 +2387,3 @@ pub fn epilogue_fuse_reset() {
     EPILOGUE_FUSE_ELEMENTS.store(0, EpilogueFuseOrdering::Relaxed);
     EPILOGUE_FUSE_NANOS.store(0, EpilogueFuseOrdering::Relaxed);
 }
-

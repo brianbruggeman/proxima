@@ -39,8 +39,8 @@ use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
 use proxima_tensor::op::NodeId;
 use proxima_tensor::spec::{
-    LayerAttentionConfig, LayerFfnConfig, LayerKind, RopePairing, RopeTableSel, ValueSourceKind,
-    lfm2_forward_program_with_experts,
+    AttentionScoreScale, LayerAttentionConfig, LayerFfnConfig, LayerKind, RopePairing,
+    RopeTableSel, ValueSourceKind, lfm2_forward_program_with_experts,
 };
 use proxima_tokenizer::Vocab;
 
@@ -616,7 +616,9 @@ fn build_lfm2_position_inputs(
 /// layer, so this reproduces [`lfm2_forward_program_with_experts`]'s prior
 /// crate-wide-constant behaviour node-for-node rather than genuinely
 /// varying anything per layer.
-pub fn uniform_lfm2_attention_configs(architecture: &Lfm2Architecture) -> Vec<LayerAttentionConfig> {
+pub fn uniform_lfm2_attention_configs(
+    architecture: &Lfm2Architecture,
+) -> Vec<LayerAttentionConfig> {
     vec![
         LayerAttentionConfig {
             head_dim: architecture.head_dim,
@@ -628,6 +630,8 @@ pub fn uniform_lfm2_attention_configs(architecture: &Lfm2Architecture) -> Vec<La
                 sin_name: "rope_sin",
             },
             rope_pairing: RopePairing::Interleaved,
+            score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(architecture.head_dim),
+            value_norm: false,
         };
         architecture.block_count as usize
     ]
@@ -669,6 +673,7 @@ pub fn run_lfm2_prefill(
         &uniform_lfm2_ffn_configs(architecture),
         None,
         None,
+        false,
     )?;
 
     let mut ids = proxima_tokenizer::encode_with_bos_eos(
@@ -782,6 +787,7 @@ pub fn lfm2_forward_values(
         &uniform_lfm2_ffn_configs(architecture),
         None,
         None,
+        false,
     )?;
 
     let inputs = build_lfm2_position_inputs(

@@ -63,7 +63,6 @@ use crate::instrument;
 use crate::map::{self, AxisIndex, AxisTerm, IndexMap, IndexPattern};
 use crate::op::{self, Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 
-
 #[macro_use]
 mod primitives;
 #[macro_use]
@@ -78,13 +77,13 @@ mod single_range_moe_cached;
 mod lfm2_qwen35_gdn;
 #[macro_use]
 mod attention_forward;
-pub use primitives::*;
-pub use mistral_layer_moe::*;
-pub use mistral_forward_cached::*;
-pub use hyperconn_qwen35_dense::*;
-pub use single_range_moe_cached::*;
-pub use lfm2_qwen35_gdn::*;
 pub use attention_forward::*;
+pub use hyperconn_qwen35_dense::*;
+pub use lfm2_qwen35_gdn::*;
+pub use mistral_forward_cached::*;
+pub use mistral_layer_moe::*;
+pub use primitives::*;
+pub use single_range_moe_cached::*;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

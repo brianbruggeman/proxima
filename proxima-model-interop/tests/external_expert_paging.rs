@@ -200,6 +200,20 @@ async fn paging_an_out_of_range_expert_index_is_rejected() {
 /// indexes into.
 const PAGED_EXPERT: usize = 0;
 
+/// [`GATE_SITE`]'s own up/down siblings at layer 0 -- `bind::build_expert_slab`'s
+/// own per-layer enumeration order is `[Gate, Up, Down]`
+/// ([`proxima_model_interop::expert_slab::ExpertProjection::ALL`]'s own
+/// order), so `site = layer * 3 + projection.index()` makes these `1`/`2`
+/// for layer 0 regardless of `support::BLOCK_COUNT`. A residency swap of
+/// "this expert" means all three of an expert's own weight matrices, not
+/// just its gate projection -- paging only [`GATE_SITE`] leaves `up`/`down`
+/// on their original `Q4_K` bytes, which is why the single-site version of
+/// this test could decode identically before and after a page: `down(silu(gate(x))
+/// * up(x))` still ran `up`/`down` unperturbed, and one layer's gate-only
+/// precision drop was not guaranteed to move the greedy argmax.
+const UP_SITE: usize = 1;
+const DOWN_SITE: usize = 2;
+
 /// The one real-output-projection fixture's bytes, leaked once so every
 /// independent [`LoadedModel::load`] call in
 /// [`q2k_paging_actually_changes_the_decoded_ids`] borrows the SAME
@@ -231,18 +245,19 @@ fn load_real_output_moe_fixture(
         .expect("loads the synthetic Q4_K MoE checkpoint with a real output projection")
 }
 
-/// [`PAGED_EXPERT`]'s own on-disk `Q4_K` bytes out of `blk.0.ffn_gate_exps.weight`
-/// -- the "hi" copy [`encode_expert_copy`]'s caller dequantizes before
-/// re-encoding as `Q2_K`, exactly the residency-downgrade shape
+/// [`PAGED_EXPERT`]'s own on-disk `Q4_K` bytes out of `tensor_name`
+/// (`blk.0.ffn_{gate,up,down}_exps.weight`) -- the "hi" copy
+/// [`encode_expert_copy`]'s caller dequantizes before re-encoding as
+/// `Q2_K`, exactly the residency-downgrade shape
 /// [`proxima_model_interop::PackedOwnedKind::Q2K`]'s own doc names.
-fn paged_expert_hi_bytes(file_bytes: &[u8]) -> Vec<u8> {
+fn paged_expert_hi_bytes(file_bytes: &[u8], tensor_name: &str) -> Vec<u8> {
     let parsed =
         proxima_gguf::parse_complete(file_bytes).expect("re-parses this test's own fixture");
     let tensor = parsed
         .tensors
         .iter()
-        .find(|candidate| candidate.name == "blk.0.ffn_gate_exps.weight")
-        .expect("the fixture stacks ffn_gate_exps.weight for layer 0");
+        .find(|candidate| candidate.name == tensor_name)
+        .unwrap_or_else(|| panic!("the fixture stacks {tensor_name} for layer 0"));
     let range = parsed
         .tensor_data_range(tensor, file_bytes.len() as u64)
         .expect("the stacked expert tensor's declared range fits the fixture bytes");
@@ -251,25 +266,25 @@ fn paged_expert_hi_bytes(file_bytes: &[u8]) -> Vec<u8> {
     stack[PAGED_EXPERT * per_expert..(PAGED_EXPERT + 1) * per_expert].to_vec()
 }
 
-/// Re-encodes [`PAGED_EXPERT`]'s current `Q4_K` bytes as `Q2_K` --
-/// dequantize-then-requantize through the real
-/// [`proxima_gguf::quant::q4_k::dequantize`]/[`encode_expert_copy`] pair,
-/// never inventing new weight data, so the paged copy is a genuine
-/// (lossier) re-encoding of the SAME expert rather than an arbitrary
-/// substitute.
-fn paged_expert_q2k_bytes(file_bytes: &[u8]) -> Vec<u8> {
-    let hi_bytes = paged_expert_hi_bytes(file_bytes);
-    let element_count = support::FEED_FORWARD as usize * support::EMBEDDING as usize;
+/// Re-encodes [`PAGED_EXPERT`]'s current `Q4_K` bytes out of `tensor_name`
+/// (own `[out_dim, in_dim]` shape) as `Q2_K` -- dequantize-then-requantize
+/// through the real [`proxima_gguf::quant::q4_k::dequantize`]/
+/// [`encode_expert_copy`] pair, never inventing new weight data, so the
+/// paged copy is a genuine (lossier) re-encoding of the SAME expert rather
+/// than an arbitrary substitute.
+fn paged_expert_q2k_bytes(
+    file_bytes: &[u8],
+    tensor_name: &str,
+    out_dim: u32,
+    in_dim: u32,
+) -> Vec<u8> {
+    let hi_bytes = paged_expert_hi_bytes(file_bytes, tensor_name);
+    let element_count = out_dim as usize * in_dim as usize;
     let mut dequantized = vec![0.0f32; element_count];
     proxima_gguf::quant::q4_k::dequantize(&hi_bytes, &mut dequantized)
         .expect("the fixture's own Q4_K expert bytes dequantize cleanly");
-    encode_expert_copy(
-        &dequantized,
-        support::FEED_FORWARD,
-        support::EMBEDDING,
-        PackedOwnedKind::Q2K,
-    )
-    .expect("a full-size dequantized expert row set re-encodes to Q2_K")
+    encode_expert_copy(&dequantized, out_dim, in_dim, PackedOwnedKind::Q2K)
+        .expect("a full-size dequantized expert row set re-encodes to Q2_K")
 }
 
 /// The index of the first position two equal-length id sequences disagree
@@ -300,7 +315,27 @@ async fn q2k_paging_actually_changes_the_decoded_ids() {
         proxima_gguf::parse_complete(file_bytes)
             .expect("parses the synthetic Q4_K MoE checkpoint with a real output projection"),
     ));
-    let q2k_bytes = paged_expert_q2k_bytes(file_bytes);
+    // PAGED_EXPERT's own gate/up/down bytes -- "paging an expert" means all
+    // three of its weight matrices (see `UP_SITE`/`DOWN_SITE`'s own doc for
+    // why gate-only paging under-powers this test).
+    let gate_q2k_bytes = paged_expert_q2k_bytes(
+        file_bytes,
+        "blk.0.ffn_gate_exps.weight",
+        support::FEED_FORWARD,
+        support::EMBEDDING,
+    );
+    let up_q2k_bytes = paged_expert_q2k_bytes(
+        file_bytes,
+        "blk.0.ffn_up_exps.weight",
+        support::FEED_FORWARD,
+        support::EMBEDDING,
+    );
+    let down_q2k_bytes = paged_expert_q2k_bytes(
+        file_bytes,
+        "blk.0.ffn_down_exps.weight",
+        support::EMBEDDING,
+        support::FEED_FORWARD,
+    );
 
     // Run A: every step reads PAGED_EXPERT's original Q4_K bytes.
     let model_a = load_real_output_moe_fixture(parsed, file_bytes);
@@ -314,23 +349,43 @@ async fn q2k_paging_actually_changes_the_decoded_ids() {
     );
 
     // Run B: an independent model over the SAME checkpoint bytes,
-    // PAGED_EXPERT re-paged to a Q2_K re-encoding BEFORE this model's own
-    // first decode call.
+    // PAGED_EXPERT's gate/up/down all re-paged to a Q2_K re-encoding BEFORE
+    // this model's own first decode call.
     let model_b = load_real_output_moe_fixture(parsed, file_bytes);
-    let epoch = model_b
+    let gate_epoch = model_b
         .page_expert(
             GATE_SITE,
             PAGED_EXPERT,
             PackedOwnedKind::Q2K,
-            &q2k_bytes,
+            &gate_q2k_bytes,
             support::FEED_FORWARD,
             support::EMBEDDING,
         )
-        .expect("paging to a real Q2_K re-encoding of the same expert succeeds");
+        .expect("paging gate to a real Q2_K re-encoding of the same expert succeeds");
     assert_eq!(
-        epoch, 1,
+        gate_epoch, 1,
         "the first page of a freshly loaded slab bumps epoch 0 -> 1"
     );
+    model_b
+        .page_expert(
+            UP_SITE,
+            PAGED_EXPERT,
+            PackedOwnedKind::Q2K,
+            &up_q2k_bytes,
+            support::FEED_FORWARD,
+            support::EMBEDDING,
+        )
+        .expect("paging up to a real Q2_K re-encoding of the same expert succeeds");
+    model_b
+        .page_expert(
+            DOWN_SITE,
+            PAGED_EXPERT,
+            PackedOwnedKind::Q2K,
+            &down_q2k_bytes,
+            support::EMBEDDING,
+            support::FEED_FORWARD,
+        )
+        .expect("paging down to a real Q2_K re-encoding of the same expert succeeds");
     let (ids_b, _text_b, _stopped_b) = Pipe::call(&model_b, (PROMPT.to_string(), TOKENS))
         .await
         .expect("run B decodes after paging");
@@ -348,11 +403,31 @@ async fn q2k_paging_actually_changes_the_decoded_ids() {
             GATE_SITE,
             PAGED_EXPERT,
             PackedOwnedKind::Q2K,
-            &q2k_bytes,
+            &gate_q2k_bytes,
             support::FEED_FORWARD,
             support::EMBEDDING,
         )
-        .expect("a never-yet-decoded model also accepts the same Q2_K paged bytes");
+        .expect("a never-yet-decoded model also accepts the same Q2_K gate bytes");
+    model_c
+        .page_expert(
+            UP_SITE,
+            PAGED_EXPERT,
+            PackedOwnedKind::Q2K,
+            &up_q2k_bytes,
+            support::FEED_FORWARD,
+            support::EMBEDDING,
+        )
+        .expect("a never-yet-decoded model also accepts the same Q2_K up bytes");
+    model_c
+        .page_expert(
+            DOWN_SITE,
+            PAGED_EXPERT,
+            PackedOwnedKind::Q2K,
+            &down_q2k_bytes,
+            support::EMBEDDING,
+            support::FEED_FORWARD,
+        )
+        .expect("a never-yet-decoded model also accepts the same Q2_K down bytes");
     let (ids_c, _text_c, _stopped_c) = Pipe::call(&model_c, (PROMPT.to_string(), TOKENS))
         .await
         .expect("run C decodes with the expert already paged");

@@ -39,7 +39,8 @@ pub(super) use crate::sized::DOT_LANES;
 ///
 /// A structural axis, not a tunable: it belongs in the build-time profile
 /// alongside lane width and unroll factor once the microkernel axes land.
-pub(super) const FUSED_MULTIPLY_ADD: bool = cfg!(target_arch = "aarch64") || cfg!(target_feature = "fma");
+pub(super) const FUSED_MULTIPLY_ADD: bool =
+    cfg!(target_arch = "aarch64") || cfg!(target_feature = "fma");
 
 /// `DOT_LANES` independent partial accumulators folded with `f32::mul_add`
 /// — the multiply-accumulate specialization of
@@ -474,7 +475,11 @@ pub(super) unsafe fn try_run_accelerate_sgemm(
 /// `usize` (`width_tile_plan`'s own doc: its offsets can run negative,
 /// unlike `neon_tile_plan`'s, so every one is validated rather than cast).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(super) fn try_run_accelerate_width_gemm(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32]) -> bool {
+pub(super) fn try_run_accelerate_width_gemm(
+    plan: &WidthTilePlan,
+    raw: &[&[f32]],
+    output: &mut [f32],
+) -> bool {
     if plan.seed != 0.0 || plan.k_stride_a != 1 {
         return false;
     }
@@ -2173,4 +2178,3 @@ pub fn matmul_bf16_f32(
         dot_bf16_f32,
     )
 }
-

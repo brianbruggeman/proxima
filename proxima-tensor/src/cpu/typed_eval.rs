@@ -687,7 +687,10 @@ pub(super) fn evaluate_widened_typed(
 /// honest `NotLowerable`: [`typed_program_plan`] already rejected a
 /// non-integer index node's *declared* dtype, this rejects the buffer the
 /// caller actually handed over disagreeing with that at the same gate.
-pub(super) fn typed_buffer_to_index(node: NodeId, buffer: &TypedBuffer) -> Result<Vec<i64>, TensorError> {
+pub(super) fn typed_buffer_to_index(
+    node: NodeId,
+    buffer: &TypedBuffer,
+) -> Result<Vec<i64>, TensorError> {
     match buffer {
         TypedBuffer::Int8(data) => Ok(data.iter().map(|&value| i64::from(value)).collect()),
         TypedBuffer::UInt8(data) => Ok(data.iter().map(|&value| i64::from(value)).collect()),
@@ -1113,7 +1116,10 @@ where
 
 /// The typed counterpart of [`take_or_allocate`]: same best-fit-by-capacity
 /// pool search, generic over [`Element`] instead of hardcoded to `f32`.
-pub(super) fn typed_take_or_allocate<T: Element>(pool: &mut Vec<Vec<T>>, required: usize) -> Vec<T> {
+pub(super) fn typed_take_or_allocate<T: Element>(
+    pool: &mut Vec<Vec<T>>,
+    required: usize,
+) -> Vec<T> {
     let best_fit = pool
         .iter()
         .enumerate()
@@ -1565,4 +1571,3 @@ pub(super) fn run_scan_generic<T: Element>(
     }
     Ok(())
 }
-

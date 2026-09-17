@@ -94,6 +94,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
         shallow_ffn_configs,
         None,
         None,
+        false,
     )
     .expect("build shallow throwaway lfm2 program");
 
@@ -117,6 +118,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
         deep_ffn_configs,
         None,
         None,
+        false,
     )
     .expect("build deep throwaway lfm2 program");
 

@@ -201,6 +201,52 @@ pub fn evaluate_quantized_exact_with_scratch_and_experts(
     )
 }
 
+/// [`evaluate_quantized_with_scratch_impl`]'s own pre-materialization pass:
+/// a quantized weight read anywhere other than a `Reduce` fold's own
+/// primary `operands()` (that path stays on `run_reduce_with_quantized_
+/// weights`, which reads `quantized_weights` directly) needs its bytes in
+/// `buffers` before evaluation, or `buffer_of` finds the slot `None` and
+/// raises `NotLowerable`. An `Elementwise` node's `operands()` and a
+/// `Reduce`'s own `epilogue_operands` (`apply_reduce_epilogue`) are the two
+/// shapes that can name such a weight today.
+pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
+    resolved: &[BoundOp],
+    shapes: &shape::Shapes,
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+    buffers: &mut [Option<Cow<'_, [f32]>>],
+) -> Result<(), TensorError> {
+    for computed in resolved {
+        let sources: &[(NodeId, bind::Layout, Option<bind::Lookup>)] = match &computed.kind {
+            BoundOpKind::Elementwise { .. } => computed.operands(),
+            BoundOpKind::Reduce {
+                epilogue_operands, ..
+            } => epilogue_operands,
+            BoundOpKind::CachedAttention { .. }
+            | BoundOpKind::GatedDeltaNet { .. }
+            | BoundOpKind::MoeTopK { .. }
+            | BoundOpKind::Iota
+            | BoundOpKind::Constant { .. } => &[],
+        };
+        for (operand, ..) in sources {
+            if operand.0 == 6540 {
+                eprintln!(
+                    "DIAG node6540 reader={} in_quantized_weights={} in_expert_sources={} buffer_some_before={}",
+                    computed.node.0,
+                    quantized_weights.contains_key(operand),
+                    expert_sources.is_some_and(|sources| sources.contains_key(operand)),
+                    buffers[operand.0 as usize].is_some(),
+                );
+            }
+            if expert_sources.is_some_and(|sources| sources.contains_key(operand)) {
+                continue;
+            }
+            materialize_quantized_weight_output(*operand, shapes, quantized_weights, buffers)?;
+        }
+    }
+    Ok(())
+}
+
 // every `NodeId` the fused kernel dereferences at `fire_position` --
 // `x` plus the tail's own four operand slots -- resolved from the tail
 // `BoundOp`'s operand list rather than assumed contiguous with `x_node`,
@@ -366,22 +412,23 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
     // since the fusion above already absorbed it into its reduce), and only
     // does real work on exactly the diagnostic window this defect was
     // reported against (`docs/discipline.md`, `int8-logs`).
-    for computed in &resolved {
-        if !matches!(computed.kind, BoundOpKind::Elementwise { .. }) {
-            continue;
-        }
-        for (operand, ..) in computed.operands() {
-            if expert_sources.is_some_and(|sources| sources.contains_key(operand)) {
-                continue;
-            }
-            materialize_quantized_weight_output(
-                *operand,
-                &shapes,
-                &quantized_weights,
-                &mut buffers,
-            )?;
-        }
-    }
+    //
+    // A `Reduce`'s epilogue is the same gap under a different fusion: an
+    // RMSNorm gamma multiply fused into `epilogue_operands` (`apply_reduce_
+    // epilogue`, `run_node.rs`) reads `buffer_of` too, but `quantized_
+    // operand`/`run_reduce_with_quantized_weights` only ever inspect the
+    // fold's own `operands()` -- the epilogue's quantized weight is never
+    // that fold's primary operand, so nothing else in this function
+    // dequantizes it. Widening this scan to `epilogue_operands` (never
+    // `operands()` for a `Reduce`, which stays on the direct-from-
+    // `quantized_weights` path above) closes that second gap the same way.
+    materialize_quantized_weights_read_by_non_primary_operands(
+        &resolved,
+        &shapes,
+        &quantized_weights,
+        expert_sources,
+        &mut buffers,
+    )?;
     // The weight's own `NodeId` can ALSO be named directly in
     // `effective_outputs` (a caller inspecting a raw checkpoint tensor, not
     // just the activation that multiplies it) with no live `Elementwise`
@@ -657,9 +704,8 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
                 ..
             } = &computed.kind
             {
-                for (extra_node, value) in
-                    moe_topk_extra_node_order(routes, weights, *weight_total)
-                        .zip(moe_topk_extra.iter().copied())
+                for (extra_node, value) in moe_topk_extra_node_order(routes, weights, *weight_total)
+                    .zip(moe_topk_extra.iter().copied())
                 {
                     buffers[extra_node.0 as usize] = Some(Cow::Owned(vec![value]));
                 }

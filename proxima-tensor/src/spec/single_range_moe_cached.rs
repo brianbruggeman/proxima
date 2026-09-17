@@ -1430,6 +1430,7 @@ pub fn append_mistral_cached_moe_layer(
         ones,
         ExpertGatingFunc::Softmax,
         None,
+        Activation::Silu,
     )?;
 
     let x_next = elementwise(
@@ -1480,4 +1481,3 @@ impl LayerKind {
         Err(TensorError::UndeterminedLayerKind { layer })
     }
 }
-

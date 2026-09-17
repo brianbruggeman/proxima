@@ -1993,7 +1993,8 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
                 inv_sqrt_key_dim,
                 position,
             )?;
-            let placed = qwen35_gdn_place_position(program, step.delta_out, position_axis, position)?;
+            let placed =
+                qwen35_gdn_place_position(program, step.delta_out, position_axis, position)?;
             delta_out_stacked = elementwise(
                 program,
                 DType::Float32,
@@ -2281,4 +2282,3 @@ pub fn append_qwen35_ssm_mixer_with_taps_and_layout(
     };
     Ok((mixer_out, taps))
 }
-

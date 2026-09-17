@@ -56,7 +56,8 @@ pub fn compare_rows_relative_to_norm(
                 / row_norm;
             std::println!(
                 "{case_label} row={row} backend={} vs {} relative_error={relative_error:e}",
-                candidate.label, baseline.label
+                candidate.label,
+                baseline.label
             );
             if relative_error > tolerance {
                 failures.push(std::format!(

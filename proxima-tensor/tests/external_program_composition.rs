@@ -21,8 +21,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 use proxima_tensor::spec::{
-    ExpertGatingFunc, append_moe_ffn, causal_mask, elementwise, embedding_lookup, input_leaf,
-    reduce, rmsnorm, scalar_constant, sigmoid, symbolic_leaf,
+    Activation, ExpertGatingFunc, append_moe_ffn, causal_mask, elementwise, embedding_lookup,
+    input_leaf, reduce, rmsnorm, scalar_constant, sigmoid, symbolic_leaf,
 };
 use proxima_tensor::{DType, Extent, ReduceInit, ScalarOp};
 
@@ -233,6 +233,7 @@ fn external_crate_composes_a_one_layer_forward_program() {
         one,
         ExpertGatingFunc::Softmax,
         None,
+        Activation::Silu,
     )
     .expect("routed moe ffn lowers");
 

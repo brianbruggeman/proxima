@@ -198,7 +198,6 @@ use crate::op::{Keep, NodeId, Op, ReduceInit, ScalarOp};
 use crate::shape;
 use crate::sized::COHORT_SPIN_POLLS;
 
-
 #[macro_use]
 mod arena;
 #[macro_use]
@@ -222,16 +221,16 @@ mod width_kernels;
 #[macro_use]
 mod typed_eval;
 pub use arena::*;
-pub use epilogue::*;
-pub use quantized_eval::*;
-pub use run_node::*;
 use elementwise_matmul::*;
-pub use run_reduce_scan::*;
-pub use gemm_tile::*;
+pub use epilogue::*;
 pub use gemm_dot_quant::*;
 pub use gemm_q8k::*;
-use width_kernels::*;
+pub use gemm_tile::*;
+pub use quantized_eval::*;
+pub use run_node::*;
+pub use run_reduce_scan::*;
 pub use typed_eval::*;
+use width_kernels::*;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

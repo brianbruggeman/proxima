@@ -434,7 +434,12 @@ impl SsmLayerCache {
     /// Keeps only the most recent `conv_history_len` elements -- older rows
     /// fall out of the causal conv1d kernel's left context and are never
     /// read again.
-    pub(super) fn advance(&mut self, qkv_mixed_new: &[f32], state_new: &[f32], conv_history_len: usize) {
+    pub(super) fn advance(
+        &mut self,
+        qkv_mixed_new: &[f32],
+        state_new: &[f32],
+        conv_history_len: usize,
+    ) {
         self.advance_conv_history(qkv_mixed_new, conv_history_len);
         if self.state.len() == state_new.len() {
             self.state.copy_from_slice(state_new);
@@ -936,6 +941,24 @@ pub(super) struct PositionInputs {
     pub(super) sin: Vec<f32>,
 }
 
+/// Builds the `ids`/`eps`/`rope_cos`/`rope_sin` step inputs every
+/// architecture's builtin decode-loop leaves share. `rope_freqs`, when
+/// present, is the checkpoint's own per-pair frequency-scaling factor
+/// (GGUF `ROPE_FREQS`, `crate::gemma4::bind::Gemma4Arch::rope_freq_factors`)
+/// that ggml divides each pair's angle by before taking `cos`/`sin` --
+/// gemma4's full/global layers are the only architecture this crate binds
+/// one for (`[1.0]*64 + [1e30]*192]` on the real checkpoint: dividing by
+/// `1.0` is a no-op for the first 64 pairs, and dividing by `1e30` shrinks
+/// `theta` for the remaining 192 pairs to a value so far below one radian
+/// that `cos` rounds to exactly `1.0f32` and `sin` rounds to a value
+/// indistinguishable from `0.0f32` at any downstream precision -- the same
+/// observable effect this function used to get by skipping those pairs
+/// outright (`rotary_pairs` truncation, since removed: this is the
+/// data-driven replacement, not an additional code path). `None` (every
+/// non-gemma4 architecture, and gemma4's own SWA layers via
+/// `gemma4_sliding_rope_table`, which never calls this function) leaves
+/// every pair's angle undivided -- full rotation, this function's only
+/// behaviour before `rope_freqs` existed.
 pub(super) fn build_position_inputs(
     new_ids: &[u32],
     start_position: usize,
@@ -943,13 +966,14 @@ pub(super) fn build_position_inputs(
     rope_freq_base: f32,
     rms_epsilon: f32,
     _qwen35_mrope: bool,
+    rope_freqs: Option<&[f32]>,
 ) -> PositionInputs {
     let new_count = new_ids.len();
     let pairs = head_dim as usize / 2;
     let ids_i32: Vec<i32> = new_ids.iter().map(|&id| id as i32).collect();
     let epsilon = alloc::vec![rms_epsilon; new_count];
 
-    let mut cos = alloc::vec![0.0f32; new_count * pairs];
+    let mut cos = alloc::vec![1.0f32; new_count * pairs];
     let mut sin = alloc::vec![0.0f32; new_count * pairs];
     for offset in 0..new_count {
         let position = (start_position + offset) as f32;
@@ -959,8 +983,11 @@ pub(super) fn build_position_inputs(
             // graph still consumes one flat table, so only angle generation
             // changes here.
             let frequency_pair = pair;
-            let theta =
+            let mut theta =
                 position * rope_freq_base.powf(-((2 * frequency_pair) as f32) / (head_dim as f32));
+            if let Some(factor) = rope_freqs.and_then(|freqs| freqs.get(pair)) {
+                theta /= factor;
+            }
             cos[offset * pairs + pair] = theta.cos();
             sin[offset * pairs + pair] = theta.sin();
         }
@@ -971,6 +998,77 @@ pub(super) fn build_position_inputs(
         epsilon,
         cos,
         sin,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod rope_freqs_tests {
+    use super::build_position_inputs;
+
+    /// gemma4's real checkpoint shape: `head_dim=512` (256 pairs),
+    /// `rope_freq_base=1e6`, `rope_freqs.weight = [1.0]*64 + [1e30]*192`.
+    /// Confirms the data-driven division path is numerically identical to
+    /// the removed `rotary_pairs = 64` truncation this replaces: pairs
+    /// `0..64` (factor `1.0`, a no-op divide) carry the same real angle as
+    /// an undivided full rotation, and pairs `64..256` (factor `1e30`)
+    /// collapse to the truncation's own exact `cos=1, sin=0` identity pass
+    /// -- `cos` rounds bit-exact to `1.0f32`, `sin` lands at float noise
+    /// (`< 1e-9`) far below any value that changes a downstream matmul.
+    #[test]
+    fn gemma4_full_layer_rope_freqs_matches_truncation_at_pair_boundary() {
+        let head_dim = 512u32;
+        let rope_freq_base = 1.0e6_f32;
+        let mut rope_freqs = alloc::vec![1.0f32; 64];
+        rope_freqs.extend(alloc::vec![1.0e30_f32; 192]);
+        let positions = [1u32, 100, 4096];
+
+        let full_rotation = build_position_inputs(
+            &positions,
+            0,
+            head_dim,
+            rope_freq_base,
+            1e-5,
+            false,
+            None,
+        );
+        let scaled = build_position_inputs(
+            &positions,
+            0,
+            head_dim,
+            rope_freq_base,
+            1e-5,
+            false,
+            Some(&rope_freqs),
+        );
+
+        let pairs = head_dim as usize / 2;
+        for offset in 0..positions.len() {
+            for pair in 0..64 {
+                let index = offset * pairs + pair;
+                assert_eq!(
+                    scaled.cos[index], full_rotation.cos[index],
+                    "factor 1.0 must be a no-op divide for pair {pair} at offset {offset}"
+                );
+                assert_eq!(
+                    scaled.sin[index], full_rotation.sin[index],
+                    "factor 1.0 must be a no-op divide for pair {pair} at offset {offset}"
+                );
+            }
+            for pair in 64..pairs {
+                let index = offset * pairs + pair;
+                assert_eq!(
+                    scaled.cos[index], 1.0f32,
+                    "factor 1e30 must round cos to exactly 1.0 for pair {pair} at offset {offset}"
+                );
+                assert!(
+                    scaled.sin[index].abs() < 1e-9,
+                    "factor 1e30 must collapse sin to float noise for pair {pair} at offset \
+                     {offset}, got {}",
+                    scaled.sin[index]
+                );
+            }
+        }
     }
 }
 
@@ -1149,7 +1247,8 @@ pub(crate) struct BackendRuntime {
     /// Plans for the stable pre-gather router/gather partitions. The segment
     /// programs reuse node IDs across layers, so this cache is keyed by the
     /// partition's address and shape rather than the ordinary decode key.
-    pub(super) segment_plans: alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>), Plan>,
+    pub(super) segment_plans:
+        alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>), Plan>,
     /// `ServingConfig::math_mode`, read once at construction and narrowed
     /// into every freshly-built [`Plan`] below (`set_math_mode`'s own call
     /// sites) -- a plan-cache hit reuses a `Plan` already carrying it, same
@@ -1181,7 +1280,8 @@ pub(crate) struct BackendRuntime {
     /// `(new_count, merged_len)` shape space -- sharing one map would let a
     /// single-range plan satisfy a two-range lookup by coincidence of key.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    pub(super) placed_plans: alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>), omega::metal::Plan>,
+    pub(super) placed_plans:
+        alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>), omega::metal::Plan>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) placed_segment_plans:
         alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>), omega::metal::Plan>,
@@ -2502,7 +2602,12 @@ pub(super) fn decode_until_stop_or_budget(
         let token_id = produce_next_token(step)?;
         let elapsed_ms = u64::try_from(loop_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let is_eos = vocab.eos_token_id() == Some(token_id);
-        let mut text_piece = if is_eos {
+        // Control tokens (gemma4's `<turn|>`-shaped turn markers) are
+        // structural, not content -- they must never appear in decoded
+        // TEXT, but unlike eos they do not stop generation: the id still
+        // enters `generated_ids` below, only its visible piece is empty.
+        let is_control = vocab.token_type(token_id) == Some(TokenType::Control);
+        let mut text_piece = if is_eos || is_control {
             String::new()
         } else {
             decode_streamed_piece(vocab, token_id, &mut pending_bytes)?
@@ -2549,6 +2654,83 @@ pub(super) fn decode_until_stop_or_budget(
         }
     }
     Ok((generated_ids, stopped_by_eos))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod decode_control_suppression_tests {
+    use alloc::string::String;
+
+    use super::{Control, Phase, TokenEvent, TokenType, Vocab, decode_until_stop_or_budget};
+
+    /// A small vocab with one [`TokenType::Control`] entry (`"<turn|>"`,
+    /// gemma4's real turn-boundary marker) among ordinary text tokens --
+    /// built directly, no model or checkpoint needed
+    /// (`decode_until_stop_or_budget`'s own doc: "provable against a
+    /// scripted token source").
+    fn vocab_with_control_marker() -> Vocab {
+        let tokens = alloc::vec![
+            String::from("h"),
+            String::from("i"),
+            String::from("<turn|>"),
+        ];
+        let vocab =
+            Vocab::new(tokens, &[], None, None, None).expect("small vocab with no merges builds");
+        let token_types = alloc::vec![TokenType::Normal, TokenType::Normal, TokenType::Control];
+        vocab
+            .with_token_types(token_types)
+            .expect("token type array length matches vocab length")
+    }
+
+    /// Pre-fix, this loop never consulted `token_type` and the control
+    /// id's own bytes (`"<turn|>"`) leaked into `text_piece` like any other
+    /// token, so this call's accumulated text was `"h<turn|>i"`. Post-fix
+    /// the control id still enters `generated_ids` (it is structural
+    /// signal a caller may want to see, just not render), but contributes
+    /// zero characters to the decoded text, leaving `"hi"`.
+    #[test]
+    fn decode_until_stop_or_budget_suppresses_control_text_but_keeps_the_id() {
+        let vocab = vocab_with_control_marker();
+        let h_id = vocab.token_id("h").expect("h token exists");
+        let i_id = vocab.token_id("i").expect("i token exists");
+        let control_id = vocab.token_id("<turn|>").expect("control token exists");
+        let script = [h_id, control_id, i_id];
+
+        // Only `Phase::Token` events are accumulated -- step 0 additionally
+        // fires a `Phase::Prefill` event carrying the same `text_piece`
+        // (`decode_until_stop_or_budget`'s own doc), and a real caller
+        // renders text from one phase, not both, to avoid double-counting
+        // step 0's piece.
+        let mut text = String::new();
+        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
+            &vocab,
+            script.len(),
+            0,
+            |step| Ok(script[step]),
+            &mut |event: TokenEvent<'_>| {
+                if event.phase == Phase::Token {
+                    text.push_str(event.text_piece);
+                }
+                Control::Continue
+            },
+        )
+        .expect("decode succeeds against a scripted token source");
+
+        assert_eq!(
+            generated_ids,
+            script.to_vec(),
+            "the control id still enters generated_ids"
+        );
+        assert!(!stopped_by_eos, "no eos id in this script");
+        assert_eq!(
+            text, "hi",
+            "the control token must contribute zero characters to decoded text"
+        );
+        assert!(
+            !text.contains("<turn|>"),
+            "no literal control marker leaks into decoded text"
+        );
+    }
 }
 
 /// [`Vocab::add_bos_token`]'s own fallback when the checkpoint's metadata
@@ -2601,7 +2783,10 @@ impl CurrentExpertSources {
         self.len = 0;
     }
 
-    pub(super) fn push(&mut self, decision: crate::residency::ServeDecision) -> Result<(), InteropError> {
+    pub(super) fn push(
+        &mut self,
+        decision: crate::residency::ServeDecision,
+    ) -> Result<(), InteropError> {
         let Some(slot) = self.decisions.get_mut(self.len) else {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from("qwen35moe"),
@@ -2793,4 +2978,3 @@ where
         },
     )
 }
-

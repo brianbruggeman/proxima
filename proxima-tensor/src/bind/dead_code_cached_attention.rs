@@ -55,7 +55,11 @@ pub fn correct_packed_matmul_layouts(resolved: &mut [BoundOp], packed_operands: 
 /// only for its `base` and for which axes it left at stride 0 (a batch axis
 /// this operand broadcasts across, e.g. sequence position -- must stay
 /// broadcast rather than gain a stride from this reconstruction).
-pub(super) fn native_packed_layout(extents: &[u64], output_axes: &[u16], declared: &Layout) -> Layout {
+pub(super) fn native_packed_layout(
+    extents: &[u64],
+    output_axes: &[u16],
+    declared: &Layout,
+) -> Layout {
     let rank = extents.len();
     let mut strides = SmallVec::<[i64; MAX_INLINE_RANK]>::from_elem(0, rank);
 
@@ -193,7 +197,11 @@ pub(super) fn elementwise_operands(
 }
 
 #[cfg(feature = "cached-attention-streaming")]
-pub(super) fn binary_elementwise(program: &[Op], node: NodeId, body: ScalarOp) -> Option<[NodeId; 2]> {
+pub(super) fn binary_elementwise(
+    program: &[Op],
+    node: NodeId,
+    body: ScalarOp,
+) -> Option<[NodeId; 2]> {
     let operands = elementwise_operands(program, node, body)?;
     let [(left, _), (right, _)] = operands else {
         return None;
@@ -236,7 +244,10 @@ pub(super) fn constant_value(program: &[Op], node: NodeId) -> Option<f32> {
 }
 
 #[cfg(feature = "cached-attention-streaming")]
-pub(super) fn decode_rotary_terms(program: &[Op], terms: [NodeId; 2]) -> Option<(NodeId, NodeId, NodeId, NodeId)> {
+pub(super) fn decode_rotary_terms(
+    program: &[Op],
+    terms: [NodeId; 2],
+) -> Option<(NodeId, NodeId, NodeId, NodeId)> {
     let even_product = reduced_source(program, terms[0], ScalarOp::Add, ReduceInit::Zero)?;
     let odd_product = reduced_source(program, terms[1], ScalarOp::Add, ReduceInit::Zero)?;
     let even_operands = binary_elementwise(program, even_product, ScalarOp::Multiply)?;
@@ -610,8 +621,13 @@ pub(super) fn cached_attention_candidates(
             );
             continue;
         }
-        let Some((query_even_grouped, query_odd_grouped, cached_key_even, cached_key_odd, cached_pass)) =
-            attention_score_sources(program, cached_scaled_source, scale)
+        let Some((
+            query_even_grouped,
+            query_odd_grouped,
+            cached_key_even,
+            cached_key_odd,
+            cached_pass,
+        )) = attention_score_sources(program, cached_scaled_source, scale)
         else {
             #[cfg(feature = "instrument")]
             debug!(
@@ -621,8 +637,13 @@ pub(super) fn cached_attention_candidates(
             );
             continue;
         };
-        let Some((new_query_even_grouped, new_query_odd_grouped, new_key_even, new_key_odd, new_pass)) =
-            attention_score_sources(program, *new_scaled, scale)
+        let Some((
+            new_query_even_grouped,
+            new_query_odd_grouped,
+            new_key_even,
+            new_key_odd,
+            new_pass,
+        )) = attention_score_sources(program, *new_scaled, scale)
         else {
             #[cfg(feature = "instrument")]
             debug!(
@@ -692,7 +713,10 @@ pub(super) fn cached_attention_candidates(
             continue;
         }
         let pass = match (cached_pass, new_pass) {
-            (Some((cached_query_pass_grouped, cached_key_pass)), Some((new_query_pass_grouped, new_key_pass))) => {
+            (
+                Some((cached_query_pass_grouped, cached_key_pass)),
+                Some((new_query_pass_grouped, new_key_pass)),
+            ) => {
                 if cached_query_pass_grouped != new_query_pass_grouped {
                     #[cfg(feature = "instrument")]
                     debug!(
@@ -875,7 +899,13 @@ pub(super) fn cached_attention_candidates(
             || new_key_shape[0] != new_value_shape[0]
             || cached_value_shape[2] != total_head_dim
             || new_value_shape[2] != total_head_dim
-            || shapes.of(output) != [query_shape[0], query_shape[1], query_shape[2], total_head_dim]
+            || shapes.of(output)
+                != [
+                    query_shape[0],
+                    query_shape[1],
+                    query_shape[2],
+                    total_head_dim,
+                ]
         {
             #[cfg(feature = "instrument")]
             debug!(
@@ -1374,7 +1404,11 @@ pub(super) fn cached_attention_single_range_candidates(
 }
 
 #[cfg(feature = "cached-attention-streaming")]
-pub(super) fn attention_dependencies(program: &[Op], output: NodeId, sources: &[NodeId]) -> BTreeSet<NodeId> {
+pub(super) fn attention_dependencies(
+    program: &[Op],
+    output: NodeId,
+    sources: &[NodeId],
+) -> BTreeSet<NodeId> {
     let source_set: BTreeSet<NodeId> = sources.iter().copied().collect();
     let mut visited = BTreeSet::new();
     let mut pending = vec![output];
@@ -1472,4 +1506,3 @@ pub(super) fn removable_attention_dependencies(
     }
     dependencies.difference(&retained).copied().collect()
 }
-

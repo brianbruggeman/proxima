@@ -720,6 +720,10 @@ pub(crate) fn metadata_u32_per_layer(
 /// [`InteropError::MissingMetadataKey`] when the key is absent or is not a
 /// bool array; [`InteropError::MetadataArrayLengthMismatch`] when the array
 /// length is not the declared block count.
+///
+/// `std`-gated: its only caller, `gemma4::hparams::from_metadata`, lives
+/// behind `#[cfg(feature = "std")]` (`lib.rs:28`).
+#[cfg(feature = "std")]
 pub(crate) fn metadata_bool_per_layer(
     parsed: &ParsedGguf,
     key: &str,
@@ -973,7 +977,7 @@ impl PackedOwnedKind {
     /// so this direction stays unwired until one does; construct
     /// [`Self::Q2K`] directly, the way [`crate::expert_slab::encode_expert_copy`]'s
     /// caller does).
-    fn from_ggml_type(ggml_type: GgmlType) -> Option<Self> {
+    pub(crate) fn from_ggml_type(ggml_type: GgmlType) -> Option<Self> {
         match ggml_type {
             GgmlType::Q4_K => Some(PackedOwnedKind::Q4K),
             GgmlType::Q5_K => Some(PackedOwnedKind::Q5K),
@@ -2343,6 +2347,14 @@ pub(crate) fn build_expert_slab<'file>(
                 )
                 .is_ok()
             {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    layer,
+                    site,
+                    weight_node = weight_node.0,
+                    projection = projection_kind.name(),
+                    "proxima-debugger route: expert slab site bound"
+                );
                 slab.register_model_layer_site(layer as usize, projection_kind, site);
             }
         }
@@ -2989,6 +3001,7 @@ mod tests {
     /// matches an independent hand computation of the block's `x =
     /// d*sc*q - dmin*m` formula for the one nonzero probe element this
     /// fixture packs.
+    #[cfg(feature = "std")]
     #[test]
     fn q4_k_tensor_dequantizes_through_bind_by_name() {
         let mut block = [0u8; q4_k::BLOCK_BYTES];

@@ -9,7 +9,7 @@ use crate::bpe::{decode_ids, encode_pretoken};
 use crate::error::TokenizerError;
 use crate::pretokenize::pretokenize;
 use crate::unigram;
-use crate::vocab::Vocab;
+use crate::vocab::{TokenType, Vocab};
 
 /// Scans `text` for literal occurrences of an "added token" marker
 /// (`Vocab::with_token_types`'s `Control`/`UserDefined` entries -- e.g.
@@ -175,14 +175,25 @@ pub fn drain_lossy_utf8(pending: &mut Vec<u8>, output: &mut String) {
 /// # Errors
 ///
 /// [`TokenizerError::TokenIdOutOfRange`] for an id absent from `vocab`.
+///
+/// [`TokenType::Control`] ids ([`Vocab::with_token_types`]) are structural,
+/// not content -- `<turn|>`-shaped markers must never leak into decoded
+/// text -- so they contribute zero bytes here while still validating range
+/// like any other id (an out-of-range Control id still errors, since
+/// `Vocab::token_type` returns `None` for it, not `Some(Control)`).
 pub fn decode(ids: &[u32], vocab: &Vocab) -> Result<String, TokenizerError> {
-    let mut pending = decode_ids(ids, vocab)?;
+    let text_ids: Vec<u32> = ids
+        .iter()
+        .copied()
+        .filter(|&id| vocab.token_type(id) != Some(TokenType::Control))
+        .collect();
+    let mut pending = decode_ids(&text_ids, vocab)?;
     let mut text = String::new();
     drain_lossy_utf8(&mut pending, &mut text);
     if !pending.is_empty() {
         text.push('\u{FFFD}');
     }
-    if vocab.is_unigram() {
+    if vocab.space_marker() == crate::vocab::SpaceMarker::SentencePiece {
         return Ok(unigram::unescape(&text));
     }
     Ok(text)
@@ -192,7 +203,47 @@ pub fn decode(ids: &[u32], vocab: &Vocab) -> Result<String, TokenizerError> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::vocab::tests::{tiny_unigram_vocab, tiny_vocab};
+    use crate::vocab::tests::{tiny_gemma4_vocab, tiny_unigram_vocab, tiny_vocab};
+
+    /// A [`TokenType::Control`] id (gemma4's `<turn|>`-shaped turn marker,
+    /// in production) is structural, not content: it must contribute zero
+    /// characters to decoded text while an ordinary token on either side of
+    /// it still decodes normally. Pre-fix, `decode` ignored `token_type`
+    /// entirely and the control token's own bytes ("hi") leaked into the
+    /// output as `"hhii"`; post-fix it is `"hi"`.
+    #[test]
+    fn decode_suppresses_control_tokens_from_decoded_text() {
+        let base = tiny_vocab();
+        let h_id = base.token_id("h").expect("h token exists");
+        let i_id = base.token_id("i").expect("i token exists");
+        let hi_id = base.token_id("hi").expect("hi token exists");
+        let mut token_types = alloc::vec![TokenType::Normal; base.len()];
+        token_types[hi_id as usize] = TokenType::Control;
+        let vocab = base
+            .with_token_types(token_types)
+            .expect("token type array length matches vocab length");
+
+        let decoded = decode(&[h_id, hi_id, i_id], &vocab).expect("decode succeeds");
+        assert_eq!(
+            decoded, "hi",
+            "the Control token must contribute zero characters"
+        );
+    }
+
+    /// gemma4 is merges-driven ([`crate::vocab::Vocab::is_unigram`] is
+    /// false) but SentencePiece-spelled -- decode must still unescape `▁`
+    /// to a real space, the fix this task lands (previously gated on
+    /// `is_unigram()`, which this vocab shape fails).
+    #[test]
+    fn gemma4_shaped_decode_unescapes_space_marker_to_a_real_space() {
+        let vocab = tiny_gemma4_vocab();
+        let hi_id = vocab.token_id("hi").expect("hi token exists");
+        let space_id = vocab.token_id("\u{2581}").expect("space marker token exists");
+        let decoded =
+            decode(&[hi_id, space_id, hi_id], &vocab).expect("decode succeeds");
+        assert_eq!(decoded, "hi hi");
+        assert!(!decoded.contains('\u{2581}'), "no literal U+2581 survives");
+    }
 
     #[test]
     fn encode_with_bos_eos_prepends_and_appends() {
