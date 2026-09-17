@@ -80,8 +80,10 @@ pub enum ResidencyRung {
 }
 
 impl ResidencyRung {
-    // only read by `active_residency_rung_str`, itself only called from
-    // `instrument`-gated log lines -- unused without that feature.
+    // called from `LoadedModel::run_decode_loop_observed_seeded`/
+    // `run_decode_loop_placed_kv`'s own `instrument`-gated
+    // `emit_token_breakdown_metal` call, which threads the caller's own
+    // `self.mapping_residency_rung` through -- unused without that feature.
     #[cfg_attr(not(feature = "instrument"), allow(dead_code))]
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -90,26 +92,6 @@ impl ResidencyRung {
             ResidencyRung::Retry => "retry",
             ResidencyRung::Mlock => "mlock",
         }
-    }
-}
-
-/// The rung [`prove_resident`]'s last successful call resolved on --
-/// `Prefault` (0) until a load has actually run. `omega/src/metal.rs`'s
-/// `token_breakdown_metal` per-step line reads this through
-/// [`active_residency_rung_str`] so ROW 551's reproduction table can read the
-/// rung straight off the same log line as `mapping_rebound_blocks`, rather
-/// than cross-referencing a separate one-shot load-time log record.
-static ACHIEVED_RUNG: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-/// See [`ACHIEVED_RUNG`]'s own doc.
-// only called from `instrument`-gated log lines -- unused without that feature.
-#[cfg_attr(not(feature = "instrument"), allow(dead_code))]
-#[must_use]
-pub fn active_residency_rung_str() -> &'static str {
-    match ACHIEVED_RUNG.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => ResidencyRung::Retry.as_str(),
-        2 => ResidencyRung::Mlock.as_str(),
-        _ => ResidencyRung::Prefault.as_str(),
     }
 }
 
@@ -358,7 +340,6 @@ pub fn prove_resident(bytes: &[u8]) -> Result<ResidencyReport, InteropError> {
             bytes_total,
         });
     }
-    ACHIEVED_RUNG.store(rung as u8, std::sync::atomic::Ordering::Relaxed);
     Ok(ResidencyReport {
         prefault_ms,
         resident_pages,

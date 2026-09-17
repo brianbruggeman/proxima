@@ -2443,6 +2443,7 @@ pub(super) mod memory_fit_gate_tests {
                 table_bytes: 0,
                 ssm_state_bytes: 0,
             },
+            mapping_residency_rung: crate::mapping_residency::ResidencyRung::Prefault,
             model_name: None,
             checkpoint_bytes: dense_weight_bytes as usize,
             checkpoint_mapping: &[],
