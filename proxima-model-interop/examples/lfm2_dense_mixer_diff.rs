@@ -41,8 +41,7 @@ use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::{
-    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values,
-    uniform_lfm2_attention_configs, uniform_lfm2_ffn_configs,
+    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values, uniform_lfm2_schedule,
 };
 use proxima_tensor::op::{NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::spec::lfm2_forward_program_with_experts;
@@ -222,9 +221,7 @@ fn main() {
         architecture.expert_used_count,
         architecture.leading_dense_block_count,
         architecture.l_cache,
-        &architecture.layer_kinds,
-        &uniform_lfm2_attention_configs(&architecture),
-        &uniform_lfm2_ffn_configs(&architecture),
+        &uniform_lfm2_schedule(&architecture),
         None,
         None,
         false,

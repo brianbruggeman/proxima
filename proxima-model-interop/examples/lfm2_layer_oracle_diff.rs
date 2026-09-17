@@ -29,8 +29,7 @@ use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::{
-    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values,
-    uniform_lfm2_attention_configs, uniform_lfm2_ffn_configs,
+    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values, uniform_lfm2_schedule,
 };
 use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::level::Level;
@@ -73,11 +72,8 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
         // `lfm2_forward_program_with_experts`'s own opening three ops.
         return NodeId(2);
     }
-    let shallow_kinds = &architecture.layer_kinds[..depth as usize];
-    let attention_configs = uniform_lfm2_attention_configs(architecture);
-    let shallow_configs = &attention_configs[..depth as usize];
-    let ffn_configs = uniform_lfm2_ffn_configs(architecture);
-    let shallow_ffn_configs = &ffn_configs[..depth as usize];
+    let full_schedule = uniform_lfm2_schedule(architecture);
+    let shallow_schedule = &full_schedule[..depth as usize];
     let (shallow, _, _) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
@@ -89,19 +85,15 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
         architecture.expert_used_count,
         architecture.leading_dense_block_count,
         architecture.l_cache,
-        shallow_kinds,
-        shallow_configs,
-        shallow_ffn_configs,
+        shallow_schedule,
         None,
         None,
         false,
     )
     .expect("build shallow throwaway lfm2 program");
 
-    let mut deep_kinds = shallow_kinds.to_vec();
-    deep_kinds.push(architecture.layer_kinds[(depth - 1) as usize]);
-    let deep_configs = &attention_configs[..depth as usize + 1];
-    let deep_ffn_configs = &ffn_configs[..depth as usize + 1];
+    let mut deep_schedule = shallow_schedule.to_vec();
+    deep_schedule.push(full_schedule[(depth - 1) as usize]);
     let (deep, _, _) = lfm2_forward_program_with_experts(
         architecture.vocab,
         architecture.embedding,
@@ -113,9 +105,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
         architecture.expert_used_count,
         architecture.leading_dense_block_count,
         architecture.l_cache,
-        &deep_kinds,
-        deep_configs,
-        deep_ffn_configs,
+        &deep_schedule,
         None,
         None,
         false,

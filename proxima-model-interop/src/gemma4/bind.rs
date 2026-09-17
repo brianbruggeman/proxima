@@ -24,8 +24,8 @@ use alloc::vec::Vec;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
-    LayerAttentionConfig, LayerFfnConfig, LayerKind, RopePairing, RopeTableSel, ValueSourceKind,
-    lfm2_forward_program_with_experts,
+    LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, RopePairing, RopeTableSel,
+    ValueSourceKind, lfm2_forward_program_with_experts,
 };
 
 use crate::architecture::{
@@ -154,7 +154,7 @@ fn bind_norm<'file>(
 /// declare for gemma4's own [`Gemma4Arch::bind`] descriptor.
 /// `blk.{layer}.pre_ffw_norm_2.weight` is bound (via [`bind_norm`] with
 /// [`GEMMA4_NORM_SHIFT`]) and consumed by the engine's
-/// `routed_pre_norm` knob (`gemma4_ffn_configs` sets it), which normalizes
+/// `routed_pre_norm` knob (`gemma4_layer_schedule` sets it), which normalizes
 /// the routed branch's input separately from the dense branch's shared
 /// `ffn_norm`-normed one -- matching the real Gemma 4 graph.
 ///
@@ -505,14 +505,36 @@ pub static GEMMA4: Gemma4Arch = Gemma4Arch;
 /// projection's own output stands in for `V`) and the full-length RoPE
 /// table. Both use [`RopePairing::SplitHalf`] (Gemma's own half-split
 /// rotation, not Llama/Mistral's interleaved pairing).
-fn gemma4_attention_configs(architecture: &Architecture) -> Vec<LayerAttentionConfig> {
+/// Every gemma4 layer is [`LayerKind::Attention`], runs dense SwiGLU over
+/// the shared `ffn_norm`-normed input and routed MoE over its OWN
+/// `pre_ffw_norm_2`-normed input (`routed_pre_norm: true`), each with its
+/// own post-norm, summed and normalized once more, then scaled by
+/// `layer_output_scale`. The routed branch gates with `Softmax` and carries
+/// no `exp_probs_b` bias, unlike [`FfnCombination::Exclusive`]'s LFM2 shape
+/// -- see [`proxima_tensor::spec::LayerFfnConfig`]'s own doc for what each
+/// field means.
+fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
+    let ffn = LayerFfnConfig {
+        post_attention_norm: true,
+        combination: FfnCombination::ParallelDenseMoe,
+        dense_post_norm: true,
+        routed_post_norm: true,
+        combined_post_norm: true,
+        output_scale: true,
+        routed_gating: ExpertGatingFunc::Softmax,
+        routed_expert_bias: false,
+        routed_pre_norm: true,
+        router_scale: true,
+        expert_output_scale: true,
+        activation: Activation::GeluTanh,
+    };
     architecture
         .sliding_window_pattern
         .iter()
         .enumerate()
         .map(|(layer, &is_sliding)| {
             let kv_heads = architecture.kv_heads_by_layer[layer];
-            if is_sliding {
+            let attention = if is_sliding {
                 LayerAttentionConfig {
                     head_dim: architecture.key_length_swa,
                     kv_heads,
@@ -553,37 +575,14 @@ fn gemma4_attention_configs(architecture: &Architecture) -> Vec<LayerAttentionCo
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                 }
+            };
+            LayerSchedule {
+                kind: LayerKind::Attention,
+                attention,
+                ffn,
             }
         })
         .collect()
-}
-
-/// Every gemma4 layer runs dense SwiGLU over the shared `ffn_norm`-normed
-/// input and routed MoE over its OWN `pre_ffw_norm_2`-normed input
-/// (`routed_pre_norm: true`), each with its own post-norm, summed and
-/// normalized once more, then scaled by `layer_output_scale`. The routed
-/// branch gates with `Softmax` and carries no `exp_probs_b` bias, unlike
-/// [`FfnCombination::Exclusive`]'s LFM2 shape -- see
-/// [`proxima_tensor::spec::LayerFfnConfig`]'s own doc for what each field
-/// means.
-fn gemma4_ffn_configs(architecture: &Architecture) -> Vec<LayerFfnConfig> {
-    alloc::vec![
-        LayerFfnConfig {
-            post_attention_norm: true,
-            combination: FfnCombination::ParallelDenseMoe,
-            dense_post_norm: true,
-            routed_post_norm: true,
-            combined_post_norm: true,
-            output_scale: true,
-            routed_gating: ExpertGatingFunc::Softmax,
-            routed_expert_bias: false,
-            routed_pre_norm: true,
-            router_scale: true,
-            expert_output_scale: true,
-            activation: Activation::GeluTanh,
-        };
-        architecture.block_count as usize
-    ]
 }
 
 impl ArchitectureTrait for Gemma4Arch {
@@ -600,9 +599,7 @@ impl ArchitectureTrait for Gemma4Arch {
         let architecture = from_metadata(parsed)?;
         let weights = bind_gemma4_weights(parsed, file_bytes, &architecture)?;
 
-        let layer_kinds = alloc::vec![LayerKind::Attention; architecture.block_count as usize];
-        let attention_configs = gemma4_attention_configs(&architecture);
-        let ffn_configs = gemma4_ffn_configs(&architecture);
+        let schedule = gemma4_layer_schedule(&architecture);
         let logit_softcap = (architecture.final_logit_softcapping > 0.0)
             .then_some(architecture.final_logit_softcapping);
 
@@ -617,9 +614,7 @@ impl ArchitectureTrait for Gemma4Arch {
             architecture.expert_used_count,
             0,
             0,
-            &layer_kinds,
-            &attention_configs,
-            &ffn_configs,
+            &schedule,
             Some(EmbeddingScale::Sqrt),
             logit_softcap,
             true,
@@ -671,7 +666,7 @@ impl ArchitectureTrait for Gemma4Arch {
 
     /// Feeds the sliding-window RoPE table the `rope_cos_swa`/`rope_sin_swa`
     /// leaves declare (`LayerAttentionConfig::rope_table`,
-    /// [`gemma4_attention_configs`]) -- the decode loop's builtin
+    /// [`gemma4_layer_schedule`]) -- the decode loop's builtin
     /// `rope_cos`/`rope_sin` blocks always carry the FULL-layer table
     /// (`Gemma4Arch::bind`'s own `ModelArchitecture::head_dim`/
     /// `rope_freq_base` are the full-layer values), so this is the one

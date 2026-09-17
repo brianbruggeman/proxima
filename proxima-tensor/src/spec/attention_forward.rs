@@ -335,6 +335,20 @@ pub struct LayerAttentionConfig {
     pub value_norm: bool,
 }
 
+/// One block's complete per-layer choice -- [`lfm2_forward_program_with_experts`]
+/// walks one `&[LayerSchedule]` rather than three separately-indexed
+/// `layer_kinds`/`attention_configs`/`ffn_configs` slices a caller had to
+/// keep in lockstep by hand; `attention` is read only when `kind` is
+/// [`LayerKind::Attention`] (every [`LayerKind::ShortConv`] block still
+/// carries one, simply unread, so every schedule entry stays the same
+/// shape regardless of that block's own kind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerSchedule {
+    pub kind: LayerKind,
+    pub attention: LayerAttentionConfig,
+    pub ffn: LayerFfnConfig,
+}
+
 /// [`lfm2_forward_program_with_experts`]'s own per-attention-layer bundle:
 /// the shared nodes ONE [`LayerAttentionConfig`] resolves to, already
 /// deduplicated against every other layer's own config. Kept separate from
@@ -968,7 +982,7 @@ pub(crate) fn append_routed_expert_ffn(
 
 /// LFM2.5-8B-A1B's hybrid forward pass: `block_count` blocks, each either
 /// `append_attention_mixer` or `append_lfm2_conv_mixer` per its own
-/// `layer_kinds[layer]` (derived by [`LayerKind::from_tensor_names`] from the
+/// `schedule[layer].kind` (derived by [`LayerKind::from_tensor_names`] from the
 /// real checkpoint's tensor directory, since `layer_types` is not a metadata
 /// key this architecture writes), then a shared RMSNorm and
 /// `append_moe_ffn`/dense-triple FFN exactly like
@@ -985,8 +999,9 @@ pub(crate) fn append_routed_expert_ffn(
 /// composition only needs the whole sequence to be present at once, which a
 /// one-token-at-a-time decode call does not have.
 ///
-/// `ffn_configs` ([`LayerFfnConfig`]) generalizes the per-layer
-/// post-attention/FFN sequence the same way `attention_configs`
+/// `schedule` ([`LayerSchedule`]) is one entry per block, in block order --
+/// `schedule[layer].ffn` ([`LayerFfnConfig`]) generalizes the per-layer
+/// post-attention/FFN sequence the same way `schedule[layer].attention`
 /// generalized the attention sub-block -- every element
 /// [`LayerFfnConfig::exclusive`] (every caller in this crate today)
 /// reproduces this function's prior fixed FFN-selection and unnormalized
@@ -1006,29 +1021,15 @@ pub fn lfm2_forward_program_with_experts(
     expert_used_count: u32,
     leading_dense_block_count: u32,
     l_cache: u32,
-    layer_kinds: &[LayerKind],
-    attention_configs: &[LayerAttentionConfig],
-    ffn_configs: &[LayerFfnConfig],
+    schedule: &[LayerSchedule],
     embedding_scale: Option<EmbeddingScale>,
     logit_softcap: Option<f32>,
     last_row_only: bool,
 ) -> Result<(Vec<Op>, NodeId, MoeSites), TensorError> {
-    if layer_kinds.len() != block_count as usize {
-        return Err(TensorError::LayerKindCountMismatch {
+    if schedule.len() != block_count as usize {
+        return Err(TensorError::LayerScheduleCountMismatch {
             expected: block_count,
-            found: layer_kinds.len(),
-        });
-    }
-    if attention_configs.len() != block_count as usize {
-        return Err(TensorError::AttentionConfigCountMismatch {
-            expected: block_count,
-            found: attention_configs.len(),
-        });
-    }
-    if ffn_configs.len() != block_count as usize {
-        return Err(TensorError::FfnConfigCountMismatch {
-            expected: block_count,
-            found: ffn_configs.len(),
+            found: schedule.len(),
         });
     }
 
@@ -1084,11 +1085,11 @@ pub fn lfm2_forward_program_with_experts(
     let mut mask_cache: Vec<(Option<u32>, NodeId, NodeId)> = Vec::new();
     let mut attention_resources: Vec<AttentionLayerResources> = Vec::new();
 
-    for (layer, kind) in layer_kinds.iter().enumerate() {
-        if *kind != LayerKind::Attention {
+    for entry in schedule {
+        if entry.kind != LayerKind::Attention {
             continue;
         }
-        let config = &attention_configs[layer];
+        let config = &entry.attention;
         let group = query_heads / config.kv_heads;
 
         let inv_sqrt_head_dim = find_or_insert(&mut score_scale_cache, config.score_scale, || {
@@ -1166,9 +1167,10 @@ pub fn lfm2_forward_program_with_experts(
     let mut attention_layer_index: usize = 0;
     let mut moe_sites: Vec<MoeSite> = Vec::new();
 
-    for (layer, kind) in layer_kinds.iter().enumerate() {
+    for (layer, entry) in schedule.iter().enumerate() {
         let layer = layer as u32;
-        let ffn_config = &ffn_configs[layer as usize];
+        let kind = entry.kind;
+        let ffn_config = &entry.ffn;
         let attn_norm_weight = input_leaf(
             &mut program,
             DType::Float32,
@@ -1194,7 +1196,7 @@ pub fn lfm2_forward_program_with_experts(
 
         let post_mixer = match kind {
             LayerKind::Attention => {
-                let config = &attention_configs[layer as usize];
+                let config = &entry.attention;
                 let head_dim = config.head_dim;
                 let kv_heads = config.kv_heads;
 
