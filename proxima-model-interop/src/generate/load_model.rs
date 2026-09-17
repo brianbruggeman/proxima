@@ -858,7 +858,15 @@ pub struct LoadedModel<'file> {
     /// `emit_token_breakdown_metal` every step, replacing the ambient
     /// `ACHIEVED_RUNG` global that used to leak the last-loaded model's
     /// rung into every `LoadedModel` in the process.
+    ///
+    /// Read only from `emit_token_breakdown_metal`'s own `instrument`-gated
+    /// call site (`generate/decode.rs`) -- same reasoning as
+    /// [`crate::mapping_residency::ResidencyRung::as_str`]'s own
+    /// `cfg_attr`, which this field needs independently since a struct
+    /// field's dead-code lint is judged on its own, not inherited from a
+    /// method that happens to read it.
     #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[cfg_attr(not(feature = "instrument"), allow(dead_code))]
     pub(super) mapping_residency_rung: crate::mapping_residency::ResidencyRung,
     pub(super) vocab: Vocab,
     pub(super) program: Vec<Op>,

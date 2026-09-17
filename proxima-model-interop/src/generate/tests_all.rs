@@ -19,10 +19,23 @@ use super::{
 };
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 use super::{
-    PlanNumerics, qwen35_dense_attention_placed_byte_length,
-    qwen35_dense_attention_placement_enabled, retain_qwen35_segment_readbacks,
-    use_metal_output_placements,
+    qwen35_dense_attention_placed_byte_length, qwen35_dense_attention_placement_enabled,
+    retain_qwen35_segment_readbacks, use_metal_output_placements,
 };
+// Reads as unused under an explicit `--features std,metal` single-crate
+// build (every reference below is the fully-qualified `super::PlanNumerics`,
+// never the bare name this import binds), but dropping it breaks `cargo
+// check --workspace --all-targets`: `super::PlanNumerics` stops resolving
+// there ("not found in `super`") at every one of this module's 3 call
+// sites. Cargo's per-target feature unification, not this file, decides
+// whether `residency_caches`'s `pub(super) struct PlanNumerics` reaches
+// `generate`'s glob re-export (`mod.rs`'s `pub use residency_caches::*;`)
+// before this module compiles, and the workspace-wide pass resolves that
+// differently than a single-crate `--features` invocation does -- keeping
+// the explicit import is the one form both builds agree on.
+#[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
+#[allow(unused_imports)]
+use super::PlanNumerics;
 
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
