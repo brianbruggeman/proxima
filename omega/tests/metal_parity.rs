@@ -645,6 +645,38 @@ fn tanh_chain_parity_matches_within_epsilon() {
     assert_parity("tanh_chain", cpu.root(), metal.root());
 }
 
+/// Regression for the metal `tanh` intrinsic returning NaN on large finite
+/// inputs (`(exp(2x)-1)/(exp(2x)+1)` overflows past `|x| ~ 45`), traced from
+/// a real gemma4 layer-0 MoE GeGLU activation of `284.86`. CPU libm saturates
+/// to `+-1.0`; metal must match, not NaN.
+#[test]
+fn tanh_parity_saturates_instead_of_nan_on_large_magnitude_inputs() {
+    let program = tanh_chain_program(5, 1);
+    let input = [284.86f32, 100.0, -100.0, 20.0, -20.0];
+
+    let cpu = evaluate(&program, &[], &[&input], &[]).expect("cpu tanh evaluates");
+    let metal = omega::execute(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&input)],
+        &[],
+        NumericPolicy::default(),
+    )
+    .expect("metal tanh executes on a real device");
+
+    for (index, value) in metal.root().iter().enumerate() {
+        assert!(
+            value.is_finite(),
+            "metal tanh produced non-finite output at index {index}: {value}"
+        );
+    }
+    assert_eq!(cpu.root()[0], 1.0, "cpu tanh(284.86) saturates to 1.0");
+    assert_eq!(cpu.root()[1], 1.0, "cpu tanh(100.0) saturates to 1.0");
+    assert_eq!(cpu.root()[2], -1.0, "cpu tanh(-100.0) saturates to -1.0");
+
+    assert_parity("tanh_saturating_large_magnitude", cpu.root(), metal.root());
+}
+
 #[test]
 fn reciprocal_parity_matches_within_epsilon() {
     let program = reciprocal_program(4);
