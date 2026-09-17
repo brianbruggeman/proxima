@@ -453,16 +453,12 @@ pub fn stack_selected_routes(
     routes: &[NodeId],
 ) -> Result<NodeId, TensorError> {
     let selected_count =
-        u32::try_from(routes.len()).map_err(|_| TensorError::InvalidExpertConfig {
-            expert_count: u32::MAX,
-            expert_used_count: u32::MAX,
+        u32::try_from(routes.len()).map_err(|_| TensorError::TooManySelectedRoutes {
+            route_count: routes.len(),
         })?;
-    if selected_count == 0 {
-        return Err(TensorError::InvalidExpertConfig {
-            expert_count: 0,
-            expert_used_count: 0,
-        });
-    }
+    let Some((&first_route, remaining_routes)) = routes.split_first() else {
+        return Err(TensorError::NoSelectedRoutes);
+    };
 
     let selected_axis = op::append(
         program,
@@ -471,43 +467,50 @@ pub fn stack_selected_routes(
             extent: Extent::Static(selected_count),
         },
     );
-    let mut stacked = None;
-    for (round, route) in routes.iter().copied().enumerate() {
-        let round_value = op::append(
-            program,
-            Op::Constant {
-                dtype: DType::Float32,
-                shape: Vec::new(),
-                value: round as f32,
-            },
-        );
-        let round_mask = elementwise(
+
+    let mut stacked = masked_selected_route(program, selected_axis, 0, first_route)?;
+    for (round, route) in remaining_routes.iter().copied().enumerate() {
+        let selected_route =
+            masked_selected_route(program, selected_axis, round as u32 + 1, route)?;
+        stacked = elementwise(
             program,
             DType::Float32,
-            ScalarOp::Equal,
-            &[(selected_axis, "k->k"), (round_value, "->k")],
+            ScalarOp::Add,
+            &[(stacked, "sk->sk"), (selected_route, "sk->sk")],
         )?;
-        let selected_route = elementwise(
-            program,
-            DType::Float32,
-            ScalarOp::Multiply,
-            &[(route, "s->sk"), (round_mask, "k->sk")],
-        )?;
-        stacked = Some(match stacked {
-            Some(previous) => elementwise(
-                program,
-                DType::Float32,
-                ScalarOp::Add,
-                &[(previous, "sk->sk"), (selected_route, "sk->sk")],
-            )?,
-            None => selected_route,
-        });
     }
 
-    stacked.ok_or(TensorError::InvalidExpertConfig {
-        expert_count: 0,
-        expert_used_count: 0,
-    })
+    Ok(stacked)
+}
+
+/// One round's `[sequence, selected]` one-hot-masked route column: `route`
+/// broadcast onto the selected axis, zeroed everywhere but column `round`.
+fn masked_selected_route(
+    program: &mut Vec<Op>,
+    selected_axis: NodeId,
+    round: u32,
+    route: NodeId,
+) -> Result<NodeId, TensorError> {
+    let round_value = op::append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: Vec::new(),
+            value: round as f32,
+        },
+    );
+    let round_mask = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Equal,
+        &[(selected_axis, "k->k"), (round_value, "->k")],
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(route, "s->sk"), (round_mask, "k->sk")],
+    )
 }
 
 /// Selects one `[sequence, feature]` plane from a grouped
@@ -1182,10 +1185,11 @@ pub(super) fn append_moe_ffn_with_projection_strategy_from_logits(
             .zip(combine_weights.iter().copied())
             .enumerate()
         {
-            let round = u32::try_from(round).map_err(|_| TensorError::InvalidExpertConfig {
-                expert_count,
-                expert_used_count,
-            })?;
+            // `selected_routes` holds exactly one entry per round of the
+            // routing loop above, which runs `expert_used_count` (a `u32`)
+            // times -- `round` never exceeds a value that already fit a
+            // `u32`, so this cast cannot truncate.
+            let round = round as u32;
             let gate = select_grouped_round(program, grouped_gate, round, DType::Float32);
             let up = select_grouped_round(program, grouped_up, round, DType::Float32);
             let weighted_round = append_moe_round_output(
@@ -1219,11 +1223,11 @@ pub(super) fn append_moe_ffn_with_projection_strategy_from_logits(
         }
     }
 
-    let weighted_sum = weighted_sum.ok_or(TensorError::InvalidExpertConfig {
+    let weighted_sum = weighted_sum.ok_or(TensorError::MoeAccumulatorEmpty {
         expert_count,
         expert_used_count,
     })?;
-    let weight_total = weight_total.ok_or(TensorError::InvalidExpertConfig {
+    let weight_total = weight_total.ok_or(TensorError::MoeAccumulatorEmpty {
         expert_count,
         expert_used_count,
     })?;
