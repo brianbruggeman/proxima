@@ -1436,6 +1436,7 @@ pub(super) fn classify_packed_row_block(
         PackedCodec::Q2K
         | PackedCodec::Q8_0
         | PackedCodec::Q4_0
+        | PackedCodec::Q5_1
         | PackedCodec::Float16
         | PackedCodec::BFloat16 => {
             return Err(PackedRowBlockRejection::NotKQuantCodec);

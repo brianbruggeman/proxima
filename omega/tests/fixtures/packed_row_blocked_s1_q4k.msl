@@ -739,6 +739,29 @@ static inline float q4_0_element(device const uchar *block, uint index) {
 }
 
 
+// element `index` (0..32) of one Q5_1 block, byte-for-byte the value
+// proxima_gguf::quant::q5_1::dequantize_block writes at the same index.
+static inline float q5_1_element(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    ushort m_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    float delta = (float)as_type<half>(d_bits);
+    float minimum = (float)as_type<half>(m_bits);
+    uint qh = (uint)block[4] | ((uint)block[5] << 8) | ((uint)block[6] << 16) | ((uint)block[7] << 24);
+    bool high_half = index >= 16u;
+    uint local = high_half ? (index - 16u) : index;
+    uchar byte = block[8u + local];
+    uint level;
+    if (high_half) {
+        uint high_bit = (qh >> (local + 12u)) & 0x10u;
+        level = (uint)(byte >> 4u) | high_bit;
+    } else {
+        uint high_bit = ((qh >> local) << 4u) & 0x10u;
+        level = (uint)(byte & 0x0Fu) | high_bit;
+    }
+    return (float)level * delta + minimum;
+}
+
+
 // element `index` (always 0 -- BFloat16 has no super-block) of one BFloat16
 // block: the top 16 bits of the f32 this pair of bytes came from,
 // reconstructed by shifting them back into place.

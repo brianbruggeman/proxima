@@ -1720,7 +1720,7 @@ impl Plan {
 }
 
 /// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has an
-/// unpack kernel for (`Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`,
+/// unpack kernel for (`Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`, `Q5_1`,
 /// `Float16`, `BFloat16`), keyed to its [`PackedCodec`] — the single place this crate
 /// decides "packed AND which codec," shared by [`plan`] and [`prepare`] so
 /// the two cannot drift on it. `Float16` earns a codec slot despite needing
@@ -1741,6 +1741,7 @@ pub(super) fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBloc
             QuantizedBlock::Q6K(_) => Some((*node, PackedCodec::Q6K)),
             QuantizedBlock::Q8_0(_) => Some((*node, PackedCodec::Q8_0)),
             QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
+            QuantizedBlock::Q5_1(_) => Some((*node, PackedCodec::Q5_1)),
             QuantizedBlock::Float16(_) => Some((*node, PackedCodec::Float16)),
             QuantizedBlock::BFloat16(_) => Some((*node, PackedCodec::BFloat16)),
             // decode-only codecs so far (CPU-only, see `proxima_tensor::cpu`)
@@ -1748,8 +1749,7 @@ pub(super) fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBloc
             // fall out of `packed_operands` exactly like `Float32` and hit
             // `reject_unsupported_gpu_dtype`'s ordinary rejection rather
             // than a silent, wrong-shape upload.
-            QuantizedBlock::Q5_1(_)
-            | QuantizedBlock::Iq4Nl(_)
+            QuantizedBlock::Iq4Nl(_)
             | QuantizedBlock::Iq2Xs(_)
             | QuantizedBlock::Iq3Xxs(_)
             | QuantizedBlock::Float32(_)
