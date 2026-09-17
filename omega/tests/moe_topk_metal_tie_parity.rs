@@ -11,7 +11,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 use proxima_tensor::spec::{
-    Activation, ExpertGatingFunc, append_moe_ffn_from_logits, input_leaf, scalar_constant,
+    Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
+    input_leaf, scalar_constant,
 };
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{DType, Extent, NumericPolicy};
@@ -73,23 +74,22 @@ fn build_fixture() -> RoutingFixture {
         "expert_w_down",
     );
     let one = scalar_constant(&mut program, 1.0);
-    let (output, site) = append_moe_ffn_from_logits(
-        &mut program,
-        0,
-        x,
-        logits,
+    let moe_spec = MoeFfnSpec {
+        router: MoeRouter::Logits(logits),
         expert_w_gate,
         expert_w_up,
         expert_w_down,
-        EXPERT_COUNT,
-        EXPERT_USED_COUNT,
-        one,
-        ExpertGatingFunc::Softmax,
-        None,
-        None,
-        Activation::Silu,
-    )
-    .expect("real-shape qwen35moe routing block lowers");
+        expert_count: EXPERT_COUNT,
+        expert_used_count: EXPERT_USED_COUNT,
+        ones: one,
+        gating: ExpertGatingFunc::Softmax,
+        expert_bias: None,
+        expert_scale: None,
+        activation: Activation::Silu,
+        strategy: MoeProjectionStrategy::PerRoute,
+    };
+    let (output, site) = append_moe_ffn(&mut program, 0, x, &moe_spec)
+        .expect("real-shape qwen35moe routing block lowers");
     RoutingFixture {
         program,
         output,

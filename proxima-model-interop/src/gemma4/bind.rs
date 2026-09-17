@@ -399,7 +399,7 @@ pub fn bind_gemma4_weights<'file>(
         // `[expert_count]` F32, ARCHITECTURAL (not a dequant scale --
         // `ffn_down_exps.weight` is Q5_1 with its own block scales). Folded
         // into each selected expert's combination weight,
-        // [`append_moe_ffn_with_expert_scale`]'s own doc.
+        // [`append_moe_ffn`]'s own doc on `MoeFfnSpec::expert_scale`.
         bind_dense(
             parsed,
             file_bytes,

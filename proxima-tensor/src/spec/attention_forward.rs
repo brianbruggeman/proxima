@@ -244,7 +244,7 @@ pub struct LayerFfnConfig {
     /// `true` binds `blk.{layer}.ffn_down_exps.scale` (`[expert_count]`)
     /// and folds it, gathered by each round's selected expert, into that
     /// round's combination weight AFTER softmax-over-selected
-    /// renormalization ([`append_moe_ffn_with_expert_scale`]'s own doc).
+    /// renormalization ([`append_moe_ffn`]'s own doc on `MoeFfnSpec::expert_scale`).
     /// `false` (every caller today) reproduces the prior unscaled
     /// combination. Gemma 4 sets `true`.
     pub expert_output_scale: bool,
@@ -947,11 +947,8 @@ pub(crate) fn append_routed_expert_ffn(
         "sde->sde",
         "se->sde",
     )?;
-    let (ffn_out, site) = append_moe_ffn_from_logits(
-        program,
-        layer,
-        normed,
-        router_logits,
+    let moe_spec = MoeFfnSpec {
+        router: MoeRouter::Logits(router_logits),
         expert_w_gate,
         expert_w_up,
         expert_w_down,
@@ -962,7 +959,9 @@ pub(crate) fn append_routed_expert_ffn(
         expert_bias,
         expert_scale,
         activation,
-    )?;
+        strategy: MoeProjectionStrategy::PerRoute,
+    };
+    let (ffn_out, site) = append_moe_ffn(program, layer, normed, &moe_spec)?;
     moe_sites.push(site);
     Ok(ffn_out)
 }

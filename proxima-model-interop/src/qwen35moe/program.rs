@@ -45,10 +45,11 @@
 //! [`crate::qwen4exp::program::qwen4exp_forward_program`] follows.
 
 use proxima_tensor::spec::{
-    Activation, ExpertGatingFunc, ForwardRoots, GdnOutputGate, MoeSite, MoeSites,
-    Qwen35DenseAttentionTaps, Qwen35LayerRoots, SsmMixerTaps, append_moe_ffn_from_logits,
-    append_qwen35_dense_attention_only_with_taps, append_qwen35_ssm_mixer_with_taps_and_layout,
-    causal_mask, elementwise, embedding_lookup, input_leaf, reduce, rmsnorm, scalar_constant,
+    Activation, ExpertGatingFunc, ForwardRoots, GdnOutputGate, MoeFfnSpec, MoeProjectionStrategy,
+    MoeRouter, MoeSite, MoeSites, Qwen35DenseAttentionTaps, Qwen35LayerRoots, SsmMixerTaps,
+    append_moe_ffn, append_qwen35_dense_attention_only_with_taps,
+    append_qwen35_ssm_mixer_with_taps_and_layout, causal_mask, elementwise, embedding_lookup,
+    input_leaf, reduce, rmsnorm, scalar_constant,
 };
 use proxima_tensor::{DType, Extent, NodeId, Op, ReduceInit, ScalarOp};
 
@@ -118,22 +119,21 @@ fn append_qwen35moe_ffn(
         gate_inp,
     )?;
 
-    let (routed_out, moe_site) = append_moe_ffn_from_logits(
-        program,
-        layer,
-        normed,
-        router_logits,
+    let moe_spec = MoeFfnSpec {
+        router: MoeRouter::Logits(router_logits),
         expert_w_gate,
         expert_w_up,
         expert_w_down,
         expert_count,
         expert_used_count,
-        one,
-        ExpertGatingFunc::Softmax,
-        None,
-        None,
-        Activation::Silu,
-    )?;
+        ones: one,
+        gating: ExpertGatingFunc::Softmax,
+        expert_bias: None,
+        expert_scale: None,
+        activation: Activation::Silu,
+        strategy: MoeProjectionStrategy::PerRoute,
+    };
+    let (routed_out, moe_site) = append_moe_ffn(program, layer, normed, &moe_spec)?;
     let shared_out = append_sigmoid_gated_shared_expert(
         program,
         normed,

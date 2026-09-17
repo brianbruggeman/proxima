@@ -261,7 +261,7 @@ pub enum BoundOpKind {
     },
     /// One qwen35moe layer's whole top-k routing decision (ROW 569,
     /// `docs/discipline.md`), collapsing
-    /// [`crate::spec::append_moe_ffn_from_logits`]'s own `expert_used_count`
+    /// [`crate::spec::append_moe_ffn`]'s own `expert_used_count`
     /// unrolled argmax-with-exclusion rounds into one bound op: `operands`
     /// carries exactly one entry, `scores` (the gate logits under
     /// [`crate::spec::ExpertGatingFunc::Softmax`], `scores` aliased to
@@ -283,7 +283,7 @@ pub enum BoundOpKind {
     /// top-k shape [`crate::spec::append_moe_ffn`]'s own doc names),
     /// `weight_total = sum(weight_0..weight_{top_k-1})`; the caller's own
     /// `output = weighted_sum * (1 / weight_total)` renormalization
-    /// [`crate::spec::append_moe_ffn_from_logits`] builds AFTER this op is
+    /// [`crate::spec::append_moe_ffn`] builds AFTER this op is
     /// exactly the same consumer whether or not this kind fires, since
     /// `weight_total` is this op's own third kind of output, not
     /// recomputed.

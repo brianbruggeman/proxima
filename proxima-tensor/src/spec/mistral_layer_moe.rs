@@ -598,6 +598,59 @@ pub enum ExpertGatingFunc {
     Sigmoid,
 }
 
+/// [`MoeFfnSpec`]'s own router input: either the pre-router hidden state
+/// (`append_moe_ffn` computes `router_logits` from it via `gate_inp`
+/// exactly the way this function's own leading two ops always have) or an
+/// already-computed router-logit node (callers that expose the router as a
+/// graph boundary, so the routing observation and the gathered expert
+/// products consume the same node rather than rebuilding an independent
+/// projection).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoeRouter {
+    GateInput(NodeId),
+    Logits(NodeId),
+}
+
+/// Every argument [`append_moe_ffn`] needs beyond `program`/`layer`/`x` --
+/// the six call shapes this crate used to expose as separate functions
+/// (`append_moe_ffn`/`_with_expert_scale`/`_from_logits`/
+/// `_grouped_gate_up`/`_with_projection_strategy`/
+/// `_with_projection_strategy_from_logits`) collapsed onto one config
+/// struct so a caller states which optional behavior it wants (`router`,
+/// `expert_bias`, `expert_scale`, `strategy`) instead of picking a function
+/// name for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoeFfnSpec {
+    /// Where the router's per-expert logits come from.
+    pub router: MoeRouter,
+    /// `[expert_count, d_in, d_out]` gate-projection weight slab.
+    pub expert_w_gate: NodeId,
+    /// `[expert_count, d_in, d_out]` up-projection weight slab.
+    pub expert_w_up: NodeId,
+    /// `[expert_count, d_out, d_in]` down-projection weight slab.
+    pub expert_w_down: NodeId,
+    pub expert_count: u32,
+    pub expert_used_count: u32,
+    pub ones: NodeId,
+    pub gating: ExpertGatingFunc,
+    /// `blk.{layer}.exp_probs_b.bias` (`[expert_count]`) on a real LFM2
+    /// checkpoint: added to the selection score ONLY for the argmax that
+    /// picks `expert_used_count` experts, never for a selected expert's own
+    /// combination weight. `None` for every checkpoint without such a bias
+    /// (Mixtral, qwen3.6 MoE).
+    pub expert_bias: Option<NodeId>,
+    /// `blk.{layer}.ffn_down_exps.scale` (`[expert_count]`) on a real
+    /// gemma4 checkpoint: gathered by each round's own selected route and
+    /// folded into that round's combination weight AFTER
+    /// softmax-over-selected renormalization. `None` reproduces the
+    /// unscaled combination byte-for-byte (Mixtral, LFM2, qwen3.6 MoE).
+    pub expert_scale: Option<NodeId>,
+    pub activation: Activation,
+    /// Whether gate/up projections run per-route or grouped over the
+    /// selected axis.
+    pub strategy: MoeProjectionStrategy,
+}
+
 /// One [`append_moe_ffn`] call's routing decision, returned alongside its
 /// output node so the decode loop -- not this kernel-building function --
 /// decides whether to evaluate and observe it. `selected` holds one
@@ -666,164 +719,53 @@ pub struct MoeSites(pub Vec<MoeSite>);
 /// and [`mistral_cached_forward_program_with_experts`] both call per
 /// layer; see [`qwen35_forward_program`] for this crate's own worked
 /// example of a full per-layer builder chain (a dense, non-MoE FFN there).
-#[allow(clippy::too_many_arguments)]
 pub fn append_moe_ffn(
     program: &mut Vec<Op>,
     layer: u32,
     x: NodeId,
-    gate_inp: NodeId,
-    expert_w_gate: NodeId,
-    expert_w_up: NodeId,
-    expert_w_down: NodeId,
-    expert_count: u32,
-    expert_used_count: u32,
-    ones: NodeId,
-    gating: ExpertGatingFunc,
-    expert_bias: Option<NodeId>,
-    activation: Activation,
+    spec: &MoeFfnSpec,
 ) -> Result<(NodeId, MoeSite), TensorError> {
-    append_moe_ffn_with_expert_scale(
-        program,
-        layer,
-        x,
-        gate_inp,
-        expert_w_gate,
-        expert_w_up,
-        expert_w_down,
-        expert_count,
-        expert_used_count,
-        ones,
-        gating,
-        expert_bias,
-        None,
-        activation,
-    )
-}
-
-/// [`append_moe_ffn`] with an extra OPTIONAL per-expert output scale
-/// (gemma4's `blk.{layer}.ffn_down_exps.scale`, `[expert_count]`), gathered
-/// by each round's own selected route and folded into that round's
-/// combination weight AFTER softmax-over-selected renormalization, matching
-/// the authoritative `topk_weights = topk_weights * expert_scales` fold.
-/// `None` reproduces [`append_moe_ffn`] byte-for-byte -- every caller that
-/// has no such scale on disk (Mixtral, LFM2, qwen3.6 MoE) passes `None` and
-/// this function never diverges from the pre-scale program.
-#[allow(clippy::too_many_arguments)]
-pub fn append_moe_ffn_with_expert_scale(
-    program: &mut Vec<Op>,
-    layer: u32,
-    x: NodeId,
-    gate_inp: NodeId,
-    expert_w_gate: NodeId,
-    expert_w_up: NodeId,
-    expert_w_down: NodeId,
-    expert_count: u32,
-    expert_used_count: u32,
-    ones: NodeId,
-    gating: ExpertGatingFunc,
-    expert_bias: Option<NodeId>,
-    expert_scale: Option<NodeId>,
-    activation: Activation,
-) -> Result<(NodeId, MoeSite), TensorError> {
-    append_moe_ffn_with_projection_strategy(
-        program,
-        layer,
-        x,
-        gate_inp,
-        expert_w_gate,
-        expert_w_up,
-        expert_w_down,
-        expert_count,
-        expert_used_count,
-        ones,
-        gating,
-        expert_bias,
-        expert_scale,
-        activation,
-        MoeProjectionStrategy::PerRoute,
-    )
-}
-
-/// Builds a routed feed-forward block from an already-computed router-logit
-/// node. Callers that expose the router as a graph boundary use this entry
-/// point so the routing observation and the gathered expert products consume
-/// the same node rather than rebuilding an independent projection.
-#[allow(clippy::too_many_arguments)]
-pub fn append_moe_ffn_from_logits(
-    program: &mut Vec<Op>,
-    layer: u32,
-    x: NodeId,
-    logits: NodeId,
-    expert_w_gate: NodeId,
-    expert_w_up: NodeId,
-    expert_w_down: NodeId,
-    expert_count: u32,
-    expert_used_count: u32,
-    ones: NodeId,
-    gating: ExpertGatingFunc,
-    expert_bias: Option<NodeId>,
-    expert_scale: Option<NodeId>,
-    activation: Activation,
-) -> Result<(NodeId, MoeSite), TensorError> {
+    let logits = match spec.router {
+        MoeRouter::GateInput(gate_inp) => {
+            let gate_product = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(x, "sd->sde"), (gate_inp, "de->sde")],
+            )?;
+            reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                gate_product,
+                "sde->sde",
+                "se->sde",
+            )?
+        }
+        MoeRouter::Logits(logits) => logits,
+    };
     append_moe_ffn_with_projection_strategy_from_logits(
         program,
         layer,
         x,
         logits,
-        expert_w_gate,
-        expert_w_up,
-        expert_w_down,
-        expert_count,
-        expert_used_count,
-        ones,
-        gating,
-        expert_bias,
-        expert_scale,
-        activation,
-        MoeProjectionStrategy::PerRoute,
-    )
-}
-
-/// [`append_moe_ffn`] with gate and up projections grouped over the selected
-/// axis while each composed hidden activation still enters its own gathered
-/// down projection.
-#[allow(clippy::too_many_arguments)]
-pub fn append_moe_ffn_grouped_gate_up(
-    program: &mut Vec<Op>,
-    layer: u32,
-    x: NodeId,
-    gate_inp: NodeId,
-    expert_w_gate: NodeId,
-    expert_w_up: NodeId,
-    expert_w_down: NodeId,
-    expert_count: u32,
-    expert_used_count: u32,
-    ones: NodeId,
-    gating: ExpertGatingFunc,
-    expert_bias: Option<NodeId>,
-    activation: Activation,
-) -> Result<(NodeId, MoeSite), TensorError> {
-    append_moe_ffn_with_projection_strategy(
-        program,
-        layer,
-        x,
-        gate_inp,
-        expert_w_gate,
-        expert_w_up,
-        expert_w_down,
-        expert_count,
-        expert_used_count,
-        ones,
-        gating,
-        expert_bias,
-        None,
-        activation,
-        MoeProjectionStrategy::GroupedGateUp,
+        spec.expert_w_gate,
+        spec.expert_w_up,
+        spec.expert_w_down,
+        spec.expert_count,
+        spec.expert_used_count,
+        spec.ones,
+        spec.gating,
+        spec.expert_bias,
+        spec.expert_scale,
+        spec.activation,
+        spec.strategy,
     )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MoeProjectionStrategy {
+pub enum MoeProjectionStrategy {
     PerRoute,
     GroupedGateUp,
 }
@@ -865,59 +807,7 @@ pub(super) fn append_moe_round_output(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn append_moe_ffn_with_projection_strategy(
-    program: &mut Vec<Op>,
-    layer: u32,
-    x: NodeId,
-    gate_inp: NodeId,
-    expert_w_gate: NodeId,
-    expert_w_up: NodeId,
-    expert_w_down: NodeId,
-    expert_count: u32,
-    expert_used_count: u32,
-    ones: NodeId,
-    gating: ExpertGatingFunc,
-    expert_bias: Option<NodeId>,
-    expert_scale: Option<NodeId>,
-    activation: Activation,
-    projection_strategy: MoeProjectionStrategy,
-) -> Result<(NodeId, MoeSite), TensorError> {
-    let gate_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(x, "sd->sde"), (gate_inp, "de->sde")],
-    )?;
-    let logits = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        gate_product,
-        "sde->sde",
-        "se->sde",
-    )?;
-    append_moe_ffn_with_projection_strategy_from_logits(
-        program,
-        layer,
-        x,
-        logits,
-        expert_w_gate,
-        expert_w_up,
-        expert_w_down,
-        expert_count,
-        expert_used_count,
-        ones,
-        gating,
-        expert_bias,
-        expert_scale,
-        activation,
-        projection_strategy,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn append_moe_ffn_with_projection_strategy_from_logits(
+fn append_moe_ffn_with_projection_strategy_from_logits(
     program: &mut Vec<Op>,
     layer: u32,
     x: NodeId,
@@ -1508,21 +1398,21 @@ pub fn append_mistral_moe_layer(
 
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
-    let (ffn_out, site) = append_moe_ffn(
-        program,
-        layer,
-        normed2,
-        gate_inp,
+    let moe_spec = MoeFfnSpec {
+        router: MoeRouter::GateInput(gate_inp),
         expert_w_gate,
         expert_w_up,
         expert_w_down,
         expert_count,
         expert_used_count,
         ones,
-        ExpertGatingFunc::Softmax,
-        None,
-        Activation::Silu,
-    )?;
+        gating: ExpertGatingFunc::Softmax,
+        expert_bias: None,
+        expert_scale: None,
+        activation: Activation::Silu,
+        strategy: MoeProjectionStrategy::PerRoute,
+    };
+    let (ffn_out, site) = append_moe_ffn(program, layer, normed2, &moe_spec)?;
 
     let output = elementwise(
         program,

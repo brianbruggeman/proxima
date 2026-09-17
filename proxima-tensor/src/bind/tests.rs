@@ -5687,7 +5687,7 @@ mod gated_delta_net_tests {
 }
 
 /// ROW 569 (`docs/discipline.md`) census: names every bound op
-/// [`crate::spec::append_moe_ffn_from_logits`]'s own round loop builds
+/// [`crate::spec::append_moe_ffn`]'s own round loop builds
 /// at qwen35moe's real routing shape (256 experts, `expert_used_count`
 /// = 8), the shape `moe-topk-fusion`'s own `BoundOpKind` is meant to
 /// collapse into one bound op per layer -- no fusion runs here yet,
@@ -5695,7 +5695,8 @@ mod gated_delta_net_tests {
 mod moe_routing_census {
     use super::*;
     use crate::spec::{
-        Activation, ExpertGatingFunc, append_moe_ffn_from_logits, input_leaf, scalar_constant,
+        Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter,
+        append_moe_ffn, input_leaf, scalar_constant,
     };
 
     const EXPERT_COUNT: u32 = 256;
@@ -5705,7 +5706,7 @@ mod moe_routing_census {
 
     /// One qwen35moe layer's routing block: [`ExpertGatingFunc::Softmax`],
     /// `expert_bias = None` -- `proxima-model-interop/src/qwen35moe/program.rs`'s
-    /// own `append_qwen35moe_ffn` call into `append_moe_ffn_from_logits`
+    /// own `append_qwen35moe_ffn` call into `append_moe_ffn`
     /// (lines 122-135), NOT the `Sigmoid` gate this crate's Mixtral-style
     /// dense callers (`append_mistral_moe_layer`) use -- the two gating
     /// functions cost the same op count per round (`shifted`+`exp` for
@@ -5760,23 +5761,22 @@ mod moe_routing_census {
         let ones = scalar_constant(&mut program, 1.0);
         let routing_start = program.len();
 
-        let (_output, site) = append_moe_ffn_from_logits(
-            &mut program,
-            0,
-            x,
-            logits,
+        let moe_spec = MoeFfnSpec {
+            router: MoeRouter::Logits(logits),
             expert_w_gate,
             expert_w_up,
             expert_w_down,
-            EXPERT_COUNT,
-            EXPERT_USED_COUNT,
+            expert_count: EXPERT_COUNT,
+            expert_used_count: EXPERT_USED_COUNT,
             ones,
-            ExpertGatingFunc::Softmax,
-            None,
-            None,
-            Activation::Silu,
-        )
-        .expect("real-shape qwen35moe routing block lowers");
+            gating: ExpertGatingFunc::Softmax,
+            expert_bias: None,
+            expert_scale: None,
+            activation: Activation::Silu,
+            strategy: MoeProjectionStrategy::PerRoute,
+        };
+        let (_output, site) = append_moe_ffn(&mut program, 0, x, &moe_spec)
+            .expect("real-shape qwen35moe routing block lowers");
 
         assert_eq!(
             site.selected.len(),
@@ -5955,23 +5955,22 @@ mod moe_routing_census {
             "expert_w_down",
         );
         let ones = scalar_constant(&mut program, 1.0);
-        let (output, site) = append_moe_ffn_from_logits(
-            &mut program,
-            0,
-            x,
-            logits,
+        let moe_spec = MoeFfnSpec {
+            router: MoeRouter::Logits(logits),
             expert_w_gate,
             expert_w_up,
             expert_w_down,
-            EXPERT_COUNT,
-            EXPERT_USED_COUNT,
+            expert_count: EXPERT_COUNT,
+            expert_used_count: EXPERT_USED_COUNT,
             ones,
-            ExpertGatingFunc::Softmax,
-            None,
-            None,
-            Activation::Silu,
-        )
-        .expect("real-shape qwen35moe routing block lowers");
+            gating: ExpertGatingFunc::Softmax,
+            expert_bias: None,
+            expert_scale: None,
+            activation: Activation::Silu,
+            strategy: MoeProjectionStrategy::PerRoute,
+        };
+        let (output, site) = append_moe_ffn(&mut program, 0, x, &moe_spec)
+            .expect("real-shape qwen35moe routing block lowers");
         RoutingProgram {
             program,
             x,

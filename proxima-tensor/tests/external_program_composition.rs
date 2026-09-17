@@ -21,8 +21,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 use proxima_tensor::spec::{
-    Activation, ExpertGatingFunc, append_moe_ffn, causal_mask, elementwise, embedding_lookup,
-    input_leaf, reduce, rmsnorm, scalar_constant, sigmoid, symbolic_leaf,
+    Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
+    causal_mask, elementwise, embedding_lookup, input_leaf, reduce, rmsnorm, scalar_constant,
+    sigmoid, symbolic_leaf,
 };
 use proxima_tensor::{DType, Extent, ReduceInit, ScalarOp};
 
@@ -220,22 +221,22 @@ fn external_crate_composes_a_one_layer_forward_program() {
         ],
         "expert_w_down",
     );
-    let (routed_out, _moe_site) = append_moe_ffn(
-        &mut program,
-        0,
-        hidden,
-        gate_inp,
+    let moe_spec = MoeFfnSpec {
+        router: MoeRouter::GateInput(gate_inp),
         expert_w_gate,
         expert_w_up,
         expert_w_down,
         expert_count,
         expert_used_count,
-        one,
-        ExpertGatingFunc::Softmax,
-        None,
-        Activation::Silu,
-    )
-    .expect("routed moe ffn lowers");
+        ones: one,
+        gating: ExpertGatingFunc::Softmax,
+        expert_bias: None,
+        expert_scale: None,
+        activation: Activation::Silu,
+        strategy: MoeProjectionStrategy::PerRoute,
+    };
+    let (routed_out, _moe_site) = append_moe_ffn(&mut program, 0, hidden, &moe_spec)
+        .expect("routed moe ffn lowers");
 
     // A sigmoid-gated shared-expert FFN, run alongside the routed one and
     // added into its output -- the shape a private `sigmoid` could not

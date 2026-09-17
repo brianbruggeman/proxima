@@ -28,7 +28,10 @@
 #![cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
-use proxima_tensor::spec::{Activation, ExpertGatingFunc, append_moe_ffn, input_leaf, scalar_constant};
+use proxima_tensor::spec::{
+    Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
+    input_leaf, scalar_constant,
+};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{DType, Extent, NumericPolicy};
 
@@ -93,22 +96,22 @@ fn build_fixture(seq: u32, expert_count: u32, expert_used_count: u32) -> MoeFixt
     );
     let one = scalar_constant(&mut program, 1.0);
 
-    let (routed_out, moe_site) = append_moe_ffn(
-        &mut program,
-        0,
-        x,
-        gate_inp,
+    let moe_spec = MoeFfnSpec {
+        router: MoeRouter::GateInput(gate_inp),
         expert_w_gate,
         expert_w_up,
         expert_w_down,
         expert_count,
         expert_used_count,
-        one,
-        ExpertGatingFunc::Softmax,
-        None,
-        Activation::Silu,
-    )
-    .expect("routed moe ffn lowers at 128/8");
+        ones: one,
+        gating: ExpertGatingFunc::Softmax,
+        expert_bias: None,
+        expert_scale: None,
+        activation: Activation::Silu,
+        strategy: MoeProjectionStrategy::PerRoute,
+    };
+    let (routed_out, moe_site) = append_moe_ffn(&mut program, 0, x, &moe_spec)
+        .expect("routed moe ffn lowers at 128/8");
 
     let mut extra_outputs = moe_site.selected.clone();
     extra_outputs.extend(moe_site.weights.iter().copied());
