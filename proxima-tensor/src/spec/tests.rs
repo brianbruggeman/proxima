@@ -12532,16 +12532,17 @@ mod gemma4_synthetic_parity {
         // independent reference, final logits --
         let ffn_config = LayerFfnConfig {
             post_attention_norm: true,
-            combination: FfnCombination::ParallelDenseMoe,
-            dense_post_norm: true,
-            routed_post_norm: true,
-            combined_post_norm: true,
+            combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
+                dense_post_norm: true,
+                routed_post_norm: true,
+                combined_post_norm: true,
+                routed_pre_norm: true,
+                router_scale: true,
+                expert_output_scale: true,
+            }),
             output_scale: true,
             routed_gating: ExpertGatingFunc::Softmax,
             routed_expert_bias: false,
-            routed_pre_norm: true,
-            router_scale: true,
-            expert_output_scale: true,
             activation: Activation::GeluTanh,
         };
         let schedule = alloc::vec![

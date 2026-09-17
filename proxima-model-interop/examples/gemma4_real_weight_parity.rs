@@ -20,8 +20,8 @@ use proxima_model_interop::gemma4::from_metadata;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
-    LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, RopePairing, RopeTableSel,
-    ValueSourceKind, lfm2_forward_program_with_experts,
+    LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ParallelDenseMoeConfig,
+    RopePairing, RopeTableSel, ValueSourceKind, lfm2_forward_program_with_experts,
 };
 
 /// Finds the [`NodeId`] of the `Op::Input` leaf named `name` -- `op::append`'s
@@ -48,16 +48,17 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
 fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) -> (Vec<Op>, NodeId) {
     let ffn = LayerFfnConfig {
         post_attention_norm: true,
-        combination: FfnCombination::ParallelDenseMoe,
-        dense_post_norm: true,
-        routed_post_norm: true,
-        combined_post_norm: true,
+        combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
+            dense_post_norm: true,
+            routed_post_norm: true,
+            combined_post_norm: true,
+            routed_pre_norm: true,
+            router_scale: true,
+            expert_output_scale: true,
+        }),
         output_scale: true,
         routed_gating: ExpertGatingFunc::Softmax,
         routed_expert_bias: false,
-        routed_pre_norm: true,
-        router_scale: true,
-        expert_output_scale: true,
         activation: Activation::GeluTanh,
     };
     let schedule: Vec<LayerSchedule> = architecture

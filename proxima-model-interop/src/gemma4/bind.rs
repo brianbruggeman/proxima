@@ -24,8 +24,8 @@ use alloc::vec::Vec;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
-    LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, RopePairing, RopeTableSel,
-    ValueSourceKind, lfm2_forward_program_with_experts,
+    LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ParallelDenseMoeConfig,
+    RopePairing, RopeTableSel, ValueSourceKind, lfm2_forward_program_with_experts,
 };
 
 use crate::architecture::{
@@ -516,16 +516,17 @@ pub static GEMMA4: Gemma4Arch = Gemma4Arch;
 fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
     let ffn = LayerFfnConfig {
         post_attention_norm: true,
-        combination: FfnCombination::ParallelDenseMoe,
-        dense_post_norm: true,
-        routed_post_norm: true,
-        combined_post_norm: true,
+        combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
+            dense_post_norm: true,
+            routed_post_norm: true,
+            combined_post_norm: true,
+            routed_pre_norm: true,
+            router_scale: true,
+            expert_output_scale: true,
+        }),
         output_scale: true,
         routed_gating: ExpertGatingFunc::Softmax,
         routed_expert_bias: false,
-        routed_pre_norm: true,
-        router_scale: true,
-        expert_output_scale: true,
         activation: Activation::GeluTanh,
     };
     architecture

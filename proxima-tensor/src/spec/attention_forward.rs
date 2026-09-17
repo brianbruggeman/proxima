@@ -171,6 +171,39 @@ pub(super) fn append_activation(
     }
 }
 
+/// [`FfnCombination::ParallelDenseMoe`]'s own knobs -- fields only legal
+/// (and only ever read, see `lfm2_forward_program_with_experts`) when a
+/// layer runs BOTH FFNs in parallel; hoisted out of [`LayerFfnConfig`] and
+/// onto this variant's payload so a schedule cannot name them under
+/// [`FfnCombination::Exclusive`], where dense and routed never coexist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParallelDenseMoeConfig {
+    /// Sub-norm placement -- Gemma names these `blk.{layer}.post_ffw_norm_1.weight`
+    /// (dense branch), `blk.{layer}.post_ffw_norm_2.weight` (routed branch),
+    /// and `blk.{layer}.post_ffw_norm.weight` (post-sum).
+    pub dense_post_norm: bool,
+    pub routed_post_norm: bool,
+    pub combined_post_norm: bool,
+    /// `true` normalizes the routed branch's own input through
+    /// `blk.{layer}.pre_ffw_norm_2.weight` instead of reusing the dense
+    /// branch's `ffn_norm`-normed input. `false` reproduces the prior
+    /// shared-input behaviour. Gemma 4 sets `true`.
+    pub routed_pre_norm: bool,
+    /// `true` binds `blk.{layer}.ffn_gate_inp.scale` (`[embedding]`) as the
+    /// gamma of a `with_scale=False` RMSNorm over the router's own input,
+    /// then multiplies the normed result by the constant
+    /// `embedding**-0.5`, before the router projection -- never into the
+    /// experts' own input (`Gemma4TextRouter.forward`). `false` reproduces
+    /// the prior unscaled router input. Gemma 4 sets `true`.
+    pub router_scale: bool,
+    /// `true` binds `blk.{layer}.ffn_down_exps.scale` (`[expert_count]`)
+    /// and folds it, gathered by each round's selected expert, into that
+    /// round's combination weight AFTER softmax-over-selected
+    /// renormalization ([`append_moe_ffn`]'s own doc on `MoeFfnSpec::expert_scale`).
+    /// `false` reproduces the prior unscaled combination. Gemma 4 sets `true`.
+    pub expert_output_scale: bool,
+}
+
 /// How a layer's post-attention output and its feed-forward output combine
 /// -- [`FfnCombination::Exclusive`] is [`lfm2_forward_program_with_experts`]'s
 /// prior behaviour (a layer runs the dense-triple FFN XOR
@@ -178,12 +211,12 @@ pub(super) fn append_activation(
 /// [`FfnCombination::ParallelDenseMoe`] is Gemma 4's shape: BOTH FFNs run
 /// over the same normalized input and their outputs are summed, each
 /// (optionally) normalized on its own before the sum, and the sum
-/// (optionally) normalized again -- see [`LayerFfnConfig`]'s own fields for
-/// which sub-norms apply.
+/// (optionally) normalized again -- see [`ParallelDenseMoeConfig`]'s own
+/// fields for which sub-norms apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FfnCombination {
     Exclusive,
-    ParallelDenseMoe,
+    ParallelDenseMoe(ParallelDenseMoeConfig),
 }
 
 /// One layer's post-attention/feed-forward knobs -- generalizes
@@ -193,7 +226,13 @@ pub enum FfnCombination {
 /// heterogeneous schedule (Gemma 4's parallel dense+MoE, its
 /// `post_attention_norm`, its per-layer `layer_output_scale`) can vary
 /// these per layer while every uniform caller in this crate today
-/// reproduces the prior program byte-for-byte.
+/// reproduces the prior program byte-for-byte. Fields here apply under
+/// EITHER [`FfnCombination`] variant (the routed branch runs, and reads
+/// `routed_gating`/`routed_expert_bias`/`activation`, whether it is
+/// [`FfnCombination::Exclusive`]'s selected branch or
+/// [`FfnCombination::ParallelDenseMoe`]'s routed half); a field legal under
+/// only one variant lives on that variant's own payload instead --
+/// [`ParallelDenseMoeConfig`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayerFfnConfig {
     /// `true` builds and applies `blk.{layer}.post_attention_norm.weight`
@@ -203,14 +242,6 @@ pub struct LayerFfnConfig {
     pub post_attention_norm: bool,
     /// [`FfnCombination::Exclusive`] for every caller in this crate today.
     pub combination: FfnCombination,
-    /// Sub-norm placement [`FfnCombination::ParallelDenseMoe`] applies --
-    /// ignored under [`FfnCombination::Exclusive`]. Gemma names these
-    /// `blk.{layer}.post_ffw_norm_1.weight` (dense branch),
-    /// `blk.{layer}.post_ffw_norm_2.weight` (routed branch), and
-    /// `blk.{layer}.post_ffw_norm.weight` (post-sum).
-    pub dense_post_norm: bool,
-    pub routed_post_norm: bool,
-    pub combined_post_norm: bool,
     /// `true` builds `blk.{layer}.layer_output_scale.weight` (a rank-0
     /// leaf) and multiplies it into this layer's output right after the
     /// FFN residual add. `false` (every caller today) reproduces the prior
@@ -226,28 +257,6 @@ pub struct LayerFfnConfig {
     /// [`append_routed_expert_ffn`]'s prior hardcoded leaf. Gemma 4 has no
     /// such bias on its routed branch and sets `false`.
     pub routed_expert_bias: bool,
-    /// `true` normalizes the routed branch's own input through
-    /// `blk.{layer}.pre_ffw_norm_2.weight` instead of reusing the dense
-    /// branch's `ffn_norm`-normed input -- [`FfnCombination::ParallelDenseMoe`]
-    /// only; ignored under [`FfnCombination::Exclusive`]. `false` (every
-    /// caller today) reproduces the prior shared-input behaviour. Gemma 4
-    /// sets `true`.
-    pub routed_pre_norm: bool,
-    /// `true` binds `blk.{layer}.ffn_gate_inp.scale` (`[embedding]`) as the
-    /// gamma of a `with_scale=False` RMSNorm over the router's own input,
-    /// then multiplies the normed result by the constant
-    /// `embedding**-0.5`, before the router projection -- never into the
-    /// experts' own input (`Gemma4TextRouter.forward`). `false` (every
-    /// caller today) reproduces the prior unscaled router input. Gemma 4
-    /// sets `true`.
-    pub router_scale: bool,
-    /// `true` binds `blk.{layer}.ffn_down_exps.scale` (`[expert_count]`)
-    /// and folds it, gathered by each round's selected expert, into that
-    /// round's combination weight AFTER softmax-over-selected
-    /// renormalization ([`append_moe_ffn`]'s own doc on `MoeFfnSpec::expert_scale`).
-    /// `false` (every caller today) reproduces the prior unscaled
-    /// combination. Gemma 4 sets `true`.
-    pub expert_output_scale: bool,
     /// Nonlinearity [`append_activation`] applies to both the dense and
     /// routed branches' gate/up product. `Silu` (every caller in this
     /// crate today) reproduces the prior hardcoded SiLU chain
@@ -258,21 +267,15 @@ pub struct LayerFfnConfig {
 impl LayerFfnConfig {
     /// [`lfm2_forward_program_with_experts`]'s prior fixed behaviour: no
     /// post-attention norm, exclusive dense/routed FFN selection, no
-    /// sub-norms, no output scale.
+    /// output scale.
     #[must_use]
     pub const fn exclusive() -> Self {
         LayerFfnConfig {
             post_attention_norm: false,
             combination: FfnCombination::Exclusive,
-            dense_post_norm: false,
-            routed_post_norm: false,
-            combined_post_norm: false,
             output_scale: false,
             routed_gating: ExpertGatingFunc::Sigmoid,
             routed_expert_bias: true,
-            routed_pre_norm: false,
-            router_scale: false,
-            expert_output_scale: false,
             activation: Activation::Silu,
         }
     }
@@ -1391,7 +1394,7 @@ pub fn lfm2_forward_program_with_experts(
                     )?
                 }
             }
-            FfnCombination::ParallelDenseMoe => {
+            FfnCombination::ParallelDenseMoe(parallel_config) => {
                 let dense_out = append_dense_swiglu_ffn(
                     &mut program,
                     layer,
@@ -1401,7 +1404,7 @@ pub fn lfm2_forward_program_with_experts(
                     ones,
                     ffn_config.activation,
                 )?;
-                let dense_out = if ffn_config.dense_post_norm {
+                let dense_out = if parallel_config.dense_post_norm {
                     let gamma = input_leaf(
                         &mut program,
                         DType::Float32,
@@ -1413,7 +1416,7 @@ pub fn lfm2_forward_program_with_experts(
                     dense_out
                 };
 
-                let routed_input = if ffn_config.routed_pre_norm {
+                let routed_input = if parallel_config.routed_pre_norm {
                     let gamma = input_leaf(
                         &mut program,
                         DType::Float32,
@@ -1431,7 +1434,7 @@ pub fn lfm2_forward_program_with_experts(
                 // the routed branch's `pre_ffw_norm_2`-normed input; experts
                 // still consume `routed_input`, only the router's own
                 // projection input differs.
-                let router_input = if ffn_config.routed_pre_norm {
+                let router_input = if parallel_config.routed_pre_norm {
                     post_mixer
                 } else {
                     routed_input
@@ -1448,14 +1451,14 @@ pub fn lfm2_forward_program_with_experts(
                     ones,
                     ffn_config.routed_gating,
                     ffn_config.routed_expert_bias,
-                    ffn_config.router_scale,
-                    ffn_config.expert_output_scale,
+                    parallel_config.router_scale,
+                    parallel_config.expert_output_scale,
                     ffn_config.activation,
                     inv_dim,
                     eps,
                     &mut moe_sites,
                 )?;
-                let routed_out = if ffn_config.routed_post_norm {
+                let routed_out = if parallel_config.routed_post_norm {
                     let gamma = input_leaf(
                         &mut program,
                         DType::Float32,
@@ -1473,7 +1476,7 @@ pub fn lfm2_forward_program_with_experts(
                     ScalarOp::Add,
                     &[(dense_out, "sd->sd"), (routed_out, "sd->sd")],
                 )?;
-                if ffn_config.combined_post_norm {
+                if parallel_config.combined_post_norm {
                     let gamma = input_leaf(
                         &mut program,
                         DType::Float32,
