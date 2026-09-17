@@ -183,27 +183,56 @@ impl<Cache> ServingState<Cache> {
     /// resumes from the confirmed final draft token. `n < draft.len()`:
     /// `draft[n]` was wrong, so this returns `Rollback` carrying the
     /// correct placement and the target's own token in its place.
-    pub(crate) fn accept(self, row_tokens: &[u32], row_caches: Vec<Cache>) -> Result<Self, ServingFsmError> {
+    pub(crate) fn accept(
+        self,
+        row_tokens: &[u32],
+        row_caches: Vec<Cache>,
+    ) -> Result<Self, ServingFsmError> {
         match self {
-            Self::Verify { draft, .. } if draft.is_empty() || row_tokens.len() != draft.len() || row_caches.len() != draft.len() => {
-                Err(ServingFsmError::IllegalTransition { attempted: "accept" })
+            Self::Verify { draft, .. }
+                if draft.is_empty()
+                    || row_tokens.len() != draft.len()
+                    || row_caches.len() != draft.len() =>
+            {
+                Err(ServingFsmError::IllegalTransition {
+                    attempted: "accept",
+                })
             }
             Self::Verify { draft, .. } => {
-                let accepted = draft.iter().zip(row_tokens.iter()).take_while(|(drafted, predicted)| drafted == predicted).count();
+                let accepted = draft
+                    .iter()
+                    .zip(row_tokens.iter())
+                    .take_while(|(drafted, predicted)| drafted == predicted)
+                    .count();
                 let mut placements = row_caches.into_iter();
-                let placement_index = if accepted == draft.len() { accepted - 1 } else { accepted };
+                let placement_index = if accepted == draft.len() {
+                    accepted - 1
+                } else {
+                    accepted
+                };
                 let Some(cache) = placements.nth(placement_index) else {
                     // unreachable given the length guard above; a bad
                     // caller-supplied `row_caches` fails closed instead of panicking
-                    return Err(ServingFsmError::IllegalTransition { attempted: "accept" });
+                    return Err(ServingFsmError::IllegalTransition {
+                        attempted: "accept",
+                    });
                 };
                 if accepted == draft.len() {
-                    Ok(Self::Accept { n: accepted, next: draft[accepted - 1], cache })
+                    Ok(Self::Accept {
+                        n: accepted,
+                        next: draft[accepted - 1],
+                        cache,
+                    })
                 } else {
-                    Ok(Self::Rollback { snapshot: cache, to: row_tokens[accepted] })
+                    Ok(Self::Rollback {
+                        snapshot: cache,
+                        to: row_tokens[accepted],
+                    })
                 }
             }
-            _ => Err(ServingFsmError::IllegalTransition { attempted: "accept" }),
+            _ => Err(ServingFsmError::IllegalTransition {
+                attempted: "accept",
+            }),
         }
     }
 
@@ -212,7 +241,9 @@ impl<Cache> ServingState<Cache> {
     pub(crate) fn resume(self) -> Result<Self, ServingFsmError> {
         match self {
             Self::Accept { next, cache, .. } => Ok(Self::Decode { last: next, cache }),
-            _ => Err(ServingFsmError::IllegalTransition { attempted: "resume" }),
+            _ => Err(ServingFsmError::IllegalTransition {
+                attempted: "resume",
+            }),
         }
     }
 
@@ -221,7 +252,10 @@ impl<Cache> ServingState<Cache> {
     /// `accept` selected as the correct resume point.
     pub(crate) fn rollback(self) -> Result<Self, ServingFsmError> {
         match self {
-            Self::Rollback { snapshot, to } => Ok(Self::Decode { last: to, cache: snapshot }),
+            Self::Rollback { snapshot, to } => Ok(Self::Decode {
+                last: to,
+                cache: snapshot,
+            }),
             _ => Err(ServingFsmError::IllegalTransition {
                 attempted: "rollback",
             }),
@@ -357,10 +391,21 @@ mod tests {
             }
         );
         let state = state.resume().expect("accept -> decode is legal");
-        assert_eq!(state, ServingState::Decode { last: 7, cache: row_two_cache.clone() });
+        assert_eq!(
+            state,
+            ServingState::Decode {
+                last: 7,
+                cache: row_two_cache.clone()
+            }
+        );
 
         let illegal_resume = state.clone().resume();
-        assert_eq!(illegal_resume, Err(ServingFsmError::IllegalTransition { attempted: "resume" }));
+        assert_eq!(
+            illegal_resume,
+            Err(ServingFsmError::IllegalTransition {
+                attempted: "resume"
+            })
+        );
 
         // partial acceptance: draft proposes (100, 101), target predicts
         // 100 (confirming draft[0]) then 55 instead of 101 -- row_caches[0]
@@ -369,11 +414,16 @@ mod tests {
         // predict row_tokens[1]=55); rejection at index 1 resumes from
         // row_caches[1], since that is the state row_tokens[1] came from.
         let draft = alloc::vec![100_u32, 101];
-        let state = state.enter_verify(draft).expect("decode -> verify is legal");
+        let state = state
+            .enter_verify(draft)
+            .expect("decode -> verify is legal");
         let cache_after_last = row_two_cache.advanced_by(1);
         let cache_after_draft_zero = row_two_cache.advanced_by(2);
         let state = state
-            .accept(&[100, 55], alloc::vec![cache_after_last, cache_after_draft_zero.clone()])
+            .accept(
+                &[100, 55],
+                alloc::vec![cache_after_last, cache_after_draft_zero.clone()],
+            )
             .expect("verify -> rollback is legal on partial acceptance");
         assert_eq!(
             state,
@@ -383,7 +433,13 @@ mod tests {
             }
         );
         let state = state.rollback().expect("rollback -> decode is legal");
-        assert_eq!(state, ServingState::Decode { last: 55, cache: cache_after_draft_zero });
+        assert_eq!(
+            state,
+            ServingState::Decode {
+                last: 55,
+                cache: cache_after_draft_zero
+            }
+        );
 
         let done = state.finish();
         assert!(matches!(done, ServingState::Done { .. }));
@@ -411,7 +467,12 @@ mod tests {
             .expect("decode -> verify");
 
         let wrong_lengths = state.clone().accept(&[3], alloc::vec![cache.clone()]);
-        assert_eq!(wrong_lengths, Err(ServingFsmError::IllegalTransition { attempted: "accept" }));
+        assert_eq!(
+            wrong_lengths,
+            Err(ServingFsmError::IllegalTransition {
+                attempted: "accept"
+            })
+        );
 
         let empty_draft = ServingState::start(alloc::vec![1], cache.clone())
             .advance_prefill(2, cache.clone())
@@ -419,7 +480,12 @@ mod tests {
             .enter_verify(Vec::new())
             .expect("decode -> verify")
             .accept(&[], Vec::new());
-        assert_eq!(empty_draft, Err(ServingFsmError::IllegalTransition { attempted: "accept" }));
+        assert_eq!(
+            empty_draft,
+            Err(ServingFsmError::IllegalTransition {
+                attempted: "accept"
+            })
+        );
     }
 
     /// Worked example for [`draft_prompt_lookup`]: history `[5, 1, 2, 3, 9,
@@ -473,10 +539,14 @@ mod tests {
         let mut plain_history = seed_prompt.clone();
         let mut plain_state = ServingState::start(seed_prompt.clone(), FakeCache::empty());
         let mut last = *plain_history.last().expect("seed prompt is non-empty");
-        plain_state = plain_state.advance_prefill(last, FakeCache::empty()).expect("prefill -> decode");
+        plain_state = plain_state
+            .advance_prefill(last, FakeCache::empty())
+            .expect("prefill -> decode");
         for _ in 0..TOKENS {
             let next = fake_greedy_next(last, VOCAB);
-            plain_state = plain_state.advance_decode(next, FakeCache::empty()).expect("decode -> decode");
+            plain_state = plain_state
+                .advance_decode(next, FakeCache::empty())
+                .expect("decode -> decode");
             plain_history.push(next);
             last = next;
         }
@@ -484,14 +554,18 @@ mod tests {
         let mut spec_history = seed_prompt.clone();
         let mut spec_state = ServingState::start(seed_prompt.clone(), FakeCache::empty());
         let mut last = *spec_history.last().expect("seed prompt is non-empty");
-        spec_state = spec_state.advance_prefill(last, FakeCache::empty()).expect("prefill -> decode");
+        spec_state = spec_state
+            .advance_prefill(last, FakeCache::empty())
+            .expect("prefill -> decode");
         let mut verify_rounds = 0usize;
         let mut draft_tokens_accepted = 0usize;
         while spec_history.len() - seed_prompt.len() < TOKENS {
             let draft = draft_prompt_lookup(&spec_history, NGRAM, K);
             if draft.is_empty() {
                 let next = fake_greedy_next(last, VOCAB);
-                spec_state = spec_state.advance_decode(next, FakeCache::empty()).expect("decode -> decode");
+                spec_state = spec_state
+                    .advance_decode(next, FakeCache::empty())
+                    .expect("decode -> decode");
                 spec_history.push(next);
                 last = next;
                 continue;
@@ -504,8 +578,12 @@ mod tests {
             }
             let row_caches = alloc::vec![FakeCache::empty(); draft.len()];
             verify_rounds += 1;
-            let verifying = spec_state.enter_verify(draft.clone()).expect("decode -> verify");
-            let outcome = verifying.accept(&row_tokens, row_caches).expect("verify -> accept | rollback");
+            let verifying = spec_state
+                .enter_verify(draft.clone())
+                .expect("decode -> verify");
+            let outcome = verifying
+                .accept(&row_tokens, row_caches)
+                .expect("verify -> accept | rollback");
             spec_state = match outcome {
                 ServingState::Accept { n, next, cache } => {
                     draft_tokens_accepted += n;
@@ -513,20 +591,29 @@ mod tests {
                         spec_history.push(*token);
                     }
                     last = next;
-                    ServingState::Accept { n, next, cache }.resume().expect("accept -> decode")
+                    ServingState::Accept { n, next, cache }
+                        .resume()
+                        .expect("accept -> decode")
                 }
                 ServingState::Rollback { snapshot, to } => {
-                    let accepted = draft.iter().zip(row_tokens.iter()).take_while(|(drafted, predicted)| drafted == predicted).count();
+                    let accepted = draft
+                        .iter()
+                        .zip(row_tokens.iter())
+                        .take_while(|(drafted, predicted)| drafted == predicted)
+                        .count();
                     for token in &draft[..accepted] {
                         spec_history.push(*token);
                     }
                     spec_history.push(to);
                     last = to;
-                    ServingState::Rollback { snapshot, to }.rollback().expect("rollback -> decode")
+                    ServingState::Rollback { snapshot, to }
+                        .rollback()
+                        .expect("rollback -> decode")
                 }
                 _ => unreachable!("accept only ever returns Accept or Rollback"),
             };
-            spec_history.truncate(seed_prompt.len() + TOKENS.min(spec_history.len() - seed_prompt.len()));
+            spec_history
+                .truncate(seed_prompt.len() + TOKENS.min(spec_history.len() - seed_prompt.len()));
         }
 
         assert!(
@@ -534,7 +621,10 @@ mod tests {
             "the small vocab must make draft_prompt_lookup find real matches -- a zero count here means \
              this run degenerated to the empty-draft fallback and never exercised accept/resume at all"
         );
-        assert_eq!(spec_history, plain_history, "speculative and plain greedy must produce identical token ids");
+        assert_eq!(
+            spec_history, plain_history,
+            "speculative and plain greedy must produce identical token ids"
+        );
         assert!(matches!(plain_state.finish(), ServingState::Done { .. }));
         assert!(matches!(spec_state.finish(), ServingState::Done { .. }));
     }

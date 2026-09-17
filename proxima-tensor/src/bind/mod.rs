@@ -88,7 +88,6 @@ use proxima_telemetry::debug;
 /// truncating, so a wider program still binds correctly.
 pub use crate::sized::MAX_INLINE_RANK;
 
-
 #[macro_use]
 mod types_layout_boundop;
 #[macro_use]
@@ -99,11 +98,11 @@ mod dead_code_cached_attention;
 mod gdn_moe_fusion_apply;
 #[macro_use]
 mod cached_attention_epilogue_liveness;
-pub use types_layout_boundop::*;
 pub use builder_compose_window::*;
+pub use cached_attention_epilogue_liveness::*;
 pub use dead_code_cached_attention::*;
 pub use gdn_moe_fusion_apply::*;
-pub use cached_attention_epilogue_liveness::*;
+pub use types_layout_boundop::*;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

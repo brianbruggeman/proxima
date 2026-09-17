@@ -116,7 +116,12 @@ where
 
 /// Same discipline as [`dot_fold_multi_accumulator_binary`], one operand.
 #[inline(always)]
-pub(super) fn dot_fold_multi_accumulator_unary<F, R>(op: F, reduce: R, slice: &[f32], fold: DotFold) -> f32
+pub(super) fn dot_fold_multi_accumulator_unary<F, R>(
+    op: F,
+    reduce: R,
+    slice: &[f32],
+    fold: DotFold,
+) -> f32
 where
     F: Fn(f32) -> f32,
     R: Fn(f32, f32) -> f32,
@@ -188,7 +193,12 @@ pub(super) fn reduce_dot_fast(
 
 /// Same op/reduce_op monomorphized-closure dispatch as [`reduce_width_unary`],
 /// folding to one scalar instead of accumulating across a width slice.
-pub(super) fn reduce_dot_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, fold: DotFold) -> f32 {
+pub(super) fn reduce_dot_unary(
+    op: ScalarOp,
+    reduce_op: ScalarOp,
+    span: OperandSpan,
+    fold: DotFold,
+) -> f32 {
     macro_rules! unary_op_arm {
         ($f:expr) => {
             match reduce_op {
@@ -226,7 +236,12 @@ pub(super) fn reduce_dot_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandS
 /// inlined non-capturing closures. A strided span delegates to
 /// [`reduce_dot_unary_monomorphic_strided`] before the stride-0/1 arms run.
 #[inline(always)]
-pub(super) fn reduce_dot_unary_monomorphic<F, R>(op: F, reduce: R, span: OperandSpan, fold: DotFold) -> f32
+pub(super) fn reduce_dot_unary_monomorphic<F, R>(
+    op: F,
+    reduce: R,
+    span: OperandSpan,
+    fold: DotFold,
+) -> f32
 where
     F: Fn(f32) -> f32,
     R: Fn(f32, f32) -> f32,
@@ -741,7 +756,11 @@ pub(super) fn elementwise_width_generic_tile(
 /// [`elementwise_width_unary`]/[`elementwise_width_binary`]'s own
 /// once-per-call dispatch, generalized to a `Select`-only ternary case.
 #[inline(always)]
-pub(super) fn elementwise_width_generic_step(op: ScalarOp, spans: &[OperandSpan; 3], row: &mut [f32]) {
+pub(super) fn elementwise_width_generic_step(
+    op: ScalarOp,
+    spans: &[OperandSpan; 3],
+    row: &mut [f32],
+) {
     match op {
         ScalarOp::Identity => elementwise_width_unary_monomorphic(|a: f32| a, spans[0], row),
         ScalarOp::Negate => elementwise_width_unary_monomorphic(|a: f32| -a, spans[0], row),
@@ -995,8 +1014,11 @@ where
 /// Independent per-position writes, no accumulator to reorder — one
 /// [`OperandSpan::at`] read per position covers any stride > 1.
 #[inline(always)]
-pub(super) fn elementwise_width_unary_monomorphic_strided<F>(op: F, span: OperandSpan, out: &mut [f32])
-where
+pub(super) fn elementwise_width_unary_monomorphic_strided<F>(
+    op: F,
+    span: OperandSpan,
+    out: &mut [f32],
+) where
     F: Fn(f32) -> f32,
 {
     for (position, slot) in out.iter_mut().enumerate() {
@@ -1004,7 +1026,12 @@ where
     }
 }
 
-pub(super) fn elementwise_width_binary(op: ScalarOp, a: OperandSpan, b: OperandSpan, out: &mut [f32]) {
+pub(super) fn elementwise_width_binary(
+    op: ScalarOp,
+    a: OperandSpan,
+    b: OperandSpan,
+    out: &mut [f32],
+) {
     match op {
         ScalarOp::Add => elementwise_width_binary_monomorphic(|x: f32, y: f32| x + y, a, b, out),
         ScalarOp::Subtract => {
@@ -1047,8 +1074,12 @@ pub(super) fn elementwise_width_binary(op: ScalarOp, a: OperandSpan, b: OperandS
 }
 
 #[inline(always)]
-pub(super) fn elementwise_width_binary_monomorphic<F>(op: F, a: OperandSpan, b: OperandSpan, out: &mut [f32])
-where
+pub(super) fn elementwise_width_binary_monomorphic<F>(
+    op: F,
+    a: OperandSpan,
+    b: OperandSpan,
+    out: &mut [f32],
+) where
     F: Fn(f32, f32) -> f32,
 {
     if a.is_strided() || b.is_strided() {
@@ -1505,7 +1536,11 @@ pub(super) fn scan_width_binary_scalar_dispatch(
 /// Only reached through [`BodyShape::Generic`] now — [`eval_body_shape`]'s
 /// `Unary`/`Binary` arms bypass this entirely for the common single-step
 /// case, so this stays the slow-but-general path for real fused chains.
-pub(super) fn apply_body(body: &ComposedBody, operand_values: &[f32], step_values: &mut [f32]) -> f32 {
+pub(super) fn apply_body(
+    body: &ComposedBody,
+    operand_values: &[f32],
+    step_values: &mut [f32],
+) -> f32 {
     for (index, step) in body.steps.iter().enumerate() {
         let mut args = [0.0f32; 3];
         for (slot, arg) in step.args.iter().enumerate() {
@@ -1599,4 +1634,3 @@ pub(super) fn apply_scalar_op(op: ScalarOp, operands: &[f32]) -> f32 {
         }
     }
 }
-

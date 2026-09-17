@@ -128,8 +128,11 @@ async fn real_qwen35moe_width_13_plan_names_node_6540() {
         .expect("qwen35moe hparams preserve the hybrid layer configuration");
 
     let (program, roots, _layer_roots, _moe_sites, _diagnostics) =
-        proxima_model_interop::qwen35moe::qwen35moe_forward_program_at_width(&architecture, Some(13))
-            .expect("width-13 one-evaluation prefill program builds from header-only hparams");
+        proxima_model_interop::qwen35moe::qwen35moe_forward_program_at_width(
+            &architecture,
+            Some(13),
+        )
+        .expect("width-13 one-evaluation prefill program builds from header-only hparams");
     eprintln!(
         "width-13 program: ops={} logits_root={:?}",
         program.len(),
@@ -181,7 +184,10 @@ async fn real_qwen35moe_width_13_plan_names_node_6540() {
     }
 
     let dead = proxima_tensor::dead_resolved_nodes(&resolved, &[roots.logits]);
-    eprintln!("node 6540 in dead_resolved_nodes = {}", dead.contains(&target));
+    eprintln!(
+        "node 6540 in dead_resolved_nodes = {}",
+        dead.contains(&target)
+    );
 
     let last_reader = proxima_tensor::node_last_reader(&resolved, program.len());
     let reader_position = last_reader[target.0 as usize];
@@ -189,6 +195,37 @@ async fn real_qwen35moe_width_13_plan_names_node_6540() {
         "node 6540 last-reader resolved position = {} (u32::MAX means never read)",
         reader_position
     );
+    if reader_position != u32::MAX {
+        let reader = &resolved[reader_position as usize];
+        eprintln!(
+            "reader node={:?} kind_variant={}",
+            reader.node,
+            match &reader.kind {
+                proxima_tensor::bind::BoundOpKind::Elementwise { .. } => "Elementwise",
+                proxima_tensor::bind::BoundOpKind::Reduce { .. } => "Reduce",
+                proxima_tensor::bind::BoundOpKind::CachedAttention { .. } => "CachedAttention",
+                proxima_tensor::bind::BoundOpKind::GatedDeltaNet { .. } => "GatedDeltaNet",
+                proxima_tensor::bind::BoundOpKind::MoeTopK { .. } => "MoeTopK",
+                proxima_tensor::bind::BoundOpKind::Iota => "Iota",
+                proxima_tensor::bind::BoundOpKind::Constant { .. } => "Constant",
+            }
+        );
+        if let proxima_tensor::bind::BoundOpKind::Reduce {
+            epilogue_operands,
+            operands,
+            ..
+        } = &reader.kind
+        {
+            eprintln!(
+                "reader operands={:?} epilogue_operands={:?}",
+                operands.iter().map(|(node, ..)| node.0).collect::<Vec<_>>(),
+                epilogue_operands
+                    .iter()
+                    .map(|(node, ..)| node.0)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
 
     let mut producer_position = None;
     let mut consumer_positions = Vec::new();

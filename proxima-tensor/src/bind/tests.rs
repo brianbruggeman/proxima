@@ -362,14 +362,9 @@ fn cached_attention_rewrite_replaces_the_bound_attention_subgraph() {
     let outputs: &[NodeId] = &requested;
     let plain = bind_plain(&program, &shapes, outputs, NumericPolicy::bit_exact())
         .expect("plain bind succeeds");
-    let cached_only = bind_cached_attention_fusion(
-        &program,
-        &shapes,
-        outputs,
-        true,
-        NumericPolicy::bit_exact(),
-    )
-    .expect("cached-attention-only bind succeeds");
+    let cached_only =
+        bind_cached_attention_fusion(&program, &shapes, outputs, true, NumericPolicy::bit_exact())
+            .expect("cached-attention-only bind succeeds");
     let rewritten = bind(&program, &shapes, outputs, NumericPolicy::bit_exact())
         .expect("rewritten bind succeeds");
 
@@ -570,8 +565,7 @@ fn cached_attention_rewrite_accepts_the_qwen3_gqa_qk_norm_fixture() {
     for (even, odd, value) in cache_roots {
         outputs.extend_from_slice(&[even, odd, value]);
     }
-    let shapes =
-        crate::shape::infer(&program, &[1, 5]).expect("qwen3 gqa+qk_norm fixture infers");
+    let shapes = crate::shape::infer(&program, &[1, 5]).expect("qwen3 gqa+qk_norm fixture infers");
     let rewritten = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
         .expect("qwen3 gqa+qk_norm fixture binds");
 
@@ -651,8 +645,8 @@ fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_s
         NumericPolicy::bit_exact(),
     )
     .expect("cached-attention-only bind succeeds");
-    let rewritten = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
-        .expect("fused bind succeeds");
+    let rewritten =
+        bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
 
     assert_eq!(
         plain.len(),
@@ -851,7 +845,10 @@ fn qwen35_partial_rotary_attention_fixture() -> (
         &mut program,
         Op::Constant {
             dtype: DType::Float32,
-            shape: alloc::vec![Extent::Static(KV_HEADS as u32), Extent::Static(GROUP as u32)],
+            shape: alloc::vec![
+                Extent::Static(KV_HEADS as u32),
+                Extent::Static(GROUP as u32)
+            ],
             value: 1.0,
         },
     );
@@ -865,7 +862,12 @@ fn qwen35_partial_rotary_attention_fixture() -> (
         "attn_norm_weight",
     );
     let norm_shape = alloc::vec![Extent::Static(ATTN_HEAD_DIM as u32)];
-    let q_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape.clone(), "q_norm_weight");
+    let q_norm_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        norm_shape.clone(),
+        "q_norm_weight",
+    );
     let k_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape, "k_norm_weight");
     // `wq_gate`'s own middle axis is the FULL query head count
     // (`kv_heads * group`), never `kv_heads` alone -- `spec.rs:10730-10769`
@@ -920,8 +922,18 @@ fn qwen35_partial_rotary_attention_fixture() -> (
         cache_rotary_shape.clone(),
         "k_first_cache",
     );
-    let k_second_cache = input_leaf(&mut program, DType::Float32, cache_rotary_shape, "k_second_cache");
-    let k_pass_cache = input_leaf(&mut program, DType::Float32, cache_pass_shape, "k_pass_cache");
+    let k_second_cache = input_leaf(
+        &mut program,
+        DType::Float32,
+        cache_rotary_shape,
+        "k_second_cache",
+    );
+    let k_pass_cache = input_leaf(
+        &mut program,
+        DType::Float32,
+        cache_pass_shape,
+        "k_pass_cache",
+    );
     let v_cache = input_leaf(&mut program, DType::Float32, cache_v_shape, "v_cache");
 
     let (residual1, taps) = crate::spec::append_qwen35_dense_attention_only_with_taps(
@@ -1023,8 +1035,8 @@ fn qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer() 
 
     let unfused = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
         .expect("plain bind succeeds");
-    let fused = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
-        .expect("fused bind succeeds");
+    let fused =
+        bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
 
     let fused_attention_count = fused
         .iter()
@@ -1048,8 +1060,14 @@ fn qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer() 
     else {
         unreachable!("just matched CachedAttention above");
     };
-    assert_eq!(*rotary_dim, 64, "rotary width is qwen35's own 64, not the full head_dim");
-    assert_eq!(*head_dim, 256, "head_dim carries the full width, rotary plus pass");
+    assert_eq!(
+        *rotary_dim, 64,
+        "rotary width is qwen35's own 64, not the full head_dim"
+    );
+    assert_eq!(
+        *head_dim, 256,
+        "head_dim carries the full width, rotary plus pass"
+    );
     assert_eq!(
         operands.len(),
         12,
@@ -1076,13 +1094,10 @@ fn qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer() 
         actual.len(),
         "fused and unfused outputs must be the same shape"
     );
-    for (index, (&expected_value, &actual_value)) in
-        expected.iter().zip(actual.iter()).enumerate()
+    for (index, (&expected_value, &actual_value)) in expected.iter().zip(actual.iter()).enumerate()
     {
-        let (expected_value, actual_value) =
-            (f64::from(expected_value), f64::from(actual_value));
-        let relative_error =
-            (expected_value - actual_value).abs() / expected_value.abs().max(1.0);
+        let (expected_value, actual_value) = (f64::from(expected_value), f64::from(actual_value));
+        let relative_error = (expected_value - actual_value).abs() / expected_value.abs().max(1.0);
         assert!(
             relative_error <= 1e-5,
             "residual1[{index}] fused vs unfused: expected={expected_value} actual={actual_value} \
@@ -1116,8 +1131,8 @@ fn qwen35_partial_rotary_cached_attention_fuses_without_pinning_the_attended_tap
         taps.v_new,
     ];
 
-    let fused = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
-        .expect("fused bind succeeds");
+    let fused =
+        bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
     let fused_attention_count = fused
         .iter()
         .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
@@ -1139,13 +1154,10 @@ fn qwen35_partial_rotary_cached_attention_fuses_without_pinning_the_attended_tap
     let actual = fused_outputs[residual1.0 as usize]
         .as_ref()
         .expect("fused layer output computes");
-    for (index, (&expected_value, &actual_value)) in
-        expected.iter().zip(actual.iter()).enumerate()
+    for (index, (&expected_value, &actual_value)) in expected.iter().zip(actual.iter()).enumerate()
     {
-        let (expected_value, actual_value) =
-            (f64::from(expected_value), f64::from(actual_value));
-        let relative_error =
-            (expected_value - actual_value).abs() / expected_value.abs().max(1.0);
+        let (expected_value, actual_value) = (f64::from(expected_value), f64::from(actual_value));
+        let relative_error = (expected_value - actual_value).abs() / expected_value.abs().max(1.0);
         assert!(
             relative_error <= 1e-5,
             "residual1[{index}] fused vs unfused: expected={expected_value} actual={actual_value} \
@@ -1354,8 +1366,7 @@ fn qwen35_dense_attention_f64_reference(
                     score += q_rot_second[head * PAIR_DIM + pair] * k_second_cache[cache_index];
                 }
                 for pass_channel in 0..PASS_DIM {
-                    let cache_index =
-                        (cached_row * KV_HEADS + kv_head) * PASS_DIM + pass_channel;
+                    let cache_index = (cached_row * KV_HEADS + kv_head) * PASS_DIM + pass_channel;
                     score += q_pass[head * PASS_DIM + pass_channel] * k_pass_cache[cache_index];
                 }
                 score *= inv_sqrt_head_dim;
@@ -1374,10 +1385,10 @@ fn qwen35_dense_attention_f64_reference(
             let head = query_head(kv_head, group);
             let mut score = 0.0f64;
             for pair in 0..PAIR_DIM {
-                score += q_rot_first[head * PAIR_DIM + pair]
-                    * k_rot_first[kv_head * PAIR_DIM + pair];
-                score += q_rot_second[head * PAIR_DIM + pair]
-                    * k_rot_second[kv_head * PAIR_DIM + pair];
+                score +=
+                    q_rot_first[head * PAIR_DIM + pair] * k_rot_first[kv_head * PAIR_DIM + pair];
+                score +=
+                    q_rot_second[head * PAIR_DIM + pair] * k_rot_second[kv_head * PAIR_DIM + pair];
             }
             for pass_channel in 0..PASS_DIM {
                 score += q_pass[head * PASS_DIM + pass_channel]
@@ -1393,9 +1404,7 @@ fn qwen35_dense_attention_f64_reference(
     for kv_head in 0..KV_HEADS {
         for group in 0..GROUP {
             let cached_scores: Vec<f64> = (0..CACHED_EXTENT)
-                .map(|cached_row| {
-                    score_cached[(cached_row * KV_HEADS + kv_head) * GROUP + group]
-                })
+                .map(|cached_row| score_cached[(cached_row * KV_HEADS + kv_head) * GROUP + group])
                 .collect();
             let new_score = score_new[kv_head * GROUP + group];
             let global_max = cached_scores.iter().copied().fold(new_score, f64::max);
@@ -1411,8 +1420,7 @@ fn qwen35_dense_attention_f64_reference(
                 let cached_sum: f64 = (0..CACHED_EXTENT)
                     .map(|cached_row| {
                         cached_weights[cached_row]
-                            * v_cache
-                                [(cached_row * KV_HEADS + kv_head) * ATTN_HEAD_DIM + channel]
+                            * v_cache[(cached_row * KV_HEADS + kv_head) * ATTN_HEAD_DIM + channel]
                     })
                     .sum();
                 let new_sum = new_weight * v_new[kv_head * ATTN_HEAD_DIM + channel];
@@ -1518,8 +1526,8 @@ fn qwen35_partial_rotary_dense_attention_matches_an_independent_f64_reference() 
 
     let unfused = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
         .expect("plain bind succeeds");
-    let fused = bind(&program, &shapes, &outputs, NumericPolicy::bit_exact())
-        .expect("fused bind succeeds");
+    let fused =
+        bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
     let unfused_outputs = run_resolved(program.len(), &unfused, inputs.clone());
     let fused_outputs = run_resolved(program.len(), &fused, inputs);
 
@@ -1602,7 +1610,10 @@ fn a_perturbed_pass_plane_map_declines_the_qwen35_fusion() {
         .find(|&position| {
             matches!(
                 &program[position],
-                Op::Elementwise { body: ScalarOp::Multiply, .. }
+                Op::Elementwise {
+                    body: ScalarOp::Multiply,
+                    ..
+                }
             ) && shapes.of(NodeId(position as u32)).last() == Some(&192)
         })
         .expect("the fixture must contain a pass-plane product to perturb");
@@ -1655,8 +1666,7 @@ fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
     let mut resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
         .expect("plain bind succeeds");
 
-    let baseline =
-        cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
+    let baseline = cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
     assert!(
         !baseline.is_empty(),
         "the unpatched fixture must still produce a fusable candidate"
@@ -1688,8 +1698,7 @@ fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
         }
     }
 
-    let patched =
-        cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
+    let patched = cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
     assert!(
         patched.is_empty(),
         "a gathered source must abort the candidate, not just shrink its operand list"
@@ -1761,8 +1770,13 @@ fn an_iota_binds_to_its_own_ready_bound_op_with_no_operands() {
     );
 
     let shapes = shape::infer(&program, &[]).expect("iota infers");
-    let built =
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact()).expect("iota builds ops");
+    let built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("iota builds ops");
 
     assert_eq!(built.len(), 1, "the iota leaf materializes on its own");
     assert_eq!(built[0].node, iota);
@@ -1779,8 +1793,13 @@ fn an_iota_binds_to_its_own_ready_bound_op_with_no_operands() {
 fn matmul_resolves_to_one_fused_op_not_two() {
     let (program, product, sum, _lhs) = matmul_program();
     let shapes = shape::infer(&program, &[512]).expect("matmul infers");
-    let built =
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact()).expect("matmul builds ops");
+    let built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("matmul builds ops");
 
     assert_eq!(
         built.len(),
@@ -1896,8 +1915,13 @@ fn elementwise_chain_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
 fn a_chain_of_elementwise_ops_fuses_into_one_bound_op_not_three() {
     let (program, _b, _c, d) = elementwise_chain_program();
     let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
-    let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("elementwise chain builds ops");
+    let built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("elementwise chain builds ops");
 
     assert_eq!(
         built.len(),
@@ -1982,8 +2006,13 @@ fn an_elementwise_intermediate_consumed_by_two_different_ops_is_not_fused() {
     );
 
     let shapes = shape::infer(&program, &[]).expect("diamond chain infers");
-    let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("diamond chain builds ops");
+    let built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("diamond chain builds ops");
 
     assert_eq!(
         built.len(),
@@ -2067,8 +2096,13 @@ fn elementwise_into_elementwise_into_reduce_fuses_into_one_bound_op() {
     );
 
     let shapes = shape::infer(&program, &[]).expect("weighted dot infers");
-    let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("weighted dot builds ops");
+    let built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("weighted dot builds ops");
 
     assert_eq!(
         built.len(),
@@ -2117,8 +2151,13 @@ fn a_broadcast_operand_has_stride_zero_in_the_broadcast_axis() {
     );
 
     let shapes = shape::infer(&program, &[]).expect("broadcast infers");
-    let built =
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact()).expect("broadcast builds ops");
+    let built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("broadcast builds ops");
     let op = built.iter().find(|op| op.node == sum).expect("sum emitted");
     assert_eq!(
         op.operands()[1].1.stride(0),
@@ -2175,8 +2214,13 @@ fn a_conv_window_operand_folds_two_terms_into_one_stride_slot() {
     );
 
     let shapes = shape::infer(&program, &[]).expect("conv window infers");
-    let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("conv window builds ops");
+    let built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("conv window builds ops");
     let op = built
         .iter()
         .find(|op| op.node == touched)
@@ -2213,8 +2257,13 @@ fn transpose_layout_has_permuted_strides() {
     );
 
     let shapes = shape::infer(&program, &[]).expect("transpose infers");
-    let built =
-        bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact()).expect("transpose builds ops");
+    let built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("transpose builds ops");
     let op = built
         .iter()
         .find(|op| op.node == transposed)
@@ -2294,8 +2343,13 @@ fn correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_two_axis_outp
     );
 
     let shapes = shape::infer(&program, &[]).expect("two-axis output group infers");
-    let mut built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("two-axis output group binds");
+    let mut built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("two-axis output group binds");
     let packed: BTreeSet<NodeId> = core::iter::once(weight).collect();
     correct_packed_matmul_layouts(&mut built, &packed);
 
@@ -2344,8 +2398,7 @@ fn correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_two_axis_outp
 /// this is that same proof for the un-tested complementary case,
 /// output = a single axis `e`, contraction = three.
 #[test]
-fn correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_multi_axis_contraction_group()
- {
+fn correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_multi_axis_contraction_group() {
     const SEQ: u64 = 2;
     const KV_HEADS: u64 = 2;
     const GROUP: u64 = 2;
@@ -2421,8 +2474,13 @@ fn correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_multi_axis_co
     );
 
     let shapes = shape::infer(&program, &[]).expect("multi-axis contraction group infers");
-    let mut built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("multi-axis contraction group binds");
+    let mut built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("multi-axis contraction group binds");
     let packed: BTreeSet<NodeId> = core::iter::once(weight).collect();
     correct_packed_matmul_layouts(&mut built, &packed);
 
@@ -2484,11 +2542,16 @@ fn elementwise_op() -> BoundOp {
         },
     );
     let shapes = shape::infer(&program, &[]).expect("elementwise infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("elementwise builds ops")
-        .into_iter()
-        .next()
-        .expect("one op emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("elementwise builds ops")
+    .into_iter()
+    .next()
+    .expect("one op emitted")
 }
 
 fn scalar_reduction_op() -> BoundOp {
@@ -2515,11 +2578,16 @@ fn scalar_reduction_op() -> BoundOp {
         }),
     );
     let shapes = shape::infer(&program, &[]).expect("scalar reduction infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("scalar reduction builds ops")
-        .into_iter()
-        .next()
-        .expect("one op emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("scalar reduction builds ops")
+    .into_iter()
+    .next()
+    .expect("one op emitted")
 }
 
 fn scan_op() -> BoundOp {
@@ -2546,11 +2614,16 @@ fn scan_op() -> BoundOp {
         }),
     );
     let shapes = shape::infer(&program, &[]).expect("scan infers");
-    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("scan builds ops")
-        .into_iter()
-        .next()
-        .expect("one op emitted")
+    bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("scan builds ops")
+    .into_iter()
+    .next()
+    .expect("one op emitted")
 }
 
 #[test]
@@ -2636,11 +2709,16 @@ fn split_aligned_with_alignment_one_matches_split_exactly() {
 fn split_of_a_fused_matmul_reduction_rebases_operands_but_not_out_layout() {
     let (program, _product, sum, _lhs) = matmul_program();
     let shapes = shape::infer(&program, &[512]).expect("matmul infers");
-    let op = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("matmul builds ops")
-        .into_iter()
-        .next()
-        .expect("one fused op emitted");
+    let op = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("matmul builds ops")
+    .into_iter()
+    .next()
+    .expect("one fused op emitted");
     assert_eq!(op.node, sum);
     let BoundOpKind::Reduce { .. } = &op.kind else {
         panic!("the reduction fused with its elementwise op");
@@ -2696,10 +2774,7 @@ fn split_of_a_fused_matmul_reduction_rebases_operands_but_not_out_layout() {
 #[case::keep_scan_scan(scan_op(), 2)]
 #[case::too_few_parts(elementwise_op(), 1)]
 #[case::extent_smaller_than_parts(elementwise_op(), 999)]
-async fn split_returns_none_when_unsound_or_unhelpful(
-    #[case] op: BoundOp,
-    #[case] parts: usize,
-) {
+async fn split_returns_none_when_unsound_or_unhelpful(#[case] op: BoundOp, #[case] parts: usize) {
     assert!(op.split(parts).is_none());
 }
 
@@ -2911,7 +2986,7 @@ fn computed_index_via_lone_elementwise_program() -> (Vec<Op>, NodeId) {
 
 #[test]
 fn a_computed_index_reached_only_through_a_sibling_map_is_materialized_before_the_gather_reads_it()
- {
+{
     let (program, output) = computed_index_via_lone_elementwise_program();
     let shapes = shape::infer(&program, &[]).expect("computed-index program infers");
     let base_data: Vec<f32> = alloc::vec![10.0, 20.0, 30.0, 40.0];
@@ -3096,8 +3171,13 @@ fn a_masked_window_reduce_folds_to_a_single_operand_identity_read_of_source() {
     let (program, source, reduced) =
         masked_window_reduce_program(1, 0, 5, 3, 3, 1, ScalarOp::Equal);
     let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
-    let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("masked-window program builds ops");
+    let built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("masked-window program builds ops");
 
     let folded = built
         .iter()
@@ -3137,8 +3217,13 @@ fn a_masked_window_reduce_that_fails_the_in_bounds_proof_declines_and_binds_as_a
     let (program, _source, reduced) =
         masked_window_reduce_program(1, 0, 5, 3, 3, 2, ScalarOp::Equal);
     let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
-    let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("masked-window program builds ops");
+    let built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("masked-window program builds ops");
 
     let folded = built
         .iter()
@@ -3187,8 +3272,13 @@ fn a_non_equal_mask_chain_declines_and_binds_as_a_reduce() {
     let (program, _source, reduced) =
         masked_window_reduce_program(1, 0, 5, 3, 3, 1, ScalarOp::Greater);
     let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
-    let built = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("masked-window program builds ops");
+    let built = bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("masked-window program builds ops");
 
     let folded = built
         .iter()
@@ -3486,8 +3576,7 @@ mod reduce_epilogue_fusion_tests {
 
     #[test]
     fn a_strided_consumer_map_does_not_fuse() {
-        let (mut program, reduced, _consumer, x, extra_x_use) =
-            reduce_then_residual_add_program();
+        let (mut program, reduced, _consumer, x, extra_x_use) = reduce_then_residual_add_program();
         // overwrite the last-appended node (the ordinary-identity
         // consumer) with a build that reads `reduced` REVERSED
         // (`coeff: -1, offset: 3` over a 4-element axis walks indices
@@ -3840,9 +3929,7 @@ mod reduce_epilogue_fusion_tests {
                         Op::Input {
                             name: Some(name), ..
                         } => name.clone(),
-                        _ => unreachable!(
-                            "block_node_ids only ever returns named Op::Input nodes"
-                        ),
+                        _ => unreachable!("block_node_ids only ever returns named Op::Input nodes"),
                     };
                     let data = named
                         .iter()
@@ -3981,10 +4068,7 @@ mod reduce_epilogue_fusion_tests {
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Multiply,
-                operands: alloc::vec![
-                    (sum_squares, keep_seq()),
-                    (inv_dim, broadcast_scalar_seq())
-                ],
+                operands: alloc::vec![(sum_squares, keep_seq()), (inv_dim, broadcast_scalar_seq())],
                 name: None,
             },
         );
@@ -4308,9 +4392,7 @@ mod reduce_epilogue_fusion_tests {
         let epilogued = fused
             .iter()
             .find(|bound| has_real_epilogue(&bound.kind))
-            .unwrap_or_else(|| {
-                panic!("one BoundOp must carry the fused epilogue, got {fused:?}")
-            });
+            .unwrap_or_else(|| panic!("one BoundOp must carry the fused epilogue, got {fused:?}"));
         let BoundOpKind::Reduce { epilogue_body, .. } = &epilogued.kind else {
             panic!("epilogued BoundOp must be a Reduce, got {epilogued:?}");
         };
@@ -4533,7 +4615,9 @@ mod gated_delta_net_tests {
             (beta, alloc::vec![0.4, 0.6]),
             (
                 state_in,
-                alloc::vec![0.2, -0.1, 0.05, 0.3, -0.2, 0.15, 0.1, -0.05, 0.25, 0.4, -0.3, 0.2],
+                alloc::vec![
+                    0.2, -0.1, 0.05, 0.3, -0.2, 0.15, 0.1, -0.05, 0.25, 0.4, -0.3, 0.2
+                ],
             ),
         ];
         SyntheticProgram {
@@ -4560,12 +4644,7 @@ mod gated_delta_net_tests {
     /// exercises the exact structural pattern the matcher DOES already
     /// recognize (an elementwise Multiply against an all-ones donor)
     /// directly, at decode's own effective `s == 1`.
-    fn broadcast_kv_heads(
-        program: &mut Vec<Op>,
-        x: NodeId,
-        kv_heads: u32,
-        group: u32,
-    ) -> NodeId {
+    fn broadcast_kv_heads(program: &mut Vec<Op>, x: NodeId, kv_heads: u32, group: u32) -> NodeId {
         let donor = append(
             program,
             Op::Constant {
@@ -4692,11 +4771,8 @@ mod gated_delta_net_tests {
             resolved_kinds(&fused)
         );
 
-        let unfused_buffers = run_resolved(
-            synthetic.program.len(),
-            &unfused,
-            synthetic.inputs.clone(),
-        );
+        let unfused_buffers =
+            run_resolved(synthetic.program.len(), &unfused, synthetic.inputs.clone());
         let fused_buffers = run_resolved(synthetic.program.len(), &fused, synthetic.inputs);
 
         let unfused_out = unfused_buffers[synthetic.out.0 as usize]
@@ -4759,11 +4835,8 @@ mod gated_delta_net_tests {
             resolved_kinds(&fused)
         );
 
-        let unfused_buffers = run_resolved(
-            synthetic.program.len(),
-            &unfused,
-            synthetic.inputs.clone(),
-        );
+        let unfused_buffers =
+            run_resolved(synthetic.program.len(), &unfused, synthetic.inputs.clone());
         let fused_buffers = run_resolved(synthetic.program.len(), &fused, synthetic.inputs.clone());
 
         let unfused_out = unfused_buffers[synthetic.out.0 as usize]
@@ -4805,7 +4878,8 @@ mod gated_delta_net_tests {
             &unfused_with_state,
             synthetic.inputs.clone(),
         );
-        let fused_buffers = run_resolved(synthetic.program.len(), &fused_with_state, synthetic.inputs);
+        let fused_buffers =
+            run_resolved(synthetic.program.len(), &fused_with_state, synthetic.inputs);
 
         let relative_error = |fused: &[f32], unfused: &[f32]| -> f32 {
             fused
@@ -4872,11 +4946,8 @@ mod gated_delta_net_tests {
             resolved_kinds(&fused)
         );
 
-        let unfused_buffers = run_resolved(
-            synthetic.program.len(),
-            &unfused,
-            synthetic.inputs.clone(),
-        );
+        let unfused_buffers =
+            run_resolved(synthetic.program.len(), &unfused, synthetic.inputs.clone());
         let fused_buffers = run_resolved(synthetic.program.len(), &fused, synthetic.inputs.clone());
 
         let unfused_out = unfused_buffers[synthetic.out.0 as usize]
@@ -4918,7 +4989,8 @@ mod gated_delta_net_tests {
             &unfused_with_state,
             synthetic.inputs.clone(),
         );
-        let fused_buffers = run_resolved(synthetic.program.len(), &fused_with_state, synthetic.inputs);
+        let fused_buffers =
+            run_resolved(synthetic.program.len(), &fused_with_state, synthetic.inputs);
 
         let relative_error = |fused: &[f32], unfused: &[f32]| -> f32 {
             fused
@@ -5197,8 +5269,8 @@ mod gated_delta_net_tests {
         )
         .expect("real-shape qwen35moe ssm mixer lowers");
 
-        let shapes = shape::infer(&program, &[1])
-            .expect("real-shape qwen35moe ssm mixer program infers");
+        let shapes =
+            shape::infer(&program, &[1]).expect("real-shape qwen35moe ssm mixer program infers");
 
         let mut lcg = crate::test_support::Lcg(11);
         let mut fill = |node: NodeId| -> (NodeId, Vec<f32>) {
@@ -5529,8 +5601,8 @@ mod gated_delta_net_tests {
         )
         .expect("real-shape qwen35moe ssm mixer lowers");
 
-        let shapes = shape::infer(&program, &[1])
-            .expect("real-shape qwen35moe ssm mixer program infers");
+        let shapes =
+            shape::infer(&program, &[1]).expect("real-shape qwen35moe ssm mixer program infers");
 
         let fused = bind_with_fusion(
             &program,
@@ -5623,7 +5695,7 @@ mod gated_delta_net_tests {
 mod moe_routing_census {
     use super::*;
     use crate::spec::{
-        ExpertGatingFunc, append_moe_ffn_from_logits, input_leaf, scalar_constant,
+        Activation, ExpertGatingFunc, append_moe_ffn_from_logits, input_leaf, scalar_constant,
     };
 
     const EXPERT_COUNT: u32 = 256;
@@ -5701,6 +5773,8 @@ mod moe_routing_census {
             ones,
             ExpertGatingFunc::Softmax,
             None,
+            None,
+            Activation::Silu,
         )
         .expect("real-shape qwen35moe routing block lowers");
 
@@ -5733,7 +5807,8 @@ mod moe_routing_census {
         // own first draft) counted 73, conflating routing with FFN
         // evaluation; this closure is what a `BoundOpKind::TopK`
         // matcher must actually anchor on and replace.
-        let mut routing_nodes: alloc::collections::BTreeSet<u32> = alloc::collections::BTreeSet::new();
+        let mut routing_nodes: alloc::collections::BTreeSet<u32> =
+            alloc::collections::BTreeSet::new();
         let mut frontier: Vec<NodeId> = site
             .selected
             .iter()
@@ -5761,7 +5836,10 @@ mod moe_routing_census {
             );
         }
         println!("gather-index nodes (site.selected): {:?}", site.selected);
-        println!("weight nodes (site.weights, last is weight_total): {:?}", site.weights);
+        println!(
+            "weight nodes (site.weights, last is weight_total): {:?}",
+            site.weights
+        );
         println!(
             "resolved bind produced {} total BoundOps for this routing+FFN program \
              (routing closure = {} of them)",
@@ -5780,8 +5858,7 @@ mod moe_routing_census {
         tie_logits[3] = 9.0;
         tie_logits[9] = 9.0; // exact tie, index 3 vs 9
         let x_data = alloc::vec![0.1_f32; EMBEDDING as usize];
-        let expert_w_gate_data =
-            alloc::vec![0.0_f32; EXPERT_COUNT as usize * EMBEDDING as usize * FEED_FORWARD as usize];
+        let expert_w_gate_data = alloc::vec![0.0_f32; EXPERT_COUNT as usize * EMBEDDING as usize * FEED_FORWARD as usize];
         let expert_w_up_data = expert_w_gate_data.clone();
         let mut expert_w_down_data = expert_w_gate_data.clone();
         // Tag expert 3's down-projection distinctly from expert 9's so
@@ -5891,6 +5968,8 @@ mod moe_routing_census {
             ones,
             ExpertGatingFunc::Softmax,
             None,
+            None,
+            Activation::Silu,
         )
         .expect("real-shape qwen35moe routing block lowers");
         RoutingProgram {
@@ -5970,14 +6049,18 @@ mod moe_routing_census {
     #[test]
     fn fused_moe_topk_matches_unfused_routing_over_random_scores_and_exact_ties() {
         let built = build_routing_program();
-        let shapes =
-            shape::infer(&built.program, &[1]).expect("routing program infers");
+        let shapes = shape::infer(&built.program, &[1]).expect("routing program infers");
         let mut outputs = alloc::vec![built.output];
         outputs.extend(built.selected.iter().copied());
         outputs.extend(built.weights.iter().copied());
 
-        let unfused = bind_plain(&built.program, &shapes, &outputs, NumericPolicy::bit_exact())
-            .expect("unfused routing program binds");
+        let unfused = bind_plain(
+            &built.program,
+            &shapes,
+            &outputs,
+            NumericPolicy::bit_exact(),
+        )
+        .expect("unfused routing program binds");
         let fused = bind_with_fusion(
             &built.program,
             &shapes,
@@ -5994,7 +6077,10 @@ mod moe_routing_census {
             matcher_fired,
             "the moe-topk-fusion matcher must fire on the real qwen35moe routing shape, got \
              kinds {:?}",
-            fused.iter().map(|bound| bound.kind.name()).collect::<Vec<_>>()
+            fused
+                .iter()
+                .map(|bound| bound.kind.name())
+                .collect::<Vec<_>>()
         );
         let op_delta = unfused.len() - fused.len();
         println!(
@@ -6019,8 +6105,7 @@ mod moe_routing_census {
              substantial number of bound ops, got only {op_delta}"
         );
 
-        let expert_w_gate_data =
-            alloc::vec![0.0_f32; EXPERT_COUNT as usize * EMBEDDING as usize * FEED_FORWARD as usize];
+        let expert_w_gate_data = alloc::vec![0.0_f32; EXPERT_COUNT as usize * EMBEDDING as usize * FEED_FORWARD as usize];
         let expert_w_up_data = expert_w_gate_data.clone();
         let expert_w_down_data = expert_w_gate_data.clone();
         let x_data = alloc::vec![0.1_f32; EMBEDDING as usize];
@@ -6058,8 +6143,7 @@ mod moe_routing_census {
                 (built.expert_w_up, expert_w_up_data.clone()),
                 (built.expert_w_down, expert_w_down_data.clone()),
             ];
-            let unfused_buffers =
-                run_resolved(built.program.len(), &unfused, inputs.clone());
+            let unfused_buffers = run_resolved(built.program.len(), &unfused, inputs.clone());
             let fused_buffers = run_resolved(built.program.len(), &fused, inputs);
 
             let (reference_routes, reference_weights, reference_weight_total) =
@@ -6082,7 +6166,12 @@ mod moe_routing_census {
                      independent reference"
                 );
             }
-            for (round, weight_node) in built.weights.iter().take(EXPERT_USED_COUNT as usize).enumerate() {
+            for (round, weight_node) in built
+                .weights
+                .iter()
+                .take(EXPERT_USED_COUNT as usize)
+                .enumerate()
+            {
                 let unfused_weight = unfused_buffers[weight_node.0 as usize]
                     .as_ref()
                     .expect("unfused weight resolves")[0];

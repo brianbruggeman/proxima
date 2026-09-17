@@ -67,7 +67,8 @@ pub(super) fn report_encoder_split(step: usize, encoder_split_ns: (u64, u64), gp
 /// whether GPU time tracks operand bytes or is flat per dispatch.
 /// shape/dtype key -> (op count, total gpu ns, total operand bytes) accumulator
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-pub(super) type CooperativeShapeCounts = alloc::collections::BTreeMap<(Vec<u64>, Vec<u16>), (u64, u64, u64)>;
+pub(super) type CooperativeShapeCounts =
+    alloc::collections::BTreeMap<(Vec<u64>, Vec<u16>), (u64, u64, u64)>;
 
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 pub(super) fn report_op_timings(step: usize, timings: &[OpGpuTiming], program: &[Op]) {
@@ -743,7 +744,12 @@ pub(super) fn stats_pass(entry: &mut FamilyGpuStats, gpu_ns: u64, operand_bytes:
 }
 
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-pub(super) fn stats_reject(entry: &mut FamilyGpuStats, rejection: &str, gpu_ns: u64, operand_bytes: u64) {
+pub(super) fn stats_reject(
+    entry: &mut FamilyGpuStats,
+    rejection: &str,
+    gpu_ns: u64,
+    operand_bytes: u64,
+) {
     entry.rejected_count += 1;
     entry.rejected_gpu_ns += gpu_ns;
     entry.rejected_operand_bytes += operand_bytes;
@@ -1110,7 +1116,10 @@ pub(super) struct Qwen35MoeLayerSegments {
 /// Links one layer's carry set to the gather cuts consumed by later layers.
 /// The link is plan data: execution must not rediscover the suffix while a
 /// prompt row is crossing the router/residency boundary.
-pub(super) fn collect_future_gather_cuts(layer: usize, gather_cuts: &[Vec<(NodeId, String)>]) -> Vec<NodeId> {
+pub(super) fn collect_future_gather_cuts(
+    layer: usize,
+    gather_cuts: &[Vec<(NodeId, String)>],
+) -> Vec<NodeId> {
     gather_cuts[layer + 1..]
         .iter()
         .flat_map(|cuts| cuts.iter().map(|(node, _)| *node))
@@ -1162,7 +1171,10 @@ impl Drop for LoadedModel<'_> {
 /// see: a program leaf beyond the decode loop's own builtin set is, by
 /// construction, one [`crate::architecture::Architecture::step_inputs`]
 /// either never fed or fed with the wrong name.
-pub(super) fn missing_program_input(program: &[Op], named: &[(&str, QuantizedBlock<'_>)]) -> Option<String> {
+pub(super) fn missing_program_input(
+    program: &[Op],
+    named: &[(&str, QuantizedBlock<'_>)],
+) -> Option<String> {
     program.iter().find_map(|op| match op {
         Op::Input {
             name: Some(name), ..
@@ -1319,6 +1331,8 @@ pub(super) const fn step_batch_needs_logits(split_prefill: bool, is_last_step_ba
 /// The device-resident input and output buffer placements for one segment
 /// evaluation, grouped so the method they feed keeps its argument count
 /// under clippy's threshold.
+// only constructed at the `instrument`-gated call site in pregather.rs.
+#[cfg_attr(not(feature = "instrument"), allow(dead_code))]
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 pub(super) struct SegmentPlacements<'placements> {
     pub(super) input_placements: &'placements [(NodeId, &'placements PlacedBuffer, usize)],
@@ -1344,10 +1358,10 @@ pub(super) struct PreGatherContext<'context, 'mapping, 'file> {
     #[cfg(feature = "metal")]
     pub(super) sidecar: Option<&'mapping crate::expert_sidecar::MappedExpertSidecar>,
     #[cfg(feature = "metal")]
-    pub(super) all_low_expert_scratch: &'context mut crate::expert_slab::AllLowExpertSourceScratch<'mapping>,
+    pub(super) all_low_expert_scratch:
+        &'context mut crate::expert_slab::AllLowExpertSourceScratch<'mapping>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) ssm_placement: Option<&'context Qwen35SsmPlacement<'context>>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) dense_attention_placement: Option<&'context Qwen35DenseAttentionPlacement<'context>>,
 }
-

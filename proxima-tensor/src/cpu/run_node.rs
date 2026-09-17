@@ -1,7 +1,10 @@
 use super::*;
 
 #[cfg(test)]
-pub(super) fn run_node(resolved: &BoundOp, buffers: &[Option<Vec<f32>>]) -> Result<Vec<f32>, TensorError> {
+pub(super) fn run_node(
+    resolved: &BoundOp,
+    buffers: &[Option<Vec<f32>>],
+) -> Result<Vec<f32>, TensorError> {
     let mut output = vec![0.0f32; node_output_len(resolved)];
     run_node_into(resolved, buffers, None, None, None, false, &mut output)?;
     Ok(output)
@@ -116,7 +119,11 @@ pub(super) fn run_node_into_with_gdn_state<B: Deref<Target = [f32]> + Sync>(
             resolved.node.0,
             resolved.extents,
             output.len(),
-            resolved.operands().iter().map(|(node, _, _)| node.0).collect::<Vec<_>>(),
+            resolved
+                .operands()
+                .iter()
+                .map(|(node, _, _)| node.0)
+                .collect::<Vec<_>>(),
             resolved.kind
         );
     }
@@ -540,7 +547,9 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
     let cached_key_odd = cached_key_odd
         .get(..live_pair_len)
         .ok_or(out_of_range.clone())?;
-    let cached_value = cached_value.get(..live_value_len).ok_or(out_of_range.clone())?;
+    let cached_value = cached_value
+        .get(..live_value_len)
+        .ok_or(out_of_range.clone())?;
     // The trailing pass-plane triple (`pass_query`, `pass_cached_key`,
     // `pass_new_key` -- `BoundOpKind::CachedAttention`'s own doc) sits right
     // after the base eight and the optional `cached_len` scalar; `pair_dim`
@@ -1029,9 +1038,8 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
                 ..
             } = &resolved.kind
             {
-                for (extra_node, value) in
-                    moe_topk_extra_node_order(routes, weights, *weight_total)
-                        .zip(moe_topk_extra.iter().copied())
+                for (extra_node, value) in moe_topk_extra_node_order(routes, weights, *weight_total)
+                    .zip(moe_topk_extra.iter().copied())
                 {
                     (*buffers)[extra_node.0 as usize] = Some(B::from(vec![value]));
                 }
@@ -1605,4 +1613,3 @@ pub(super) fn materialize_quantized_weight_output(
     buffers[node.0 as usize] = Some(Cow::Owned(dequantized));
     Ok(())
 }
-

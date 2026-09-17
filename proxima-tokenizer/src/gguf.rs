@@ -52,7 +52,12 @@ const ADD_EOS_KEY: &str = "tokenizer.ggml.add_eos_token";
 /// merges-driven ([`Vocab::new`]) or scores-driven ([`Vocab::new_unigram`])
 /// constructor from `tokenizer.ggml.model` -- never a caller flag, matching
 /// llama.cpp's own dispatch (`tokenizer_model == "gpt2"` /
-/// `tokenizer_model == "llama"`, `llama-vocab.cpp:1405-1428`).
+/// `tokenizer_model == "llama"`, `llama-vocab.cpp:1405-1428`). `"gemma4"` is
+/// not an upstream llama.cpp string (this codebase's own local
+/// `llama.cpp` checkout predates it) -- routed onto the same merges-driven
+/// arm as `"gpt2"` because its GGUF carries a real, resolvable
+/// `tokenizer.ggml.merges`, verified against a real checkpoint (see the
+/// match arm below).
 ///
 /// # Errors
 ///
@@ -79,7 +84,18 @@ pub fn vocab_from_metadata(metadata: &ParsedGguf) -> Result<Vocab, TokenizerErro
     let add_eos_token = bool_scalar(metadata, ADD_EOS_KEY)?;
 
     let vocab = match model.as_str() {
-        "gpt2" => {
+        // `gemma4` carries a real `tokenizer.ggml.merges` (rank-ordered
+        // pairs resolving to real vocab entries -- verified against the
+        // sha256-ea549b76.. checkpoint, 262144 tokens / 514906 merges) even
+        // though its byte alphabet is spelled SentencePiece-style
+        // (`<0xXX>` hex-fallback tokens, not `gpt2`'s Unicode remap) --
+        // `assemble`'s byte-token lookup already tries the hex-fallback
+        // form as a fallback (below), so the merges-driven, rank-priority
+        // BPE encoder gpt2 uses is the correct engine here too, not the
+        // scores-driven unigram path: gemma4 also carries scores, but a
+        // real merges array means llama.cpp's own dispatch (SPM vs BPE)
+        // would pick rank-based merging, not per-token score greedy merge.
+        "gpt2" | "gemma4" => {
             let merges = string_array(metadata, MERGES_KEY)?
                 .ok_or(TokenizerError::MissingMetadataKey { key: MERGES_KEY })?;
             Vocab::new(
@@ -701,6 +717,71 @@ mod tests {
             ids.iter().filter(|&&id| id == 32000).count(),
             1,
             "the literal <|end_of_turn|> marker must resolve to its own id (32000) exactly once, not be shredded into text pieces"
+        );
+    }
+
+    /// Regression for the phantom-separator bug: gemma4's real 262144-token
+    /// vocab carries a literal `"Ġ"` (GPT-2's own space marker, U+0120) as
+    /// an ordinary -- if merge-orphaned -- entry (id 245237), unrelated to
+    /// space. Before the `Vocab::assemble` space-marker fix, every space
+    /// byte in the input was seeded with that entry instead of the
+    /// SentencePiece marker (`"▁"`, U+2581) gemma4's own merges are keyed
+    /// on, so it could never merge into the following word and survived
+    /// standalone between every pretoken: `"The capital of France is"` came
+    /// out `[818, 245237, 41626, 245237, 1340, 245237, 31756, 245237,
+    /// 511]` -- 9 ids for 5 words -- instead of one id per space-prefixed
+    /// word. `#[ignore]`d: depends on a host-local gemma4 gguf checkout.
+    #[test]
+    #[ignore = "depends on a host-local gemma4 gguf checkout outside this repo"]
+    fn real_gemma4_vocab_merges_space_into_the_following_word() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let candidate = Path::new(
+            "/Users/brianbruggeman/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129",
+        );
+        if !candidate.exists() {
+            eprintln!("no real gemma4 gguf found at {candidate:?}, skipping");
+            return;
+        }
+        let mut file = std::fs::File::open(candidate).expect("open host-local gemma4 fixture");
+        let mut header_buf = Vec::new();
+        let parsed = 'grow: {
+            for cap in [4usize << 20, 16 << 20, 64 << 20] {
+                header_buf.resize(cap, 0);
+                file.seek(SeekFrom::Start(0)).expect("seek to file start");
+                let read = file.read(&mut header_buf).expect("read gguf header region");
+                header_buf.truncate(read);
+                if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header_buf) {
+                    break 'grow parsed;
+                }
+            }
+            panic!("gguf metadata region did not fit in 64 MiB");
+        };
+        let vocab = vocab_from_metadata(&parsed).expect("builds vocab from real gemma4 metadata");
+
+        let prompt = "The capital of France is";
+        let ids = crate::encode(prompt, &vocab).expect("encode prompt");
+
+        let phantom_separator_id = vocab
+            .token_id("\u{0120}")
+            .expect("gemma4's real vocab carries a literal Ġ entry");
+        assert!(
+            !ids.contains(&phantom_separator_id),
+            "no phantom Ġ separator (id {phantom_separator_id}) between words, got {ids:?}"
+        );
+
+        let expected_words = ["The", "\u{2581}capital", "\u{2581}of", "\u{2581}France", "\u{2581}is"];
+        let expected_ids: Vec<u32> = expected_words
+            .iter()
+            .map(|word| {
+                vocab
+                    .token_id(word)
+                    .unwrap_or_else(|| panic!("{word:?} must be a real gemma4 vocab entry"))
+            })
+            .collect();
+        assert_eq!(
+            ids, expected_ids,
+            "space must merge into the following word as its ▁ prefix, one id per word"
         );
     }
 }

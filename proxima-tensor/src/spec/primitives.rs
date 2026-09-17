@@ -195,7 +195,11 @@ pub(super) fn parse_operand_pattern(notation: &str) -> Result<IndexPattern, Tens
 /// `@`) and the extent fact (`4`) spelled as two distinct pieces of syntax
 /// instead of one doing double duty — see [`AxisIndex`]'s own doc for why
 /// that distinction is the fix, not the arithmetic.
-pub(super) fn parse_axis_expr(token: &str, space: &[char], notation: &str) -> Result<AxisIndex, TensorError> {
+pub(super) fn parse_axis_expr(
+    token: &str,
+    space: &[char],
+    notation: &str,
+) -> Result<AxisIndex, TensorError> {
     let (address, len) = match token.split_once('@') {
         Some((address, length)) => {
             let length: u32 = length
@@ -495,7 +499,10 @@ pub(super) fn build_base_pattern(rank: u16, projected: &[u16], gathered_dim: u16
     }
 }
 
-pub(super) fn lookup(resolved: &BTreeMap<String, NodeId>, reference: &str) -> Result<NodeId, TensorError> {
+pub(super) fn lookup(
+    resolved: &BTreeMap<String, NodeId>,
+    reference: &str,
+) -> Result<NodeId, TensorError> {
     resolved
         .get(reference)
         .copied()
@@ -1000,6 +1007,77 @@ pub fn rmsnorm_per_head(
         DType::Float32,
         ScalarOp::Multiply,
         &[(normed, full.as_str()), (gamma, gamma_map.as_str())],
+    )
+}
+
+/// [`rmsnorm_per_head`] without the final learned-scale multiply -- Gemma 4's
+/// `v_norm` (`Gemma4TextAttention.forward`, `modeling_gemma4.py:1256-1265`):
+/// `Gemma4RMSNorm(head_dim, eps, with_scale=False)` has no `gamma` tensor at
+/// all (`with_scale=False` skips registering the learned weight), so there is
+/// no `attn_v_norm.weight` on disk to bind -- synthesizing an all-ones gamma
+/// leaf to reuse [`rmsnorm_per_head`] would invent a tensor the checkpoint
+/// never had. Same six-op shape, same per-token-per-head normalization over
+/// the head-dim axis, just without the last op.
+pub fn rmsnorm_per_head_no_scale(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_head_dim: NodeId,
+    eps: NodeId,
+    head: &str,
+) -> Result<NodeId, TensorError> {
+    let full = alloc::format!("s{head}d->s{head}d");
+    let identity = alloc::format!("s{head}->s{head}");
+    let broadcast_over_d = alloc::format!("s{head}->s{head}d");
+    let inv_head_dim_map = alloc::format!("->s{head}");
+    let eps_map = alloc::format!("s->s{head}");
+
+    let squared = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, full.as_str()), (x, full.as_str())],
+    )?;
+    let sum_squares = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        squared,
+        full.as_str(),
+        broadcast_over_d.as_str(),
+    )?;
+    let mean_square = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (sum_squares, identity.as_str()),
+            (inv_head_dim, inv_head_dim_map.as_str()),
+        ],
+    )?;
+    let mean_square_eps = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(mean_square, identity.as_str()), (eps, eps_map.as_str())],
+    )?;
+    let rms = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::SquareRoot,
+        &[(mean_square_eps, identity.as_str())],
+    )?;
+    let inv_rms = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(rms, identity.as_str())],
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, full.as_str()), (inv_rms, broadcast_over_d.as_str())],
     )
 }
 

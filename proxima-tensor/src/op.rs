@@ -306,9 +306,7 @@ impl Op {
     pub fn dependencies(&self) -> Vec<NodeId> {
         match self {
             Self::Input { .. } | Self::Iota { .. } | Self::Constant { .. } => Vec::new(),
-            Self::Elementwise { operands, .. } => {
-                operands.iter().map(|(node, _)| *node).collect()
-            }
+            Self::Elementwise { operands, .. } => operands.iter().map(|(node, _)| *node).collect(),
             Self::Reduce(reduce) => alloc::vec![reduce.operand],
         }
     }

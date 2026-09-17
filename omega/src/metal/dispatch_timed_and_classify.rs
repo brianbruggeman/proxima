@@ -1880,7 +1880,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
     #[test]
     fn qwen35moe_shaped_append_moe_ffn_packs_grouped_gate_up_and_per_route_down() {
         use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
-        use proxima_tensor::spec::ExpertGatingFunc;
+        use proxima_tensor::spec::{Activation, ExpertGatingFunc};
 
         const EMBEDDING: usize = 512;
         const FEED_FORWARD: usize = 2048;
@@ -1965,6 +1965,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
             ones,
             ExpertGatingFunc::Softmax,
             None,
+            Activation::Silu,
         )
         .expect("append_moe_ffn_grouped_gate_up lowers at the real qwen35moe shape");
 

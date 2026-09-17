@@ -878,7 +878,8 @@ pub(super) struct PackedWidthPanels {
 /// [`set_pack_at_plan_time_enabled`] rather than rebuilding the crate under
 /// a separate cargo feature.
 #[cfg(target_arch = "aarch64")]
-pub(super) static PACK_AT_PLAN_TIME_ENABLED: EpilogueFuseAtomicBool = EpilogueFuseAtomicBool::new(true);
+pub(super) static PACK_AT_PLAN_TIME_ENABLED: EpilogueFuseAtomicBool =
+    EpilogueFuseAtomicBool::new(true);
 
 /// Bench/test-only escape valve (see [`PACK_AT_PLAN_TIME_ENABLED`]'s own
 /// doc): flips whether [`build_packed_width_panels`] packs anything,
@@ -1484,4 +1485,3 @@ pub(super) fn try_run_width_tile(
         None => false,
     }
 }
-

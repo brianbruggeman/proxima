@@ -38,8 +38,10 @@ use crate::error::InteropError;
 #[cfg(feature = "instrument")]
 fn log_missing_pattern(residency: &[i8], page: usize, stage: &'static str) {
     let pages_per_gib = (1024 * 1024 * 1024 / page).max(1);
-    let missing_by_gib: std::vec::Vec<usize> =
-        residency.chunks(pages_per_gib).map(count_missing_pages).collect();
+    let missing_by_gib: std::vec::Vec<usize> = residency
+        .chunks(pages_per_gib)
+        .map(count_missing_pages)
+        .collect();
     proxima_telemetry::debug!(
         stage,
         missing_by_gib_range = ?missing_by_gib,
@@ -78,6 +80,9 @@ pub enum ResidencyRung {
 }
 
 impl ResidencyRung {
+    // only read by `active_residency_rung_str`, itself only called from
+    // `instrument`-gated log lines -- unused without that feature.
+    #[cfg_attr(not(feature = "instrument"), allow(dead_code))]
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -97,6 +102,8 @@ impl ResidencyRung {
 static ACHIEVED_RUNG: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// See [`ACHIEVED_RUNG`]'s own doc.
+// only called from `instrument`-gated log lines -- unused without that feature.
+#[cfg_attr(not(feature = "instrument"), allow(dead_code))]
 #[must_use]
 pub fn active_residency_rung_str() -> &'static str {
     match ACHIEVED_RUNG.load(std::sync::atomic::Ordering::Relaxed) {
@@ -192,7 +199,11 @@ where
     F: FnMut(ResidencyRung) -> usize,
 {
     let mut missing = 0;
-    for rung in [ResidencyRung::Prefault, ResidencyRung::Retry, ResidencyRung::Mlock] {
+    for rung in [
+        ResidencyRung::Prefault,
+        ResidencyRung::Retry,
+        ResidencyRung::Mlock,
+    ] {
         if rung < start {
             continue;
         }
@@ -240,7 +251,10 @@ fn lock_resident(bytes: &[u8]) {
     // `mlock` only pins pages already mapped into this process and never
     // writes through the pointer.
     let outcome = unsafe {
-        rustix::mm::mlock(bytes.as_ptr().cast::<core::ffi::c_void>().cast_mut(), bytes.len())
+        rustix::mm::mlock(
+            bytes.as_ptr().cast::<core::ffi::c_void>().cast_mut(),
+            bytes.len(),
+        )
     };
     #[cfg(feature = "instrument")]
     if let Err(error) = outcome {
@@ -336,7 +350,9 @@ pub fn prove_resident(bytes: &[u8]) -> Result<ResidencyReport, InteropError> {
     );
 
     if missing_pages > 0 {
-        let bytes_missing = (missing_pages as u64).saturating_mul(page_bytes).min(bytes_total);
+        let bytes_missing = (missing_pages as u64)
+            .saturating_mul(page_bytes)
+            .min(bytes_total);
         return Err(InteropError::MappingNotResident {
             bytes_missing,
             bytes_total,
@@ -450,7 +466,11 @@ mod tests {
         assert_eq!(rung, ResidencyRung::Mlock);
         assert_eq!(
             calls,
-            vec![ResidencyRung::Prefault, ResidencyRung::Retry, ResidencyRung::Mlock]
+            vec![
+                ResidencyRung::Prefault,
+                ResidencyRung::Retry,
+                ResidencyRung::Mlock
+            ]
         );
     }
 
@@ -468,7 +488,9 @@ mod tests {
     fn prove_resident_reports_zero_missing_pages_for_a_patterned_temp_file() {
         let directory = tempfile::tempdir().expect("create a scratch tempdir for the mapping");
         let path = directory.path().join("checkpoint.bin");
-        let pattern: Vec<u8> = (0..MAPPING_SIZE_BYTES).map(|index| (index % 251) as u8).collect();
+        let pattern: Vec<u8> = (0..MAPPING_SIZE_BYTES)
+            .map(|index| (index % 251) as u8)
+            .collect();
         std::fs::write(&path, &pattern).expect("write the patterned fixture file");
 
         let file = std::fs::File::open(&path).expect("open the fixture file for mapping");
@@ -501,16 +523,22 @@ mod tests {
             eprintln!("skipping: no checkpoint at {path} (set PROXIMA_QWEN35MOE_GGUF)");
             return;
         }
-        let file = std::fs::File::open(&path).unwrap_or_else(|error| panic!("open {path}: {error}"));
+        let file =
+            std::fs::File::open(&path).unwrap_or_else(|error| panic!("open {path}: {error}"));
         // SAFETY: read-only mapping of a file this test does not write or
         // truncate; the mapping is the whole test's scope.
-        let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("mmap the real checkpoint read-only");
+        let mapping =
+            unsafe { memmap2::Mmap::map(&file) }.expect("mmap the real checkpoint read-only");
         let bytes: &[u8] = &mapping;
 
         crate::loader::prefault(bytes).expect("the prefault pool builds and every chunk reports");
         let residency = super::probe_residency(bytes);
         let page = omega::metal::page_size();
-        eprintln!("page_size = {page} bytes, mapping = {} bytes, {} pages", bytes.len(), residency.len());
+        eprintln!(
+            "page_size = {page} bytes, mapping = {} bytes, {} pages",
+            bytes.len(),
+            residency.len()
+        );
 
         let pages_per_gib = (1024 * 1024 * 1024) / page;
         for (range_index, chunk) in residency.chunks(pages_per_gib.max(1)).enumerate() {
@@ -553,10 +581,12 @@ mod tests {
             eprintln!("skipping: no checkpoint at {path} (set PROXIMA_QWEN35MOE_GGUF)");
             return;
         }
-        let file = std::fs::File::open(&path).unwrap_or_else(|error| panic!("open {path}: {error}"));
+        let file =
+            std::fs::File::open(&path).unwrap_or_else(|error| panic!("open {path}: {error}"));
         // SAFETY: read-only mapping of a file this test does not write or
         // truncate; the mapping is the whole test's scope.
-        let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("mmap the real checkpoint read-only");
+        let mapping =
+            unsafe { memmap2::Mmap::map(&file) }.expect("mmap the real checkpoint read-only");
         let bytes: &[u8] = &mapping;
 
         let report = |label: &str, elapsed: std::time::Duration, residency: &[i8]| {
@@ -581,7 +611,11 @@ mod tests {
         let started = std::time::Instant::now();
         crate::loader::prefault(bytes).expect("second immediate prefault must resolve or report");
         let residency = super::probe_residency(bytes);
-        report("stage 2: second immediate prefault", started.elapsed(), &residency);
+        report(
+            "stage 2: second immediate prefault",
+            started.elapsed(),
+            &residency,
+        );
 
         let started = std::time::Instant::now();
         // SAFETY: `bytes` is a live borrow for the duration of this call;

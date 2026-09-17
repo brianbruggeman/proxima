@@ -182,7 +182,11 @@ pub(super) fn strip_leading_unit_axis(shape: &[u64]) -> &[u64] {
 }
 
 #[cfg(feature = "gated-delta-net-fusion")]
-pub(super) fn gdn_binary_elementwise(program: &[Op], node: NodeId, body: ScalarOp) -> Option<[NodeId; 2]> {
+pub(super) fn gdn_binary_elementwise(
+    program: &[Op],
+    node: NodeId,
+    body: ScalarOp,
+) -> Option<[NodeId; 2]> {
     match program.get(node.0 as usize)? {
         Op::Elementwise {
             body: actual_body,
@@ -197,7 +201,11 @@ pub(super) fn gdn_binary_elementwise(program: &[Op], node: NodeId, body: ScalarO
 }
 
 #[cfg(feature = "gated-delta-net-fusion")]
-pub(super) fn gdn_unary_elementwise(program: &[Op], node: NodeId, body: ScalarOp) -> Option<NodeId> {
+pub(super) fn gdn_unary_elementwise(
+    program: &[Op],
+    node: NodeId,
+    body: ScalarOp,
+) -> Option<NodeId> {
     match program.get(node.0 as usize)? {
         Op::Elementwise {
             body: actual_body,
@@ -386,7 +394,8 @@ pub(super) fn match_gated_delta_net_step(
 
     let out_product = gdn_reduced_source(program, out, ScalarOp::Add)?;
     absorb(out_product, &mut absorbed);
-    let [state_out, query_scaled] = gdn_binary_elementwise(program, out_product, ScalarOp::Multiply)?;
+    let [state_out, query_scaled] =
+        gdn_binary_elementwise(program, out_product, ScalarOp::Multiply)?;
     absorb(query_scaled, &mut absorbed);
 
     let [state_decayed_for_update, update] =
@@ -620,27 +629,35 @@ pub(super) fn gated_delta_net_candidates(
         // single-axis case already does, group folded in rather than a new
         // field.
         let (kv_heads, group) = match (key_shape, value_shape, gate_shape, state_shape) {
-            ([kv_heads, key_dim], [value_dim, value_kv_heads, group], [gate_kv_heads, gate_group], [state_key_dim, state_value_dim, state_kv_heads, state_group])
-                if query_shape == key_shape
-                    && *kv_heads == *value_kv_heads
-                    && *kv_heads == *gate_kv_heads
-                    && *kv_heads == *state_kv_heads
-                    && *group == *gate_group
-                    && *group == *state_group
-                    && *state_key_dim == *key_dim
-                    && *state_value_dim == *value_dim
-                    && shapes.of(output) == value_shape =>
+            (
+                [kv_heads, key_dim],
+                [value_dim, value_kv_heads, group],
+                [gate_kv_heads, gate_group],
+                [state_key_dim, state_value_dim, state_kv_heads, state_group],
+            ) if query_shape == key_shape
+                && *kv_heads == *value_kv_heads
+                && *kv_heads == *gate_kv_heads
+                && *kv_heads == *state_kv_heads
+                && *group == *gate_group
+                && *group == *state_group
+                && *state_key_dim == *key_dim
+                && *state_value_dim == *value_dim
+                && shapes.of(output) == value_shape =>
             {
                 (*kv_heads, *group)
             }
-            ([heads, key_dim], [value_dim, value_heads], [gate_heads], [state_key_dim, state_value_dim, state_heads])
-                if query_shape == key_shape
-                    && *heads == *value_heads
-                    && *heads == *gate_heads
-                    && *heads == *state_heads
-                    && *state_key_dim == *key_dim
-                    && *state_value_dim == *value_dim
-                    && shapes.of(output) == value_shape =>
+            (
+                [heads, key_dim],
+                [value_dim, value_heads],
+                [gate_heads],
+                [state_key_dim, state_value_dim, state_heads],
+            ) if query_shape == key_shape
+                && *heads == *value_heads
+                && *heads == *gate_heads
+                && *heads == *state_heads
+                && *state_key_dim == *key_dim
+                && *state_value_dim == *value_dim
+                && shapes.of(output) == value_shape =>
             {
                 (*heads, 1)
             }
@@ -681,7 +698,11 @@ pub(super) fn gated_delta_net_candidates(
 }
 
 #[cfg(feature = "moe-topk-fusion")]
-pub(super) fn moe_binary_elementwise(program: &[Op], node: NodeId, body: ScalarOp) -> Option<[NodeId; 2]> {
+pub(super) fn moe_binary_elementwise(
+    program: &[Op],
+    node: NodeId,
+    body: ScalarOp,
+) -> Option<[NodeId; 2]> {
     match program.get(node.0 as usize)? {
         Op::Elementwise {
             body: actual_body,
@@ -797,8 +818,13 @@ pub(super) fn moe_match_round(
             == Some([mask, expert_index])
     })?;
     let route = consumers.get(&candidate)?.iter().copied().find(|route| {
-        moe_reduce_operand(program, *route, DType::Int32, ScalarOp::Maximum, ReduceInit::Zero)
-            == Some(candidate)
+        moe_reduce_operand(
+            program,
+            *route,
+            DType::Int32,
+            ScalarOp::Maximum,
+            ReduceInit::Zero,
+        ) == Some(candidate)
     })?;
     let anchor = max_selection_0.unwrap_or(max_selection);
     let shifted = consumers
@@ -855,8 +881,13 @@ pub(super) fn match_moe_topk(
     route0: NodeId,
     consumers: &BTreeMap<NodeId, Vec<NodeId>>,
 ) -> Option<MoeTopKMatch> {
-    let candidate0 =
-        moe_reduce_operand(program, route0, DType::Int32, ScalarOp::Maximum, ReduceInit::Zero)?;
+    let candidate0 = moe_reduce_operand(
+        program,
+        route0,
+        DType::Int32,
+        ScalarOp::Maximum,
+        ReduceInit::Zero,
+    )?;
     let [mask0, expert_index] = moe_binary_elementwise(program, candidate0, ScalarOp::Multiply)?;
     if !matches!(program.get(expert_index.0 as usize), Some(Op::Iota { .. })) {
         return None;
@@ -907,8 +938,13 @@ pub(super) fn match_moe_topk(
     let mut round: usize = 0;
     const ROUND_SANITY_CAP: usize = 64;
     loop {
-        let matched =
-            moe_match_round(program, selection_scores, max_selection_0_node, expert_index, consumers)?;
+        let matched = moe_match_round(
+            program,
+            selection_scores,
+            max_selection_0_node,
+            expert_index,
+            consumers,
+        )?;
         if round == 0 {
             if matched.route != route0 || matched.mask != mask0 {
                 return None;
@@ -935,14 +971,15 @@ pub(super) fn match_moe_topk(
         weight_total_running = Some(match weight_total_running {
             None => matched.weight,
             Some(running) => {
-                let add_node = consumers
-                    .get(&matched.weight)?
-                    .iter()
-                    .copied()
-                    .find(|candidate| {
-                        moe_binary_elementwise(program, *candidate, ScalarOp::Add)
-                            == Some([running, matched.weight])
-                    })?;
+                let add_node =
+                    consumers
+                        .get(&matched.weight)?
+                        .iter()
+                        .copied()
+                        .find(|candidate| {
+                            moe_binary_elementwise(program, *candidate, ScalarOp::Add)
+                                == Some([running, matched.weight])
+                        })?;
                 absorbed.insert(add_node);
                 add_node
             }
@@ -1092,7 +1129,12 @@ pub(super) fn apply_moe_topk_fusion(
             }
         }
     }
-    let rebuilt = bind_plain(program, shapes, &planning_outputs, NumericPolicy::bit_exact())?;
+    let rebuilt = bind_plain(
+        program,
+        shapes,
+        &planning_outputs,
+        NumericPolicy::bit_exact(),
+    )?;
     let candidates = moe_topk_candidates(program, shapes, &rebuilt, outputs);
     if candidates.is_empty() {
         return Ok(built);
@@ -1189,4 +1231,3 @@ pub(super) fn apply_gated_delta_net_fusion(
     }
     Ok(rewritten)
 }
-

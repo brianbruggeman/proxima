@@ -37,7 +37,9 @@ const WIDTH: u32 = 13;
 /// MoE small per the brief while every quantized leaf's trailing axis stays
 /// `QK_K`-aligned (2048, 4096, 8192, 512, 256 are all multiples of 256).
 fn real_dims_architecture(layer_count: u32) -> Architecture {
-    let layer_kinds = (0..layer_count).map(|layer| LayerKind::from_interval(layer, 4)).collect::<Vec<_>>();
+    let layer_kinds = (0..layer_count)
+        .map(|layer| LayerKind::from_interval(layer, 4))
+        .collect::<Vec<_>>();
     let kv_heads_by_layer = layer_kinds
         .iter()
         .map(|kind| match kind {
@@ -102,10 +104,17 @@ fn is_large_projection_leaf(name: &str) -> bool {
 /// block layout defines validity, so this never hand-rolls the packed byte
 /// format itself.
 fn quantize_rows(values: &[f32], row_length: usize) -> Vec<u8> {
-    assert_eq!(row_length % QK_K, 0, "a quantized leaf's trailing axis must be QK_K-aligned");
+    assert_eq!(
+        row_length % QK_K,
+        0,
+        "a quantized leaf's trailing axis must be QK_K-aligned"
+    );
     let packed_row_bytes = row_length / QK_K * BLOCK_BYTES;
     let mut packed = vec![0_u8; values.len() / row_length * packed_row_bytes];
-    for (row, packed_row) in values.chunks_exact(row_length).zip(packed.chunks_exact_mut(packed_row_bytes)) {
+    for (row, packed_row) in values
+        .chunks_exact(row_length)
+        .zip(packed.chunks_exact_mut(packed_row_bytes))
+    {
         quantize(row, packed_row).expect("each output row is one valid q4_k block");
     }
     packed
@@ -294,7 +303,8 @@ fn quantized_layer_parity(layer_count: u32, width: u32) -> Vec<(usize, f32)> {
             .expect("the qwen35moe forward program lowers at the real-dims architecture's width");
 
     let symbols = vec![u64::from(width), 0];
-    let shapes = infer(&program, &symbols).expect("real-dims qwen35moe forward program infers its own shapes");
+    let shapes = infer(&program, &symbols)
+        .expect("real-dims qwen35moe forward program infers its own shapes");
 
     let node_ids = block_node_ids(&program);
     let leaves: Vec<(String, Vec<f32>, bool)> = node_ids
@@ -303,8 +313,14 @@ fn quantized_layer_parity(layer_count: u32, width: u32) -> Vec<(usize, f32)> {
             let Op::Input { name, .. } = &program[node.0 as usize] else {
                 unreachable!("block_node_ids only ever returns Op::Input nodes")
             };
-            let name = name.clone().expect("every qwen35moe forward-program input is named");
-            let count: usize = shapes.of(*node).iter().map(|extent| *extent as usize).product();
+            let name = name
+                .clone()
+                .expect("every qwen35moe forward-program input is named");
+            let count: usize = shapes
+                .of(*node)
+                .iter()
+                .map(|extent| *extent as usize)
+                .product();
             let data = if name == "ids" {
                 (0..count as u32).map(|value| value as f32).collect()
             } else if name == "eps" {
@@ -327,7 +343,10 @@ fn quantized_layer_parity(layer_count: u32, width: u32) -> Vec<(usize, f32)> {
         .zip(leaves.iter())
         .filter(|(_, (_, _, quantized))| *quantized)
         .map(|(node, (_, data, _))| {
-            let row_length = *shapes.of(*node).last().expect("every input has at least one axis") as usize;
+            let row_length = *shapes
+                .of(*node)
+                .last()
+                .expect("every input has at least one axis") as usize;
             quantize_rows(data, row_length)
         })
         .collect();
@@ -337,7 +356,9 @@ fn quantized_layer_parity(layer_count: u32, width: u32) -> Vec<(usize, f32)> {
         .iter()
         .map(|(_, data, quantized)| {
             if *quantized {
-                let bytes = quantized_storage_iter.next().expect("one packed buffer per quantized leaf");
+                let bytes = quantized_storage_iter
+                    .next()
+                    .expect("one packed buffer per quantized leaf");
                 QuantizedBlock::Q4K(bytes.as_slice())
             } else {
                 QuantizedBlock::Float32(data.as_slice())
@@ -347,19 +368,35 @@ fn quantized_layer_parity(layer_count: u32, width: u32) -> Vec<(usize, f32)> {
 
     let outputs: Vec<_> = diagnostics.iter().map(|layer| layer.block_output).collect();
 
-    let cpu = proxima_tensor::cpu::evaluate_quantized_exact(&program, &symbols, &blocks_owned, &outputs)
-        .expect("cpu reference evaluates every layer's block_output on quantized weights");
-    let metal = omega::execute(&program, &symbols, &blocks_owned, &outputs, NumericPolicy::default())
-        .expect("metal evaluates every layer's block_output on quantized weights");
+    let cpu =
+        proxima_tensor::cpu::evaluate_quantized_exact(&program, &symbols, &blocks_owned, &outputs)
+            .expect("cpu reference evaluates every layer's block_output on quantized weights");
+    let metal = omega::execute(
+        &program,
+        &symbols,
+        &blocks_owned,
+        &outputs,
+        NumericPolicy::default(),
+    )
+    .expect("metal evaluates every layer's block_output on quantized weights");
 
     outputs
         .iter()
         .enumerate()
         .map(|(layer_index, node)| {
-            let cpu_values = cpu.get(*node).expect("cpu produced this layer's block_output").0;
-            let metal_values = metal.get(*node).expect("metal produced this layer's block_output").0;
+            let cpu_values = cpu
+                .get(*node)
+                .expect("cpu produced this layer's block_output")
+                .0;
+            let metal_values = metal
+                .get(*node)
+                .expect("metal produced this layer's block_output")
+                .0;
             let embedding = architecture.embedding as usize;
-            (layer_index, relative_error_at_last_position(metal_values, cpu_values, embedding))
+            (
+                layer_index,
+                relative_error_at_last_position(metal_values, cpu_values, embedding),
+            )
         })
         .collect()
 }

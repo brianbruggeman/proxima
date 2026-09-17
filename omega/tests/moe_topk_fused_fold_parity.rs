@@ -28,7 +28,7 @@
 #![cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
-use proxima_tensor::spec::{ExpertGatingFunc, append_moe_ffn, input_leaf, scalar_constant};
+use proxima_tensor::spec::{Activation, ExpertGatingFunc, append_moe_ffn, input_leaf, scalar_constant};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{DType, Extent, NumericPolicy};
 
@@ -106,6 +106,7 @@ fn build_fixture(seq: u32, expert_count: u32, expert_used_count: u32) -> MoeFixt
         one,
         ExpertGatingFunc::Softmax,
         None,
+        Activation::Silu,
     )
     .expect("routed moe ffn lowers at 128/8");
 

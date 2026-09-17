@@ -150,6 +150,7 @@ pub fn classify_task(parsed: &ParsedGguf) -> TaskProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use arrayvec::ArrayVec;
     use proxima_gguf::{GgmlType, MetadataValue, TensorInfo};
 

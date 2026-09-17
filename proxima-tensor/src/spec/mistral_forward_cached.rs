@@ -321,7 +321,8 @@ pub struct ForwardRoots {
 /// layer, and ROW 326/328's [`DuplicateHeadPosition`] scratch output
 /// (`Some` only when that position is not [`DuplicateHeadPosition::None`]
 /// -- see the function's own doc).
-pub(super) type SingleRangeForwardProgram = (Vec<Op>, NodeId, Vec<CachedLayerRoots>, Option<NodeId>);
+pub(super) type SingleRangeForwardProgram =
+    (Vec<Op>, NodeId, Vec<CachedLayerRoots>, Option<NodeId>);
 
 /// [`mistral_cached_forward_program_with_experts_and_layer_taps`]'s own
 /// return shape: the lowered program, its [`ForwardRoots`], one
@@ -1425,4 +1426,3 @@ pub fn append_hyper_connection_combine(
         &[(residual, "shi->shi"), (broadcast_out, "shi->shi")],
     )
 }
-

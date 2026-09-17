@@ -441,7 +441,8 @@ pub fn stream_cached_attention_split_gqa(
                 let mut running_max = f32::NEG_INFINITY;
                 let mut running_sum = 0.0;
 
-                let pass_query_start = (query_row * kv_heads * query_groups + query_head) * pass_dim;
+                let pass_query_start =
+                    (query_row * kv_heads * query_groups + query_head) * pass_dim;
                 for (range_index, (keys_even, keys_odd, pass_key, values, key_rows)) in [
                     (
                         keys[0][0],
@@ -735,9 +736,10 @@ mod tests {
         assert!(stream_cached_attention_split_gqa(
             [&rotary_zero, &rotary_zero],
             [[&rotary_zero, &rotary_zero], [&rotary_zero, &rotary_zero]],
-            [&[2.0, 3.0, 10.0, 11.0, 100.0, 101.0, 110.0, 111.0][..], &[
-                4.0, 5.0, 12.0, 13.0, 200.0, 201.0, 210.0, 211.0
-            ][..]],
+            [
+                &[2.0, 3.0, 10.0, 11.0, 100.0, 101.0, 110.0, 111.0][..],
+                &[4.0, 5.0, 12.0, 13.0, 200.0, 201.0, 210.0, 211.0][..]
+            ],
             &mut output,
             extents,
             CachedAttentionRotary {
@@ -751,8 +753,14 @@ mod tests {
             CachedAttentionScore {
                 scale: 1.0,
                 bands: [
-                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
-                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+                    CausalBand {
+                        lower_inclusive: i64::MIN,
+                        upper_inclusive: 0
+                    },
+                    CausalBand {
+                        lower_inclusive: i64::MIN,
+                        upper_inclusive: 0
+                    },
                 ],
             },
         ));
@@ -827,8 +835,14 @@ mod tests {
             CachedAttentionScore {
                 scale: 1.0,
                 bands: [
-                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
-                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+                    CausalBand {
+                        lower_inclusive: i64::MIN,
+                        upper_inclusive: 0
+                    },
+                    CausalBand {
+                        lower_inclusive: i64::MIN,
+                        upper_inclusive: 0
+                    },
                 ],
             },
         ));
@@ -843,8 +857,18 @@ mod tests {
         let heads: [(f32, f32, [f32; 4], [f32; 4]); 4] = [
             (1.0, 0.0, [2.0, 3.0, 10.0, 11.0], [4.0, 5.0, 12.0, 13.0]),
             (0.0, 1.0, [2.0, 3.0, 10.0, 11.0], [4.0, 5.0, 12.0, 13.0]),
-            (2.0, 1.0, [100.0, 101.0, 110.0, 111.0], [200.0, 201.0, 210.0, 211.0]),
-            (0.0, 2.0, [100.0, 101.0, 110.0, 111.0], [200.0, 201.0, 210.0, 211.0]),
+            (
+                2.0,
+                1.0,
+                [100.0, 101.0, 110.0, 111.0],
+                [200.0, 201.0, 210.0, 211.0],
+            ),
+            (
+                0.0,
+                2.0,
+                [100.0, 101.0, 110.0, 111.0],
+                [200.0, 201.0, 210.0, 211.0],
+            ),
         ];
         for (head, (cached_score, new_score, cached_value, new_value)) in heads.iter().enumerate() {
             let (cached_weight, new_weight) = weight(*cached_score, *new_score);
@@ -898,8 +922,14 @@ mod tests {
             CachedAttentionScore {
                 scale: 1.0,
                 bands: [
-                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
-                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+                    CausalBand {
+                        lower_inclusive: i64::MIN,
+                        upper_inclusive: 0
+                    },
+                    CausalBand {
+                        lower_inclusive: i64::MIN,
+                        upper_inclusive: 0
+                    },
                 ],
             },
         ));

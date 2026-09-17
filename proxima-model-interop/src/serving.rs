@@ -178,7 +178,9 @@ pub struct PhaseSchedule {
 
 impl Default for PhaseSchedule {
     fn default() -> Self {
-        Self { prefill_before_decode: true }
+        Self {
+            prefill_before_decode: true,
+        }
     }
 }
 
@@ -603,9 +605,15 @@ impl Default for ServingConfig<'static> {
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
-            admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
-            phase_schedule: PhaseSchedule { prefill_before_decode: true },
-            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
+            admission_schedule: AdmissionSchedule {
+                max_concurrent_requests: 0,
+            },
+            phase_schedule: PhaseSchedule {
+                prefill_before_decode: true,
+            },
+            expert_residency_schedule: ExpertResidencySchedule {
+                per_layer_budget_bytes: 0,
+            },
         }
     }
 }
@@ -640,7 +648,8 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
     }
 
     let max_concurrent_requests = config.admission_schedule.max_concurrent_requests;
-    if max_concurrent_requests != 0 && config.parallel_sequences as usize > max_concurrent_requests {
+    if max_concurrent_requests != 0 && config.parallel_sequences as usize > max_concurrent_requests
+    {
         return Err(InteropError::UnsupportedServingConfig(format!(
             "admission_schedule.max_concurrent_requests={max_concurrent_requests}: \
              parallel_sequences={} exceeds the request-admission ceiling",
@@ -922,9 +931,15 @@ mod tests {
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
-            admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
-            phase_schedule: PhaseSchedule { prefill_before_decode: true },
-            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
+            admission_schedule: AdmissionSchedule {
+                max_concurrent_requests: 0,
+            },
+            phase_schedule: PhaseSchedule {
+                prefill_before_decode: true,
+            },
+            expert_residency_schedule: ExpertResidencySchedule {
+                per_layer_budget_bytes: 0,
+            },
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -1085,9 +1100,15 @@ mod tests {
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
-            admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
-            phase_schedule: PhaseSchedule { prefill_before_decode: true },
-            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
+            admission_schedule: AdmissionSchedule {
+                max_concurrent_requests: 0,
+            },
+            phase_schedule: PhaseSchedule {
+                prefill_before_decode: true,
+            },
+            expert_residency_schedule: ExpertResidencySchedule {
+                per_layer_budget_bytes: 0,
+            },
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);
@@ -1176,9 +1197,15 @@ mod tests {
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
-            admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
-            phase_schedule: PhaseSchedule { prefill_before_decode: true },
-            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
+            admission_schedule: AdmissionSchedule {
+                max_concurrent_requests: 0,
+            },
+            phase_schedule: PhaseSchedule {
+                prefill_before_decode: true,
+            },
+            expert_residency_schedule: ExpertResidencySchedule {
+                per_layer_budget_bytes: 0,
+            },
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(
@@ -1257,9 +1284,15 @@ mod tests {
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
-            admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
-            phase_schedule: PhaseSchedule { prefill_before_decode: true },
-            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
+            admission_schedule: AdmissionSchedule {
+                max_concurrent_requests: 0,
+            },
+            phase_schedule: PhaseSchedule {
+                prefill_before_decode: true,
+            },
+            expert_residency_schedule: ExpertResidencySchedule {
+                per_layer_budget_bytes: 0,
+            },
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.exact_activations);
@@ -1328,9 +1361,15 @@ mod tests {
             plan_time_constants: false,
             max_command_buffers_per_token: 0,
             overlap_transfer_compute: false,
-            admission_schedule: AdmissionSchedule { max_concurrent_requests: 0 },
-            phase_schedule: PhaseSchedule { prefill_before_decode: true },
-            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 0 },
+            admission_schedule: AdmissionSchedule {
+                max_concurrent_requests: 0,
+            },
+            phase_schedule: PhaseSchedule {
+                prefill_before_decode: true,
+            },
+            expert_residency_schedule: ExpertResidencySchedule {
+                per_layer_budget_bytes: 0,
+            },
         };
         assert_eq!(via_default_override, via_full_literal);
         assert!(via_default_override.prefill_one_evaluation);
@@ -1365,7 +1404,9 @@ mod tests {
         let baseline = ServingConfig::default();
 
         let admission_changed = ServingConfig {
-            admission_schedule: AdmissionSchedule { max_concurrent_requests: 4 },
+            admission_schedule: AdmissionSchedule {
+                max_concurrent_requests: 4,
+            },
             ..baseline
         };
         assert_eq!(admission_changed.phase_schedule, baseline.phase_schedule);
@@ -1375,24 +1416,36 @@ mod tests {
         );
 
         let phase_changed = ServingConfig {
-            phase_schedule: PhaseSchedule { prefill_before_decode: false },
+            phase_schedule: PhaseSchedule {
+                prefill_before_decode: false,
+            },
             ..baseline
         };
-        assert_eq!(phase_changed.admission_schedule, baseline.admission_schedule);
+        assert_eq!(
+            phase_changed.admission_schedule,
+            baseline.admission_schedule
+        );
         assert_eq!(
             phase_changed.expert_residency_schedule,
             baseline.expert_residency_schedule
         );
 
         let residency_changed = ServingConfig {
-            expert_residency_schedule: ExpertResidencySchedule { per_layer_budget_bytes: 1024 },
+            expert_residency_schedule: ExpertResidencySchedule {
+                per_layer_budget_bytes: 1024,
+            },
             ..baseline
         };
-        assert_eq!(residency_changed.admission_schedule, baseline.admission_schedule);
+        assert_eq!(
+            residency_changed.admission_schedule,
+            baseline.admission_schedule
+        );
         assert_eq!(residency_changed.phase_schedule, baseline.phase_schedule);
 
         let over_admission = ServingConfig {
-            admission_schedule: AdmissionSchedule { max_concurrent_requests: 1 },
+            admission_schedule: AdmissionSchedule {
+                max_concurrent_requests: 1,
+            },
             parallel_sequences: 2,
             ..baseline
         };

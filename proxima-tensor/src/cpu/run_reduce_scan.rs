@@ -63,8 +63,8 @@ pub(super) static EXPERT_SELECTION_COUNTS: Mutex<BTreeMap<(u32, u32), ExpertSele
 /// whatever state that caller's own increment reached, never a torn entry
 /// (every mutation under this lock is one `BTreeMap` insert-or-increment),
 /// so recovering and continuing is safe.
-pub(super) fn lock_expert_selection_counts() -> MutexGuard<'static, BTreeMap<(u32, u32), ExpertSelectionEntry>>
-{
+pub(super) fn lock_expert_selection_counts()
+-> MutexGuard<'static, BTreeMap<(u32, u32), ExpertSelectionEntry>> {
     EXPERT_SELECTION_COUNTS
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -625,6 +625,14 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 });
             }
             record_expert_selection(resolved.node, expert_index as u32);
+            #[cfg(feature = "instrument")]
+            debug!(
+                weight_node = weight_node.0,
+                reduce_node = resolved.node.0,
+                position = position as u64,
+                expert_index = expert_index as u64,
+                "proxima-debugger route: gathered weight selects expert"
+            );
             // An `ExpertSource` resolves expert `expert_index`'s own entry
             // instead of slicing a fixed offset out of one contiguous
             // stack -- each entry names its own codec and bytes
@@ -635,6 +643,15 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 let rows_u32 = u32::try_from(rows).map_err(|_| shape_error())?;
                 let k_u32 = u32::try_from(k).map_err(|_| shape_error())?;
                 let entry = source.entry(resolved.node, expert_index as usize, rows_u32, k_u32)?;
+                #[cfg(feature = "instrument")]
+                debug!(
+                    weight_node = weight_node.0,
+                    reduce_node = resolved.node.0,
+                    expert_index = expert_index as u64,
+                    epoch = entry.epoch,
+                    codec = ?entry.block,
+                    "proxima-debugger route: resolved expert_source entry"
+                );
                 let bytes = entry.block.packed_bytes().ok_or_else(shape_error)?;
                 expert_entry = Some(entry);
                 bytes
@@ -903,7 +920,10 @@ pub(super) struct ReduceAxisShape {
 /// list, per this function's own "sound at any position" note above — so
 /// `leading_extents` for the kept axis is `[1]`, `leading_total` (product)
 /// is `1`, and the tile plans address exactly the single row this shape has.
-pub(super) fn resolve_reduce_axis_shape(resolved: &BoundOp, output_axes: &[u16]) -> ReduceAxisShape {
+pub(super) fn resolve_reduce_axis_shape(
+    resolved: &BoundOp,
+    output_axes: &[u16],
+) -> ReduceAxisShape {
     let reduction_dims: Vec<u16> = (0..resolved.extents.len() as u16)
         .filter(|dim| !output_axes.contains(dim))
         .collect();
@@ -999,9 +1019,7 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
     output: &mut [f32],
     packed_width: Option<&PackedWidthPanels>,
 ) -> Result<(), TensorError> {
-    if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some()
-        && resolved.node.0 == 1265
-    {
+    if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() && resolved.node.0 == 1265 {
         let output_axes = match &resolved.kind {
             BoundOpKind::Reduce { output_axes, .. } => output_axes.as_slice(),
             _ => &[],
@@ -2271,7 +2289,11 @@ pub(super) fn body_shape(body: &ComposedBody) -> BodyShape<'_> {
 /// change), rather than re-running it every element the way a direct
 /// `apply_body` call forced.
 #[inline(always)]
-pub(super) fn eval_body_shape(shape: &BodyShape, operand_values: &[f32], step_values: &mut [f32]) -> f32 {
+pub(super) fn eval_body_shape(
+    shape: &BodyShape,
+    operand_values: &[f32],
+    step_values: &mut [f32],
+) -> f32 {
     match *shape {
         BodyShape::Unary(op, a) => apply_scalar_op(op, &[operand_values[a as usize]]),
         BodyShape::Binary(op, a, b) => apply_scalar_op(
@@ -2309,7 +2331,11 @@ pub(super) fn operand_is_affine(resolved: &BoundOp, strides: &[i64], index: u16)
 /// (`proxima-tensor/docs/discipline.md` ROW 66). The two gates genuinely
 /// disagree on which strides they accept, and the disagreement is a
 /// measurement.
-pub(super) fn operand_is_unit_or_broadcast(resolved: &BoundOp, strides: &[i64], index: u16) -> bool {
+pub(super) fn operand_is_unit_or_broadcast(
+    resolved: &BoundOp,
+    strides: &[i64],
+    index: u16,
+) -> bool {
     operand_is_affine(resolved, strides, index) && strides[index as usize] <= 1
 }
 
@@ -2322,7 +2348,11 @@ pub(super) fn operand_is_unit_or_broadcast(resolved: &BoundOp, strides: &[i64], 
 /// `Generic` staying `false` here is load-bearing, not merely conservative.
 /// [`run_elementwise`]'s own `Generic` fast path is a separate, WIDER gate:
 /// [`generic_body_is_affine_fast_path`].
-pub(super) fn body_shape_is_affine_fast_path(resolved: &BoundOp, shape: &BodyShape, strides: &[i64]) -> bool {
+pub(super) fn body_shape_is_affine_fast_path(
+    resolved: &BoundOp,
+    shape: &BodyShape,
+    strides: &[i64],
+) -> bool {
     match *shape {
         BodyShape::Unary(_, a) => operand_is_unit_or_broadcast(resolved, strides, a),
         BodyShape::Binary(_, a, b) => {
@@ -2548,7 +2578,12 @@ pub(super) fn reduce_width_fast(
 }
 
 #[inline(always)]
-pub(super) fn combine_reduction(reduce_op: ScalarOp, previous: f32, value: f32, seeded: bool) -> f32 {
+pub(super) fn combine_reduction(
+    reduce_op: ScalarOp,
+    previous: f32,
+    value: f32,
+    seeded: bool,
+) -> f32 {
     if seeded {
         apply_scalar_op(reduce_op, &[previous, value])
     } else {
@@ -2952,4 +2987,3 @@ pub(super) fn reduce_width_binary_scalar_dispatch(
         *slot = combine_reduction(reduce_op, *slot, value, seeded);
     }
 }
-

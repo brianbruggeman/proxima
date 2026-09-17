@@ -1372,7 +1372,9 @@ impl<'file> LoadedModel<'file> {
         // of the pool-wide budget below (`ServingConfig::
         // expert_residency_schedule`'s own doc names this as the one site
         // that consults it).
-        let per_layer_residency_budget = serving_config.expert_residency_schedule.per_layer_budget_bytes;
+        let per_layer_residency_budget = serving_config
+            .expert_residency_schedule
+            .per_layer_budget_bytes;
         if per_layer_residency_budget != 0 {
             return Err(InteropError::UnsupportedServingConfig(format!(
                 "expert_residency_schedule.per_layer_budget_bytes={per_layer_residency_budget}: \
@@ -1554,26 +1556,32 @@ impl<'file> LoadedModel<'file> {
         // for-byte the prior behavior. `cached_len` (below) already carries
         // KV state across these chunks the same way it carries it across
         // the one-position split loop.
-        let one_evaluation_chunks: Vec<(usize, usize)> =
-            if self.single_position_step && prompt_token_count > 1 && one_evaluation_prefill_requested {
-                let chunk_width = serving_config.prefill_chunk_positions;
-                if chunk_width > 0 && chunk_width < prompt_token_count {
-                    let mut chunks = Vec::new();
-                    let mut offset = 0;
-                    while offset < prompt_token_count {
-                        let width = chunk_width.min(prompt_token_count - offset);
-                        chunks.push((offset, width));
-                        offset += width;
-                    }
-                    chunks
-                } else {
-                    alloc::vec![(0, prompt_token_count)]
+        let one_evaluation_chunks: Vec<(usize, usize)> = if self.single_position_step
+            && prompt_token_count > 1
+            && one_evaluation_prefill_requested
+        {
+            let chunk_width = serving_config.prefill_chunk_positions;
+            if chunk_width > 0 && chunk_width < prompt_token_count {
+                let mut chunks = Vec::new();
+                let mut offset = 0;
+                while offset < prompt_token_count {
+                    let width = chunk_width.min(prompt_token_count - offset);
+                    chunks.push((offset, width));
+                    offset += width;
                 }
+                chunks
             } else {
-                Vec::new()
-            };
-        let mut one_evaluation_prefill_programs: Vec<(usize, Vec<Op>, NodeId, Vec<Qwen35LayerRoots>)> =
-            Vec::new();
+                alloc::vec![(0, prompt_token_count)]
+            }
+        } else {
+            Vec::new()
+        };
+        let mut one_evaluation_prefill_programs: Vec<(
+            usize,
+            Vec<Op>,
+            NodeId,
+            Vec<Qwen35LayerRoots>,
+        )> = Vec::new();
         if self.single_position_step
             && let Some(hparams) = self.qwen35moe_hparams.as_ref()
         {
@@ -1585,14 +1593,19 @@ impl<'file> LoadedModel<'file> {
                     continue;
                 }
                 let (program, roots, layer_roots, _moe_sites, _diagnostics) =
-                    crate::qwen35moe::qwen35moe_forward_program_at_width(hparams, Some(width as u32))
-                        .map_err(|error| InteropError::PreGatherExecutionUnsupported {
+                    crate::qwen35moe::qwen35moe_forward_program_at_width(
+                        hparams,
+                        Some(width as u32),
+                    )
+                    .map_err(|error| {
+                        InteropError::PreGatherExecutionUnsupported {
                             architecture: String::from("qwen35moe"),
                             reason: alloc::format!(
                                 "one-evaluation prefill program at width {width} failed to build: \
                                  {error}"
                             ),
-                        })?;
+                        }
+                    })?;
                 one_evaluation_prefill_programs.push((width, program, roots.logits, layer_roots));
             }
         }
@@ -1667,10 +1680,13 @@ impl<'file> LoadedModel<'file> {
                             // every width in `one_evaluation_chunks` was built into
                             // `one_evaluation_prefill_programs` above, in the same loop.
                             #[allow(clippy::expect_used)]
-                            let (_, program, _logits_root, layer_roots) = one_evaluation_prefill_programs
-                                .iter()
-                                .find(|(built_width, ..)| *built_width == width)
-                                .expect("chunk width program built above for every chunk width");
+                            let (_, program, _logits_root, layer_roots) =
+                                one_evaluation_prefill_programs
+                                    .iter()
+                                    .find(|(built_width, ..)| *built_width == width)
+                                    .expect(
+                                        "chunk width program built above for every chunk width",
+                                    );
                             (program, layer_roots, false)
                         } else {
                             (&self.program, &self.layer_roots, self.single_position_step)
@@ -1713,6 +1729,9 @@ impl<'file> LoadedModel<'file> {
                         self.architecture_impl
                             .as_ref()
                             .is_some_and(|architecture| architecture.name() == "qwen35moe"),
+                        self.architecture_impl
+                            .as_ref()
+                            .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
                     );
                     #[cfg(feature = "instrument")]
                     let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
@@ -1876,7 +1895,8 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(feature = "instrument")]
                     let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
 
-                    let mut roots: Vec<NodeId> = Vec::with_capacity(1 + active_layer_roots.len() * 3);
+                    let mut roots: Vec<NodeId> =
+                        Vec::with_capacity(1 + active_layer_roots.len() * 3);
                     let monolithic_prefill_requested = qwen35moe_pre_gather_enabled(
                         serving_config.qwen35moe_pre_gather,
                         self.architecture_impl
@@ -1891,7 +1911,14 @@ impl<'file> LoadedModel<'file> {
                     if monolithic_prefill_requested {
                         roots.extend(self.router_roots.iter().copied());
                     }
-                    for roots_for_layer in active_layer_roots.iter() {
+                    // `_layer` is read inside `#[cfg(all(feature =
+                    // "metal-output-placement", target_os = "macos"))]`
+                    // arms below -- genuinely unused under a plain `std`
+                    // build, so both clippy's unused-enumerate-index lint
+                    // and rustc's unused-variables lint fire on a config
+                    // this loop body does not compile under.
+                    #[allow(clippy::unused_enumerate_index)]
+                    for (_layer, roots_for_layer) in active_layer_roots.iter().enumerate() {
                         match roots_for_layer {
                             Qwen35LayerRoots::Attention((even, odd, value)) => {
                                 roots.push(*even);
@@ -1986,7 +2013,8 @@ impl<'file> LoadedModel<'file> {
                             self.qwen35moe_layer_diagnostics.iter().enumerate()
                         {
                             if let Some(taps) = diagnostic.dense_attention_taps {
-                                if let Some(operation) = active_program.get(taps.q_split.0 as usize) {
+                                if let Some(operation) = active_program.get(taps.q_split.0 as usize)
+                                {
                                     eprintln!(
                                         "dense_nodes layer={} normed={} q_split={} q_op={operation:?}",
                                         layer, taps.normed.0, taps.q_split.0,
@@ -2019,7 +2047,8 @@ impl<'file> LoadedModel<'file> {
                                                         if let Some(Op::Elementwise {
                                                             operands: weight_operands,
                                                             ..
-                                                        }) = active_program.get(operand.0 as usize)
+                                                        }) =
+                                                            active_program.get(operand.0 as usize)
                                                         {
                                                             roots.extend(
                                                                 weight_operands
@@ -3233,7 +3262,15 @@ impl<'file> LoadedModel<'file> {
                             "decode_loop_step_trace: layer 0/3 cache state before/after this step's append"
                         );
                     }
-                    cached_len += new_count;
+                    // Cacheless (`active_layer_roots.is_empty()`) architectures have
+                    // no `LayerCache` to advance -- `cached_len` stays 0 so next
+                    // step's `build_position_inputs`/`apply_serving_config` above
+                    // compute positions against the FULL re-fed sequence starting
+                    // at 0, matching the `next_ids` re-prefill below, rather than
+                    // an offset into a cache that was never populated.
+                    if !active_layer_roots.is_empty() {
+                        cached_len += new_count;
+                    }
 
                     // Everything below samples a token off THIS batch's logits.
                     // For a `single_position_step` architecture's expanded
@@ -3278,11 +3315,12 @@ impl<'file> LoadedModel<'file> {
                                 vocab: vocab_size,
                             });
                         }
+                        let last_position = &logits[..vocab_size];
                         if std::env::var_os("PROXIMA_DEBUG_GDN_LOGITS").is_some() {
                             let mut ranked: Vec<usize> = (0..vocab_size).collect();
                             ranked.sort_unstable_by(|left, right| {
-                                logits[*right]
-                                    .total_cmp(&logits[*left])
+                                last_position[*right]
+                                    .total_cmp(&last_position[*left])
                                     .then_with(|| left.cmp(right))
                             });
                             eprintln!(
@@ -3292,12 +3330,11 @@ impl<'file> LoadedModel<'file> {
                                 ranked
                                     .iter()
                                     .take(8)
-                                    .map(|index| (*index, logits[*index]))
+                                    .map(|index| (*index, last_position[*index]))
                                     .collect::<Vec<_>>(),
-                                &logits[..logits.len().min(8)]
+                                &last_position[..last_position.len().min(8)]
                             );
                         }
-                        let last_position = &logits[..vocab_size];
                         #[cfg(feature = "instrument")]
                         {
                             let (argmax_token, argmax_logit) = last_position
@@ -3352,7 +3389,21 @@ impl<'file> LoadedModel<'file> {
                             token_sampled = token_id,
                             "decode_loop_step_trace: sampled token fed forward as next step's next_ids"
                         );
-                        next_ids = alloc::vec![token_id];
+                        // Cacheless architectures (`active_layer_roots.is_empty()`)
+                        // have no KV cache carrying prior context forward, so
+                        // feeding only the new token would forward a one-token
+                        // sequence with no history. Re-prefill the FULL growing
+                        // sequence instead -- `next_ids` here is still THIS step's
+                        // own `ids_for_step` source (its last use already passed),
+                        // so appending is exactly last step's sequence plus the
+                        // token just sampled.
+                        next_ids = if active_layer_roots.is_empty() {
+                            let mut resent_sequence = next_ids.clone();
+                            resent_sequence.push(token_id);
+                            resent_sequence
+                        } else {
+                            alloc::vec![token_id]
+                        };
 
                         #[cfg(feature = "instrument")]
                         {
@@ -3679,6 +3730,9 @@ impl<'file> LoadedModel<'file> {
                     self.architecture_impl
                         .as_ref()
                         .is_some_and(|architecture| architecture.name() == "qwen35moe"),
+                    self.architecture_impl
+                        .as_ref()
+                        .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
                 );
                 #[cfg(feature = "instrument")]
                 let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
@@ -3928,7 +3982,8 @@ impl<'file> LoadedModel<'file> {
                 // caller-opted-in ceiling, not an unconditional assertion.
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 if serving_config.max_command_buffers_per_token > 0
-                    && metal_stage.gpu_exec_calls > serving_config.max_command_buffers_per_token as u64
+                    && metal_stage.gpu_exec_calls
+                        > serving_config.max_command_buffers_per_token as u64
                 {
                     return Err(InteropError::TooManyCommandBuffers {
                         step: _step,
@@ -4191,6 +4246,9 @@ impl<'file> LoadedModel<'file> {
             self.architecture_impl
                 .as_ref()
                 .is_some_and(|architecture| architecture.name() == "qwen35moe"),
+            self.architecture_impl
+                .as_ref()
+                .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
         );
 
         // The SAME program-derived cache-leaf-name/step_inputs assembly
@@ -4385,10 +4443,18 @@ impl<'file> LoadedModel<'file> {
             self.forward_node_values_on_backend(prompt, &[self.logits_root], gpu_layers)?;
         let logits = values.remove(0);
         let vocab_size = self.architecture.vocab as usize;
-        // `logits_root` is now the `lm_head_row`-gathered LAST row only
-        // (`spec.rs`'s own doc on that leaf, fed `ids.len() - 1` above) --
-        // one row of `vocab_size`, already the "last prompt position"
-        // this method's own doc promises.
+        // `logits_root` must be the `lm_head_row`-gathered LAST row only
+        // (`crate::architecture`'s doc on `BoundProgram::logits_root`) --
+        // exactly one row of `vocab_size`. A foreign `Architecture` that
+        // hands back the full `[new_count, vocab]` buffer is rejected here
+        // rather than silently sampled at row 0.
+        if logits.len() != vocab_size {
+            return Err(InteropError::LogitsShapeMismatch {
+                expected_rows: 1,
+                found_rows: logits.len() / vocab_size,
+                vocab: vocab_size,
+            });
+        }
         let last_position = logits[..vocab_size].to_vec();
 
         #[cfg(feature = "instrument")]
@@ -4414,7 +4480,10 @@ impl<'file> LoadedModel<'file> {
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-pub(super) fn use_metal_output_placements(has_recurrent_state: bool, monolithic_all_low: bool) -> bool {
+pub(super) fn use_metal_output_placements(
+    has_recurrent_state: bool,
+    monolithic_all_low: bool,
+) -> bool {
     // `evaluate_with_placements` has carried `expert_sources` since it grew
     // `execute_plan_named_with_placements_and_expert_sources` -- excluding
     // routed-expert steps here (ROW 549) used to send every qwen35moe
@@ -4426,7 +4495,10 @@ pub(super) fn use_metal_output_placements(has_recurrent_state: bool, monolithic_
     monolithic_all_low || has_recurrent_state
 }
 
-pub(super) fn qwen35moe_pre_gather_enabled(configured: bool, architecture_name: Option<&str>) -> bool {
+pub(super) fn qwen35moe_pre_gather_enabled(
+    configured: bool,
+    architecture_name: Option<&str>,
+) -> bool {
     configured && architecture_name == Some("qwen35moe")
 }
 
@@ -4445,7 +4517,10 @@ pub(super) fn qwen35moe_monolithic_all_low_enabled(
 }
 
 #[cfg(any(test, feature = "metal"))]
-pub(super) fn should_release_monolithic_sources(monolithic_all_low: bool, retain_for_warmup: bool) -> bool {
+pub(super) fn should_release_monolithic_sources(
+    monolithic_all_low: bool,
+    retain_for_warmup: bool,
+) -> bool {
     monolithic_all_low && !retain_for_warmup
 }
 
@@ -4486,4 +4561,3 @@ pub(super) fn map_expert_sources_to_segment<'source>(
     }
     Ok(mapped)
 }
-

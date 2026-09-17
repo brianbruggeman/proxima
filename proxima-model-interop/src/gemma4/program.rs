@@ -34,8 +34,8 @@ pub fn gemma4_sliding_rope_table(
     let mut sin = alloc::vec![0.0f32; positions.len() * pairs];
     for (offset, &position) in positions.iter().enumerate() {
         for pair in 0..pairs {
-            let theta = position as f32
-                * freq_base.powf(-((2 * pair) as f32) / dimension_count as f32);
+            let theta =
+                position as f32 * freq_base.powf(-((2 * pair) as f32) / dimension_count as f32);
             cos[offset * pairs + pair] = theta.cos();
             sin[offset * pairs + pair] = theta.sin();
         }
@@ -51,7 +51,11 @@ mod tests {
     #[test]
     fn gemma4_sliding_rope_table_produces_identity_angles_at_position_zero() {
         let (cos, sin) = gemma4_sliding_rope_table(&[0], 1.0e4, 4);
-        assert_eq!(cos, alloc::vec![1.0, 1.0], "theta = 0 at position 0 for every pair");
+        assert_eq!(
+            cos,
+            alloc::vec![1.0, 1.0],
+            "theta = 0 at position 0 for every pair"
+        );
         assert_eq!(sin, alloc::vec![0.0, 0.0]);
     }
 
@@ -59,6 +63,9 @@ mod tests {
     fn gemma4_sliding_rope_table_varies_by_position() {
         let (cos_zero, _) = gemma4_sliding_rope_table(&[0], 1.0e4, 4);
         let (cos_one, _) = gemma4_sliding_rope_table(&[1], 1.0e4, 4);
-        assert_ne!(cos_zero, cos_one, "distinct positions rotate by distinct angles");
+        assert_ne!(
+            cos_zero, cos_one,
+            "distinct positions rotate by distinct angles"
+        );
     }
 }

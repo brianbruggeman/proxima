@@ -531,8 +531,13 @@ fn row_c_gather_fused_reduce(c: &mut Criterion) {
     let _ = reduced;
 
     let shapes = proxima_tensor::infer(&program, &[]).expect("row c infers");
-    let resolved = proxima_tensor::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("row c binds");
+    let resolved = proxima_tensor::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("row c binds");
     println!(
         "proxima BoundOp count for gather->scale->reduce: {} (1 means gather+scale never materialize)",
         resolved.len()
@@ -672,8 +677,13 @@ fn row_d_deep_chain(c: &mut Criterion) {
     let _ = reduced;
 
     let shapes = proxima_tensor::infer(&program, &[]).expect("row d infers");
-    let resolved = proxima_tensor::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("row d binds");
+    let resolved = proxima_tensor::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("row d binds");
     println!(
         "proxima BoundOp count for the 9-op chain + reduce: {} (expect 9: 8 elementwise ops \
          each materialize their own buffer — only op 9, the reduce's direct producer, is \
@@ -803,8 +813,13 @@ fn row_e_locally_connected_window(c: &mut Criterion) {
     let _ = reduced;
 
     let shapes = proxima_tensor::infer(&program, &[]).expect("row e infers");
-    let resolved = proxima_tensor::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("row e binds");
+    let resolved = proxima_tensor::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("row e binds");
     println!(
         "proxima BoundOp count: {} (the two-term window*multiply folds directly into the reduce)",
         resolved.len()
@@ -1061,8 +1076,13 @@ fn row_g_mlp_chain(c: &mut Criterion) {
     let _ = out;
 
     let shapes = proxima_tensor::infer(&program, &[]).expect("row g infers");
-    let resolved = proxima_tensor::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("row g binds");
+    let resolved = proxima_tensor::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("row g binds");
     println!(
         "proxima BoundOp count for the full MLP chain: {} (only the up-projection's product \
          is absorbed into its reduce; rmsnorm's and silu's elementwise steps each materialize)",
@@ -1162,8 +1182,13 @@ fn row_h_elementwise_chain(c: &mut Criterion) {
     let _ = h;
 
     let shapes = proxima_tensor::infer(&program, &[]).expect("row h infers");
-    let resolved = proxima_tensor::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("row h binds");
+    let resolved = proxima_tensor::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("row h binds");
     println!(
         "proxima BoundOp count for the 7-op pure chain: {} (== 7: no fusion, every op \
          materializes its own {} MB buffer)",

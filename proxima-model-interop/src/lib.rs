@@ -37,9 +37,9 @@ pub mod expert_sidecar;
 #[cfg(feature = "std")]
 pub mod expert_slab;
 #[cfg(feature = "std")]
-mod generate;
-#[cfg(feature = "std")]
 pub mod gemma4;
+#[cfg(feature = "std")]
+mod generate;
 #[cfg(feature = "std")]
 mod hf_bind;
 mod hf_config;
@@ -101,6 +101,8 @@ pub use expert_sidecar::{
 #[cfg(feature = "std")]
 pub use expert_slab::{ExpertSlab, ExpertSlabMemory, encode_expert_copy, recode_expert_into};
 #[cfg(feature = "std")]
+pub use gemma4::{GEMMA4, Gemma4Arch};
+#[cfg(feature = "std")]
 pub use generate::{Control, DecodeMetrics, LoadedModel, Phase, PrefixState, TokenEvent};
 #[cfg(feature = "std")]
 pub use hf_bind::{names as hf_names, node_names as hf_node_names, permute_rope_rows};
@@ -120,8 +122,6 @@ pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, qua
 pub use qwen35::{
     Qwen35Arch, Qwen35Architecture, Qwen35LayerKind, Qwen35SsmShape, bind_qwen35_checkpoint,
 };
-#[cfg(feature = "std")]
-pub use gemma4::{GEMMA4, Gemma4Arch};
 #[cfg(feature = "std")]
 pub use qwen35moe::{QWEN35MOE, Qwen35MoeArch};
 #[cfg(feature = "std")]

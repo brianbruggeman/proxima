@@ -669,7 +669,8 @@ pub(super) fn layer_norm_cluster_plan(
 }
 
 pub(super) static LAYER_NORM_CLUSTER_HITS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
-pub(super) static LAYER_NORM_CLUSTER_ELEMENTS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+pub(super) static LAYER_NORM_CLUSTER_ELEMENTS: EpilogueFuseAtomicU64 =
+    EpilogueFuseAtomicU64::new(0);
 pub(super) static LAYER_NORM_CLUSTER_NANOS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
 
 /// `docs/discipline.md` ROW 204's own re-provable hit counter, same shape as
@@ -945,17 +946,23 @@ pub(super) fn apply_layer_norm_cluster_fused<B: Deref<Target = [f32]>>(
 /// profiling run); (b) [`is_post_reduce_epilogue`] matches; (c) everything
 /// else (non-epilogue elementwise, iota, constant, scan).
 #[cfg(feature = "epilogue-profile-probe")]
-pub(super) static EPILOGUE_PROFILE_REDUCE_NANOS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+pub(super) static EPILOGUE_PROFILE_REDUCE_NANOS: EpilogueProfileAtomicU64 =
+    EpilogueProfileAtomicU64::new(0);
 #[cfg(feature = "epilogue-profile-probe")]
-pub(super) static EPILOGUE_PROFILE_REDUCE_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+pub(super) static EPILOGUE_PROFILE_REDUCE_CALLS: EpilogueProfileAtomicU64 =
+    EpilogueProfileAtomicU64::new(0);
 #[cfg(feature = "epilogue-profile-probe")]
-pub(super) static EPILOGUE_PROFILE_EPILOGUE_NANOS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+pub(super) static EPILOGUE_PROFILE_EPILOGUE_NANOS: EpilogueProfileAtomicU64 =
+    EpilogueProfileAtomicU64::new(0);
 #[cfg(feature = "epilogue-profile-probe")]
-pub(super) static EPILOGUE_PROFILE_EPILOGUE_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+pub(super) static EPILOGUE_PROFILE_EPILOGUE_CALLS: EpilogueProfileAtomicU64 =
+    EpilogueProfileAtomicU64::new(0);
 #[cfg(feature = "epilogue-profile-probe")]
-pub(super) static EPILOGUE_PROFILE_OTHER_NANOS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+pub(super) static EPILOGUE_PROFILE_OTHER_NANOS: EpilogueProfileAtomicU64 =
+    EpilogueProfileAtomicU64::new(0);
 #[cfg(feature = "epilogue-profile-probe")]
-pub(super) static EPILOGUE_PROFILE_OTHER_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+pub(super) static EPILOGUE_PROFILE_OTHER_CALLS: EpilogueProfileAtomicU64 =
+    EpilogueProfileAtomicU64::new(0);
 /// `docs/discipline.md` ROW 201/202: bucket (a) above merges the 96
 /// GEMM-shaped `MatMul` folds with 74 small non-GEMM reduces (LayerNorm
 /// mean/variance, final mean-pooling) that share `Keep::Reduce` but pay a
@@ -979,7 +986,11 @@ pub(super) static EPILOGUE_PROFILE_REDUCE_SMALL_CALLS: EpilogueProfileAtomicU64 
     EpilogueProfileAtomicU64::new(0);
 
 #[cfg(feature = "epilogue-profile-probe")]
-pub(super) fn epilogue_profile_record(computed: &BoundOp, reduce_nodes: &[bool], elapsed_nanos: u64) {
+pub(super) fn epilogue_profile_record(
+    computed: &BoundOp,
+    reduce_nodes: &[bool],
+    elapsed_nanos: u64,
+) {
     if matches!(
         computed.kind,
         BoundOpKind::Reduce {
@@ -1842,4 +1853,3 @@ impl<'a> QuantizedBlock<'a> {
         })
     }
 }
-

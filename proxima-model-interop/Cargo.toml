@@ -354,3 +354,82 @@ required-features = ["std"]
 [[example]]
 name = "compare_local"
 required-features = ["std"]
+
+# Loads a real checkpoint via `generate::LoadedModel` over an mmap'd file --
+# same reason as `synth_qwen35_decode`: `LoadedModel` and `memmap2` are both
+# `std`-gated, so a bare default-features build has neither.
+[[example]]
+name = "rerank_local"
+required-features = ["std"]
+
+# mmap's a GGUF file and drives `proxima_tokenizer::{decode, encode_with_bos_eos}`
+# -- same `std`-only reason as `bench_local`: `memmap2` and `dep:proxima-tokenizer`
+# are both only pulled in by the `std` feature.
+[[example]]
+name = "tokenize_local"
+required-features = ["std"]
+
+# Writes an expert sidecar file via `write_expert_sidecar`/`ExpertStackSpec`/
+# `PackedOwnedKind` (all `#[cfg(feature = "std")]` re-exports in `lib.rs`) and
+# reads config through `conflaguration::Settings`, which `std` alone pulls in
+# as an optional dep -- same `std`-only reason as the examples above.
+[[example]]
+name = "build_qwen35_sidecar"
+required-features = ["std"]
+
+# mmap's a checkpoint and drives `LoadedModel`/`metadata_u32` -- same `std`-only
+# reason as `rerank_local`/`embed_local`'s sibling scripts above. The
+# `omega::CudaDriver`/`omega::probe_wgpu` calls are internally gated behind
+# `#[cfg(feature = "cuda")]`/`#[cfg(feature = "vulkan")]` inside the file
+# itself (matching `bench_local.rs`), so they need no feature here.
+[[example]]
+name = "embed_local"
+required-features = ["std"]
+
+# mmap's the gemma4 checkpoint -- same `std`-only reason as `bench_local`.
+[[example]]
+name = "gemma4_dump"
+required-features = ["std"]
+
+# mmap's the gemma4 checkpoint -- same `std`-only reason as `gemma4_dump`.
+[[example]]
+name = "gemma4_norm_channels"
+required-features = ["std"]
+
+# mmap's the gemma4 checkpoint and drives `LoadedModel`/`gemma4::from_metadata`
+# (both `#[cfg(feature = "std")]` in `lib.rs`) -- same `std`-only reason as
+# `synth_qwen35_decode`.
+[[example]]
+name = "gemma4_real_weight_parity"
+required-features = ["std"]
+
+# mmap's a GGUF file and drives `classify_task` over it -- same `std`-only
+# reason as `bench_local`/`rerank_local` (memmap2 is `std`-gated).
+[[example]]
+name = "task_probe"
+required-features = ["std"]
+
+# Drives `proxima_tokenizer::{encode, decode, gguf::vocab_from_metadata}`,
+# only pulled in by `dep:proxima-tokenizer` under `std` -- same reason as
+# `tokenize_local`.
+[[example]]
+name = "gemma4_decode_probe"
+required-features = ["std"]
+
+# Drives `proxima_tokenizer::{vocab::Vocab, gguf::vocab_from_metadata, encode,
+# unigram::encode_fragment}` -- same `std`-only reason as `tokenize_local`.
+[[example]]
+name = "gemma4_tokenizer_spm_no_prefix"
+required-features = ["std"]
+
+# Drives `proxima_tokenizer::{vocab::Vocab, gguf::vocab_from_metadata, encode}`
+# -- same `std`-only reason as `tokenize_local`.
+[[example]]
+name = "gemma4_tokenizer_spm_vs_bpe"
+required-features = ["std"]
+
+# Drives `proxima_tokenizer::{gguf::vocab_from_metadata, encode, bpe::encode_pretoken}`
+# -- same `std`-only reason as `tokenize_local`.
+[[example]]
+name = "gemma4_tokenizer_wholestring_bpe"
+required-features = ["std"]

@@ -1325,4 +1325,3 @@ pub fn append_qwen35_dense_attention_layer(
 
     Ok((x_next, roots))
 }
-

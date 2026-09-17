@@ -71,7 +71,8 @@ use proxima_primitives::pipe::Pipe;
 ))]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts;
 use proxima_tensor::cpu::{
-    Evaluated, ExpertSource, QuantizedBlock, evaluate_quantized_named_exact_with_scratch_and_experts,
+    Evaluated, ExpertSource, QuantizedBlock,
+    evaluate_quantized_named_exact_with_scratch_and_experts,
 };
 use proxima_tensor::op::{Extent, NodeId, Op};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -79,7 +80,7 @@ use proxima_tensor::spec::CachedLayerRoots;
 use proxima_tensor::spec::{
     Qwen35LayerRoots, mistral_cached_forward_program_with_experts_and_layer_taps,
 };
-use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
+use proxima_tokenizer::{SamplingConfig, TokenType, Vocab, sample_next_token};
 use std::cell::RefCell;
 use std::fs::File;
 use std::sync::Arc;
@@ -144,17 +145,17 @@ use omega::execute_plan_named_with_placements_dispatch_timed;
     target_os = "macos"
 ))]
 use omega::execute_plan_named_with_placements_op_timed;
-#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-use omega::{
-    PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
-    execute_plan_named_with_placements_and_expert_sources, plan_named_with_placed_inputs,
-};
 #[cfg(all(
     feature = "metal-output-placement",
     feature = "instrument",
     target_os = "macos"
 ))]
 use omega::read_placed_buffer_f32;
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use omega::{
+    PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
+    execute_plan_named_with_placements_and_expert_sources, plan_named_with_placed_inputs,
+};
 #[cfg(feature = "instrument")]
 use proxima_telemetry::{debug, info};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -175,7 +176,6 @@ use crate::serving::GPU_LAYERS_ALL;
 use crate::serving::apply_serving_config;
 use crate::serving::{GdnPrefillBackend, ServingConfig};
 
-
 #[macro_use]
 mod load_model;
 #[macro_use]
@@ -185,7 +185,7 @@ mod residency_caches;
 #[macro_use]
 mod decode;
 mod tests_all;
+use decode::*;
 pub use load_model::*;
 pub(crate) use pregather::*;
 pub use residency_caches::*;
-use decode::*;

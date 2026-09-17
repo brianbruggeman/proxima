@@ -472,8 +472,7 @@ fn a_reduce_with_a_sigmoid_epilogue_is_not_stranded_by_width_tile_packing() {
     let named: Vec<(&str, &[f32])> = vec![("x", &x_data), ("w", &w_data)];
 
     let small = evaluate_named(&program, &[], &named, &[g]).expect("small (g alone) evaluates");
-    let wide =
-        evaluate_named(&program, &[], &named, &[z, g]).expect("wide (z and g) evaluates");
+    let wide = evaluate_named(&program, &[], &named, &[z, g]).expect("wide (z and g) evaluates");
 
     let small_g = small.get(g).expect("small g present").0;
     let wide_z = wide.get(z).expect("wide z present").0;
@@ -893,8 +892,13 @@ fn commutative_operand_order_is_canonical_regardless_of_authored_order() {
         );
 
         let shapes = shape::infer(&program, &[]).expect("shape inference succeeds");
-        let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-            .expect("bind succeeds");
+        let resolved = bind::bind(
+            &program,
+            &shapes,
+            &[terminal(&program)],
+            NumericPolicy::bit_exact(),
+        )
+        .expect("bind succeeds");
         let BoundOpKind::Elementwise { body, .. } = &resolved
             .iter()
             .find(|op| op.node == root)
@@ -1101,8 +1105,7 @@ fn staged_round_never_runs_a_stage_before_its_predecessor_completes() {
 
     let stage_offsets = uniform_stage_offsets(STAGES, CHUNKS);
     let completed: Vec<AtomicUsize> = (0..STAGES).map(|_| AtomicUsize::new(0)).collect();
-    let published: Vec<AtomicUsize> =
-        (0..STAGES * CHUNKS).map(|_| AtomicUsize::new(0)).collect();
+    let published: Vec<AtomicUsize> = (0..STAGES * CHUNKS).map(|_| AtomicUsize::new(0)).collect();
     let violations = AtomicUsize::new(0);
 
     let round = StagedRound {
@@ -1596,8 +1599,8 @@ fn reduce_dot_binary_stride_two_matches_a_scalar_reference() {
 
     let x_data = random_vec(0x51de_0000, 2 * k);
     let y_data = random_vec(0x51de_0001, k);
-    let evaluated = evaluate(&program, &[], &[&x_data, &y_data], &[])
-        .expect("stride-2 dot reduce evaluates");
+    let evaluated =
+        evaluate(&program, &[], &[&x_data, &y_data], &[]).expect("stride-2 dot reduce evaluates");
 
     let expected: f32 = (0..k)
         .map(|position| x_data[2 * position] * y_data[position])
@@ -1684,17 +1687,17 @@ fn cached_attention_bound_step_runs_online_softmax() {
 fn cached_attention_bound_step_scores_the_partial_rotary_pass_plane() {
     let mut buffers = vec![None; 11];
     let inputs = [
-        vec![1.0],           // query_even
-        vec![0.0],           // query_odd
-        vec![1.0],           // cached_key_even
-        vec![0.0],           // cached_key_odd
-        vec![0.0],           // new_key_even
-        vec![1.0],           // new_key_odd
+        vec![1.0],                  // query_even
+        vec![0.0],                  // query_odd
+        vec![1.0],                  // cached_key_even
+        vec![0.0],                  // cached_key_odd
+        vec![0.0],                  // new_key_even
+        vec![1.0],                  // new_key_odd
         vec![2.0, 3.0, 10.0, 11.0], // cached_value
         vec![4.0, 5.0, 12.0, 13.0], // new_value
-        vec![1.0, 0.0],      // pass_query
-        vec![1.0, 0.0],      // pass_cached_key
-        vec![0.0, 1.0],      // pass_new_key
+        vec![1.0, 0.0],             // pass_query
+        vec![1.0, 0.0],             // pass_cached_key
+        vec![0.0, 1.0],             // pass_new_key
     ];
     for (index, input) in inputs.iter().enumerate() {
         buffers[index] = Some(input.as_slice());
@@ -1738,8 +1741,7 @@ fn cached_attention_bound_step_scores_the_partial_rotary_pass_plane() {
     let cached_weight = 1.0 / (1.0 + (-2.0f32).exp());
     let new_weight = 1.0 - cached_weight;
     for dimension in 0..4 {
-        let expected =
-            cached_weight * inputs[6][dimension] + new_weight * inputs[7][dimension];
+        let expected = cached_weight * inputs[6][dimension] + new_weight * inputs[7][dimension];
         assert!(
             (output[dimension] - expected).abs() < 1e-6,
             "dimension {dimension}: got {}, expected {expected}",
@@ -1967,13 +1969,7 @@ where
         let next_index = Arc::clone(&next_index);
         let chunk_ranges = Arc::clone(&chunk_ranges);
         drop(pool.spawn(move || {
-            claim_and_run_rows::<Wide>(
-                &next_index,
-                dot_row_address,
-                width,
-                &chunk_ranges,
-                &sender,
-            );
+            claim_and_run_rows::<Wide>(&next_index, dot_row_address, width, &chunk_ranges, &sender);
             Ok::<(), _>(())
         }));
     }
@@ -2029,8 +2025,7 @@ fn bench_row_oversubscribe_picks_the_multiplier() {
         let mut samples_micros = Vec::with_capacity(5);
         for _ in 0..5 {
             let started = Instant::now();
-            let output =
-                dispatch_rows_with_oversubscribe(rows, workers, oversubscribe, dot_row);
+            let output = dispatch_rows_with_oversubscribe(rows, workers, oversubscribe, dot_row);
             let elapsed = started.elapsed().as_micros() as f64;
             assert_eq!(output.len(), rows);
             samples_micros.push(elapsed);
@@ -2220,15 +2215,12 @@ fn attention_tile_shapes_nano() {
         .output()
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .unwrap_or_else(|_| "uptime unavailable".to_string());
-    eprintln!(
-        "attention_tile_shapes_nano: heads={HEADS} repeats={REPEATS} ambient_load={load}"
-    );
+    eprintln!("attention_tile_shapes_nano: heads={HEADS} repeats={REPEATS} ambient_load={load}");
 
     for seq_len in [7usize, 8, 9] {
         for (name, k, n) in [("Q@K^T", 32usize, seq_len), ("softmax@V", seq_len, 32usize)] {
             let m = seq_len;
-            let mut rng =
-                Lcg(0x9E37_79B9 ^ (m as u64) ^ ((k as u64) << 8) ^ ((n as u64) << 16));
+            let mut rng = Lcg(0x9E37_79B9 ^ (m as u64) ^ ((k as u64) << 8) ^ ((n as u64) << 16));
             let a: Vec<f32> = (0..HEADS * m * k).map(|_| rng.next_unit()).collect();
             let b_kn: Vec<f32> = (0..HEADS * k * n).map(|_| rng.next_unit()).collect();
             // `n x k` row-major transpose of `b_kn`, per-head -- the
@@ -2416,9 +2408,7 @@ fn narrow_width_tile_shapes_nano() {
         .output()
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .unwrap_or_else(|_| "uptime unavailable".to_string());
-    eprintln!(
-        "narrow_width_tile_shapes_nano: heads={HEADS} repeats={REPEATS} ambient_load={load}"
-    );
+    eprintln!("narrow_width_tile_shapes_nano: heads={HEADS} repeats={REPEATS} ambient_load={load}");
 
     for m in [7usize, 8, 9] {
         let (k, n) = (32usize, m);
@@ -3170,12 +3160,10 @@ fn evaluate_named_with_arena_matches_evaluate_named_over_two_calls() {
 
     let first_a = [1.0f32, 2.0, 3.0, 4.0];
     let first_b = [10.0f32, 20.0, 30.0, 40.0];
-    let arena_first =
-        evaluate_named_with_arena(&mut arena, &[("a", &first_a), ("b", &first_b)])
-            .expect("first arena call evaluates");
-    let baseline_first =
-        evaluate_named(&program, &[], &[("a", &first_a), ("b", &first_b)], &[sum])
-            .expect("first baseline call evaluates");
+    let arena_first = evaluate_named_with_arena(&mut arena, &[("a", &first_a), ("b", &first_b)])
+        .expect("first arena call evaluates");
+    let baseline_first = evaluate_named(&program, &[], &[("a", &first_a), ("b", &first_b)], &[sum])
+        .expect("first baseline call evaluates");
     assert_eq!(
         arena_first.get(sum).map(|(data, _)| data.to_vec()),
         baseline_first.get(sum).map(|(data, _)| data.to_vec()),
@@ -3184,9 +3172,8 @@ fn evaluate_named_with_arena_matches_evaluate_named_over_two_calls() {
 
     let second_a = [100.0f32, 200.0, 300.0, 400.0];
     let second_b = [1.0f32, 2.0, 3.0, 4.0];
-    let arena_second =
-        evaluate_named_with_arena(&mut arena, &[("a", &second_a), ("b", &second_b)])
-            .expect("second arena call evaluates");
+    let arena_second = evaluate_named_with_arena(&mut arena, &[("a", &second_a), ("b", &second_b)])
+        .expect("second arena call evaluates");
     let baseline_second =
         evaluate_named(&program, &[], &[("a", &second_a), ("b", &second_b)], &[sum])
             .expect("second baseline call evaluates");
@@ -3370,9 +3357,8 @@ fn evaluate_named_with_arena_answers_a_constant_bound_input_without_a_repass_and
     let a = vec![1.0f32, 2.0, 3.0, 4.0];
     let b_first = vec![10.0f32, 20.0, 30.0, 40.0];
 
-    let mut arena =
-        build_static_arena_with_constants(&program, &[], &[sum], &[("b", &b_first)])
-            .expect("build arena with b bound at construction time");
+    let mut arena = build_static_arena_with_constants(&program, &[], &[sum], &[("b", &b_first)])
+        .expect("build arena with b bound at construction time");
 
     // First call: `named` carries ONLY `a` -- `b` is never re-passed.
     // `require_all = true` must not raise `UnboundInputName` for `b`.
@@ -3609,8 +3595,8 @@ fn build_static_arena_runs_a_live_constant_once_and_never_again() {
     );
 
     let step_three = [0.0f32, 0.0, 0.0, 0.0];
-    let evaluated = evaluate_named_with_arena(&mut arena, &[("a", &step_three)])
-        .expect("step three evaluates");
+    let evaluated =
+        evaluate_named_with_arena(&mut arena, &[("a", &step_three)]).expect("step three evaluates");
     assert_eq!(
         evaluated.get(live).map(|(data, _)| data.to_vec()),
         Some(vec![999.0, 999.0, 999.0, 999.0]),
@@ -4452,8 +4438,13 @@ fn a_gather_fused_into_a_fold_matches_a_hand_written_embedding_matmul_reference(
         embedding_matmul_program(vocab as u32, embed_dim as u32, seq as u32, out_dim as u32);
 
     let shapes = shape::infer(&program, &[]).expect("embedding matmul infers");
-    let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("embedding matmul resolves");
+    let resolved = bind::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("embedding matmul resolves");
     assert_eq!(
         resolved.len(),
         1,
@@ -4478,8 +4469,7 @@ fn a_gather_fused_into_a_fold_matches_a_hand_written_embedding_matmul_reference(
         for col in 0..out_dim {
             let mut total = 0.0f32;
             for k in 0..embed_dim {
-                total +=
-                    table_data[vocab_index * embed_dim + k] * weight_data[k * out_dim + col];
+                total += table_data[vocab_index * embed_dim + k] * weight_data[k * out_dim + col];
             }
             reference[row * out_dim + col] = total;
         }
@@ -4526,8 +4516,13 @@ fn a_gather_program_past_the_parallel_threshold_actually_splits_and_still_matche
         .collect();
 
     let shapes = shape::infer(&program, &[]).expect("infers");
-    let resolved =
-        bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact()).expect("resolves");
+    let resolved = bind::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("resolves");
     assert_eq!(resolved.len(), 1, "fused into one reduction node");
     assert!(
         element_count(&resolved[0].extents) >= PARALLEL_THRESHOLD,
@@ -4641,7 +4636,7 @@ fn a_reduce_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row() 
 /// the narrow-width widening covered separately below.
 #[test]
 fn a_composed_two_axis_reduction_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row()
- {
+{
     let (rows, k_outer, k_inner, width) = (8u32, 3u32, 4u32, 16u32);
     let contraction = k_outer * k_inner;
     let (program, sum) = batched_matmul_program_with_per_row_weight_composed_reduction(
@@ -4818,8 +4813,7 @@ fn a_two_leading_axis_shared_weight_reduce_engages_width_tile_and_matches_naive_
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 fn a_three_leading_axis_reduce_declines_width_tile_with_axes_shape_reason() {
     let (outer, batch, seq, contraction, width) = (2u32, 3u32, 4u32, 5u32, 16u32);
-    let (program, sum) =
-        three_leading_axes_matmul_program(outer, batch, seq, contraction, width);
+    let (program, sum) = three_leading_axes_matmul_program(outer, batch, seq, contraction, width);
 
     let rows = outer * batch * seq;
     let lhs: Vec<f32> = (0..rows * contraction)
@@ -4900,10 +4894,10 @@ fn a_three_leading_axis_batched_reduce_engages_width_tile_and_matches_naive_matm
     );
     let mut reference = vec![0.0f32; (outer * batch * seq * width) as usize];
     for slice in 0..(outer * batch) as usize {
-        let lhs_slice = &lhs
-            [slice * (seq * contraction) as usize..(slice + 1) * (seq * contraction) as usize];
-        let rhs_slice = &rhs[slice * (contraction * width) as usize
-            ..(slice + 1) * (contraction * width) as usize];
+        let lhs_slice =
+            &lhs[slice * (seq * contraction) as usize..(slice + 1) * (seq * contraction) as usize];
+        let rhs_slice = &rhs
+            [slice * (contraction * width) as usize..(slice + 1) * (contraction * width) as usize];
         let slice_out = naive_matmul(
             lhs_slice,
             rhs_slice,
@@ -5018,8 +5012,7 @@ fn fused_contraction_skips_the_product_tensor() {
     let lhs: Vec<f32> = (0..m * k).map(|value| (value % 7) as f32).collect();
     let rhs: Vec<f32> = (0..k * n).map(|value| (value % 5) as f32).collect();
 
-    let evaluated =
-        evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("64x64x64 matmul evaluates");
+    let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("64x64x64 matmul evaluates");
     let reference = naive_matmul(&lhs, &rhs, m, k, n);
     for (row, col) in [(0, 0), (0, n - 1), (m - 1, 0), (m - 1, n - 1)] {
         let index = row * n + col;
@@ -5301,8 +5294,13 @@ fn a_chain_of_8_unary_ops_binds_to_one_bound_op_and_the_result_is_unchanged() {
     let _ = current;
 
     let shapes = shape::infer(&program, &[]).expect("tanh chain infers");
-    let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("tanh chain resolves");
+    let resolved = bind::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("tanh chain resolves");
     assert_eq!(
         resolved.len(),
         1,
@@ -5361,8 +5359,13 @@ fn a_chain_of_elementwise_ops_binds_to_one_bound_op_and_matches_a_hand_reference
     );
 
     let shapes = shape::infer(&program, &[]).expect("elementwise chain infers");
-    let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("elementwise chain resolves");
+    let resolved = bind::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("elementwise chain resolves");
     assert_eq!(
         resolved.len(),
         1,
@@ -5435,8 +5438,13 @@ fn an_elementwise_intermediate_consumed_by_two_ops_still_evaluates_correctly() {
     );
 
     let shapes = shape::infer(&program, &[]).expect("diamond chain infers");
-    let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("diamond chain resolves");
+    let resolved = bind::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("diamond chain resolves");
     assert_eq!(
         resolved.len(),
         2,
@@ -5574,8 +5582,7 @@ fn wrong_block_size_is_rejected() {
     f32_block(&mut program, &[Extent::Static(4)]);
 
     let too_short = [1.0, 2.0f32];
-    let error =
-        evaluate(&program, &[], &[&too_short], &[]).expect_err("block is the wrong size");
+    let error = evaluate(&program, &[], &[&too_short], &[]).expect_err("block is the wrong size");
     assert!(
         matches!(error, TensorError::InputSizeMismatch { .. }),
         "{error}"
@@ -5754,8 +5761,13 @@ fn splitting_an_elementwise_node_and_running_its_chunks_matches_the_unsplit_resu
     );
 
     let shapes = shape::infer(&program, &[]).expect("elementwise infers");
-    let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("elementwise resolves");
+    let resolved = bind::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("elementwise resolves");
     let node = &resolved[0];
 
     let data: Vec<f32> = (0..40).map(|value| value as f32 * 0.01).collect();
@@ -5769,8 +5781,7 @@ fn splitting_an_elementwise_node_and_running_its_chunks_matches_the_unsplit_resu
     let mut remaining = split_output.as_mut_slice();
     for chunk in &chunks {
         let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-        run_node_into(chunk, &buffers, None, None, None, false, this_chunk)
-            .expect("chunk runs");
+        run_node_into(chunk, &buffers, None, None, None, false, this_chunk).expect("chunk runs");
         remaining = rest;
     }
 
@@ -5785,8 +5796,13 @@ fn splitting_a_fused_matmul_reduction_and_running_its_chunks_matches_the_unsplit
     let rhs: Vec<f32> = (0..k * n).map(|value| value as f32).collect();
 
     let shapes = shape::infer(&program, &[]).expect("matmul infers");
-    let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("matmul resolves");
+    let resolved = bind::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("matmul resolves");
     assert_eq!(resolved.len(), 1, "fused into one reduction node");
     let node = &resolved[0];
 
@@ -5801,8 +5817,7 @@ fn splitting_a_fused_matmul_reduction_and_running_its_chunks_matches_the_unsplit
     let mut remaining = split_output.as_mut_slice();
     for chunk in &chunks {
         let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
-        run_node_into(chunk, &buffers, None, None, None, false, this_chunk)
-            .expect("chunk runs");
+        run_node_into(chunk, &buffers, None, None, None, false, this_chunk).expect("chunk runs");
         remaining = rest;
     }
 
@@ -5821,8 +5836,8 @@ fn assert_parallel_matches_sequential(
 ) {
     let workers = NonZeroUsize::new(workers).expect("every case here uses a nonzero count");
     let sequential = evaluate(program, symbols, blocks, outputs).expect("sequential evaluates");
-    let parallel = evaluate_parallel(program, symbols, blocks, outputs, workers)
-        .expect("parallel evaluates");
+    let parallel =
+        evaluate_parallel(program, symbols, blocks, outputs, workers).expect("parallel evaluates");
 
     assert_eq!(parallel.shape(), sequential.shape());
     assert_eq!(parallel.root(), sequential.root());
@@ -5851,9 +5866,7 @@ fn assert_parallel_matches_sequential(
 #[case::two_workers(2)]
 #[case::three_workers(3)]
 #[case::eight_workers(8)]
-async fn evaluate_quantized_matches_evaluate_for_a_large_elementwise_chain(
-    #[case] workers: usize,
-) {
+async fn evaluate_quantized_matches_evaluate_for_a_large_elementwise_chain(#[case] workers: usize) {
     // SAFETY of the test env var mutation: `PROXIMA_MATMUL_WORKERS` is
     // read exactly once, lazily, behind `matmul_worker_count`'s own
     // `OnceLock` — set before that lock is ever touched by any other
@@ -5892,8 +5905,7 @@ async fn evaluate_quantized_matches_evaluate_for_a_large_elementwise_chain(
 
     let sequential = evaluate(&program, &[], &[&input], &[]).expect("sequential evaluates");
     let blocks = [QuantizedBlock::Float32(&input)];
-    let quantized =
-        evaluate_quantized(&program, &[], &blocks, &[]).expect("quantized evaluates");
+    let quantized = evaluate_quantized(&program, &[], &blocks, &[]).expect("quantized evaluates");
 
     assert_eq!(quantized.shape(), sequential.shape());
     assert_eq!(
@@ -6047,9 +6059,7 @@ async fn evaluate_parallel_matches_evaluate_for_cumsum(#[case] workers: usize) {
 #[case::two_workers(2)]
 #[case::three_workers(3)]
 #[case::eight_workers(8)]
-async fn evaluate_parallel_matches_evaluate_for_multiple_requested_outputs(
-    #[case] workers: usize,
-) {
+async fn evaluate_parallel_matches_evaluate_for_multiple_requested_outputs(#[case] workers: usize) {
     let mut program = Vec::new();
     let source = f32_block(&mut program, &[Extent::Static(4)]);
     let mut current = source;
@@ -6081,8 +6091,13 @@ fn a_matmul_past_the_parallel_threshold_actually_splits_and_still_matches_sequen
     let rhs: Vec<f32> = (0..k * n).map(|value| (value % 5) as f32).collect();
 
     let shapes = shape::infer(&program, &[]).expect("64x64x64 matmul infers");
-    let resolved = bind::bind(&program, &shapes, &[terminal(&program)], NumericPolicy::bit_exact())
-        .expect("64x64x64 matmul resolves");
+    let resolved = bind::bind(
+        &program,
+        &shapes,
+        &[terminal(&program)],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("64x64x64 matmul resolves");
     assert_eq!(resolved.len(), 1, "fused into one reduction node");
     assert!(
         element_count(&resolved[0].extents) >= PARALLEL_THRESHOLD,
@@ -6121,10 +6136,9 @@ fn evaluate_parallel_raises_the_same_errors_as_evaluate_on_every_existing_sad_pa
 
     let mut dtype_program = Vec::new();
     block(&mut dtype_program, DType::Int32, &[Extent::Static(4)]);
-    let sequential_error =
-        evaluate(&dtype_program, &[], &[], &[]).expect_err("int32 is not f32");
-    let parallel_error = evaluate_parallel(&dtype_program, &[], &[], &[], workers)
-        .expect_err("int32 is not f32");
+    let sequential_error = evaluate(&dtype_program, &[], &[], &[]).expect_err("int32 is not f32");
+    let parallel_error =
+        evaluate_parallel(&dtype_program, &[], &[], &[], workers).expect_err("int32 is not f32");
     assert_eq!(sequential_error, parallel_error);
 
     // A `Keep::Scan` scatter stays rejected (shape.rs's own doc: a scan
@@ -6265,8 +6279,7 @@ fn execute_composes_through_pipe_ext_matching_the_free_function() {
         .and_then(Interpreter::new(&mut buffers));
 
     for expr in &program {
-        block_on(Pipe::call(&chain, expr.clone()))
-            .expect("shape+bind+execute pipe step succeeds");
+        block_on(Pipe::call(&chain, expr.clone())).expect("shape+bind+execute pipe step succeeds");
     }
     // Release the chain's mutable borrow of `buffers` before reading the
     // result back out of it — the interpreter stage was moved into
@@ -6358,8 +6371,8 @@ fn evaluate_typed_rejects_negate_on_an_unsigned_dtype() {
         },
     );
     let blocks = [TypedBuffer::UInt32(alloc::vec![1, 2])];
-    let error = evaluate_typed(&program, &[], &blocks, &[])
-        .expect_err("u32 has no representable negative");
+    let error =
+        evaluate_typed(&program, &[], &blocks, &[]).expect_err("u32 has no representable negative");
     assert!(
         matches!(
             error,
@@ -6506,9 +6519,8 @@ fn an_i8_operand_i32_accumulator_reduce_evaluates() {
 fn f32_typed_path_is_unchanged() {
     let (program, _) = typed_reduce_vector_to_scalar_program(DType::Float32, 4);
     let operand = TypedBuffer::Float32(alloc::vec![1.5, 2.5, 3.0, 4.0]);
-    let results = evaluate_typed(&program, &[], &[operand], &[]).expect(
-        "a uniform f32 typed program still evaluates via the unchanged NEON-backed path",
-    );
+    let results = evaluate_typed(&program, &[], &[operand], &[])
+        .expect("a uniform f32 typed program still evaluates via the unchanged NEON-backed path");
     assert_eq!(results[0].2, TypedBuffer::Float32(alloc::vec![11.0]));
 }
 
@@ -6585,11 +6597,7 @@ async fn half_precision_uniform_elementwise_matches_f32_reference(
                 .map(|(left, right)| left.to_f32() + right.to_f32())
                 .collect(),
         ),
-        (
-            TypedBuffer::BFloat16(sum),
-            TypedBuffer::BFloat16(lhs),
-            TypedBuffer::BFloat16(rhs),
-        ) => (
+        (TypedBuffer::BFloat16(sum), TypedBuffer::BFloat16(lhs), TypedBuffer::BFloat16(rhs)) => (
             sum.iter().map(|value| value.to_f32()).collect(),
             lhs.iter()
                 .zip(rhs)
@@ -6647,8 +6655,7 @@ fn f16_reduce_widens_into_an_f32_accumulator_where_f16_alone_overflows() {
     // observable result" shape as the i8/i32 test above, at floating
     // widths instead of integer ones.
     let (program, _) = typed_widened_reduce_program(DType::Float16, DType::Float32, 2);
-    let operand =
-        TypedBuffer::Float16(alloc::vec![f16::from_f32(40000.0), f16::from_f32(40000.0)]);
+    let operand = TypedBuffer::Float16(alloc::vec![f16::from_f32(40000.0), f16::from_f32(40000.0)]);
     let results = evaluate_typed(&program, &[], &[operand], &[])
         .expect("an f16-operand, f32-accumulator reduce evaluates");
     let TypedBuffer::Float32(sum) = &results[0].2 else {
@@ -6923,8 +6930,8 @@ async fn typed_gather_matches_f32_oracle_element_for_element(#[case] index_dtype
         .collect();
     // row 3 repeated, plus both boundary rows (0 and vocab - 1).
     let ids_f32 = [3.0f32, (vocab - 1) as f32, 0.0, 3.0, 25.0];
-    let oracle = evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[])
-        .expect("f32 oracle evaluates");
+    let oracle =
+        evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[]).expect("f32 oracle evaluates");
 
     let (typed_program, _) = typed_embedding_lookup_program(
         DType::Float32,
@@ -6935,9 +6942,7 @@ async fn typed_gather_matches_f32_oracle_element_for_element(#[case] index_dtype
     );
     let ids_block = match index_dtype {
         DType::Int32 => TypedBuffer::Int32(ids_f32.iter().map(|&value| value as i32).collect()),
-        DType::UInt32 => {
-            TypedBuffer::UInt32(ids_f32.iter().map(|&value| value as u32).collect())
-        }
+        DType::UInt32 => TypedBuffer::UInt32(ids_f32.iter().map(|&value| value as u32).collect()),
         other => panic!("unexpected index dtype in case table: {other:?}"),
     };
     let blocks = [TypedBuffer::Float32(table_data.clone()), ids_block];
@@ -6967,8 +6972,8 @@ fn typed_gather_f16_compute_matches_f32_oracle_within_half_precision() {
         .map(|value| (value % 23) as f32 - 5.0)
         .collect();
     let ids_f32 = [0.0f32, (vocab - 1) as f32, 7.0, 7.0, 15.0, 31.0];
-    let oracle = evaluate(&f32_program, &[], &[&table_f32, &ids_f32], &[])
-        .expect("f32 oracle evaluates");
+    let oracle =
+        evaluate(&f32_program, &[], &[&table_f32, &ids_f32], &[]).expect("f32 oracle evaluates");
 
     let (typed_program, _) = typed_embedding_lookup_program(
         DType::Float16,
@@ -7016,8 +7021,8 @@ fn typed_gather_dim1_matches_f32_oracle() {
         .map(|value| (value % 17) as f32 + 1.0)
         .collect();
     let ids_f32 = [0.0f32, (vocab - 1) as f32, 9.0, 9.0];
-    let oracle = evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[])
-        .expect("f32 oracle evaluates");
+    let oracle =
+        evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[]).expect("f32 oracle evaluates");
 
     let (typed_program, _) = typed_gather_dim_program(
         DType::Float32,
@@ -7119,9 +7124,7 @@ fn evaluate_typed_rejects_a_float_gather_index_dtype_at_execution() {
 #[proxima::test]
 #[case::index_past_the_extent(4)]
 #[case::negative_index(-1)]
-async fn typed_gather_out_of_range_index_matches_f32_oracle_error_shape(
-    #[case] bad_index: i32,
-) {
+async fn typed_gather_out_of_range_index_matches_f32_oracle_error_shape(#[case] bad_index: i32) {
     let (vocab, dim, seq) = (4usize, 2usize, 1usize);
     let (f32_program, _) = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
     let table_data: Vec<f32> = (0..vocab * dim).map(|value| value as f32).collect();
@@ -7276,8 +7279,7 @@ async fn evaluate_typed_reduces_a_vector_to_a_scalar_across_widths(
     #[case] expected: TypedBuffer,
 ) {
     let (program, _) = typed_reduce_vector_to_scalar_program(dtype, 4);
-    let results =
-        evaluate_typed(&program, &[], &[operand], &[]).expect("typed reduce evaluates");
+    let results = evaluate_typed(&program, &[], &[operand], &[]).expect("typed reduce evaluates");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].2, expected);
 }
@@ -7310,12 +7312,7 @@ fn evaluate_typed_scans_an_integer_vector_producing_a_running_sum() {
 /// Matmul-shaped: a `Multiply` elementwise body fused into an `Add`
 /// reduce, same construction as [`matmul_program`] with `dtype`
 /// parameterized so it can run through [`evaluate_typed`] at any width.
-fn typed_matmul_program(
-    dtype: DType,
-    m: u32,
-    k: u32,
-    n: u32,
-) -> (Vec<Op>, NodeId, NodeId, NodeId) {
+fn typed_matmul_program(dtype: DType, m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId, NodeId, NodeId) {
     let mut program = Vec::new();
     let lhs = block(&mut program, dtype, &[Extent::Static(m), Extent::Static(k)]);
     let rhs = block(&mut program, dtype, &[Extent::Static(k), Extent::Static(n)]);
@@ -7421,8 +7418,7 @@ fn evaluate_typed_float32_matmul_shaped_reduce_matches_evaluate_bit_for_bit() {
         .map(|value| (value as f32 * 0.0271).cos())
         .collect();
 
-    let via_evaluate =
-        evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("f32 matmul evaluates");
+    let via_evaluate = evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("f32 matmul evaluates");
     let blocks = [TypedBuffer::Float32(lhs), TypedBuffer::Float32(rhs)];
     let via_typed =
         evaluate_typed(&program, &[], &blocks, &[]).expect("typed f32 matmul evaluates");
@@ -7452,8 +7448,7 @@ fn evaluate_typed_float32_matmul_rhs_transposed_matches_evaluate_bit_for_bit() {
     let lhs = random_vec(0x1234_5678_9abc_def0, m * k);
     let rhs = random_vec(0x0fed_cba9_8765_4321, n * k);
 
-    let via_evaluate =
-        evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("f32 matmul evaluates");
+    let via_evaluate = evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("f32 matmul evaluates");
     let blocks = [TypedBuffer::Float32(lhs), TypedBuffer::Float32(rhs)];
     let via_typed =
         evaluate_typed(&program, &[], &blocks, &[]).expect("typed f32 matmul evaluates");
@@ -7663,8 +7658,7 @@ fn evaluate_records_exactly_the_distinct_rows_a_gather_touches_not_the_whole_tab
     let ids_data = [3.0f32, 3.0, 999.0, 999.0, 500.0, 500.0];
     evaluate(&program, &[], &[&table_data, &ids_data], &[gathered]).expect("gather evaluates");
 
-    let table_access =
-        instrument::operand_access_of(NodeId(0)).expect("table was instrumented");
+    let table_access = instrument::operand_access_of(NodeId(0)).expect("table was instrumented");
     assert_eq!(
         table_access.distinct_elements,
         3 * u64::from(dim),
@@ -7818,8 +7812,7 @@ fn erf_evaluates_through_a_real_elementwise_program() {
 
     let values: [f32; 4] = [0.0, 0.5, 1.0, -1.5];
     let blocks: [&[f32]; 1] = [&values];
-    let evaluated =
-        evaluate(&program, &[], &blocks, &[output]).expect("erf elementwise evaluates");
+    let evaluated = evaluate(&program, &[], &blocks, &[output]).expect("erf elementwise evaluates");
 
     let found = evaluated.root();
     assert_eq!(found.len(), values.len());
@@ -7886,8 +7879,8 @@ fn matmul_q4k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance
         expected.push(dot);
     }
 
-    let actual = matmul_q4k_f32(&weight_blocks, rows, &activation)
-        .expect("well-formed quantized matmul");
+    let actual =
+        matmul_q4k_f32(&weight_blocks, rows, &activation).expect("well-formed quantized matmul");
 
     assert_eq!(actual.len(), expected.len());
     let mut max_error = 0.0f32;
@@ -7925,8 +7918,7 @@ fn matmul_q4k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance
 /// length does not match the weight row's decoded element count is
 /// rejected, not silently truncated or padded.
 #[test]
-fn matmul_q4k_f32_rejects_an_activation_length_that_does_not_match_the_weight_rows_element_count()
- {
+fn matmul_q4k_f32_rejects_an_activation_length_that_does_not_match_the_weight_rows_element_count() {
     use proxima_gguf::quant::q4_k::BLOCK_BYTES;
 
     let weight_blocks = vec![0u8; BLOCK_BYTES];
@@ -8079,8 +8071,8 @@ fn matmul_q4k_f32_matches_an_f64_dequant_reference_tighter_than_the_int8_path_on
     }
 
     let exact = dot_q4k_f32(first_row, &activation).expect("well-formed exact q4_k dot");
-    let int8 = matmul_q4k_q8k_f32(first_row, 1, &activation)
-        .expect("well-formed packed int8 matmul")[0];
+    let int8 =
+        matmul_q4k_q8k_f32(first_row, 1, &activation).expect("well-formed packed int8 matmul")[0];
 
     let magnitude = f64_reference.abs().max(1.0);
     let exact_relative_error = ((f64::from(exact) - f64_reference) / magnitude).abs();
@@ -8138,7 +8130,7 @@ fn matmul_q4k_f32_matches_an_f64_dequant_reference_tighter_than_the_int8_path_on
 #[cfg(feature = "q4k-int8-dot")]
 #[test]
 fn matmul_q4k_q8k_f32_stays_within_tolerance_at_real_forward_out_dim_above_the_reported_threshold()
- {
+{
     use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
 
     let rows = 4096;
@@ -8363,8 +8355,7 @@ fn quantize_row_q8k_dispatch_is_bit_identical_to_the_serial_reference() {
         .collect();
 
     let mut serial = vec![0u8; block_count * Q8K_BLOCK_BYTES];
-    quantize_row_q8k(&activation, &mut serial)
-        .expect("well-formed activation quantizes serially");
+    quantize_row_q8k(&activation, &mut serial).expect("well-formed activation quantizes serially");
 
     let cohort = MatmulCohort::from_config(
         MatmulCohort::builder()
@@ -8487,9 +8478,8 @@ fn quant_dot_fused_and_unfused_agree_for_q4k_within_int8_quantization_tolerance(
     quantize_row_q8k(&activation_f32, &mut activation_q8k)
         .expect("k is a whole number of q8_k super-blocks");
 
-    let fused =
-        block_on(QuantDot::Fused(QuantizedBlock::Q4K(&weight_bytes)).call(&activation_q8k))
-            .expect("fused int8 dot evaluates");
+    let fused = block_on(QuantDot::Fused(QuantizedBlock::Q4K(&weight_bytes)).call(&activation_q8k))
+        .expect("fused int8 dot evaluates");
     let unfused =
         block_on(QuantDot::Unfused(QuantizedBlock::Q4K(&weight_bytes)).call(&activation_q8k))
             .expect("unfused dequantize-then-fold evaluates");
@@ -8527,9 +8517,8 @@ fn quant_dot_fused_and_unfused_agree_for_q5k_within_int8_quantization_tolerance(
     quantize_row_q8k(&activation_f32, &mut activation_q8k)
         .expect("k is a whole number of q8_k super-blocks");
 
-    let fused =
-        block_on(QuantDot::Fused(QuantizedBlock::Q5K(&weight_bytes)).call(&activation_q8k))
-            .expect("fused int8 dot evaluates");
+    let fused = block_on(QuantDot::Fused(QuantizedBlock::Q5K(&weight_bytes)).call(&activation_q8k))
+        .expect("fused int8 dot evaluates");
     let unfused =
         block_on(QuantDot::Unfused(QuantizedBlock::Q5K(&weight_bytes)).call(&activation_q8k))
             .expect("unfused dequantize-then-fold evaluates");
@@ -8567,9 +8556,8 @@ fn quant_dot_fused_and_unfused_agree_for_q6k_within_int8_quantization_tolerance(
     quantize_row_q8k(&activation_f32, &mut activation_q8k)
         .expect("k is a whole number of q8_k super-blocks");
 
-    let fused =
-        block_on(QuantDot::Fused(QuantizedBlock::Q6K(&weight_bytes)).call(&activation_q8k))
-            .expect("fused int8 dot evaluates");
+    let fused = block_on(QuantDot::Fused(QuantizedBlock::Q6K(&weight_bytes)).call(&activation_q8k))
+        .expect("fused int8 dot evaluates");
     let unfused =
         block_on(QuantDot::Unfused(QuantizedBlock::Q6K(&weight_bytes)).call(&activation_q8k))
             .expect("unfused dequantize-then-fold evaluates");
@@ -8672,16 +8660,14 @@ fn mins_correction_neon_agrees_with_get_scale_min_k4_scalar_route_on_real_gguf_b
     };
 
     let mut scales = [0u8; Q4K_SCALE_BYTES];
-    scales
-        .copy_from_slice(&weight_bytes[Q4K_SCALES_OFFSET..Q4K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
+    scales.copy_from_slice(&weight_bytes[Q4K_SCALES_OFFSET..Q4K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
 
     let activation: Vec<f32> = random_vec(29, Q4K_BLOCK_ELEMENTS)
         .into_iter()
         .map(|value| value * 6.0 - 3.0)
         .collect();
     let mut activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
-    quantize_row_q8k(&activation, &mut activation_q8k)
-        .expect("well-formed activation super-block");
+    quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation super-block");
     let bsums = &activation_q8k[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
 
     let mut expected_mins_correction = 0i32;
@@ -8744,16 +8730,14 @@ fn q5k_mins_correction_neon_agrees_with_get_scale_min_k4_scalar_route_on_real_gg
     };
 
     let mut scales = [0u8; Q4K_SCALE_BYTES];
-    scales
-        .copy_from_slice(&weight_bytes[Q5K_SCALES_OFFSET..Q5K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
+    scales.copy_from_slice(&weight_bytes[Q5K_SCALES_OFFSET..Q5K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
 
     let activation: Vec<f32> = random_vec(37, Q4K_BLOCK_ELEMENTS)
         .into_iter()
         .map(|value| value * 6.0 - 3.0)
         .collect();
     let mut activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
-    quantize_row_q8k(&activation, &mut activation_q8k)
-        .expect("well-formed activation super-block");
+    quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation super-block");
     let bsums = &activation_q8k[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
 
     let mut expected_mins_correction = 0i32;
@@ -8879,8 +8863,7 @@ fn evaluate_quantized_matmul_matches_dequantize_then_f32_evaluate() {
         .chunks_exact(blocks_per_row * BLOCK_BYTES)
         .zip(dequantized_weight.chunks_exact_mut(k as usize))
     {
-        dequantize(row_blocks, row_f32)
-            .expect("row_blocks is a whole number of q4_k super-blocks");
+        dequantize(row_blocks, row_f32).expect("row_blocks is a whole number of q4_k super-blocks");
     }
 
     let (f32_program, f32_sum) = matmul_program(rows, k, 1, false);
@@ -9039,9 +9022,8 @@ fn evaluate_quantized_threads_a_fused_elementwise_step_ahead_of_the_matmul_multi
     // materialized: requesting `real_activation` too keeps it `still_live`,
     // so `bind` cannot fuse it into the reduce -- the reduce now reads a
     // real, already-added buffer, the same path a plain f32 matmul takes.
-    let materialized_result =
-        evaluate_quantized(&program, &[], &blocks, &[real_activation, sum])
-            .expect("materialized quantized matmul evaluates");
+    let materialized_result = evaluate_quantized(&program, &[], &blocks, &[real_activation, sum])
+        .expect("materialized quantized matmul evaluates");
     let materialized = materialized_result
         .get(sum)
         .expect("the reduce output was requested")
@@ -9149,10 +9131,7 @@ fn evaluate_quantized_applies_the_full_composed_gate_not_just_its_first_leaf() {
         Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Exponential,
-            operands: alloc::vec![(
-                negated_gate,
-                IndexMap::Affine(map::projection(2, &[0, 1]))
-            )],
+            operands: alloc::vec![(negated_gate, IndexMap::Affine(map::projection(2, &[0, 1])))],
             name: None,
         },
     );
@@ -9324,8 +9303,7 @@ fn evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contrac
         .chunks_exact(in_dim)
         .zip(weight_blocks.chunks_exact_mut(row_bytes))
     {
-        quantize(row_f32, row_blocks)
-            .expect("row length is a whole number of QK_K super-blocks");
+        quantize(row_f32, row_blocks).expect("row length is a whole number of QK_K super-blocks");
     }
 
     let mut program = Vec::new();
@@ -9358,10 +9336,7 @@ fn evaluate_quantized_applies_the_composed_gate_over_a_multi_axis_packed_contrac
         Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Negate,
-            operands: alloc::vec![(
-                gate_node,
-                IndexMap::Affine(map::projection(3, &[0, 1, 2]))
-            )],
+            operands: alloc::vec![(gate_node, IndexMap::Affine(map::projection(3, &[0, 1, 2])))],
             name: None,
         },
     );
@@ -9603,11 +9578,10 @@ fn qwen35_batched_packed_ssm_projection_matches_repeated_rows() {
         QuantizedBlock::Q4K(weight_blocks.as_slice()),
         QuantizedBlock::Float32(activation.as_slice()),
     ];
-    let batched =
-        evaluate_quantized_exact(&batched_program, &[], &batched_blocks, &[batched_sum])
-            .expect("batched projection evaluates")
-            .root()
-            .to_vec();
+    let batched = evaluate_quantized_exact(&batched_program, &[], &batched_blocks, &[batched_sum])
+        .expect("batched projection evaluates")
+        .root()
+        .to_vec();
 
     let (single_program, single_sum) = build(1);
     let mut repeated = Vec::new();
@@ -9677,8 +9651,7 @@ fn evaluate_quantized_exact_matches_dequantize_then_f32_evaluate_near_exactly() 
         .chunks_exact(blocks_per_row * BLOCK_BYTES)
         .zip(dequantized_weight.chunks_exact_mut(k as usize))
     {
-        dequantize(row_blocks, row_f32)
-            .expect("row_blocks is a whole number of q4_k super-blocks");
+        dequantize(row_blocks, row_f32).expect("row_blocks is a whole number of q4_k super-blocks");
     }
 
     let (f32_program, f32_sum) = matmul_program(rows, k, 1, false);
@@ -9853,9 +9826,8 @@ fn evaluate_quantized_gathered_moe_weight_matches_the_routed_experts_own_matmul(
         // a wrong-expert read, which is the one thing this test exists
         // to catch.
         #[cfg(feature = "q4k-int8-dot")]
-        let expected =
-            matmul_q4k_q8k_f32(&expert_blocks[expert], rows as usize, activation_row)
-                .expect("the routed expert's own standalone matmul evaluates");
+        let expected = matmul_q4k_q8k_f32(&expert_blocks[expert], rows as usize, activation_row)
+            .expect("the routed expert's own standalone matmul evaluates");
         #[cfg(not(feature = "q4k-int8-dot"))]
         let expected = matmul_q4k_f32(&expert_blocks[expert], rows as usize, activation_row)
             .expect("the routed expert's own standalone matmul evaluates");
@@ -9884,8 +9856,8 @@ fn resolve_gathered_reduce_for_expert_source_test<'a>(
     activation: &'a [f32],
 ) -> (BoundOp, Vec<Option<Cow<'a, [f32]>>>, NodeId) {
     let shapes = shape::infer(program, &[]).expect("shape inference succeeds");
-    let resolved = bind::bind(program, &shapes, &[sum], NumericPolicy::bit_exact())
-        .expect("bind succeeds");
+    let resolved =
+        bind::bind(program, &shapes, &[sum], NumericPolicy::bit_exact()).expect("bind succeeds");
     let block_nodes = block_node_ids(program);
     let mut buffers: Vec<Option<Cow<'a, [f32]>>> = vec![None; program.len()];
     // `gathered_quantized_matmul_program` emits exactly three `Op::Input`
@@ -10413,8 +10385,7 @@ fn expert_source_rejects_an_entry_whose_shape_disagrees_with_the_program() {
 
     let mut expert_blocks: Vec<Vec<u8>> = Vec::new();
     for expert in 0..n_experts {
-        let weight_f32: Vec<f32> =
-            random_vec(601 + u64::from(expert), rows as usize * k as usize);
+        let weight_f32: Vec<f32> = random_vec(601 + u64::from(expert), rows as usize * k as usize);
         let block_bytes = BLOCK_BYTES;
         let mut blocks = vec![0u8; rows as usize * block_bytes];
         for (row_f32, row_blocks) in weight_f32
@@ -10693,6 +10664,157 @@ fn evaluate_quantized_two_layers_does_not_underflow_live_now() {
     );
 }
 
+/// `materialize_quantized_weight_output`'s pre-fix scan matched
+/// [`BoundOpKind::Elementwise`] alone, so a quantized weight reachable
+/// ONLY through a [`BoundOpKind::Reduce`]'s own `epilogue_operands` (the
+/// exact shape `reduce-epilogue-fusion` gives an RMSNorm gamma multiply,
+/// per `apply_reduce_epilogue`'s own doc) was never dequantized into
+/// `buffers`, and `apply_reduce_epilogue`'s `buffer_of` call raised the
+/// same `NotLowerable { reason: "operand buffer missing at evaluation
+/// time" }` node `6540` hit on the real qwen35moe checkpoint
+/// (`docs/discipline.md`). This hand-builds ONE `Reduce` `BoundOp` with a
+/// quantized `epilogue_operands` entry directly (bypassing `bind::bind`,
+/// which only ever produces this shape when the `reduce-epilogue-fusion`
+/// feature is compiled in — not this crate's default set) so the fix is
+/// exercised without that feature: first proves the pre-fix error still
+/// reproduces mechanically against the unwidened buffer table, then proves
+/// `materialize_quantized_weights_read_by_non_primary_operands` closes it
+/// and the fused evaluation matches a hand-computed Float32 reference.
+#[test]
+fn reduce_epilogue_only_quantized_weight_is_materialized_before_evaluation() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+    let rows = QK_K as u32; // the per-row weight's own length must be a whole QK_K block
+    let k = 8u32; // the reduced axis -- any width works, kept small
+
+    let mut program = Vec::new();
+    let x_node = f32_block(&mut program, &[Extent::Static(rows), Extent::Static(k)]);
+    let gate_node = block(&mut program, DType::UInt8, &[Extent::Static(rows)]);
+    let shapes = shape::infer(&program, &[]).expect("the two-input shape program infers");
+
+    let x_data: Vec<f32> = random_vec(551, rows as usize * k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let gate_f32: Vec<f32> = random_vec(552, rows as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let mut gate_bytes = vec![0u8; BLOCK_BYTES];
+    quantize(&gate_f32, &mut gate_bytes).expect("rows is a whole QK_K block by construction");
+    let mut gate_dequantized = vec![0.0f32; rows as usize];
+    dequantize(&gate_bytes, &mut gate_dequantized).expect("the packed gate block dequantizes");
+
+    let resolved = BoundOp {
+        node: NodeId(2),
+        dtype: DType::Float32,
+        extents: alloc::vec![rows as u64, k as u64],
+        kind: BoundOpKind::Reduce {
+            element_body: ComposedBody {
+                steps: alloc::vec![step(ScalarOp::Identity, &[StepArg::Operand(0)])],
+            },
+            reduce_op: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            keep: Keep::Reduce,
+            operands: alloc::vec![(
+                x_node,
+                bind::Layout {
+                    base: 0,
+                    strides: smallvec::smallvec![k as i64, 1],
+                },
+                None,
+            )],
+            output_axes: smallvec::smallvec![0],
+            out_layout: bind::Layout {
+                base: 0,
+                strides: smallvec::smallvec![1],
+            },
+            out_scatter: None,
+            epilogue_body: ComposedBody {
+                steps: alloc::vec![step(
+                    ScalarOp::Multiply,
+                    &[StepArg::Operand(0), StepArg::Operand(1)]
+                )],
+            },
+            epilogue_operands: alloc::vec![(
+                gate_node,
+                bind::Layout {
+                    base: 0,
+                    strides: smallvec::smallvec![1],
+                },
+                None,
+            )],
+            epilogue_broadcast_axes: smallvec::smallvec![],
+        },
+    };
+
+    let quantized_weights: BTreeMap<NodeId, QuantizedBlock> =
+        BTreeMap::from([(gate_node, QuantizedBlock::Q4K(&gate_bytes))]);
+    let mut buffers: Vec<Option<Cow<'_, [f32]>>> = alloc::vec![None; program.len()];
+    buffers[x_node.0 as usize] = Some(Cow::Borrowed(x_data.as_slice()));
+
+    let mut output = vec![0.0f32; rows as usize];
+    let pre_fix_error = run_node_into(
+        &resolved,
+        &buffers,
+        Some(&quantized_weights),
+        None,
+        None,
+        false,
+        &mut output,
+    )
+    .expect_err(
+        "the gate's own buffer slot is still None here -- the epilogue read must fail exactly \
+         as it did on the real checkpoint before the materialize scan was widened",
+    );
+    assert_eq!(
+        pre_fix_error,
+        TensorError::NotLowerable {
+            node: gate_node,
+            reason: "operand buffer missing at evaluation time",
+        },
+        "the pre-fix failure must name the epilogue's own quantized operand, not the fold"
+    );
+
+    materialize_quantized_weights_read_by_non_primary_operands(
+        core::slice::from_ref(&resolved),
+        &shapes,
+        &quantized_weights,
+        None,
+        &mut buffers,
+    )
+    .expect("the widened scan dequantizes a Reduce epilogue's own quantized operand");
+    assert!(
+        buffers[gate_node.0 as usize].is_some(),
+        "the gate's buffer slot must be populated after the widened materialize scan"
+    );
+
+    output.fill(0.0);
+    run_node_into(
+        &resolved,
+        &buffers,
+        Some(&quantized_weights),
+        None,
+        None,
+        false,
+        &mut output,
+    )
+    .expect("evaluation succeeds once the epilogue's quantized operand is materialized");
+
+    for row in 0..rows as usize {
+        let row_sum: f32 = x_data[row * k as usize..(row + 1) * k as usize]
+            .iter()
+            .sum();
+        let expected = gate_dequantized[row] * row_sum;
+        assert!(
+            (output[row] - expected).abs() <= 1e-3 * expected.abs().max(1.0),
+            "row {row}: got {}, expected {expected} (gate={}, row_sum={row_sum})",
+            output[row],
+            gate_dequantized[row],
+        );
+    }
+}
+
 /// A small, synthetic stand-in for the cached-attention reduce shape
 /// that trips the seam `q8_0_quantized_key_value_cache_cannot_cross_the_weight_matmul_quantized_seam`
 /// (`proxima-model-interop/src/bind.rs`) reaches on a real checkpoint:
@@ -10874,9 +10996,7 @@ impl HalfPrecisionKind {
 #[proxima::test]
 #[case::f16(HalfPrecisionKind::F16)]
 #[case::bf16(HalfPrecisionKind::Bf16)]
-async fn dot_half_precision_matches_a_hand_computed_dot_product(
-    #[case] kind: HalfPrecisionKind,
-) {
+async fn dot_half_precision_matches_a_hand_computed_dot_product(#[case] kind: HalfPrecisionKind) {
     let weight = [1.0f32, 2.0, -1.0, 0.5];
     let activation = [2.0f32, 0.5, 3.0, 4.0];
     let weight_bytes = kind.pack(&weight);
@@ -11472,9 +11592,8 @@ fn matmul_q4k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_g
         })
         .collect();
 
-    let wide =
-        matmul_q4k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None)
-            .expect("wide fold call");
+    let wide = matmul_q4k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None)
+        .expect("wide fold call");
     assert_eq!(
         wide.len(),
         out_dim * leading_total,
@@ -11534,9 +11653,8 @@ fn matmul_q5k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_g
         })
         .collect();
 
-    let wide =
-        matmul_q5k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None)
-            .expect("wide fold call");
+    let wide = matmul_q5k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None)
+        .expect("wide fold call");
     assert_eq!(
         wide.len(),
         out_dim * leading_total,
@@ -11593,9 +11711,8 @@ fn matmul_q6k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_g
         })
         .collect();
 
-    let wide =
-        matmul_q6k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None)
-            .expect("wide fold call");
+    let wide = matmul_q6k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None)
+        .expect("wide fold call");
     assert_eq!(
         wide.len(),
         out_dim * leading_total,
@@ -11742,8 +11859,7 @@ fn evaluate_quantized_routes_q5k_block_and_matches_dequantize_then_evaluate() {
         .chunks_exact(blocks_per_row * BLOCK_BYTES)
         .zip(dequantized_weight.chunks_exact_mut(k as usize))
     {
-        dequantize(row_blocks, row_f32)
-            .expect("row_blocks is a whole number of q5_k super-blocks");
+        dequantize(row_blocks, row_f32).expect("row_blocks is a whole number of q5_k super-blocks");
     }
 
     let (f32_program, f32_sum) = matmul_program(rows, k, 1, false);
@@ -12048,8 +12164,8 @@ fn dot_q3k_f32_matches_dequantize_then_f32_matmul_on_a_real_checkpoint_row() {
     );
 
     let row_elements = tensor.dims[0] as usize;
-    let row_bytes = (row_elements / proxima_gguf::quant::q3_k::QK_K)
-        * proxima_gguf::quant::q3_k::BLOCK_BYTES;
+    let row_bytes =
+        (row_elements / proxima_gguf::quant::q3_k::QK_K) * proxima_gguf::quant::q3_k::BLOCK_BYTES;
     let full_range = parsed
         .tensor_data_range(tensor, file_len)
         .expect("tensor data range within real checkpoint");
@@ -12061,8 +12177,7 @@ fn dot_q3k_f32_matches_dequantize_then_f32_matmul_on_a_real_checkpoint_row() {
         .expect("read exact tensor row bytes");
 
     let mut row_f32 = vec![0.0f32; row_elements];
-    proxima_gguf::quant::q3_k::dequantize(&row_packed, &mut row_f32)
-        .expect("decode real Q3_K row");
+    proxima_gguf::quant::q3_k::dequantize(&row_packed, &mut row_f32).expect("decode real Q3_K row");
 
     let mut lcg = Lcg(99);
     let activation: Vec<f32> = (0..row_elements)
@@ -12356,8 +12471,8 @@ fn matmul_q2k_f32_matches_naive_dequantize_then_dot_matvec() {
         })
         .collect();
 
-    let got = matmul_q2k_f32(&packed, rows, &activation)
-        .expect("well-formed q2_k weight matrix matvec");
+    let got =
+        matmul_q2k_f32(&packed, rows, &activation).expect("well-formed q2_k weight matrix matvec");
 
     assert_eq!(got.len(), rows);
     for (row, (&got_value, &expected_value)) in got.iter().zip(expected.iter()).enumerate() {

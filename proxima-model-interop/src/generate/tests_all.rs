@@ -1,3 +1,10 @@
+#[cfg(all(test, feature = "instrument", feature = "metal", target_os = "macos"))]
+use super::phys_footprint_bytes;
+#[cfg(all(test, feature = "metal"))]
+use super::{
+    BackendRuntime, InteropError, LogitsSink, NodeValuesSink, PrefixState, ServingConfig,
+    map_expert_sources_to_segment, supported_serving_config, wants_bos,
+};
 #[cfg(test)]
 use super::{
     Control, DecodeMetrics, LoadedModel, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache,
@@ -7,19 +14,12 @@ use super::{
     should_release_monolithic_sources, step_batch_needs_logits, visit_qwen35moe_router_boundary,
     visit_qwen35moe_router_selections,
 };
-#[cfg(all(test, feature = "metal"))]
-use super::{
-    BackendRuntime, InteropError, LogitsSink, NodeValuesSink, PrefixState, ServingConfig,
-    map_expert_sources_to_segment, supported_serving_config, wants_bos,
-};
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 use super::{
     PlanNumerics, qwen35_dense_attention_placed_byte_length,
     qwen35_dense_attention_placement_enabled, retain_qwen35_segment_readbacks,
     use_metal_output_placements,
 };
-#[cfg(all(test, feature = "instrument", feature = "metal", target_os = "macos"))]
-use super::phys_footprint_bytes;
 
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -29,9 +29,8 @@ pub(super) mod tests {
     use super::{
         RouterExpertCounts, RouterLogits, SsmLayerCache, begin_expert_gather_phase,
         collect_future_gather_cuts, first_nonfinite_node_value, kv_extent, lock_expert_slab,
-        qwen35moe_admit_low_copy,
-        qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
-        should_release_monolithic_sources, step_batch_needs_logits,
+        qwen35moe_admit_low_copy, qwen35moe_monolithic_all_low_enabled,
+        qwen35moe_pre_gather_enabled, should_release_monolithic_sources, step_batch_needs_logits,
         visit_qwen35moe_router_boundary, visit_qwen35moe_router_selections,
     };
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -794,6 +793,7 @@ pub(super) mod tests {
             architecture.rope_freq_base,
             architecture.rms_epsilon,
             false,
+            None,
         );
 
         assert_eq!(
@@ -3345,28 +3345,27 @@ pub(super) mod memory_fit_gate_tests {
 
             // SAFETY: no other thread touches `PROXIMA_PREFILL_ONE_EVALUATION`
             // during this call (this function's own doc).
-            let (one_evaluation_ids, one_evaluation_text, one_evaluation_logits) =
-                unsafe {
-                    with_one_evaluation_prefill_forced(|| {
-                        let mut one_evaluation_runtime = BackendRuntime::new(&serving_config);
-                        let mut one_evaluation_logits: Vec<Vec<f32>> = Vec::new();
-                        let (ids, text, _, _) = model
-                            .run_decode_loop_observed_seeded(
-                                prompt,
-                                steps,
-                                &serving_config,
-                                &mut one_evaluation_runtime,
-                                None,
-                                &mut LogitsSink::Collect(&mut one_evaluation_logits),
-                                &mut NodeValuesSink::Discard,
-                                &mut |_event| Control::Continue,
-                                None,
-                                false,
-                            )
-                            .expect("one-evaluation prefill greedy generate");
-                        (ids, text, one_evaluation_logits)
-                    })
-                };
+            let (one_evaluation_ids, one_evaluation_text, one_evaluation_logits) = unsafe {
+                with_one_evaluation_prefill_forced(|| {
+                    let mut one_evaluation_runtime = BackendRuntime::new(&serving_config);
+                    let mut one_evaluation_logits: Vec<Vec<f32>> = Vec::new();
+                    let (ids, text, _, _) = model
+                        .run_decode_loop_observed_seeded(
+                            prompt,
+                            steps,
+                            &serving_config,
+                            &mut one_evaluation_runtime,
+                            None,
+                            &mut LogitsSink::Collect(&mut one_evaluation_logits),
+                            &mut NodeValuesSink::Discard,
+                            &mut |_event| Control::Continue,
+                            None,
+                            false,
+                        )
+                        .expect("one-evaluation prefill greedy generate");
+                    (ids, text, one_evaluation_logits)
+                })
+            };
 
             std::println!(
                 "one_evaluation_prefill: ids={one_evaluation_ids:?} text={one_evaluation_text:?}"
@@ -3413,7 +3412,7 @@ pub(super) mod memory_fit_gate_tests {
         #[test]
         #[ignore = "requires a real, local qwen3.6:35b-a3b GGUF blob; set PROXIMA_QWEN35MOE_GGUF"]
         fn one_evaluation_prefill_through_generate_streaming_matches_sequential_on_the_real_checkpoint()
-        {
+         {
             let model_path = crate::test_support::qwen35moe_gguf_path();
             crate::test_support::require_fixture(&model_path, Some("PROXIMA_QWEN35MOE_GGUF"));
             let mapped = MappedGguf::open(std::path::Path::new(&model_path))
@@ -3597,9 +3596,9 @@ pub(super) mod memory_fit_gate_tests {
                 }
             }
             match first_diverging_layer {
-                Some((layer, relative_diff)) => std::println!(
-                    "first_diverging_layer={layer} relative_diff={relative_diff}"
-                ),
+                Some((layer, relative_diff)) => {
+                    std::println!("first_diverging_layer={layer} relative_diff={relative_diff}")
+                }
                 None => std::println!("no layer's block_output diverged past 1e-3 relative"),
             }
         }
@@ -4027,13 +4026,9 @@ pub(super) mod memory_fit_gate_tests {
             }
 
             let symbols: [u64; 2] = [13, 0];
-            let decisions = proxima_tensor::cpu::plan_trace_named(
-                &program,
-                &symbols,
-                &[],
-                &production_outputs,
-            )
-            .expect("plan traces against the production output set");
+            let decisions =
+                proxima_tensor::cpu::plan_trace_named(&program, &symbols, &[], &production_outputs)
+                    .expect("plan traces against the production output set");
 
             // `readers[source]` = every program position (== `NodeId.0`,
             // this crate numbers nodes by their own `Vec<Op>` index) that
@@ -4043,10 +4038,8 @@ pub(super) mod memory_fit_gate_tests {
             // decision's own `into` position can be checked against the
             // TRUE last reader, not merely "does 2+ readers exist" (which is
             // routine and not itself a defect).
-            let mut readers: alloc::collections::BTreeMap<
-                proxima_tensor::op::NodeId,
-                Vec<u32>,
-            > = alloc::collections::BTreeMap::new();
+            let mut readers: alloc::collections::BTreeMap<proxima_tensor::op::NodeId, Vec<u32>> =
+                alloc::collections::BTreeMap::new();
             for (position, operation) in program.iter().enumerate() {
                 let uses = match operation {
                     proxima_tensor::Op::Elementwise { operands, .. } => {

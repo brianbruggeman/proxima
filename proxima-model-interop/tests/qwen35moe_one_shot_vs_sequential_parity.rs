@@ -15,7 +15,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_model_interop::qwen35moe::hparams::{Architecture, LayerKind};
-use proxima_model_interop::qwen35moe::{Qwen35MoeLayerDiagnostics, qwen35moe_forward_program_at_width};
+use proxima_model_interop::qwen35moe::{
+    Qwen35MoeLayerDiagnostics, qwen35moe_forward_program_at_width,
+};
 use proxima_tensor::spec::Qwen35LayerRoots;
 use proxima_tensor::test_support::Lcg;
 
@@ -34,7 +36,9 @@ const WIDTH: u32 = 13;
 /// parity.rs`'s own `synthetic_architecture`, duplicated here rather than
 /// shared across files since this file carries no `metal`/`macos` gate.
 fn synthetic_architecture(layer_count: u32) -> Architecture {
-    let layer_kinds = (0..layer_count).map(|layer| LayerKind::from_interval(layer, 4)).collect::<Vec<_>>();
+    let layer_kinds = (0..layer_count)
+        .map(|layer| LayerKind::from_interval(layer, 4))
+        .collect::<Vec<_>>();
     let kv_heads_by_layer = layer_kinds
         .iter()
         .map(|kind| match kind {
@@ -132,13 +136,21 @@ fn seed_named_inputs(
             let Op::Input { name, .. } = &program[node.0 as usize] else {
                 unreachable!("block_node_ids only ever returns Op::Input nodes")
             };
-            let name = name.clone().expect("every qwen35moe forward-program input is named");
-            let extents: Vec<usize> = shapes.of(node).iter().map(|extent| *extent as usize).collect();
+            let name = name
+                .clone()
+                .expect("every qwen35moe forward-program input is named");
+            let extents: Vec<usize> = shapes
+                .of(node)
+                .iter()
+                .map(|extent| *extent as usize)
+                .collect();
             let count: usize = extents.iter().product();
             let data = if let Some(overridden) = cache_overrides.get(&name) {
                 overridden.clone()
             } else if name == "ids" {
-                (0..count as u32).map(|row| (absolute_position + row) as f32).collect()
+                (0..count as u32)
+                    .map(|row| (absolute_position + row) as f32)
+                    .collect()
             } else if name == "eps" {
                 vec![1e-6_f32; count]
             } else if name == "cached_len" {
@@ -146,10 +158,14 @@ fn seed_named_inputs(
             } else if name == "lm_head_row" {
                 vec![(local_width - 1) as f32]
             } else if name == "rope_cos" || name == "rope_sin" {
-                let pairs = *extents.last().expect("rope tables have a trailing pair axis");
+                let pairs = *extents
+                    .last()
+                    .expect("rope tables have a trailing pair axis");
                 let width = count / pairs.max(1);
                 (0..width)
-                    .flat_map(|row| rope_row(name == "rope_cos", absolute_position + row as u32, pairs))
+                    .flat_map(|row| {
+                        rope_row(name == "rope_cos", absolute_position + row as u32, pairs)
+                    })
                     .collect()
             } else if name.starts_with("ssm_cache.") || name.starts_with("kv_cache.") {
                 // no override means "no prior history" (a fresh prefill, or
@@ -165,14 +181,25 @@ fn seed_named_inputs(
 }
 
 fn named_f32(named: &[(String, Vec<f32>)]) -> Vec<(&str, &[f32])> {
-    named.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect()
+    named
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect()
 }
 
 /// Per-layer cache threaded between sequential single-step calls, one entry
 /// per layer matching `Qwen35LayerRoots`'s own per-layer discriminant.
 enum LayerCache {
-    Ssm { conv_history: Vec<f32>, state: Vec<f32> },
-    DenseAttention { k_first: Vec<f32>, k_second: Vec<f32>, k_pass: Vec<f32>, v: Vec<f32> },
+    Ssm {
+        conv_history: Vec<f32>,
+        state: Vec<f32>,
+    },
+    DenseAttention {
+        k_first: Vec<f32>,
+        k_second: Vec<f32>,
+        k_pass: Vec<f32>,
+        v: Vec<f32>,
+    },
 }
 
 /// The last `row_length` elements of `data` -- the one-shot program's
@@ -184,9 +211,23 @@ fn last_row(data: &[f32], row_length: usize) -> &[f32] {
 
 /// Relative-to-row-norm max-abs diff between two EQUAL-length rows.
 fn relative_error(found: &[f32], wanted: &[f32]) -> f32 {
-    assert_eq!(found.len(), wanted.len(), "relative_error compares two rows of the same width");
-    let row_norm: f32 = wanted.iter().map(|value| value * value).sum::<f32>().sqrt().max(1e-6);
-    found.iter().zip(wanted.iter()).map(|(actual, expected)| (actual - expected).abs()).fold(0.0, f32::max) / row_norm
+    assert_eq!(
+        found.len(),
+        wanted.len(),
+        "relative_error compares two rows of the same width"
+    );
+    let row_norm: f32 = wanted
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt()
+        .max(1e-6);
+    found
+        .iter()
+        .zip(wanted.iter())
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0, f32::max)
+        / row_norm
 }
 
 /// The one-evaluation width-13 program: seeds every leaf at
@@ -205,9 +246,15 @@ fn run_one_shot() -> ParitySample {
     let named = seed_named_inputs(&program, &symbols, 0, WIDTH, &empty_caches);
     let blocks = named_f32(&named);
 
-    let mut outputs: Vec<_> = diagnostics.iter().map(|layer: &Qwen35MoeLayerDiagnostics| layer.block_output).collect();
+    let mut outputs: Vec<_> = diagnostics
+        .iter()
+        .map(|layer: &Qwen35MoeLayerDiagnostics| layer.block_output)
+        .collect();
     outputs.push(roots.logits);
-    let layer0_ssm_taps = diagnostics[0].ssm_taps.clone().expect("layer 0 is a synthetic GDN layer");
+    let layer0_ssm_taps = diagnostics[0]
+        .ssm_taps
+        .clone()
+        .expect("layer 0 is a synthetic GDN layer");
     outputs.push(layer0_ssm_taps.state_out);
     outputs.push(layer0_ssm_taps.qkv_mixed);
     assert_eq!(
@@ -220,19 +267,55 @@ fn run_one_shot() -> ParitySample {
     let evaluated = proxima_tensor::cpu::evaluate_named(&program, &symbols, &blocks, &outputs)
         .expect("cpu evaluates the one-shot program's diagnostics and logits");
 
-    let per_layer_block_output: Vec<Vec<f32>> =
-        diagnostics.iter().map(|layer| evaluated.get(layer.block_output).expect("block_output produced").0.to_vec()).collect();
-    let logits = evaluated.get(roots.logits).expect("logits produced").0.to_vec();
-    let state_out = evaluated.get(layer0_ssm_taps.state_out).expect("layer 0 state_out produced").0.to_vec();
-    let qkv_mixed = evaluated.get(layer0_ssm_taps.qkv_mixed).expect("layer 0 qkv_mixed produced").0.to_vec();
+    let per_layer_block_output: Vec<Vec<f32>> = diagnostics
+        .iter()
+        .map(|layer| {
+            evaluated
+                .get(layer.block_output)
+                .expect("block_output produced")
+                .0
+                .to_vec()
+        })
+        .collect();
+    let logits = evaluated
+        .get(roots.logits)
+        .expect("logits produced")
+        .0
+        .to_vec();
+    let state_out = evaluated
+        .get(layer0_ssm_taps.state_out)
+        .expect("layer 0 state_out produced")
+        .0
+        .to_vec();
+    let qkv_mixed = evaluated
+        .get(layer0_ssm_taps.qkv_mixed)
+        .expect("layer 0 qkv_mixed produced")
+        .0
+        .to_vec();
     let per_position_state_out: Vec<Vec<f32>> = layer0_ssm_taps
         .per_position_state_out
         .iter()
-        .map(|node| evaluated.get(*node).expect("per-position state_out produced").0.to_vec())
+        .map(|node| {
+            evaluated
+                .get(*node)
+                .expect("per-position state_out produced")
+                .0
+                .to_vec()
+        })
         .collect();
 
-    assert_eq!(layer_roots.len(), diagnostics.len(), "one layer_roots entry per diagnostics entry");
-    (per_layer_block_output, logits, state_out, qkv_mixed, per_position_state_out)
+    assert_eq!(
+        layer_roots.len(),
+        diagnostics.len(),
+        "one layer_roots entry per diagnostics entry"
+    );
+    (
+        per_layer_block_output,
+        logits,
+        state_out,
+        qkv_mixed,
+        per_position_state_out,
+    )
 }
 
 /// The 13-step sequential program: builds `qwen35moe_forward_program_at_
@@ -256,15 +339,23 @@ fn run_sequential() -> ParitySample {
     let conv_history_len = ((architecture.ssm_conv_kernel - 1) * qkv_dim) as usize;
     let ssm_group = architecture.ssm_time_step_rank / architecture.ssm_group_count.max(1);
     let head_v_dim = architecture.ssm_inner_size / architecture.ssm_time_step_rank.max(1);
-    let state_len = (architecture.ssm_state_size * head_v_dim * architecture.ssm_group_count * ssm_group) as usize;
+    let state_len =
+        (architecture.ssm_state_size * head_v_dim * architecture.ssm_group_count * ssm_group)
+            as usize;
     let mut caches: Vec<LayerCache> = architecture
         .layer_kinds
         .iter()
         .map(|kind| match kind {
-            LayerKind::Gdn => LayerCache::Ssm { conv_history: vec![0.0; conv_history_len], state: vec![0.0; state_len] },
-            LayerKind::Attention => {
-                LayerCache::DenseAttention { k_first: Vec::new(), k_second: Vec::new(), k_pass: Vec::new(), v: Vec::new() }
-            }
+            LayerKind::Gdn => LayerCache::Ssm {
+                conv_history: vec![0.0; conv_history_len],
+                state: vec![0.0; state_len],
+            },
+            LayerKind::Attention => LayerCache::DenseAttention {
+                k_first: Vec::new(),
+                k_second: Vec::new(),
+                k_pass: Vec::new(),
+                v: Vec::new(),
+            },
         })
         .collect();
 
@@ -283,11 +374,22 @@ fn run_sequential() -> ParitySample {
         let mut overrides = std::collections::HashMap::new();
         for (layer, cache) in caches.iter().enumerate() {
             match cache {
-                LayerCache::Ssm { conv_history, state } => {
-                    overrides.insert(format!("ssm_cache.{layer}.conv_history"), conv_history.clone());
+                LayerCache::Ssm {
+                    conv_history,
+                    state,
+                } => {
+                    overrides.insert(
+                        format!("ssm_cache.{layer}.conv_history"),
+                        conv_history.clone(),
+                    );
                     overrides.insert(format!("ssm_cache.{layer}.state"), state.clone());
                 }
-                LayerCache::DenseAttention { k_first, k_second, k_pass, v } => {
+                LayerCache::DenseAttention {
+                    k_first,
+                    k_second,
+                    k_pass,
+                    v,
+                } => {
                     overrides.insert(format!("kv_cache.{layer}.k_first"), k_first.clone());
                     overrides.insert(format!("kv_cache.{layer}.k_second"), k_second.clone());
                     overrides.insert(format!("kv_cache.{layer}.k_pass"), k_pass.clone());
@@ -302,7 +404,10 @@ fn run_sequential() -> ParitySample {
         outputs.push(roots.logits);
         for (layer, layer_root) in layer_roots.iter().enumerate() {
             match layer_root {
-                Qwen35LayerRoots::Ssm { qkv_mixed, state_out } => {
+                Qwen35LayerRoots::Ssm {
+                    qkv_mixed,
+                    state_out,
+                } => {
                     outputs.push(*qkv_mixed);
                     outputs.push(*state_out);
                 }
@@ -312,7 +417,9 @@ fn run_sequential() -> ParitySample {
                     outputs.push(*pass);
                     outputs.push(*value);
                 }
-                Qwen35LayerRoots::Attention(_) => unreachable!("synthetic architecture never uses the even/odd shape"),
+                Qwen35LayerRoots::Attention(_) => {
+                    unreachable!("synthetic architecture never uses the even/odd shape")
+                }
             }
             let _ = layer;
         }
@@ -321,13 +428,30 @@ fn run_sequential() -> ParitySample {
             .expect("cpu evaluates this sequential step's diagnostics, logits and cache roots");
 
         for (layer, layer_diagnostics) in diagnostics.iter().enumerate() {
-            per_layer_block_output[layer] = evaluated.get(layer_diagnostics.block_output).expect("block_output produced").0.to_vec();
+            per_layer_block_output[layer] = evaluated
+                .get(layer_diagnostics.block_output)
+                .expect("block_output produced")
+                .0
+                .to_vec();
         }
-        logits_last = evaluated.get(roots.logits).expect("logits produced").0.to_vec();
+        logits_last = evaluated
+            .get(roots.logits)
+            .expect("logits produced")
+            .0
+            .to_vec();
 
         for (layer, layer_root) in layer_roots.iter().enumerate() {
             match (layer_root, &mut caches[layer]) {
-                (Qwen35LayerRoots::Ssm { qkv_mixed, state_out }, LayerCache::Ssm { conv_history, state }) => {
+                (
+                    Qwen35LayerRoots::Ssm {
+                        qkv_mixed,
+                        state_out,
+                    },
+                    LayerCache::Ssm {
+                        conv_history,
+                        state,
+                    },
+                ) => {
                     let qkv_mixed_new = evaluated.get(*qkv_mixed).expect("qkv_mixed produced").0;
                     let state_new = evaluated.get(*state_out).expect("state_out produced").0;
                     conv_history.extend_from_slice(qkv_mixed_new);
@@ -344,10 +468,25 @@ fn run_sequential() -> ParitySample {
                 }
                 (
                     Qwen35LayerRoots::DenseAttention((first, second, pass, value)),
-                    LayerCache::DenseAttention { k_first, k_second, k_pass, v },
+                    LayerCache::DenseAttention {
+                        k_first,
+                        k_second,
+                        k_pass,
+                        v,
+                    },
                 ) => {
-                    k_first.extend_from_slice(evaluated.get(*first).expect("rotated_k_new_first produced").0);
-                    k_second.extend_from_slice(evaluated.get(*second).expect("rotated_k_new_second produced").0);
+                    k_first.extend_from_slice(
+                        evaluated
+                            .get(*first)
+                            .expect("rotated_k_new_first produced")
+                            .0,
+                    );
+                    k_second.extend_from_slice(
+                        evaluated
+                            .get(*second)
+                            .expect("rotated_k_new_second produced")
+                            .0,
+                    );
                     k_pass.extend_from_slice(evaluated.get(*pass).expect("k_pass produced").0);
                     v.extend_from_slice(evaluated.get(*value).expect("v_new produced").0);
                 }
@@ -356,7 +495,13 @@ fn run_sequential() -> ParitySample {
         }
     }
 
-    (per_layer_block_output, logits_last, layer0_final_state_out, layer0_last_qkv_mixed, layer0_per_position_state_out)
+    (
+        per_layer_block_output,
+        logits_last,
+        layer0_final_state_out,
+        layer0_last_qkv_mixed,
+        layer0_per_position_state_out,
+    )
 }
 
 /// The decisive, checkpoint-free comparison: does the width-13 ONE-SHOT
@@ -365,10 +510,20 @@ fn run_sequential() -> ParitySample {
 /// single CPU engine, with no Metal/executor involved at all.
 #[test]
 fn one_shot_program_matches_sequential_decode_on_synthetic_layers() {
-    let (one_shot_layers, one_shot_logits, one_shot_state_out, one_shot_qkv_mixed, one_shot_per_position_state_out) =
-        run_one_shot();
-    let (sequential_layers, sequential_logits, sequential_state_out, sequential_qkv_mixed, sequential_per_position_state_out) =
-        run_sequential();
+    let (
+        one_shot_layers,
+        one_shot_logits,
+        one_shot_state_out,
+        one_shot_qkv_mixed,
+        one_shot_per_position_state_out,
+    ) = run_one_shot();
+    let (
+        sequential_layers,
+        sequential_logits,
+        sequential_state_out,
+        sequential_qkv_mixed,
+        sequential_per_position_state_out,
+    ) = run_sequential();
 
     assert_eq!(
         one_shot_per_position_state_out.len(),
@@ -376,11 +531,15 @@ fn one_shot_program_matches_sequential_decode_on_synthetic_layers() {
         "one row per prompt position on both sides"
     );
     let mut first_state_divergence: Option<u32> = None;
-    for (position, (one_shot_row, sequential_row)) in
-        one_shot_per_position_state_out.iter().zip(sequential_per_position_state_out.iter()).enumerate()
+    for (position, (one_shot_row, sequential_row)) in one_shot_per_position_state_out
+        .iter()
+        .zip(sequential_per_position_state_out.iter())
+        .enumerate()
     {
         let error = relative_error(sequential_row, one_shot_row);
-        std::println!("one_shot_vs_sequential position={position} layer0_state_out_relative_error={error:e}");
+        std::println!(
+            "one_shot_vs_sequential position={position} layer0_state_out_relative_error={error:e}"
+        );
         if error > 1e-3 && first_state_divergence.is_none() {
             first_state_divergence = Some(position as u32);
         }
@@ -390,9 +549,15 @@ fn one_shot_program_matches_sequential_decode_on_synthetic_layers() {
     let embedding = 8usize;
     let vocab = 16usize;
     let mut first_divergence: Option<String> = None;
-    for (layer_index, (one_shot, sequential)) in one_shot_layers.iter().zip(sequential_layers.iter()).enumerate() {
+    for (layer_index, (one_shot, sequential)) in one_shot_layers
+        .iter()
+        .zip(sequential_layers.iter())
+        .enumerate()
+    {
         let error = relative_error(sequential, last_row(one_shot, embedding));
-        std::println!("one_shot_vs_sequential layer={layer_index} block_output_relative_error={error:e}");
+        std::println!(
+            "one_shot_vs_sequential layer={layer_index} block_output_relative_error={error:e}"
+        );
         if error > 1e-3 && first_divergence.is_none() {
             first_divergence = Some(format!("layer {layer_index} block_output"));
         }
@@ -405,9 +570,13 @@ fn one_shot_program_matches_sequential_decode_on_synthetic_layers() {
 
     let state_out_error = relative_error(&sequential_state_out, &one_shot_state_out);
     std::println!("one_shot_vs_sequential layer0_state_out_relative_error={state_out_error:e}");
-    let qkv_mixed_error =
-        relative_error(&sequential_qkv_mixed, last_row(&one_shot_qkv_mixed, sequential_qkv_mixed.len()));
-    std::println!("one_shot_vs_sequential layer0_qkv_mixed_row12_relative_error={qkv_mixed_error:e}");
+    let qkv_mixed_error = relative_error(
+        &sequential_qkv_mixed,
+        last_row(&one_shot_qkv_mixed, sequential_qkv_mixed.len()),
+    );
+    std::println!(
+        "one_shot_vs_sequential layer0_qkv_mixed_row12_relative_error={qkv_mixed_error:e}"
+    );
 
     assert!(
         first_divergence.is_none(),
@@ -416,4 +585,3 @@ fn one_shot_program_matches_sequential_decode_on_synthetic_layers() {
          width-13 PROGRAM computing something different from the sequential program, not an executor bug"
     );
 }
-

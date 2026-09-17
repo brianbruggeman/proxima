@@ -618,6 +618,33 @@ pub fn select_grouped_round(
     )
 }
 
+/// `scale[route[s]]`: gathers one scalar per selected expert, the
+/// rank-one counterpart of [`gathered_expert_product`]'s weight-matrix
+/// gather. Used to fold a per-expert output scale (gemma4's
+/// `blk.{layer}.ffn_down_exps.scale`, `[expert_count]`) into that expert's
+/// routing weight before combination.
+#[must_use]
+fn gather_expert_scale(program: &mut Vec<Op>, scale: NodeId, route: NodeId) -> NodeId {
+    let gathered_map = IndexMap::Computed {
+        indices: route,
+        index_map: map::projection(1, &[0]),
+        base: IndexPattern {
+            iter_rank: 1,
+            axes: alloc::vec![AxisIndex::default()],
+        },
+        gathered_dim: 0,
+    };
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(scale, gathered_map)],
+            name: None,
+        },
+    )
+}
+
 /// Which function turns a MoE gate's raw logits into per-expert routing
 /// scores -- llama.cpp's own `llama_expert_gating_func_type`
 /// (`llama-hparams.h:11-14`), read from a checkpoint's own
@@ -718,6 +745,50 @@ pub fn append_moe_ffn(
     ones: NodeId,
     gating: ExpertGatingFunc,
     expert_bias: Option<NodeId>,
+    activation: Activation,
+) -> Result<(NodeId, MoeSite), TensorError> {
+    append_moe_ffn_with_expert_scale(
+        program,
+        layer,
+        x,
+        gate_inp,
+        expert_w_gate,
+        expert_w_up,
+        expert_w_down,
+        expert_count,
+        expert_used_count,
+        ones,
+        gating,
+        expert_bias,
+        None,
+        activation,
+    )
+}
+
+/// [`append_moe_ffn`] with an extra OPTIONAL per-expert output scale
+/// (gemma4's `blk.{layer}.ffn_down_exps.scale`, `[expert_count]`), gathered
+/// by each round's own selected route and folded into that round's
+/// combination weight AFTER softmax-over-selected renormalization, matching
+/// the authoritative `topk_weights = topk_weights * expert_scales` fold.
+/// `None` reproduces [`append_moe_ffn`] byte-for-byte -- every caller that
+/// has no such scale on disk (Mixtral, LFM2, qwen3.6 MoE) passes `None` and
+/// this function never diverges from the pre-scale program.
+#[allow(clippy::too_many_arguments)]
+pub fn append_moe_ffn_with_expert_scale(
+    program: &mut Vec<Op>,
+    layer: u32,
+    x: NodeId,
+    gate_inp: NodeId,
+    expert_w_gate: NodeId,
+    expert_w_up: NodeId,
+    expert_w_down: NodeId,
+    expert_count: u32,
+    expert_used_count: u32,
+    ones: NodeId,
+    gating: ExpertGatingFunc,
+    expert_bias: Option<NodeId>,
+    expert_scale: Option<NodeId>,
+    activation: Activation,
 ) -> Result<(NodeId, MoeSite), TensorError> {
     append_moe_ffn_with_projection_strategy(
         program,
@@ -732,6 +803,8 @@ pub fn append_moe_ffn(
         ones,
         gating,
         expert_bias,
+        expert_scale,
+        activation,
         MoeProjectionStrategy::PerRoute,
     )
 }
@@ -754,6 +827,8 @@ pub fn append_moe_ffn_from_logits(
     ones: NodeId,
     gating: ExpertGatingFunc,
     expert_bias: Option<NodeId>,
+    expert_scale: Option<NodeId>,
+    activation: Activation,
 ) -> Result<(NodeId, MoeSite), TensorError> {
     append_moe_ffn_with_projection_strategy_from_logits(
         program,
@@ -768,6 +843,8 @@ pub fn append_moe_ffn_from_logits(
         ones,
         gating,
         expert_bias,
+        expert_scale,
+        activation,
         MoeProjectionStrategy::PerRoute,
     )
 }
@@ -789,6 +866,7 @@ pub fn append_moe_ffn_grouped_gate_up(
     ones: NodeId,
     gating: ExpertGatingFunc,
     expert_bias: Option<NodeId>,
+    activation: Activation,
 ) -> Result<(NodeId, MoeSite), TensorError> {
     append_moe_ffn_with_projection_strategy(
         program,
@@ -803,6 +881,8 @@ pub fn append_moe_ffn_grouped_gate_up(
         ones,
         gating,
         expert_bias,
+        None,
+        activation,
         MoeProjectionStrategy::GroupedGateUp,
     )
 }
@@ -822,42 +902,14 @@ pub(super) fn append_moe_round_output(
     route: NodeId,
     weight: NodeId,
     ones: NodeId,
+    activation: Activation,
 ) -> Result<NodeId, TensorError> {
-    let neg_gate = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Negate,
-        &[(gate, "sg->sg")],
-    )?;
-    let exp_neg_gate = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Exponential,
-        &[(neg_gate, "sg->sg")],
-    )?;
-    let one_plus_exp = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(exp_neg_gate, "sg->sg"), (ones, "->sg")],
-    )?;
-    let sigmoid_gate = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Reciprocal,
-        &[(one_plus_exp, "sg->sg")],
-    )?;
-    let silu_gate = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")],
-    )?;
+    let activated_gate = append_activation(program, gate, ones, activation)?;
     let hidden = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(silu_gate, "sg->sg"), (up, "sg->sg")],
+        &[(activated_gate, "sg->sg"), (up, "sg->sg")],
     )?;
     let down_product = gathered_expert_product(program, expert_w_down, route, hidden);
     let round_output = reduce(
@@ -891,6 +943,8 @@ pub(super) fn append_moe_ffn_with_projection_strategy(
     ones: NodeId,
     gating: ExpertGatingFunc,
     expert_bias: Option<NodeId>,
+    expert_scale: Option<NodeId>,
+    activation: Activation,
     projection_strategy: MoeProjectionStrategy,
 ) -> Result<(NodeId, MoeSite), TensorError> {
     let gate_product = elementwise(
@@ -921,6 +975,8 @@ pub(super) fn append_moe_ffn_with_projection_strategy(
         ones,
         gating,
         expert_bias,
+        expert_scale,
+        activation,
         projection_strategy,
     )
 }
@@ -939,6 +995,8 @@ pub(super) fn append_moe_ffn_with_projection_strategy_from_logits(
     ones: NodeId,
     gating: ExpertGatingFunc,
     expert_bias: Option<NodeId>,
+    expert_scale: Option<NodeId>,
+    activation: Activation,
     projection_strategy: MoeProjectionStrategy,
 ) -> Result<(NodeId, MoeSite), TensorError> {
     if expert_used_count == 0 || expert_used_count > expert_count {
@@ -1003,6 +1061,7 @@ pub(super) fn append_moe_ffn_with_projection_strategy_from_logits(
     let mut max_selection_0: Option<NodeId> = None;
     let mut selected_routes: Vec<NodeId> = Vec::with_capacity(expert_used_count as usize);
     let mut round_weights: Vec<NodeId> = Vec::with_capacity(expert_used_count as usize);
+    let mut combine_weights: Vec<NodeId> = Vec::with_capacity(expert_used_count as usize);
     let mut weighted_sum = None;
     let mut weight_total = None;
 
@@ -1076,6 +1135,25 @@ pub(super) fn append_moe_ffn_with_projection_strategy_from_logits(
         };
         selected_routes.push(route);
         round_weights.push(weight);
+        // `weight_total`/`round_weights` stay on the UNSCALED softmax-over-
+        // selected weight (the renormalization denominator); the per-expert
+        // scale multiplies only the combination weight each round's own
+        // output is scaled by, matching the authoritative
+        // `topk_weights = topk_weights * expert_scales` fold applied AFTER
+        // renormalization, not before it.
+        let combine_weight = match expert_scale {
+            Some(scale) => {
+                let gathered_scale = gather_expert_scale(program, scale, route);
+                elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Multiply,
+                    &[(weight, "s->s"), (gathered_scale, "s->s")],
+                )?
+            }
+            None => weight,
+        };
+        combine_weights.push(combine_weight);
 
         if projection_strategy == MoeProjectionStrategy::PerRoute {
             let gate_product = gathered_expert_product(program, expert_w_gate, route, x);
@@ -1098,8 +1176,16 @@ pub(super) fn append_moe_ffn_with_projection_strategy_from_logits(
                 "sio->sio",
                 "so->sio",
             )?;
-            let weighted_round =
-                append_moe_round_output(program, gate, up, expert_w_down, route, weight, ones)?;
+            let weighted_round = append_moe_round_output(
+                program,
+                gate,
+                up,
+                expert_w_down,
+                route,
+                combine_weight,
+                ones,
+                activation,
+            )?;
             weighted_sum = Some(match weighted_sum {
                 Some(accumulated) => elementwise(
                     program,
@@ -1157,10 +1243,11 @@ pub(super) fn append_moe_ffn_with_projection_strategy_from_logits(
             "sko->skio",
         )?;
 
-        for (round, (route, weight)) in selected_routes
+        for (round, ((route, weight), combine_weight)) in selected_routes
             .iter()
             .copied()
             .zip(round_weights.iter().copied())
+            .zip(combine_weights.iter().copied())
             .enumerate()
         {
             let round = u32::try_from(round).map_err(|_| TensorError::InvalidExpertConfig {
@@ -1169,8 +1256,16 @@ pub(super) fn append_moe_ffn_with_projection_strategy_from_logits(
             })?;
             let gate = select_grouped_round(program, grouped_gate, round, DType::Float32);
             let up = select_grouped_round(program, grouped_up, round, DType::Float32);
-            let weighted_round =
-                append_moe_round_output(program, gate, up, expert_w_down, route, weight, ones)?;
+            let weighted_round = append_moe_round_output(
+                program,
+                gate,
+                up,
+                expert_w_down,
+                route,
+                combine_weight,
+                ones,
+                activation,
+            )?;
             weighted_sum = Some(match weighted_sum {
                 Some(accumulated) => elementwise(
                     program,
@@ -1558,6 +1653,7 @@ pub fn append_mistral_moe_layer(
         ones,
         ExpertGatingFunc::Softmax,
         None,
+        Activation::Silu,
     )?;
 
     let output = elementwise(
@@ -1568,4 +1664,3 @@ pub fn append_mistral_moe_layer(
     )?;
     Ok((output, site))
 }
-

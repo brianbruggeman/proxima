@@ -711,6 +711,11 @@ pub enum InteropError {
     /// fails the load instead of letting `omega::backend::register_checkpoint_mapping`
     /// hand a partially-resident mapping to the first dispatch.
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    #[error("checkpoint mapping still has {bytes_missing} of {bytes_total} bytes non-resident after prefault")]
-    MappingNotResident { bytes_missing: u64, bytes_total: u64 },
+    #[error(
+        "checkpoint mapping still has {bytes_missing} of {bytes_total} bytes non-resident after prefault"
+    )]
+    MappingNotResident {
+        bytes_missing: u64,
+        bytes_total: u64,
+    },
 }

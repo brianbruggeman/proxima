@@ -12,7 +12,9 @@
 #![cfg(all(feature = "metal", feature = "instrument", feature = "moe-topk-fusion", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::spec::{ExpertGatingFunc, append_moe_ffn_from_logits, input_leaf, scalar_constant};
+use proxima_tensor::spec::{
+    Activation, ExpertGatingFunc, append_moe_ffn_from_logits, input_leaf, scalar_constant,
+};
 use proxima_tensor::{DType, Extent, NumericPolicy, QuantizedBlock};
 
 const EXPERT_COUNT: u32 = 256;
@@ -79,6 +81,8 @@ fn moe_topk_bare_dispatch_median_of_seven() {
         one,
         ExpertGatingFunc::Softmax,
         None,
+        None,
+        Activation::Silu,
     )
     .expect("real-shape qwen35moe routing block lowers");
 

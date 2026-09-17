@@ -984,7 +984,10 @@ impl<'a> Pipe for QuantDot<'a> {
     feature = "q5k-int8-dot",
     feature = "q6k-int8-dot"
 ))]
-pub(super) fn fused_quant_dot(block: QuantizedBlock<'_>, activation_q8k: &[u8]) -> Result<f32, TensorError> {
+pub(super) fn fused_quant_dot(
+    block: QuantizedBlock<'_>,
+    activation_q8k: &[u8],
+) -> Result<f32, TensorError> {
     match block {
         #[cfg(feature = "q4k-int8-dot")]
         QuantizedBlock::Q4K(bytes) => dot_q4k_q8k(bytes, activation_q8k),
@@ -1009,7 +1012,10 @@ pub(super) fn fused_quant_dot(block: QuantizedBlock<'_>, activation_q8k: &[u8]) 
     feature = "q5k-int8-dot",
     feature = "q6k-int8-dot"
 ))]
-pub(super) fn unfused_quant_dot(block: QuantizedBlock<'_>, activation_q8k: &[u8]) -> Result<f32, TensorError> {
+pub(super) fn unfused_quant_dot(
+    block: QuantizedBlock<'_>,
+    activation_q8k: &[u8],
+) -> Result<f32, TensorError> {
     let (weight_bytes, block_bytes, qk_k): (&[u8], usize, usize) = match block {
         QuantizedBlock::Q4K(bytes) => (
             bytes,
@@ -1459,7 +1465,10 @@ pub(super) unsafe fn dot_q4k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_blo
 /// Caller guarantees `FEAT_DotProd`; `bsums.len() == Q8K_BSUMS_COUNT * 2`
 /// (16 `i16`s) so the two 8-lane `vld1q_s16` loads stay in bounds.
 #[cfg(all(q4k_dotprod, any(feature = "q4k-int8-dot", feature = "q5k-int8-dot")))]
-pub(super) unsafe fn mins_correction_neon(scales: &[u8; Q4K_SCALE_BYTES], bsums: &[u8]) -> (u32, u32, i32) {
+pub(super) unsafe fn mins_correction_neon(
+    scales: &[u8; Q4K_SCALE_BYTES],
+    bsums: &[u8],
+) -> (u32, u32, i32) {
     // Same masks as `get_scale_min_k4`'s scalar bit-trick, applied once to
     // the whole 12-byte field instead of once per sub-block per call.
     const KMASK1: u32 = 0x3f3f_3f3f;
@@ -2711,4 +2720,3 @@ pub(super) unsafe fn gemm_tile_neon<const ROWS: usize>(
         }
     }
 }
-

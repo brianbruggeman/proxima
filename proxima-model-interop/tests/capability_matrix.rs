@@ -177,19 +177,22 @@ async fn dense_cpu_q6_k_forward_produces_a_deterministic_token_sequence(#[case] 
 
 // --- the codecs this crate's bind path cannot run at all ---
 
-/// [`GgmlType::Q4_0`]/[`GgmlType::Q5_0`]/[`GgmlType::Q2_K`] have no encoder OR
-/// decoder anywhere in `proxima_gguf::quant` (grepped: only
-/// `q3_k`/`q4_k`/`q5_k`/`q6_k`/`q8_0` exist as modules) -- `bind::gguf_tensor_as_f32`'s
-/// own `match` names every one of them as `InteropError::UnrepresentableGgmlType`
-/// rather than misreading a codec it has no decoder for. `bind::bind_dense`/
+/// [`GgmlType::Mxfp4`]/[`GgmlType::Tq10`]/[`GgmlType::Iq1S`] have no decoder
+/// anywhere in `proxima_gguf::quant::dispatch::dequantize` (grepped: its
+/// `match` names `f16`/`bf16`/`q1_0`/`q2_0`/`q2_k`/`q3_k`/`q4_0`/`q4_1`/`q4_k`/
+/// `q5_0`/`q5_1`/`q5_k`/`q6_k`/`q8_0`/`q8_1`/`q8_k`/`iq2_xs`/`iq3_xxs`/`iq4_nl`;
+/// `mxfp4`/`tq1_0`/`iq1_s` fall through its `other` arm to
+/// `QuantError::UnsupportedCodec`) -- `bind::gguf_tensor_as_f32`'s own `match`
+/// names every one of them as `InteropError::UnrepresentableGgmlType` rather
+/// than misreading a codec it has no decoder for. `bind::bind_dense`/
 /// `bind::bind_matmul_weight`/`bind::bind_all_weights` now propagate that
 /// `Err` with `?` instead of `.unwrap_or_else(|error| panic!(...))`, so
 /// `LoadedModel::load` returns it through its own documented `Result`
 /// rather than aborting the process on untrusted input.
 #[proxima::test]
-#[case::q4_0(GgmlType::Q4_0)]
-#[case::q5_0(GgmlType::Q5_0)]
-#[case::q2_k(GgmlType::Q2_K)]
+#[case::mxfp4(GgmlType::Mxfp4)]
+#[case::tq1_0(GgmlType::Tq10)]
+#[case::iq1_s(GgmlType::Iq1S)]
 async fn dense_cpu_unrepresentable_codec_load_returns_a_typed_error(#[case] codec: GgmlType) {
     let file_bytes = support::checkpoint_bytes(codec);
     let parsed =
@@ -205,8 +208,6 @@ async fn dense_cpu_unrepresentable_codec_load_returns_a_typed_error(#[case] code
 }
 
 #[proxima::test]
-#[ignore = "no Q4_0 codec in proxima_gguf::quant (only q4_k/q5_k/q6_k/q8_0 exist); \
-            bind::gguf_tensor_as_f32 rejects Q4_0 with UnrepresentableGgmlType before a forward pass can run"]
 async fn dense_cpu_q4_0_forward_prefill_and_decode() {
     let (_ids, _text, _stopped) = run_cpu(GgmlType::Q4_0, 2)
         .await
@@ -214,8 +215,6 @@ async fn dense_cpu_q4_0_forward_prefill_and_decode() {
 }
 
 #[proxima::test]
-#[ignore = "no Q5_0 codec in proxima_gguf::quant (only q4_k/q5_k/q6_k/q8_0 exist); \
-            bind::gguf_tensor_as_f32 rejects Q5_0 with UnrepresentableGgmlType before a forward pass can run"]
 async fn dense_cpu_q5_0_forward_prefill_and_decode() {
     let (_ids, _text, _stopped) = run_cpu(GgmlType::Q5_0, 2)
         .await
@@ -223,8 +222,6 @@ async fn dense_cpu_q5_0_forward_prefill_and_decode() {
 }
 
 #[proxima::test]
-#[ignore = "no Q2_K codec in proxima_gguf::quant (only q4_k/q5_k/q6_k/q8_0 exist); \
-            bind::gguf_tensor_as_f32 rejects Q2_K with UnrepresentableGgmlType before a forward pass can run"]
 async fn dense_cpu_q2_k_forward_prefill_and_decode() {
     let (_ids, _text, _stopped) = run_cpu(GgmlType::Q2_K, 2)
         .await
