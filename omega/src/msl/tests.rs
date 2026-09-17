@@ -1805,7 +1805,7 @@ fn elementwise_op_emits_one_input_one_output_and_a_matching_grid() {
             .source
             .contains("kernel void omega_elementwise_r1_n1_tanh")
     );
-    assert!(kernel.source.contains("tanh(scratch[0])"));
+    assert!(kernel.source.contains("tanh(clamp(scratch[0], -20.0f, 20.0f))"));
     assert_eq!(kernel.grid.threads, 10);
 }
 

@@ -388,7 +388,9 @@ pub(super) fn scalar_op_expr(op: ScalarOp, args: &[&str]) -> String {
         ScalarOp::Exponential => format!("exp({})", args[0]),
         ScalarOp::Logarithm => format!("log({})", args[0]),
         ScalarOp::SquareRoot => format!("sqrt({})", args[0]),
-        ScalarOp::Tanh => format!("tanh({})", args[0]),
+        // metal's tanh = (exp(2x)-1)/(exp(2x)+1) overflows to NaN past |x| ~ 45;
+        // clamp first since tanh saturates to +-1.0 at f32 precision well inside +-20
+        ScalarOp::Tanh => format!("tanh(clamp({}, -20.0f, 20.0f))", args[0]),
         ScalarOp::Erf => format!("proxima_erf({})", args[0]),
         ScalarOp::Greater => format!("(({} > {}) ? 1.0f : 0.0f)", args[0], args[1]),
         ScalarOp::Equal => format!("((fabs({} - {}) == 0.0f) ? 1.0f : 0.0f)", args[0], args[1]),
