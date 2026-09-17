@@ -256,6 +256,31 @@ pub enum TensorError {
         expert_used_count: u32,
     },
 
+    /// [`crate::spec::stack_selected_routes`] casts its `routes` slice length
+    /// to a `u32` `Op::Iota` extent; a caller that hands it more than
+    /// `u32::MAX` selected routes has no valid axis to stack them onto.
+    #[error("stack_selected_routes got {route_count} routes, which does not fit a u32 axis extent")]
+    TooManySelectedRoutes { route_count: usize },
+
+    /// [`crate::spec::stack_selected_routes`] was called with zero selected
+    /// routes: there is nothing to stack onto the selected axis.
+    #[error("stack_selected_routes got zero selected routes")]
+    NoSelectedRoutes,
+
+    /// [`crate::spec::append_moe_ffn_with_projection_strategy_from_logits`]'s
+    /// per-round accumulators ended empty after combining every round's
+    /// output: `expert_count`/`expert_used_count` already passed
+    /// [`Self::InvalidExpertConfig`]'s check, so this reports an internal
+    /// invariant violation, never a caller-supplied bad config.
+    #[error(
+        "moe combine produced no weighted output despite expert_count={expert_count} \
+         expert_used_count={expert_used_count}"
+    )]
+    MoeAccumulatorEmpty {
+        expert_count: u32,
+        expert_used_count: u32,
+    },
+
     #[error("expert payload arena is invalid: {reason}")]
     InvalidExpertPayloadArena { reason: &'static str },
 
