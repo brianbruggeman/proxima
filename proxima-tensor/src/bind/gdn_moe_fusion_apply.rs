@@ -739,7 +739,7 @@ pub(super) fn moe_reduce_operand(
 
 /// Every [`NodeId`] in `program` that reads `node` as one of its own
 /// [`Op::dependencies`] -- the forward index [`match_moe_topk`] needs because
-/// `append_moe_ffn_from_logits`'s own per-round chain only ever links
+/// `append_moe_ffn`'s own per-round chain only ever links
 /// backwards from a LATER round's `selection_scores` to an EARLIER round's
 /// `mask` (the exclusion `Select`), never the reverse, so finding round
 /// `r + 1` from round `r`'s own `mask` is a forward lookup, not a backward
@@ -756,7 +756,7 @@ pub(super) fn moe_consumers(program: &[Op]) -> BTreeMap<NodeId, Vec<NodeId>> {
     consumers
 }
 
-/// One round's own three consumer-side facts: [`crate::spec::append_moe_ffn_from_logits`]'s
+/// One round's own three consumer-side facts: [`crate::spec::append_moe_ffn`]'s
 /// own `mask`/`max_selection`/`route`/`weight` for whichever round produced
 /// `selection_scores`'s own `mask`/`max_selection` pair — see
 /// [`match_moe_topk`] for how successive rounds chain together.
@@ -770,7 +770,7 @@ pub(super) struct MoeRound {
     pub(super) weight: NodeId,
 }
 
-/// Matches one round of [`crate::spec::append_moe_ffn_from_logits`]'s own
+/// Matches one round of [`crate::spec::append_moe_ffn`]'s own
 /// argmax-with-exclusion loop, forward from `selection_scores` (this round's
 /// own live-score tensor, `scores` itself for round 0, the previous round's
 /// exclusion `Select` output otherwise) using `consumers` rather than walking
@@ -866,7 +866,7 @@ pub(super) struct MoeTopKMatch {
     pub(super) absorbed: BTreeSet<NodeId>,
 }
 
-/// Matches `append_moe_ffn_from_logits`'s own whole routing chain, anchored
+/// Matches `append_moe_ffn`'s own whole routing chain, anchored
 /// at `route0` (round 0's own `route` node -- this op's own eventual primary
 /// `node`, mirroring [`BoundOpKind::GatedDeltaNet`]'s "first output is the
 /// bound op's own node" shape). Declines (returns `None`) on ANY structural
@@ -959,7 +959,7 @@ pub(super) fn match_moe_topk(
         // `route0` (round 0) becomes this op's own primary `node`, never an
         // absorbed one -- every LATER round's `route` is multi-consumer
         // (three `gathered_expert_product` gathers in
-        // `append_moe_ffn_with_projection_strategy_from_logits`'s own
+        // `append_moe_ffn`'s own
         // per-round FFN evaluation), so it materializes as its own `BoundOp`
         // in `rebuilt` regardless of this fusion; it must be dropped here so
         // the fused kind's own extra-output write supplies it instead.
@@ -1023,7 +1023,7 @@ pub(super) fn match_moe_topk(
     })
 }
 
-/// Scans `program` for [`append_moe_ffn_from_logits`] round-0 candidates and,
+/// Scans `program` for [`append_moe_ffn`] round-0 candidates and,
 /// for each, resolves `scores`'s own [`Layout`] against `resolved` -- the
 /// same technique [`gated_delta_net_candidates`] uses for its own six
 /// operand sources, scaled down to the one true operand this kind reads

@@ -1417,21 +1417,21 @@ pub fn append_mistral_cached_moe_layer(
 
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
-    let (ffn_out, site) = append_moe_ffn(
-        program,
-        layer,
-        normed2,
-        gate_inp,
+    let moe_spec = MoeFfnSpec {
+        router: MoeRouter::GateInput(gate_inp),
         expert_w_gate,
         expert_w_up,
         expert_w_down,
         expert_count,
         expert_used_count,
         ones,
-        ExpertGatingFunc::Softmax,
-        None,
-        Activation::Silu,
-    )?;
+        gating: ExpertGatingFunc::Softmax,
+        expert_bias: None,
+        expert_scale: None,
+        activation: Activation::Silu,
+        strategy: MoeProjectionStrategy::PerRoute,
+    };
+    let (ffn_out, site) = append_moe_ffn(program, layer, normed2, &moe_spec)?;
 
     let x_next = elementwise(
         program,

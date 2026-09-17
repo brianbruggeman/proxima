@@ -1947,7 +1947,7 @@ fn position_zero_slice(embedding: usize) -> std::ops::Range<usize> {
     0..embedding.min(8)
 }
 
-/// Reproduces `append_moe_ffn_with_projection_strategy_from_logits`'s own
+/// Reproduces `append_moe_ffn`'s own
 /// top-k selection (`mistral_layer_moe.rs:1061-1221`) for
 /// [`proxima_tensor::spec::ExpertGatingFunc::Softmax`] gating: each round
 /// takes the arg-max of the still-unselected logits (ties break to the

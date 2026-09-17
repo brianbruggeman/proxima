@@ -7,13 +7,14 @@
 //! `OpGpuTiming::gpu_ns` for a plan whose ONLY compute op is the fused
 //! `BoundOpKind::MoeTopK` -- `outputs` names only routing nodes, so
 //! `bind`'s own liveness reachability never pulls in the per-round FFN
-//! evaluation ops `append_moe_ffn_from_logits` also builds.
+//! evaluation ops `append_moe_ffn` also builds.
 
 #![cfg(all(feature = "metal", feature = "instrument", feature = "moe-topk-fusion", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::spec::{
-    Activation, ExpertGatingFunc, append_moe_ffn_from_logits, input_leaf, scalar_constant,
+    Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
+    input_leaf, scalar_constant,
 };
 use proxima_tensor::{DType, Extent, NumericPolicy, QuantizedBlock};
 
@@ -68,27 +69,26 @@ fn moe_topk_bare_dispatch_median_of_seven() {
         "expert_w_down",
     );
     let one = scalar_constant(&mut program, 1.0);
-    let (_output, site) = append_moe_ffn_from_logits(
-        &mut program,
-        0,
-        x,
-        logits,
+    let moe_spec = MoeFfnSpec {
+        router: MoeRouter::Logits(logits),
         expert_w_gate,
         expert_w_up,
         expert_w_down,
-        EXPERT_COUNT,
-        EXPERT_USED_COUNT,
-        one,
-        ExpertGatingFunc::Softmax,
-        None,
-        None,
-        Activation::Silu,
-    )
-    .expect("real-shape qwen35moe routing block lowers");
+        expert_count: EXPERT_COUNT,
+        expert_used_count: EXPERT_USED_COUNT,
+        ones: one,
+        gating: ExpertGatingFunc::Softmax,
+        expert_bias: None,
+        expert_scale: None,
+        activation: Activation::Silu,
+        strategy: MoeProjectionStrategy::PerRoute,
+    };
+    let (_output, site) = append_moe_ffn(&mut program, 0, x, &moe_spec)
+        .expect("real-shape qwen35moe routing block lowers");
 
     // Routing outputs ONLY -- `bind`'s own liveness never pulls in the
     // per-round FFN evaluation ops (gate/up/down gathers, SwiGLU) that
-    // `append_moe_ffn_from_logits` also built, since nothing in the routing
+    // `append_moe_ffn` also built, since nothing in the routing
     // chain reads them.
     let mut outputs = site.selected.clone();
     outputs.extend(site.weights.iter().copied());

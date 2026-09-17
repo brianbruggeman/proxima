@@ -267,7 +267,7 @@ pub enum TensorError {
     #[error("stack_selected_routes got zero selected routes")]
     NoSelectedRoutes,
 
-    /// [`crate::spec::append_moe_ffn_with_projection_strategy_from_logits`]'s
+    /// [`crate::spec::append_moe_ffn`]'s
     /// per-round accumulators ended empty after combining every round's
     /// output: `expert_count`/`expert_used_count` already passed
     /// [`Self::InvalidExpertConfig`]'s check, so this reports an internal

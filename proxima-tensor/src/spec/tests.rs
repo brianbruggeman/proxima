@@ -140,27 +140,27 @@ fn grouped_gate_up_matches_the_per_route_moe_graph_on_cpu() {
             "down",
         );
         let one = scalar_constant(&mut program, 1.0);
-        let appended = if grouped {
-            append_moe_ffn_grouped_gate_up
+        let strategy = if grouped {
+            MoeProjectionStrategy::GroupedGateUp
         } else {
-            append_moe_ffn
+            MoeProjectionStrategy::PerRoute
         };
-        let (root, _) = appended(
-            &mut program,
-            0,
-            x,
-            gate_inp,
-            gate,
-            up,
-            down,
-            EXPERT_COUNT,
-            EXPERT_USED_COUNT,
-            one,
-            ExpertGatingFunc::Softmax,
-            None,
-            Activation::Silu,
-        )
-        .expect("the MoE graph builds");
+        let moe_spec = MoeFfnSpec {
+            router: MoeRouter::GateInput(gate_inp),
+            expert_w_gate: gate,
+            expert_w_up: up,
+            expert_w_down: down,
+            expert_count: EXPERT_COUNT,
+            expert_used_count: EXPERT_USED_COUNT,
+            ones: one,
+            gating: ExpertGatingFunc::Softmax,
+            expert_bias: None,
+            expert_scale: None,
+            activation: Activation::Silu,
+            strategy,
+        };
+        let (root, _) =
+            append_moe_ffn(&mut program, 0, x, &moe_spec).expect("the MoE graph builds");
         (program, root)
     };
 
@@ -2046,22 +2046,22 @@ fn a_routed_ffn_built_by_append_moe_ffn_matches_an_independent_topk_swiglu_refer
     );
     let ones = scalar_constant(&mut program, 1.0);
 
-    let (root, _site) = append_moe_ffn(
-        &mut program,
-        0,
-        x_node,
-        gate_inp_node,
-        expert_w_gate_node,
-        expert_w_up_node,
-        expert_w_down_node,
-        EXPERT_COUNT,
-        EXPERT_USED_COUNT,
+    let moe_spec = MoeFfnSpec {
+        router: MoeRouter::GateInput(gate_inp_node),
+        expert_w_gate: expert_w_gate_node,
+        expert_w_up: expert_w_up_node,
+        expert_w_down: expert_w_down_node,
+        expert_count: EXPERT_COUNT,
+        expert_used_count: EXPERT_USED_COUNT,
         ones,
-        ExpertGatingFunc::Softmax,
-        None,
-        Activation::Silu,
-    )
-    .expect("the routed ffn lowers");
+        gating: ExpertGatingFunc::Softmax,
+        expert_bias: None,
+        expert_scale: None,
+        activation: Activation::Silu,
+        strategy: MoeProjectionStrategy::PerRoute,
+    };
+    let (root, _site) = append_moe_ffn(&mut program, 0, x_node, &moe_spec)
+        .expect("the routed ffn lowers");
 
     let gathered_products = program
         .iter()
@@ -2330,22 +2330,22 @@ fn a_routed_ffn_built_by_append_moe_ffn_with_sigmoid_gating_and_bias_matches_an_
     );
     let ones = scalar_constant(&mut program, 1.0);
 
-    let (root, _site) = append_moe_ffn(
-        &mut program,
-        0,
-        x_node,
-        gate_inp_node,
-        expert_w_gate_node,
-        expert_w_up_node,
-        expert_w_down_node,
-        EXPERT_COUNT,
-        EXPERT_USED_COUNT,
+    let moe_spec = MoeFfnSpec {
+        router: MoeRouter::GateInput(gate_inp_node),
+        expert_w_gate: expert_w_gate_node,
+        expert_w_up: expert_w_up_node,
+        expert_w_down: expert_w_down_node,
+        expert_count: EXPERT_COUNT,
+        expert_used_count: EXPERT_USED_COUNT,
         ones,
-        ExpertGatingFunc::Sigmoid,
-        Some(bias_node),
-        Activation::Silu,
-    )
-    .expect("the sigmoid-gated routed ffn lowers");
+        gating: ExpertGatingFunc::Sigmoid,
+        expert_bias: Some(bias_node),
+        expert_scale: None,
+        activation: Activation::Silu,
+        strategy: MoeProjectionStrategy::PerRoute,
+    };
+    let (root, _site) = append_moe_ffn(&mut program, 0, x_node, &moe_spec)
+        .expect("the sigmoid-gated routed ffn lowers");
 
     let symbols = [SEQUENCE as u64];
     crate::shape::infer(&program, &symbols).expect("the sigmoid-gated routed ffn infers");
@@ -2969,22 +2969,22 @@ fn quantized_moe_ffn_over_a_packed_q4k_expert_stack_matches_the_routed_experts_o
     );
     let ones = scalar_constant(&mut program, 1.0);
 
-    let (root, _site) = append_moe_ffn(
-        &mut program,
-        0,
-        x_node,
-        gate_inp_node,
-        expert_w_gate_node,
-        expert_w_up_node,
-        expert_w_down_node,
-        EXPERT_COUNT,
-        EXPERT_USED_COUNT,
+    let moe_spec = MoeFfnSpec {
+        router: MoeRouter::GateInput(gate_inp_node),
+        expert_w_gate: expert_w_gate_node,
+        expert_w_up: expert_w_up_node,
+        expert_w_down: expert_w_down_node,
+        expert_count: EXPERT_COUNT,
+        expert_used_count: EXPERT_USED_COUNT,
         ones,
-        ExpertGatingFunc::Softmax,
-        None,
-        Activation::Silu,
-    )
-    .expect("the packed-stack routed ffn lowers");
+        gating: ExpertGatingFunc::Softmax,
+        expert_bias: None,
+        expert_scale: None,
+        activation: Activation::Silu,
+        strategy: MoeProjectionStrategy::PerRoute,
+    };
+    let (root, _site) = append_moe_ffn(&mut program, 0, x_node, &moe_spec)
+        .expect("the packed-stack routed ffn lowers");
 
     let symbols = [SEQUENCE as u64];
     crate::shape::infer(&program, &symbols).expect("the packed-stack routed ffn infers");
