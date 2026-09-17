@@ -499,85 +499,11 @@ pub fn append_attention_mixer(
         v_raw
     };
 
-    let (q_same_offset, q_partner_offset) = rope_pairing.offsets();
-    let q_same_pattern = alloc::format!("s,h,{q_same_offset}->shi");
-    let q_partner_pattern = alloc::format!("s,h,{q_partner_offset}->shi");
-    let k_same_pattern = alloc::format!("s,u,{q_same_offset}->sui");
-    let k_partner_pattern = alloc::format!("s,u,{q_partner_offset}->sui");
+    let (rotated_q_even, rotated_q_odd) =
+        fused_rope_pair(program, q, 'h', cos, sin, rope_pairing)?;
 
-    let q_even_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, q_same_pattern.as_str()), (cos, "si->shi")],
-    )?;
-    let q_odd_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, q_partner_pattern.as_str()), (sin, "si->shi")],
-    )?;
-    let rotated_q_even = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")],
-    )?;
-    let q_even_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, q_same_pattern.as_str()), (sin, "si->shi")],
-    )?;
-    let q_odd_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, q_partner_pattern.as_str()), (cos, "si->shi")],
-    )?;
-    let rotated_q_odd = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")],
-    )?;
-
-    let k_even_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k, k_same_pattern.as_str()), (cos, "si->sui")],
-    )?;
-    let k_odd_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k, k_partner_pattern.as_str()), (sin, "si->sui")],
-    )?;
-    let rotated_k_even = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(k_even_cos, "sui->sui"), (k_odd_sin, "sui->sui")],
-    )?;
-    let k_even_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k, k_same_pattern.as_str()), (sin, "si->sui")],
-    )?;
-    let k_odd_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k, k_partner_pattern.as_str()), (cos, "si->sui")],
-    )?;
-    let rotated_k_odd = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(k_even_sin, "sui->sui"), (k_odd_cos, "sui->sui")],
-    )?;
+    let (rotated_k_even, rotated_k_odd) =
+        fused_rope_pair(program, k, 'u', cos, sin, rope_pairing)?;
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(

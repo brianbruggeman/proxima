@@ -81,79 +81,11 @@ pub fn append_mistral_layer(
         "sud->sudi",
     )?;
 
-    let q_even_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i->shi"), (cos, "si->shi")],
-    )?;
-    let q_odd_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i+1->shi"), (sin, "si->shi")],
-    )?;
-    let rotated_q_even = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")],
-    )?;
-    let q_even_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i->shi"), (sin, "si->shi")],
-    )?;
-    let q_odd_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i+1->shi"), (cos, "si->shi")],
-    )?;
-    let rotated_q_odd = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")],
-    )?;
+    let (rotated_q_even, rotated_q_odd) =
+        fused_rope_pair(program, q, 'h', cos, sin, RopePairing::Interleaved)?;
 
-    let k_even_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k, "s,u,2*i->sui"), (cos, "si->sui")],
-    )?;
-    let k_odd_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k, "s,u,2*i+1->sui"), (sin, "si->sui")],
-    )?;
-    let rotated_k_even = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(k_even_cos, "sui->sui"), (k_odd_sin, "sui->sui")],
-    )?;
-    let k_even_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k, "s,u,2*i->sui"), (sin, "si->sui")],
-    )?;
-    let k_odd_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k, "s,u,2*i+1->sui"), (cos, "si->sui")],
-    )?;
-    let rotated_k_odd = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(k_even_sin, "sui->sui"), (k_odd_cos, "sui->sui")],
-    )?;
+    let (rotated_k_even, rotated_k_odd) =
+        fused_rope_pair(program, k, 'u', cos, sin, RopePairing::Interleaved)?;
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
@@ -1401,79 +1333,11 @@ pub fn append_mistral_moe_layer(
         "sud->sudi",
     )?;
 
-    let q_even_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i->shi"), (cos, "si->shi")],
-    )?;
-    let q_odd_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i+1->shi"), (sin, "si->shi")],
-    )?;
-    let rotated_q_even = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")],
-    )?;
-    let q_even_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i->shi"), (sin, "si->shi")],
-    )?;
-    let q_odd_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i+1->shi"), (cos, "si->shi")],
-    )?;
-    let rotated_q_odd = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")],
-    )?;
+    let (rotated_q_even, rotated_q_odd) =
+        fused_rope_pair(program, q, 'h', cos, sin, RopePairing::Interleaved)?;
 
-    let k_even_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k, "s,u,2*i->sui"), (cos, "si->sui")],
-    )?;
-    let k_odd_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k, "s,u,2*i+1->sui"), (sin, "si->sui")],
-    )?;
-    let rotated_k_even = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(k_even_cos, "sui->sui"), (k_odd_sin, "sui->sui")],
-    )?;
-    let k_even_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k, "s,u,2*i->sui"), (sin, "si->sui")],
-    )?;
-    let k_odd_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k, "s,u,2*i+1->sui"), (cos, "si->sui")],
-    )?;
-    let rotated_k_odd = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(k_even_sin, "sui->sui"), (k_odd_cos, "sui->sui")],
-    )?;
+    let (rotated_k_even, rotated_k_odd) =
+        fused_rope_pair(program, k, 'u', cos, sin, RopePairing::Interleaved)?;
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
