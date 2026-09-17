@@ -20,14 +20,13 @@ use std::env;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
+use std::ops::ControlFlow;
 use std::time::Instant;
 
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::GgmlType;
 use proxima_gguf::parse_complete;
-use proxima_model_interop::{
-    Control, GPU_LAYERS_ALL, LoadedModel, Phase, ServingConfig, classify_task,
-};
+use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, Phase, ServingConfig, classify_task};
 
 struct TtntJson(Option<f64>);
 
@@ -245,7 +244,7 @@ fn main() {
                 }
                 Phase::Token => token_times_ms.push(elapsed_ms),
             }
-            Control::Continue
+            ControlFlow::Continue(())
         });
     let (ids, text, stopped_by_eos) = result.expect("local generation");
     let verification = if backend != "cpu" && env::var_os("PROXIMA_VERIFY_GPU").is_some() {
@@ -254,7 +253,9 @@ fn main() {
             ..serving_config
         };
         let (cpu_ids, _cpu_text, _cpu_stopped_by_eos) = loaded_model
-            .generate_streaming(&prompt, max_tokens, cpu_config, &mut |_| Control::Continue)
+            .generate_streaming(&prompt, max_tokens, cpu_config, &mut |_| {
+                ControlFlow::Continue(())
+            })
             .expect("CPU verification generation");
         let matches = ids == cpu_ids;
         eprintln!(

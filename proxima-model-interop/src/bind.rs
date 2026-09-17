@@ -6619,7 +6619,7 @@ mod real_openchat_file {
                     &mut runtime,
                     None,
                     &mut logits_sink,
-                    &mut |_event| crate::generate::Control::Continue,
+                    &mut |_event| core::ops::ControlFlow::Continue(()),
                 )
                 .expect("generate through the metal backend");
 

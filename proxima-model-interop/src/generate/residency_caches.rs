@@ -1,3 +1,5 @@
+use core::ops::ControlFlow;
+
 use super::*;
 
 pub enum NodeValuesSink<'sink> {
@@ -2515,17 +2517,6 @@ pub enum Phase {
     Token,
 }
 
-/// A caller's per-token decision, read back by `decode_until_stop_or_budget`
-/// after every [`TokenEvent`]. `Stop` is the same early exit this loop
-/// already gives the model's own end-of-sequence id, just requested by the
-/// caller instead -- a chat template's own `<|im_end|>`, or a think-block
-/// boundary a caller wants to cut before ever reaching `max_tokens`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Control {
-    Continue,
-    Stop,
-}
-
 /// One [`TokenEvent::text_piece`] worth of text for `token_id`, carrying
 /// forward any UTF-8 tail [`proxima_tokenizer::bpe::decode_ids`] left
 /// incomplete in `pending` from a previous call -- byte-level BPE has no
@@ -2572,15 +2563,16 @@ pub(super) fn decode_streamed_piece(
 /// decoding stops immediately without appending that id. Returns the
 /// accumulated ids plus whether the stop was the model's own signal
 /// (`true`) rather than the budget running out (`false`) -- a caller
-/// [`Control::Stop`] collapses into the same `false` as budget exhaustion,
-/// since neither is the model's own eos.
+/// [`ControlFlow::Break`] collapses into the same `false` as budget
+/// exhaustion, since neither is the model's own eos.
 ///
 /// Every step, after producing that step's token, calls `on_token` once (an
 /// extra [`Phase::Prefill`] call at step `0`, ahead of that step's own
 /// [`Phase::Token`] call) -- [`LoadedModel::generate_with_serving_config`]'s
-/// own `&mut |_| Control::Continue` never observes a difference from this
-/// function's pre-streaming behavior; [`LoadedModel::generate_streaming`]
-/// is the same loop with a real callback.
+/// own `&mut |_| ControlFlow::Continue(())` never observes a difference
+/// from this function's pre-streaming behavior;
+/// [`LoadedModel::generate_streaming`] is the same loop with a real
+/// callback.
 ///
 /// Factored out so this policy -- the exact defect this module's
 /// [`LoadedModel::generate`] fixed (a loop with no termination condition
@@ -2591,7 +2583,7 @@ pub(super) fn decode_until_stop_or_budget(
     max_tokens: usize,
     prompt_token_count: usize,
     mut produce_next_token: impl FnMut(usize) -> Result<u32, InteropError>,
-    on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
+    on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
 ) -> Result<(Vec<u32>, bool), InteropError> {
     let mut generated_ids = Vec::with_capacity(max_tokens);
     let mut stopped_by_eos = false;
@@ -2633,7 +2625,7 @@ pub(super) fn decode_until_stop_or_budget(
                 step,
                 elapsed_ms,
             });
-            if control == Control::Stop {
+            if control == ControlFlow::Break(()) {
                 break;
             }
         }
@@ -2649,7 +2641,7 @@ pub(super) fn decode_until_stop_or_budget(
             step,
             elapsed_ms,
         });
-        if control == Control::Stop {
+        if control == ControlFlow::Break(()) {
             break;
         }
     }
@@ -2660,8 +2652,9 @@ pub(super) fn decode_until_stop_or_budget(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod decode_control_suppression_tests {
     use alloc::string::String;
+    use core::ops::ControlFlow;
 
-    use super::{Control, Phase, TokenEvent, TokenType, Vocab, decode_until_stop_or_budget};
+    use super::{Phase, TokenEvent, TokenType, Vocab, decode_until_stop_or_budget};
 
     /// A small vocab with one [`TokenType::Control`] entry (`"<turn|>"`,
     /// gemma4's real turn-boundary marker) among ordinary text tokens --
@@ -2711,7 +2704,7 @@ mod decode_control_suppression_tests {
                 if event.phase == Phase::Token {
                     text.push_str(event.text_piece);
                 }
-                Control::Continue
+                ControlFlow::Continue(())
             },
         )
         .expect("decode succeeds against a scripted token source");

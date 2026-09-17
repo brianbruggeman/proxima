@@ -14,10 +14,10 @@
 //! below).
 
 use std::env;
+use std::ops::ControlFlow;
 use std::time::Instant;
 
 use proxima_gguf::pipe::parse_complete;
-use proxima_model_interop::Control;
 use proxima_model_interop::LoadedModel;
 use proxima_model_interop::Phase;
 use proxima_model_interop::ServingConfig;
@@ -117,7 +117,7 @@ fn main() {
         if let Phase::Token = event.phase {
             streamed_text.push_str(event.text_piece);
         }
-        Control::Continue
+        ControlFlow::Continue(())
     };
 
     let outcome = model.generate_streaming(&prompt, max_tokens, serving_config, &mut on_token);

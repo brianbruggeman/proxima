@@ -103,7 +103,7 @@ pub use expert_slab::{ExpertSlab, ExpertSlabMemory, encode_expert_copy, recode_e
 #[cfg(feature = "std")]
 pub use gemma4::{GEMMA4, Gemma4Arch};
 #[cfg(feature = "std")]
-pub use generate::{Control, DecodeMetrics, LoadedModel, Phase, PrefixState, TokenEvent};
+pub use generate::{DecodeMetrics, LoadedModel, Phase, PrefixState, TokenEvent};
 #[cfg(feature = "std")]
 pub use hf_bind::{names as hf_names, node_names as hf_node_names, permute_rope_rows};
 pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};

@@ -47,6 +47,7 @@
 //! failure surfaces as an explicit, unambiguous CPU fallback below -- never
 //! a silent one.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -55,7 +56,6 @@ use serde::{Deserialize, Serialize};
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::ArchitectureRegistry;
-use proxima_model_interop::Control;
 use proxima_model_interop::GPU_LAYERS_ALL;
 use proxima_model_interop::GdnPrefillBackend;
 use proxima_model_interop::LoadedModel;
@@ -783,7 +783,7 @@ fn main() {
                 token_elapsed_ms.push(event.elapsed_ms);
             }
         }
-        Control::Continue
+        ControlFlow::Continue(())
     };
     let (outcome, backend_label) = match requested_backend {
         RequestedBackend::Cpu => {
