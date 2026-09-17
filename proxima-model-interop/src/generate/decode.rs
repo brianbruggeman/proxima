@@ -36,6 +36,21 @@ fn set_fusion_disable_env_var(name: &str, disable: bool) {
     }
 }
 
+/// Resolves the `PROXIMA_PREFILL_ONE_EVALUATION`/`PROXIMA_PREFILL_SEQUENTIAL`
+/// escape hatches (`ServingConfig::prefill_one_evaluation`'s own doc) into
+/// the one presence-based override
+/// [`LoadedModel::run_decode_loop_observed_seeded`]'s prefill batch loop
+/// consumes -- read exactly once, at that driver's own entry, rather than
+/// inline at each of the two read sites. Presence, not a parsed value, is
+/// what both env vars mean (`generate/tests_all.rs`'s `set_var(.., "1")`-
+/// around-body tests rely on this), unchanged from the two inline
+/// `std::env::var_os` calls this replaces.
+fn prefill_one_evaluation_requested(serving_config: &ServingConfig) -> bool {
+    (serving_config.prefill_one_evaluation
+        || std::env::var_os("PROXIMA_PREFILL_ONE_EVALUATION").is_some())
+        && std::env::var_os("PROXIMA_PREFILL_SEQUENTIAL").is_none()
+}
+
 impl<'file> LoadedModel<'file> {
     /// [`Self::generate_with_serving_config`] against
     /// [`supported_serving_config`] -- the reachable path every existing
@@ -1216,6 +1231,23 @@ impl<'file> LoadedModel<'file> {
             ));
         }
 
+        // I11 scheduling level 2: phase scheduling, independent of the
+        // admission and residency levels (`ServingConfig::phase_schedule`'s
+        // own doc names this as the one site that consults it). Checked
+        // here, at this driver's own entry, before any of the decode-loop
+        // state below is built, rather than after -- a config this call
+        // cannot serve fails before paying for cache-name derivation, SSM
+        // buffer allocation, or sidecar scratch construction, not partway
+        // through it.
+        if !serving_config.phase_schedule.prefill_before_decode {
+            return Err(InteropError::UnsupportedServingConfig(
+                "phase_schedule.prefill_before_decode=false: interleaving prefill and decode \
+                 steps across sequences is not implemented yet"
+                    .into(),
+            ));
+        }
+        let one_evaluation_prefill_requested = prefill_one_evaluation_requested(serving_config);
+
         // The program's own declared `Op::Input` leaves are the single
         // source of truth for which cache shape each layer needs fed --
         // never `self.layer_roots[layer]`'s own discriminant, which a
@@ -1535,21 +1567,8 @@ impl<'file> LoadedModel<'file> {
         // OPT-IN escape hatch (default OFF, so every existing caller keeps
         // the proven split-loop behavior): built once here, never per step,
         // since `prompt_token_count > 1` is only ever true on the prompt's
-        // own first step.
-        // I11 scheduling level 2: phase scheduling, independent of the
-        // admission and residency levels above (`ServingConfig::
-        // phase_schedule`'s own doc names this as the one site that
-        // consults it).
-        if !serving_config.phase_schedule.prefill_before_decode {
-            return Err(InteropError::UnsupportedServingConfig(
-                "phase_schedule.prefill_before_decode=false: interleaving prefill and decode \
-                 steps across sequences is not implemented yet"
-                    .into(),
-            ));
-        }
-        let one_evaluation_prefill_requested = (serving_config.prefill_one_evaluation
-            || std::env::var_os("PROXIMA_PREFILL_ONE_EVALUATION").is_some())
-            && std::env::var_os("PROXIMA_PREFILL_SEQUENTIAL").is_none();
+        // own first step. `one_evaluation_prefill_requested` itself is
+        // resolved once, at this call's own driver entry, above.
         // Sarathi/chunked-prefill (I9): split the prompt into
         // `serving_config.prefill_chunk_positions`-sized windows instead of
         // one whole-prompt evaluation, so peak activation memory is bounded
