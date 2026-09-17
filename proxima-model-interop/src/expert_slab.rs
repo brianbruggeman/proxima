@@ -17,9 +17,9 @@
 //! [`ExpertSlab::page_expert`]/[`ExpertSlab::evict_expert`] are the
 //! step-boundary surface a residency policy outside this crate drives --
 //! both reject the call with [`InteropError::ExpertSwapDuringStep`] while
-//! [`ExpertSlab::begin_step`] has been called with no matching
-//! [`ExpertSlab::end_step`] yet, so a policy can never race a running
-//! step's own borrowed [`ExpertSource`] snapshot.
+//! the [`StepGuard`] [`ExpertSlab::begin_step`] returns is still alive, so
+//! a policy can never race a running step's own borrowed [`ExpertSource`]
+//! snapshot.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -517,18 +517,37 @@ impl<'file> ExpertSlab<'file> {
         Ok(copy.as_ref().is_some_and(|value| value.bytes.is_mapped()))
     }
 
-    /// Marks a decode step as started -- [`Self::page_expert`]/
-    /// [`Self::evict_expert`] reject any call until the matching
-    /// [`Self::end_step`] runs, so a paging call from inside a
+    /// Marks a decode step as started and returns the [`StepGuard`] that
+    /// scopes it -- [`Self::page_expert`]/[`Self::evict_expert`] reject any
+    /// call until the guard is dropped, so a paging call from inside a
     /// `step_inputs` callback (this crate's own decode-loop hook) is caught
     /// as [`InteropError::ExpertSwapDuringStep`] rather than mutating bytes
-    /// a snapshot already borrowed for this step.
-    pub fn begin_step(&mut self) {
+    /// a snapshot already borrowed for this step. Dropping the guard closes
+    /// the step unconditionally -- on an early `?` return as much as on the
+    /// ordinary path -- so a caller can no longer forget the matching close
+    /// the way a free-standing `end_step` call could be skipped.
+    #[must_use]
+    pub fn begin_step(&mut self) -> StepGuard<'_, 'file> {
+        self.open_step();
+        StepGuard { slab: self }
+    }
+
+    /// The raw, non-RAII half of [`Self::begin_step`]/[`StepGuard`]'s own
+    /// close -- crate-private because every step lifecycle should go
+    /// through [`Self::begin_step`] except the one place a step legitimately
+    /// re-opens after an intra-step pause: `visit_qwen35moe_router_boundary`
+    /// (`generate/residency_caches.rs`) briefly [`Self::close_step`]s to let
+    /// its own residency callback page an expert, then reopens with this
+    /// method before resuming the same step its caller's [`StepGuard`] is
+    /// still scoping.
+    pub(crate) fn open_step(&mut self) {
         self.step_in_progress = true;
     }
 
-    /// Marks the current decode step as finished -- see [`Self::begin_step`].
-    pub fn end_step(&mut self) {
+    /// The raw, non-RAII half of [`StepGuard`]'s own close -- see
+    /// [`Self::open_step`] for why this stays crate-private and who else
+    /// calls it directly.
+    pub(crate) fn close_step(&mut self) {
         self.step_in_progress = false;
     }
 
@@ -1073,6 +1092,69 @@ impl<'file> ExpertSlab<'file> {
     }
 }
 
+/// RAII scope for one open [`ExpertSlab`] decode step, returned by
+/// [`ExpertSlab::begin_step`]. Holding the exclusive borrow for its whole
+/// lifetime is what makes [`ExpertSlab::page_expert`]/
+/// [`ExpertSlab::evict_expert`] compile-unreachable through a `StepGuard`
+/// itself -- neither is forwarded here, so a caller holding only a
+/// `StepGuard` has no expression that names them. [`Self::as_slab_mut`] is
+/// the one deliberate, crate-private escape back to the full
+/// [`ExpertSlab`] surface the pre-gather router-boundary machinery needs
+/// (see [`ExpertSlab::open_step`]'s own doc); outside this crate a
+/// `StepGuard` grants no such escape, so the borrow-checker guarantee is
+/// total for every external caller.
+#[must_use]
+pub struct StepGuard<'slab, 'file> {
+    slab: &'slab mut ExpertSlab<'file>,
+}
+
+impl<'file> StepGuard<'_, 'file> {
+    /// Hands back the scoped step's own [`ExpertSlab`] for the narrow
+    /// window a caller inside this crate legitimately needs the full
+    /// surface (paging included) while the step is nominally still open --
+    /// see [`ExpertSlab::open_step`]'s own doc for the one real caller.
+    pub(crate) fn as_slab_mut(&mut self) -> &mut ExpertSlab<'file> {
+        self.slab
+    }
+
+    /// Forwards to [`ExpertSlab::clear_selected_experts_for_step`].
+    pub fn clear_selected_experts_for_step(&mut self) {
+        self.slab.clear_selected_experts_for_step();
+    }
+
+    /// Forwards to [`ExpertSlab::sources_for_step`].
+    pub fn sources_for_step<'scratch>(
+        &'scratch self,
+        entries: &'scratch mut Vec<(NodeId, Vec<ExpertEntry<'scratch>>)>,
+    ) -> Result<BTreeMap<NodeId, ExpertSource<'scratch>>, InteropError> {
+        self.slab.sources_for_step(entries)
+    }
+
+    /// Forwards to [`ExpertSlab::all_low_sources_for_step`]. Only
+    /// `feature = "metal"` (not `cfg(test)`) has a caller through
+    /// `StepGuard` -- the crate's own unit tests exercise
+    /// [`ExpertSlab::all_low_sources_for_step`] directly on a bare
+    /// `ExpertSlab` (`expert_sidecar.rs`'s own tests), bypassing this
+    /// forwarding method entirely.
+    #[cfg(feature = "metal")]
+    pub(crate) fn all_low_sources_for_step<'mapping, 'scratch>(
+        &self,
+        sidecar: &'mapping crate::expert_sidecar::MappedExpertSidecar,
+        scratch: &'scratch mut AllLowExpertSourceScratch<'mapping>,
+    ) -> Result<BTreeMap<NodeId, ExpertSource<'scratch>>, InteropError>
+    where
+        'mapping: 'scratch,
+    {
+        self.slab.all_low_sources_for_step(sidecar, scratch)
+    }
+}
+
+impl Drop for StepGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.slab.close_step();
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1286,7 +1368,7 @@ mod tests {
         let mut slab = ExpertSlab::new();
         slab.bind_layer_stack(0, NodeId(1), PackedOwnedKind::Q4K, &stack, 1, 32, 32)
             .expect("a 1-expert Q4_K stack binds");
-        slab.begin_step();
+        slab.open_step();
 
         let result = slab.page_expert(0, 0, PackedOwnedKind::Q4K, &[0u8; 144], 32, 32);
 

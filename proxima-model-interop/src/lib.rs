@@ -99,7 +99,9 @@ pub use expert_sidecar::{
     write_expert_sidecar,
 };
 #[cfg(feature = "std")]
-pub use expert_slab::{ExpertSlab, ExpertSlabMemory, encode_expert_copy, recode_expert_into};
+pub use expert_slab::{
+    ExpertSlab, ExpertSlabMemory, StepGuard, encode_expert_copy, recode_expert_into,
+};
 #[cfg(feature = "std")]
 pub use gemma4::{GEMMA4, Gemma4Arch};
 #[cfg(feature = "std")]
