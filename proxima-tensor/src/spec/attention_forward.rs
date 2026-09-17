@@ -376,6 +376,45 @@ where
     value
 }
 
+/// The decode loop only ever samples the LAST row's logits, prefill or
+/// not (`proxima-model-interop::generate`'s own `logits[(new_count - 1)
+/// * vocab_size..]` slice, every call site) -- greedy sampling needs one
+/// row, never the whole prefill. Slicing here, before the vocab-sized
+/// `output.weight` matmul, is what turns a 915-row Q6K reduce into a
+/// 1-row one on an 850+-token prefill (`docs/discipline.md` ROW 418's
+/// own `output.weight` measurement: 14.7s of 43.8s GPU time, 33% of
+/// total, on the FULL 915-row projection). [`embedding_lookup`] is reused
+/// verbatim, not a new primitive: it is already exactly `table[ids[s],
+/// d]`, the same [`IndexMap::Computed`] gather this needs, just with a
+/// 1-entry `lm_head_row` index instead of a `new_count`-entry `ids`.
+/// `lm_head_row` is host-supplied (`new_count - 1`, same convention as
+/// `cached_len`/`ids` above) rather than derived in-graph from
+/// `Extent::Symbolic(0)`: `cpu.rs`'s own
+/// `evaluate_typed_names_a_computed_gather_index_node_as_not_yet_supported`
+/// test is this crate's own proof that an in-program-computed gather
+/// index (an `Op::Iota`/`Op::Reduce` chain, not a caller-supplied
+/// `Op::Input` block) is a named `NotLowerable` gap on the typed
+/// evaluator, not a silently-guessed execution path -- a host-supplied
+/// leaf is the one gather-index shape this crate's gather machinery
+/// already proves correct end to end ([`embedding_lookup`]'s own `ids`).
+/// `last_row_only: false` skips this leaf entirely (not merely bypasses
+/// it) so the program a `false` caller gets is byte-for-byte the one
+/// this function has always built -- no new node, no new required
+/// binding, every existing per-position-logits caller unaffected.
+fn gather_last_row(program: &mut Vec<Op>, normed_final: NodeId, last_row_only: bool) -> NodeId {
+    if last_row_only {
+        let lm_head_row = input_leaf(
+            program,
+            DType::Int32,
+            alloc::vec![Extent::Static(1)],
+            "lm_head_row",
+        );
+        embedding_lookup(program, normed_final, lm_head_row)
+    } else {
+        normed_final
+    }
+}
+
 /// [`append_mistral_layer`]'s attention sub-block in isolation (RoPE + GQA +
 /// causal mask + residual, no FFN) -- the piece [`lfm2_forward_program_with_experts`]
 /// needs on its own, since an attention block there sits beside
@@ -1478,12 +1517,7 @@ pub fn lfm2_forward_program_with_experts(
     );
     let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
 
-    let normed_last = if last_row_only {
-        let lm_head_row = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Static(1)], "lm_head_row");
-        embedding_lookup(&mut program, normed_final, lm_head_row)
-    } else {
-        normed_final
-    };
+    let normed_last = gather_last_row(&mut program, normed_final, last_row_only);
 
     let lm_head = input_leaf(
         &mut program,
@@ -2224,42 +2258,7 @@ pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_ro
     );
     let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
 
-    // The decode loop only ever samples the LAST row's logits, prefill or
-    // not (`proxima-model-interop::generate`'s own `logits[(new_count - 1)
-    // * vocab_size..]` slice, every call site) -- greedy sampling needs one
-    // row, never the whole prefill. Slicing here, before the vocab-sized
-    // `output.weight` matmul, is what turns a 915-row Q6K reduce into a
-    // 1-row one on an 850+-token prefill (`docs/discipline.md` ROW 418's
-    // own `output.weight` measurement: 14.7s of 43.8s GPU time, 33% of
-    // total, on the FULL 915-row projection). `embedding_lookup` is reused
-    // verbatim, not a new primitive: it is already exactly `table[ids[s],
-    // d]`, the same [`IndexMap::Computed`] gather this needs, just with a
-    // 1-entry `lm_head_row` index instead of a `new_count`-entry `ids`.
-    // `lm_head_row` is host-supplied (`new_count - 1`, same convention as
-    // `cached_len`/`ids` above) rather than derived in-graph from
-    // `Extent::Symbolic(0)`: `cpu.rs`'s own
-    // `evaluate_typed_names_a_computed_gather_index_node_as_not_yet_supported`
-    // test is this crate's own proof that an in-program-computed gather
-    // index (an `Op::Iota`/`Op::Reduce` chain, not a caller-supplied
-    // `Op::Input` block) is a named `NotLowerable` gap on the typed
-    // evaluator, not a silently-guessed execution path -- a host-supplied
-    // leaf is the one gather-index shape this crate's gather machinery
-    // already proves correct end to end (`embedding_lookup`'s own `ids`).
-    // `last_row_only: false` skips this leaf entirely (not merely bypasses
-    // it) so the program a `false` caller gets is byte-for-byte the one
-    // this function has always built -- no new node, no new required
-    // binding, every existing per-position-logits caller unaffected.
-    let normed_last = if last_row_only {
-        let lm_head_row = input_leaf(
-            &mut program,
-            DType::Int32,
-            alloc::vec![Extent::Static(1)],
-            "lm_head_row",
-        );
-        embedding_lookup(&mut program, normed_final, lm_head_row)
-    } else {
-        normed_final
-    };
+    let normed_last = gather_last_row(&mut program, normed_final, last_row_only);
 
     let lm_head = input_leaf(
         &mut program,
@@ -2987,17 +2986,7 @@ pub fn qwen35_forward_program_with_last_row(
     );
     let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
 
-    let normed_last = if last_row_only {
-        let lm_head_row = input_leaf(
-            &mut program,
-            DType::Int32,
-            alloc::vec![Extent::Static(1)],
-            "lm_head_row",
-        );
-        embedding_lookup(&mut program, normed_final, lm_head_row)
-    } else {
-        normed_final
-    };
+    let normed_last = gather_last_row(&mut program, normed_final, last_row_only);
     let lm_head = input_leaf(
         &mut program,
         DType::Float32,
