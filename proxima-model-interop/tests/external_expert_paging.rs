@@ -77,8 +77,9 @@ fn one_expert_q4k_bytes(out_dim: u32, in_dim: u32, seed: u64) -> Vec<u8> {
 /// Paging an expert BETWEEN two decode steps bumps its epoch and the
 /// decode loop keeps running, unchanged in shape, on both sides of the
 /// swap -- the CPU decode path (`LoadedModel::run_decode_loop_observed_seeded`)
-/// really does call `ExpertSlab::begin_step`/`sources_for_step`/`end_step`
-/// around every evaluation instead of reading `weights.packed` unconditionally.
+/// really does scope every evaluation in an `ExpertSlab::begin_step`
+/// `StepGuard`, reading through `sources_for_step`, instead of reading
+/// `weights.packed` unconditionally.
 #[proxima::test]
 async fn paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues() {
     let model = load_moe_fixture();

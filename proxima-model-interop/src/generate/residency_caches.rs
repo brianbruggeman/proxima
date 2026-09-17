@@ -2746,13 +2746,6 @@ pub(super) fn wants_bos(vocab: &Vocab) -> bool {
         .unwrap_or_else(|| vocab.bos_token_id().is_some())
 }
 
-/// Calls [`crate::expert_slab::ExpertSlab::end_step`] on every exit from the
-/// expert-gather phase -- normal return and an early `?` error -- so the
-/// source-snapshot guard cannot remain closed after a failed evaluation.
-pub(super) struct EndStepOnDrop<'a, 'file> {
-    pub(super) slab: &'a std::sync::Mutex<crate::expert_slab::ExpertSlab<'file>>,
-}
-
 pub(super) struct CurrentExpertSources {
     pub(super) decisions: [crate::residency::ServeDecision; 16],
     pub(super) len: usize,
@@ -2796,12 +2789,6 @@ impl CurrentExpertSources {
     }
 }
 
-impl Drop for EndStepOnDrop<'_, '_> {
-    fn drop(&mut self) {
-        lock_expert_slab(self.slab).end_step();
-    }
-}
-
 /// Every `LoadedModel::expert_slab` acquire, in one place -- recovers from
 /// poisoning instead of panicking (see that field's own doc for why) rather
 /// than each call site repeating the same `unwrap_or_else`.
@@ -2810,13 +2797,6 @@ pub(super) fn lock_expert_slab<'lock, 'file>(
 ) -> std::sync::MutexGuard<'lock, crate::expert_slab::ExpertSlab<'file>> {
     slab.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-pub(super) fn begin_expert_gather_phase<'lock, 'file>(
-    slab: &'lock std::sync::Mutex<crate::expert_slab::ExpertSlab<'file>>,
-) -> EndStepOnDrop<'lock, 'file> {
-    lock_expert_slab(slab).begin_step();
-    EndStepOnDrop { slab }
 }
 
 /// A router logits tensor and the `[positions, experts]` shape it was
@@ -2962,10 +2942,14 @@ where
         counts,
         scratch,
         &mut |layer, position, routes| {
-            expert_slab.end_step();
+            // Legitimately pauses the caller's own open `StepGuard` scope
+            // for exactly this callback -- see [`ExpertSlab::open_step`]'s
+            // own doc for why this is the one place a step reopens outside
+            // [`ExpertSlab::begin_step`] itself.
+            expert_slab.close_step();
             let boundary_result = before_gather(layer, position, routes, expert_slab);
             if boundary_result.is_ok() {
-                expert_slab.begin_step();
+                expert_slab.open_step();
             }
             boundary_result
         },

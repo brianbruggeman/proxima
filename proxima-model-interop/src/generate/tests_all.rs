@@ -11,9 +11,9 @@ use core::ops::ControlFlow;
 #[cfg(test)]
 use super::{
     DecodeMetrics, LoadedModel, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache,
-    TokenEvent, begin_expert_gather_phase, build_position_inputs, collect_future_gather_cuts,
-    decode_until_stop_or_budget, first_nonfinite_node_value, kv_extent, lock_expert_slab,
-    qwen35moe_admit_low_copy, qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
+    TokenEvent, build_position_inputs, collect_future_gather_cuts, decode_until_stop_or_budget,
+    first_nonfinite_node_value, kv_extent, lock_expert_slab, qwen35moe_admit_low_copy,
+    qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
     should_release_monolithic_sources, step_batch_needs_logits, visit_qwen35moe_router_boundary,
     visit_qwen35moe_router_selections,
 };
@@ -30,11 +30,11 @@ pub(super) mod tests {
     #[cfg(feature = "qwen35moe-expert-prefetch")]
     use super::super::qwen35moe_expert_prefetch_requested;
     use super::{
-        RouterExpertCounts, RouterLogits, SsmLayerCache, begin_expert_gather_phase,
-        collect_future_gather_cuts, first_nonfinite_node_value, kv_extent, lock_expert_slab,
-        qwen35moe_admit_low_copy, qwen35moe_monolithic_all_low_enabled,
-        qwen35moe_pre_gather_enabled, should_release_monolithic_sources, step_batch_needs_logits,
-        visit_qwen35moe_router_boundary, visit_qwen35moe_router_selections,
+        RouterExpertCounts, RouterLogits, SsmLayerCache, collect_future_gather_cuts,
+        first_nonfinite_node_value, kv_extent, lock_expert_slab, qwen35moe_admit_low_copy,
+        qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
+        should_release_monolithic_sources, step_batch_needs_logits, visit_qwen35moe_router_boundary,
+        visit_qwen35moe_router_selections,
     };
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::{map_expert_sources_to_segment, use_metal_output_placements};
@@ -416,8 +416,14 @@ pub(super) mod tests {
             )
             .expect("the current route may change residency before gather");
 
-        let gather_phase = begin_expert_gather_phase(&slab);
-        let during_gather = lock_expert_slab(&slab).page_expert(
+        let mut locked = lock_expert_slab(&slab);
+        let mut gather_phase = locked.begin_step();
+        // `StepGuard` forwards no paging method itself -- `as_slab_mut` is
+        // the one crate-private escape this test uses to prove the
+        // `step_in_progress` rejection still fires when something inside
+        // the crate reaches past the guard, exactly as
+        // `visit_qwen35moe_router_boundary`'s own residency callback would.
+        let during_gather = gather_phase.as_slab_mut().page_expert(
             0,
             0,
             crate::bind::PackedOwnedKind::Q4K,
@@ -434,6 +440,7 @@ pub(super) mod tests {
         ));
 
         drop(gather_phase);
+        drop(locked);
         lock_expert_slab(&slab)
             .page_expert(
                 0,
@@ -443,7 +450,7 @@ pub(super) mod tests {
                 32,
                 32,
             )
-            .expect("the next router boundary reopens after gather");
+            .expect("paging succeeds again once the gather phase's StepGuard drops");
     }
 
     #[test]
@@ -503,7 +510,7 @@ pub(super) mod tests {
             32,
         )
         .expect("the routed layer binds before evaluation");
-        slab.begin_step();
+        slab.open_step();
         let mut route_scratch = Vec::with_capacity(1);
 
         visit_qwen35moe_router_boundary(

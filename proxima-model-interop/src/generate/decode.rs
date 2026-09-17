@@ -2184,14 +2184,12 @@ impl<'file> LoadedModel<'file> {
                         );
                     }
 
-                    // Keep the residency boundary mutable through graph-input
-                    // preparation. Freeze it only immediately before the
-                    // evaluator borrows the expert-source table.
-                    let _end_step_on_drop = begin_expert_gather_phase(&self.expert_slab);
-                    // Dropped before `_end_step_on_drop` (reverse declaration
-                    // order), so the source borrows end before the boundary is
-                    // reopened even on an early `?` return.
+                    // The `StepGuard` (shadowing the lock below) closes this
+                    // step on every exit -- normal return and an early `?`
+                    // error alike -- so the source-snapshot boundary cannot
+                    // remain open after a failed evaluation.
                     let mut expert_slab_guard = lock_expert_slab(&self.expert_slab);
+                    let mut expert_slab_guard = expert_slab_guard.begin_step();
 
                     // the routed segment plan `qwen35moe_pre_gather_plan` builds
                     // is sliced from `self.program`'s own node ids
@@ -2504,7 +2502,7 @@ impl<'file> LoadedModel<'file> {
                                 named: &named_blocks,
                                 outputs: &roots,
                                 resident_names: &resident_names,
-                                expert_slab: &mut expert_slab_guard,
+                                expert_slab: expert_slab_guard.as_slab_mut(),
                                 sidecar_read_scratch: &mut sidecar_read_scratch,
                                 current_sources: &current_sources,
                                 position_offset: cached_len,
@@ -2591,7 +2589,7 @@ impl<'file> LoadedModel<'file> {
                                 named: &named_blocks,
                                 outputs: &roots,
                                 resident_names: &resident_names,
-                                expert_slab: &mut expert_slab_guard,
+                                expert_slab: expert_slab_guard.as_slab_mut(),
                                 sidecar_read_scratch: &mut sidecar_read_scratch,
                                 current_sources: &current_sources,
                                 position_offset: cached_len,
@@ -4333,7 +4331,7 @@ impl<'file> LoadedModel<'file> {
         let resident_names: BTreeSet<&str> = self.resident_names();
 
         // A one-shot diagnostic forward, not a decode step -- no
-        // `ExpertSlab::begin_step`/`end_step` pair runs around it, so this
+        // `ExpertSlab::begin_step` `StepGuard` scopes this call, so it
         // reads whatever is currently paged (this checkpoint's own aliased
         // stack, absent a caller ever paging one) exactly as
         // `run_reduce_with_quantized_weights` always has: `None` here is
