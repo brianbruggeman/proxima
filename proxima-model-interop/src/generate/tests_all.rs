@@ -6,8 +6,11 @@ use super::{
     map_expert_sources_to_segment, supported_serving_config, wants_bos,
 };
 #[cfg(test)]
+use core::ops::ControlFlow;
+
+#[cfg(test)]
 use super::{
-    Control, DecodeMetrics, LoadedModel, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache,
+    DecodeMetrics, LoadedModel, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache,
     TokenEvent, begin_expert_gather_phase, build_position_inputs, collect_future_gather_cuts,
     decode_until_stop_or_budget, first_nonfinite_node_value, kv_extent, lock_expert_slab,
     qwen35moe_admit_low_copy, qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
@@ -380,7 +383,7 @@ pub(super) mod tests {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::{BackendRuntime, LoadedModel};
     use super::{
-        Control, DecodeMetrics, Phase, TokenEvent, build_position_inputs,
+        ControlFlow, DecodeMetrics, Phase, TokenEvent, build_position_inputs,
         decode_until_stop_or_budget,
     };
     use crate::bind::architecture_from_metadata;
@@ -957,7 +960,7 @@ pub(super) mod tests {
                 calls += 1;
                 Ok(scripted_tokens[step])
             },
-            &mut |_event| Control::Continue,
+            &mut |_event| ControlFlow::Continue(()),
         )
         .expect("scripted token source never errors");
 
@@ -990,7 +993,7 @@ pub(super) mod tests {
             scripted_tokens.len(),
             0,
             |step| Ok(scripted_tokens[step]),
-            &mut |_event| Control::Continue,
+            &mut |_event| ControlFlow::Continue(()),
         )
         .expect("scripted token source never errors");
 
@@ -1766,7 +1769,7 @@ pub(super) mod tests {
                 &mut unpadded_runtime,
                 None,
                 &mut super::LogitsSink::Collect(&mut unpadded_logits),
-                &mut |_event| Control::Continue,
+                &mut |_event| ControlFlow::Continue(()),
             )
             .expect("runs the unpadded (kv_bucket_tokens=1) qwen35 dense-attention decode loop");
 
@@ -1784,7 +1787,7 @@ pub(super) mod tests {
                 &mut padded_runtime,
                 None,
                 &mut super::LogitsSink::Collect(&mut padded_logits),
-                &mut |_event| Control::Continue,
+                &mut |_event| ControlFlow::Continue(()),
             )
             .expect("runs the padded (kv_bucket_tokens=32) qwen35 dense-attention decode loop");
 
@@ -1839,7 +1842,7 @@ pub(super) mod tests {
                 calls += 1;
                 Ok(32_000)
             },
-            &mut |_event| Control::Continue,
+            &mut |_event| ControlFlow::Continue(()),
         )
         .expect("scripted token source never errors");
 
@@ -1883,7 +1886,7 @@ pub(super) mod tests {
                     String::from(event.text_piece),
                     event.step,
                 ));
-                Control::Continue
+                ControlFlow::Continue(())
             },
         )
         .expect("scripted token source never errors");
@@ -1937,8 +1940,8 @@ pub(super) mod tests {
         );
     }
 
-    /// [`Control::Stop`]'s own contract: returning it from `on_token` ends
-    /// decoding after that token, short of `max_tokens`, and is reported
+    /// [`ControlFlow::Break`]'s own contract: returning it from `on_token`
+    /// ends decoding after that token, short of `max_tokens`, and is reported
     /// the same way running out of budget is -- never mistaken for the
     /// model's own eos.
     #[test]
@@ -1956,10 +1959,10 @@ pub(super) mod tests {
                 if matches!(event.phase, Phase::Token) {
                     token_events_seen += 1;
                     if token_events_seen == 3 {
-                        return Control::Stop;
+                        return ControlFlow::Break(());
                     }
                 }
-                Control::Continue
+                ControlFlow::Continue(())
             },
         )
         .expect("scripted token source never errors");
@@ -2000,7 +2003,7 @@ pub(super) mod tests {
             scripted_tokens.len(),
             0,
             |step| Ok(scripted_tokens[step]),
-            &mut |_event| Control::Continue,
+            &mut |_event| ControlFlow::Continue(()),
         )
         .expect("an incomplete trailing multibyte sequence must never error");
 
@@ -2047,7 +2050,7 @@ pub(super) mod tests {
                 if matches!(event.phase, Phase::Token) {
                     events.push(String::from(event.text_piece));
                 }
-                Control::Continue
+                ControlFlow::Continue(())
             },
         )
         .expect("a non-continuing follow-on token must never error");
@@ -2585,8 +2588,8 @@ pub(super) mod memory_fit_gate_tests {
         use proxima_telemetry::recorder::Recorder;
 
         use super::super::{
-            BackendRuntime, Control, LoadedModel, LogitsSink, NodeValuesSink, Phase, PrefixState,
-            supported_serving_config,
+            BackendRuntime, ControlFlow, LoadedModel, LogitsSink, NodeValuesSink, Phase,
+            PrefixState, supported_serving_config,
         };
         use crate::serving::GPU_LAYERS_ALL;
 
@@ -2718,7 +2721,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     &mut LogitsSink::Collect(&mut direct_logits),
                     &mut NodeValuesSink::Discard,
-                    &mut |_event| Control::Continue,
+                    &mut |_event| ControlFlow::Continue(()),
                     None,
                     false,
                 )
@@ -2743,7 +2746,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     &mut LogitsSink::Collect(&mut resumed_logits),
                     &mut NodeValuesSink::Discard,
-                    &mut |_event| Control::Continue,
+                    &mut |_event| ControlFlow::Continue(()),
                     Some(seed),
                     true,
                 )
@@ -2804,7 +2807,7 @@ pub(super) mod memory_fit_gate_tests {
                     SUFFIX_A,
                     max_tokens,
                     &serving_config,
-                    &mut |_event| Control::Continue,
+                    &mut |_event| ControlFlow::Continue(()),
                 )
                 .expect("resume decoding from the cached prefix");
 
@@ -2861,7 +2864,7 @@ pub(super) mod memory_fit_gate_tests {
                             if let Phase::Prefill { prompt_tokens } = event.phase {
                                 prefill_rows = prompt_tokens;
                             }
-                            Control::Continue
+                            ControlFlow::Continue(())
                         },
                     )
                     .expect("resume decoding from the cached prefix");
@@ -2955,7 +2958,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     &mut LogitsSink::Discard,
                     &mut NodeValuesSink::Discard,
-                    &mut |_event| Control::Continue,
+                    &mut |_event| ControlFlow::Continue(()),
                     None,
                     true,
                 )
@@ -3092,7 +3095,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     &mut LogitsSink::Discard,
                     &mut NodeValuesSink::Discard,
-                    &mut |_event| Control::Continue,
+                    &mut |_event| ControlFlow::Continue(()),
                     None,
                     true,
                 )
@@ -3162,7 +3165,7 @@ pub(super) mod memory_fit_gate_tests {
                         None,
                         &mut LogitsSink::Discard,
                         &mut NodeValuesSink::Discard,
-                        &mut |_event| Control::Continue,
+                        &mut |_event| ControlFlow::Continue(()),
                         None,
                         true,
                     )
@@ -3198,7 +3201,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     &mut LogitsSink::Discard,
                     &mut NodeValuesSink::Discard,
-                    &mut |_event| Control::Continue,
+                    &mut |_event| ControlFlow::Continue(()),
                     None,
                     true,
                 )
@@ -3221,7 +3224,7 @@ pub(super) mod memory_fit_gate_tests {
         use proxima_tensor::op::NodeId;
 
         use super::super::{
-            BackendRuntime, Control, LoadedModel, LogitsSink, NodeValuesSink,
+            BackendRuntime, ControlFlow, LoadedModel, LogitsSink, NodeValuesSink,
             supported_serving_config,
         };
         use crate::serving::GPU_LAYERS_ALL;
@@ -3337,7 +3340,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     &mut LogitsSink::Collect(&mut sequential_logits),
                     &mut NodeValuesSink::Discard,
-                    &mut |_event| Control::Continue,
+                    &mut |_event| ControlFlow::Continue(()),
                     None,
                     false,
                 )
@@ -3358,7 +3361,7 @@ pub(super) mod memory_fit_gate_tests {
                             None,
                             &mut LogitsSink::Collect(&mut one_evaluation_logits),
                             &mut NodeValuesSink::Discard,
-                            &mut |_event| Control::Continue,
+                            &mut |_event| ControlFlow::Continue(()),
                             None,
                             false,
                         )
@@ -3424,7 +3427,7 @@ pub(super) mod memory_fit_gate_tests {
 
             let (sequential_ids, sequential_text, _) = model
                 .generate_streaming(prompt, steps, serving_config, &mut |_event| {
-                    Control::Continue
+                    ControlFlow::Continue(())
                 })
                 .expect("sequential prefill through generate_streaming");
 
@@ -3434,7 +3437,7 @@ pub(super) mod memory_fit_gate_tests {
                 with_one_evaluation_prefill_forced(|| {
                     model
                         .generate_streaming(prompt, steps, serving_config, &mut |_event| {
-                            Control::Continue
+                            ControlFlow::Continue(())
                         })
                         .expect("one-evaluation prefill through generate_streaming")
                 })
@@ -3526,7 +3529,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     &mut LogitsSink::Discard,
                     &mut sequential_sink,
-                    &mut |_event| Control::Continue,
+                    &mut |_event| ControlFlow::Continue(()),
                     None,
                     false,
                 )
@@ -3552,7 +3555,7 @@ pub(super) mod memory_fit_gate_tests {
                             None,
                             &mut LogitsSink::Discard,
                             &mut one_evaluation_sink,
-                            &mut |_event| Control::Continue,
+                            &mut |_event| ControlFlow::Continue(()),
                             None,
                             false,
                         )
@@ -3675,7 +3678,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     &mut LogitsSink::Discard,
                     &mut sequential_sink,
-                    &mut |_event| Control::Continue,
+                    &mut |_event| ControlFlow::Continue(()),
                     None,
                     false,
                 )
@@ -3701,7 +3704,7 @@ pub(super) mod memory_fit_gate_tests {
                             None,
                             &mut LogitsSink::Discard,
                             &mut one_evaluation_sink,
-                            &mut |_event| Control::Continue,
+                            &mut |_event| ControlFlow::Continue(()),
                             None,
                             false,
                         )
@@ -3870,7 +3873,7 @@ pub(super) mod memory_fit_gate_tests {
                     None,
                     &mut LogitsSink::Discard,
                     &mut sequential_sink,
-                    &mut |_event| Control::Continue,
+                    &mut |_event| ControlFlow::Continue(()),
                     None,
                     false,
                 )
@@ -3896,7 +3899,7 @@ pub(super) mod memory_fit_gate_tests {
                             None,
                             &mut LogitsSink::Discard,
                             &mut one_evaluation_sink,
-                            &mut |_event| Control::Continue,
+                            &mut |_event| ControlFlow::Continue(()),
                             None,
                             false,
                         )

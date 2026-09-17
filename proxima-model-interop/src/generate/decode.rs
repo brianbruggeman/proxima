@@ -1,3 +1,5 @@
+use core::ops::ControlFlow;
+
 use super::*;
 
 /// Measurement-only edge switch: mirrors `ServingConfig`'s three fusion
@@ -736,7 +738,7 @@ impl<'file> LoadedModel<'file> {
                 None,
                 &mut LogitsSink::Discard,
                 &mut NodeValuesSink::Discard,
-                &mut |_event| Control::Continue,
+                &mut |_event| ControlFlow::Continue(()),
                 None,
                 true,
             )?;
@@ -772,7 +774,7 @@ impl<'file> LoadedModel<'file> {
         suffix: &str,
         max_tokens: usize,
         serving_config: &ServingConfig,
-        on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let effective_serving_config = {
@@ -968,7 +970,7 @@ impl<'file> LoadedModel<'file> {
             runtime,
             None,
             &mut LogitsSink::Discard,
-            &mut |_event| Control::Continue,
+            &mut |_event| ControlFlow::Continue(()),
         )
     }
 
@@ -985,10 +987,10 @@ impl<'file> LoadedModel<'file> {
     /// step's own forward-pass latency), then one [`Phase::Token`] event
     /// per generated token, `text_piece`s concatenating to this call's
     /// returned `String` on the same ids as its returned `Vec<u32>`.
-    /// Returning [`Control::Stop`] from any call ends decoding after that
-    /// token, same as [`Control::Stop`]'s own doc: this call then returns
-    /// `finished = false`, exactly like running out of `max_tokens`, never
-    /// mistaken for the model's own eos.
+    /// Returning [`ControlFlow::Break`] from any call ends decoding after
+    /// that token, same as [`decode_until_stop_or_budget`]'s own doc: this
+    /// call then returns `finished = false`, exactly like running out of
+    /// `max_tokens`, never mistaken for the model's own eos.
     ///
     /// # Errors
     ///
@@ -998,7 +1000,7 @@ impl<'file> LoadedModel<'file> {
         prompt: &str,
         max_tokens: usize,
         serving_config: ServingConfig,
-        on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let serving_config = {
@@ -1009,7 +1011,7 @@ impl<'file> LoadedModel<'file> {
         let mut runtime = BackendRuntime::new(&serving_config);
         #[cfg(feature = "metal")]
         if std::env::var_os("PROXIMA_WARMUP_BEFORE_GENERATE").is_some() {
-            let mut warmup_callback = |_event: TokenEvent<'_>| Control::Continue;
+            let mut warmup_callback = |_event: TokenEvent<'_>| ControlFlow::Continue(());
             runtime.retain_monolithic_prefill_sources = true;
             let warmup_result = self.run_decode_loop_observed(
                 prompt,
@@ -1050,9 +1052,9 @@ impl<'file> LoadedModel<'file> {
     /// read off per-step logits without a parallel, uncached forward pass.
     /// Both are no-ops for [`Self::run_decode_loop`]'s own callers.
     /// `on_token` is [`decode_until_stop_or_budget`]'s own per-step callback,
-    /// threaded straight through -- `&mut |_| Control::Continue` for every
-    /// caller that does not need it, [`Self::generate_streaming`]'s real one
-    /// for the one that does.
+    /// threaded straight through -- `&mut |_| ControlFlow::Continue(())` for
+    /// every caller that does not need it, [`Self::generate_streaming`]'s
+    /// real one for the one that does.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_decode_loop_observed(
         &self,
@@ -1062,7 +1064,7 @@ impl<'file> LoadedModel<'file> {
         runtime: &mut BackendRuntime,
         token_override: Option<&[u32]>,
         logits_sink: &mut LogitsSink,
-        on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let (generated_ids, text, stopped_by_eos, _prefix_state) = self
             .run_decode_loop_observed_seeded(
@@ -1113,7 +1115,7 @@ impl<'file> LoadedModel<'file> {
         token_override: Option<&[u32]>,
         logits_sink: &mut LogitsSink,
         node_values_sink: &mut NodeValuesSink,
-        on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
         seed: Option<PrefixState>,
         force_two_range: bool,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
@@ -3562,8 +3564,8 @@ impl<'file> LoadedModel<'file> {
         // just-sampled, never yet fed back through `evaluate`). Derived
         // from `cached_len` itself rather than re-counting loop iterations,
         // so it is correct on every exit path `decode_until_stop_or_budget`
-        // has (`max_tokens` exhaustion, model EOS, `Control::Stop` from
-        // either phase) without special-casing any of them.
+        // has (`max_tokens` exhaustion, model EOS, `ControlFlow::Break(())`
+        // from either phase) without special-casing any of them.
         let mut final_ids = seed_ids;
         final_ids.extend_from_slice(&ids);
         let forwarded_generated = cached_len
@@ -3616,7 +3618,7 @@ impl<'file> LoadedModel<'file> {
         runtime: &mut BackendRuntime,
         token_override: Option<&[u32]>,
         logits_sink: &mut LogitsSink,
-        on_token: &mut dyn FnMut(TokenEvent<'_>) -> Control,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let prompt_token_count = ids.len();
         let block_count = self.architecture.block_count as usize;
@@ -4191,7 +4193,7 @@ impl<'file> LoadedModel<'file> {
             None,
             &mut LogitsSink::Discard,
             &mut node_values_sink,
-            &mut |_event| Control::Continue,
+            &mut |_event| ControlFlow::Continue(()),
             None,
             true,
         )?;
@@ -4416,7 +4418,7 @@ impl<'file> LoadedModel<'file> {
             let mut runtime = BackendRuntime::new(&serving_config);
             let mut captured = Vec::new();
             let mut logits_sink = LogitsSink::Collect(&mut captured);
-            let mut on_token = |_event: TokenEvent<'_>| Control::Continue;
+            let mut on_token = |_event: TokenEvent<'_>| ControlFlow::Continue(());
             self.run_decode_loop_observed(
                 prompt,
                 1,

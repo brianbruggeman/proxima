@@ -37,11 +37,12 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
 use serde::Deserialize;
 
 use crate::error::InteropError;
-use crate::generate::{BackendRuntime, Control, LoadedModel, LogitsSink, supported_serving_config};
+use crate::generate::{BackendRuntime, LoadedModel, LogitsSink, supported_serving_config};
 use crate::serving::ServingConfig;
 
 /// One held-out prompt the quality harness scores a variant decode
@@ -284,7 +285,7 @@ fn score_prompt(
             &mut reference_runtime,
             None,
             &mut LogitsSink::Collect(&mut reference_logits),
-            &mut |_event| Control::Continue,
+            &mut |_event| ControlFlow::Continue(()),
         )?;
 
     // `reference_logits.len()` already includes the eos-triggering step's
@@ -306,7 +307,7 @@ fn score_prompt(
             &mut variant_runtime,
             Some(&reference_ids[..tokens_compared]),
             &mut LogitsSink::Collect(&mut variant_logits),
-            &mut |_event| Control::Continue,
+            &mut |_event| ControlFlow::Continue(()),
         )?;
     }
 
