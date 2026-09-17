@@ -7795,32 +7795,29 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
     const REAL_CONTEXT: u64 = 8192;
     const ATTENTION_LAYERS: [u32; 6] = [2, 6, 10, 14, 18, 21];
 
-    let layer_kinds: Vec<LayerKind> = (0..24)
-        .map(|layer| {
-            if ATTENTION_LAYERS.contains(&layer) {
+    let schedule: Vec<LayerSchedule> = (0..24)
+        .map(|layer| LayerSchedule {
+            kind: if ATTENTION_LAYERS.contains(&layer) {
                 LayerKind::Attention
             } else {
                 LayerKind::ShortConv
-            }
-        })
-        .collect();
-
-    let attention_configs: Vec<LayerAttentionConfig> = (0..24)
-        .map(|_| LayerAttentionConfig {
-            head_dim: 64,
-            kv_heads: 8,
-            mask_window: None,
-            value_source_kind: ValueSourceKind::ProjectedV,
-            rope_table: RopeTableSel {
-                cos_name: "rope_cos",
-                sin_name: "rope_sin",
             },
-            rope_pairing: RopePairing::Interleaved,
-            score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
-            value_norm: false,
+            attention: LayerAttentionConfig {
+                head_dim: 64,
+                kv_heads: 8,
+                mask_window: None,
+                value_source_kind: ValueSourceKind::ProjectedV,
+                rope_table: RopeTableSel {
+                    cos_name: "rope_cos",
+                    sin_name: "rope_sin",
+                },
+                rope_pairing: RopePairing::Interleaved,
+                score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
+                value_norm: false,
+            },
+            ffn: LayerFfnConfig::exclusive(),
         })
         .collect();
-    let ffn_configs: Vec<LayerFfnConfig> = (0..24).map(|_| LayerFfnConfig::exclusive()).collect();
 
     let build_start = std::time::Instant::now();
     let (program, _logits, _moe_sites) = lfm2_forward_program_with_experts(
@@ -7834,9 +7831,7 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
         4,
         2,
         3,
-        &layer_kinds,
-        &attention_configs,
-        &ffn_configs,
+        &schedule,
         None,
         None,
         false,
@@ -7861,37 +7856,32 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
 }
 
 #[proxima::test]
-async fn lfm2_forward_program_rejects_a_layer_kinds_length_mismatch() {
-    let layer_kinds = [LayerKind::Attention, LayerKind::ShortConv];
-    let attention_configs = [
-        LayerAttentionConfig {
-            head_dim: 64,
-            kv_heads: 8,
-            mask_window: None,
-            value_source_kind: ValueSourceKind::ProjectedV,
-            rope_table: RopeTableSel {
-                cos_name: "rope_cos",
-                sin_name: "rope_sin",
-            },
-            rope_pairing: RopePairing::Interleaved,
-            score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
-            value_norm: false,
+async fn lfm2_forward_program_rejects_a_layer_schedule_length_mismatch() {
+    let attention = LayerAttentionConfig {
+        head_dim: 64,
+        kv_heads: 8,
+        mask_window: None,
+        value_source_kind: ValueSourceKind::ProjectedV,
+        rope_table: RopeTableSel {
+            cos_name: "rope_cos",
+            sin_name: "rope_sin",
         },
-        LayerAttentionConfig {
-            head_dim: 64,
-            kv_heads: 8,
-            mask_window: None,
-            value_source_kind: ValueSourceKind::ProjectedV,
-            rope_table: RopeTableSel {
-                cos_name: "rope_cos",
-                sin_name: "rope_sin",
-            },
-            rope_pairing: RopePairing::Interleaved,
-            score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
-            value_norm: false,
+        rope_pairing: RopePairing::Interleaved,
+        score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
+        value_norm: false,
+    };
+    let schedule = [
+        LayerSchedule {
+            kind: LayerKind::Attention,
+            attention,
+            ffn: LayerFfnConfig::exclusive(),
+        },
+        LayerSchedule {
+            kind: LayerKind::ShortConv,
+            attention,
+            ffn: LayerFfnConfig::exclusive(),
         },
     ];
-    let ffn_configs = [LayerFfnConfig::exclusive(), LayerFfnConfig::exclusive()];
     let error = lfm2_forward_program_with_experts(
         128_000,
         2048,
@@ -7903,18 +7893,16 @@ async fn lfm2_forward_program_rejects_a_layer_kinds_length_mismatch() {
         4,
         2,
         3,
-        &layer_kinds,
-        &attention_configs,
-        &ffn_configs,
+        &schedule,
         None,
         None,
         false,
     )
-    .expect_err("2 layer_kinds against block_count=24 must be rejected");
+    .expect_err("2 schedule entries against block_count=24 must be rejected");
     assert!(
         matches!(
             error,
-            TensorError::LayerKindCountMismatch {
+            TensorError::LayerScheduleCountMismatch {
                 expected: 24,
                 found: 2
             }
@@ -12542,38 +12530,6 @@ mod gemma4_synthetic_parity {
         // -- stage 4: full end-to-end engine graph (gemma4's real
         // composition via lfm2_forward_program_with_experts) vs the fully
         // independent reference, final logits --
-        let attention_configs = alloc::vec![
-            LayerAttentionConfig {
-                head_dim: HEAD_DIM as u32,
-                kv_heads: KV_HEADS as u32,
-                mask_window: Some(SWA_WINDOW as u32),
-                value_source_kind: ValueSourceKind::ProjectedV,
-                rope_table: RopeTableSel {
-                    cos_name: "rope_cos_swa",
-                    sin_name: "rope_sin_swa"
-                },
-                rope_pairing: RopePairing::SplitHalf {
-                    pairs: PAIRS as u32
-                },
-                score_scale: AttentionScoreScale::Unscaled,
-                value_norm: true,
-            },
-            LayerAttentionConfig {
-                head_dim: HEAD_DIM as u32,
-                kv_heads: KV_HEADS as u32,
-                mask_window: None,
-                value_source_kind: ValueSourceKind::SharedWithKey,
-                rope_table: RopeTableSel {
-                    cos_name: "rope_cos",
-                    sin_name: "rope_sin"
-                },
-                rope_pairing: RopePairing::SplitHalf {
-                    pairs: PAIRS as u32
-                },
-                score_scale: AttentionScoreScale::Unscaled,
-                value_norm: true,
-            },
-        ];
         let ffn_config = LayerFfnConfig {
             post_attention_norm: true,
             combination: FfnCombination::ParallelDenseMoe,
@@ -12588,6 +12544,46 @@ mod gemma4_synthetic_parity {
             expert_output_scale: true,
             activation: Activation::GeluTanh,
         };
+        let schedule = alloc::vec![
+            LayerSchedule {
+                kind: LayerKind::Attention,
+                attention: LayerAttentionConfig {
+                    head_dim: HEAD_DIM as u32,
+                    kv_heads: KV_HEADS as u32,
+                    mask_window: Some(SWA_WINDOW as u32),
+                    value_source_kind: ValueSourceKind::ProjectedV,
+                    rope_table: RopeTableSel {
+                        cos_name: "rope_cos_swa",
+                        sin_name: "rope_sin_swa"
+                    },
+                    rope_pairing: RopePairing::SplitHalf {
+                        pairs: PAIRS as u32
+                    },
+                    score_scale: AttentionScoreScale::Unscaled,
+                    value_norm: true,
+                },
+                ffn: ffn_config,
+            },
+            LayerSchedule {
+                kind: LayerKind::Attention,
+                attention: LayerAttentionConfig {
+                    head_dim: HEAD_DIM as u32,
+                    kv_heads: KV_HEADS as u32,
+                    mask_window: None,
+                    value_source_kind: ValueSourceKind::SharedWithKey,
+                    rope_table: RopeTableSel {
+                        cos_name: "rope_cos",
+                        sin_name: "rope_sin"
+                    },
+                    rope_pairing: RopePairing::SplitHalf {
+                        pairs: PAIRS as u32
+                    },
+                    score_scale: AttentionScoreScale::Unscaled,
+                    value_norm: true,
+                },
+                ffn: ffn_config,
+            },
+        ];
         let (program, logits, _moe_sites) = lfm2_forward_program_with_experts(
             VOCAB as u32,
             EMBEDDING as u32,
@@ -12599,9 +12595,7 @@ mod gemma4_synthetic_parity {
             EXPERT_USED as u32,
             0,
             0,
-            &[LayerKind::Attention, LayerKind::Attention],
-            &attention_configs,
-            &alloc::vec![ffn_config; 2],
+            &schedule,
             Some(EmbeddingScale::Sqrt),
             Some(SOFTCAP),
             false,

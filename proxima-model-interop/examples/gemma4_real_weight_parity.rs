@@ -20,8 +20,8 @@ use proxima_model_interop::gemma4::from_metadata;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
-    LayerAttentionConfig, LayerFfnConfig, LayerKind, RopePairing, RopeTableSel, ValueSourceKind,
-    lfm2_forward_program_with_experts,
+    LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, RopePairing, RopeTableSel,
+    ValueSourceKind, lfm2_forward_program_with_experts,
 };
 
 /// Finds the [`NodeId`] of the `Op::Input` leaf named `name` -- `op::append`'s
@@ -35,8 +35,8 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
         .unwrap_or_else(|| panic!("no Op::Input leaf named {name:?} in program"))
 }
 
-/// Reproduces `gemma4_attention_configs`/`gemma4_ffn_configs`
-/// (`proxima-model-interop/src/gemma4/bind.rs`, both private to that crate)
+/// Reproduces `gemma4_layer_schedule`
+/// (`proxima-model-interop/src/gemma4/bind.rs`, private to that crate)
 /// so this diagnostic can call `lfm2_forward_program_with_experts` directly
 /// -- pure graph construction, no weight bytes touched, so it is
 /// near-instant next to the real `Gemma4Arch::bind`'s full weight bind
@@ -46,13 +46,27 @@ fn find_input(program: &[Op], name: &str) -> NodeId {
 /// `LoadedModel::load` built internally, so its `NodeId`s are the same ones
 /// `LoadedModel::forward_node_values` evaluates against the real blob.
 fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) -> (Vec<Op>, NodeId) {
-    let attention_configs: Vec<LayerAttentionConfig> = architecture
+    let ffn = LayerFfnConfig {
+        post_attention_norm: true,
+        combination: FfnCombination::ParallelDenseMoe,
+        dense_post_norm: true,
+        routed_post_norm: true,
+        combined_post_norm: true,
+        output_scale: true,
+        routed_gating: ExpertGatingFunc::Softmax,
+        routed_expert_bias: false,
+        routed_pre_norm: true,
+        router_scale: true,
+        expert_output_scale: true,
+        activation: Activation::GeluTanh,
+    };
+    let schedule: Vec<LayerSchedule> = architecture
         .sliding_window_pattern
         .iter()
         .enumerate()
         .map(|(layer, &is_sliding)| {
             let kv_heads = architecture.kv_heads_by_layer[layer];
-            if is_sliding {
+            let attention = if is_sliding {
                 LayerAttentionConfig {
                     head_dim: architecture.key_length_swa,
                     kv_heads,
@@ -84,27 +98,14 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                 }
+            };
+            LayerSchedule {
+                kind: LayerKind::Attention,
+                attention,
+                ffn,
             }
         })
         .collect();
-    let layer_kinds = vec![LayerKind::Attention; architecture.block_count as usize];
-    let ffn_configs = vec![
-        LayerFfnConfig {
-            post_attention_norm: true,
-            combination: FfnCombination::ParallelDenseMoe,
-            dense_post_norm: true,
-            routed_post_norm: true,
-            combined_post_norm: true,
-            output_scale: true,
-            routed_gating: ExpertGatingFunc::Softmax,
-            routed_expert_bias: false,
-            routed_pre_norm: true,
-            router_scale: true,
-            expert_output_scale: true,
-            activation: Activation::GeluTanh,
-        };
-        architecture.block_count as usize
-    ];
     let logit_softcap = (architecture.final_logit_softcapping > 0.0)
         .then_some(architecture.final_logit_softcapping);
     let (program, logits, _moe_sites) = lfm2_forward_program_with_experts(
@@ -118,9 +119,7 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
         architecture.expert_used_count,
         0,
         0,
-        &layer_kinds,
-        &attention_configs,
-        &ffn_configs,
+        &schedule,
         Some(EmbeddingScale::Sqrt),
         logit_softcap,
         true,
@@ -1136,7 +1135,7 @@ fn main() {
     // (`attention_forward.rs:627-632`: `scores_scaled = scores *
     // inv_sqrt_head_dim`, `inv_sqrt_head_dim = 1/sqrt(query_pre_attn_scalar)`,
     // `query_pre_attn_scalar` hard-set 256 for every gemma4 layer in
-    // `gemma4_attention_configs`, `gemma4/bind.rs:502`.)
+    // `gemma4_layer_schedule`, `gemma4/bind.rs:502`.)
     let mut factor_samples: Vec<f32> = Vec::new();
     for (&raw, &scaled) in engine_scores_raw5.iter().zip(engine_scores_scaled5.iter()) {
         if raw.abs() > 1e-3 {
