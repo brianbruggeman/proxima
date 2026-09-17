@@ -1306,8 +1306,16 @@ pub(super) fn cached_attention_single_range_candidates(
             None,
         );
         let pair_dim = query_shape[3];
+        // Rank 5, matching `key_strides`/`value_strides` below: the fused
+        // reduce's own iteration space is `[s, t, kv_heads, query_groups,
+        // pair_dim]`, and query -- which carries no `t` axis of its own --
+        // reads it broadcast (stride 0) at index 1, the same way key/value
+        // already declare their own missing axes (`s` at index 0,
+        // `query_groups` at index 3) as explicit zero strides rather than
+        // omitting them from the array.
         let query_strides = [
             (query_shape[1] * query_shape[2] * pair_dim) as i64,
+            0i64,
             (query_shape[2] * pair_dim) as i64,
             pair_dim as i64,
             1i64,
