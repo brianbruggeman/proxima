@@ -1550,6 +1550,7 @@ pub(super) fn dequantize_row(
         QuantizedBlock::Iq3Xxs(data) => (data, iq3_xxs::BLOCK_BYTES, iq3_xxs::QK_K),
         QuantizedBlock::Float32(_)
         | QuantizedBlock::Q4_0(_)
+        | QuantizedBlock::Q5_0(_)
         | QuantizedBlock::Float16(_)
         | QuantizedBlock::BFloat16(_) => {
             return Err(unaligned_row());

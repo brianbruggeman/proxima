@@ -1445,6 +1445,7 @@ pub(super) fn block_identity_key(block: &QuantizedBlock<'_>) -> (usize, usize) {
         | QuantizedBlock::Q8_0(bytes)
         | QuantizedBlock::Q4_0(bytes)
         | QuantizedBlock::Q5_1(bytes)
+        | QuantizedBlock::Q5_0(bytes)
         | QuantizedBlock::Q2K(bytes)
         | QuantizedBlock::Iq4Nl(bytes)
         | QuantizedBlock::Iq2Xs(bytes)
@@ -1721,7 +1722,7 @@ impl Plan {
 
 /// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has an
 /// unpack kernel for (`Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`, `Q5_1`,
-/// `Float16`, `BFloat16`), keyed to its [`PackedCodec`] — the single place this crate
+/// `Q5_0`, `Float16`, `BFloat16`), keyed to its [`PackedCodec`] — the single place this crate
 /// decides "packed AND which codec," shared by [`plan`] and [`prepare`] so
 /// the two cannot drift on it. `Float16` earns a codec slot despite needing
 /// no unpack FUNCTION (see `msl::FLOAT16_BLOCK_BYTES`'s own doc) because its
@@ -1742,6 +1743,7 @@ pub(super) fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBloc
             QuantizedBlock::Q8_0(_) => Some((*node, PackedCodec::Q8_0)),
             QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
             QuantizedBlock::Q5_1(_) => Some((*node, PackedCodec::Q5_1)),
+            QuantizedBlock::Q5_0(_) => Some((*node, PackedCodec::Q5_0)),
             QuantizedBlock::Float16(_) => Some((*node, PackedCodec::Float16)),
             QuantizedBlock::BFloat16(_) => Some((*node, PackedCodec::BFloat16)),
             // decode-only codecs so far (CPU-only, see `proxima_tensor::cpu`)

@@ -1339,6 +1339,16 @@ pub enum QuantizedBlock<'a> {
     /// 0.64 GB) -- decode-only, same reasoning as [`Self::Q4_0`] for why no
     /// `dot_fn_for` entry exists (no shared int8-wide-fold path).
     Q5_1(&'a [u8]),
+    /// Raw packed `Q5_0` bytes -- 32-element blocks, one `f16` scale per
+    /// block plus a 4-byte 5th-bit plane, no per-block min term (unlike
+    /// [`Self::Q5_1`]) and no shared super-block with the K-quant family;
+    /// see [`proxima_gguf::quant::q5_0`] for the on-disk layout this
+    /// borrows unchanged. `Q5_1` with the min dropped -- `value = d *
+    /// (level - 16)`, `level` the 5-bit nibble+`qh` union -- equivalently
+    /// `Q4_0` with a 5th bit. gemma4's `blk.{1..29}.ffn_down_exps.weight`
+    /// codec -- decode-only, same reasoning as [`Self::Q5_1`] for why no
+    /// `dot_fn_for` entry exists (no shared int8-wide-fold path).
+    Q5_0(&'a [u8]),
     /// Raw packed `IQ4_NL` bytes -- 32-element blocks, one `f16` scale per
     /// block, byte-identical shape to [`Self::Q4_0`] but with a non-linear
     /// codebook (`kvalues_iq4nl`) instead of a fixed `nibble - 8` recenter;
@@ -1707,6 +1717,7 @@ impl<'a> QuantizedBlock<'a> {
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
             | QuantizedBlock::Q5_1(bytes)
+            | QuantizedBlock::Q5_0(bytes)
             | QuantizedBlock::Iq4Nl(bytes)
             | QuantizedBlock::Iq2Xs(bytes)
             | QuantizedBlock::Iq3Xxs(bytes)
@@ -1738,6 +1749,7 @@ impl<'a> QuantizedBlock<'a> {
             QuantizedBlock::Q8_0(_) => QuantizedBlock::Q8_0(bytes),
             QuantizedBlock::Q4_0(_) => QuantizedBlock::Q4_0(bytes),
             QuantizedBlock::Q5_1(_) => QuantizedBlock::Q5_1(bytes),
+            QuantizedBlock::Q5_0(_) => QuantizedBlock::Q5_0(bytes),
             QuantizedBlock::Iq4Nl(_) => QuantizedBlock::Iq4Nl(bytes),
             QuantizedBlock::Iq2Xs(_) => QuantizedBlock::Iq2Xs(bytes),
             QuantizedBlock::Iq3Xxs(_) => QuantizedBlock::Iq3Xxs(bytes),
@@ -1811,6 +1823,12 @@ impl<'a> QuantizedBlock<'a> {
                 bytes.len(),
                 q5_1::BLOCK_BYTES,
                 q5_1::blocks_for_bytes(bytes.len()).map(q5_1::elements_for_blocks),
+            ),
+            QuantizedBlock::Q5_0(bytes) => (
+                "q5_0",
+                bytes.len(),
+                q5_0::BLOCK_BYTES,
+                q5_0::blocks_for_bytes(bytes.len()).map(q5_0::elements_for_blocks),
             ),
             QuantizedBlock::Iq4Nl(bytes) => (
                 "iq4_nl",

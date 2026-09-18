@@ -976,6 +976,7 @@ fn packed_block<'a>(codec: &str, bytes: &'a [u8]) -> QuantizedBlock<'a> {
         "q8_0" => QuantizedBlock::Q8_0(bytes),
         "q4_0" => QuantizedBlock::Q4_0(bytes),
         "q5_1" => QuantizedBlock::Q5_1(bytes),
+        "q5_0" => QuantizedBlock::Q5_0(bytes),
         "iq4_nl" => QuantizedBlock::Iq4Nl(bytes),
         "iq2_xs" => QuantizedBlock::Iq2Xs(bytes),
         "iq3_xxs" => QuantizedBlock::Iq3Xxs(bytes),

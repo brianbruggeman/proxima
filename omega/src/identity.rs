@@ -299,6 +299,7 @@ fn codec_token(codec: Option<PackedCodec>) -> char {
         Some(PackedCodec::Q8_0) => '8',
         Some(PackedCodec::Q4_0) => '0',
         Some(PackedCodec::Q5_1) => '1',
+        Some(PackedCodec::Q5_0) => 'z',
         Some(PackedCodec::Float16) => 'h',
         Some(PackedCodec::BFloat16) => 'b',
         None => 'f',

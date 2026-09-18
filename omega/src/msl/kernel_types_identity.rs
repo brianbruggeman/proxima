@@ -1231,6 +1231,59 @@ pub const Q5_1_BLOCK_BYTES: usize = proxima_gguf::quant::q5_1::BLOCK_BYTES;
 /// `proxima_gguf::quant::q5_1::QK5_1`.
 pub const Q5_1_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_1::QK5_1;
 
+/// `Q5_0`: [`Q5_1_UNPACK_MSL`] with the `m` (min) term dropped -- a flat
+/// 32-element block, one `f16` scale and a 5th bit per element split out
+/// into a separate `qh` plane, same as `Q5_1`, but no per-block min: `x = d
+/// * (level - 16)`, a fixed midpoint recenter exactly like [`Q4_0_UNPACK_MSL`]
+/// except `level` is 5 bits wide instead of 4. Same KIND-difference from the
+/// K-quant family [`Q8_0_UNPACK_MSL`]/[`Q4_0_UNPACK_MSL`] draw: no
+/// super-block, so this codec does not take the row-blocked
+/// (`classify_packed_row_block`) or tiled-GEMM (`classify_tiled_gemm`) fast
+/// paths either -- it always renders through the fully generic per-element
+/// accessor below.
+///
+/// Ports `proxima_gguf::quant::q5_0::dequantize_block` exactly (see that
+/// function's own doc for the exact `ggml-quants.c` bit-shift derivation):
+/// each packed nibble byte carries two 4-bit levels (low nibble at element
+/// `j`, high nibble at element `16 + j`), each widened to 5 bits by a
+/// per-element bit from `qh`.
+///
+/// Layout, 22 bytes per 32 elements: `d` f16 at 0, 4 bytes of packed 5th
+/// bits (`qh`) at 2, 16 packed-nibble bytes (`qs`) at 6 -- [`Q5_1_UNPACK_MSL`]'s
+/// layout with the `m` field at offset 2 removed and every later field
+/// shifted back by 2 bytes.
+pub const Q5_0_UNPACK_MSL: &str = r#"
+// element `index` (0..32) of one Q5_0 block, byte-for-byte the value
+// proxima_gguf::quant::q5_0::dequantize_block writes at the same index.
+static inline float q5_0_element(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float delta = (float)as_type<half>(d_bits);
+    uint qh = (uint)block[2] | ((uint)block[3] << 8) | ((uint)block[4] << 16) | ((uint)block[5] << 24);
+    bool high_half = index >= 16u;
+    uint local = high_half ? (index - 16u) : index;
+    uchar byte = block[6u + local];
+    uint level;
+    if (high_half) {
+        uint high_bit = (qh >> (local + 12u)) & 0x10u;
+        level = (uint)(byte >> 4u) | high_bit;
+    } else {
+        uint high_bit = ((qh >> local) << 4u) & 0x10u;
+        level = (uint)(byte & 0x0Fu) | high_bit;
+    }
+    return ((float)level - 16.0f) * delta;
+}
+"#;
+
+/// Bytes one `Q5_0` block occupies -- read from
+/// `proxima_gguf::quant::q5_0::BLOCK_BYTES`; pinned in
+/// `omega/tests/q5_0_unpack.rs`, same posture as [`Q4_0_BLOCK_BYTES`].
+pub const Q5_0_BLOCK_BYTES: usize = proxima_gguf::quant::q5_0::BLOCK_BYTES;
+
+/// Elements one `Q5_0` block carries -- 32, the same flat block width as
+/// [`Q4_0_BLOCK_ELEMENTS`]/[`Q5_1_BLOCK_ELEMENTS`]. Read from
+/// `proxima_gguf::quant::q5_0::QK5_0`.
+pub const Q5_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_0::QK5_0;
+
 /// `Float16`: not a quantization at all -- MSL's `half` is IEEE-754 binary16
 /// natively, so a `Float16` weight's bytes ARE a valid `half` buffer with no
 /// unpack function required. It still needs a [`PackedCodec`] slot (rather
@@ -1315,6 +1368,11 @@ pub enum PackedCodec {
     /// family as [`Self::Q8_0`]/[`Self::Q4_0`]; see [`Q5_1_UNPACK_MSL`]'s
     /// own doc.
     Q5_1,
+    /// Flat 32-element block, one `f16` scale, plus a separate 5th-bit
+    /// plane -- [`Self::Q5_1`] with the min term dropped, same KIND-
+    /// difference from the K-quant family as [`Self::Q8_0`]/[`Self::Q4_0`];
+    /// see [`Q5_0_UNPACK_MSL`]'s own doc.
+    Q5_0,
     /// Not a quantization: `half`-native bytes, read directly through a
     /// `device const half*` binding, no unpack function -- see
     /// [`FLOAT16_BLOCK_BYTES`]'s own doc for why this still needs a codec
@@ -1337,6 +1395,7 @@ impl PackedCodec {
             PackedCodec::Q8_0 => "q8_0",
             PackedCodec::Q4_0 => "q4_0",
             PackedCodec::Q5_1 => "q5_1",
+            PackedCodec::Q5_0 => "q5_0",
             PackedCodec::Float16 => "f16",
             PackedCodec::BFloat16 => "bf16",
         }
@@ -1357,6 +1416,7 @@ impl PackedCodec {
             PackedCodec::Q8_0 => Q8_0_BLOCK_BYTES,
             PackedCodec::Q4_0 => Q4_0_BLOCK_BYTES,
             PackedCodec::Q5_1 => Q5_1_BLOCK_BYTES,
+            PackedCodec::Q5_0 => Q5_0_BLOCK_BYTES,
             PackedCodec::Float16 => FLOAT16_BLOCK_BYTES,
             PackedCodec::BFloat16 => BFLOAT16_BLOCK_BYTES,
         }
@@ -1380,6 +1440,7 @@ impl PackedCodec {
             PackedCodec::Q8_0 => Q8_0_BLOCK_ELEMENTS,
             PackedCodec::Q4_0 => Q4_0_BLOCK_ELEMENTS,
             PackedCodec::Q5_1 => Q5_1_BLOCK_ELEMENTS,
+            PackedCodec::Q5_0 => Q5_0_BLOCK_ELEMENTS,
             PackedCodec::Float16 => FLOAT16_BLOCK_ELEMENTS,
             PackedCodec::BFloat16 => BFLOAT16_BLOCK_ELEMENTS,
         }

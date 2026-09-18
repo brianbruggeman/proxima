@@ -1763,6 +1763,87 @@ pub fn matmul_q5_1_f32(
     )
 }
 
+/// Packed bytes per `Q5_0` block -- needed unconditionally, same reasoning
+/// as [`Q4_0_BLOCK_BYTES`].
+pub(super) const Q5_0_BLOCK_BYTES: usize = proxima_gguf::quant::q5_0::BLOCK_BYTES;
+
+/// Decoded `f32` elements per `Q5_0` block (`QK5_0`, 32) -- the same flat
+/// 32-element shape as [`QuantizedBlock::Q4_0`]/[`QuantizedBlock::Q5_1`];
+/// see [`QuantizedBlock::Q5_0`]'s own doc.
+pub(super) const Q5_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_0::QK5_0;
+
+/// [`dot_q5_1_f32`]'s mechanism applied to `Q5_0`: dequantizes one
+/// 32-element block at a time into a reused stack buffer via
+/// [`proxima_gguf::quant::q5_0::dequantize_block`], then folds against the
+/// matching activation slice with the same [`dot_fold_fused_multiply_add`]
+/// fold. `Q5_0` has no shared super-block with the K-quant family and no
+/// `dot_fn_for` entry -- this plain scalar dequantize-then-fold path is the
+/// only one this codec takes on the CPU backend (no int8-dot fast path
+/// exists for it, same as `Q4_0`/`Q5_1`).
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`Q5_0_BLOCK_BYTES`], or `activation.len()` does not
+/// equal the row's block count times [`Q5_0_BLOCK_ELEMENTS`].
+pub(super) fn dot_q5_0_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q5_0_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q5_0 block size",
+        });
+    }
+    let block_count = weight_row.len() / Q5_0_BLOCK_BYTES;
+    if activation.len() != block_count * Q5_0_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+
+    let mut scratch = [0.0f32; Q5_0_BLOCK_ELEMENTS];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .as_chunks::<Q5_0_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<Q5_0_BLOCK_ELEMENTS>().0)
+    {
+        proxima_gguf::quant::q5_0::dequantize_block(block, &mut scratch);
+        acc = dot_fold_fused_multiply_add(
+            &scratch,
+            activation_chunk,
+            DotFold {
+                len: Q5_0_BLOCK_ELEMENTS,
+                init: acc,
+                seeded: true,
+            },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `Q5_0`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector -- `dot_q5_0_f32`'s per-row kernel, same scalar
+/// dequantize-then-fold shape as [`matmul_q5_1_f32`] (no packed int8-dot
+/// wide fold exists for this codec either).
+///
+/// # Errors
+/// Propagates `dot_q5_0_f32`'s [`TensorError::QuantizedShapeMismatch`], or
+/// reports the same error if `weights.len()` is not a whole multiple of
+/// `rows`.
+pub fn matmul_q5_0_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_q5_0_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_q5_0_f32,
+    )
+}
+
 /// Packed bytes per `IQ4_NL` block -- byte-identical to
 /// [`Q4_0_BLOCK_BYTES`], kept as its own named constant rather than reused
 /// since the two codecs decode differently (fixed recenter vs codebook

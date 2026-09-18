@@ -1846,6 +1846,7 @@ fn packed_kind(ggml_type: GgmlType, tensor: &str) -> Result<PackedOwnedKind, Int
         GgmlType::F16 => Ok(PackedOwnedKind::Float16),
         GgmlType::Bf16 => Ok(PackedOwnedKind::BFloat16),
         GgmlType::Q5_1 => Ok(PackedOwnedKind::Q5_1),
+        GgmlType::Q5_0 => Ok(PackedOwnedKind::Q5_0),
         other => Err(InteropError::UnrepresentableGgmlType {
             tensor: tensor.to_owned(),
             ggml_type: other,
@@ -1865,6 +1866,7 @@ fn codec_tag(codec: PackedOwnedKind) -> u8 {
         PackedOwnedKind::Float16 => 7,
         PackedOwnedKind::BFloat16 => 8,
         PackedOwnedKind::Q5_1 => 9,
+        PackedOwnedKind::Q5_0 => 10,
     }
 }
 
@@ -1880,6 +1882,7 @@ fn codec_from_tag(tag: u8) -> Result<PackedOwnedKind, InteropError> {
         7 => Ok(PackedOwnedKind::Float16),
         8 => Ok(PackedOwnedKind::BFloat16),
         9 => Ok(PackedOwnedKind::Q5_1),
+        10 => Ok(PackedOwnedKind::Q5_0),
         _ => Err(invalid_sidecar(format!("unknown codec tag {tag}"))),
     }
 }

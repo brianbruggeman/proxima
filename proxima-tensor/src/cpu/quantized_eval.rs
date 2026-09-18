@@ -340,6 +340,7 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
             | QuantizedBlock::Q8_0(_)
             | QuantizedBlock::Q4_0(_)
             | QuantizedBlock::Q5_1(_)
+            | QuantizedBlock::Q5_0(_)
             | QuantizedBlock::Iq4Nl(_)
             | QuantizedBlock::Iq2Xs(_)
             | QuantizedBlock::Iq3Xxs(_)

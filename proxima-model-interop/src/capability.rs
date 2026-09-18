@@ -298,12 +298,13 @@ pub mod quant_format {
             PackedCodec::Q8_0 => "Q8_0",
             PackedCodec::Q4_0 => "Q4_0",
             PackedCodec::Q5_1 => "Q5_1",
+            PackedCodec::Q5_0 => "Q5_0",
             PackedCodec::Float16 => "F16",
             PackedCodec::BFloat16 => "BF16",
         }
     }
 
-    /// The 10 [`PackedCodec`] variants, exhaustively -- adding an 11th to
+    /// The 11 [`PackedCodec`] variants, exhaustively -- adding a 12th to
     /// `omega::msl::PackedCodec` without adding it here is a compile error,
     /// not a silently stale doc.
     const ALL_CODECS: &[PackedCodec] = &[
@@ -315,17 +316,20 @@ pub mod quant_format {
         PackedCodec::Q8_0,
         PackedCodec::Q4_0,
         PackedCodec::Q5_1,
+        PackedCodec::Q5_0,
         PackedCodec::Float16,
         PackedCodec::BFloat16,
     ];
 
-    /// `Q3_K` and `Q5_1` are metal-only so far -- see [`codec_name`]'s own
-    /// doc; `Q5_1` has no `omega::wgsl`/`omega::cuda` emitter yet (only
-    /// `omega::msl::Q5_1_UNPACK_MSL` exists), same posture `Q3_K` already
-    /// has.
+    /// `Q3_K`, `Q5_1`, and `Q5_0` are metal-only so far -- see
+    /// [`codec_name`]'s own doc; `Q5_0` has no `omega::wgsl`/`omega::cuda`
+    /// emitter yet (only `omega::msl::Q5_0_UNPACK_MSL` exists), same
+    /// posture `Q5_1`/`Q3_K` already have.
     fn emitter_support_columns(codec: PackedCodec) -> (&'static str, &'static str, &'static str) {
         match codec {
-            PackedCodec::Q3K | PackedCodec::Q5_1 => ("supported", "unsupported", "unsupported"),
+            PackedCodec::Q3K | PackedCodec::Q5_1 | PackedCodec::Q5_0 => {
+                ("supported", "unsupported", "unsupported")
+            }
             _ => ("supported", "supported", "supported"),
         }
     }
