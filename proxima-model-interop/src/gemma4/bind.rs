@@ -649,7 +649,8 @@ impl ArchitectureTrait for Gemma4Arch {
         let (program, logits, layer_roots, moe_sites) = {
             let mut descriptor = gemma4_descriptor(architecture.vocab);
             descriptor.cache_strategy = CacheStrategy::TwoRange;
-            let (program, logits, cache_roots, moe_sites) = build_forward(&descriptor, true)?;
+            let (program, logits, cache_roots, moe_sites, _layer_residuals) =
+                build_forward(&descriptor, true)?;
             let layer_roots: Vec<Qwen35LayerRoots> = cache_roots
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)

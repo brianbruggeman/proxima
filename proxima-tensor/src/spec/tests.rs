@@ -13697,10 +13697,16 @@ mod gemma4_synthetic_parity {
             logit_softcap: Some(SOFTCAP),
             layers,
             cache_strategy: CacheStrategy::TwoRange,
+            // inert under `TwoRange` -- see `ModelDescriptor::qk_norm`'s own doc.
+            qk_norm: false,
+            qkv_biases: false,
+            paired_gate_up_reduce: false,
+            fused_qkv_reduce: false,
         };
 
-        let (program, logits, _cache_roots, _moe_sites) = build_forward(&descriptor, false)
-            .expect("build_forward's TwoRange path lowers the gemma4-shaped descriptor");
+        let (program, logits, _cache_roots, _moe_sites, _layer_residuals) =
+            build_forward(&descriptor, false)
+                .expect("build_forward's TwoRange path lowers the gemma4-shaped descriptor");
 
         let ids_i32: Vec<i32> = ids.iter().map(|&id| id as i32).collect();
         let ids_f32: Vec<f32> = ids_i32.iter().map(|&id| id as f32).collect();
@@ -13961,13 +13967,88 @@ mod gemma4_synthetic_parity {
             )
             .expect("direct real-dims build");
 
-        let (program_b, logits_b, roots_b, moe_b) =
+        let (program_b, logits_b, roots_b, moe_b, _layer_residuals_b) =
             build_forward(&descriptor_b, true).expect("build_forward real-dims build");
 
         assert_eq!(program_a.len(), program_b.len(), "op count mismatch");
         assert_eq!(logits_a, logits_b, "root node id mismatch");
         assert_eq!(roots_a, roots_b, "cache roots mismatch");
         assert_eq!(moe_a.0.len(), moe_b.0.len(), "moe site count mismatch");
+
+        let first_divergence = program_a
+            .iter()
+            .zip(program_b.iter())
+            .enumerate()
+            .find(|(_, (op_a, op_b))| op_a != op_b);
+        assert!(
+            first_divergence.is_none(),
+            "op graphs diverge at index {:?}: a={:?} b={:?}",
+            first_divergence.as_ref().map(|(index, _)| *index),
+            first_divergence.as_ref().map(|(_, (op_a, _))| *op_a),
+            first_divergence.as_ref().map(|(_, (_, op_b))| *op_b),
+        );
+    }
+
+    /// [`build_forward_matches_direct_builder_call_at_real_gemma4_dims`]'s
+    /// own mistral counterpart -- proves
+    /// [`CacheStrategy::SingleRange`]'s [`build_forward`] arm reproduces
+    /// `mistral_cached_forward_program_with_experts_and_layer_taps` (the
+    /// builder `DenseArch::bind` calls,
+    /// `proxima-model-interop/src/dense.rs`) byte-for-byte at the real
+    /// openchat-3.5-1210 / Mistral-7B-v0.1 shape
+    /// (`single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape`,
+    /// `proxima-tensor/src/bind/tests.rs`, is this same real shape's own
+    /// proof against the checkpoint's GGUF metadata). Asserts full [`Op`]
+    /// equality, not just a logits diff bound, across the entire
+    /// real-shaped program AND the layer-residual taps
+    /// [`build_forward`]'s own fifth return element now carries.
+    #[test]
+    fn build_forward_matches_direct_builder_call_at_real_mistral_dims() {
+        const REAL_VOCAB: u32 = 32002;
+        const REAL_EMBEDDING: u32 = 4096;
+        const REAL_FEED_FORWARD: u32 = 14336;
+        const REAL_QUERY_HEADS: u32 = 32;
+        const REAL_KV_HEADS: u32 = 8;
+        const REAL_HEAD_DIM: u32 = 128;
+        const REAL_BLOCK_COUNT: u32 = 32;
+
+        let (program_a, roots_a, cache_roots_a, layer_residuals_a, moe_a) =
+            mistral_cached_forward_program_with_experts_and_layer_taps(
+                REAL_VOCAB,
+                REAL_EMBEDDING,
+                REAL_FEED_FORWARD,
+                REAL_QUERY_HEADS,
+                REAL_KV_HEADS,
+                REAL_HEAD_DIM,
+                REAL_BLOCK_COUNT,
+                0,
+                0,
+                false,
+                false,
+                false,
+                false,
+                true,
+            )
+            .expect("direct real-dims build");
+
+        let descriptor_b = mistral_descriptor(REAL_VOCAB);
+        assert_eq!(descriptor_b.embedding, REAL_EMBEDDING);
+        assert_eq!(descriptor_b.feed_forward, REAL_FEED_FORWARD);
+        assert_eq!(descriptor_b.query_heads, REAL_QUERY_HEADS);
+        assert_eq!(descriptor_b.block_count, REAL_BLOCK_COUNT);
+        assert_eq!(descriptor_b.cache_strategy, CacheStrategy::SingleRange);
+
+        let (program_b, logits_b, cache_roots_b, moe_b, layer_residuals_b) =
+            build_forward(&descriptor_b, true).expect("build_forward real-dims build");
+
+        assert_eq!(program_a.len(), program_b.len(), "op count mismatch");
+        assert_eq!(roots_a.logits, logits_b, "root node id mismatch");
+        assert_eq!(cache_roots_a, cache_roots_b, "cache roots mismatch");
+        assert_eq!(moe_a.0.len(), moe_b.0.len(), "moe site count mismatch");
+        assert_eq!(
+            layer_residuals_a, layer_residuals_b,
+            "layer-residual roots mismatch"
+        );
 
         let first_divergence = program_a
             .iter()
