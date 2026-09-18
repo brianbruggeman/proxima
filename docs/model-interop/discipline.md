@@ -64,10 +64,23 @@ hybrid recurrent graphs" (`serving.rs:343-351`, `residency_caches.rs:1404-1408`)
 gemma4 is a MoE graph -- exactly the class `Concurrent`'s `HazardTracker` is
 NOT proven for, so running it `Concurrent` would substitute an unproven
 schedule for a race, not remove one. Because `Serial` is supposed to order
-every dispatch for free yet a MoE graph still zero-fills, the leading suspect
-is the MoE expert-buffer residency/gather path (paged/resident expert buffers
-read before their upload completes), which is MoE-specific and matches
-serving's own "unproven for recurrent/MoE" flag -- not the general arena.
+every dispatch for free yet a MoE graph still zero-fills, and the expert-buffer
+UPLOAD path is race-free (expert buffers are host-resident `StorageModeShared`,
+built before the single committed command buffer -- no blit, no second command
+buffer, `execute_and_hazards.rs:844-886`, `resident_nocopy_cache.rs:217-244`),
+the leading suspect is instead a RESIDENCY / PAGE-FAULT gap. Weight and expert
+buffers wrap the mmap'd checkpoint via `newBufferWithBytesNoCopy`
+(`resident_nocopy_cache.rs:217`), and the production path never prefaults them
+(`madvise(WILLNEED)` exists only in an `#[ignore]`'d test). A GPU read of a
+non-resident mmap page returns ZEROS in this codebase (the documented
+qwen35moe non-resident-mapping-reads-as-zeros finding) -- so a not-yet-faulted
+weight (e.g. the final projection) read as zeros gives `x . 0 = 0`, i.e. the
+all-zero logits, intermittently (page residency is timing/pressure dependent),
+vanishing under instrumentation (which touches and thus faults the pages).
+Candidate fix (next session, do not land blind): prefault / residency-gate the
+no-copy mmap weight+expert pages before the GPU dispatch that reads them; a
+prefault of ~13.8 GB has a perf cost, so measure it, and validate against the
+intermittent repro (many runs, since one pass never proves a race gone).
 
 Commit `9fdc6596`'s message "gemma4 metal deterministic" OVERCLAIMS:
 generation is a flaky race, not deterministic.
