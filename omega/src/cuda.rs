@@ -2021,8 +2021,8 @@ __device__ __forceinline__ float q4k_element(const unsigned char *block, unsigne
 }
 ";
 
-pub const Q4K_BLOCK_BYTES: usize = 144;
-pub const Q4K_BLOCK_ELEMENTS: usize = 256;
+pub const Q4K_BLOCK_BYTES: usize = proxima_gguf::quant::q4_k::BLOCK_BYTES;
+pub const Q4K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_k::QK_K;
 
 /// CUDA C source for unpacking one element of a `Q6_K` super-block — ports
 /// `crate::msl::Q6K_UNPACK_MSL`'s `q6k_element`/`q6k_value` (see that
@@ -2055,7 +2055,7 @@ __device__ __forceinline__ float q6k_element(const unsigned char *block, unsigne
 }
 ";
 
-pub const Q6K_BLOCK_BYTES: usize = 210;
+pub const Q6K_BLOCK_BYTES: usize = proxima_gguf::quant::q6_k::BLOCK_BYTES;
 
 /// CUDA C source for unpacking one element of a `Q5_K` super-block — ports
 /// `crate::msl::Q5K_UNPACK_MSL`'s `q5k_element`/`q5k_value` (see that
@@ -2088,7 +2088,7 @@ __device__ __forceinline__ float q5k_element(const unsigned char *block, unsigne
 }
 ";
 
-pub const Q5K_BLOCK_BYTES: usize = 176;
+pub const Q5K_BLOCK_BYTES: usize = proxima_gguf::quant::q5_k::BLOCK_BYTES;
 
 /// CUDA C source for unpacking one element of a `Q8_0` block — ports
 /// `crate::msl::Q8_0_UNPACK_MSL`'s `q8_0_element` exactly: a flat 32-element
@@ -2102,8 +2102,8 @@ __device__ __forceinline__ float q8_0_element(const unsigned char *block, unsign
 }
 ";
 
-pub const Q8_0_BLOCK_BYTES: usize = 34;
-pub const Q8_0_BLOCK_ELEMENTS: usize = 32;
+pub const Q8_0_BLOCK_BYTES: usize = proxima_gguf::quant::q8_0::BLOCK_BYTES;
+pub const Q8_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q8_0::QK8_0;
 
 /// CUDA C source for unpacking one element of a `Q4_0` block — ports
 /// `crate::msl::Q4_0_UNPACK_MSL`'s `q4_0_element` exactly: llama.cpp's
@@ -2118,13 +2118,13 @@ __device__ __forceinline__ float q4_0_element(const unsigned char *block, unsign
 }
 ";
 
-pub const Q4_0_BLOCK_BYTES: usize = 18;
-pub const Q4_0_BLOCK_ELEMENTS: usize = 32;
+pub const Q4_0_BLOCK_BYTES: usize = proxima_gguf::quant::q4_0::BLOCK_BYTES;
+pub const Q4_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_0::QK4_0;
 
-pub const FLOAT16_BLOCK_BYTES: usize = 2;
-pub const FLOAT16_BLOCK_ELEMENTS: usize = 1;
-pub const BFLOAT16_BLOCK_BYTES: usize = 2;
-pub const BFLOAT16_BLOCK_ELEMENTS: usize = 1;
+pub const FLOAT16_BLOCK_BYTES: usize = proxima_gguf::quant::f16::BLOCK_BYTES;
+pub const FLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::f16::QK_F16;
+pub const BFLOAT16_BLOCK_BYTES: usize = proxima_gguf::quant::bf16::BLOCK_BYTES;
+pub const BFLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::bf16::QK_BF16;
 
 /// Widens one `bfloat16` element to `float` by shifting it into the high 16
 /// bits of a 32-bit word and reinterpreting — ports
