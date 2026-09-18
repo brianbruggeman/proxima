@@ -5,8 +5,12 @@
 //! `general.architecture` this crate has no dedicated hybrid binder for).
 //! Composes exactly what that `else` arm always called:
 //! [`crate::bind::architecture_from_metadata`],
-//! [`crate::bind::checkpoint_has_qk_norm`], and
-//! [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`] --
+//! [`crate::bind::checkpoint_has_qk_norm`], and (routed through
+//! [`proxima_tensor::spec::build_forward`]'s `CacheStrategy::SingleRange`
+//! arm, via [`proxima_tensor::spec::mistral_descriptor_from_shape`] built
+//! straight off this checkpoint's own parsed `architecture`, rather than a
+//! direct call)
+//! [`proxima_tensor::spec::mistral_cached_forward_program_with_experts_and_layer_taps`] --
 //! `expert_count`/`expert_used_count` off the checkpoint's own metadata is
 //! what already selects a dense vs. mixture-of-experts program inside that
 //! one builder, so this one [`Architecture`] impl covers both without a
@@ -23,7 +27,7 @@
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
-    Qwen35LayerRoots, mistral_cached_forward_program_with_experts_and_layer_taps,
+    Qwen35LayerRoots, build_forward, mistral_descriptor_from_shape,
     qwen2_cached_forward_program_with_experts_and_layer_taps,
 };
 
@@ -79,25 +83,48 @@ impl Architecture for DenseArch {
         // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
         // own doc on that flag and `proxima-tensor/docs/discipline.md`
         // ROW 418/421 for the measured cost of computing every row instead.
-        let (program, roots, cache_roots, layer_residuals, moe_sites) =
+        let (program, logits_root, hidden_root, cache_roots, layer_residuals, moe_sites) =
             if architecture_name == "qwen2" {
-                qwen2_cached_forward_program_with_experts_and_layer_taps(
-                    architecture.vocab,
-                    architecture.embedding,
-                    architecture.feed_forward,
-                    architecture.query_heads,
-                    architecture.kv_heads,
-                    architecture.head_dim,
-                    architecture.block_count,
-                    architecture.expert_count,
-                    architecture.expert_used_count,
-                    checkpoint_qkv_biases(parsed, &architecture)?,
-                    false,
-                    false,
-                    last_row_only,
-                )?
+                let (program, roots, cache_roots, layer_residuals, moe_sites) =
+                    qwen2_cached_forward_program_with_experts_and_layer_taps(
+                        architecture.vocab,
+                        architecture.embedding,
+                        architecture.feed_forward,
+                        architecture.query_heads,
+                        architecture.kv_heads,
+                        architecture.head_dim,
+                        architecture.block_count,
+                        architecture.expert_count,
+                        architecture.expert_used_count,
+                        checkpoint_qkv_biases(parsed, &architecture)?,
+                        false,
+                        false,
+                        last_row_only,
+                    )?;
+                (
+                    program,
+                    roots.logits,
+                    Some(roots.hidden),
+                    cache_roots,
+                    layer_residuals,
+                    moe_sites,
+                )
             } else {
-                mistral_cached_forward_program_with_experts_and_layer_taps(
+                // Routes through the generic `ModelDescriptor`/`build_forward`
+                // path (`proxima_tensor::spec`) instead of calling
+                // `mistral_cached_forward_program_with_experts_and_layer_taps`
+                // directly -- `mistral_descriptor_from_shape` builds its
+                // descriptor straight off THIS checkpoint's own parsed
+                // `architecture` (not `mistral_descriptor`'s hardcoded
+                // openchat-3.5-1210 constants, which only that one proven
+                // shape matches), so `build_forward`'s own
+                // `CacheStrategy::SingleRange` arm calls the exact same
+                // builder with the exact same argument set this match arm
+                // passed directly before -- proven byte-identical at the
+                // real openchat-3.5-1210 dims by
+                // `build_forward_matches_direct_builder_call_at_real_mistral_dims`
+                // (`proxima-tensor/src/spec/tests.rs`), hidden root included.
+                let descriptor = mistral_descriptor_from_shape(
                     architecture.vocab,
                     architecture.embedding,
                     architecture.feed_forward,
@@ -111,15 +138,17 @@ impl Architecture for DenseArch {
                     checkpoint_qkv_biases(parsed, &architecture)?,
                     false,
                     false,
-                    last_row_only,
-                )?
+                );
+                let (program, logits, cache_roots, moe_sites, layer_residuals, hidden) =
+                    build_forward(&descriptor, last_row_only)?;
+                (program, logits, hidden, cache_roots, layer_residuals, moe_sites)
             };
         Ok(BoundProgram {
             weights,
             architecture,
             program,
-            logits_root: roots.logits,
-            hidden_root: Some(roots.hidden),
+            logits_root,
+            hidden_root,
             residual_roots: layer_residuals,
             layer_roots: cache_roots
                 .into_iter()
