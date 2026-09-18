@@ -55,9 +55,22 @@ reuse factor and `barriers=0` (which is BY DESIGN under Serial -- Metal's
 serial encoder is assumed to order dispatches for free). The repro is
 instrumentation-fragile (added timing overhead hides it), so pinning it needs
 a Metal GPU frame capture or per-dispatch fence logging caught on a live
-failure, and a fix cannot be validated by a single passing run. Commit
-`9fdc6596`'s message "gemma4 metal deterministic" OVERCLAIMS: generation is a
-flaky race, not deterministic.
+failure, and a fix cannot be validated by a single passing run.
+
+`Serial` is LOAD-BEARING here -- do NOT "fix" this by switching to
+`Concurrent`. Serving forces `Serial` for gemma4 on purpose: the `Concurrent`
+hazard schedule is proven only for the placed single-range program, "not
+hybrid recurrent graphs" (`serving.rs:343-351`, `residency_caches.rs:1404-1408`).
+gemma4 is a MoE graph -- exactly the class `Concurrent`'s `HazardTracker` is
+NOT proven for, so running it `Concurrent` would substitute an unproven
+schedule for a race, not remove one. Because `Serial` is supposed to order
+every dispatch for free yet a MoE graph still zero-fills, the leading suspect
+is the MoE expert-buffer residency/gather path (paged/resident expert buffers
+read before their upload completes), which is MoE-specific and matches
+serving's own "unproven for recurrent/MoE" flag -- not the general arena.
+
+Commit `9fdc6596`'s message "gemma4 metal deterministic" OVERCLAIMS:
+generation is a flaky race, not deterministic.
 
 ## C2 — CUDA precompiled-PTX driver boundary
 
