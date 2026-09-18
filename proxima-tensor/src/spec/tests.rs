@@ -13843,6 +13843,146 @@ mod gemma4_synthetic_parity {
         );
     }
 
+    /// [`build_forward_two_range_matches_direct_builder_call`] proves parity
+    /// at this module's 2-layer synthetic dims; this proves the same parity
+    /// at the REAL gemma4 26B-A4B shape (30 layers, 128 experts/8 used,
+    /// 512/256 head dims, 2/8 kv-heads, every-6th-layer-full) that shape
+    /// bakes into `gemma4_descriptor`'s own constants
+    /// (`proxima-tensor/src/spec/descriptor.rs`) -- a small-dims-only parity
+    /// check cannot catch a divergence that only exists at the real layer
+    /// count or head-dim split, so this asserts full [`Op`] equality (not
+    /// just a logits diff bound) across the entire real-shaped program.
+    #[test]
+    fn build_forward_matches_direct_builder_call_at_real_gemma4_dims() {
+        const REAL_VOCAB: u32 = 32;
+        const REAL_BLOCK_COUNT: u32 = 30;
+        const REAL_EMBEDDING: u32 = 2816;
+        const REAL_FEED_FORWARD: u32 = 2112;
+        const REAL_EXPERT_FF: u32 = 704;
+        const REAL_QUERY_HEADS: u32 = 16;
+        const REAL_EXPERT_COUNT: u32 = 128;
+        const REAL_EXPERT_USED: u32 = 8;
+        const REAL_HEAD_DIM_FULL: u32 = 512;
+        const REAL_HEAD_DIM_SWA: u32 = 256;
+        const REAL_KV_FULL: u32 = 2;
+        const REAL_KV_SWA: u32 = 8;
+        const REAL_SLIDING_WINDOW: u32 = 1024;
+
+        let ffn = LayerFfnConfig {
+            post_attention_norm: true,
+            combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
+                dense_post_norm: true,
+                routed_post_norm: true,
+                combined_post_norm: true,
+                routed_pre_norm: true,
+                router_scale: true,
+                expert_output_scale: true,
+            }),
+            output_scale: true,
+            routed_gating: ExpertGatingFunc::Softmax,
+            routed_expert_bias: false,
+            activation: Activation::GeluTanh,
+        };
+
+        // mirrors `gemma4::bind::gemma4_layer_schedule`'s own per-layer
+        // branch, fed real per-layer values the way `Architecture` would.
+        let layers_a: Vec<LayerSchedule> = (0..REAL_BLOCK_COUNT)
+            .map(|layer| {
+                let is_full = (layer + 1).is_multiple_of(6);
+                let kv_heads = if is_full { REAL_KV_FULL } else { REAL_KV_SWA };
+                let attention = if !is_full {
+                    LayerAttentionConfig {
+                        head_dim: REAL_HEAD_DIM_SWA,
+                        kv_heads,
+                        mask_window: Some(REAL_SLIDING_WINDOW),
+                        value_source_kind: ValueSourceKind::ProjectedV,
+                        rope_table: RopeTableSel {
+                            cos_name: "rope_cos_swa",
+                            sin_name: "rope_sin_swa",
+                        },
+                        rope_pairing: RopePairing::SplitHalf {
+                            pairs: REAL_HEAD_DIM_SWA / 2,
+                        },
+                        score_scale: AttentionScoreScale::Unscaled,
+                        value_norm: true,
+                    }
+                } else {
+                    LayerAttentionConfig {
+                        head_dim: REAL_HEAD_DIM_FULL,
+                        kv_heads,
+                        mask_window: None,
+                        value_source_kind: ValueSourceKind::SharedWithKey,
+                        rope_table: RopeTableSel {
+                            cos_name: "rope_cos",
+                            sin_name: "rope_sin",
+                        },
+                        rope_pairing: RopePairing::SplitHalf {
+                            pairs: REAL_HEAD_DIM_FULL / 2,
+                        },
+                        score_scale: AttentionScoreScale::Unscaled,
+                        value_norm: true,
+                    }
+                };
+                LayerSchedule {
+                    kind: LayerKind::Attention,
+                    attention,
+                    ffn,
+                }
+            })
+            .collect();
+
+        let descriptor_b = {
+            let mut descriptor = gemma4_descriptor(REAL_VOCAB);
+            descriptor.cache_strategy = CacheStrategy::TwoRange;
+            descriptor
+        };
+
+        assert_eq!(
+            layers_a, descriptor_b.layers,
+            "gemma4_descriptor's per-layer schedule must match gemma4_layer_schedule's own \
+             real-dims construction"
+        );
+
+        let (program_a, logits_a, roots_a, moe_a) =
+            lfm2_two_range_cached_forward_program_with_experts(
+                REAL_VOCAB,
+                REAL_EMBEDDING,
+                REAL_FEED_FORWARD,
+                REAL_EXPERT_FF,
+                REAL_QUERY_HEADS,
+                REAL_BLOCK_COUNT,
+                REAL_EXPERT_COUNT,
+                REAL_EXPERT_USED,
+                0,
+                &layers_a,
+                Some(EmbeddingScale::Sqrt),
+                Some(30.0),
+                true,
+            )
+            .expect("direct real-dims build");
+
+        let (program_b, logits_b, roots_b, moe_b) =
+            build_forward(&descriptor_b, true).expect("build_forward real-dims build");
+
+        assert_eq!(program_a.len(), program_b.len(), "op count mismatch");
+        assert_eq!(logits_a, logits_b, "root node id mismatch");
+        assert_eq!(roots_a, roots_b, "cache roots mismatch");
+        assert_eq!(moe_a.0.len(), moe_b.0.len(), "moe site count mismatch");
+
+        let first_divergence = program_a
+            .iter()
+            .zip(program_b.iter())
+            .enumerate()
+            .find(|(_, (op_a, op_b))| op_a != op_b);
+        assert!(
+            first_divergence.is_none(),
+            "op graphs diverge at index {:?}: a={:?} b={:?}",
+            first_divergence.as_ref().map(|(index, _)| *index),
+            first_divergence.as_ref().map(|(_, (op_a, _))| *op_a),
+            first_divergence.as_ref().map(|(_, (_, op_b))| *op_b),
+        );
+    }
+
     /// A genuine TWO-STEP decode (`cached_len=0` over the first `2` prompt
     /// tokens, then `cached_len=2` over the last `1` token, `LayerCache`
     /// grown by folding step 1's own [`CachedLayerRoots`] outputs the exact
