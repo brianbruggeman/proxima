@@ -5,7 +5,8 @@
 //!   /path/to/model.gguf cpu "prompt" 16 [batch_size] [ubatch_size]`
 //!
 //! Use `--features std,vulkan` and `vulkan` for the wgpu/Vulkan route, or
-//! `--features std,cuda` and `cuda` for CUDA. The
+//! `--features std,cuda` and `cuda` for CUDA, or
+//! `--features std,metal` and `metal` for Metal (macOS only). The
 //! callback timestamps are wall-clock observations from the same client call:
 //! TTFT is the prefill event boundary and TTNT is the mean interval between
 //! generated-token events.  No derived number is presented as device time.
@@ -41,9 +42,9 @@ impl fmt::Display for TtntJson {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: bench_local <model.gguf> <cpu|cuda|vulkan> <prompt> [max_tokens] \
+        "usage: bench_local <model.gguf> <cpu|cuda|vulkan|metal> <prompt> [max_tokens] \
          [batch_size] [ubatch_size] [--gpu-memory-bytes N]\n\
-         cuda requires --features std,cuda; vulkan requires --features std,vulkan"
+         cuda requires --features std,cuda; vulkan requires --features std,vulkan; metal requires --features std,metal (macOS only)"
     );
     std::process::exit(2)
 }
@@ -132,6 +133,15 @@ fn require_cuda_device() {
 #[cfg(not(feature = "cuda"))]
 fn require_cuda_device() {}
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn require_metal_device() {
+    // Metal is only available on macOS; just check that omega can initialize a command queue.
+    // The actual device initialization happens when generating.
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+fn require_metal_device() {}
+
 fn main() {
     let mut args = env::args().skip(1);
     let model_path = args.next().unwrap_or_else(|| usage());
@@ -157,7 +167,7 @@ fn main() {
         ),
         Some(_) => usage(),
     };
-    if args.next().is_some() || !matches!(backend.as_str(), "cpu" | "cuda" | "vulkan") {
+    if args.next().is_some() || !matches!(backend.as_str(), "cpu" | "cuda" | "vulkan" | "metal") {
         usage();
     }
     if backend == "cuda" && !cfg!(feature = "cuda") {
@@ -166,6 +176,14 @@ fn main() {
     }
     if backend == "vulkan" && !cfg!(feature = "vulkan") {
         eprintln!("bench_local: vulkan mode requires --features vulkan");
+        std::process::exit(2);
+    }
+    if backend == "metal" && !cfg!(feature = "metal") {
+        eprintln!("bench_local: metal mode requires --features metal");
+        std::process::exit(2);
+    }
+    if backend == "metal" && !cfg!(target_os = "macos") {
+        eprintln!("bench_local: metal is only supported on macOS");
         std::process::exit(2);
     }
     if backend != "cpu" && cfg!(all(feature = "cuda", feature = "vulkan")) {
@@ -179,6 +197,9 @@ fn main() {
     }
     if backend == "cuda" {
         require_cuda_device();
+    }
+    if backend == "metal" {
+        require_metal_device();
     }
 
     let file = File::open(&model_path).expect("open GGUF checkpoint");
