@@ -940,6 +940,19 @@ pub(super) fn upload_block_as_float(
     }
     let byte_length = size_of_val(data);
     let pointer = data.as_ptr().cast::<c_void>();
+    // A mmap'd tensor is page-aligned by construction, so the alignment
+    // check below always wins first if it runs first -- minting a dedicated
+    // no-copy buffer that duplicates memory the whole-checkpoint mapping
+    // (or the expert-sidecar mapping) already covers. Try the zero-cost
+    // OFFSET views into an already-registered mapping before ever minting a
+    // new buffer; only a genuinely separate allocation (a KV-cache row, a
+    // scratch buffer) falls through to the page-aligned no-copy path.
+    if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
+        return result;
+    }
+    if let Some(result) = expert_mapping_offset(device, pointer, byte_length) {
+        return result;
+    }
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
         counter!(BLOCK_NOCOPY_BOUND_BYTES, byte_length as u64);
@@ -949,12 +962,6 @@ pub(super) fn upload_block_as_float(
         }
         return upload_block_no_copy_uncached(device, pointer, byte_length)
             .map(|buffer| (buffer, 0));
-    }
-    if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
-        return result;
-    }
-    if let Some(result) = expert_mapping_offset(device, pointer, byte_length) {
-        return result;
     }
     if let Some(name) = resident_name {
         return upload_resident_copy(device, name, pointer, byte_length).map(|buffer| (buffer, 0));
@@ -1009,6 +1016,14 @@ pub(super) fn upload_packed_bytes(
     if mapping_published {
         counter!(EXPERT_MAPPING_MISSED_UPLOADS, 1);
     }
+    // Same reorder as `upload_block_as_float`: a page-aligned quantized
+    // tensor that also falls inside the whole-checkpoint mapping must be
+    // served as a zero-cost offset view before minting a duplicate
+    // dedicated buffer -- this is the path every GGUF quantized weight
+    // (e.g. `blk.N.ffn_down_exps.weight`) actually takes.
+    if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
+        return result;
+    }
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
         counter!(BLOCK_NOCOPY_BOUND_BYTES, byte_length as u64);
@@ -1018,9 +1033,6 @@ pub(super) fn upload_packed_bytes(
         }
         return upload_block_no_copy_uncached(device, pointer, byte_length)
             .map(|buffer| (buffer, 0));
-    }
-    if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
-        return result;
     }
     if let Some(name) = resident_name {
         return upload_resident_copy(device, name, pointer, byte_length).map(|buffer| (buffer, 0));
