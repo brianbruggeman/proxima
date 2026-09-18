@@ -307,7 +307,10 @@ pub mod quant_format {
     /// The 11 [`PackedCodec`] variants, exhaustively -- adding a 12th to
     /// `omega::msl::PackedCodec` without adding it here is a compile error,
     /// not a silently stale doc.
-    const ALL_CODECS: &[PackedCodec] = &[
+    ///
+    /// `pub(super)` so [`super::quant_format_tests`] can derive its row-count
+    /// assertion from `ALL_CODECS.len()` instead of a hardcoded integer.
+    pub(super) const ALL_CODECS: &[PackedCodec] = &[
         PackedCodec::Q2K,
         PackedCodec::Q3K,
         PackedCodec::Q4K,
@@ -409,15 +412,15 @@ mod tests {
 
 #[cfg(all(test, feature = "metal"))]
 mod quant_format_tests {
-    use super::quant_format::render_markdown;
+    use super::quant_format::{ALL_CODECS, render_markdown};
 
     #[test]
-    fn renders_exactly_ten_packed_codec_rows_plus_the_header() {
+    fn renders_one_packed_codec_row_per_all_codecs_plus_the_header() {
         let rendered = render_markdown();
         assert_eq!(
             rendered.lines().count(),
-            12,
-            "10 PackedCodec variants, 1 header row, 1 separator row"
+            ALL_CODECS.len() + 2,
+            "one row per PackedCodec variant, 1 header row, 1 separator row"
         );
     }
 
