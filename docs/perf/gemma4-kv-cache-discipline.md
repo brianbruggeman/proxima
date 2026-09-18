@@ -134,12 +134,74 @@ scorecard is computed. The raw cached-path ttnt (93.538 ms/token vs the
 oracle's 4152.904 ms/token, ~44x) is recorded above **only as evidence of
 what was measured**, explicitly disqualified as a performance result.
 
-## Bench table (informational only -- gated, no verdict)
+## C3 -- 24-token VerifyBench (this slice): token-identical confirmed, still short of the bar
+
+**Correctness (binding oracle check), 24 tokens greedy, real gemma4 26B-A4B
+blob, two distinctly-fingerprinted release `bench_local` binaries
+(`md5 76ca0c62...` flag-off, `md5 2b3c8968...` flag-on, matching the fix
+commit's own reported fingerprints), templated France prompt:**
+**token-identical at all 24 positions**, ids
+`[818, 5279, 529, 7001, 563, 5213, 50429, 84750, 106, 106, 45518, 107, 45518,
+107, 101, 818, 5279, 529, 7001, 563, 5213, 50429, 84750, 106]`, text
+`"The capital of France is **Paris**.thought\nthought\n<channel|>The capital
+of France is **Paris**."` on both arms, matching the C1 Baseline step's
+oracle byte-for-byte. This is a stronger correctness result than C2's
+8-token confirm: the flag-on path now holds token identity over 3x the
+sequence length, across the SWA-history boundary.
+
+**Performance (only a valid claim because correctness above holds):**
+cached decode measured **9.368 tok/s** (`ttnt_ms=106.749`, `ttft_ms=3408.376`,
+`total_ms=5881.558` for 20 prompt tokens + 24 generated). Cacheless
+(this same clean run) measured **0.2166 tok/s** (`ttnt_ms=4617.054`),
+consistent with the task's stated 0.24 tok/s baseline -- cached is
+**43.25x faster** than this run's own cacheless arm and **39.03x faster**
+than the stated baseline.
+
+**Meets-or-beats verdict: NO.** 9.368 tok/s vs Ollama/llama.cpp's 56.62
+tok/s is **0.1654x** -- Ollama is 6.05x faster. 9.368 tok/s vs MLX's
+67.667 tok/s is **0.1384x** -- MLX is 7.22x faster. Correct output, real
+~39-43x win over the cacheless path, but the decode hot path remains
+roughly one order of magnitude below both incumbents.
+
+**Environment finding (not a code finding):** across 10 total attempts in
+this verification, 8 produced degenerate all-zero-id output on BOTH arms
+symmetrically (including a full 5/5-failed retry loop per binary), coincident
+with two concurrently-resident Ollama `llama-server` processes consuming
+~30GB RSS and driving load average above 12 -- the known
+`project_ollama_loader_is_the_judge_hook.md` contention pattern (its
+judge hook curls `/api/generate` on every Stop). One partially-contended
+attempt showed a correct prefix collapsing mid-decode to zero, evidence the
+corruption is a mid-run Metal-residency failure under memory pressure (the
+13GB mmap'd weights losing residency and reading back as zero), not a logic
+bug in either arm -- symmetric across flag-off and flag-on, and the fix
+diff (`d9f20f107`) touches only `#[cfg(feature = "gemma4-kv-cache")]` code,
+so it structurally cannot be the cause of a flag-off failure. The
+token-identical and 9.368 tok/s numbers above come from one clean
+back-to-back pair (cacheless immediately followed by cached, no intervening
+tool call) captured once host load dropped to ~30% CPU and both
+`llama-server` RSS footprints stopped growing.
+
+**Gate:** `cargo nextest run -p proxima-model-interop --features std,metal`
+re-run this slice: **261 tests run: 261 passed, 0 failed, 59 skipped**, exit
+0 (log at
+`/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/9049d06b-8620-4a97-8fec-5659655eee9d/scratchpad/nextest_gate2.log`).
+No code changed this slice -- doc-only update.
+
+**Updated gate cells (supersede the C1 row's Compare-bench/Home-turf/
+Correctness cells, current truth as of this slice):**
+
+| Cell | C1 (superseded) | Current (C3) |
+|---|---|---|
+| Correctness | FAILED -- token_identical=false, diverged at index 0 | **PASSED -- token_identical=true across 24/24 positions**, two independent confirms (8-token in C2, 24-token here) |
+| Compare-bench | Gated -- no verdict possible, output was wrong | **Computed and NEGATIVE**: cached 9.368 tok/s = 0.1654x Ollama (56.62), 0.1384x MLX (67.667) -- correct but 6.05-7.22x short of the bar |
+| Home-turf | Ollama/MLX numbers measured but unusable (cached arm disqualified) | Same Ollama (56.62) / MLX (67.667) numbers now usable as the denominator of an actual (failing) compare-bench verdict |
+
+## Bench table (current)
 
 | Arm | design-favors | Decode tok/s | Status |
 |---|---|---|---|
-| proxima cacheless (ours, oracle) | neutral | 0.2408-0.2415 | Correct, reproduced twice; ~234-280x slower than the incumbents |
-| proxima cached (`gemma4-kv-cache`, ours) | ours | 10.69 (raw, invalid) | **INCORRECT OUTPUT -- disqualified, not a result** |
+| proxima cacheless (ours, oracle) | neutral | 0.2166-0.2415 | Correct, reproduced across 3 sessions; ~234-280x slower than the incumbents |
+| proxima cached (`gemma4-kv-cache`, ours) | ours | **9.368** | **Correct (token-identical, 24/24), still 6.05x below Ollama and 7.22x below MLX -- does not meet or beat** |
 | Ollama / llama.cpp (`batiai/gemma4-26b:latest`) | incumbent | 56.62 | Measured, correct (their own decode) |
 | MLX (`mlx-community/gemma-4-26b-a4b-it-4bit`) | incumbent | 67.667 | Measured, correct (their own decode, different quant/sampling) |
 
@@ -151,6 +213,9 @@ what was measured**, explicitly disqualified as a performance result.
 | 2026-09-18 | Implement (`9db00f837`): landed `gemma4-kv-cache` feature -- new `causal_mask_merged_windowed` primitive, new `lfm2_single_range_cached.rs` cached forward-program builder, `Gemma4Arch::bind()` gains a flag-gated branch populating real `CachedLayerRoots`; all seven architectural blockers closed at the spec level | compiles clean with and without the flag; CPU spec/bind suite 669/670 (1 pre-existing unrelated failure); no GPU/model-load run this step (explicitly out of scope) | deterministic build+test counts | local build host, no GPU run |
 | 2026-09-18 | Verify+Bench: ran both flag-off and flag-on `bench_local` binaries against the real gemma4 blob under the model gate | **token_identical=false** -- cached path diverges at generated-token index 0, collapses to a 4-token repeating cycle; cacheless oracle reproduced its own baseline byte-for-byte | one comparison run each; cacheless reproduced across two independent sessions | local Metal host, model gate held for both runs (0s wait, held ~5.6s total for the cached run) |
 | 2026-09-18 | This log: ran the required crate test gate and recorded the discipline log; no code changed | `cargo nextest run -p proxima-model-interop --features std,metal`: 261 passed, 0 failed, 59 skipped | deterministic | local build host, no GPU run |
+| 2026-09-18 | Fix (`d9f20f107`) + docs (`d23af282b`): root-caused the zero-cache read (single-range engine never folds its own call's new K/V before scoring, generic decode loop never pre-folds), landed `append_lfm2_two_range_cached_attention` generalizing the proven qwen35moe two-block online-softmax combine; 8-token real-checkpoint confirm **token_identical=true** | cacheless 3160.764 ms/token vs cached 107.383 ms/token (~29x, now valid since output is correct); superseded the prior 44x-but-wrong number | `proxima-tensor` 672/673 (1 pre-existing unrelated failure); `proxima-model-interop` 261/261 | local Metal host, model gate held |
+| 2026-09-18 | C3 VerifyBench: 24-token real-checkpoint run, two fresh-fingerprint binaries, clean back-to-back pair after host contention (2 concurrent Ollama `llama-server` processes) cleared | **token_identical=true (24/24)**; cached 9.368 tok/s vs cacheless 0.2166 tok/s (43.25x); vs Ollama 56.62 tok/s = 0.1654x (6.05x short); vs MLX 67.667 tok/s = 0.1384x (7.22x short) -- **meets-or-beats: NO** | 1 clean comparison pair; 8/10 total attempts degenerate under host contention (documented, ruled out as a logic bug, symmetric across both arms) | local Metal host, model gate held; two Ollama judge-hook `llama-server` processes contending for ~30GB RSS during 8 of 10 attempts |
+| 2026-09-18 | Gate re-run for this doc-only slice, no code changed | `cargo nextest run -p proxima-model-interop --features std,metal`: 261 passed, 0 failed, 59 skipped, exit 0 | deterministic | local build host, no GPU run |
 
 **Honest read:** the `gemma4-kv-cache` feature compiles clean on both sides
 of its flag and closes all seven architectural gaps needed to *express*
@@ -261,3 +326,24 @@ now a VALID performance observation, since the output is correct (the
 reused). A full 24-token VerifyBench run and a meets-or-beats scoreboard
 against Ollama (56.62 tok/s) / MLX (67.667 tok/s) is the next slice's own
 gate, not claimed here.
+
+**Update (this slice, C3): the 24-token VerifyBench ran** -- see the "C3 --
+24-token VerifyBench" section above for the full evidence. Result:
+token-identical confirmed at 24/24 positions; cached decode measures
+9.368 tok/s, which does **not** meet or beat either incumbent (0.1654x
+Ollama, 0.1384x MLX). This closes the item this note deferred; it is not
+still open.
+
+**Current honest read (supersedes the C1 honest read above): the fix is
+real and verified twice at two different sequence lengths (8-token and
+24-token real-checkpoint runs, both token-identical to the cacheless
+oracle) -- gemma4 cached decode is now CORRECT, not still-incorrect. It is
+also NOT yet a meets-or-beats result: 9.368 tok/s is 6.05x below Ollama's
+56.62 tok/s and 7.22x below MLX's 67.667 tok/s. Status: correct-but-slower.
+The ~39-43x win over the cacheless path is real progress and the right
+foundation (O(1)-per-step decode, no re-prefill), but the initiative's
+stated bar -- meet or beat both incumbents -- is not met, and the component
+stays behind its default-off `gemma4-kv-cache` flag. The next divergence to
+chase for further speedup, not correctness, is decode-step dispatch count
+and kernel occupancy on the two-range cached mixer (unmeasured this slice --
+no micro-bench or profile was run to say where the remaining ~6-7x lives).**
