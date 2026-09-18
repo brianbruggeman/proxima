@@ -22,6 +22,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
+// `gemma4_layer_schedule`'s own per-layer schedule types are consulted only
+// by the cacheless path below -- the `gemma4-kv-cache` path builds its
+// schedule from `proxima_tensor::spec::gemma4_descriptor` instead (see
+// `Gemma4Arch::bind`'s own `#[cfg(feature = "gemma4-kv-cache")]` split
+// below), so importing them unconditionally would leave them unused under
+// that feature, a warning that `workspace.lints.rust.warnings = "deny"`
+// turns into a `cargo check` failure.
+#[cfg(not(feature = "gemma4-kv-cache"))]
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ParallelDenseMoeConfig,
@@ -35,7 +43,7 @@ use proxima_tensor::spec::{
 #[cfg(not(feature = "gemma4-kv-cache"))]
 use proxima_tensor::spec::lfm2_forward_program_with_experts;
 #[cfg(feature = "gemma4-kv-cache")]
-use proxima_tensor::spec::{Qwen35LayerRoots, lfm2_two_range_cached_forward_program_with_experts};
+use proxima_tensor::spec::{CacheStrategy, Qwen35LayerRoots, build_forward, gemma4_descriptor};
 
 use crate::architecture::{
     Architecture as ArchitectureTrait, BoundProgram, StepInput, StepInputContext,
@@ -522,6 +530,7 @@ pub static GEMMA4: Gemma4Arch = Gemma4Arch;
 /// no `exp_probs_b` bias, unlike [`FfnCombination::Exclusive`]'s LFM2 shape
 /// -- see [`proxima_tensor::spec::LayerFfnConfig`]'s own doc for what each
 /// field means.
+#[cfg(not(feature = "gemma4-kv-cache"))]
 fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
     let ffn = LayerFfnConfig {
         post_attention_norm: true,
@@ -609,47 +618,38 @@ impl ArchitectureTrait for Gemma4Arch {
         let architecture = from_metadata(parsed)?;
         let weights = bind_gemma4_weights(parsed, file_bytes, &architecture)?;
 
-        let schedule = gemma4_layer_schedule(&architecture);
-        let logit_softcap = (architecture.final_logit_softcapping > 0.0)
-            .then_some(architecture.final_logit_softcapping);
-
-        // `gemma4-kv-cache` (default-off): engages
-        // `lfm2_two_range_cached_forward_program_with_experts` in place of
-        // the cacheless full-reprefill `lfm2_forward_program_with_experts`
-        // below -- see that function's own module doc for why a decode
-        // step's cost drops from O(n^2) to O(1) in prior sequence length
-        // once `layer_roots` below is non-empty. The TWO-range engine, not
-        // the single-range one: gemma4's own first step (`single_position_step
-        // == false` below) processes the WHOLE prompt as one `cached_len=0`
-        // call, and a single merged softmax has no self-consistent way to
-        // include that call's own new positions in `kv_cache.{layer}.*`
-        // before they exist (`lfm2_single_range_cached.rs`'s own module doc)
-        // -- proven by `proxima-tensor`'s own
+        // `gemma4-kv-cache` (default-off): routes through the generic
+        // `ModelDescriptor`/`build_forward` path (`proxima_tensor::spec`)
+        // instead of calling
+        // `lfm2_two_range_cached_forward_program_with_experts` directly --
+        // `gemma4_descriptor` bakes the SAME real-checkpoint shape
+        // `gemma4_layer_schedule` below derives from `architecture` at bind
+        // time (proven field-for-field identical by the real registry
+        // probe cited on `gemma4_descriptor`'s own constants), so swapping
+        // the call site changes nothing about the emitted program -- see
+        // `lfm2_two_range_cached_forward_program_with_experts`'s own module
+        // doc for why a decode step's cost drops from O(n^2) to O(1) in
+        // prior sequence length once `layer_roots` below is non-empty. The
+        // TWO-range engine, not the single-range one: gemma4's own first
+        // step (`single_position_step == false` below) processes the WHOLE
+        // prompt as one `cached_len=0` call, and a single merged softmax
+        // has no self-consistent way to include that call's own new
+        // positions in `kv_cache.{layer}.*` before they exist
+        // (`lfm2_single_range_cached.rs`'s own module doc) -- proven by
+        // `proxima-tensor`'s own
         // `single_range_cached_gemma4_diverges_on_zero_cache_matches_when_self_range_is_folded`
         // (zero-cache max-abs-diff 0.39 vs the prefill oracle) and closed by
         // `two_range_cached_gemma4_matches_prefill_oracle_with_decode_loop_realistic_zero_padding`/
-        // `..._two_step_decode_matches_one_shot_prefill_oracle` (both < 1e-4
-        // against the SAME oracle, fed exactly what this crate's existing
-        // growing-cache decode loop already provides -- no decode-loop
-        // change).
+        // `..._two_step_decode_matches_one_shot_prefill_oracle`/
+        // `build_forward_two_range_matches_direct_builder_call` (all
+        // < 1e-4 / < 1e-6 against the SAME oracle, fed exactly what this
+        // crate's existing growing-cache decode loop already provides --
+        // no decode-loop change).
         #[cfg(feature = "gemma4-kv-cache")]
         let (program, logits, layer_roots, moe_sites) = {
-            let (program, logits, cache_roots, moe_sites) =
-                lfm2_two_range_cached_forward_program_with_experts(
-                    architecture.vocab,
-                    architecture.embedding,
-                    architecture.feed_forward,
-                    architecture.expert_feed_forward,
-                    architecture.head_count,
-                    architecture.block_count,
-                    architecture.expert_count,
-                    architecture.expert_used_count,
-                    0,
-                    &schedule,
-                    Some(EmbeddingScale::Sqrt),
-                    logit_softcap,
-                    true,
-                )?;
+            let mut descriptor = gemma4_descriptor(architecture.vocab);
+            descriptor.cache_strategy = CacheStrategy::TwoRange;
+            let (program, logits, cache_roots, moe_sites) = build_forward(&descriptor, true)?;
             let layer_roots: Vec<Qwen35LayerRoots> = cache_roots
                 .into_iter()
                 .map(Qwen35LayerRoots::Attention)
@@ -658,6 +658,9 @@ impl ArchitectureTrait for Gemma4Arch {
         };
         #[cfg(not(feature = "gemma4-kv-cache"))]
         let (program, logits, layer_roots, moe_sites) = {
+            let schedule = gemma4_layer_schedule(&architecture);
+            let logit_softcap = (architecture.final_logit_softcapping > 0.0)
+                .then_some(architecture.final_logit_softcapping);
             let (program, logits, moe_sites) = lfm2_forward_program_with_experts(
                 architecture.vocab,
                 architecture.embedding,
