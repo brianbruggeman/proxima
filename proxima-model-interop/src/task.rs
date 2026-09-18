@@ -128,6 +128,7 @@ pub fn classify_task(parsed: &ParsedGguf) -> TaskProfile {
             || value.contains("qwen")
             || value.contains("mixtral")
             || value.contains("lfm")
+            || value.contains("gemma")
     }) {
         evidence.push(format!(
             "decoder architecture family: {}",
