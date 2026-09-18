@@ -13704,7 +13704,7 @@ mod gemma4_synthetic_parity {
             fused_qkv_reduce: false,
         };
 
-        let (program, logits, _cache_roots, _moe_sites, _layer_residuals) =
+        let (program, logits, _cache_roots, _moe_sites, _layer_residuals, _hidden) =
             build_forward(&descriptor, false)
                 .expect("build_forward's TwoRange path lowers the gemma4-shaped descriptor");
 
@@ -13967,7 +13967,7 @@ mod gemma4_synthetic_parity {
             )
             .expect("direct real-dims build");
 
-        let (program_b, logits_b, roots_b, moe_b, _layer_residuals_b) =
+        let (program_b, logits_b, roots_b, moe_b, _layer_residuals_b, _hidden_b) =
             build_forward(&descriptor_b, true).expect("build_forward real-dims build");
 
         assert_eq!(program_a.len(), program_b.len(), "op count mismatch");
@@ -14038,11 +14038,18 @@ mod gemma4_synthetic_parity {
         assert_eq!(descriptor_b.block_count, REAL_BLOCK_COUNT);
         assert_eq!(descriptor_b.cache_strategy, CacheStrategy::SingleRange);
 
-        let (program_b, logits_b, cache_roots_b, moe_b, layer_residuals_b) =
+        let (program_b, logits_b, cache_roots_b, moe_b, layer_residuals_b, hidden_b) =
             build_forward(&descriptor_b, true).expect("build_forward real-dims build");
 
         assert_eq!(program_a.len(), program_b.len(), "op count mismatch");
         assert_eq!(roots_a.logits, logits_b, "root node id mismatch");
+        assert_eq!(
+            Some(roots_a.hidden),
+            hidden_b,
+            "hidden root mismatch -- build_forward's SingleRange arm must \
+             surface ForwardRoots::hidden, the node LoadedModel::embed's \
+             pooling path reads, not just logits"
+        );
         assert_eq!(cache_roots_a, cache_roots_b, "cache roots mismatch");
         assert_eq!(moe_a.0.len(), moe_b.0.len(), "moe site count mismatch");
         assert_eq!(

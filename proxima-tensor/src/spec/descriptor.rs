@@ -263,11 +263,6 @@ const MISTRAL_BLOCK_COUNT: u32 = 32;
 /// branch.
 const MISTRAL_EXPERT_COUNT: u32 = 0;
 const MISTRAL_EXPERT_USED_COUNT: u32 = 0;
-/// `mistral_cached_forward_program_with_experts_and_layer_taps`'s builder
-/// (`attention_forward.rs`) has no `LayerKind::ShortConv` branch at all --
-/// every layer is [`LayerKind::Attention`], and `l_cache` is read nowhere
-/// in it, same as [`GEMMA4_L_CACHE`]'s own doc.
-const MISTRAL_L_CACHE: u32 = 0;
 
 /// Builds the real openchat-3.5-1210 / Mistral-7B-v0.1 dense [`ModelDescriptor`]
 /// -- interleaved RoPE off one shared table, `1/sqrt(head_dim)` attention
@@ -313,8 +308,40 @@ const MISTRAL_L_CACHE: u32 = 0;
 /// openchat-3.5-1210 itself never takes that branch) behaviour rather than
 /// [`LayerFfnConfig::exclusive`]'s own unrelated LFM2 default
 /// (`ExpertGatingFunc::Sigmoid`, bias `true`).
+/// [`mistral_descriptor`]'s own shape, but every field [`DenseArch::bind`]
+/// already reads off a real checkpoint's own metadata
+/// (`ModelArchitecture`'s `embedding`/`feed_forward`/`query_heads`/
+/// `kv_heads`/`head_dim`/`block_count`/`expert_count`/`expert_used_count`)
+/// stays a parameter here rather than a `MISTRAL_*` constant --
+/// `DenseArch` is the un-registered-by-name fallback for `llama`, `mistral`,
+/// `qwen3`, `mixtral`, and any other architecture this crate has no
+/// dedicated hybrid binder for (`crate::dense`'s own module doc), so a
+/// SINGLE proven checkpoint's dims (openchat-3.5-1210's, `mistral_descriptor`
+/// below) are only ever right for that one checkpoint -- a Mixtral header's
+/// `expert_count > 0`, or any header with a different `head_dim`/
+/// `block_count`, would silently mis-shape the whole program if `DenseArch`
+/// built its descriptor from those constants instead of this function.
+/// [`mistral_descriptor`] itself now delegates here with its own
+/// `MISTRAL_*` constants, so the two never drift against each other.
+///
+/// [`DenseArch::bind`]: ../../../proxima_model_interop/dense/struct.DenseArch.html
+#[expect(clippy::too_many_arguments, reason = "mirrors the builder's own flat positional signature this descriptor replaces -- see build_forward's SingleRange arm, which reads every one of these fields straight back off the descriptor it builds")]
 #[must_use]
-pub fn mistral_descriptor(vocab: u32) -> ModelDescriptor {
+pub fn mistral_descriptor_from_shape(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    block_count: u32,
+    expert_count: u32,
+    expert_used_count: u32,
+    qk_norm: bool,
+    qkv_biases: bool,
+    paired_gate_up_reduce: bool,
+    fused_qkv_reduce: bool,
+) -> ModelDescriptor {
     let ffn = LayerFfnConfig {
         post_attention_norm: false,
         combination: FfnCombination::Exclusive,
@@ -325,8 +352,8 @@ pub fn mistral_descriptor(vocab: u32) -> ModelDescriptor {
     };
 
     let attention = LayerAttentionConfig {
-        head_dim: MISTRAL_HEAD_DIM,
-        kv_heads: MISTRAL_KV_HEADS,
+        head_dim,
+        kv_heads,
         mask_window: None,
         value_source_kind: ValueSourceKind::ProjectedV,
         rope_table: RopeTableSel {
@@ -334,11 +361,11 @@ pub fn mistral_descriptor(vocab: u32) -> ModelDescriptor {
             sin_name: "rope_sin",
         },
         rope_pairing: RopePairing::Interleaved,
-        score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(MISTRAL_HEAD_DIM),
+        score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(head_dim),
         value_norm: false,
     };
 
-    let layers: Vec<LayerSchedule> = (0..MISTRAL_BLOCK_COUNT)
+    let layers: Vec<LayerSchedule> = (0..block_count)
         .map(|_| LayerSchedule {
             kind: LayerKind::Attention,
             attention,
@@ -348,41 +375,80 @@ pub fn mistral_descriptor(vocab: u32) -> ModelDescriptor {
 
     ModelDescriptor {
         vocab,
-        embedding: MISTRAL_EMBEDDING,
-        feed_forward: MISTRAL_FEED_FORWARD,
-        expert_feed_forward: MISTRAL_FEED_FORWARD,
-        query_heads: MISTRAL_QUERY_HEADS,
-        block_count: MISTRAL_BLOCK_COUNT,
-        expert_count: MISTRAL_EXPERT_COUNT,
-        expert_used_count: MISTRAL_EXPERT_USED_COUNT,
-        leading_dense_block_count: MISTRAL_BLOCK_COUNT,
-        l_cache: MISTRAL_L_CACHE,
+        embedding,
+        feed_forward,
+        expert_feed_forward: feed_forward,
+        query_heads,
+        block_count,
+        expert_count,
+        expert_used_count,
+        leading_dense_block_count: block_count,
+        // no `LayerKind::ShortConv` layer ever appears in a SingleRange
+        // schedule, and that arm's own builder never reads `l_cache` --
+        // same inertness as `Self::l_cache`'s own doc.
+        l_cache: 0,
         embedding_scale: None,
         logit_softcap: None,
         layers,
         cache_strategy: CacheStrategy::SingleRange,
+        qk_norm,
+        qkv_biases,
+        paired_gate_up_reduce,
+        fused_qkv_reduce,
+    }
+}
+
+#[must_use]
+pub fn mistral_descriptor(vocab: u32) -> ModelDescriptor {
+    mistral_descriptor_from_shape(
+        vocab,
+        MISTRAL_EMBEDDING,
+        MISTRAL_FEED_FORWARD,
+        MISTRAL_QUERY_HEADS,
+        MISTRAL_KV_HEADS,
+        MISTRAL_HEAD_DIM,
+        MISTRAL_BLOCK_COUNT,
+        MISTRAL_EXPERT_COUNT,
+        MISTRAL_EXPERT_USED_COUNT,
         // openchat-3.5-1210's own real header: no per-head QK-norm weights,
         // no bias tensors, and `DenseArch::bind`'s own call site
         // (`proxima-model-interop/src/dense.rs`) always passes `false` for
         // both reduce-fusion diagnostics -- see slice 1's own real-shape
         // citation on `MISTRAL_HEAD_DIM` above.
-        qk_norm: false,
-        qkv_biases: false,
-        paired_gate_up_reduce: false,
-        fused_qkv_reduce: false,
-    }
+        false,
+        false,
+        false,
+        false,
+    )
 }
 
 /// [`build_forward`]'s own return shape: the lowered program, its `logits`
 /// root, one [`CachedLayerRoots`] per layer (empty under
-/// [`CacheStrategy::Cacheless`]), one [`MoeSite`] per MoE layer, and one
+/// [`CacheStrategy::Cacheless`]), one [`MoeSite`] per MoE layer, one
 /// residual [`NodeId`] per layer (empty under
 /// [`CacheStrategy::Cacheless`]/[`CacheStrategy::TwoRange`], neither of
 /// which tracks it -- [`CacheStrategy::SingleRange`]'s own arm is the only
 /// one that populates it, straight from
 /// `mistral_cached_forward_program_with_experts_and_layer_taps`'s own
-/// fourth return element).
-pub type BuildForwardProgram = (Vec<Op>, NodeId, Vec<CachedLayerRoots>, MoeSites, Vec<NodeId>);
+/// fourth return element), and the `hidden` root (`ForwardRoots::hidden` --
+/// the last-norm activation `logits` projects from, the node
+/// `proxima-model-interop`'s `LoadedModel::embed` pooling path needs and
+/// `DenseArch::bind`'s mistral arm carried before it routed through this
+/// function). `None` under [`CacheStrategy::Cacheless`]/[`CacheStrategy::TwoRange`]:
+/// neither `lfm2_forward_program_with_experts` nor
+/// `lfm2_two_range_cached_forward_program_with_experts` expose a hidden
+/// node at all, so there is no value here to forward, not merely one this
+/// function declines to read -- same "degenerate default for an engine
+/// that does not produce this value" precedent `cache_roots` and the
+/// residual `Vec<NodeId>` already set.
+pub type BuildForwardProgram = (
+    Vec<Op>,
+    NodeId,
+    Vec<CachedLayerRoots>,
+    MoeSites,
+    Vec<NodeId>,
+    Option<NodeId>,
+);
 
 /// Generalizes [`lfm2_two_range_cached_forward_program_with_experts`] (the
 /// working gemma4 two-range engine, already schedule-driven rather than
@@ -440,7 +506,7 @@ pub fn build_forward(
                     descriptor.logit_softcap,
                     last_row_only,
                 )?;
-            Ok((program, logits, cache_roots, moe_sites, Vec::new()))
+            Ok((program, logits, cache_roots, moe_sites, Vec::new(), None))
         }
         CacheStrategy::Cacheless => {
             let (program, logits, moe_sites) = lfm2_forward_program_with_experts(
@@ -459,7 +525,7 @@ pub fn build_forward(
                 descriptor.logit_softcap,
                 last_row_only,
             )?;
-            Ok((program, logits, Vec::new(), moe_sites, Vec::new()))
+            Ok((program, logits, Vec::new(), moe_sites, Vec::new(), None))
         }
         CacheStrategy::SingleRange => {
             if descriptor.layers.len() != descriptor.block_count as usize {
@@ -510,7 +576,14 @@ pub fn build_forward(
                     descriptor.fused_qkv_reduce,
                     last_row_only,
                 )?;
-            Ok((program, roots.logits, cache_roots, moe_sites, layer_residuals))
+            Ok((
+                program,
+                roots.logits,
+                cache_roots,
+                moe_sites,
+                layer_residuals,
+                Some(roots.hidden),
+            ))
         }
     }
 }
