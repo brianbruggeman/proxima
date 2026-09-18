@@ -17,7 +17,7 @@ These are behavioral smoke tests, not substitutes for reference-logit or
 gold-text tests; a pass only proves the model did not obviously lose task
 semantics.
 
-## C3 — Metal gemma4 generation correctness (INTERMITTENT RACE, unpinned)
+## C3 — Metal gemma4 generation correctness (RESIDENCY EVICTION — FIXED, mlock pin)
 
 gemma4 (26B MoE, 128-expert/8-used, ollama blob `sha256-ea549b...24129`) runs
 end-to-end on the Metal backend, but its generated `logits_root` buffer
@@ -77,10 +77,23 @@ qwen35moe non-resident-mapping-reads-as-zeros finding) -- so a not-yet-faulted
 weight (e.g. the final projection) read as zeros gives `x . 0 = 0`, i.e. the
 all-zero logits, intermittently (page residency is timing/pressure dependent),
 vanishing under instrumentation (which touches and thus faults the pages).
-Candidate fix (next session, do not land blind): prefault / residency-gate the
-no-copy mmap weight+expert pages before the GPU dispatch that reads them; a
-prefault of ~13.8 GB has a perf cost, so measure it, and validate against the
-intermittent repro (many runs, since one pass never proves a race gone).
+RESOLVED 2026-09-18 (branch `fix/gemma4-metal-residency`, commit `0efe45cf`),
+superseding the frame-capture speculation above. Root: the residency ladder in
+`mapping_residency.rs` (`walk_residency_ladder`, ~179-198) returns at the FIRST
+rung that reaches 0 missing pages, so a quiet load resolves at `Prefault` and
+NEVER reaches the `Mlock` rung -- leaving pages RESIDENT-BUT-UNPINNED, which a
+later evictor under memory pressure reclaims; the GPU then reads the evicted page
+as zeros. Residency != pinned. Fix: `prove_resident` now ALWAYS attempts the
+`mlock` pin once residency is proven (reusing the existing best-effort
+`lock_resident`; graceful `warn!` + continue where `RLIMIT_MEMLOCK` is
+constrained). VALIDATED BY OS GUARANTEE, not a hopeful re-run: on every load
+`mlock(2)` returns `Ok(())` over the full 13,286,728,576-byte mapping -> pages
+WIRED -> eviction, and thus the zero read, is impossible by construction. France
+4/4 coherent (`The capital of France is **Paris**.`) and the Hamlet soliloquy now
+decodes correctly (`To be, or not to be, that is the question: ...`), zero token-0
+across all runs. NOTE: `madvise(MADV_DONTNEED)` is a no-op on this macOS host (a
+degenerate control proved it), so the race could not be force-reproduced -- which
+is exactly why the OS-guarantee validation matters more than any run count.
 
 Commit `9fdc6596`'s message "gemma4 metal deterministic" OVERCLAIMS:
 generation is a flaky race, not deterministic.
