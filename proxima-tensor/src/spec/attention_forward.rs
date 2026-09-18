@@ -417,6 +417,7 @@ where
 /// own `output.weight` measurement: 14.7s of 43.8s GPU time, 33% of
 /// total, on the FULL 915-row projection). [`embedding_lookup`] is reused
 /// verbatim, not a new primitive: it is already exactly `table[ids[s],
+///
 /// d]`, the same [`IndexMap::Computed`] gather this needs, just with a
 /// 1-entry `lm_head_row` index instead of a `new_count`-entry `ids`.
 /// `lm_head_row` is host-supplied (`new_count - 1`, same convention as
@@ -431,6 +432,7 @@ where
 /// already proves correct end to end ([`embedding_lookup`]'s own `ids`).
 /// `last_row_only: false` skips this leaf entirely (not merely bypasses
 /// it) so the program a `false` caller gets is byte-for-byte the one
+///
 /// this function has always built -- no new node, no new required
 /// binding, every existing per-position-logits caller unaffected.
 fn gather_last_row(program: &mut Vec<Op>, normed_final: NodeId, last_row_only: bool) -> NodeId {
