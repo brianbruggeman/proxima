@@ -77,9 +77,12 @@ mod single_range_moe_cached;
 mod lfm2_qwen35_gdn;
 #[macro_use]
 mod attention_forward;
+#[macro_use]
+mod lfm2_single_range_cached;
 pub use attention_forward::*;
 pub use hyperconn_qwen35_dense::*;
 pub use lfm2_qwen35_gdn::*;
+pub use lfm2_single_range_cached::*;
 pub use mistral_forward_cached::*;
 pub use mistral_layer_moe::*;
 pub use primitives::*;

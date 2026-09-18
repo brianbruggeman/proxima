@@ -25,7 +25,18 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ParallelDenseMoeConfig,
-    RopePairing, RopeTableSel, ValueSourceKind, lfm2_forward_program_with_experts,
+    RopePairing, RopeTableSel, ValueSourceKind,
+};
+// Each build uses exactly one of these two forward-program builders (see
+// `Gemma4Arch::bind`'s own `#[cfg(feature = "gemma4-kv-cache")]` split
+// below) -- importing both unconditionally would leave the unused one a
+// warning that `workspace.lints.rust.warnings = "deny"` turns into a
+// `cargo check` failure.
+#[cfg(not(feature = "gemma4-kv-cache"))]
+use proxima_tensor::spec::lfm2_forward_program_with_experts;
+#[cfg(feature = "gemma4-kv-cache")]
+use proxima_tensor::spec::{
+    Qwen35LayerRoots, lfm2_single_range_cached_forward_program_with_experts,
 };
 
 use crate::architecture::{
@@ -604,22 +615,62 @@ impl ArchitectureTrait for Gemma4Arch {
         let logit_softcap = (architecture.final_logit_softcapping > 0.0)
             .then_some(architecture.final_logit_softcapping);
 
-        let (program, logits, moe_sites) = lfm2_forward_program_with_experts(
-            architecture.vocab,
-            architecture.embedding,
-            architecture.feed_forward,
-            architecture.expert_feed_forward,
-            architecture.head_count,
-            architecture.block_count,
-            architecture.expert_count,
-            architecture.expert_used_count,
-            0,
-            0,
-            &schedule,
-            Some(EmbeddingScale::Sqrt),
-            logit_softcap,
-            true,
-        )?;
+        // `gemma4-kv-cache` (default-off): engages
+        // `lfm2_single_range_cached_forward_program_with_experts` (the
+        // single-range cached engine every other decode-capable
+        // architecture in this crate already uses) in place of the
+        // cacheless full-reprefill `lfm2_forward_program_with_experts`
+        // below -- see that function's own module doc for why a decode
+        // step's cost drops from O(n^2) to O(1) in prior sequence length
+        // once `layer_roots` below is non-empty. Off by default: this path
+        // has no differential CPU-oracle proof against the cacheless one
+        // yet (the binding correctness rule this repo's own guiding
+        // principles set), so production stays on the proven cacheless
+        // program until that proof lands.
+        #[cfg(feature = "gemma4-kv-cache")]
+        let (program, logits, layer_roots, moe_sites) = {
+            let (program, logits, cache_roots, moe_sites) =
+                lfm2_single_range_cached_forward_program_with_experts(
+                    architecture.vocab,
+                    architecture.embedding,
+                    architecture.feed_forward,
+                    architecture.expert_feed_forward,
+                    architecture.head_count,
+                    architecture.block_count,
+                    architecture.expert_count,
+                    architecture.expert_used_count,
+                    0,
+                    &schedule,
+                    Some(EmbeddingScale::Sqrt),
+                    logit_softcap,
+                    true,
+                )?;
+            let layer_roots: Vec<Qwen35LayerRoots> = cache_roots
+                .into_iter()
+                .map(Qwen35LayerRoots::Attention)
+                .collect();
+            (program, logits, layer_roots, moe_sites)
+        };
+        #[cfg(not(feature = "gemma4-kv-cache"))]
+        let (program, logits, layer_roots, moe_sites) = {
+            let (program, logits, moe_sites) = lfm2_forward_program_with_experts(
+                architecture.vocab,
+                architecture.embedding,
+                architecture.feed_forward,
+                architecture.expert_feed_forward,
+                architecture.head_count,
+                architecture.block_count,
+                architecture.expert_count,
+                architecture.expert_used_count,
+                0,
+                0,
+                &schedule,
+                Some(EmbeddingScale::Sqrt),
+                logit_softcap,
+                true,
+            )?;
+            (program, logits, Vec::new(), moe_sites)
+        };
 
         let tied_embeddings = find_tensor(parsed, "output.weight").is_err();
         let full_head_dim = architecture.key_length;
@@ -646,7 +697,7 @@ impl ArchitectureTrait for Gemma4Arch {
             logits_root: logits,
             hidden_root: None,
             residual_roots: Vec::new(),
-            layer_roots: Vec::new(),
+            layer_roots,
             qwen35moe_layer_diagnostics: Vec::new(),
             router_roots: Vec::new(),
             moe_sites,
