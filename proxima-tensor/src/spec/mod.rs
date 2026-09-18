@@ -79,7 +79,9 @@ mod lfm2_qwen35_gdn;
 mod attention_forward;
 #[macro_use]
 mod lfm2_single_range_cached;
+mod descriptor;
 pub use attention_forward::*;
+pub use descriptor::*;
 pub use hyperconn_qwen35_dense::*;
 pub use lfm2_qwen35_gdn::*;
 pub use lfm2_single_range_cached::*;
