@@ -15,6 +15,25 @@ use super::*;
 pub enum CacheStrategy {
     Cacheless,
     TwoRange,
+    /// [`mistral_cached_forward_program_with_experts_and_layer_taps`]'s own
+    /// single-continuous-range KV cache (`kv_cache.{layer}.k_even`/`k_odd`/
+    /// `v`) -- a genuinely different scoring algebra from both other
+    /// variants: the cached block is NEVER masked (a cached position is
+    /// definitionally in the past of every new query, per that function's
+    /// own doc on its `is_future` usage), where [`Cacheless`]'s block-local
+    /// mask has no cache to skip and [`TwoRange`]'s own single-range
+    /// counterpart -- [`lfm2_single_range_cached_forward_program_with_experts`],
+    /// the plausible reuse candidate this variant's own doc first
+    /// considered -- masks the cached block with a `cached_len`-aware
+    /// [`causal_mask_merged_windowed`] to exclude stale KV-bucket padding.
+    /// Mistral's cache carries no such padding, so no exclusion mask exists
+    /// in its program at all; threading that engine's own masking as a
+    /// descriptor knob would mean rewriting its cache algebra, not adding a
+    /// parameter. [`build_forward`]'s own arm therefore calls
+    /// [`mistral_cached_forward_program_with_experts_and_layer_taps`]
+    /// directly -- the SAME "dispatch to an existing, unmodified builder"
+    /// shape [`TwoRange`]'s own arm already uses.
+    SingleRange,
 }
 
 /// A whole model's build-time shape as DATA: the global hyperparameters
@@ -62,6 +81,30 @@ pub struct ModelDescriptor {
     pub logit_softcap: Option<f32>,
     pub layers: Vec<LayerSchedule>,
     pub cache_strategy: CacheStrategy,
+    /// Qwen3-style per-head QK-norm, consulted ONLY by
+    /// [`CacheStrategy::SingleRange`]'s arm
+    /// (`mistral_cached_forward_program_with_experts_and_layer_taps`'s own
+    /// `qk_norm` parameter) -- inert, safe at any value, under
+    /// [`CacheStrategy::Cacheless`]/[`CacheStrategy::TwoRange`], same
+    /// "unused when the arm never reads it" precedent [`Self::l_cache`]'s
+    /// own doc already set. A model-global flag, not a per-layer
+    /// [`LayerAttentionConfig`] field, because that builder's own signature
+    /// takes it as one flat `bool` applied uniformly to every layer.
+    pub qk_norm: bool,
+    /// `attn_{q,k,v}.bias` presence, consulted ONLY by
+    /// [`CacheStrategy::SingleRange`]'s arm -- same inertness and
+    /// model-global-not-per-layer reasoning as [`Self::qk_norm`].
+    pub qkv_biases: bool,
+    /// Single fused `[2, feed_forward, embedding]` gate+up weight leaf vs.
+    /// two separate leaves, consulted ONLY by [`CacheStrategy::SingleRange`]'s
+    /// arm -- same inertness and model-global-not-per-layer reasoning as
+    /// [`Self::qk_norm`].
+    pub paired_gate_up_reduce: bool,
+    /// Single fused `[query_heads + 2*kv_heads, head_dim, embedding]` QKV
+    /// weight leaf vs. three separate leaves, consulted ONLY by
+    /// [`CacheStrategy::SingleRange`]'s arm -- same inertness and
+    /// model-global-not-per-layer reasoning as [`Self::qk_norm`].
+    pub fused_qkv_reduce: bool,
 }
 
 /// Real gemma4 26B-A4B header values, proven by the `#[ignore]`d
@@ -191,6 +234,13 @@ pub fn gemma4_descriptor(vocab: u32) -> ModelDescriptor {
         logit_softcap: Some(GEMMA4_LOGIT_SOFTCAP),
         layers,
         cache_strategy: CacheStrategy::Cacheless,
+        // inert: neither `Cacheless` nor `TwoRange` ever reads these four
+        // fields (`ModelDescriptor::qk_norm`'s own doc) -- gemma4 has no
+        // concept of any of them.
+        qk_norm: false,
+        qkv_biases: false,
+        paired_gate_up_reduce: false,
+        fused_qkv_reduce: false,
     }
 }
 
@@ -231,18 +281,16 @@ const MISTRAL_L_CACHE: u32 = 0;
 /// baked-in constant, for the same reason [`gemma4_descriptor`]'s own doc
 /// gives: it is per-checkpoint tokenizer data, not architecture.
 ///
-/// [`ModelDescriptor::cache_strategy`] is set to [`CacheStrategy::Cacheless`]
-/// as a PLACEHOLDER only -- neither existing [`CacheStrategy`] variant is
-/// `mistral_cached_forward_program_with_experts_and_layer_taps`'s own
-/// single-continuous-range KV cache (`kv_cache.{layer}.k_even`/`k_odd`/`v`,
-/// distinct from both [`CacheStrategy::Cacheless`]'s no-cache engine and
-/// [`CacheStrategy::TwoRange`]'s two-range engine). [`build_forward`] does
-/// not yet dispatch mistral through this descriptor at all; a later slice
-/// must add a third [`CacheStrategy`] variant (its own engine is already
-/// schedule-driven --
-/// [`lfm2_single_range_cached_forward_program_with_experts`]) and a
-/// `build_forward` match arm for it before this field carries real meaning
-/// for mistral.
+/// [`ModelDescriptor::cache_strategy`] is [`CacheStrategy::SingleRange`] --
+/// see that variant's own doc for why its [`build_forward`] arm dispatches
+/// straight to `mistral_cached_forward_program_with_experts_and_layer_taps`
+/// rather than through the schedule-driven
+/// [`lfm2_single_range_cached_forward_program_with_experts`] (that engine's
+/// own unconditional per-head QK-norm and `cached_len`-aware merged mask
+/// are not openchat-3.5-1210's own program, node for node -- see
+/// `build_forward_matches_direct_builder_call_at_real_mistral_dims`'s own
+/// doc, `proxima-tensor/src/spec/tests.rs`, for the byte-identical proof
+/// this field's value makes true).
 ///
 /// `expert_feed_forward` reuses [`MISTRAL_FEED_FORWARD`] rather than a
 /// separate constant: unlike gemma4's split dense/routed widths,
@@ -312,9 +360,29 @@ pub fn mistral_descriptor(vocab: u32) -> ModelDescriptor {
         embedding_scale: None,
         logit_softcap: None,
         layers,
-        cache_strategy: CacheStrategy::Cacheless,
+        cache_strategy: CacheStrategy::SingleRange,
+        // openchat-3.5-1210's own real header: no per-head QK-norm weights,
+        // no bias tensors, and `DenseArch::bind`'s own call site
+        // (`proxima-model-interop/src/dense.rs`) always passes `false` for
+        // both reduce-fusion diagnostics -- see slice 1's own real-shape
+        // citation on `MISTRAL_HEAD_DIM` above.
+        qk_norm: false,
+        qkv_biases: false,
+        paired_gate_up_reduce: false,
+        fused_qkv_reduce: false,
     }
 }
+
+/// [`build_forward`]'s own return shape: the lowered program, its `logits`
+/// root, one [`CachedLayerRoots`] per layer (empty under
+/// [`CacheStrategy::Cacheless`]), one [`MoeSite`] per MoE layer, and one
+/// residual [`NodeId`] per layer (empty under
+/// [`CacheStrategy::Cacheless`]/[`CacheStrategy::TwoRange`], neither of
+/// which tracks it -- [`CacheStrategy::SingleRange`]'s own arm is the only
+/// one that populates it, straight from
+/// `mistral_cached_forward_program_with_experts_and_layer_taps`'s own
+/// fourth return element).
+pub type BuildForwardProgram = (Vec<Op>, NodeId, Vec<CachedLayerRoots>, MoeSites, Vec<NodeId>);
 
 /// Generalizes [`lfm2_two_range_cached_forward_program_with_experts`] (the
 /// working gemma4 two-range engine, already schedule-driven rather than
@@ -328,32 +396,52 @@ pub fn mistral_descriptor(vocab: u32) -> ModelDescriptor {
 /// (`kv_cache.{layer}.k_even`/`k_odd`/`v`) are elided for: it delegates to
 /// the plain builder and wraps that builder's three-tuple return
 /// (`program, logits, moe_sites`, no cache roots) into this function's own
-/// four-tuple shape with `cache_roots` always empty, so callers never match
-/// on which engine actually built the program. `last_row_only` stays a call
+/// return shape with `cache_roots` always empty, so callers never match on
+/// which engine actually built the program. `last_row_only` stays a call
 /// parameter rather than a `ModelDescriptor` field because it shapes a
 /// single call's graph (whole-sequence logits vs. one gathered row), not the
 /// model itself -- the same role it already plays as each builder's own
 /// trailing positional argument.
+///
+/// [`CacheStrategy::SingleRange`] dispatches to
+/// `mistral_cached_forward_program_with_experts_and_layer_taps` directly,
+/// unchanged -- see that variant's own doc for why (a genuinely different
+/// cache-scoring algebra, not a knob the other two engines can express).
+/// That builder's per-layer residual outputs are this function's own fifth
+/// return element, empty for [`CacheStrategy::Cacheless`]/
+/// [`CacheStrategy::TwoRange`] (neither engine tracks them) -- the same
+/// "degenerate default for an engine that does not produce this value"
+/// precedent `cache_roots` itself already sets on the [`Cacheless`][CacheStrategy::Cacheless]
+/// arm above.
+///
+/// [`BuildForwardProgram`]'s own doc names each element -- the same
+/// named-tuple-alias precedent
+/// [`MistralMoeForwardProgramWithLayerTaps`] already sets for a
+/// same-shaped return.
 pub fn build_forward(
     descriptor: &ModelDescriptor,
     last_row_only: bool,
-) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>, MoeSites), TensorError> {
+) -> Result<BuildForwardProgram, TensorError> {
     match descriptor.cache_strategy {
-        CacheStrategy::TwoRange => lfm2_two_range_cached_forward_program_with_experts(
-            descriptor.vocab,
-            descriptor.embedding,
-            descriptor.feed_forward,
-            descriptor.expert_feed_forward,
-            descriptor.query_heads,
-            descriptor.block_count,
-            descriptor.expert_count,
-            descriptor.expert_used_count,
-            descriptor.leading_dense_block_count,
-            &descriptor.layers,
-            descriptor.embedding_scale,
-            descriptor.logit_softcap,
-            last_row_only,
-        ),
+        CacheStrategy::TwoRange => {
+            let (program, logits, cache_roots, moe_sites) =
+                lfm2_two_range_cached_forward_program_with_experts(
+                    descriptor.vocab,
+                    descriptor.embedding,
+                    descriptor.feed_forward,
+                    descriptor.expert_feed_forward,
+                    descriptor.query_heads,
+                    descriptor.block_count,
+                    descriptor.expert_count,
+                    descriptor.expert_used_count,
+                    descriptor.leading_dense_block_count,
+                    &descriptor.layers,
+                    descriptor.embedding_scale,
+                    descriptor.logit_softcap,
+                    last_row_only,
+                )?;
+            Ok((program, logits, cache_roots, moe_sites, Vec::new()))
+        }
         CacheStrategy::Cacheless => {
             let (program, logits, moe_sites) = lfm2_forward_program_with_experts(
                 descriptor.vocab,
@@ -371,7 +459,58 @@ pub fn build_forward(
                 descriptor.logit_softcap,
                 last_row_only,
             )?;
-            Ok((program, logits, Vec::new(), moe_sites))
+            Ok((program, logits, Vec::new(), moe_sites, Vec::new()))
+        }
+        CacheStrategy::SingleRange => {
+            if descriptor.layers.len() != descriptor.block_count as usize {
+                return Err(TensorError::LayerScheduleCountMismatch {
+                    expected: descriptor.block_count,
+                    found: descriptor.layers.len(),
+                });
+            }
+            let Some(first) = descriptor.layers.first() else {
+                return Err(TensorError::LayerScheduleCountMismatch {
+                    expected: descriptor.block_count,
+                    found: 0,
+                });
+            };
+            // This builder takes one flat `head_dim`/`kv_heads` for the
+            // whole model, not a per-layer value (`DenseArch::bind`'s own
+            // `architecture.uniform_kv_heads()?` call makes the same
+            // requirement at bind time) -- silently reading `layers[0]`
+            // over a schedule that actually varies per layer would build a
+            // structurally wrong program with no error at all, the exact
+            // failure mode `TensorError::UnsupportedInBuilder`'s own doc
+            // says to raise instead of work around.
+            if descriptor
+                .layers
+                .iter()
+                .any(|layer| layer.attention != first.attention)
+            {
+                return Err(TensorError::UnsupportedInBuilder {
+                    builder: "build_forward(CacheStrategy::SingleRange)",
+                    feature: "non-uniform per-layer attention config",
+                });
+            }
+            let attention = first.attention;
+            let (program, roots, cache_roots, layer_residuals, moe_sites) =
+                mistral_cached_forward_program_with_experts_and_layer_taps(
+                    descriptor.vocab,
+                    descriptor.embedding,
+                    descriptor.feed_forward,
+                    descriptor.query_heads,
+                    attention.kv_heads,
+                    attention.head_dim,
+                    descriptor.block_count,
+                    descriptor.expert_count,
+                    descriptor.expert_used_count,
+                    descriptor.qk_norm,
+                    descriptor.qkv_biases,
+                    descriptor.paired_gate_up_reduce,
+                    descriptor.fused_qkv_reduce,
+                    last_row_only,
+                )?;
+            Ok((program, roots.logits, cache_roots, moe_sites, layer_residuals))
         }
     }
 }
@@ -457,7 +596,11 @@ mod tests {
         assert_eq!(descriptor.l_cache, 0);
         assert_eq!(descriptor.embedding_scale, None);
         assert_eq!(descriptor.logit_softcap, None);
-        assert_eq!(descriptor.cache_strategy, CacheStrategy::Cacheless);
+        assert_eq!(descriptor.cache_strategy, CacheStrategy::SingleRange);
+        assert!(!descriptor.qk_norm);
+        assert!(!descriptor.qkv_biases);
+        assert!(!descriptor.paired_gate_up_reduce);
+        assert!(!descriptor.fused_qkv_reduce);
 
         for layer in &descriptor.layers {
             assert_eq!(layer.kind, LayerKind::Attention);
