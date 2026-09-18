@@ -89,9 +89,12 @@ as zeros. Residency != pinned. Fix: `prove_resident` now ALWAYS attempts the
 constrained). VALIDATED BY OS GUARANTEE, not a hopeful re-run: on every load
 `mlock(2)` returns `Ok(())` over the full 13,286,728,576-byte mapping -> pages
 WIRED -> eviction, and thus the zero read, is impossible by construction. France
-4/4 coherent (`The capital of France is **Paris**.`) and the Hamlet soliloquy now
-decodes correctly (`To be, or not to be, that is the question: ...`), zero token-0
-across all runs. NOTE: `madvise(MADV_DONTNEED)` is a no-op on this macOS host (a
+4/4 coherent (`The capital of France is **Paris**.`), zero token-0 across all
+runs. The Hamlet soliloquy decodes the correct OPENING (`To be, or not to be,
+that is the question: / Whether 'tis nobler in the mind to suffer`) but that
+validation run used only 24 tokens (~1.5 lines); smoke prompt #2's full FIVE-line
+requirement (discipline contract above) is NOT yet confirmed here -- an 80-token
+decode is the honest check for it. NOTE: `madvise(MADV_DONTNEED)` is a no-op on this macOS host (a
 degenerate control proved it), so the race could not be force-reproduced -- which
 is exactly why the OS-guarantee validation matters more than any run count.
 
