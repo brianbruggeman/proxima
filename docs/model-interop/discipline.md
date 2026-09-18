@@ -17,6 +17,48 @@ These are behavioral smoke tests, not substitutes for reference-logit or
 gold-text tests; a pass only proves the model did not obviously lose task
 semantics.
 
+## C3 — Metal gemma4 generation correctness (INTERMITTENT RACE, unpinned)
+
+gemma4 (26B MoE, 128-expert/8-used, ollama blob `sha256-ea549b...24129`) runs
+end-to-end on the Metal backend, but its generated `logits_root` buffer
+INTERMITTENTLY reads back all-zero (unwritten Metal memory) -> argmax index 0
+-> token 0 -> empty/garbage output. Reproduced twice, then produced correct
+output (`The capital of France`) 5/5 on a byte-identical reverted rebuild: a
+race, not a deterministic defect.
+
+**Smoke prompts (contract above):**
+
+1. `What is the capital of France?` -> INTERMITTENT: sometimes reaches `Paris`,
+   sometimes token-0 zero-fill. Not a reliable pass.
+2. Hamlet soliloquy -> additionally blocked upstream: gemma4 needs its own
+   `<|turn>role...<turn|>` chat template applied by the caller
+   (`encode_with_bos_eos` takes a raw pre-rendered string, `decode.rs:1143`;
+   OpenChat/Mixtral pre-render in their own fixtures, `bind.rs:5080`/`7555`).
+   No committed harness renders gemma4's template; that is the consuming
+   application's prompt-policy responsibility, not proxima's. Raw-prompt runs
+   produce continuation garbage on BOTH cpu and metal, independent of the race.
+
+**Ruled out by reading the code (do not re-check):** the softcap/tanh math
+(`forward_node_values_on_backend(NodeId 12721)` on Metal returns correct
+logits, `min=-22.82 max=27.38`); the Q5_0/Q5_1 codec (`9fdc6596` fixed a
+~51 GB f32-dequant alloc -- a real but ORTHOGONAL bug); memory-pressure
+eviction (retracted); the CPU readback fence
+(`placements_execute_named.rs:562-563` is one command buffer, `commit()` then
+`waitUntilCompleted()` BEFORE `finish()` reads, all output buffers
+`StorageModeShared`+hazard-tracked, `contents()` read after the wait); the
+`DispatchType::as_mtl` mapping (`Serial -> MTLDispatchType::Serial`, correct);
+`metal-horizontal-merge` (default OFF, not enabled by `--features std,metal`).
+
+**Narrowest honest statement:** a subtle GPU-execution-ordering / arena
+buffer-identity race under `dispatch_type=Serial` with a ~100x buffer-arena
+reuse factor and `barriers=0` (which is BY DESIGN under Serial -- Metal's
+serial encoder is assumed to order dispatches for free). The repro is
+instrumentation-fragile (added timing overhead hides it), so pinning it needs
+a Metal GPU frame capture or per-dispatch fence logging caught on a live
+failure, and a fix cannot be validated by a single passing run. Commit
+`9fdc6596`'s message "gemma4 metal deterministic" OVERCLAIMS: generation is a
+flaky race, not deterministic.
+
 ## C2 — CUDA precompiled-PTX driver boundary
 
 | Build | Tests | Clippy | Micro-bench | Compare-bench | E2E | Opt | SIMD/SM/no-Box | O(1) | Cfg/API | Home-turf | Δ | Notes |
