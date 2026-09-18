@@ -1239,6 +1239,7 @@ pub const Q5_1_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_1::QK5_1;
 /// K-quant family [`Q8_0_UNPACK_MSL`]/[`Q4_0_UNPACK_MSL`] draw: no
 /// super-block, so this codec does not take the row-blocked
 /// (`classify_packed_row_block`) or tiled-GEMM (`classify_tiled_gemm`) fast
+///
 /// paths either -- it always renders through the fully generic per-element
 /// accessor below.
 ///
