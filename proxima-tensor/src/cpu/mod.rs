@@ -177,8 +177,8 @@ use half::{bf16, f16};
 // modules `QuantizedBlock::element_count` composes down to, not the scalar
 // float types.
 use proxima_gguf::quant::{
-    bf16 as gguf_bf16, f16 as gguf_f16, iq2_xs, iq3_xxs, iq4_nl, q2_k, q3_k, q4_0, q4_k, q5_1,
-    q5_k, q6_k, q8_0,
+    bf16 as gguf_bf16, f16 as gguf_f16, iq2_xs, iq3_xxs, iq4_nl, q2_k, q3_k, q4_0, q4_k, q5_0,
+    q5_1, q5_k, q6_k, q8_0,
 };
 
 use crate::bind::{

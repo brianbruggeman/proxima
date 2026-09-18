@@ -566,6 +566,12 @@ pub(super) fn push_packed_row_blocked_body(
                         codec: "q5_1",
                     });
                 }
+                PackedCodec::Q5_0 => {
+                    return Err(EmitError::NonKQuantPackedCodec {
+                        node: resolved.node,
+                        codec: "q5_0",
+                    });
+                }
                 PackedCodec::Float16 => {
                     return Err(EmitError::NonKQuantPackedCodec {
                         node: resolved.node,

@@ -709,6 +709,8 @@ pub(super) fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(Q5_1_UNPACK_MSL);
     source.push('\n');
+    source.push_str(Q5_0_UNPACK_MSL);
+    source.push('\n');
     source.push_str(BF16_UNPACK_MSL);
     source.push('\n');
 }
@@ -753,6 +755,11 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<PackedCodec
         // [`Q5_1_BLOCK_ELEMENTS`], never [`Q4K_BLOCK_ELEMENTS`].
         Some(PackedCodec::Q5_1) => format!(
             "q5_1_element(in{index} + ({offset} / {Q5_1_BLOCK_ELEMENTS}) * {Q5_1_BLOCK_BYTES}, (uint)({offset} % {Q5_1_BLOCK_ELEMENTS}))"
+        ),
+        // `Q5_0`'s block is 32 elements, not 256 -- its own
+        // [`Q5_0_BLOCK_ELEMENTS`], never [`Q4K_BLOCK_ELEMENTS`].
+        Some(PackedCodec::Q5_0) => format!(
+            "q5_0_element(in{index} + ({offset} / {Q5_0_BLOCK_ELEMENTS}) * {Q5_0_BLOCK_BYTES}, (uint)({offset} % {Q5_0_BLOCK_ELEMENTS}))"
         ),
         // `Float16`'s buffer already binds as `device const half*`
         // (`kernel_signature`'s own match), so reading it is a plain index

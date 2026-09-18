@@ -197,6 +197,7 @@ pub fn gguf_tensor_as_packed_block<'a>(
         GgmlType::Q2_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q2K(bytes)),
         GgmlType::Q4_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Q4_0(bytes)),
         GgmlType::Q5_1 => Ok(proxima_tensor::cpu::QuantizedBlock::Q5_1(bytes)),
+        GgmlType::Q5_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Q5_0(bytes)),
         GgmlType::Q5_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q5K(bytes)),
         GgmlType::Q3_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q3K(bytes)),
         GgmlType::Q6_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q6K(bytes)),
@@ -950,6 +951,15 @@ pub enum PackedOwnedKind {
     /// friends), which only ever borrows already-on-disk `Q5_1` bytes and
     /// never re-encodes them.
     Q5_1,
+    /// `Q5_0`: 32-element blocks, one `f16` scale plus a 4-byte 5th-bit
+    /// plane (22 bytes/block, [`Self::Q5_1`] with the min term dropped);
+    /// see [`proxima_gguf::quant::q5_0`] for the on-disk layout.
+    /// Decode-only, same reasoning as [`Self::Q5_1`] for why
+    /// [`quantize_to_kind`] cannot encode INTO this kind. Reachable from
+    /// [`Self::from_ggml_type`] purely for the load-time
+    /// packed-vs-dequantize decision -- gemma4's
+    /// `blk.{1..29}.ffn_down_exps.weight` codec.
+    Q5_0,
 }
 
 #[cfg(feature = "std")]
@@ -972,6 +982,7 @@ impl PackedOwnedKind {
             PackedOwnedKind::BFloat16 => proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes),
             PackedOwnedKind::Q2K => proxima_tensor::cpu::QuantizedBlock::Q2K(bytes),
             PackedOwnedKind::Q5_1 => proxima_tensor::cpu::QuantizedBlock::Q5_1(bytes),
+            PackedOwnedKind::Q5_0 => proxima_tensor::cpu::QuantizedBlock::Q5_0(bytes),
         }
     }
 
@@ -1005,6 +1016,7 @@ impl PackedOwnedKind {
             GgmlType::Bf16 => Some(PackedOwnedKind::BFloat16),
             GgmlType::Q2_K => Some(PackedOwnedKind::Q2K),
             GgmlType::Q5_1 => Some(PackedOwnedKind::Q5_1),
+            GgmlType::Q5_0 => Some(PackedOwnedKind::Q5_0),
             _ => None,
         }
     }
@@ -1029,6 +1041,7 @@ impl PackedOwnedKind {
             PackedOwnedKind::BFloat16 => "bf16",
             PackedOwnedKind::Q2K => "q2_k",
             PackedOwnedKind::Q5_1 => "q5_1",
+            PackedOwnedKind::Q5_0 => "q5_0",
         }
     }
 
@@ -1048,6 +1061,7 @@ impl PackedOwnedKind {
             PackedOwnedKind::BFloat16 => GgmlType::Bf16,
             PackedOwnedKind::Q2K => GgmlType::Q2_K,
             PackedOwnedKind::Q5_1 => GgmlType::Q5_1,
+            PackedOwnedKind::Q5_0 => GgmlType::Q5_0,
         }
     }
 
@@ -1484,6 +1498,10 @@ pub(crate) fn quantize_to_kind(
         // load-time packed check never calls this function); errors instead
         // of silently mis-encoding.
         PackedOwnedKind::Q5_1 => Err(QuantError::UnsupportedCodec { codec: "q5_1" }),
+        // `proxima_gguf::quant::q5_0` ships `dequantize`/`dequantize_block`
+        // only -- see `PackedOwnedKind::Q5_0`'s own doc. Same reasoning as
+        // `PackedOwnedKind::Q5_1`'s arm just above.
+        PackedOwnedKind::Q5_0 => Err(QuantError::UnsupportedCodec { codec: "q5_0" }),
     }
 }
 

@@ -213,6 +213,7 @@ pub(super) fn execute_plan_inner(
             | QuantizedBlock::Q8_0(bytes)
             | QuantizedBlock::Q4_0(bytes)
             | QuantizedBlock::Q5_1(bytes)
+            | QuantizedBlock::Q5_0(bytes)
             | QuantizedBlock::Q2K(bytes)
             | QuantizedBlock::Iq4Nl(bytes)
             | QuantizedBlock::Iq2Xs(bytes)

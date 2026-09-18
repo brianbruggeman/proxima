@@ -1261,6 +1261,7 @@ pub(super) fn build_matmul_stage_plan<'weights>(
         QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
         QuantizedBlock::Q4_0(bytes) => (bytes, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS),
         QuantizedBlock::Q5_1(bytes) => (bytes, Q5_1_BLOCK_BYTES, Q5_1_BLOCK_ELEMENTS),
+        QuantizedBlock::Q5_0(bytes) => (bytes, Q5_0_BLOCK_BYTES, Q5_0_BLOCK_ELEMENTS),
         QuantizedBlock::Iq4Nl(bytes) => (bytes, IQ4_NL_BLOCK_BYTES, IQ4_NL_BLOCK_ELEMENTS),
         QuantizedBlock::Iq2Xs(bytes) => (bytes, IQ2_XS_BLOCK_BYTES, IQ2_XS_BLOCK_ELEMENTS),
         QuantizedBlock::Iq3Xxs(bytes) => (bytes, IQ3_XXS_BLOCK_BYTES, IQ3_XXS_BLOCK_ELEMENTS),
