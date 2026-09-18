@@ -35,10 +35,29 @@ pub enum CacheStrategy {
 pub struct ModelDescriptor {
     pub vocab: u32,
     pub embedding: u32,
+    /// Dense-branch FFN hidden width (`append_lfm2_layer_ffn`'s own
+    /// `feed_forward`) -- every layer's dense-FFN weight shapes derive from
+    /// this, same as `expert_feed_forward` does for the routed branch.
+    pub feed_forward: u32,
+    /// Routed-expert FFN hidden width, distinct from `feed_forward` because
+    /// gemma4's dense and routed branches run at different widths
+    /// (`append_lfm2_layer_ffn`'s own `expert_feed_forward` parameter).
+    pub expert_feed_forward: u32,
+    /// Query head count, shared by every layer's attention sub-block
+    /// (`build_attention_layer_resources`'s own `query_heads` parameter) --
+    /// distinct from `LayerAttentionConfig::kv_heads`, which is per-layer.
+    pub query_heads: u32,
     pub block_count: u32,
     pub expert_count: u32,
     pub expert_used_count: u32,
     pub leading_dense_block_count: u32,
+    /// Short-conv kernel width, consulted only by a [`LayerKind::ShortConv`]
+    /// entry's `append_lfm2_conv_mixer` call
+    /// (`proxima-tensor/src/spec/attention_forward.rs`'s own `l_cache`
+    /// parameter doc) -- unused and safe to leave at any value when
+    /// `layers` holds no `ShortConv` entry, as every gemma4 layer is
+    /// [`LayerKind::Attention`].
+    pub l_cache: u32,
     pub embedding_scale: Option<EmbeddingScale>,
     pub logit_softcap: Option<f32>,
     pub layers: Vec<LayerSchedule>,
@@ -54,6 +73,14 @@ const GEMMA4_EXPERT_COUNT: u32 = 128;
 const GEMMA4_EXPERT_USED_COUNT: u32 = 8;
 const GEMMA4_EMBEDDING: u32 = 2816;
 const GEMMA4_LOGIT_SOFTCAP: f32 = 30.0;
+const GEMMA4_FEED_FORWARD: u32 = 2112;
+const GEMMA4_EXPERT_FEED_FORWARD: u32 = 704;
+const GEMMA4_QUERY_HEADS: u32 = 16;
+/// `Gemma4Arch::bind`'s own two `lfm2_forward_program_with_experts`/
+/// `lfm2_two_range_cached_forward_program_with_experts` call sites
+/// (`proxima-model-interop/src/gemma4/bind.rs`) both pass `0` here too --
+/// consulted only by a `LayerKind::ShortConv` entry, and gemma4 has none.
+const GEMMA4_L_CACHE: u32 = 0;
 /// Full-attention head dim (`architecture.key_length`); sliding layers use
 /// [`GEMMA4_HEAD_DIM_SWA`] instead.
 const GEMMA4_HEAD_DIM_FULL: u32 = 512;
@@ -151,14 +178,78 @@ pub fn gemma4_descriptor(vocab: u32) -> ModelDescriptor {
     ModelDescriptor {
         vocab,
         embedding: GEMMA4_EMBEDDING,
+        feed_forward: GEMMA4_FEED_FORWARD,
+        expert_feed_forward: GEMMA4_EXPERT_FEED_FORWARD,
+        query_heads: GEMMA4_QUERY_HEADS,
         block_count: GEMMA4_BLOCK_COUNT,
         expert_count: GEMMA4_EXPERT_COUNT,
         expert_used_count: GEMMA4_EXPERT_USED_COUNT,
         leading_dense_block_count: GEMMA4_LEADING_DENSE_BLOCK_COUNT,
+        l_cache: GEMMA4_L_CACHE,
         embedding_scale: Some(EmbeddingScale::Sqrt),
         logit_softcap: Some(GEMMA4_LOGIT_SOFTCAP),
         layers,
         cache_strategy: CacheStrategy::Cacheless,
+    }
+}
+
+/// Generalizes [`lfm2_two_range_cached_forward_program_with_experts`] (the
+/// working gemma4 two-range engine, already schedule-driven rather than
+/// gemma4-hardcoded internally) and [`lfm2_forward_program_with_experts`]
+/// (the cacheless engine) behind one [`ModelDescriptor`]-shaped entry point:
+/// plain sync data->op-graph construction, no async/`Future`/`Box<dyn>`
+/// anywhere, dispatching purely on [`ModelDescriptor::cache_strategy`] and
+/// rewriting none of either engine's math. [`CacheStrategy::TwoRange`] calls
+/// the two-range builder directly, unchanged. [`CacheStrategy::Cacheless`]
+/// is the degenerate case the two-range engine's own cache leaves
+/// (`kv_cache.{layer}.k_even`/`k_odd`/`v`) are elided for: it delegates to
+/// the plain builder and wraps that builder's three-tuple return
+/// (`program, logits, moe_sites`, no cache roots) into this function's own
+/// four-tuple shape with `cache_roots` always empty, so callers never match
+/// on which engine actually built the program. `last_row_only` stays a call
+/// parameter rather than a `ModelDescriptor` field because it shapes a
+/// single call's graph (whole-sequence logits vs. one gathered row), not the
+/// model itself -- the same role it already plays as each builder's own
+/// trailing positional argument.
+pub fn build_forward(
+    descriptor: &ModelDescriptor,
+    last_row_only: bool,
+) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>, MoeSites), TensorError> {
+    match descriptor.cache_strategy {
+        CacheStrategy::TwoRange => lfm2_two_range_cached_forward_program_with_experts(
+            descriptor.vocab,
+            descriptor.embedding,
+            descriptor.feed_forward,
+            descriptor.expert_feed_forward,
+            descriptor.query_heads,
+            descriptor.block_count,
+            descriptor.expert_count,
+            descriptor.expert_used_count,
+            descriptor.leading_dense_block_count,
+            &descriptor.layers,
+            descriptor.embedding_scale,
+            descriptor.logit_softcap,
+            last_row_only,
+        ),
+        CacheStrategy::Cacheless => {
+            let (program, logits, moe_sites) = lfm2_forward_program_with_experts(
+                descriptor.vocab,
+                descriptor.embedding,
+                descriptor.feed_forward,
+                descriptor.expert_feed_forward,
+                descriptor.query_heads,
+                descriptor.block_count,
+                descriptor.expert_count,
+                descriptor.expert_used_count,
+                descriptor.leading_dense_block_count,
+                descriptor.l_cache,
+                &descriptor.layers,
+                descriptor.embedding_scale,
+                descriptor.logit_softcap,
+                last_row_only,
+            )?;
+            Ok((program, logits, Vec::new(), moe_sites))
+        }
     }
 }
 
