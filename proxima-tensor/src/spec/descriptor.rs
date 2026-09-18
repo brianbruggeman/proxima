@@ -76,10 +76,11 @@ const GEMMA4_LOGIT_SOFTCAP: f32 = 30.0;
 const GEMMA4_FEED_FORWARD: u32 = 2112;
 const GEMMA4_EXPERT_FEED_FORWARD: u32 = 704;
 const GEMMA4_QUERY_HEADS: u32 = 16;
-/// `Gemma4Arch::bind`'s own two `lfm2_forward_program_with_experts`/
-/// `lfm2_two_range_cached_forward_program_with_experts` call sites
-/// (`proxima-model-interop/src/gemma4/bind.rs`) both pass `0` here too --
-/// consulted only by a `LayerKind::ShortConv` entry, and gemma4 has none.
+/// `Gemma4Arch::bind`'s own cacheless `lfm2_forward_program_with_experts`
+/// call site (`proxima-model-interop/src/gemma4/bind.rs`) passes `0` here
+/// too, and its `gemma4-kv-cache` sibling now builds its program from this
+/// same constant via `gemma4_descriptor` -- consulted only by a
+/// `LayerKind::ShortConv` entry, and gemma4 has none.
 const GEMMA4_L_CACHE: u32 = 0;
 /// Full-attention head dim (`architecture.key_length`); sliding layers use
 /// [`GEMMA4_HEAD_DIM_SWA`] instead.
