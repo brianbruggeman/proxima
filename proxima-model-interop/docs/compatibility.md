@@ -36,5 +36,6 @@ Generated from `src/capability.rs`'s own tables by `examples/generate_compatibil
 | Q8_0 | supported | supported | supported | supported |
 | Q4_0 | supported | supported | supported | supported |
 | Q5_1 | supported | supported | unsupported | unsupported |
+| Q5_0 | supported | supported | unsupported | unsupported |
 | F16 | supported | supported | supported | supported |
 | BF16 | supported | supported | supported | supported |
