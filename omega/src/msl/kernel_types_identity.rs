@@ -1386,6 +1386,40 @@ pub enum PackedCodec {
 }
 
 impl PackedCodec {
+    /// The codec a raw [`QuantizedBlock`] carries, if any — the one place
+    /// every driver (`cuda_driver::packed_codec`, `wgpu_driver::
+    /// packed_operands_of`, `metal::device_buffers_arena_plan::
+    /// packed_operands_of`) asks "is this operand packed, and under which
+    /// codec." Each driver still decides its OWN supported subset (not
+    /// every backend has an unpack kernel for every codec this returns
+    /// `Some` for) — this only answers whether `PackedCodec` has a variant
+    /// for the block at all. `None` for the two non-quantized carriers
+    /// ([`QuantizedBlock::Float32`]/`Int32`) and for the codecs with no
+    /// `PackedCodec`/unpack-kernel entry anywhere yet
+    /// ([`QuantizedBlock::Iq4Nl`]/`Iq2Xs`/`Iq3Xxs`) — decode-only, CPU-side
+    /// so far (see `proxima_tensor::cpu`).
+    #[cfg(feature = "std")]
+    pub(crate) const fn from_quantized_block(block: &QuantizedBlock<'_>) -> Option<Self> {
+        match block {
+            QuantizedBlock::Q2K(_) => Some(Self::Q2K),
+            QuantizedBlock::Q3K(_) => Some(Self::Q3K),
+            QuantizedBlock::Q4K(_) => Some(Self::Q4K),
+            QuantizedBlock::Q5K(_) => Some(Self::Q5K),
+            QuantizedBlock::Q6K(_) => Some(Self::Q6K),
+            QuantizedBlock::Q8_0(_) => Some(Self::Q8_0),
+            QuantizedBlock::Q4_0(_) => Some(Self::Q4_0),
+            QuantizedBlock::Q5_1(_) => Some(Self::Q5_1),
+            QuantizedBlock::Q5_0(_) => Some(Self::Q5_0),
+            QuantizedBlock::Float16(_) => Some(Self::Float16),
+            QuantizedBlock::BFloat16(_) => Some(Self::BFloat16),
+            QuantizedBlock::Float32(_)
+            | QuantizedBlock::Int32(_)
+            | QuantizedBlock::Iq4Nl(_)
+            | QuantizedBlock::Iq2Xs(_)
+            | QuantizedBlock::Iq3Xxs(_) => None,
+        }
+    }
+
     pub(crate) const fn cache_token(self) -> &'static str {
         match self {
             PackedCodec::Q2K => "q2k",

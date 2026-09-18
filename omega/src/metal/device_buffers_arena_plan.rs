@@ -1734,30 +1734,31 @@ pub(super) fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBloc
     block_nodes
         .iter()
         .zip(blocks.iter())
-        .filter_map(|(node, block)| match block {
-            QuantizedBlock::Q2K(_) => Some((*node, PackedCodec::Q2K)),
-            QuantizedBlock::Q3K(_) => Some((*node, PackedCodec::Q3K)),
-            QuantizedBlock::Q4K(_) => Some((*node, PackedCodec::Q4K)),
-            QuantizedBlock::Q5K(_) => Some((*node, PackedCodec::Q5K)),
-            QuantizedBlock::Q6K(_) => Some((*node, PackedCodec::Q6K)),
-            QuantizedBlock::Q8_0(_) => Some((*node, PackedCodec::Q8_0)),
-            QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
-            QuantizedBlock::Q5_1(_) => Some((*node, PackedCodec::Q5_1)),
-            QuantizedBlock::Q5_0(_) => Some((*node, PackedCodec::Q5_0)),
-            QuantizedBlock::Float16(_) => Some((*node, PackedCodec::Float16)),
-            QuantizedBlock::BFloat16(_) => Some((*node, PackedCodec::BFloat16)),
-            // decode-only codecs so far (CPU-only, see `proxima_tensor::cpu`)
-            // -- no `PackedCodec`/unpack-kernel entry exists yet, so these
-            // fall out of `packed_operands` exactly like `Float32` and hit
-            // `reject_unsupported_gpu_dtype`'s ordinary rejection rather
-            // than a silent, wrong-shape upload.
-            QuantizedBlock::Iq4Nl(_)
-            | QuantizedBlock::Iq2Xs(_)
-            | QuantizedBlock::Iq3Xxs(_)
-            | QuantizedBlock::Float32(_)
-            | QuantizedBlock::Int32(_) => None,
-        })
+        // decode-only codecs (CPU-only, see `proxima_tensor::cpu`) and the
+        // two non-quantized carriers fall out of `PackedCodec::
+        // from_quantized_block` as `None`, exactly like before, and hit
+        // `reject_unsupported_gpu_dtype`'s ordinary rejection rather than a
+        // silent, wrong-shape upload.
+        .filter_map(|(node, block)| PackedCodec::from_quantized_block(block).map(|codec| (*node, codec)))
         .collect()
+}
+
+/// The [`PackedCodec`] one expert-table entry's block carries, restricted to
+/// the four codecs mixed-expert lowering has a decoder for
+/// (`Q2_K`/`Q3_K`/`Q4_K`/`Q6_K`) — the shared subset
+/// [`expert_payload_descriptors`], [`selected_expert_payloads`], and
+/// [`selected_expert_arena_descriptors`] each re-derived identically before
+/// this. Any other block (including codecs [`PackedCodec::
+/// from_quantized_block`] itself recognizes, like `Q4_0`/`Q8_0`) is rejected
+/// the same way an unrecognized block always was here.
+fn expert_codec(node: NodeId, block: &QuantizedBlock<'_>) -> Result<PackedCodec, MetalError> {
+    match PackedCodec::from_quantized_block(block) {
+        Some(codec @ (PackedCodec::Q2K | PackedCodec::Q3K | PackedCodec::Q4K | PackedCodec::Q6K)) => Ok(codec),
+        _ => Err(MetalError::ExpertSourceUnsupported {
+            node,
+            reason: "mixed expert lowering only has Q2_K, Q3_K, Q4_K, and Q6_K decoders",
+        }),
+    }
 }
 
 /// Describes the borrowed payloads in one expert substitution table.
@@ -1778,18 +1779,7 @@ pub fn expert_payload_descriptors(
     let mut descriptors = Vec::with_capacity(source.entries().len());
     let mut byte_offset = 0usize;
     for entry in source.entries() {
-        let codec = match entry.block {
-            QuantizedBlock::Q2K(_) => PackedCodec::Q2K,
-            QuantizedBlock::Q3K(_) => PackedCodec::Q3K,
-            QuantizedBlock::Q4K(_) => PackedCodec::Q4K,
-            QuantizedBlock::Q6K(_) => PackedCodec::Q6K,
-            _ => {
-                return Err(MetalError::ExpertSourceUnsupported {
-                    node,
-                    reason: "mixed expert lowering only has Q2_K, Q3_K, Q4_K, and Q6_K decoders",
-                });
-            }
-        };
+        let codec = expert_codec(node, &entry.block)?;
         let bytes = entry
             .block
             .packed_bytes()
@@ -1841,18 +1831,7 @@ pub fn selected_expert_payloads(
     let mut payload_bytes = Vec::new();
     let mut descriptors = Vec::with_capacity(source.entries().len());
     for (expert_index, entry) in source.entries().iter().enumerate() {
-        let codec = match entry.block {
-            QuantizedBlock::Q2K(_) => PackedCodec::Q2K,
-            QuantizedBlock::Q3K(_) => PackedCodec::Q3K,
-            QuantizedBlock::Q4K(_) => PackedCodec::Q4K,
-            QuantizedBlock::Q6K(_) => PackedCodec::Q6K,
-            _ => {
-                return Err(MetalError::ExpertSourceUnsupported {
-                    node,
-                    reason: "mixed expert lowering only has Q2_K, Q3_K, Q4_K, and Q6_K decoders",
-                });
-            }
-        };
+        let codec = expert_codec(node, &entry.block)?;
         let bytes = entry
             .block
             .packed_bytes()
@@ -1909,18 +1888,7 @@ pub(super) fn selected_expert_arena_descriptors(
     let spans = arena.spans();
     let mut descriptors = Vec::with_capacity(source.entries().len());
     for (expert_index, entry) in source.entries().iter().enumerate() {
-        let codec = match entry.block {
-            QuantizedBlock::Q2K(_) => PackedCodec::Q2K,
-            QuantizedBlock::Q3K(_) => PackedCodec::Q3K,
-            QuantizedBlock::Q4K(_) => PackedCodec::Q4K,
-            QuantizedBlock::Q6K(_) => PackedCodec::Q6K,
-            _ => {
-                return Err(MetalError::ExpertSourceUnsupported {
-                    node,
-                    reason: "mixed expert lowering only has Q2_K, Q3_K, Q4_K, and Q6_K decoders",
-                });
-            }
-        };
+        let codec = expert_codec(node, &entry.block)?;
         let selected = selected_ids.is_none_or(|ids| {
             ids.iter()
                 .any(|id| *id == u32::try_from(expert_index).unwrap_or(u32::MAX))

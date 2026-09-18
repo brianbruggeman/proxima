@@ -165,14 +165,16 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
     block_nodes
         .iter()
         .zip(blocks.iter())
-        .filter_map(|(node, block)| match block {
-            QuantizedBlock::Q4K(_) => Some((*node, PackedCodec::Q4K)),
-            QuantizedBlock::Q5K(_) => Some((*node, PackedCodec::Q5K)),
-            QuantizedBlock::Q6K(_) => Some((*node, PackedCodec::Q6K)),
-            QuantizedBlock::Q8_0(_) => Some((*node, PackedCodec::Q8_0)),
-            QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
-            QuantizedBlock::Float16(_) => Some((*node, PackedCodec::Float16)),
-            QuantizedBlock::BFloat16(_) => Some((*node, PackedCodec::BFloat16)),
+        .filter_map(|(node, block)| match PackedCodec::from_quantized_block(block) {
+            Some(
+                codec @ (PackedCodec::Q4K
+                | PackedCodec::Q5K
+                | PackedCodec::Q6K
+                | PackedCodec::Q8_0
+                | PackedCodec::Q4_0
+                | PackedCodec::Float16
+                | PackedCodec::BFloat16),
+            ) => Some((*node, codec)),
             // `PackedCodec::Q3K` exists (Metal has a real unpack kernel for
             // it) but `crate::wgsl` does not -- `None` here routes a `Q3_K`
             // node through `execute_plan`'s existing
@@ -181,18 +183,12 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
             // `EmitError::UnsupportedPackedCodec` raises for a caller who
             // reaches it directly.
             //
-            // `Q5_1`/`Iq4Nl`/`Iq2Xs`/`Iq3Xxs` are decode-only so far (CPU-only,
-            // see `proxima_tensor::cpu`) -- no `PackedCodec` entry exists for
-            // any of them on either GPU driver yet, so they take the same
-            // `None` route as `Q3K` above.
-            QuantizedBlock::Int32(_)
-            | QuantizedBlock::Q2K(_)
-            | QuantizedBlock::Q3K(_)
-            | QuantizedBlock::Q5_1(_)
-            | QuantizedBlock::Iq4Nl(_)
-            | QuantizedBlock::Iq2Xs(_)
-            | QuantizedBlock::Iq3Xxs(_)
-            | QuantizedBlock::Float32(_) => None,
+            // `Q2K`/`Q5_1`/`Q5_0` take the same `None` route as `Q3K` above
+            // -- no wgpu unpack entry exists for any of them yet, the same
+            // "decode-only so far" reasoning `Iq4Nl`/`Iq2Xs`/`Iq3Xxs` (and
+            // `Float32`/`Int32`, which have no `PackedCodec` at all) already
+            // take through `PackedCodec::from_quantized_block`'s own `None`.
+            Some(PackedCodec::Q2K | PackedCodec::Q3K | PackedCodec::Q5_1 | PackedCodec::Q5_0) | None => None,
         })
         .collect()
 }
