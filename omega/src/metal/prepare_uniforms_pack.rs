@@ -44,20 +44,10 @@ pub(super) fn block_byte_len(block: &QuantizedBlock<'_>) -> usize {
     match block {
         QuantizedBlock::Float32(data) => size_of_val(*data),
         QuantizedBlock::Int32(data) => size_of_val(*data),
-        QuantizedBlock::Q3K(bytes)
-        | QuantizedBlock::Q4K(bytes)
-        | QuantizedBlock::Q5K(bytes)
-        | QuantizedBlock::Q6K(bytes)
-        | QuantizedBlock::Q8_0(bytes)
-        | QuantizedBlock::Q4_0(bytes)
-        | QuantizedBlock::Q5_1(bytes)
-        | QuantizedBlock::Q5_0(bytes)
-        | QuantizedBlock::Q2K(bytes)
-        | QuantizedBlock::Iq4Nl(bytes)
-        | QuantizedBlock::Iq2Xs(bytes)
-        | QuantizedBlock::Iq3Xxs(bytes)
-        | QuantizedBlock::Float16(bytes)
-        | QuantizedBlock::BFloat16(bytes) => bytes.len(),
+        // every other variant carries packed bytes directly --
+        // `QuantizedBlock::packed_bytes` is the one place that per-variant
+        // byte-slice extraction lives, instead of restating this match here.
+        _ => block.packed_bytes().unwrap_or(&[]).len(),
     }
 }
 
