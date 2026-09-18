@@ -194,6 +194,128 @@ pub fn gemma4_descriptor(vocab: u32) -> ModelDescriptor {
     }
 }
 
+/// Real openchat-3.5-1210 / Mistral-7B-v0.1 header shape, proven by
+/// `single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape`
+/// (`proxima-tensor/src/bind/tests.rs`), which binds this exact shape
+/// against the real `openchat-3.5-1210.Q4_K_S.gguf` checkpoint.
+const MISTRAL_EMBEDDING: u32 = 4096;
+const MISTRAL_FEED_FORWARD: u32 = 14336;
+const MISTRAL_QUERY_HEADS: u32 = 32;
+const MISTRAL_KV_HEADS: u32 = 8;
+const MISTRAL_HEAD_DIM: u32 = 128;
+const MISTRAL_BLOCK_COUNT: u32 = 32;
+/// `DenseArch::bind`'s own call site
+/// (`proxima-model-interop/src/dense.rs`) reads `expert_count`/
+/// `expert_used_count` straight off the checkpoint's own metadata
+/// (`architecture.expert_count`/`expert_used_count`) -- openchat-3.5-1210
+/// has no `ffn_gate_inp.weight` tensor, so both read `0` there, selecting
+/// `mistral_cached_forward_program_with_experts_and_layer_taps`'s dense
+/// branch.
+const MISTRAL_EXPERT_COUNT: u32 = 0;
+const MISTRAL_EXPERT_USED_COUNT: u32 = 0;
+/// `mistral_cached_forward_program_with_experts_and_layer_taps`'s builder
+/// (`attention_forward.rs`) has no `LayerKind::ShortConv` branch at all --
+/// every layer is [`LayerKind::Attention`], and `l_cache` is read nowhere
+/// in it, same as [`GEMMA4_L_CACHE`]'s own doc.
+const MISTRAL_L_CACHE: u32 = 0;
+
+/// Builds the real openchat-3.5-1210 / Mistral-7B-v0.1 dense [`ModelDescriptor`]
+/// -- interleaved RoPE off one shared table, `1/sqrt(head_dim)` attention
+/// score scale, plain projected-V (no value-norm, no shared-KV), exclusive
+/// SwiGLU FFN, no embedding scale, no logit softcap. Every field mirrors
+/// `mistral_cached_forward_program_with_experts_and_layer_taps`'s own
+/// builder (`proxima-tensor/src/spec/attention_forward.rs`) node-for-node --
+/// see that function's call site in `DenseArch::bind`
+/// (`proxima-model-interop/src/dense.rs`) for the real argument set this
+/// descriptor's constants were read off. `vocab` stays a parameter, not a
+/// baked-in constant, for the same reason [`gemma4_descriptor`]'s own doc
+/// gives: it is per-checkpoint tokenizer data, not architecture.
+///
+/// [`ModelDescriptor::cache_strategy`] is set to [`CacheStrategy::Cacheless`]
+/// as a PLACEHOLDER only -- neither existing [`CacheStrategy`] variant is
+/// `mistral_cached_forward_program_with_experts_and_layer_taps`'s own
+/// single-continuous-range KV cache (`kv_cache.{layer}.k_even`/`k_odd`/`v`,
+/// distinct from both [`CacheStrategy::Cacheless`]'s no-cache engine and
+/// [`CacheStrategy::TwoRange`]'s two-range engine). [`build_forward`] does
+/// not yet dispatch mistral through this descriptor at all; a later slice
+/// must add a third [`CacheStrategy`] variant (its own engine is already
+/// schedule-driven --
+/// [`lfm2_single_range_cached_forward_program_with_experts`]) and a
+/// `build_forward` match arm for it before this field carries real meaning
+/// for mistral.
+///
+/// `expert_feed_forward` reuses [`MISTRAL_FEED_FORWARD`] rather than a
+/// separate constant: unlike gemma4's split dense/routed widths,
+/// `mistral_cached_forward_program_with_experts_and_layer_taps`'s own MoE
+/// branch (`append_mistral_cached_moe_layer`,
+/// `proxima-tensor/src/spec/single_range_moe_cached.rs`) sizes
+/// `ffn_gate_exps.weight`/`ffn_up_exps.weight`/`ffn_down_exps.weight` off
+/// the SAME `feed_forward` parameter the dense branch uses -- one width,
+/// not two. `leading_dense_block_count` is set to the full
+/// [`MISTRAL_BLOCK_COUNT`] ("every layer is dense") rather than `0`
+/// because openchat-3.5-1210 itself is dense (`expert_count == 0`); this
+/// builder picks dense-vs-MoE for the WHOLE checkpoint, not per layer, so
+/// this field is likewise inert for mistral until a future slice wires it.
+/// `routed_gating`/`routed_expert_bias` on [`LayerFfnConfig`] mirror
+/// `append_mistral_cached_moe_layer`'s own hardcoded router instead
+/// (`ExpertGatingFunc::Softmax`, no bias, `single_range_moe_cached.rs`
+/// lines 1428-1430) -- the SAME builder this dense checkpoint's program
+/// comes from runs that router whenever a Mixtral-family checkpoint's
+/// `expert_count > 0`, so this reflects real (if here unexercised, since
+/// openchat-3.5-1210 itself never takes that branch) behaviour rather than
+/// [`LayerFfnConfig::exclusive`]'s own unrelated LFM2 default
+/// (`ExpertGatingFunc::Sigmoid`, bias `true`).
+#[must_use]
+pub fn mistral_descriptor(vocab: u32) -> ModelDescriptor {
+    let ffn = LayerFfnConfig {
+        post_attention_norm: false,
+        combination: FfnCombination::Exclusive,
+        output_scale: false,
+        routed_gating: ExpertGatingFunc::Softmax,
+        routed_expert_bias: false,
+        activation: Activation::Silu,
+    };
+
+    let attention = LayerAttentionConfig {
+        head_dim: MISTRAL_HEAD_DIM,
+        kv_heads: MISTRAL_KV_HEADS,
+        mask_window: None,
+        value_source_kind: ValueSourceKind::ProjectedV,
+        rope_table: RopeTableSel {
+            cos_name: "rope_cos",
+            sin_name: "rope_sin",
+        },
+        rope_pairing: RopePairing::Interleaved,
+        score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(MISTRAL_HEAD_DIM),
+        value_norm: false,
+    };
+
+    let layers: Vec<LayerSchedule> = (0..MISTRAL_BLOCK_COUNT)
+        .map(|_| LayerSchedule {
+            kind: LayerKind::Attention,
+            attention,
+            ffn,
+        })
+        .collect();
+
+    ModelDescriptor {
+        vocab,
+        embedding: MISTRAL_EMBEDDING,
+        feed_forward: MISTRAL_FEED_FORWARD,
+        expert_feed_forward: MISTRAL_FEED_FORWARD,
+        query_heads: MISTRAL_QUERY_HEADS,
+        block_count: MISTRAL_BLOCK_COUNT,
+        expert_count: MISTRAL_EXPERT_COUNT,
+        expert_used_count: MISTRAL_EXPERT_USED_COUNT,
+        leading_dense_block_count: MISTRAL_BLOCK_COUNT,
+        l_cache: MISTRAL_L_CACHE,
+        embedding_scale: None,
+        logit_softcap: None,
+        layers,
+        cache_strategy: CacheStrategy::Cacheless,
+    }
+}
+
 /// Generalizes [`lfm2_two_range_cached_forward_program_with_experts`] (the
 /// working gemma4 two-range engine, already schedule-driven rather than
 /// gemma4-hardcoded internally) and [`lfm2_forward_program_with_experts`]
@@ -317,5 +439,46 @@ mod tests {
             full_kv_heads.iter().all(|&kv_heads| kv_heads == 2),
             "every full layer uses 2 kv-heads: {full_kv_heads:?}"
         );
+    }
+
+    #[test]
+    fn mistral_descriptor_matches_real_openchat_checkpoint_shape() {
+        let descriptor = mistral_descriptor(TEST_VOCAB);
+
+        assert_eq!(descriptor.block_count, 32);
+        assert_eq!(descriptor.layers.len(), 32);
+        assert_eq!(descriptor.embedding, 4096);
+        assert_eq!(descriptor.feed_forward, 14336);
+        assert_eq!(descriptor.expert_feed_forward, 14336);
+        assert_eq!(descriptor.query_heads, 32);
+        assert_eq!(descriptor.expert_count, 0);
+        assert_eq!(descriptor.expert_used_count, 0);
+        assert_eq!(descriptor.leading_dense_block_count, 32);
+        assert_eq!(descriptor.l_cache, 0);
+        assert_eq!(descriptor.embedding_scale, None);
+        assert_eq!(descriptor.logit_softcap, None);
+        assert_eq!(descriptor.cache_strategy, CacheStrategy::Cacheless);
+
+        for layer in &descriptor.layers {
+            assert_eq!(layer.kind, LayerKind::Attention);
+            assert_eq!(layer.attention.head_dim, 128);
+            assert_eq!(layer.attention.kv_heads, 8);
+            assert_eq!(layer.attention.mask_window, None);
+            assert_eq!(layer.attention.value_source_kind, ValueSourceKind::ProjectedV);
+            assert_eq!(layer.attention.rope_table.cos_name, "rope_cos");
+            assert_eq!(layer.attention.rope_table.sin_name, "rope_sin");
+            assert_eq!(layer.attention.rope_pairing, RopePairing::Interleaved);
+            assert_eq!(
+                layer.attention.score_scale,
+                AttentionScoreScale::InverseSqrtQueryPreAttnScalar(128)
+            );
+            assert!(!layer.attention.value_norm);
+            assert_eq!(layer.ffn.combination, FfnCombination::Exclusive);
+            assert_eq!(layer.ffn.activation, Activation::Silu);
+            assert!(!layer.ffn.post_attention_norm);
+            assert!(!layer.ffn.output_scale);
+            assert_eq!(layer.ffn.routed_gating, ExpertGatingFunc::Softmax);
+            assert!(!layer.ffn.routed_expert_bias);
+        }
     }
 }
