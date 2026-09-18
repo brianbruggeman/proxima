@@ -14,6 +14,8 @@ pub enum ValueSource {
     SharedWithKey,
 }
 
+/// Technique: Gemma value-shares-key attention (`ValueSource::SharedWithKey`) -- see `docs/design/technique-taxonomy.md#attention`.
+///
 /// [`ValueSource`] without the resolved weight [`NodeId`] -- a schedule
 /// entry names WHICH shape a layer's `V` takes, but the actual `wv` leaf (if
 /// any) is only known once [`lfm2_forward_program_with_experts`]'s own loop
@@ -26,6 +28,8 @@ pub enum ValueSourceKind {
     SharedWithKey,
 }
 
+/// Technique: Gemma local-global dual-base RoPE (`DualBaseRope { base, base_swa }`) -- see `docs/design/technique-taxonomy.md#positional`.
+///
 /// Names one RoPE table a layer reads its `cos`/`sin` from, by the exact
 /// [`Op::Input`] leaf names [`lfm2_forward_program_with_experts`] declares
 /// for it -- e.g. `("rope_cos", "rope_sin")`. Every layer naming the SAME
@@ -204,6 +208,8 @@ pub struct ParallelDenseMoeConfig {
     pub expert_output_scale: bool,
 }
 
+/// Technique: Gemma-style parallel dense+MoE FFN (`ParallelDenseMoe`) -- see `docs/design/technique-taxonomy.md#ffn--experts`.
+///
 /// How a layer's post-attention output and its feed-forward output combine
 /// -- [`FfnCombination::Exclusive`] is [`lfm2_forward_program_with_experts`]'s
 /// prior behaviour (a layer runs the dense-triple FFN XOR
@@ -219,6 +225,8 @@ pub enum FfnCombination {
     ParallelDenseMoe(ParallelDenseMoeConfig),
 }
 
+/// Technique: gated FFN activation (Shazeer 2020, GLU Variants -- SwiGLU/GeGLU) -- see `docs/design/technique-taxonomy.md#ffn--experts`.
+///
 /// One layer's post-attention/feed-forward knobs -- generalizes
 /// [`lfm2_forward_program_with_experts`]'s previously-uniform "ffn_norm,
 /// then dense-triple XOR routed FFN, then residual add" sequence the same
@@ -281,6 +289,8 @@ impl LayerFfnConfig {
     }
 }
 
+/// Technique: Gemma unscaled attention score (`ScoreScale::Unscaled`) -- see `docs/design/technique-taxonomy.md#attention`.
+///
 /// How a [`LayerAttentionConfig`] layer scales its raw attention scores
 /// before the causal mask -- see [`LayerAttentionConfig::score_scale`]'s own
 /// doc for which architecture uses which variant and why.
@@ -295,6 +305,8 @@ pub enum AttentionScoreScale {
     Unscaled,
 }
 
+/// Technique: grouped-query attention (Ainslie et al. 2023, GQA -- `kv_heads`) -- see `docs/design/technique-taxonomy.md#attention`.
+///
 /// One [`LayerKind::Attention`] block's own attention shape --
 /// [`lfm2_forward_program_with_experts`]'s per-layer generalization of the
 /// single crate-wide `head_dim`/`kv_heads` it used to compute once outside
