@@ -1113,23 +1113,22 @@ impl CudaPlan {
     }
 }
 
+// `Q5_1`/`Q5_0` are excluded here the same way `Iq4Nl`/`Iq2Xs`/`Iq3Xxs` are --
+// no CUDA unpack kernel exists for either yet, so both stay routed through
+// `None` even though `PackedCodec::from_quantized_block` itself recognizes
+// them.
 fn packed_codec(block: &QuantizedBlock<'_>) -> Option<PackedCodec> {
-    match block {
-        QuantizedBlock::Q2K(_) => Some(PackedCodec::Q2K),
-        QuantizedBlock::Q3K(_) => Some(PackedCodec::Q3K),
-        QuantizedBlock::Q4K(_) => Some(PackedCodec::Q4K),
-        QuantizedBlock::Q5K(_) => Some(PackedCodec::Q5K),
-        QuantizedBlock::Q6K(_) => Some(PackedCodec::Q6K),
-        QuantizedBlock::Q8_0(_) => Some(PackedCodec::Q8_0),
-        QuantizedBlock::Q4_0(_) => Some(PackedCodec::Q4_0),
-        QuantizedBlock::Float16(_) => Some(PackedCodec::Float16),
-        QuantizedBlock::BFloat16(_) => Some(PackedCodec::BFloat16),
-        QuantizedBlock::Float32(_)
-        | QuantizedBlock::Int32(_)
-        | QuantizedBlock::Q5_1(_)
-        | QuantizedBlock::Iq4Nl(_)
-        | QuantizedBlock::Iq2Xs(_)
-        | QuantizedBlock::Iq3Xxs(_) => None,
+    match PackedCodec::from_quantized_block(block)? {
+        codec @ (PackedCodec::Q2K
+        | PackedCodec::Q3K
+        | PackedCodec::Q4K
+        | PackedCodec::Q5K
+        | PackedCodec::Q6K
+        | PackedCodec::Q8_0
+        | PackedCodec::Q4_0
+        | PackedCodec::Float16
+        | PackedCodec::BFloat16) => Some(codec),
+        PackedCodec::Q5_1 | PackedCodec::Q5_0 => None,
     }
 }
 
