@@ -30,7 +30,7 @@ use core::ops::Range;
 use memmap2::Mmap;
 use std::sync::Arc;
 
-use proxima_gguf::quant::{bf16, f16, q2_k, q3_k, q4_0, q4_k, q5_k, q6_k, q8_0};
+use proxima_gguf::quant::{bf16, f16, q2_k, q3_k, q4_0, q4_k, q5_1, q5_k, q6_k, q8_0};
 use proxima_tensor::NodeId;
 #[cfg(any(test, feature = "metal"))]
 use proxima_tensor::cpu::ExpertPayloadSpan;
@@ -199,6 +199,7 @@ fn source_codec_name(codec: PackedOwnedKind) -> &'static str {
         PackedOwnedKind::Q4_0 => "q4_0",
         PackedOwnedKind::Float16 => "f16",
         PackedOwnedKind::BFloat16 => "bf16",
+        PackedOwnedKind::Q5_1 => "q5_1",
     }
 }
 
@@ -217,6 +218,7 @@ fn dequantize_expert(
         PackedOwnedKind::Q4_0 => q4_0::dequantize(source, output),
         PackedOwnedKind::Float16 => f16::dequantize(source, output),
         PackedOwnedKind::BFloat16 => bf16::dequantize(source, output),
+        PackedOwnedKind::Q5_1 => q5_1::dequantize(source, output),
     }
     .map_err(InteropError::from)
 }

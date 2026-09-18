@@ -940,6 +940,16 @@ pub enum PackedOwnedKind {
     /// target `Q2_K` too -- today it is only ever constructed by
     /// [`crate::expert_slab::encode_expert_copy`]'s own caller.
     Q2K,
+    /// `Q5_1`: 32-element blocks, one `f16` scale and one `f16` min per
+    /// block plus a 4-byte 5th-bit plane (24 bytes/block); see
+    /// [`proxima_gguf::quant::q5_1`] for the on-disk layout. Decode-only --
+    /// that module ships `dequantize`/`dequantize_block` but no `quantize`,
+    /// so [`quantize_to_kind`] cannot encode INTO this kind (its arm errors).
+    /// Reachable from [`Self::from_ggml_type`] purely for the load-time
+    /// packed-vs-dequantize decision ([`bind_moe_stacked_experts`] and
+    /// friends), which only ever borrows already-on-disk `Q5_1` bytes and
+    /// never re-encodes them.
+    Q5_1,
 }
 
 #[cfg(feature = "std")]
@@ -961,6 +971,7 @@ impl PackedOwnedKind {
             PackedOwnedKind::Float16 => proxima_tensor::cpu::QuantizedBlock::Float16(bytes),
             PackedOwnedKind::BFloat16 => proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes),
             PackedOwnedKind::Q2K => proxima_tensor::cpu::QuantizedBlock::Q2K(bytes),
+            PackedOwnedKind::Q5_1 => proxima_tensor::cpu::QuantizedBlock::Q5_1(bytes),
         }
     }
 
@@ -969,14 +980,19 @@ impl PackedOwnedKind {
     /// [`recode_tensor`] can pack (`F32` stays dequantized-then-transposed:
     /// `run_reduce_quantized`'s gather rejects a `Float32` weight block
     /// outright, `proxima_tensor::cpu::run_reduce_quantized`'s own
-    /// `shape_error` arm for that variant; and every `GgmlType` with no
-    /// [`proxima_gguf::quant`] encoder at all -- the `Iq*` family,
-    /// `Q4_1`/`Q5_1`/`Q8_1`, the integer/`F64`/`Tq*` types. `Q2_K` DOES have
-    /// an encoder now -- [`Self::Q2K`] exists -- but no checkpoint-load
-    /// caller has needed `Q2_K` as a `weight_precision` recode TARGET yet,
-    /// so this direction stays unwired until one does; construct
-    /// [`Self::Q2K`] directly, the way [`crate::expert_slab::encode_expert_copy`]'s
-    /// caller does).
+    /// `shape_error` arm for that variant; and every remaining `GgmlType`
+    /// with no [`proxima_gguf::quant`] DEcoder at all -- the `Iq*` family
+    /// minus `Iq4Nl`, `Q4_1`/`Q8_1`, the integer/`F64`/`Tq*` types. `Q2_K`
+    /// and `Q5_1` both map here now purely for this LOAD-time
+    /// packed-vs-dequantize decision -- both have a complete decode path
+    /// ([`proxima_gguf::quant::q2_k`]/[`proxima_gguf::quant::q5_1`]'s own
+    /// `dequantize`, `proxima_tensor::cpu`'s matching `QuantizedBlock`
+    /// variant, and an omega Metal unpack kernel) even though `Q5_1` has no
+    /// [`proxima_gguf::quant::q5_1`] `quantize` (encode) function --
+    /// [`quantize_to_kind`]'s `Q5_1` arm errors rather than silently
+    /// mis-encoding, so [`recode_tensor`]'s `weight_precision` direction
+    /// still refuses a `Q5_1` TARGET, just one level deeper than this
+    /// function used to reject it.
     pub(crate) fn from_ggml_type(ggml_type: GgmlType) -> Option<Self> {
         match ggml_type {
             GgmlType::Q4_K => Some(PackedOwnedKind::Q4K),
@@ -987,6 +1003,8 @@ impl PackedOwnedKind {
             GgmlType::Q4_0 => Some(PackedOwnedKind::Q4_0),
             GgmlType::F16 => Some(PackedOwnedKind::Float16),
             GgmlType::Bf16 => Some(PackedOwnedKind::BFloat16),
+            GgmlType::Q2_K => Some(PackedOwnedKind::Q2K),
+            GgmlType::Q5_1 => Some(PackedOwnedKind::Q5_1),
             _ => None,
         }
     }
@@ -1010,6 +1028,7 @@ impl PackedOwnedKind {
             PackedOwnedKind::Float16 => "f16",
             PackedOwnedKind::BFloat16 => "bf16",
             PackedOwnedKind::Q2K => "q2_k",
+            PackedOwnedKind::Q5_1 => "q5_1",
         }
     }
 
@@ -1028,6 +1047,7 @@ impl PackedOwnedKind {
             PackedOwnedKind::Float16 => GgmlType::F16,
             PackedOwnedKind::BFloat16 => GgmlType::Bf16,
             PackedOwnedKind::Q2K => GgmlType::Q2_K,
+            PackedOwnedKind::Q5_1 => GgmlType::Q5_1,
         }
     }
 
@@ -1458,6 +1478,12 @@ pub(crate) fn quantize_to_kind(
         PackedOwnedKind::Float16 => f16::quantize(decoded, output),
         PackedOwnedKind::BFloat16 => bf16::quantize(decoded, output),
         PackedOwnedKind::Q2K => q2_k::quantize(decoded, output),
+        // `proxima_gguf::quant::q5_1` ships `dequantize`/`dequantize_block`
+        // only -- see `PackedOwnedKind::Q5_1`'s own doc. Reachable only via
+        // `recode_tensor`'s `weight_precision` TARGET direction (the
+        // load-time packed check never calls this function); errors instead
+        // of silently mis-encoding.
+        PackedOwnedKind::Q5_1 => Err(QuantError::UnsupportedCodec { codec: "q5_1" }),
     }
 }
 
