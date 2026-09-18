@@ -18,7 +18,14 @@
 //! the race at 81-82% memory free, so a final `mlock(2)` rung
 //! ([`lock_resident`]) pins the whole mapping before the gate gives up --
 //! a false refusal blocks serving, which is worse than the silent zero-read
-//! ROW 533 named. [`count_missing_pages`] is split out of the `mincore` call
+//! ROW 533 named. The ladder walk itself still stops at the first rung whose
+//! `mincore` probe reports zero missing pages (a quiet load usually resolves
+//! at `Prefault` alone), but [`prove_resident`] does not stop there: it
+//! always attempts the `mlock` pin once more after the ladder succeeds,
+//! because a page `mincore` reports resident NOW can still be reclaimed
+//! LATER by an evictor once the ladder has moved on -- resident is not the
+//! same guarantee as pinned, and only `mlock` gives the latter.
+//! [`count_missing_pages`] is split out of the `mincore` call
 //! itself so the counting rule (which residency-vector bit means "resident")
 //! is testable against a hand-built vector, with no real mapping or syscall
 //! involved -- `omega::metal::checkpoint_mmap_resident_pages` fuses the
@@ -240,9 +247,12 @@ fn lock_resident(bytes: &[u8]) {
     };
     #[cfg(feature = "instrument")]
     if let Err(error) = outcome {
-        proxima_telemetry::debug!(
+        // a failed pin leaves the mapping evictable -- the exact gap this
+        // rung exists to close -- so it is a degraded-but-self-healing
+        // condition worth a warning, not a silent debug line.
+        proxima_telemetry::warn!(
             ?error,
-            "checkpoint_mapping_residency: mlock rung syscall failed, falling through to the existing error"
+            "checkpoint_mapping_residency: mlock pin failed, mapping stays evictable"
         );
     }
     #[cfg(not(feature = "instrument"))]
@@ -260,17 +270,23 @@ fn lock_resident(bytes: &[u8]) {
 /// free (11.7-8.5 GB missing of 24 GB), a false refusal that is worse than
 /// the silent zero-read it guards against (ROW 533), so `mlock` is the
 /// last rung tried even though it is a no-op under that common limit.
-/// `lock_resident`'s own `mlock(2)` return value is
-/// discarded (surfaced only as an `instrument`-gated debug log, never an
+///
+/// Once every page is proven resident, this ALWAYS attempts [`lock_resident`]
+/// one more time before returning `Ok`, even when `Prefault` or `Retry`
+/// already resolved the ladder -- resident-but-unpinned pages are still
+/// evictable by a later reclaim under memory pressure, which is the same
+/// silent zero-read ROW 533 named, just deferred past load time instead of
+/// caught by it. `lock_resident`'s own `mlock(2)` return value is
+/// discarded (surfaced only as an `instrument`-gated warning, never an
 /// error) -- a process under the common default `RLIMIT_MEMLOCK` (often a
 /// few MiB, well under a multi-GB checkpoint) gets `ENOMEM`/`EAGAIN` from
 /// this call silently, with no lock actually taken. Whatever this function
-/// returns still comes from the `mincore(2)` probe immediately after, so a
-/// caller still gets [`InteropError::MappingNotResident`] rather than a
-/// false "resident" result on a mapping this rung failed to lock; what it
-/// cannot guarantee is that a page found resident at that probe stays
-/// resident afterward -- mlock still failed, so nothing here holds it
-/// against a later evictor.
+/// returns still comes from the `mincore(2)` probe already run inside the
+/// ladder, so a caller still gets [`InteropError::MappingNotResident`]
+/// rather than a false "resident" result on a mapping this rung failed to
+/// lock; what it cannot guarantee is that a page found resident at that
+/// probe stays resident afterward -- mlock still failed, so nothing here
+/// holds it against a later evictor.
 ///
 /// # Errors
 ///
@@ -339,6 +355,15 @@ pub fn prove_resident(bytes: &[u8]) -> Result<ResidencyReport, InteropError> {
             bytes_missing,
             bytes_total,
         });
+    }
+    // resident is not pinned: `Prefault`/`Retry` only prove the pages are
+    // resident AT THIS INSTANT, and a later evictor can still reclaim them,
+    // which is exactly the silent zero-read ROW 533 named. Only `mlock`
+    // pins, so it always runs here even when an earlier rung already
+    // resolved every page, instead of stopping at the first zero-missing
+    // rung the way the ladder walk itself does.
+    if rung != ResidencyRung::Mlock {
+        lock_resident(bytes);
     }
     Ok(ResidencyReport {
         prefault_ms,
