@@ -11600,6 +11600,130 @@ fn causal_mask_windowed_with_no_window_matches_causal_mask_exactly() {
     );
 }
 
+/// Hand-worked 3-query x 5-key merged-cache sliding-window mask,
+/// `cached_len = 2`, `window = 2`: 3 new queries land at absolute
+/// positions 2, 3, 4 against a merged key range of 5 (2 already-cached
+/// plus 3 fresh). A query at absolute position `p` attends only `p` and
+/// `p-1` -- the two most recent keys of the whole merged range, per
+/// [`causal_mask_merged_windowed`]'s own `distance >= window` rule.
+///
+/// ```text
+///           t=0    t=1    t=2    t=3    t=4
+/// s=0(p=2) mask   allow  allow  mask   mask
+/// s=1(p=3) mask   mask   allow  allow  mask
+/// s=2(p=4) mask   mask   mask   allow  allow
+/// ```
+#[test]
+fn causal_mask_merged_windowed_matches_the_hand_worked_three_by_five_table() {
+    const NEW_COUNT: usize = 3;
+    const MERGED_LEN: usize = 5;
+    const CACHED_LEN: f32 = 2.0;
+    const WINDOW: u32 = 2;
+    #[rustfmt::skip]
+    let expected_masked: [[bool; MERGED_LEN]; NEW_COUNT] = [
+        [true,  false, false, true,  true ],
+        [true,  true,  false, false, true ],
+        [true,  true,  true,  false, false],
+    ];
+
+    let mut program = Vec::new();
+    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    let is_masked = causal_mask_merged_windowed(&mut program, cached_len, Some(WINDOW))
+        .expect("merged windowed causal mask lowers");
+
+    let cached_len_data = [CACHED_LEN];
+    let evaluated = crate::cpu::evaluate_named(
+        &program,
+        &[NEW_COUNT as u64, MERGED_LEN as u64],
+        &[("cached_len", &cached_len_data)],
+        &[is_masked],
+    )
+    .expect("the merged windowed causal mask evaluates");
+
+    let (mask, _shape) = evaluated
+        .get(is_masked)
+        .expect("the mask node was requested");
+    assert_eq!(
+        mask.len(),
+        NEW_COUNT * MERGED_LEN,
+        "a vacuous mask proves nothing"
+    );
+
+    let mut checked = 0usize;
+    for (query, row) in mask.as_chunks::<MERGED_LEN>().0.iter().enumerate() {
+        for (key, &value) in row.iter().enumerate() {
+            let masked = value != 0.0;
+            assert_eq!(
+                masked, expected_masked[query][key],
+                "query {query} key {key}: expected masked={}, found masked={masked}",
+                expected_masked[query][key]
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(
+        checked,
+        NEW_COUNT * MERGED_LEN,
+        "every cell must be checked, not a subset"
+    );
+}
+
+/// `window = None` must reproduce [`causal_mask_merged`]'s own program and
+/// output byte-for-byte -- the existing merged causal mask is the oracle,
+/// and the windowed builder's `None` branch must not diverge from it even
+/// by an algebraically-equivalent rewrite.
+#[test]
+fn causal_mask_merged_windowed_with_no_window_matches_causal_mask_merged_exactly() {
+    const NEW_COUNT: usize = 3;
+    const MERGED_LEN: usize = 5;
+    const CACHED_LEN: f32 = 2.0;
+
+    let mut plain_program = Vec::new();
+    let plain_cached_len = input_leaf(&mut plain_program, DType::Float32, Vec::new(), "cached_len");
+    let plain_is_future = causal_mask_merged(&mut plain_program, plain_cached_len)
+        .expect("merged causal mask lowers");
+
+    let mut windowed_program = Vec::new();
+    let windowed_cached_len =
+        input_leaf(&mut windowed_program, DType::Float32, Vec::new(), "cached_len");
+    let windowed_is_future =
+        causal_mask_merged_windowed(&mut windowed_program, windowed_cached_len, None)
+            .expect("merged windowed causal mask lowers");
+
+    assert_eq!(
+        plain_program, windowed_program,
+        "window=None must build the identical program, not merely an equivalent one"
+    );
+    assert_eq!(plain_is_future, windowed_is_future);
+
+    let cached_len_data = [CACHED_LEN];
+    let plain_evaluated = crate::cpu::evaluate_named(
+        &plain_program,
+        &[NEW_COUNT as u64, MERGED_LEN as u64],
+        &[("cached_len", &cached_len_data)],
+        &[plain_is_future],
+    )
+    .expect("the plain merged causal mask evaluates");
+    let windowed_evaluated = crate::cpu::evaluate_named(
+        &windowed_program,
+        &[NEW_COUNT as u64, MERGED_LEN as u64],
+        &[("cached_len", &cached_len_data)],
+        &[windowed_is_future],
+    )
+    .expect("the windowed merged causal mask evaluates");
+
+    let (plain_mask, _) = plain_evaluated
+        .get(plain_is_future)
+        .expect("the plain mask node was requested");
+    let (windowed_mask, _) = windowed_evaluated
+        .get(windowed_is_future)
+        .expect("the windowed mask node was requested");
+    assert_eq!(
+        plain_mask, windowed_mask,
+        "window=None must evaluate to byte-identical values as causal_mask_merged"
+    );
+}
+
 /// Tiny synthetic parity harness localizing gemma4's remaining forward bug.
 /// `embedding=8, head_dim=4, 2 q heads, 1 kv head`, one sliding layer
 /// (window=2, `ProjectedV`), one full layer (`K=V`, `SharedWithKey`), a

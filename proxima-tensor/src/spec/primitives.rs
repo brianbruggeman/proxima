@@ -1220,3 +1220,78 @@ pub fn causal_mask_merged(
         &[(key_index, "t->st"), (query_absolute, "s->st")],
     )
 }
+
+/// [`causal_mask_merged`]'s sliding-window counterpart -- Gemma 4's SWA
+/// layers restrict each query to the most recent `window` keys of the
+/// MERGED cache (symbol 1), not the whole merged prefix
+/// [`causal_mask_merged`] allows. Composes that function's own
+/// `is_future` (`key_index > query_absolute`) with
+/// [`causal_mask_windowed`]'s own `too_old` pattern
+/// (`distance >= window`), OR-ed by the same `ScalarOp::Maximum`
+/// [`causal_mask_windowed`] already uses -- no new `ScalarOp` variant, no
+/// new comparison shape, just [`causal_mask_merged`]'s own
+/// `query_absolute` (`query_index + cached_len`) standing in for
+/// [`causal_mask_windowed`]'s block-local `query_index` on both sides of
+/// the distance check, since the merged key axis (`t`) already indexes
+/// absolute positions the way [`causal_mask_merged`]'s own `key_index`
+/// does.
+///
+/// `window` of `None`/`Some(0)` delegates straight to
+/// [`causal_mask_merged`], so the unwindowed merged case (every
+/// full-attention layer) reproduces that function's own program
+/// byte-for-byte -- the same precedent [`causal_mask_windowed`] itself
+/// set against [`causal_mask`].
+pub fn causal_mask_merged_windowed(
+    program: &mut Vec<Op>,
+    cached_len: NodeId,
+    window: Option<u32>,
+) -> Result<NodeId, TensorError> {
+    let Some(window) = window.filter(|&window| window > 0) else {
+        return causal_mask_merged(program, cached_len);
+    };
+    let query_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Symbolic(0),
+        },
+    );
+    let key_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Symbolic(1),
+        },
+    );
+    let query_absolute = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(query_index, "s->s"), (cached_len, "->s")],
+    )?;
+    let is_future = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(key_index, "t->st"), (query_absolute, "s->st")],
+    )?;
+    let distance = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(query_absolute, "s->st"), (key_index, "t->st")],
+    )?;
+    let window_ceiling = scalar_constant(program, window as f32 - 1.0);
+    let too_old = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(distance, "st->st"), (window_ceiling, "->st")],
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        &[(is_future, "st->st"), (too_old, "st->st")],
+    )
+}

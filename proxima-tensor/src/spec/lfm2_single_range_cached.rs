@@ -1,0 +1,641 @@
+//! [`lfm2_forward_program_with_experts`]'s single-range-cached counterpart
+//! for a schedule of ONLY [`LayerKind::Attention`] entries -- Gemma 4's own
+//! shape (no `LayerKind::ShortConv`). Shares that function's own
+//! [`build_attention_layer_resources`] pre-pass and
+//! [`append_lfm2_layer_ffn`] post-attention/FFN composition verbatim;
+//! [`append_lfm2_single_range_cached_attention`] is the one new piece,
+//! [`single_range_moe_cached::append_mistral_single_range_cached_layer_with_biases`]'s
+//! own merged-cache scoring generalized the same way
+//! [`append_attention_mixer`] generalized the prefill mixer -- windowed
+//! merged mask ([`causal_mask_merged_windowed`]), [`ValueSource`] (a
+//! shared-KV layer has no `attn_v.weight`), [`AttentionScoreScale`], and
+//! `value_norm`.
+//!
+//! Gated one level up (`proxima-model-interop`'s `gemma4-kv-cache`
+//! feature, default-off): the functions here always compile, like every
+//! other `spec::*_cached` module in this crate, since building a program
+//! spec has no execution cost until a caller actually runs it -- only
+//! `crate::gemma4::bind::Gemma4Arch::bind`'s own choice of which builder
+//! to call is feature-gated.
+
+use super::*;
+
+/// [`append_attention_mixer`]'s single-range-cached counterpart: the same
+/// per-layer knobs ([`ValueSource`], [`RopePairing`], `post_attention_norm`,
+/// `value_norm`), but scored against a MERGED key/value cache
+/// (`k_even_cache`/`k_odd_cache`/`v_cache`, symbol 1 -- every position this
+/// call attends, prior positions and this call's own freshly rotated keys
+/// NOT yet folded in) instead of this call's own freshly rotated
+/// block-local keys, mirroring
+/// `single_range_moe_cached::append_mistral_single_range_cached_layer_with_biases`'s
+/// own single-softmax scoring shape. Returns `(post_mixer,
+/// CachedLayerRoots)` -- this call's own freshly rotated
+/// `(k_even, k_odd, v)` for the caller to fold into next call's merged
+/// cache, the same 3-wide contract every other single-range cached layer
+/// in this crate returns.
+#[allow(clippy::too_many_arguments)]
+pub fn append_lfm2_single_range_cached_attention(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    inv_sqrt_head_dim: NodeId,
+    inv_head_dim: NodeId,
+    cos_new: NodeId,
+    sin_new: NodeId,
+    group_ones: NodeId,
+    is_future: NodeId,
+    neg_infinity: NodeId,
+    group: u32,
+    attn_norm_weight: NodeId,
+    q_norm_weight: NodeId,
+    k_norm_weight: NodeId,
+    wq: NodeId,
+    wk: NodeId,
+    value_source: ValueSource,
+    wo: NodeId,
+    rope_pairing: RopePairing,
+    post_attention_norm_weight: Option<NodeId>,
+    value_norm: bool,
+    k_even_cache: NodeId,
+    k_odd_cache: NodeId,
+    v_cache: NodeId,
+) -> Result<(NodeId, CachedLayerRoots), TensorError> {
+    let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
+
+    let q_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->shdi"), (wq, "ihd->shdi")],
+    )?;
+    let q_raw = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        q_product,
+        "shdi->shdi",
+        "shd->shdi",
+    )?;
+    let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
+
+    let k_new_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wk, "iud->sudi")],
+    )?;
+    let k_new_raw = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        k_new_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
+    let k_new = rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+
+    let v_new_raw = match value_source {
+        ValueSource::Projected(wv) => {
+            let v_product = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(normed, "si->sudi"), (wv, "iud->sudi")],
+            )?;
+            reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                v_product,
+                "sudi->sudi",
+                "sud->sudi",
+            )?
+        }
+        ValueSource::SharedWithKey => k_new_raw,
+    };
+    // Gemma 4's `v_norm` -- same weightless per-kv-head RMSNorm, no RoPE,
+    // [`append_attention_mixer`]'s own doc walks through.
+    let v_new = if value_norm {
+        rmsnorm_per_head_no_scale(program, v_new_raw, inv_head_dim, eps, "u")?
+    } else {
+        v_new_raw
+    };
+
+    let (rotated_q_even, rotated_q_odd) = fused_rope_pair(program, q, 'h', cos_new, sin_new, rope_pairing)?;
+    let (rotated_k_new_even, rotated_k_new_odd) =
+        fused_rope_pair(program, k_new, 'u', cos_new, sin_new, rope_pairing)?;
+
+    let group_map = alloc::format!("s,{group}*u+g,i->sugi");
+    let q_even_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_even, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
+    let q_odd_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_odd, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
+
+    // Single-range: query `s` against the WHOLE merged key range `t`
+    // (symbol 1), `k_even_cache`/`k_odd_cache` already carrying every
+    // position this query may attend -- this call's own
+    // `rotated_k_new_*`/`v_new` are computed above only to be returned as
+    // this layer's own `CachedLayerRoots`, never read for THIS call's own
+    // score (a query never attends a key that does not exist yet).
+    let score_even_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_even_grouped, "sugi->stugi"),
+            (k_even_cache, "tui->stugi"),
+        ],
+    )?;
+    let score_even = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_even_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let score_odd_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")],
+    )?;
+    let score_odd = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_odd_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let scores = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(score_even, "stug->stug"), (score_odd, "stug->stug")],
+    )?;
+    let scores_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
+    )?;
+    let scores_masked = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[
+            (is_future, "st->stug"),
+            (neg_infinity, "->stug"),
+            (scores_scaled, "stug->stug"),
+        ],
+    )?;
+
+    let score_max = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        scores_masked,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let shifted = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(scores_masked, "stug->stug"), (score_max, "sug->stug")],
+    )?;
+    let weights = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(shifted, "stug->stug")],
+    )?;
+    let weight_sum = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weights,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let inv_weight_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(weight_sum, "sug->sug")],
+    )?;
+    let probabilities = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")],
+    )?;
+
+    let attended_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(probabilities, "stug->stugd"), (v_cache, "tud->stugd")],
+    )?;
+    let attended = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        attended_product,
+        "stugd->stugd",
+        "sugd->stugd",
+    )?;
+
+    let wo_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
+    )?;
+    let attn_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        wo_product,
+        "sugdo->sugdo",
+        "so->sugdo",
+    )?;
+
+    let attn_out = match post_attention_norm_weight {
+        Some(gamma) => rmsnorm(program, attn_out, gamma, inv_dim, eps)?,
+        None => attn_out,
+    };
+
+    let post_mixer = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(attn_out, "sd->sd"), (x, "sd->sd")],
+    )?;
+
+    Ok((post_mixer, (rotated_k_new_even, rotated_k_new_odd, v_new)))
+}
+
+/// [`lfm2_forward_program_with_experts`]'s single-range-cached counterpart.
+/// `ids`/`rope_cos`/`rope_sin` carry only the NEW positions this call
+/// introduces (symbol 0); attention draws on a per-layer already-rotated
+/// key/value cache sized by symbol 1 (`kv_cache.{layer}.k_even`/`k_odd`/`v`,
+/// the same leaf-naming contract every other single-range cached engine in
+/// this crate uses, so `proxima-model-interop`'s existing generic
+/// cache-growing decode loop needs no change to drive this builder); the
+/// returned roots are `(logits, per_layer_cache_roots, moe_sites)` instead
+/// of a bare logits root. `cached_len` (a rank-0 `Op::Input`, zero on the
+/// first call) feeds [`causal_mask_merged_windowed`] the same way
+/// [`causal_mask_merged`] already does for the dense single-range engine.
+///
+/// Every `schedule` entry must be [`LayerKind::Attention`] -- a
+/// [`LayerKind::ShortConv`] entry has no cache-state contract this builder
+/// defines (see this module's own doc on why a conv-cached counterpart is
+/// a further step neither this function nor
+/// [`lfm2_forward_program_with_experts`] claims) and is rejected with
+/// [`TensorError::UnsupportedInBuilder`] rather than silently mishandled.
+#[allow(clippy::too_many_arguments)]
+pub fn lfm2_single_range_cached_forward_program_with_experts(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    expert_feed_forward: u32,
+    query_heads: u32,
+    block_count: u32,
+    expert_count: u32,
+    expert_used_count: u32,
+    leading_dense_block_count: u32,
+    schedule: &[LayerSchedule],
+    embedding_scale: Option<EmbeddingScale>,
+    logit_softcap: Option<f32>,
+    last_row_only: bool,
+) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>, MoeSites), TensorError> {
+    if schedule.len() != block_count as usize {
+        return Err(TensorError::LayerScheduleCountMismatch {
+            expected: block_count,
+            found: schedule.len(),
+        });
+    }
+    if schedule.iter().any(|entry| entry.kind != LayerKind::Attention) {
+        return Err(TensorError::UnsupportedInBuilder {
+            builder: "lfm2_single_range_cached_forward_program_with_experts",
+            feature: "LayerKind::ShortConv (no single-range cache-state contract yet)",
+        });
+    }
+
+    let mut program = Vec::new();
+
+    let ids = input_leaf(
+        &mut program,
+        DType::Int32,
+        alloc::vec![Extent::Symbolic(0)],
+        "ids",
+    );
+    let table = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
+        "token_embd.weight",
+    );
+    let mut x = embedding_lookup(&mut program, table, ids);
+    if let Some(scale) = embedding_scale {
+        let multiplier = match scale {
+            EmbeddingScale::Sqrt => (embedding as f32).sqrt(),
+        };
+        let multiplier = scalar_constant(&mut program, multiplier);
+        x = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(x, "sd->sd"), (multiplier, "->sd")],
+        )?;
+    }
+
+    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let ones = scalar_constant(&mut program, 1.0);
+    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+
+    let attention_resources =
+        build_attention_layer_resources(&mut program, schedule, query_heads, |program, window| {
+            let is_future = causal_mask_merged_windowed(program, cached_len, window)?;
+            let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+            Ok((is_future, neg_infinity))
+        })?;
+
+    let mut cache_roots: Vec<CachedLayerRoots> = Vec::with_capacity(block_count as usize);
+    let mut moe_sites: Vec<MoeSite> = Vec::new();
+
+    for (layer, entry) in schedule.iter().enumerate() {
+        let layer = layer as u32;
+        let config = &entry.attention;
+        let ffn_config = &entry.ffn;
+        let resources = &attention_resources[layer as usize];
+
+        let head_dim = config.head_dim;
+        let kv_heads = config.kv_heads;
+        let pairs = head_dim / 2;
+        let group = resources.group;
+
+        let attn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.attn_norm.weight"),
+        );
+        let ffn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.ffn_norm.weight"),
+        );
+        let post_attention_norm_weight = if ffn_config.post_attention_norm {
+            Some(input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.post_attention_norm.weight"),
+            ))
+        } else {
+            None
+        };
+
+        let wq = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(query_heads),
+                Extent::Static(head_dim)
+            ],
+            &alloc::format!("blk.{layer}.attn_q.weight"),
+        );
+        let wk = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(kv_heads),
+                Extent::Static(head_dim)
+            ],
+            &alloc::format!("blk.{layer}.attn_k.weight"),
+        );
+        let value_source = match config.value_source_kind {
+            ValueSourceKind::ProjectedV => {
+                let wv = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![
+                        Extent::Static(embedding),
+                        Extent::Static(kv_heads),
+                        Extent::Static(head_dim)
+                    ],
+                    &alloc::format!("blk.{layer}.attn_v.weight"),
+                );
+                ValueSource::Projected(wv)
+            }
+            ValueSourceKind::SharedWithKey => ValueSource::SharedWithKey,
+        };
+        let wo = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(kv_heads),
+                Extent::Static(group),
+                Extent::Static(head_dim),
+                Extent::Static(embedding),
+            ],
+            &alloc::format!("blk.{layer}.attn_output.weight"),
+        );
+        let q_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(head_dim)],
+            &alloc::format!("blk.{layer}.attn_q_norm.weight"),
+        );
+        let k_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(head_dim)],
+            &alloc::format!("blk.{layer}.attn_k_norm.weight"),
+        );
+
+        let k_even_cache = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(1),
+                Extent::Static(kv_heads),
+                Extent::Static(pairs)
+            ],
+            &alloc::format!("kv_cache.{layer}.k_even"),
+        );
+        let k_odd_cache = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(1),
+                Extent::Static(kv_heads),
+                Extent::Static(pairs)
+            ],
+            &alloc::format!("kv_cache.{layer}.k_odd"),
+        );
+        let v_cache = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(1),
+                Extent::Static(kv_heads),
+                Extent::Static(head_dim)
+            ],
+            &alloc::format!("kv_cache.{layer}.v"),
+        );
+
+        let (post_mixer, layer_roots) = append_lfm2_single_range_cached_attention(
+            &mut program,
+            x,
+            inv_dim,
+            eps,
+            resources.inv_sqrt_head_dim,
+            resources.inv_head_dim,
+            resources.cos,
+            resources.sin,
+            resources.group_ones,
+            resources.is_future,
+            resources.neg_infinity,
+            group,
+            attn_norm_weight,
+            q_norm_weight,
+            k_norm_weight,
+            wq,
+            wk,
+            value_source,
+            wo,
+            config.rope_pairing,
+            post_attention_norm_weight,
+            config.value_norm,
+            k_even_cache,
+            k_odd_cache,
+            v_cache,
+        )?;
+
+        x = append_lfm2_layer_ffn(
+            &mut program,
+            layer,
+            post_mixer,
+            ffn_norm_weight,
+            embedding,
+            feed_forward,
+            expert_feed_forward,
+            expert_count,
+            expert_used_count,
+            leading_dense_block_count,
+            ones,
+            inv_dim,
+            eps,
+            ffn_config,
+            &mut moe_sites,
+        )?;
+
+        cache_roots.push(layer_roots);
+    }
+
+    let output_norm_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding)],
+        "output_norm.weight",
+    );
+    let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
+
+    // Host-supplied gather leaf, not a `gather_last_row`-style in-program
+    // reduction -- the same `lm_head_row` contract
+    // `mistral_single_range_cached_forward_program`'s own `last_row_only`
+    // arm uses, so this builder's decode-time binding stays identical to
+    // every other single-range cached engine's.
+    let normed_last = if last_row_only {
+        let lm_head_row = input_leaf(
+            &mut program,
+            DType::Int32,
+            alloc::vec![Extent::Static(1)],
+            "lm_head_row",
+        );
+        embedding_lookup(&mut program, normed_final, lm_head_row)
+    } else {
+        normed_final
+    };
+
+    let lm_head = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
+        "output.weight",
+    );
+    let logits_product = elementwise(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
+    )?;
+    let logits = reduce(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        logits_product,
+        "sdv->sdv",
+        "sv->sdv",
+    )?;
+
+    let logits = match logit_softcap {
+        Some(cap) => {
+            let cap_node = scalar_constant(&mut program, cap);
+            let scaled = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Divide,
+                &[(logits, "sv->sv"), (cap_node, "->sv")],
+            )?;
+            let tanh = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Tanh,
+                &[(scaled, "sv->sv")],
+            )?;
+            elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(tanh, "sv->sv"), (cap_node, "->sv")],
+            )?
+        }
+        None => logits,
+    };
+
+    Ok((program, logits, cache_roots, MoeSites(moe_sites)))
+}
