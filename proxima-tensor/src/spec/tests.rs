@@ -13558,6 +13558,291 @@ mod gemma4_synthetic_parity {
         );
     }
 
+    /// [`two_range_cached_gemma4_matches_prefill_oracle_with_decode_loop_realistic_zero_padding`],
+    /// but through the generic [`build_forward`] dispatch instead of a
+    /// direct [`lfm2_two_range_cached_forward_program_with_experts`] call --
+    /// proves `build_forward(&descriptor, ..)` with
+    /// `descriptor.cache_strategy == CacheStrategy::TwoRange` lowers to the
+    /// SAME op graph that direct call already proves matches the prefill
+    /// oracle, at this module's synthetic gemma4-shaped dims (2 layers, one
+    /// sliding + one full, matching this suite's own SWA/full pairing). No
+    /// separate oracle derivation: same `reference_logits`, same weights,
+    /// same decode-loop-realistic zero-padded cache, only the entry point
+    /// differs.
+    #[test]
+    fn build_forward_two_range_matches_direct_builder_call() {
+        let ids = [1usize, 3, 2];
+        let embedding_table = wave("token_embd.weight", VOCAB * EMBEDDING);
+        let output_norm = norm_wave("output_norm.weight", EMBEDDING);
+
+        let resid: Vec<Vec<f32>> = ids
+            .iter()
+            .map(|&id| {
+                let row = &embedding_table[id * EMBEDDING..(id + 1) * EMBEDDING];
+                row.iter()
+                    .map(|&value| value * (EMBEDDING as f32).sqrt())
+                    .collect()
+            })
+            .collect();
+
+        let positions: Vec<usize> = (0..SEQ).collect();
+        let (cos_full, sin_full) =
+            rope_table_partial(&positions, ROPE_BASE_FULL, HEAD_DIM, ROTARY_PAIRS_FULL);
+        let (cos_swa, sin_swa) = rope_table(&positions, ROPE_BASE_SWA, HEAD_DIM);
+
+        let layer0 = layer_weights(0, true);
+        let layer1 = layer_weights(1, false);
+
+        let (layer0_next, _layer0_post_mixer) =
+            layer_reference(resid.clone(), &layer0, &cos_swa, &sin_swa, Some(SWA_WINDOW));
+        let (layer1_next, _layer1_post_mixer) =
+            layer_reference(layer0_next.clone(), &layer1, &cos_full, &sin_full, None);
+
+        let tied_lm_head = {
+            let mut out = alloc::vec![0.0f32; EMBEDDING * VOCAB];
+            for v in 0..VOCAB {
+                for i in 0..EMBEDDING {
+                    out[i * VOCAB + v] = embedding_table[v * EMBEDDING + i];
+                }
+            }
+            out
+        };
+        let final_normed: Vec<Vec<f32>> = layer1_next
+            .iter()
+            .map(|row| rmsnorm_ref(row, &output_norm, EPS))
+            .collect();
+        let reference_logits: Vec<f32> = final_normed
+            .iter()
+            .flat_map(|row| {
+                (0..VOCAB)
+                    .map(|v| {
+                        let raw: f32 = (0..EMBEDDING)
+                            .map(|i| row[i] * tied_lm_head[i * VOCAB + v])
+                            .sum();
+                        SOFTCAP * (raw / SOFTCAP).tanh()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        let ffn_config = LayerFfnConfig {
+            post_attention_norm: true,
+            combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
+                dense_post_norm: true,
+                routed_post_norm: true,
+                combined_post_norm: true,
+                routed_pre_norm: true,
+                router_scale: true,
+                expert_output_scale: true,
+            }),
+            output_scale: true,
+            routed_gating: ExpertGatingFunc::Softmax,
+            routed_expert_bias: false,
+            activation: Activation::GeluTanh,
+        };
+        let layers = alloc::vec![
+            LayerSchedule {
+                kind: LayerKind::Attention,
+                attention: LayerAttentionConfig {
+                    head_dim: HEAD_DIM as u32,
+                    kv_heads: KV_HEADS as u32,
+                    mask_window: Some(SWA_WINDOW as u32),
+                    value_source_kind: ValueSourceKind::ProjectedV,
+                    rope_table: RopeTableSel {
+                        cos_name: "rope_cos_swa",
+                        sin_name: "rope_sin_swa"
+                    },
+                    rope_pairing: RopePairing::SplitHalf {
+                        pairs: PAIRS as u32
+                    },
+                    score_scale: AttentionScoreScale::Unscaled,
+                    value_norm: true,
+                },
+                ffn: ffn_config,
+            },
+            LayerSchedule {
+                kind: LayerKind::Attention,
+                attention: LayerAttentionConfig {
+                    head_dim: HEAD_DIM as u32,
+                    kv_heads: KV_HEADS as u32,
+                    mask_window: None,
+                    value_source_kind: ValueSourceKind::SharedWithKey,
+                    rope_table: RopeTableSel {
+                        cos_name: "rope_cos",
+                        sin_name: "rope_sin"
+                    },
+                    rope_pairing: RopePairing::SplitHalf {
+                        pairs: PAIRS as u32
+                    },
+                    score_scale: AttentionScoreScale::Unscaled,
+                    value_norm: true,
+                },
+                ffn: ffn_config,
+            },
+        ];
+        let descriptor = ModelDescriptor {
+            vocab: VOCAB as u32,
+            embedding: EMBEDDING as u32,
+            feed_forward: FEED_FORWARD as u32,
+            expert_feed_forward: EXPERT_FF as u32,
+            query_heads: QUERY_HEADS as u32,
+            block_count: 2,
+            expert_count: EXPERT_COUNT as u32,
+            expert_used_count: EXPERT_USED as u32,
+            leading_dense_block_count: 0,
+            // No `LayerKind::ShortConv` entry above, so unused -- see
+            // `ModelDescriptor::l_cache`'s own doc.
+            l_cache: 0,
+            embedding_scale: Some(EmbeddingScale::Sqrt),
+            logit_softcap: Some(SOFTCAP),
+            layers,
+            cache_strategy: CacheStrategy::TwoRange,
+        };
+
+        let (program, logits, _cache_roots, _moe_sites) = build_forward(&descriptor, false)
+            .expect("build_forward's TwoRange path lowers the gemma4-shaped descriptor");
+
+        let ids_i32: Vec<i32> = ids.iter().map(|&id| id as i32).collect();
+        let ids_f32: Vec<f32> = ids_i32.iter().map(|&id| id as f32).collect();
+        let eps_data = alloc::vec![EPS; SEQ];
+        let cached_len_scalar = [0.0f32];
+
+        let mut named: Vec<(&str, &[f32])> = alloc::vec![
+            ("ids", ids_f32.as_slice()),
+            ("eps", eps_data.as_slice()),
+            ("token_embd.weight", embedding_table.as_slice()),
+            ("output_norm.weight", output_norm.as_slice()),
+            ("output.weight", tied_lm_head.as_slice()),
+            ("rope_cos_swa", flatten(&cos_swa).leak()),
+            ("rope_sin_swa", flatten(&sin_swa).leak()),
+            ("rope_cos", flatten(&cos_full).leak()),
+            ("rope_sin", flatten(&sin_full).leak()),
+            ("cached_len", cached_len_scalar.as_slice()),
+            ("blk.0.attn_norm.weight", layer0.attn_norm.as_slice()),
+            (
+                "blk.0.post_attention_norm.weight",
+                layer0.post_attention_norm.as_slice()
+            ),
+            ("blk.0.attn_q_norm.weight", layer0.q_norm.as_slice()),
+            ("blk.0.attn_k_norm.weight", layer0.k_norm.as_slice()),
+            ("blk.0.attn_q.weight", layer0.wq.as_slice()),
+            ("blk.0.attn_k.weight", layer0.wk.as_slice()),
+            (
+                "blk.0.attn_v.weight",
+                layer0
+                    .wv
+                    .as_ref()
+                    .expect("sliding layer carries attn_v")
+                    .as_slice()
+            ),
+            ("blk.0.attn_output.weight", layer0.wo.as_slice()),
+            (
+                "blk.0.layer_output_scale.weight",
+                core::slice::from_ref(&layer0.output_scale)
+            ),
+            ("blk.0.ffn_norm.weight", layer0.ffn_norm.as_slice()),
+            (
+                "blk.0.post_ffw_norm_1.weight",
+                layer0.post_ffw_norm_1.as_slice()
+            ),
+            (
+                "blk.0.post_ffw_norm_2.weight",
+                layer0.post_ffw_norm_2.as_slice()
+            ),
+            (
+                "blk.0.post_ffw_norm.weight",
+                layer0.post_ffw_norm.as_slice()
+            ),
+            (
+                "blk.0.pre_ffw_norm_2.weight",
+                layer0.pre_ffw_norm_2.as_slice()
+            ),
+            ("blk.0.ffn_gate.weight", layer0.ffn_gate.as_slice()),
+            ("blk.0.ffn_up.weight", layer0.ffn_up.as_slice()),
+            ("blk.0.ffn_down.weight", layer0.ffn_down.as_slice()),
+            ("blk.0.ffn_gate_inp.weight", layer0.gate_inp.as_slice()),
+            ("blk.0.ffn_gate_inp.scale", layer0.gate_inp_scale.as_slice()),
+            ("blk.0.ffn_gate_exps.weight", layer0.gate_exps.as_slice()),
+            ("blk.0.ffn_up_exps.weight", layer0.up_exps.as_slice()),
+            ("blk.0.ffn_down_exps.weight", layer0.down_exps.as_slice()),
+            (
+                "blk.0.ffn_down_exps.scale",
+                layer0.down_exps_scale.as_slice()
+            ),
+            ("blk.1.attn_norm.weight", layer1.attn_norm.as_slice()),
+            (
+                "blk.1.post_attention_norm.weight",
+                layer1.post_attention_norm.as_slice()
+            ),
+            ("blk.1.attn_q_norm.weight", layer1.q_norm.as_slice()),
+            ("blk.1.attn_k_norm.weight", layer1.k_norm.as_slice()),
+            ("blk.1.attn_q.weight", layer1.wq.as_slice()),
+            ("blk.1.attn_k.weight", layer1.wk.as_slice()),
+            ("blk.1.attn_output.weight", layer1.wo.as_slice()),
+            (
+                "blk.1.layer_output_scale.weight",
+                core::slice::from_ref(&layer1.output_scale)
+            ),
+            ("blk.1.ffn_norm.weight", layer1.ffn_norm.as_slice()),
+            (
+                "blk.1.post_ffw_norm_1.weight",
+                layer1.post_ffw_norm_1.as_slice()
+            ),
+            (
+                "blk.1.post_ffw_norm_2.weight",
+                layer1.post_ffw_norm_2.as_slice()
+            ),
+            (
+                "blk.1.post_ffw_norm.weight",
+                layer1.post_ffw_norm.as_slice()
+            ),
+            (
+                "blk.1.pre_ffw_norm_2.weight",
+                layer1.pre_ffw_norm_2.as_slice()
+            ),
+            ("blk.1.ffn_gate.weight", layer1.ffn_gate.as_slice()),
+            ("blk.1.ffn_up.weight", layer1.ffn_up.as_slice()),
+            ("blk.1.ffn_down.weight", layer1.ffn_down.as_slice()),
+            ("blk.1.ffn_gate_inp.weight", layer1.gate_inp.as_slice()),
+            ("blk.1.ffn_gate_inp.scale", layer1.gate_inp_scale.as_slice()),
+            ("blk.1.ffn_gate_exps.weight", layer1.gate_exps.as_slice()),
+            ("blk.1.ffn_up_exps.weight", layer1.up_exps.as_slice()),
+            ("blk.1.ffn_down_exps.weight", layer1.down_exps.as_slice()),
+            (
+                "blk.1.ffn_down_exps.scale",
+                layer1.down_exps_scale.as_slice()
+            ),
+        ];
+
+        // Same decode-loop-realistic all-zero merged cache the direct-call
+        // test uses -- `cached_len=0`, no pre-fold.
+        let zero_even_odd = alloc::vec![0.0f32; SEQ * KV_HEADS * PAIRS];
+        let zero_v = alloc::vec![0.0f32; SEQ * KV_HEADS * HEAD_DIM];
+        named.push(("kv_cache.0.k_even", zero_even_odd.as_slice()));
+        named.push(("kv_cache.0.k_odd", zero_even_odd.as_slice()));
+        named.push(("kv_cache.0.v", zero_v.as_slice()));
+        named.push(("kv_cache.1.k_even", zero_even_odd.as_slice()));
+        named.push(("kv_cache.1.k_odd", zero_even_odd.as_slice()));
+        named.push(("kv_cache.1.v", zero_v.as_slice()));
+
+        let symbols = [SEQ as u64, SEQ as u64];
+        let evaluated = crate::cpu::evaluate_named(&program, &symbols, &named, &[logits])
+            .expect("build_forward's TwoRange program evaluates");
+        let engine_logits = evaluated.get(logits).expect("logits present").0.to_vec();
+        let diff = max_abs_diff(&engine_logits, &reference_logits);
+
+        std::println!(
+            "build_forward_two_range_matches_direct_builder_call diff={diff} \
+             reference={reference_logits:?} engine={engine_logits:?}"
+        );
+
+        assert!(
+            diff < 1.0e-6,
+            "build_forward's TwoRange path must match the prefill oracle to the same precision \
+             the direct builder call already does -- found {diff}"
+        );
+    }
+
     /// A genuine TWO-STEP decode (`cached_len=0` over the first `2` prompt
     /// tokens, then `cached_len=2` over the last `1` token, `LayerCache`
     /// grown by folding step 1's own [`CachedLayerRoots`] outputs the exact
