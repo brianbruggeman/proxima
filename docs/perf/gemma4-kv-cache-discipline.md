@@ -182,3 +182,82 @@ prefill mixer's own reference at `cached_len=0` (degenerate case) and
 `cached_len>0` -- this is the gap that let the spec-level test suite pass
 (669/670) while the real-model decode was wrong, and closing it is required
 before any further GPU-level correctness or performance claim.
+
+## C2 -- root cause and fix
+
+**Root cause (proven, not inferred):** `lfm2_single_range_cached.rs`'s own
+module doc names the shape correctly -- `append_lfm2_single_range_cached_attention`
+scores ONLY against the merged `kv_cache.{layer}.*` leaves, and explicitly
+never reads its own freshly-rotated `rotated_k_new`/`v_new` for its own
+call's score ("a query never attends a key that does not exist yet"). That
+contract is correct ONLY when a caller pre-folds this call's OWN new
+positions into the merged cache leaves before evaluating (proven by the
+existing `single_range_vs_two_range_decode` test's own "folded in by hand
+the way write-placement would fold them in at runtime" pattern,
+`proxima-tensor/src/spec/tests.rs`). `proxima-model-interop`'s GENERIC
+(non-placed) decode loop (`push_kv_named_blocks`/`KvPadScratch::fill`,
+`proxima-model-interop/src/generate/residency_caches.rs:149-170`) never does
+that pre-fold: `LayerCache` starts empty and only grows AFTER a step
+evaluates. Only the Metal `metal-output-placement` `run_decode_loop_placed_kv`
+path (dense-only, MoE excluded, `load_model.rs:1260`) achieves the
+write-then-read ordering, via a fused kernel writing new K/V into the same
+device buffer a plan reads back. `Gemma4Arch::bind` wired the single-range
+engine into the GENERIC loop -- so at `cached_len=0`, `new_count=` the whole
+prompt (`single_position_step: false`), literally every attention layer's
+merged-cache leaf was entirely zero on the very first (and every
+subsequent) step, at EVERY layer, collapsing the whole network to residual
++ FFN only.
+
+**Execution evidence** (`proxima-tensor/src/spec/tests.rs`,
+`gemma4_synthetic_parity` module, synthetic 2-layer/SWA+full gemma4-shaped
+fixture): feeding the single-range engine the SAME all-zero merged cache
+the real decode loop provides at `cached_len=0` diverges from the prefill
+oracle by `max_abs_diff=0.394` (`single_range_cached_gemma4_diverges_on_zero_cache_matches_when_self_range_is_folded`);
+hand-folding this call's own new K/V into the SAME leaves before evaluating
+matches the oracle to float noise (`2.98e-8`) -- proving the mechanism
+directly, node values in hand.
+
+**Fix** (`proxima-tensor/src/spec/lfm2_single_range_cached.rs`,
+`proxima-model-interop/src/gemma4/bind.rs`): a new
+`append_lfm2_two_range_cached_attention` +
+`lfm2_two_range_cached_forward_program_with_experts`, generalizing
+`single_range_moe_cached::append_mistral_cached_moe_layer`'s own
+already-proven two-block online-softmax combine (reuse-first, no new Op
+variant, no new type) with gemma4's existing knobs (`ValueSource`,
+`RopePairing`, `value_norm`, dual RoPE tables). The cache block scores ONLY
+genuine history -- a new `causal_mask_cached_windowed` excludes every row at
+or past `cached_len` unconditionally (`is_padding`), composed with the same
+too-old windowed check `causal_mask_merged_windowed` already established for
+SWA layers. The local block scores this call's own new positions against
+its own in-graph `rotated_k_new_even`/`rotated_k_new_odd`/`v_new`, never
+round-tripped through a cache leaf -- so `kv_cache.{layer}.*` may be fed
+EXACTLY what the existing growing-cache decode loop already provides (real
+`[0, cached_len)`, zero padding past it), with **no decode-loop change**.
+`Gemma4Arch::bind` now calls the two-range builder in place of the
+single-range one.
+
+**Fix verification** (same synthetic fixture, `proxima-tensor` CPU suite):
+`two_range_cached_gemma4_matches_prefill_oracle_with_decode_loop_realistic_zero_padding`
+(cached_len=0, the exact zero-padded cache the real loop feeds, no pre-fold)
+matches the oracle to `3.9e-8`;
+`two_range_cached_gemma4_two_step_decode_matches_one_shot_prefill_oracle` (a
+genuine two-step decode, `cached_len=0` then `cached_len=2` with real folded
+SWA-windowed history) matches to `4.9e-8`. `cargo check -p proxima-model-interop
+--features std,metal,gemma4-kv-cache` (+ `--all-targets`) and the flag-off
+equivalent both exit 0. `cargo nextest run -p proxima-tensor --features
+std,config,test-support,cached-attention-streaming,kv-capacity-bucket`:
+672/673 (the same PRE-EXISTING `single_range_cached_attention_fuses_...`
+875-vs-939 failure, confirmed unrelated). `cargo nextest run -p
+proxima-model-interop --features std,metal`: 261/261, 0 failed, 59 skipped.
+
+**Real-checkpoint confirm** (model gate held, two distinctly-fingerprinted
+release `bench_local` binaries, `--features std,metal` vs `--features
+std,metal,gemma4-kv-cache`, templated France prompt, 8 tokens, greedy):
+**token-identical.** Both arms produce `ids=[818, 5279, 529, 7001, 563,
+5213, 50429, 84750]`, text `"The capital of France is **Paris**."`.
+`ttnt_ms`: cacheless 3160.764 ms/token, cached 107.383 ms/token (~29x) --
+now a VALID performance observation, since the output is correct (the
+44x-faster-but-wrong number from the prior slice is superseded, not
+reused). A full 24-token VerifyBench run and a meets-or-beats scoreboard
+against Ollama (56.62 tok/s) / MLX (67.667 tok/s) is the next slice's own
+gate, not claimed here.
