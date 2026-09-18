@@ -35,9 +35,7 @@ use proxima_tensor::spec::{
 #[cfg(not(feature = "gemma4-kv-cache"))]
 use proxima_tensor::spec::lfm2_forward_program_with_experts;
 #[cfg(feature = "gemma4-kv-cache")]
-use proxima_tensor::spec::{
-    Qwen35LayerRoots, lfm2_single_range_cached_forward_program_with_experts,
-};
+use proxima_tensor::spec::{Qwen35LayerRoots, lfm2_two_range_cached_forward_program_with_experts};
 
 use crate::architecture::{
     Architecture as ArchitectureTrait, BoundProgram, StepInput, StepInputContext,
@@ -616,21 +614,28 @@ impl ArchitectureTrait for Gemma4Arch {
             .then_some(architecture.final_logit_softcapping);
 
         // `gemma4-kv-cache` (default-off): engages
-        // `lfm2_single_range_cached_forward_program_with_experts` (the
-        // single-range cached engine every other decode-capable
-        // architecture in this crate already uses) in place of the
-        // cacheless full-reprefill `lfm2_forward_program_with_experts`
+        // `lfm2_two_range_cached_forward_program_with_experts` in place of
+        // the cacheless full-reprefill `lfm2_forward_program_with_experts`
         // below -- see that function's own module doc for why a decode
         // step's cost drops from O(n^2) to O(1) in prior sequence length
-        // once `layer_roots` below is non-empty. Off by default: this path
-        // has no differential CPU-oracle proof against the cacheless one
-        // yet (the binding correctness rule this repo's own guiding
-        // principles set), so production stays on the proven cacheless
-        // program until that proof lands.
+        // once `layer_roots` below is non-empty. The TWO-range engine, not
+        // the single-range one: gemma4's own first step (`single_position_step
+        // == false` below) processes the WHOLE prompt as one `cached_len=0`
+        // call, and a single merged softmax has no self-consistent way to
+        // include that call's own new positions in `kv_cache.{layer}.*`
+        // before they exist (`lfm2_single_range_cached.rs`'s own module doc)
+        // -- proven by `proxima-tensor`'s own
+        // `single_range_cached_gemma4_diverges_on_zero_cache_matches_when_self_range_is_folded`
+        // (zero-cache max-abs-diff 0.39 vs the prefill oracle) and closed by
+        // `two_range_cached_gemma4_matches_prefill_oracle_with_decode_loop_realistic_zero_padding`/
+        // `..._two_step_decode_matches_one_shot_prefill_oracle` (both < 1e-4
+        // against the SAME oracle, fed exactly what this crate's existing
+        // growing-cache decode loop already provides -- no decode-loop
+        // change).
         #[cfg(feature = "gemma4-kv-cache")]
         let (program, logits, layer_roots, moe_sites) = {
             let (program, logits, cache_roots, moe_sites) =
-                lfm2_single_range_cached_forward_program_with_experts(
+                lfm2_two_range_cached_forward_program_with_experts(
                     architecture.vocab,
                     architecture.embedding,
                     architecture.feed_forward,
