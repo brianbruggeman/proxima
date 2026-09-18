@@ -388,34 +388,18 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         );
     }
 
-    // Every K-quant weight codec this crate packs shares `Q4K_BLOCK_ELEMENTS`
-    // (256) elements per super-block (`q5_k`/`q6_k`'s own module docs: same
-    // `QK_K`); `Q8_0`'s block is a different, much smaller shape (32
-    // elements, no sub-block structure) -- the growable key/value context
-    // cache's rows are `HEAD_DIM / 2` wide, too narrow for a 256-element
-    // super-block to divide evenly without straddling more than one cached
-    // position, so `block_elements` varies per codec rather than being one
+    // `QuantizedBlock::block_layout` is the one per-codec
+    // `(block_bytes, block_elements)` table -- `Q8_0`'s 32-element block is
+    // the odd one out (the growable key/value context cache's rows are
+    // `HEAD_DIM / 2` wide, too narrow for a 256-element K-quant super-block
+    // to divide evenly without straddling more than one cached position),
+    // which is exactly why that table is keyed per codec rather than one
     // shared constant.
-    let (weights, block_bytes, block_elements): (&[u8], usize, usize) = match weight_block {
-        QuantizedBlock::Int32(_) => {
-            unreachable!("integer index blocks never enter quantized matmul")
-        }
-        QuantizedBlock::Float32(_) => return Err(shape_error()),
-        QuantizedBlock::Q4K(bytes) => (bytes, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
-        QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
-        QuantizedBlock::Q3K(bytes) => (bytes, Q3K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
-        QuantizedBlock::Q2K(bytes) => (bytes, Q2K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
-        QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
-        QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
-        QuantizedBlock::Q4_0(bytes) => (bytes, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS),
-        QuantizedBlock::Q5_1(bytes) => (bytes, Q5_1_BLOCK_BYTES, Q5_1_BLOCK_ELEMENTS),
-        QuantizedBlock::Q5_0(bytes) => (bytes, Q5_0_BLOCK_BYTES, Q5_0_BLOCK_ELEMENTS),
-        QuantizedBlock::Iq4Nl(bytes) => (bytes, IQ4_NL_BLOCK_BYTES, IQ4_NL_BLOCK_ELEMENTS),
-        QuantizedBlock::Iq2Xs(bytes) => (bytes, IQ2_XS_BLOCK_BYTES, IQ2_XS_BLOCK_ELEMENTS),
-        QuantizedBlock::Iq3Xxs(bytes) => (bytes, IQ3_XXS_BLOCK_BYTES, IQ3_XXS_BLOCK_ELEMENTS),
-        QuantizedBlock::Float16(bytes) => (bytes, HALF_PRECISION_ELEMENT_BYTES, 1),
-        QuantizedBlock::BFloat16(bytes) => (bytes, HALF_PRECISION_ELEMENT_BYTES, 1),
-    };
+    if let QuantizedBlock::Int32(_) = weight_block {
+        unreachable!("integer index blocks never enter quantized matmul")
+    }
+    let weights = weight_block.packed_bytes().ok_or_else(shape_error)?;
+    let (block_bytes, block_elements) = weight_block.block_layout().ok_or_else(shape_error)?;
     if k == 0 || rows == 0 || !weights.len().is_multiple_of(block_bytes) {
         return Err(shape_error());
     }

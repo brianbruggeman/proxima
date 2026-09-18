@@ -1726,6 +1726,37 @@ impl<'a> QuantizedBlock<'a> {
         }
     }
 
+    /// Packed-block `(block_bytes, block_elements)` footprint for this
+    /// codec, or `None` for [`Self::Float32`]/[`Self::Int32`] (decoded
+    /// values, not packed blocks) -- the one table
+    /// `run_reduce_quantized`, `build_matmul_stage_plan`, and
+    /// `dequantize_row` all compose down to instead of each hand-matching
+    /// the same per-codec constants a second and third time. Sourced from
+    /// the same `proxima_gguf::quant::*` block-size constants
+    /// [`proxima_gguf::GgmlType::block_layout`] wraps for its own codec
+    /// table.
+    #[must_use]
+    pub const fn block_layout(&self) -> Option<(usize, usize)> {
+        match self {
+            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => None,
+            QuantizedBlock::Q4K(_) => Some((Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS)),
+            QuantizedBlock::Q5K(_) => Some((Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS)),
+            QuantizedBlock::Q3K(_) => Some((Q3K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS)),
+            QuantizedBlock::Q2K(_) => Some((Q2K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS)),
+            QuantizedBlock::Q6K(_) => Some((Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS)),
+            QuantizedBlock::Q8_0(_) => Some((Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS)),
+            QuantizedBlock::Q4_0(_) => Some((Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS)),
+            QuantizedBlock::Q5_1(_) => Some((Q5_1_BLOCK_BYTES, Q5_1_BLOCK_ELEMENTS)),
+            QuantizedBlock::Q5_0(_) => Some((Q5_0_BLOCK_BYTES, Q5_0_BLOCK_ELEMENTS)),
+            QuantizedBlock::Iq4Nl(_) => Some((IQ4_NL_BLOCK_BYTES, IQ4_NL_BLOCK_ELEMENTS)),
+            QuantizedBlock::Iq2Xs(_) => Some((IQ2_XS_BLOCK_BYTES, IQ2_XS_BLOCK_ELEMENTS)),
+            QuantizedBlock::Iq3Xxs(_) => Some((IQ3_XXS_BLOCK_BYTES, IQ3_XXS_BLOCK_ELEMENTS)),
+            QuantizedBlock::Float16(_) | QuantizedBlock::BFloat16(_) => {
+                Some((HALF_PRECISION_ELEMENT_BYTES, 1))
+            }
+        }
+    }
+
     /// Rewraps `self`'s own codec discriminant around a different `'a`
     /// byte slice -- [`expert_entries_from_stack`]'s own per-expert slicing,
     /// and `run_reduce_quantized`'s per-position gather read, both need "the

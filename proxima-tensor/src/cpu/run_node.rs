@@ -1534,28 +1534,25 @@ pub(super) fn dequantize_row(
         node,
         reason: "quantized embedding row width does not divide the codec's own block width",
     };
-    let (data, block_bytes, block_elements): (&[u8], usize, usize) = match block {
-        QuantizedBlock::Int32(_) => unreachable!("integer index blocks never enter quantized dot"),
-        QuantizedBlock::Q4K(data) => (data, q4_k::BLOCK_BYTES, q4_k::QK_K),
-        QuantizedBlock::Q5K(data) => (data, q5_k::BLOCK_BYTES, q5_k::QK_K),
-        QuantizedBlock::Q3K(data) => (data, q3_k::BLOCK_BYTES, q3_k::QK_K),
-        QuantizedBlock::Q2K(data) => (data, q2_k::BLOCK_BYTES, q2_k::QK_K),
-        QuantizedBlock::Q6K(data) => (data, q6_k::BLOCK_BYTES, q6_k::QK_K),
-        QuantizedBlock::Q8_0(data) => (data, q8_0::BLOCK_BYTES, q8_0::QK8_0),
-        // the target checkpoint's ngram embedding table is IQ4_NL -- this
-        // per-row lookup path is exactly what that table's gather needs.
-        QuantizedBlock::Iq4Nl(data) => (data, iq4_nl::BLOCK_BYTES, iq4_nl::QK4_NL),
-        QuantizedBlock::Q5_1(data) => (data, q5_1::BLOCK_BYTES, q5_1::QK5_1),
-        QuantizedBlock::Iq2Xs(data) => (data, iq2_xs::BLOCK_BYTES, iq2_xs::QK_K),
-        QuantizedBlock::Iq3Xxs(data) => (data, iq3_xxs::BLOCK_BYTES, iq3_xxs::QK_K),
+    if let QuantizedBlock::Int32(_) = block {
+        unreachable!("integer index blocks never enter quantized dot")
+    }
+    // Row-level decode only reaches codecs with a `dequantize` arm below --
+    // `Q4_0`/`Q5_0`/`Float16`/`BFloat16` do have a `QuantizedBlock::block_layout`
+    // entry, but no per-row dequantize path here, so they stay excluded
+    // rather than silently decoding through the shared table.
+    if matches!(
+        block,
         QuantizedBlock::Float32(_)
-        | QuantizedBlock::Q4_0(_)
-        | QuantizedBlock::Q5_0(_)
-        | QuantizedBlock::Float16(_)
-        | QuantizedBlock::BFloat16(_) => {
-            return Err(unaligned_row());
-        }
-    };
+            | QuantizedBlock::Q4_0(_)
+            | QuantizedBlock::Q5_0(_)
+            | QuantizedBlock::Float16(_)
+            | QuantizedBlock::BFloat16(_)
+    ) {
+        return Err(unaligned_row());
+    }
+    let data = block.packed_bytes().ok_or_else(unaligned_row)?;
+    let (block_bytes, block_elements) = block.block_layout().ok_or_else(unaligned_row)?;
     if !dim.is_multiple_of(block_elements) {
         return Err(unaligned_row());
     }
