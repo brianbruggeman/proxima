@@ -728,6 +728,49 @@ mod tests {
     }
 
     #[test]
+    fn sequential_spawns_do_not_retain_prior_stdin_writers() {
+        let mut command = CommandDescriptor::new(cstr("/bin/sh"));
+        command
+            .arg(cstr("-c"))
+            .arg(cstr("read line; exit 0"))
+            .stdin(Stdio::Piped);
+
+        let mut first = spawn(&command, SpawnOptions::default()).expect("spawn first child");
+        let mut second = spawn(&command, SpawnOptions::default()).expect("spawn second child");
+
+        drop(first.stdin.take().expect("first child stdin"));
+
+        let mut first_exit = None;
+        for _ in 0..100_000 {
+            if let Some(exit_code) = first.try_wait().expect("poll first child") {
+                first_exit = Some(exit_code);
+                break;
+            }
+            thread::yield_now();
+        }
+
+        if first_exit.is_none() {
+            second
+                .kill()
+                .expect("kill second child after failed EOF poll");
+        }
+        drop(second.stdin.take().expect("second child stdin"));
+        let second_exit = second.wait().expect("reap second child");
+
+        if first_exit.is_none() {
+            first
+                .wait()
+                .expect("reap first child after failed EOF poll");
+        }
+
+        assert_eq!(
+            first_exit,
+            Some(0),
+            "first child must see EOF before second child exits; second exit was {second_exit}"
+        );
+    }
+
+    #[test]
     fn kill_terminates_indefinitely_blocked_child_and_try_wait_reports_signal_death() {
         let mut command = CommandDescriptor::new(cstr("/bin/sh"));
         command
