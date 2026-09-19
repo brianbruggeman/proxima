@@ -723,19 +723,20 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             // unconditionally, unlike `Q4K`/`Q5K`/`Q6K` above which fall
             // back to this same shape only when their own int8-dot feature
             // is off.
-            QuantizedBlock::Q3K(_) => matmul_q3k_f32(weights, rows, activation_row)?,
-            // No int8-dot kernel exists for `Q2_K` either -- same reasoning
-            // as `Q3K`'s own note just above.
-            QuantizedBlock::Q2K(_) => matmul_q2k_f32(weights, rows, activation_row)?,
-            QuantizedBlock::Q8_0(_) => matmul_q8_0_f32(weights, rows, activation_row)?,
-            QuantizedBlock::Q4_0(_) => matmul_q4_0_f32(weights, rows, activation_row)?,
-            QuantizedBlock::Q5_1(_) => matmul_q5_1_f32(weights, rows, activation_row)?,
-            QuantizedBlock::Q5_0(_) => matmul_q5_0_f32(weights, rows, activation_row)?,
-            QuantizedBlock::Iq4Nl(_) => matmul_iq4_nl_f32(weights, rows, activation_row)?,
-            QuantizedBlock::Iq2Xs(_) => matmul_iq2_xs_f32(weights, rows, activation_row)?,
-            QuantizedBlock::Iq3Xxs(_) => matmul_iq3_xxs_f32(weights, rows, activation_row)?,
-            QuantizedBlock::Float16(_) => matmul_f16_f32(weights, rows, activation_row)?,
-            QuantizedBlock::BFloat16(_) => matmul_bf16_f32(weights, rows, activation_row)?,
+            QuantizedBlock::Q3K(_)
+            | QuantizedBlock::Q2K(_)
+            | QuantizedBlock::Q8_0(_)
+            | QuantizedBlock::Q4_0(_)
+            | QuantizedBlock::Q5_1(_)
+            | QuantizedBlock::Q5_0(_)
+            | QuantizedBlock::Iq4Nl(_)
+            | QuantizedBlock::Iq2Xs(_)
+            | QuantizedBlock::Iq3Xxs(_)
+            | QuantizedBlock::Float16(_)
+            | QuantizedBlock::BFloat16(_) => {
+                let kernel = dispatch_block.matmul_f32_kernel().ok_or_else(shape_error)?;
+                kernel(weights, rows, activation_row)?
+            }
         };
         #[cfg(feature = "instrument")]
         {
