@@ -461,6 +461,21 @@ pub(super) fn bound_output_len(bound: &BoundOp) -> usize {
             output_axes,
             epilogue_broadcast_axes,
             ..
+        }
+        // A round-batched fold's own `round_outputs[0]` is round 0's own
+        // reduce output -- the identical `output_axes`-projected length its
+        // `BoundOpKind::Reduce` sibling arm above computes, never the wider
+        // pre-reduction `extents` product the fallback arm below assumes.
+        // Without this arm, `encode_op`'s own unplaced fallback allocation
+        // (`allocate_buffer(device, bound_output_len(bound), ..)`) over-
+        // allocates by the reduced axis's own factor -- wasteful, not
+        // unsound, but still the wrong number for anything that reads this
+        // length as this op's true output size (`ensure_round_group_resolved`'s
+        // own `output_member_bytes`).
+        | BoundOpKind::RoundBatchedReduce {
+            output_axes,
+            epilogue_broadcast_axes,
+            ..
         } if epilogue_broadcast_axes.is_empty() => output_axes
             .iter()
             .map(|axis| bound.extents[*axis as usize] as usize)
@@ -714,15 +729,20 @@ pub(super) fn pack_uniforms_into(
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => pack_scan_uniforms(bound, scratch),
-        // unreachable in practice: `emit` declines a round-merged fold
-        // before any encode path ever asks this module to pack its
-        // uniforms -- an explicit typed error here anyway, never a silent
-        // pack of the wrong shape, the same discipline `emit_inner` itself
-        // applies.
+        // `round_zero_reduce_bound`'s own doc: the uniforms blob addresses
+        // round 0's own strides/extents/bases -- per-round offsets move
+        // through the spliced `RoundBase` table instead
+        // (`splice_round_batched_reduce_base_table`), never through this
+        // buffer, so packing round 0's shape here is exact for every round.
+        #[cfg(feature = "metal-moe-mul-mat-id")]
+        BoundOpKind::RoundBatchedReduce { .. } => {
+            pack_reduce_uniforms(&crate::msl::round_zero_reduce_bound(bound), scratch)
+        }
+        #[cfg(not(feature = "metal-moe-mul-mat-id"))]
         BoundOpKind::RoundBatchedReduce { .. } => Err(EmitError::EpilogueNotSupported {
             node: bound.node,
             reason: "round-merged reduce (BoundOpKind::RoundBatchedReduce) has no \
-                     Metal uniform packer yet",
+                     Metal uniform packer without metal-moe-mul-mat-id",
         }),
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => {
             pack_leaf_uniforms(bound, scratch);

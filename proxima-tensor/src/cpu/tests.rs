@@ -12557,11 +12557,24 @@ fn round_batched_reduce_matches_k_sequential_reduces() {
     let round1 = round_reduce(&mut program, route1);
 
     let shapes = shape::infer(&program, &[]).expect("shape inference succeeds");
-    let resolved = bind::bind(
-        &program,
-        &shapes,
-        &[round0, round1],
-        NumericPolicy::bit_exact(),
+    // This fixture is now exactly the shape `moe_round_group_is_contiguous`
+    // admits (`bind_collapses_structurally_uniform_round_group_into_round_batched_reduce`
+    // proves that separately) -- disable the automatic collapse here so
+    // `round0`/`round1` still resolve as two plain, standalone `Reduce`s,
+    // keeping this test's own proof (the HAND-collapse below is bit-exact
+    // with the k separate folds) independent of whether that admission gate
+    // fires, exactly as this test's own doc states.
+    let resolved = temp_env::with_var(
+        "PROXIMA_DISABLE_MOE_ROUND_GROUP_FUSION",
+        Some("1"),
+        || {
+            bind::bind(
+                &program,
+                &shapes,
+                &[round0, round1],
+                NumericPolicy::bit_exact(),
+            )
+        },
     )
     .expect("bind succeeds");
 
@@ -12667,5 +12680,111 @@ fn round_batched_reduce_matches_k_sequential_reduces() {
         reference1[0].to_bits(),
         "round 1 (routed through round_sink) must be bit-exact with the standalone Reduce it \
          replaces"
+    );
+}
+
+/// [`bind::bind`]'s own admission for a two-round `MoeRoundGroup` (the same
+/// `sum_k table[route[z], k] * x[k]` shape [`round_batched_reduce_matches_k_sequential_reduces`]
+/// hand-collapses) now says YES once `moe_round_group_is_contiguous` checks
+/// structural uniformity instead of returning `false` unconditionally: two
+/// round-sibling `Reduce`s over the same `table`/`x` and same-shaped
+/// `route0`/`route1` gather indices collapse into exactly one
+/// `RoundBatchedReduce` with `round_count: 2`, and round 1's own `BoundOp`
+/// is gone from the resolved list -- proving the ADMISSION half of this
+/// landing independently of the executor half the sibling test already
+/// covers.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+#[test]
+fn bind_collapses_structurally_uniform_round_group_into_round_batched_reduce() {
+    let n_experts: u32 = 3;
+    let width: u32 = 4;
+
+    let mut program = Vec::new();
+    let table = f32_block(
+        &mut program,
+        &[Extent::Static(n_experts), Extent::Static(width)],
+    );
+    let x = f32_block(&mut program, &[Extent::Static(width)]);
+    let route0 = block(&mut program, DType::Int32, &[Extent::Static(1)]);
+    let route1 = block(&mut program, DType::Int32, &[Extent::Static(1)]);
+
+    let gather_map = |route: NodeId| IndexMap::Computed {
+        indices: route,
+        index_map: map::projection(1, &[]),
+        base: map::IndexPattern {
+            iter_rank: 1,
+            axes: alloc::vec![
+                map::AxisIndex::default(),
+                map::AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(0)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let x_map = IndexMap::Affine(map::projection(1, &[0]));
+
+    let round_reduce = |program: &mut Vec<Op>, route: NodeId| -> NodeId {
+        let product = append(
+            program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(table, gather_map(route)), (x, x_map.clone())],
+                name: None,
+            },
+        );
+        append(
+            program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        )
+    };
+
+    let round0 = round_reduce(&mut program, route0);
+    let round1 = round_reduce(&mut program, route1);
+
+    let shapes = shape::infer(&program, &[]).expect("shape inference succeeds");
+    let resolved = bind::bind(
+        &program,
+        &shapes,
+        &[round0, round1],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("bind succeeds");
+
+    let round0_bound = resolved
+        .iter()
+        .find(|bound| bound.node == round0)
+        .expect("round0 still resolves to a BoundOp after collapse");
+    let BoundOpKind::RoundBatchedReduce {
+        round_count,
+        round_routes,
+        round_outputs,
+        ..
+    } = &round0_bound.kind
+    else {
+        panic!(
+            "round0 must collapse into RoundBatchedReduce once the admission check is \
+             structural, got {:?}",
+            round0_bound.kind.name()
+        );
+    };
+    assert_eq!(*round_count, 2, "two round-sibling reduces collapse to round_count 2");
+    assert_eq!(round_routes.as_slice(), [route0, route1]);
+    assert_eq!(round_outputs.as_slice(), [round0, round1]);
+    assert!(
+        resolved.iter().all(|bound| bound.node != round1),
+        "round1's own BoundOp must be dropped from the resolved list once absorbed"
     );
 }

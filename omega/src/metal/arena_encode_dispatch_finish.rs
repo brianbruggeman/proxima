@@ -787,12 +787,42 @@ pub(super) fn encode_op(
     };
     #[cfg(feature = "instrument")]
     let op_setup_started = read_ticks();
-    let (output, output_offset) = match placement {
-        Some((buffer, offset)) => (buffer.clone(), offset),
-        None => (
-            allocate_buffer(device, bound_output_len(bound), bound.dtype)?,
-            0,
-        ),
+    // A `RoundBatchedReduce` dispatch never uses the generic placement/fresh
+    // -allocation output below: it writes `round_count` rounds into ONE
+    // contiguous buffer the spliced kernel addresses via `round_gid.z`
+    // (`splice_round_batched_reduce_base_table`'s own doc), so round 0's own
+    // output slot must be THIS group's own buffer at offset `0`, never a
+    // caller placement or a bare `bound_output_len(bound)`-sized allocation
+    // sized for round 0 alone. `ensure_round_group_resolved` also OVERWRITES
+    // `device_buffers[round_routes[0]]` so `bind_buffers`' own `Binding::
+    // Indices` lookup for this op binds the group's contiguous route buffer
+    // (offset `0`) instead of round 0's own individually-allocated one --
+    // the spliced kernel's `gather_idx{slot}` parameter must be that
+    // contiguous buffer's base for `round_base.route_base` to address into
+    // it correctly.
+    #[cfg(feature = "metal-moe-mul-mat-id")]
+    let round_group: Option<ResolvedRoundGroup> =
+        if matches!(bound.kind, BoundOpKind::RoundBatchedReduce { .. }) {
+            let group = ensure_round_group_resolved(device, bound, device_buffers)?;
+            if let BoundOpKind::RoundBatchedReduce { round_routes, .. } = &bound.kind {
+                device_buffers.insert(round_routes[0], (group.route_buffer.clone(), 0));
+            }
+            Some(group)
+        } else {
+            None
+        };
+    #[cfg(not(feature = "metal-moe-mul-mat-id"))]
+    let round_group: Option<()> = None;
+    let (output, output_offset) = match &round_group {
+        #[cfg(feature = "metal-moe-mul-mat-id")]
+        Some(group) => (group.output_buffer.clone(), 0),
+        _ => match placement {
+            Some((buffer, offset)) => (buffer.clone(), offset),
+            None => (
+                allocate_buffer(device, bound_output_len(bound), bound.dtype)?,
+                0,
+            ),
+        },
     };
     // `Some` only from `execute_plan_with_placements` (a `Plan`-owned,
     // call-to-call-reused buffer via `attention_scratch_buffer`). Every
@@ -981,6 +1011,33 @@ pub(super) fn encode_op(
                 tracker.record(&[], Some(Retained::as_ptr(&extra_buffer)));
             }
             device_buffers.insert(*extra_node, (extra_buffer, extra_offset));
+        }
+    }
+    // `splice_round_batched_reduce_base_table`'s own `round_table [[buffer(N)]]`
+    // parameter, bound OUTSIDE `bindings` at the exact slot the splice's own
+    // MSL text names (`kernel.bindings.len()` at splice time, i.e.
+    // `bindings.len()` here since splicing never mutates that `Vec`) -- the
+    // same "one binding with no `NodeId` of its own" shape
+    // `splice_horizontal_merge_base_table`'s own `base_table` already uses.
+    // `round_outputs[1..]` are registered into `device_buffers` at their own
+    // `(output_buffer, round * output_member_bytes)` slot, mirroring
+    // `MoeTopK`'s own extra-output arm just above, so a later op reading a
+    // non-leader round's own output finds the right buffer/offset.
+    #[cfg(feature = "metal-moe-mul-mat-id")]
+    if let (Some(group), BoundOpKind::RoundBatchedReduce { round_outputs, .. }) =
+        (&round_group, &bound.kind)
+    {
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(&group.round_table), 0, bindings.len());
+        }
+        if let Some(tracker) = hazard.as_deref_mut() {
+            tracker.record(&[], Some(Retained::as_ptr(&group.output_buffer)));
+        }
+        for (round, round_node) in round_outputs.iter().enumerate().skip(1) {
+            device_buffers.insert(
+                *round_node,
+                (group.output_buffer.clone(), round * group.output_member_bytes),
+            );
         }
     }
     dispatch(encoder, &pipeline, grid);

@@ -638,6 +638,158 @@ mod horizontal_merge_base_table_splice_tests {
     }
 }
 
+/// A `RoundBatchedReduce` fixture: `gathered_matmul_op`'s own gathered
+/// reduce, hand-wrapped into a `round_count`-round fold the way
+/// `bind::apply_moe_round_group_fusion` would have collapsed it. A real
+/// round-batched fold names `round_count` DISTINCT sibling route nodes in
+/// `round_routes` -- this fixture reuses one `NodeId` for every round
+/// since [`splice_round_batched_reduce_base_table`] only renders TEXT from
+/// the gather SLOT number, never from which concrete `NodeId` each round
+/// names.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+fn round_batched_matmul_op(round_count: u32) -> BoundOp {
+    let BoundOp {
+        node,
+        dtype,
+        extents,
+        kind,
+    } = gathered_matmul_op(4, 8, 16, 256);
+    let BoundOpKind::Reduce {
+        element_body,
+        reduce_op,
+        init,
+        keep,
+        operands,
+        output_axes,
+        out_layout,
+        out_scatter,
+        epilogue_body,
+        epilogue_operands,
+        epilogue_broadcast_axes,
+    } = kind
+    else {
+        unreachable!("gathered_matmul_op always binds to a Keep::Reduce fold")
+    };
+    let route_node = operands
+        .iter()
+        .find_map(|(_, _, lookup)| lookup.as_ref().map(|lookup| lookup.indices))
+        .expect("gathered_matmul_op's own product operand gathers a route");
+    BoundOp {
+        node,
+        dtype,
+        extents,
+        kind: BoundOpKind::RoundBatchedReduce {
+            element_body,
+            reduce_op,
+            init,
+            keep,
+            operands,
+            output_axes,
+            out_layout,
+            out_scatter,
+            epilogue_body,
+            epilogue_operands,
+            epilogue_broadcast_axes,
+            round_count,
+            round_routes: vec![route_node; round_count as usize],
+            round_outputs: vec![node; round_count as usize],
+        },
+    }
+}
+
+/// Mirrors `horizontal_merge_base_table_splice_tests` (gate (1) of its own
+/// doc): the round-batched kernel's text must differ from round 0's own
+/// unspliced kernel ONLY by the `RoundBase` preamble
+/// ([`splice_round_batched_reduce_base_table`]'s own doc), and it must
+/// slice ONLY the gathered route and the output -- the shared weight/
+/// activation operands must remain untouched, never renamed.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+mod round_batched_reduce_base_table_splice_tests {
+    use alloc::collections::BTreeMap;
+
+    use proxima_tensor::NumericPolicy;
+
+    use super::super::{
+        Codec, EmitError, emit, round_zero_reduce_bound, splice_round_batched_reduce_base_table,
+    };
+    use super::round_batched_matmul_op;
+
+    const STRUCT_DECL: &str = "struct RoundBase { ulong route_base; ulong output_base; };\n";
+
+    #[test]
+    fn round_batched_kernel_text_differs_from_round_zero_only_by_the_round_base_preamble()
+    -> Result<(), EmitError> {
+        let round_batched = round_batched_matmul_op(4);
+        let round_zero = round_zero_reduce_bound(&round_batched);
+        let weight_node = round_zero.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, Codec::Q4K);
+
+        let unspliced = emit(&round_zero, &q4k, NumericPolicy::default()).expect("round 0 emits");
+        let mut spliced = unspliced.clone();
+        splice_round_batched_reduce_base_table(&mut spliced, &round_batched)?;
+
+        assert!(
+            spliced.source.contains(STRUCT_DECL),
+            "spliced kernel must declare RoundBase:\n{}",
+            spliced.source
+        );
+        assert!(
+            spliced.source.contains("round_table[round_gid.z]"),
+            "spliced kernel must index the round table by the z grid coordinate:\n{}",
+            spliced.source
+        );
+        assert!(
+            !spliced.source.contains("uint gid [[thread_position_in_grid]]"),
+            "the spliced kernel must not keep the scalar gid parameter:\n{}",
+            spliced.source
+        );
+        assert!(
+            spliced
+                .source
+                .contains("uint3 round_gid [[thread_position_in_grid]]"),
+            "the spliced kernel must declare the widened vector gid parameter:\n{}",
+            spliced.source
+        );
+        // the shared weight/activation operands are gathered's OWN `in0`
+        // (packed Q4K weight) and the plain `in1` activation -- neither may
+        // be renamed: only the gathered route (`gather_idx0`) and `out`
+        // move per round.
+        assert!(
+            spliced.source.contains("in0"),
+            "the shared packed weight operand must remain untouched:\n{}",
+            spliced.source
+        );
+        assert!(
+            spliced.source.contains("in1"),
+            "the shared activation operand must remain untouched:\n{}",
+            spliced.source
+        );
+
+        let round_table_index = spliced.bindings.len();
+        let vector_gid = "uint3 round_gid [[thread_position_in_grid]]";
+        let scalar_gid = "uint gid [[thread_position_in_grid]]";
+        let extra_params = format!(
+            ",\n    device const RoundBase* round_table [[buffer({round_table_index})]]"
+        );
+        let preamble = "    uint gid = round_gid.x;\n    RoundBase round_base = round_table[round_gid.z];\n    device const float* sliced_route = (device const float*)((device const uchar*)gather_idx0 + round_base.route_base);\n    device float* sliced_out = (device float*)((device uchar*)out + round_base.output_base);\n";
+
+        let mut restored = spliced.source.replacen(STRUCT_DECL, "", 1);
+        restored = restored.replacen(&extra_params, "", 1);
+        restored = restored.replacen(preamble, "", 1);
+        restored = restored.replacen(vector_gid, scalar_gid, 1);
+        restored = restored.replace("sliced_route", "gather_idx0");
+        restored = restored.replace("sliced_out", "out");
+
+        assert_eq!(
+            restored, unspliced.source,
+            "reversing the splice's known insertions and renames must exactly recover round \
+             0's own unspliced kernel text -- any other diff is an UNDOCUMENTED change to the body"
+        );
+        Ok(())
+    }
+}
+
 /// `Q5_K` sibling of the test above: the same Add-reduce-over-plain-
 /// product shape must select `q5k_pair_dot` (`Codec::supports_pair_dot`,
 /// a structural fact of `Q5_K`'s block layout, not a cargo feature)
