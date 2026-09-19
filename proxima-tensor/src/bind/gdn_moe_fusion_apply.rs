@@ -1344,25 +1344,58 @@ pub(super) fn moe_round_groups(program: &[Op]) -> Vec<MoeRoundGroup> {
         .collect()
 }
 
+/// `true` only when `group`'s own k round-sibling `route`/output positions
+/// already sit at one call-invariant, per-round-uniform element stride, so a
+/// single z-addressed read/write can reach every round through one more
+/// stride layered on top of round 0's own [`Layout`] -- the precondition
+/// [`apply_moe_round_group_fusion`]'s own doc names before it may re-kind a
+/// group into [`BoundOpKind::RoundBatchedReduce`].
+///
+/// Neither backend's buffer table places two different [`NodeId`]s at a
+/// call-invariant relative offset today: the CPU arena
+/// (`crate::cpu::arena::build_static_arena_with_constants`'s own
+/// `buffers: Vec<Option<Vec<f32>>>`) heap-allocates one independent `Vec`
+/// per node, and the Metal backend (`omega::metal`'s own
+/// `device_buffers: BTreeMap<NodeId, DeviceBuffer>`) device-allocates one
+/// independent buffer per node -- only `metal-horizontal-merge`'s own
+/// `ensure_merged_group_resolved` (`omega::metal::device_buffers_arena_plan`)
+/// allocates one shared, group-sized buffer with a controlled per-member
+/// offset, and that machinery is not wired for a [`MoeRoundGroup`]. Bind
+/// time itself runs BEFORE either buffer table exists, so it has no
+/// placement plan to consult either way. This always declines today --
+/// `false` unconditionally -- until an arena-side eager-placement pass
+/// gives a round group's `route`/output nodes that shared, strided
+/// allocation; this function is the seam a future placement plan reports
+/// through, not a computation over data bind time can see yet.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+fn moe_round_group_is_contiguous(_group: &MoeRoundGroup) -> bool {
+    false
+}
+
 /// Runs [`moe_round_groups`] and rewrites `built` so each group's own k
 /// round-sibling `BoundOp`s collapse into ONE, round 0's own `BoundOp`
 /// re-kinded from [`BoundOpKind::Reduce`] to
 /// [`BoundOpKind::RoundBatchedReduce`] with `round_count: k` -- `omega`'s own
 /// `GridSpec::depth` reads that field already (this landing's other half);
 /// rounds `1..k` are dropped from the rewritten program the same way
-/// [`apply_moe_topk_fusion`] drops its own absorbed nodes.
+/// [`apply_moe_topk_fusion`] drops its own absorbed nodes -- but ONLY for a
+/// group [`moe_round_group_is_contiguous`] admits. A group it declines is
+/// left with its k plain `Reduce`s untouched, so this rewrite is a no-op
+/// for every group until that predicate can say yes.
 ///
 /// This is the BIND-TIME half of the design only: round 0's own resolved
 /// operands (its `route`/`x`/`stack` [`Layout`]s) are carried forward
 /// UNCHANGED, which reproduces round 0's own single-route read for every
 /// round once a renderer walks `round_count` -- correct only once the k
 /// route/output positions are pre-placed contiguously so a z-addressed read
-/// can reach every round through one more stride. That arena-side
+/// can reach every round through one more stride, which is exactly
+/// [`moe_round_group_is_contiguous`]'s own admission gate. That arena-side
 /// eager-placement change is this landing's own named residual (`omega`'s
-/// Metal renderer declines a [`BoundOpKind::RoundBatchedReduce`] fold with
-/// `EmitError::EpilogueNotSupported` rather than emit a kernel that reads
-/// round 0 `k` times); this function's own job is the graph-shape half —
-/// proving `built` collapses from k `BoundOp`s to 1 per round-sibling group.
+/// Metal renderer would otherwise decline a [`BoundOpKind::RoundBatchedReduce`]
+/// fold with `EmitError::EpilogueNotSupported` rather than emit a kernel that
+/// reads round 0 `k` times, if this predicate ever let one reach it ungated);
+/// this function's own job is the graph-shape half — proving `built`
+/// collapses from k `BoundOp`s to 1 per ADMITTED round-sibling group.
 #[cfg(feature = "metal-moe-mul-mat-id")]
 pub(super) fn apply_moe_round_group_fusion(
     built: Vec<BoundOp>,
@@ -1375,6 +1408,9 @@ pub(super) fn apply_moe_round_group_fusion(
     let mut round_count_by_node: BTreeMap<NodeId, u32> = BTreeMap::new();
     let mut drop: BTreeSet<NodeId> = BTreeSet::new();
     for group in &groups {
+        if !moe_round_group_is_contiguous(group) {
+            continue;
+        }
         let Some((&first, rest)) = group.reduces.split_first() else {
             continue;
         };
