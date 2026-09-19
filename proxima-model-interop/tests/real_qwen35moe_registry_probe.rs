@@ -203,6 +203,9 @@ async fn real_qwen35moe_width_13_plan_names_node_6540() {
             match &reader.kind {
                 proxima_tensor::bind::BoundOpKind::Elementwise { .. } => "Elementwise",
                 proxima_tensor::bind::BoundOpKind::Reduce { .. } => "Reduce",
+                proxima_tensor::bind::BoundOpKind::RoundBatchedReduce { .. } => {
+                    "RoundBatchedReduce"
+                }
                 proxima_tensor::bind::BoundOpKind::CachedAttention { .. } => "CachedAttention",
                 proxima_tensor::bind::BoundOpKind::GatedDeltaNet { .. } => "GatedDeltaNet",
                 proxima_tensor::bind::BoundOpKind::MoeTopK { .. } => "MoeTopK",

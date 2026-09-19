@@ -198,6 +198,14 @@ pub(super) fn run_node_into_with_gdn_state<B: Deref<Target = [f32]> + Sync>(
         }
         BoundOpKind::Iota => run_iota(output),
         BoundOpKind::Constant { value } => run_constant(*value, output),
+        // no CPU renderer for a round-merged fold yet -- the same decline
+        // `omega::msl::emit_and_classify::emit_inner` makes for Metal
+        // (`EmitError::EpilogueNotSupported`); erroring here is the
+        // deliberate default, never a silent round-0-only read.
+        BoundOpKind::RoundBatchedReduce { .. } => Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "round-batched reduce has no CPU interpreter yet",
+        }),
     };
     result?;
     if gdn_debug_q_reduce {

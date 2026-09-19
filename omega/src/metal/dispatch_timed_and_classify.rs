@@ -1293,7 +1293,8 @@ pub(super) fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -
         | BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
         | BoundOpKind::GatedDeltaNet { .. }
-        | BoundOpKind::MoeTopK { .. } => bound.kind.name(),
+        | BoundOpKind::MoeTopK { .. }
+        | BoundOpKind::RoundBatchedReduce { .. } => bound.kind.name(),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => bound.kind.name(),

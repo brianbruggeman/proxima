@@ -1680,7 +1680,8 @@ fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
         let operands = match &mut bound.kind {
             BoundOpKind::CachedAttention { operands, .. }
             | BoundOpKind::Elementwise { operands, .. }
-            | BoundOpKind::Reduce { operands, .. } => operands,
+            | BoundOpKind::Reduce { operands, .. }
+            | BoundOpKind::RoundBatchedReduce { operands, .. } => operands,
             BoundOpKind::Iota
             | BoundOpKind::Constant { .. }
             | BoundOpKind::GatedDeltaNet { .. }

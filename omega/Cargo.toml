@@ -396,6 +396,17 @@ metal-q4k-ggml-port = ["metal"]
 # positions never share a slot, so the arena cannot back base_table's
 # output_base -- only an explicit `output_placements` buffer can).
 metal-horizontal-merge = ["metal"]
+# One `BoundOp` per (MoeSite, projection) instead of k: `proxima-tensor`'s
+# own `metal-moe-mul-mat-id` admission collapses the k round-sibling
+# gate/up/down `Reduce` nodes into one `BoundOp` carrying `round_count:
+# Some(k)`; this crate reads `round_count` into `GridSpec.depth` (dispatch
+# grid z-extent) and folds `thread_position_in_grid.z` into the existing
+# rank-generic gather-stride addressing loop (`push_gather_fetch`) as one
+# more iteration axis -- no new elementwise ops, no new cooperative-reduce
+# dispatch, no change to the Op-graph shape `metal-horizontal-merge`'s own
+# `GroupedGateUp` regression (docs/discipline.md ROW 543-545) came from.
+# Default-off: no default-path caller.
+metal-moe-mul-mat-id = ["metal", "proxima-tensor/metal-moe-mul-mat-id"]
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }

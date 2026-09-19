@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "std")]
+use std::env;
 
 pub fn bind(
     program: &[Op],
@@ -75,7 +77,7 @@ pub fn bind_with_fusion(
     admit(numeric_policy, NumericRewrite::ChainFusion)?;
     #[cfg(feature = "std")]
     let fuse_cached_attention = fuse_cached_attention
-        && std::env::var_os("PROXIMA_DISABLE_CACHED_ATTENTION_FUSION").is_none();
+        && env::var_os("PROXIMA_DISABLE_CACHED_ATTENTION_FUSION").is_none();
     let built = bind_cached_attention_fusion(
         program,
         shapes,
@@ -95,7 +97,7 @@ pub fn bind_with_fusion(
     #[cfg(feature = "gated-delta-net-fusion")]
     #[cfg(feature = "std")]
     let gated_delta_net_fusion_disabled =
-        std::env::var_os("PROXIMA_DISABLE_GATED_DELTA_NET_FUSION").is_some();
+        env::var_os("PROXIMA_DISABLE_GATED_DELTA_NET_FUSION").is_some();
     #[cfg(feature = "gated-delta-net-fusion")]
     #[cfg(not(feature = "std"))]
     let gated_delta_net_fusion_disabled = false;
@@ -114,7 +116,7 @@ pub fn bind_with_fusion(
     };
     #[cfg(feature = "moe-topk-fusion")]
     #[cfg(feature = "std")]
-    let moe_topk_fusion_disabled = std::env::var_os("PROXIMA_DISABLE_MOE_TOPK_FUSION").is_some();
+    let moe_topk_fusion_disabled = env::var_os("PROXIMA_DISABLE_MOE_TOPK_FUSION").is_some();
     #[cfg(feature = "moe-topk-fusion")]
     #[cfg(not(feature = "std"))]
     let moe_topk_fusion_disabled = false;
@@ -124,11 +126,24 @@ pub fn bind_with_fusion(
     } else {
         apply_moe_topk_fusion(built, program, shapes, outputs)?
     };
+    #[cfg(feature = "metal-moe-mul-mat-id")]
+    #[cfg(feature = "std")]
+    let moe_round_group_fusion_disabled =
+        env::var_os("PROXIMA_DISABLE_MOE_ROUND_GROUP_FUSION").is_some();
+    #[cfg(feature = "metal-moe-mul-mat-id")]
+    #[cfg(not(feature = "std"))]
+    let moe_round_group_fusion_disabled = false;
+    #[cfg(feature = "metal-moe-mul-mat-id")]
+    let built = if moe_round_group_fusion_disabled {
+        built
+    } else {
+        apply_moe_round_group_fusion(built, program)?
+    };
     #[cfg(feature = "reduce-epilogue-fusion")]
     {
         admit(numeric_policy, NumericRewrite::ReduceEpilogueFusion)?;
         #[cfg(feature = "std")]
-        if std::env::var_os("PROXIMA_DISABLE_REDUCE_EPILOGUE_FUSION").is_some() {
+        if env::var_os("PROXIMA_DISABLE_REDUCE_EPILOGUE_FUSION").is_some() {
             return Ok(built);
         }
         let epilogued = reduce_epilogue_fusion(built, outputs, numeric_policy)?;
@@ -1228,6 +1243,181 @@ pub(super) fn apply_gated_delta_net_fusion(
         } else if !absorbed.contains(&bound.node) {
             rewritten.push(bound);
         }
+    }
+    Ok(rewritten)
+}
+
+/// `true` when `node` is one round's own [`crate::spec::gathered_expert_product`]
+/// output reduced over the contraction axis -- [`crate::spec::append_moe_ffn`]'s
+/// own `PerRoute` gate/up projection shape (`reduce(.., ScalarOp::Add,
+/// ReduceInit::Zero, gathered_expert_product(stack, route, x), ..)`,
+/// `spec/mistral_layer_moe.rs`'s own `append_moe_ffn` body) -- returning the
+/// `(stack, route, x)` triple every round shares everything but `route`. The
+/// down projection (`append_moe_round_output`'s own weighted-sum reduce)
+/// shares this exact shape too, so this matcher serves all three
+/// projections a `MoeSite` builds, keyed apart from each other by their own
+/// distinct `stack` node.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+pub(super) fn moe_round_reduce_operand(program: &[Op], node: NodeId) -> Option<(NodeId, NodeId, NodeId)> {
+    let Some(Op::Reduce(reduce)) = program.get(node.0 as usize) else {
+        return None;
+    };
+    if reduce.body != ScalarOp::Add || reduce.init != ReduceInit::Zero || reduce.keep != Keep::Reduce {
+        return None;
+    }
+    let Some(Op::Elementwise {
+        body: ScalarOp::Multiply,
+        operands,
+        ..
+    }) = program.get(reduce.operand.0 as usize)
+    else {
+        return None;
+    };
+    let [(stack, stack_map), (x, x_map)] = operands.as_slice() else {
+        return None;
+    };
+    let IndexMap::Computed {
+        indices: route,
+        gathered_dim: 0,
+        ..
+    } = stack_map
+    else {
+        return None;
+    };
+    if !matches!(x_map, IndexMap::Affine(_)) {
+        return None;
+    }
+    Some((*stack, *route, *x))
+}
+
+/// One (site, projection)'s own round-sibling group: every round-`r`
+/// `Reduce` [`moe_round_reduce_operand`] matched against the SAME `stack`
+/// (and therefore the same `x`), in program order -- `PerRoute`'s own round
+/// order, matching [`crate::spec::MoeSite::selected`]'s own convention.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+pub(super) struct MoeRoundGroup {
+    pub(super) x: NodeId,
+    pub(super) routes: Vec<NodeId>,
+    pub(super) reduces: Vec<NodeId>,
+}
+
+/// Scans `program` for every `MoeRoundGroup` of two or more round-sibling
+/// `Reduce`s sharing one `stack` -- the manifest-driven candidate set this
+/// crate's own design note (`docs/discipline.md`'s MoE round-group entry)
+/// scopes admission to, in place of the unbounded structural search
+/// `metal-horizontal-merge`'s own `group_mergeable_positions` runs
+/// (ROW 571's own 0%-admission finding). Order within a group follows
+/// `program` position, which is `PerRoute`'s own emission order (round 0
+/// first) by construction -- `append_moe_ffn` never reorders a round's own
+/// three reduces relative to an earlier round's.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+pub(super) fn moe_round_groups(program: &[Op]) -> Vec<MoeRoundGroup> {
+    let mut by_stack: BTreeMap<NodeId, MoeRoundGroup> = BTreeMap::new();
+    let mut order: Vec<NodeId> = Vec::new();
+    for position in 0..program.len() {
+        let node = NodeId(position as u32);
+        let Some((stack, route, x)) = moe_round_reduce_operand(program, node) else {
+            continue;
+        };
+        let group = by_stack.entry(stack).or_insert_with(|| {
+            order.push(stack);
+            MoeRoundGroup {
+                x,
+                routes: Vec::new(),
+                reduces: Vec::new(),
+            }
+        });
+        if group.x != x {
+            // A different activation feeding the same weight stack is not a
+            // shape this matcher recognizes -- decline the WHOLE group
+            // rather than guess which round is wrong, by leaving it with
+            // fewer than two rounds (filtered out below).
+            continue;
+        }
+        group.routes.push(route);
+        group.reduces.push(node);
+    }
+    order
+        .into_iter()
+        .filter_map(|stack| by_stack.remove(&stack))
+        .filter(|group| group.routes.len() >= 2)
+        .collect()
+}
+
+/// Runs [`moe_round_groups`] and rewrites `built` so each group's own k
+/// round-sibling `BoundOp`s collapse into ONE, round 0's own `BoundOp`
+/// re-kinded from [`BoundOpKind::Reduce`] to
+/// [`BoundOpKind::RoundBatchedReduce`] with `round_count: k` -- `omega`'s own
+/// `GridSpec::depth` reads that field already (this landing's other half);
+/// rounds `1..k` are dropped from the rewritten program the same way
+/// [`apply_moe_topk_fusion`] drops its own absorbed nodes.
+///
+/// This is the BIND-TIME half of the design only: round 0's own resolved
+/// operands (its `route`/`x`/`stack` [`Layout`]s) are carried forward
+/// UNCHANGED, which reproduces round 0's own single-route read for every
+/// round once a renderer walks `round_count` -- correct only once the k
+/// route/output positions are pre-placed contiguously so a z-addressed read
+/// can reach every round through one more stride. That arena-side
+/// eager-placement change is this landing's own named residual (`omega`'s
+/// Metal renderer declines a [`BoundOpKind::RoundBatchedReduce`] fold with
+/// `EmitError::EpilogueNotSupported` rather than emit a kernel that reads
+/// round 0 `k` times); this function's own job is the graph-shape half —
+/// proving `built` collapses from k `BoundOp`s to 1 per round-sibling group.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+pub(super) fn apply_moe_round_group_fusion(
+    built: Vec<BoundOp>,
+    program: &[Op],
+) -> Result<Vec<BoundOp>, TensorError> {
+    let groups = moe_round_groups(program);
+    if groups.is_empty() {
+        return Ok(built);
+    }
+    let mut round_count_by_node: BTreeMap<NodeId, u32> = BTreeMap::new();
+    let mut drop: BTreeSet<NodeId> = BTreeSet::new();
+    for group in &groups {
+        let Some((&first, rest)) = group.reduces.split_first() else {
+            continue;
+        };
+        round_count_by_node.insert(first, group.reduces.len() as u32);
+        drop.extend(rest.iter().copied());
+    }
+    let mut rewritten = Vec::with_capacity(built.len());
+    for mut bound in built {
+        if drop.contains(&bound.node) {
+            continue;
+        }
+        if let Some(&round_count) = round_count_by_node.get(&bound.node) {
+            if let BoundOpKind::Reduce {
+                element_body,
+                reduce_op,
+                init,
+                keep,
+                operands,
+                output_axes,
+                out_layout,
+                out_scatter,
+                epilogue_body,
+                epilogue_operands,
+                epilogue_broadcast_axes,
+            } = bound.kind
+            {
+                bound.kind = BoundOpKind::RoundBatchedReduce {
+                    element_body,
+                    reduce_op,
+                    init,
+                    keep,
+                    operands,
+                    output_axes,
+                    out_layout,
+                    out_scatter,
+                    epilogue_body,
+                    epilogue_operands,
+                    epilogue_broadcast_axes,
+                    round_count,
+                };
+            }
+        }
+        rewritten.push(bound);
     }
     Ok(rewritten)
 }

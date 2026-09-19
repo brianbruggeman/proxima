@@ -478,6 +478,27 @@ pub(crate) fn kernel_identity(
                 "{prefix}_{kind}_r{rank}_ax{axes}_n{operand_count}_{body}_{reduce_body}_{init}{epilogue}"
             )
         }
+        BoundOpKind::RoundBatchedReduce {
+            reduce_op,
+            init,
+            keep,
+            output_axes,
+            round_count,
+            ..
+        } => {
+            let body = body_token(resolved.element_body());
+            let kind = keep_token(*keep);
+            let reduce_body = op_token(*reduce_op);
+            let init = init_token(*init);
+            let axes = output_axes
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join("_");
+            format!(
+                "{prefix}_{kind}_r{rank}_ax{axes}_n{operand_count}_{body}_{reduce_body}_{init}_k{round_count}"
+            )
+        }
         BoundOpKind::Iota => format!("{prefix}_iota_r{rank}"),
         // the literal is baked into the source, so it has to be part of the
         // identity too -- otherwise two constants of the same rank would

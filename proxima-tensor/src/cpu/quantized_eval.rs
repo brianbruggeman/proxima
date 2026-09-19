@@ -221,6 +221,9 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
             BoundOpKind::Elementwise { .. } => computed.operands(),
             BoundOpKind::Reduce {
                 epilogue_operands, ..
+            }
+            | BoundOpKind::RoundBatchedReduce {
+                epilogue_operands, ..
             } => epilogue_operands,
             BoundOpKind::CachedAttention { .. }
             | BoundOpKind::GatedDeltaNet { .. }

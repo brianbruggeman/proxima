@@ -34,6 +34,17 @@ pub(super) fn emit_inner(
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(resolved, &entry, &quantized),
+        // `moe_round_group_candidates`'s own round-merged fold -- the
+        // z-addressed gather-stride extension to `push_gather_fetch` this
+        // renderer needs to actually WALK the extra round axis is the named
+        // residual of this landing (docs/discipline.md's own MoE round-group
+        // note), so this declines rather than emit a kernel that ignores the
+        // extra axis and reads round 0 `k` times.
+        BoundOpKind::RoundBatchedReduce { .. } => Err(EmitError::EpilogueNotSupported {
+            node: resolved.node,
+            reason: "round-merged reduce (BoundOpKind::RoundBatchedReduce) has no \
+                     z-addressed Metal renderer yet",
+        }),
         BoundOpKind::Iota => render_iota(resolved, &entry),
         BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
         BoundOpKind::GatedDeltaNet { .. } => render_gated_delta_net(resolved, &entry),
@@ -61,9 +72,28 @@ pub(super) fn emit_inner(
         grid: GridSpec {
             threads: grid_threads(resolved, &quantized, numeric_policy, expert_source_mode)?,
             threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
-            depth: 1,
+            depth: reduce_round_count(resolved).unwrap_or(1),
         },
     })
+}
+
+/// [`bind::BoundOpKind::RoundBatchedReduce::round_count`], widened to `u64`
+/// for [`GridSpec::depth`] -- `None` for every OTHER `BoundOpKind`, including
+/// a plain (non-round-merged) `Reduce`, so `depth` stays `1` (today's exact
+/// `MTLSize { depth: 1, .. }`) on every path this crate's default build
+/// takes. `metal-moe-mul-mat-id`'s own `moe_round_group_candidates` is the
+/// only writer of a `RoundBatchedReduce`.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+fn reduce_round_count(resolved: &BoundOp) -> Option<u64> {
+    match &resolved.kind {
+        BoundOpKind::RoundBatchedReduce { round_count, .. } => Some(u64::from(*round_count)),
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "metal-moe-mul-mat-id"))]
+fn reduce_round_count(_resolved: &BoundOp) -> Option<u64> {
+    None
 }
 
 /// Emits the ordinary kernel ABI plus the two buffers required by a HOBBIT
