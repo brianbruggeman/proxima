@@ -81,6 +81,45 @@ mean(){ grep -oE 'mean[^0-9]*[0-9.]+' "$1"|grep -oE '[0-9.]+'|head -1; }
 | AC5 | R4 (gemma) | `G=$($OLL show --modelfile batiai/gemma4-26b:latest|grep -oE '/[^ ]*blobs/sha256-[a-f0-9]+'|head -1); if [ -z "$G" ]; then echo GEMMA_BLOB_MISSING; else reclaim; PROXIMA_METAL_OP_PROFILE_STEP=1 /tmp/ggf.allon "$G" "$Q" 32 gpu >/tmp/gon.txt 2>&1; reclaim; /tmp/ggf.alloff "$G" "$Q" 32 gpu >/tmp/goff.txt 2>&1; LT=$($OLL run batiai/gemma4-26b:latest --verbose "$Q" 2>&1|grep -oE 'eval rate:[^0-9]*[0-9.]+'|grep -oE '[0-9.]+'|head -1); echo gon=$(mean /tmp/gon.txt) gllama_ms=$(awk "BEGIN{print 1000/$LT}"); diff <(grep generated_text /tmp/gon.txt) <(grep generated_text /tmp/goff.txt)|grep -c '^[<>]'; fi` | non-empty `$G` (else GEMMA_BLOB_MISSING); printed `gon` ≤ 1.1 × `gllama_ms`; `0` differing lines |
 | AC6 | R5 | `for f in metal-moe-mul-mat-id metal-gdn-attention-fusion metal-elementwise-stage-fusion; do awk '/^\[features\]/{x=1} x&&/^default *=/{print}' omega/Cargo.toml | grep -c "$f"; done; reclaim; /tmp/ggf.alloff "$BLOB" "$Q" 16 gpu 2>&1 | grep -c Paris` | `0` `0` `0` (no flag in default); default France Paris `1` |
 
+## regime lens — the tooling is a probe; redirect on what it returns
+
+Each component is not only a fix attempt — it is a PROBE that returns which
+regime its bucket is in, measured by the same harness. The batched-dispatch /
+fusion capability is the instrument; the redirect follows the regime, not a fixed
+plan. So a "we got worse" result is not a loss — it localizes the real term and
+saves the tooling from being spent where it cannot help.
+
+Cheap discriminator: achieved GB/s vs the 381 GB/s ceiling, and µs-per-dispatch.
+- Far below ceiling / tiny µs-per-dispatch → LAUNCH- or BARRIER-bound → the
+  collapse/fusion tool is the lever.
+- Near ceiling → BANDWIDTH-bound → the term is BYTES (quant / sparsity / layout),
+  NOT dispatch count — do not spend the collapse tool there.
+
+| bucket | ops/tok | ~µs/dispatch | regime (predicted) | tool |
+|---|---|---|---|---|
+| reduce-packed-row-blocked | 1211 | ~18 (33 GB/s = 8.6% util, measured ROW 542) | launch-bound | batched expert product (RoundBatchedReduce — measuring now) |
+| reduce-cooperative | 551 | ~15 (est: gpu_exec/count) | launch-bound | fused GDN + attention |
+| elementwise | 503 | ~24 (est) | launch-bound | stage fusion |
+
+Caveat: only packed-row's GB/s is directly measured (ROW 542); the cooperative/
+elementwise µs are gpu_exec÷count estimates, and ROW 542's split predates the
+current top-k counts — re-probe each before building. All three PREDICT
+launch-bound (tiny per-dispatch, far under ceiling), so the collapse/fusion
+tool should apply to all three.
+
+The in-flight packed-row measurement (route-hoist a3536954) is the first
+CONFIRMATION of the whole thesis: if op_count↓ moves TTNT, the prediction holds
+and the tool generalizes to the other two buckets; if op_count↓ but TTNT is flat
+at 8.6% utilization, the term is the BARRIER chain (~2913 RAW barriers/token
+serialize the ~2700 dispatches), and the tooling redirects to cutting the
+dependency chain (cross-barrier fusion) rather than within-kind batching. Either
+way the measurement de-risks the next three moves.
+
+Reusable regardless of any single number: the RoundBatchedReduce primitive +
+bit-exact CPU/Metal emission (reusable for training / prefill / any MoE model),
+the measurement/reclaim/parity harness (the probe instrument), and the spec+audit
+framework.
+
 ## out of scope
 
 - Prefill / TTFT (the 8,492-dispatch prefill path is a separate campaign).
