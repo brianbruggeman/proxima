@@ -1213,9 +1213,10 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
             // sink is read below, not the allocation itself.
             let mut gdn_state = Vec::new();
             let mut moe_topk_extra = Vec::new();
+            let mut round_extra: Vec<Vec<f32>> = Vec::new();
             {
                 let buffers = self.buffers.borrow();
-                run_node_into_with_gdn_state(
+                run_node_into_with_round_sink(
                     resolved,
                     *buffers,
                     None,
@@ -1225,6 +1226,7 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
                     &mut output,
                     Some(&mut gdn_state),
                     Some(&mut moe_topk_extra),
+                    Some(&mut round_extra),
                 )?;
                 #[cfg(feature = "instrument")]
                 record_bound_op_operand_access(resolved, *buffers);
@@ -1245,6 +1247,11 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
                     .zip(moe_topk_extra.iter().copied())
                 {
                     (*buffers)[extra_node.0 as usize] = Some(B::from(vec![value]));
+                }
+            }
+            if let BoundOpKind::RoundBatchedReduce { round_outputs, .. } = &resolved.kind {
+                for (extra_node, value) in round_outputs.iter().skip(1).zip(round_extra) {
+                    (*buffers)[extra_node.0 as usize] = Some(B::from(value));
                 }
             }
         }
