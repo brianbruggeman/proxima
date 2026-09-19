@@ -1,0 +1,26 @@
+# moe-mul-mat-id -- slices
+
+Each slice: one commit, one behaviour change, one validation command, under ~30 minutes.
+Update the checkbox and the note IN THE SAME COMMIT as the slice.
+
+Validation commands assume the SPEC.md acceptance-criteria setup block is sourced
+(binds `WT`, `BASE`, `BLOB`, `Q`, `reclaim`, `pkops`, `gtext`, `gemma_blob`, and
+builds `/tmp/ggf.off` / `/tmp/ggf.on`).
+
+| # | slice | discharges | validation command | expected | done | note |
+|---|---|---|---|---|---|---|
+| 1 | flag `metal-moe-mul-mat-id` default-off + `round_count` field + admission scaffold; both feature sets compile; default byte-unchanged; no new lib type; confined | AC1, AC2, AC3, AC7, AC8 | `grep -c metal-moe-mul-mat-id proxima-tensor/Cargo.toml omega/Cargo.toml; awk '/^\[features\]/{f=1} f&&/^default *=/{print}' omega/Cargo.toml\|grep -c metal-moe-mul-mat-id; CARGO_TARGET_DIR=$WT/target cargo build --release --example gguf_generate 2>&1\|grep -c 'error\['; CARGO_TARGET_DIR=$WT/target cargo build --release --example gguf_generate --features omega/metal-moe-mul-mat-id 2>&1\|grep -c 'error\['; reclaim; /tmp/ggf.off "$BLOB" "$Q" 16 gpu >/tmp/off16.txt 2>&1; grep -c Paris /tmp/off16.txt; CARGO_TARGET_DIR=$BASE/target cargo build --release --manifest-path $BASE/Cargo.toml --example gguf_generate -q && cp $BASE/target/release/examples/gguf_generate /tmp/ggf.base; reclaim; /tmp/ggf.base "$BLOB" "$Q" 16 gpu >/tmp/base16.txt 2>&1; diff <(gtext /tmp/off16.txt) <(gtext /tmp/base16.txt)\|grep -c '^[<>]'; git -C $WT diff 5ec9c8698 -- proxima-primitives proxima-core proxima-tensor/src\|grep -E '^\+'\|grep -cE 'pub (struct\|enum\|trait) '; git -C $WT diff 5ec9c8698 --name-only\|grep -vcE '^(omega/\|proxima-tensor/)'` | flag ≥1/crate, `0` under default; `0`,`0` build errors; flag-off Paris `1`; `0` differing lines vs clean base (AC3 byte-unchanged); `0` new pub types; `0` files outside omega/proxima-tensor | [~] | scaffold BUILT (wf_fecbb835-f14); flag-off Paris verified (a324ffea); RE-ENCODING field→variant per compliance critical (ab0590177) before landing |
+| 2 | z-addressed MSL gather-stride kernel (widen gid→uint3 in the packed-row body, precedent emit_and_classify.rs:454-466) + arena eager-contiguous placement — make flag-on FUNCTIONAL | AC4 | `reclaim; /tmp/ggf.off "$BLOB" "$Q" 16 gpu >/tmp/off16.txt 2>&1; reclaim; /tmp/ggf.on "$BLOB" "$Q" 16 gpu >/tmp/on16.txt 2>&1; grep -c Paris /tmp/on16.txt; diff <(gtext /tmp/off16.txt) <(gtext /tmp/on16.txt)\|grep -c '^[<>]'` | `1`, `0` | [ ] | the crux; multi-hour; design risk #1 = arena scheduling; body confirmed packed-row-blocked (a3e5a39e) |
+| 3 | qwen op-collapse proof (design gate 5 — dispatch count must actually drop) | AC5 | `reclaim; PROXIMA_METAL_OP_PROFILE_STEP=1 /tmp/ggf.off "$BLOB" "$Q" 32 gpu >/tmp/offp.txt 2>&1; reclaim; PROXIMA_METAL_OP_PROFILE_STEP=1 /tmp/ggf.on "$BLOB" "$Q" 32 gpu >/tmp/onp.txt 2>&1; echo off=$(pkops /tmp/offp.txt) on=$(pkops /tmp/onp.txt)` | `off` in [1000,1300]; `on` ≤ 200 | [ ] | flag green on parity but on≈off = ROW 571 false positive; measures BOTH, not an assumed 1211 |
+| 4 | gemma4 (`batiai/gemma4-26b:latest`) parity + op-collapse (model-generic proof) | AC9, AC10 | `G=$(gemma_blob); if [ -z "$G" ]; then echo GEMMA_BLOB_MISSING; else reclaim; /tmp/ggf.off "$G" "$Q" 16 gpu >/tmp/goff.txt 2>&1; reclaim; /tmp/ggf.on "$G" "$Q" 16 gpu >/tmp/gon.txt 2>&1; grep -c Paris /tmp/gon.txt; diff <(gtext /tmp/goff.txt) <(gtext /tmp/gon.txt)\|grep -c '^[<>]'; reclaim; PROXIMA_METAL_OP_PROFILE_STEP=1 /tmp/ggf.off "$G" "$Q" 32 gpu >/tmp/goffp.txt 2>&1; reclaim; PROXIMA_METAL_OP_PROFILE_STEP=1 /tmp/ggf.on "$G" "$Q" 32 gpu >/tmp/gonp.txt 2>&1; echo goff=$(pkops /tmp/goffp.txt) gon=$(pkops /tmp/gonp.txt); fi` | non-empty `$G` (else only GEMMA_BLOB_MISSING); gemma flag-on Paris `1`; `0` differing lines vs gemma flag-off; `gon` ≤ 0.3 × `goff` | [ ] | tag is batiai/gemma4-26b, NOT gemma4:26b-a4b (ab3cf8278); runs BOTH flag-off and flag-on |
+| 5 | compare-bench qwen+gemma vs llama.cpp, CoV self-computed, no-new-type audit | AC6, AC7 | `for f in off on; do echo -n "$f "; { for i in 1 2 3; do reclaim; PROXIMA_METAL_OP_PROFILE_STEP=1 /tmp/ggf.$f "$BLOB" "$Q" 32 gpu 2>&1\|grep -oE 'mean[^0-9]*[0-9.]+'\|grep -oE '[0-9.]+'\|head -1; done; }\|awk '{s+=$1;ss+=$1*$1;n++} END{m=s/n;printf "mean=%.2f cov=%.1f%%\n",m,100*sqrt(ss/n-m*m)/m}'; done; git -C $WT diff 5ec9c8698 -- proxima-primitives proxima-core proxima-tensor/src\|grep -E '^\+'\|grep -cE 'pub (struct\|enum\|trait) '` | `off mean=/cov=` and `on mean=/cov=` lines (delta = off−on); `0` new library types | [ ] | AC8 confinement is proven in slice 1; recording the delta row in discipline.md is the landing step |
+
+## resume
+
+Last landed slice: 0 (spec on 2nd re-audit; scaffold built in worktree `proxima-wt-moe-fusion`, flag-off verified intact, not yet committed; kernel slice 2 STOPPED — multi-hour codegen, body = packed-row-blocked)
+Next action: re-audit (3rd); if ADMIT, land slice 1 scaffold from the worktree diff onto local main, then run slice 2 as a properly-budgeted kernel campaign (gid→uint3 in the packed-row body + z-stride + arena placement)
+Open question, if any: none — gemma4 tag on this box is `batiai/gemma4-26b:latest` (resolved, ab3cf8278)
+
+## struck
+
+-
