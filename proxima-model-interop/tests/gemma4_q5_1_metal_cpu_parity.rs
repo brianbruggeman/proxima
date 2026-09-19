@@ -23,8 +23,8 @@
 //! kernel generator treats as a packed quantized operand needing an unpack
 //! read -- has NO `Q5_1` arm in its match; its own doc says so explicitly:
 //! "decide-only codecs so far (CPU-only, see `proxima_tensor::cpu`) -- no
-//! `PackedCodec`/unpack-kernel entry exists yet, so these fall out of
-//! `packed_operands` exactly like `Float32`". `msl::PackedCodec` itself
+//! `Codec`/unpack-kernel entry exists yet, so these fall out of
+//! `packed_operands` exactly like `Float32`". `msl::Codec` itself
 //! (`omega/src/msl/kernel_types_identity.rs`) confirms: `Q2K, Q3K, Q4K,
 //! Q5K, Q6K, Q8_0, Q4_0` all have entries; `Q5_1` has none.
 //!
@@ -66,6 +66,7 @@ use std::fs::File;
 use proxima_gguf::parse_complete;
 use proxima_gguf::quant::q5_1::{BLOCK_BYTES, QK5_1, dequantize};
 use proxima_gguf::types::GgmlType;
+use proxima_primitives::Codec;
 use proxima_tensor::map::projection;
 use proxima_tensor::op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
 use proxima_tensor::{DType, IndexMap, QuantizedBlock};
@@ -257,7 +258,7 @@ fn metal_matches_cpu_on_real_q5_1_down_projection_bytes() {
     assert!(
         metal_vs_cpu <= 1e-3,
         "PROVEN (not guessed): metal disagrees with cpu on a Q5_1-quantized weight (real bytes off \
-         gemma4's own blk.0.ffn_down.weight) -- omega::msl::PackedCodec has no Q5_1 unpack-kernel \
+         gemma4's own blk.0.ffn_down.weight) -- omega::msl::Codec has no Q5_1 unpack-kernel \
          entry (kernel_types_identity.rs), so device_buffers_arena_plan.rs's packed_operands_of \
          excludes Q5_1 from the packed-operand set the kernel generator special-cases, while \
          placements_execute_named.rs still uploads Q5_1's raw packed bytes unchanged (the same \

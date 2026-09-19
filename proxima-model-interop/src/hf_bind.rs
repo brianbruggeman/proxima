@@ -37,6 +37,7 @@ use proxima_safetensors::Manifest;
 use proxima_tensor::DType;
 use proxima_tensor::cpu::QuantizedBlock;
 
+use crate::Codec;
 use crate::bind::{
     BoundWeights, ModelArchitecture, aligned_f32_view, dequantize, reinterpret_f32,
     transpose_out_in_to_in_out,

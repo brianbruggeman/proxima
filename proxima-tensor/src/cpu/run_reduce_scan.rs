@@ -769,6 +769,8 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes: _ } => {}
                 QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes: _ } => {}
                 QuantizedBlock::Packed { codec: Codec::Float16, bytes: _ } | QuantizedBlock::Packed { codec: Codec::BFloat16, bytes: _ } => {}
+                // codecs with no dedicated counter simply get no instrumentation
+                QuantizedBlock::Packed { .. } => {}
             }
         }
         output[position * rows..(position + 1) * rows].copy_from_slice(&result);

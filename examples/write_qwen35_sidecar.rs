@@ -7,7 +7,7 @@ use std::io::BufWriter;
 
 use memmap2::Mmap;
 use proxima_gguf::pipe::parse_complete;
-use proxima_model_interop::{ExpertStackSpec, PackedOwnedKind, write_expert_sidecar};
+use proxima_model_interop::{Codec, ExpertStackSpec, write_expert_sidecar};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let model_path = env::args()
@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             expert_count: 256,
             out_dim: 512,
             in_dim: 2048,
-            target_codec: PackedOwnedKind::Q3K,
+            target_codec: Codec::Q3K,
         });
         specifications.push(ExpertStackSpec {
             layer,
@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             expert_count: 256,
             out_dim: 512,
             in_dim: 2048,
-            target_codec: PackedOwnedKind::Q3K,
+            target_codec: Codec::Q3K,
         });
         specifications.push(ExpertStackSpec {
             layer,
@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             expert_count: 256,
             out_dim: 2048,
             in_dim: 512,
-            target_codec: PackedOwnedKind::Q4K,
+            target_codec: Codec::Q4K,
         });
     }
     let maximum_elements = 2048 * 512;
@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &parsed,
         &mapping,
         &specifications,
-        PackedOwnedKind::Q3K,
+        Codec::Q3K,
         &mut scratch,
         &mut output,
         &mut destination,

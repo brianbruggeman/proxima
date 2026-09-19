@@ -44,6 +44,7 @@ use proxima_tensor::spec::{
 };
 use proxima_tokenizer::Vocab;
 
+use crate::Codec;
 use crate::bind::{
     BoundWeights, aligned_f32_view, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as,
     bind_moe_expert_weights, find_tensor, metadata_f32_optional, metadata_str, metadata_u32,

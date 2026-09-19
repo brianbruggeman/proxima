@@ -3776,7 +3776,9 @@ impl<'file> LoadedModel<'file> {
                     named_blocks.push((name.as_str(), *block));
                 }
                 for (name, bytes, kind) in &self.weights.packed_owned {
-                    named_blocks.push((name.as_str(), crate::bind::as_block(*kind, bytes)));
+                    let block = crate::bind::as_block(*kind, bytes)
+                        .ok_or(InteropError::UnsupportedCodec { codec: *kind })?;
+                    named_blocks.push((name.as_str(), block));
                 }
                 named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
                 named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));

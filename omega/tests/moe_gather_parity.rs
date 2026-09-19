@@ -19,6 +19,7 @@
 #![cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use proxima_primitives::Codec;
 use proxima_tensor::instrument::path_totals;
 use proxima_tensor::map::{self, AxisIndex, AxisTerm};
 use proxima_tensor::test_support::Lcg;

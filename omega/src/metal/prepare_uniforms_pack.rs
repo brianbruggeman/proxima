@@ -346,8 +346,8 @@ pub(super) fn operand_tensor_bytes(
     };
     match packed_operands.get(&source) {
         Some(codec) => {
-            elements * crate::msl::codec_block_bytes(codec) as u64
-                / crate::msl::codec_block_elements(codec) as u64
+            elements * crate::msl::codec_block_bytes(*codec) as u64
+                / crate::msl::codec_block_elements(*codec) as u64
         }
         None => elements * gpu_dtype(program, index_nodes, source).size_bytes() as u64,
     }

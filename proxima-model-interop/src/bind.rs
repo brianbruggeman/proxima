@@ -128,7 +128,7 @@ pub fn gguf_tensor_as_f32(
 /// `matmul_q8_0_f32` walks `Codec::Q8_0`'s raw bytes directly (same
 /// per-row contiguous layout the k-quant matmul family assumes), and the GPU
 /// emitters (`omega::msl`/`omega::wgsl`/`omega::cuda`) already carry a
-/// `PackedCodec::Q8_0` arm -- the packed kernel has always supported this
+/// `Codec::Q8_0` arm -- the packed kernel has always supported this
 /// codec, only this bind-time decode arm was missing.
 ///
 /// `F16`/`Bf16` route through the same packed path rather than through
@@ -4865,6 +4865,7 @@ mod real_openchat_file {
 
     use proxima_gguf::GgmlType;
     use proxima_gguf::quant::q4_k;
+    use proxima_primitives::Codec;
     use proxima_primitives::pipe::Pipe;
     use proxima_tensor::DType;
     use proxima_tensor::cpu::{
