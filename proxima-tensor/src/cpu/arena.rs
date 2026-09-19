@@ -761,6 +761,17 @@ pub fn build_static_arena_with_constants(
                 buffers[extra_node.0 as usize] = Some(vec![0.0f32; 1]);
             }
         }
+        // `round_outputs[1..]` (ROW 569's own shape, generalized): the k-1
+        // round-sibling nodes this fusion dropped from `resolved` never
+        // appear as any resolved node's own `.node` either -- size each
+        // one's slot here, same length as `round_outputs[0]`'s own
+        // `node_output_len` (every round shares one output shape).
+        if let BoundOpKind::RoundBatchedReduce { round_outputs, .. } = &computed.kind {
+            let round_len = node_output_len(computed);
+            for extra_node in round_outputs.iter().skip(1) {
+                buffers[extra_node.0 as usize] = Some(vec![0.0f32; round_len]);
+            }
+        }
     }
     let dead = dead_resolved_nodes(&resolved, &effective_outputs);
     let static_nodes = static_resolved_nodes(&resolved, &dead);
@@ -1069,9 +1080,10 @@ pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(),
             // unread for every kind but `MoeTopK`.
             let mut gdn_state = Vec::new();
             let mut moe_topk_extra = Vec::new();
+            let mut round_extra: Vec<Vec<f32>> = Vec::new();
             match arena.packed_width_panels.get(&node) {
                 Some(packed) => run_reduce(computed, &arena.buffers, &mut output, Some(packed))?,
-                None => run_node_into_with_gdn_state(
+                None => run_node_into_with_round_sink(
                     computed,
                     &arena.buffers,
                     None,
@@ -1081,6 +1093,7 @@ pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(),
                     &mut output,
                     Some(&mut gdn_state),
                     Some(&mut moe_topk_extra),
+                    Some(&mut round_extra),
                 )?,
             }
             #[cfg(feature = "epilogue-profile-probe")]
@@ -1116,6 +1129,11 @@ pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(),
                     .zip(moe_topk_extra.iter().copied())
                 {
                     arena.buffers[extra_node.0 as usize] = Some(vec![value]);
+                }
+            }
+            if let BoundOpKind::RoundBatchedReduce { round_outputs, .. } = &computed.kind {
+                for (extra_node, value) in round_outputs.iter().skip(1).zip(round_extra) {
+                    arena.buffers[extra_node.0 as usize] = Some(value);
                 }
             }
         }

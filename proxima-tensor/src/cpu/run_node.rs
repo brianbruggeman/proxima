@@ -89,7 +89,7 @@ pub(super) fn run_node_into<B: Deref<Target = [f32]> + Sync>(
 /// `MoeTopK` node (the typed executors reject both kinds before dispatch).
 ///
 /// `clippy::too_many_arguments`: this mirrors [`run_node_into`]'s own seven,
-/// plus the two seams this function adds -- splitting it further would just
+/// plus the three seams this function adds -- splitting it further would just
 /// relocate the same dispatch one level down.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_node_into_with_gdn_state<B: Deref<Target = [f32]> + Sync>(
@@ -102,6 +102,42 @@ pub(super) fn run_node_into_with_gdn_state<B: Deref<Target = [f32]> + Sync>(
     output: &mut [f32],
     gdn_state_sink: Option<&mut Vec<f32>>,
     moe_topk_extra_sink: Option<&mut Vec<f32>>,
+) -> Result<(), TensorError> {
+    run_node_into_with_round_sink(
+        resolved,
+        buffers,
+        quantized_weights,
+        expert_sources,
+        session,
+        exact_activations,
+        output,
+        gdn_state_sink,
+        moe_topk_extra_sink,
+        None,
+    )
+}
+
+/// [`run_node_into_with_gdn_state`]'s own body, plus the fourth seam
+/// [`BoundOpKind::RoundBatchedReduce`] dispatch needs: `round_sink`, `Some`
+/// only at [`run_resolved_nodes_in_arena`]'s own call site -- the sole caller
+/// that can ever hand this a resolved `RoundBatchedReduce` node (every other
+/// caller reaches [`run_node_into_with_gdn_state`] above, which always passes
+/// `None`, matching that function's own `gdn_state_sink`/`moe_topk_extra_sink`
+/// convention). Kept as a separate function, rather than a fourth parameter on
+/// `run_node_into_with_gdn_state` itself, so that function's own signature --
+/// already threaded through more than a dozen call sites -- never changes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    quantized_weights: Option<&BTreeMap<NodeId, QuantizedBlock>>,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+    session: Option<&MatmulSession<'_>>,
+    exact_activations: bool,
+    output: &mut [f32],
+    gdn_state_sink: Option<&mut Vec<f32>>,
+    moe_topk_extra_sink: Option<&mut Vec<f32>>,
+    round_sink: Option<&mut Vec<Vec<f32>>>,
 ) -> Result<(), TensorError> {
     let gdn_debug_q_reduce = std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
         && output.len() >= 4_096
@@ -198,14 +234,16 @@ pub(super) fn run_node_into_with_gdn_state<B: Deref<Target = [f32]> + Sync>(
         }
         BoundOpKind::Iota => run_iota(output),
         BoundOpKind::Constant { value } => run_constant(*value, output),
-        // no CPU renderer for a round-merged fold yet -- the same decline
-        // `omega::msl::emit_and_classify::emit_inner` makes for Metal
-        // (`EmitError::EpilogueNotSupported`); erroring here is the
-        // deliberate default, never a silent round-0-only read.
-        BoundOpKind::RoundBatchedReduce { .. } => Err(TensorError::NotLowerable {
-            node: resolved.node,
-            reason: "round-batched reduce has no CPU interpreter yet",
-        }),
+        BoundOpKind::RoundBatchedReduce { .. } => run_round_batched_reduce(
+            resolved,
+            buffers,
+            quantized_weights,
+            expert_sources,
+            session,
+            exact_activations,
+            output,
+            round_sink,
+        ),
     };
     result?;
     if gdn_debug_q_reduce {
@@ -217,6 +255,131 @@ pub(super) fn run_node_into_with_gdn_state<B: Deref<Target = [f32]> + Sync>(
         );
     }
     apply_reduce_epilogue(resolved, buffers, output)
+}
+
+/// [`BoundOpKind::RoundBatchedReduce`]'s CPU interpreter: for each round `z`
+/// in `0..round_count`, re-runs the EXACT [`BoundOpKind::Reduce`] instruction
+/// sequence the fusion admission (`bind::apply_moe_round_group_fusion`)
+/// collapsed away, with the stack operand's gather
+/// [`bind::Lookup::indices`] swapped to `round_routes[z]` -- never reading
+/// round 0's own route `k` times. Round 0 writes straight into `output` (the
+/// same slot the caller pre-sized for this op's own primary `node`, matching
+/// [`BoundOpKind::RoundBatchedReduce::round_outputs`]`[0]`'s own doc); rounds
+/// `1..round_count` write into a fresh scratch buffer apiece, pushed onto
+/// `round_sink` in round order -- the caller (`run_resolved_nodes_in_arena`)
+/// is the one place that can place each scratch buffer at its own
+/// `round_outputs[z]` slot in the arena's buffer table, since only it holds
+/// that table.
+///
+/// Delegating to [`run_node_into_with_round_sink`] per round -- rather than
+/// hand-rolling a parallel reduce loop here -- is what makes this BIT-EXACT
+/// with the k separate `Reduce`s this collapse replaces: every round runs
+/// the identical dispatch (`out_scatter`/quantized-weights branch/epilogue)
+/// a standalone `Reduce` node would have run for that round.
+///
+/// `clippy::too_many_arguments`: mirrors `run_node_into_with_round_sink`'s
+/// own seven [`Deref`]/buffer/session/output parameters, plus `round_sink`
+/// -- the same shape that function's own doc already justifies.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_round_batched_reduce<B: Deref<Target = [f32]> + Sync>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    quantized_weights: Option<&BTreeMap<NodeId, QuantizedBlock>>,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+    session: Option<&MatmulSession<'_>>,
+    exact_activations: bool,
+    output: &mut [f32],
+    mut round_sink: Option<&mut Vec<Vec<f32>>>,
+) -> Result<(), TensorError> {
+    let BoundOpKind::RoundBatchedReduce {
+        element_body,
+        reduce_op,
+        init,
+        keep,
+        operands,
+        output_axes,
+        out_layout,
+        out_scatter,
+        epilogue_body,
+        epilogue_operands,
+        epilogue_broadcast_axes,
+        round_count,
+        round_routes,
+        round_outputs: _,
+    } = &resolved.kind
+    else {
+        unreachable!("run_round_batched_reduce is only called for a RoundBatchedReduce fold")
+    };
+    let stack_operand_index = operands
+        .iter()
+        .position(|(_, _, lookup)| lookup.is_some())
+        .ok_or(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "round-batched reduce has no gathered stack operand to re-route per round",
+        })?;
+    for round in 0..*round_count as usize {
+        let mut round_operands = operands.clone();
+        let route = *round_routes
+            .get(round)
+            .ok_or(TensorError::NotLowerable {
+                node: resolved.node,
+                reason: "round-batched reduce round_routes is shorter than round_count",
+            })?;
+        let Some(lookup) = &mut round_operands[stack_operand_index].2 else {
+            unreachable!("stack_operand_index was found by locating a Some(lookup) above")
+        };
+        lookup.indices = route;
+        let round_bound = BoundOp {
+            node: resolved.node,
+            dtype: resolved.dtype,
+            extents: resolved.extents.clone(),
+            kind: BoundOpKind::Reduce {
+                element_body: element_body.clone(),
+                reduce_op: *reduce_op,
+                init: *init,
+                keep: *keep,
+                operands: round_operands,
+                output_axes: output_axes.clone(),
+                out_layout: out_layout.clone(),
+                out_scatter: out_scatter.clone(),
+                epilogue_body: epilogue_body.clone(),
+                epilogue_operands: epilogue_operands.clone(),
+                epilogue_broadcast_axes: epilogue_broadcast_axes.clone(),
+            },
+        };
+        if round == 0 {
+            run_node_into_with_round_sink(
+                &round_bound,
+                buffers,
+                quantized_weights,
+                expert_sources,
+                session,
+                exact_activations,
+                output,
+                None,
+                None,
+                None,
+            )?;
+        } else {
+            let mut round_output = vec![0.0f32; output.len()];
+            run_node_into_with_round_sink(
+                &round_bound,
+                buffers,
+                quantized_weights,
+                expert_sources,
+                session,
+                exact_activations,
+                &mut round_output,
+                None,
+                None,
+                None,
+            )?;
+            if let Some(sink) = round_sink.as_deref_mut() {
+                sink.push(round_output);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Applies [`BoundOpKind::Reduce::epilogue_body`] over
@@ -947,6 +1110,38 @@ pub(super) fn node_output_len(resolved: &BoundOp) -> usize {
                 .product();
             let width = last_output_dim.map_or(1, |dim| resolved.extents[dim as usize] as usize);
             leading_product as usize * width
+        }
+        // Mirrors the `Reduce` arm directly above -- one round's own output
+        // shape, exactly what round 0's own `Reduce` had before
+        // `bind::apply_moe_round_group_fusion` re-kinded it. `round_count`
+        // never widens this: each of `round_outputs`'s buffers is an
+        // independent, single-round-shaped allocation (this variant's own
+        // doc), not one `round_count`-times-wider buffer.
+        BoundOpKind::RoundBatchedReduce {
+            keep: Keep::Reduce,
+            output_axes,
+            out_scatter: None,
+            ..
+        } => {
+            let (leading_output_axes, last_output_dim) = output_axes_split(output_axes.as_slice());
+            let leading_product: u64 = leading_output_axes
+                .iter()
+                .map(|dim| resolved.extents[*dim as usize])
+                .product();
+            let width = last_output_dim.map_or(1, |dim| resolved.extents[dim as usize] as usize);
+            leading_product as usize * width
+        }
+        BoundOpKind::RoundBatchedReduce {
+            keep: Keep::Reduce,
+            output_axes,
+            out_scatter: Some(target),
+            ..
+        } => {
+            let non_scattered_product: u64 = output_axes
+                .iter()
+                .map(|dim| resolved.extents[*dim as usize])
+                .product();
+            non_scattered_product as usize * target.extent as usize
         }
         _ => element_count(&resolved.extents),
     }
