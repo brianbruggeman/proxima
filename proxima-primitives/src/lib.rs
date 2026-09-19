@@ -32,12 +32,14 @@ extern crate alloc;
 #[cfg(all(test, not(feature = "std")))]
 extern crate std;
 
+pub mod codec;
 pub mod driver;
 pub mod pipe;
 pub mod stream;
 pub mod sync;
 pub mod transport;
 
+pub use codec::Codec;
 pub use driver::block_on;
 // Fluent combinator sugar (`.and_then`/`.filter`/`.fanout`/`.fanin`) over the
 // pipe algebra — no prelude in this crate, so callers reach it via an

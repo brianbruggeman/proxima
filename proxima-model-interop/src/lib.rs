@@ -83,10 +83,10 @@ pub use architecture::{
 pub use bind::gguf_tensor_as_packed_block;
 #[cfg(feature = "std")]
 pub use bind::{
-    BoundWeights, PackedOwnedKind, bind_dense, bind_dense_as, bind_matmul_weight,
-    bind_matmul_weight_as, bind_matmul_weight_transposed_f32, bind_moe_expert_weights,
-    bind_native_f32, find_tensor, metadata_f32_optional, metadata_str, metadata_str_opt,
-    metadata_u32, metadata_u32_optional_or, vocab_from_token_embedding,
+    BoundWeights, Codec, bind_dense, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as,
+    bind_matmul_weight_transposed_f32, bind_moe_expert_weights, bind_native_f32, find_tensor,
+    metadata_f32_optional, metadata_str, metadata_str_opt, metadata_u32, metadata_u32_optional_or,
+    vocab_from_token_embedding,
 };
 pub use bind::{ModelArchitecture, architecture_from_metadata, gguf_tensor_as_f32};
 #[cfg(feature = "std")]

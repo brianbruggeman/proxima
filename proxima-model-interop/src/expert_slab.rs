@@ -36,7 +36,7 @@ use proxima_tensor::NodeId;
 use proxima_tensor::cpu::ExpertPayloadSpan;
 use proxima_tensor::cpu::{ExpertEntry, ExpertSource};
 
-use crate::bind::{PackedOwnedKind, quantize_to_kind};
+use crate::bind::{Codec, quantize_to_kind};
 use crate::error::InteropError;
 use crate::residency::ExpertAddress;
 
@@ -85,9 +85,9 @@ impl ExpertProjection {
 /// this with [`ExpertSlab::page_expert`]: dequantize the expert's current
 /// bytes (`proxima_gguf::quant`'s per-codec `dequantize`/`dequantize_block`),
 /// optionally mutate them, re-encode here into a smaller/different codec
-/// (`Q2_K` is the smallest [`PackedOwnedKind`] this crate's encoders
+/// (`Q2_K` is the smallest [`Codec`] this crate's encoders
 /// support), then hand the result to [`ExpertSlab::page_expert`] -- the
-/// same [`PackedOwnedKind`] tag both calls share is what lets
+/// same [`Codec`] tag both calls share is what lets
 /// [`ExpertCopy::entry`] read the paged bytes back as the right
 /// [`proxima_tensor::cpu::QuantizedBlock`] variant.
 ///
@@ -99,10 +99,10 @@ pub fn encode_expert_copy(
     rows: &[f32],
     out_dim: u32,
     in_dim: u32,
-    codec: PackedOwnedKind,
+    codec: Codec,
 ) -> Result<Vec<u8>, InteropError> {
     let element_count = out_dim as usize * in_dim as usize;
-    let mut encoded = vec![0u8; codec.byte_len_for(element_count)];
+    let mut encoded = vec![0u8; crate::bind::codec_byte_len_for(codec, element_count)];
     quantize_to_kind(codec, rows, &mut encoded)?;
     Ok(encoded)
 }
@@ -117,11 +117,11 @@ pub fn encode_expert_copy_into(
     rows: &[f32],
     out_dim: u32,
     in_dim: u32,
-    codec: PackedOwnedKind,
+    codec: Codec,
     output: &mut [u8],
 ) -> Result<(), InteropError> {
     let element_count = out_dim as usize * in_dim as usize;
-    let expected_bytes = codec.byte_len_for(element_count);
+    let expected_bytes = crate::bind::codec_byte_len_for(codec, element_count);
     if output.len() != expected_bytes {
         return Err(InteropError::Quant(
             proxima_gguf::quant::QuantError::OutputSizeMismatch {
@@ -147,13 +147,13 @@ pub fn encode_expert_copy_into(
 /// elements. `Q2K` is intentionally supported as a target, while source
 /// codecs are limited to codecs for which this crate has a decoder.
 pub fn recode_expert_into(
-    source_codec: PackedOwnedKind,
+    source_codec: Codec,
     source_bytes: &[u8],
-    target_codec: PackedOwnedKind,
+    target_codec: Codec,
     scratch: &mut [f32],
     output: &mut [u8],
 ) -> Result<usize, InteropError> {
-    let source_layout = source_codec.to_ggml_type().block_layout();
+    let source_layout = crate::bind::codec_to_ggml_type(source_codec).block_layout();
     let block_bytes = source_layout.block_bytes as usize;
     let block_elements = source_layout.block_elements as usize;
     if !source_bytes.len().is_multiple_of(block_bytes) {
@@ -174,7 +174,7 @@ pub fn recode_expert_into(
             },
         ));
     }
-    let target_bytes = target_codec.byte_len_for(element_count);
+    let target_bytes = crate::bind::codec_byte_len_for(target_codec, element_count);
     if output.len() != target_bytes {
         return Err(InteropError::Quant(
             proxima_gguf::quant::QuantError::OutputSizeMismatch {
@@ -188,39 +188,35 @@ pub fn recode_expert_into(
     Ok(target_bytes)
 }
 
-fn source_codec_name(codec: PackedOwnedKind) -> &'static str {
+fn source_codec_name(codec: Codec) -> &'static str {
     match codec {
-        PackedOwnedKind::Q2K => "q2_k",
-        PackedOwnedKind::Q3K => "q3_k",
-        PackedOwnedKind::Q4K => "q4_k",
-        PackedOwnedKind::Q5K => "q5_k",
-        PackedOwnedKind::Q6K => "q6_k",
-        PackedOwnedKind::Q8_0 => "q8_0",
-        PackedOwnedKind::Q4_0 => "q4_0",
-        PackedOwnedKind::Float16 => "f16",
-        PackedOwnedKind::BFloat16 => "bf16",
-        PackedOwnedKind::Q5_1 => "q5_1",
-        PackedOwnedKind::Q5_0 => "q5_0",
+        Codec::Q2K => "q2_k",
+        Codec::Q3K => "q3_k",
+        Codec::Q4K => "q4_k",
+        Codec::Q5K => "q5_k",
+        Codec::Q6K => "q6_k",
+        Codec::Q8_0 => "q8_0",
+        Codec::Q4_0 => "q4_0",
+        Codec::Float16 => "f16",
+        Codec::BFloat16 => "bf16",
+        Codec::Q5_1 => "q5_1",
+        Codec::Q5_0 => "q5_0",
     }
 }
 
-fn dequantize_expert(
-    codec: PackedOwnedKind,
-    source: &[u8],
-    output: &mut [f32],
-) -> Result<(), InteropError> {
+fn dequantize_expert(codec: Codec, source: &[u8], output: &mut [f32]) -> Result<(), InteropError> {
     match codec {
-        PackedOwnedKind::Q2K => q2_k::dequantize(source, output),
-        PackedOwnedKind::Q3K => q3_k::dequantize(source, output),
-        PackedOwnedKind::Q4K => q4_k::dequantize(source, output),
-        PackedOwnedKind::Q5K => q5_k::dequantize(source, output),
-        PackedOwnedKind::Q6K => q6_k::dequantize(source, output),
-        PackedOwnedKind::Q8_0 => q8_0::dequantize(source, output),
-        PackedOwnedKind::Q4_0 => q4_0::dequantize(source, output),
-        PackedOwnedKind::Float16 => f16::dequantize(source, output),
-        PackedOwnedKind::BFloat16 => bf16::dequantize(source, output),
-        PackedOwnedKind::Q5_1 => q5_1::dequantize(source, output),
-        PackedOwnedKind::Q5_0 => q5_0::dequantize(source, output),
+        Codec::Q2K => q2_k::dequantize(source, output),
+        Codec::Q3K => q3_k::dequantize(source, output),
+        Codec::Q4K => q4_k::dequantize(source, output),
+        Codec::Q5K => q5_k::dequantize(source, output),
+        Codec::Q6K => q6_k::dequantize(source, output),
+        Codec::Q8_0 => q8_0::dequantize(source, output),
+        Codec::Q4_0 => q4_0::dequantize(source, output),
+        Codec::Float16 => f16::dequantize(source, output),
+        Codec::BFloat16 => bf16::dequantize(source, output),
+        Codec::Q5_1 => q5_1::dequantize(source, output),
+        Codec::Q5_0 => q5_0::dequantize(source, output),
     }
     .map_err(InteropError::from)
 }
@@ -238,7 +234,7 @@ pub struct WeightDims {
 /// [`ExpertSlab::page_expert_recode_borrowed`] keeps its argument count under
 /// clippy's threshold.
 pub struct RecodeSource<'source> {
-    pub codec: PackedOwnedKind,
+    pub codec: Codec,
     pub bytes: &'source [u8],
 }
 
@@ -291,7 +287,7 @@ impl<'file> ExpertBytes<'file> {
 /// of a live mmap [`ExpertSlab::page_expert_mapped`] retained.
 #[derive(Debug, Clone)]
 struct ExpertCopy<'file> {
-    codec: PackedOwnedKind,
+    codec: Codec,
     bytes: ExpertBytes<'file>,
     out_dim: u32,
     in_dim: u32,
@@ -307,13 +303,9 @@ impl<'file> ExpertCopy<'file> {
         self.entry_with_codec(bytes, self.codec)
     }
 
-    fn entry_with_codec<'bytes>(
-        &self,
-        bytes: &'bytes [u8],
-        codec: PackedOwnedKind,
-    ) -> ExpertEntry<'bytes> {
+    fn entry_with_codec<'bytes>(&self, bytes: &'bytes [u8], codec: Codec) -> ExpertEntry<'bytes> {
         ExpertEntry {
-            block: codec.as_block(bytes),
+            block: crate::bind::as_block(codec, bytes),
             out_dim: self.out_dim,
             in_dim: self.in_dim,
             epoch: self.epoch,
@@ -433,7 +425,7 @@ impl<'file> ExpertSlab<'file> {
         &mut self,
         layer: usize,
         weight_node: NodeId,
-        codec: PackedOwnedKind,
+        codec: Codec,
         stack: &'file [u8],
         expert_count: usize,
         out_dim: u32,
@@ -567,7 +559,7 @@ impl<'file> ExpertSlab<'file> {
         &mut self,
         layer: usize,
         expert: usize,
-        codec: PackedOwnedKind,
+        codec: Codec,
         bytes: &[u8],
         out_dim: u32,
         in_dim: u32,
@@ -597,7 +589,7 @@ impl<'file> ExpertSlab<'file> {
         &mut self,
         layer: usize,
         expert: usize,
-        codec: PackedOwnedKind,
+        codec: Codec,
         bytes: &'file [u8],
         out_dim: u32,
         in_dim: u32,
@@ -621,7 +613,7 @@ impl<'file> ExpertSlab<'file> {
         &mut self,
         address: ExpertAddress,
         source: RecodeSource<'_>,
-        target_codec: PackedOwnedKind,
+        target_codec: Codec,
         scratch: &mut [f32],
         target_bytes: &'file mut [u8],
         dims: WeightDims,
@@ -674,7 +666,7 @@ impl<'file> ExpertSlab<'file> {
         &mut self,
         layer: usize,
         expert: usize,
-        codec: PackedOwnedKind,
+        codec: Codec,
         mapping: Arc<Mmap>,
         range: Range<usize>,
         dims: WeightDims,
@@ -700,7 +692,7 @@ impl<'file> ExpertSlab<'file> {
         &mut self,
         layer: usize,
         expert: usize,
-        codec: PackedOwnedKind,
+        codec: Codec,
         bytes: ExpertBytes<'file>,
         out_dim: u32,
         in_dim: u32,
@@ -1179,7 +1171,7 @@ mod tests {
         let stack = q4k_stack_bytes(4);
         let mut slab = ExpertSlab::new();
 
-        slab.bind_layer_stack(0, NodeId(7), PackedOwnedKind::Q4K, &stack, 4, 32, 32)
+        slab.bind_layer_stack(0, NodeId(7), Codec::Q4K, &stack, 4, 32, 32)
             .expect("a 4-expert Q4_K stack binds");
 
         let mut entries = Vec::new();
@@ -1199,11 +1191,11 @@ mod tests {
     fn sources_for_layer_includes_every_projection_site() {
         let stack = q4k_stack_bytes(1);
         let mut slab = ExpertSlab::new();
-        slab.bind_layer_stack(0, NodeId(10), PackedOwnedKind::Q4K, &stack, 1, 32, 32)
+        slab.bind_layer_stack(0, NodeId(10), Codec::Q4K, &stack, 1, 32, 32)
             .expect("gate site binds");
-        slab.bind_layer_stack(1, NodeId(11), PackedOwnedKind::Q4K, &stack, 1, 32, 32)
+        slab.bind_layer_stack(1, NodeId(11), Codec::Q4K, &stack, 1, 32, 32)
             .expect("up site binds");
-        slab.bind_layer_stack(2, NodeId(12), PackedOwnedKind::Q4K, &stack, 1, 32, 32)
+        slab.bind_layer_stack(2, NodeId(12), Codec::Q4K, &stack, 1, 32, 32)
             .expect("down site binds");
         slab.register_model_layer_site(4, ExpertProjection::Gate, 0);
         slab.register_model_layer_site(4, ExpertProjection::Up, 1);
@@ -1230,9 +1222,9 @@ mod tests {
         let mut target_bytes = [0u8; 84];
 
         let written = recode_expert_into(
-            PackedOwnedKind::Q4K,
+            Codec::Q4K,
             &source_bytes,
-            PackedOwnedKind::Q2K,
+            Codec::Q2K,
             &mut scratch,
             &mut target_bytes,
         )
@@ -1251,12 +1243,12 @@ mod tests {
     fn page_expert_bumps_the_epoch_and_swaps_the_bytes() {
         let stack = q4k_stack_bytes(2);
         let mut slab = ExpertSlab::new();
-        slab.bind_layer_stack(0, NodeId(1), PackedOwnedKind::Q4K, &stack, 2, 32, 32)
+        slab.bind_layer_stack(0, NodeId(1), Codec::Q4K, &stack, 2, 32, 32)
             .expect("a 2-expert Q4_K stack binds");
 
         let repaged = vec![9u8; 144];
         let epoch = slab
-            .page_expert(0, 1, PackedOwnedKind::Q4K, &repaged, 32, 32)
+            .page_expert(0, 1, Codec::Q4K, &repaged, 32, 32)
             .expect("paging between steps succeeds");
 
         assert_eq!(epoch, 1, "the first page bumps epoch 0 -> 1");
@@ -1274,10 +1266,10 @@ mod tests {
         let mapped_copy = vec![7u8; 144];
         let mapped_address = mapped_copy.as_ptr();
         let mut slab = ExpertSlab::new();
-        slab.bind_layer_stack(0, NodeId(1), PackedOwnedKind::Q4K, &stack, 1, 32, 32)
+        slab.bind_layer_stack(0, NodeId(1), Codec::Q4K, &stack, 1, 32, 32)
             .expect("a 1-expert Q4_K stack binds");
 
-        slab.page_expert_borrowed(0, 0, PackedOwnedKind::Q4K, &mapped_copy, 32, 32)
+        slab.page_expert_borrowed(0, 0, Codec::Q4K, &mapped_copy, 32, 32)
             .expect("a mapped promotion succeeds");
 
         let mut entries = Vec::new();
@@ -1319,13 +1311,13 @@ mod tests {
         );
         let mapped_address = mapping.as_ptr();
         let mut slab = ExpertSlab::new();
-        slab.bind_layer_stack(0, NodeId(1), PackedOwnedKind::Q4K, &stack, 1, 32, 32)
+        slab.bind_layer_stack(0, NodeId(1), Codec::Q4K, &stack, 1, 32, 32)
             .expect("a 1-expert Q4_K stack binds");
 
         slab.page_expert_mapped(
             0,
             0,
-            PackedOwnedKind::Q4K,
+            Codec::Q4K,
             Arc::clone(&mapping),
             0..144,
             WeightDims {
@@ -1370,11 +1362,11 @@ mod tests {
     fn page_expert_during_a_step_is_rejected() {
         let stack = q4k_stack_bytes(1);
         let mut slab = ExpertSlab::new();
-        slab.bind_layer_stack(0, NodeId(1), PackedOwnedKind::Q4K, &stack, 1, 32, 32)
+        slab.bind_layer_stack(0, NodeId(1), Codec::Q4K, &stack, 1, 32, 32)
             .expect("a 1-expert Q4_K stack binds");
         slab.open_step();
 
-        let result = slab.page_expert(0, 0, PackedOwnedKind::Q4K, &[0u8; 144], 32, 32);
+        let result = slab.page_expert(0, 0, Codec::Q4K, &[0u8; 144], 32, 32);
 
         assert!(
             matches!(
@@ -1392,7 +1384,7 @@ mod tests {
     fn evict_expert_removes_it_from_the_next_snapshot() {
         let stack = q4k_stack_bytes(2);
         let mut slab = ExpertSlab::new();
-        slab.bind_layer_stack(0, NodeId(1), PackedOwnedKind::Q4K, &stack, 2, 32, 32)
+        slab.bind_layer_stack(0, NodeId(1), Codec::Q4K, &stack, 2, 32, 32)
             .expect("a 2-expert Q4_K stack binds");
 
         slab.evict_expert(0, 1)
@@ -1424,7 +1416,7 @@ mod tests {
         let stack = q4k_stack_bytes(2);
         let mut evicted = ExpertSlab::new();
         evicted
-            .bind_layer_stack(0, NodeId(1), PackedOwnedKind::Q4K, &stack, 2, 32, 32)
+            .bind_layer_stack(0, NodeId(1), Codec::Q4K, &stack, 2, 32, 32)
             .expect("a 2-expert Q4_K stack binds");
         assert_eq!(evicted.first_modified_layer(), None);
         evicted.evict_expert(0, 1).expect("eviction succeeds");
@@ -1432,10 +1424,10 @@ mod tests {
 
         let mut paged = ExpertSlab::new();
         paged
-            .bind_layer_stack(0, NodeId(1), PackedOwnedKind::Q4K, &stack, 2, 32, 32)
+            .bind_layer_stack(0, NodeId(1), Codec::Q4K, &stack, 2, 32, 32)
             .expect("a 2-expert Q4_K stack binds");
         paged
-            .page_expert(0, 1, PackedOwnedKind::Q4K, &[9u8; 144], 32, 32)
+            .page_expert(0, 1, Codec::Q4K, &[9u8; 144], 32, 32)
             .expect("paging succeeds");
         assert_eq!(paged.first_modified_layer(), Some(0));
     }
@@ -1450,7 +1442,7 @@ mod tests {
         let mut scratch = [0.0f32; 256];
         let mut target_bytes = [0u8; 84];
         let mut slab = ExpertSlab::new();
-        slab.bind_layer_stack(0, NodeId(7), PackedOwnedKind::Q4K, &source_bytes, 1, 32, 32)
+        slab.bind_layer_stack(0, NodeId(7), Codec::Q4K, &source_bytes, 1, 32, 32)
             .expect("the source stack binds");
         let epoch = slab
             .page_expert_recode_borrowed(
@@ -1459,10 +1451,10 @@ mod tests {
                     expert: 0,
                 },
                 RecodeSource {
-                    codec: PackedOwnedKind::Q4K,
+                    codec: Codec::Q4K,
                     bytes: &source_bytes,
                 },
-                PackedOwnedKind::Q2K,
+                Codec::Q2K,
                 &mut scratch,
                 &mut target_bytes,
                 WeightDims {

@@ -49,8 +49,8 @@ use crate::architecture::{
     Architecture as ArchitectureTrait, BoundProgram, StepInput, StepInputContext,
 };
 use crate::bind::{
-    BoundWeights, ModelArchitecture, PackedOwnedKind, bind_dense, bind_matmul_weight,
-    bind_matmul_weight_as, bind_matmul_weight_transposed_f32, bind_moe_expert_weights, find_tensor,
+    BoundWeights, ModelArchitecture, bind_dense, bind_matmul_weight, bind_matmul_weight_as,
+    bind_matmul_weight_transposed_f32, bind_moe_expert_weights, codec_from_ggml_type, find_tensor,
     gguf_tensor_as_f32,
 };
 use crate::error::InteropError;
@@ -451,7 +451,7 @@ pub fn bind_gemma4_weights<'file>(
 /// single strided borrow the way [`bind_moe_expert_weights`]'s
 /// already-native-stacked fast path does -- each half is assembled into its
 /// own owned packed buffer, one packed memcpy per expert per half, matching
-/// the two `Q3_K`-tagged [`PackedOwnedKind::Q3K`] buffers
+/// the two `Q3_K`-tagged [`Codec::Q3K`] buffers
 /// [`BoundWeights::packed_owned`] already carries for every other MoE
 /// family's restack fallback ([`bind_moe_expert_weights`]).
 ///
@@ -459,7 +459,7 @@ pub fn bind_gemma4_weights<'file>(
 ///
 /// [`InteropError::UnknownTensor`] if the fused tensor is absent;
 /// [`InteropError::UnrepresentableGgmlType`] if its `ggml_type` has no
-/// [`PackedOwnedKind`] (every codec a real gemma4 checkpoint ships does);
+/// [`Codec`] (every codec a real gemma4 checkpoint ships does);
 /// whatever [`ParsedGguf::tensor_data_range`] can fail with if the tensor's
 /// declared byte range does not fit `file_bytes`.
 fn bind_gemma4_fused_gate_up_experts<'file>(
@@ -474,7 +474,7 @@ fn bind_gemma4_fused_gate_up_experts<'file>(
     let name = format!("blk.{layer}.ffn_gate_up_exps.weight");
     let tensor = find_tensor(parsed, &name)?;
     let layout = tensor.ggml_type.block_layout();
-    let kind = PackedOwnedKind::from_ggml_type(tensor.ggml_type).ok_or_else(|| {
+    let kind = codec_from_ggml_type(tensor.ggml_type).ok_or_else(|| {
         InteropError::UnrepresentableGgmlType {
             tensor: name.clone(),
             ggml_type: tensor.ggml_type,

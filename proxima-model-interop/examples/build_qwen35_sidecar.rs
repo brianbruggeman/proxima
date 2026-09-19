@@ -9,7 +9,7 @@ use std::io::BufWriter;
 use conflaguration::Settings;
 use memmap2::MmapOptions;
 use proxima_gguf::parse_complete;
-use proxima_model_interop::{ExpertStackSpec, PackedOwnedKind, write_expert_sidecar};
+use proxima_model_interop::{Codec, ExpertStackSpec, write_expert_sidecar};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Settings)]
@@ -33,10 +33,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // an explicit experiment, never an accidental production artifact.
     let codec_name = settings.sidecar_codec;
     let target_codec = match codec_name.as_str() {
-        "q2_k" | "q2" => PackedOwnedKind::Q2K,
-        "mixed" => PackedOwnedKind::Q4K,
-        "q4_k" | "q4" => PackedOwnedKind::Q4K,
-        "q6_k" | "q6" => PackedOwnedKind::Q6K,
+        "q2_k" | "q2" => Codec::Q2K,
+        "mixed" => Codec::Q4K,
+        "q4_k" | "q4" => Codec::Q4K,
+        "q6_k" | "q6" => Codec::Q6K,
         other => return Err(format!("unsupported PROXIMA_SIDECAR_CODEC={other:?}").into()),
     };
     let mut specifications = Vec::new();
@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let in_dim = tensor.dims[0] as u32;
             let out_dim = tensor.dims[1] as u32;
             let projection_codec = if codec_name == "mixed" && projection == "ffn_down" {
-                PackedOwnedKind::Q6K
+                Codec::Q6K
             } else {
                 target_codec
             };
@@ -89,9 +89,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|spec| {
             let layout = match spec.target_codec {
-                PackedOwnedKind::Q2K => proxima_gguf::types::GgmlType::Q2_K.block_layout(),
-                PackedOwnedKind::Q4K => proxima_gguf::types::GgmlType::Q4_K.block_layout(),
-                PackedOwnedKind::Q6K => proxima_gguf::types::GgmlType::Q6_K.block_layout(),
+                Codec::Q2K => proxima_gguf::types::GgmlType::Q2_K.block_layout(),
+                Codec::Q4K => proxima_gguf::types::GgmlType::Q4_K.block_layout(),
+                Codec::Q6K => proxima_gguf::types::GgmlType::Q6_K.block_layout(),
                 _ => unreachable!("target codec is selected from the three packed codecs"),
             };
             (spec.out_dim as usize * spec.in_dim as usize / layout.block_elements as usize)

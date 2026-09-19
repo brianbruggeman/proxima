@@ -380,7 +380,7 @@ impl<'file> LoadedModel<'file> {
         &self,
         layer: usize,
         expert: usize,
-        codec: crate::bind::PackedOwnedKind,
+        codec: crate::bind::Codec,
         bytes: &[u8],
         out_dim: u32,
         in_dim: u32,
@@ -409,7 +409,7 @@ impl<'file> LoadedModel<'file> {
         &self,
         layer: usize,
         expert: usize,
-        codec: crate::bind::PackedOwnedKind,
+        codec: crate::bind::Codec,
         mapping: Arc<Mmap>,
         range: Range<usize>,
         dims: crate::expert_slab::WeightDims,
@@ -1774,7 +1774,7 @@ impl<'file> LoadedModel<'file> {
                         named_blocks.push((name.as_str(), *block));
                     }
                     for (name, bytes, kind) in &self.weights.packed_owned {
-                        named_blocks.push((name.as_str(), kind.as_block(bytes)));
+                        named_blocks.push((name.as_str(), crate::bind::as_block(*kind, bytes)));
                     }
                     // Rounds `cached_len` up to `ServingConfig::kv_bucket_tokens`
                     // (`kv_extent`'s own doc) -- `usize::MAX` in place of the
@@ -3774,7 +3774,7 @@ impl<'file> LoadedModel<'file> {
                     named_blocks.push((name.as_str(), *block));
                 }
                 for (name, bytes, kind) in &self.weights.packed_owned {
-                    named_blocks.push((name.as_str(), kind.as_block(bytes)));
+                    named_blocks.push((name.as_str(), crate::bind::as_block(*kind, bytes)));
                 }
                 named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
                 named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
@@ -4310,7 +4310,7 @@ impl<'file> LoadedModel<'file> {
             named_blocks.push((name.as_str(), *block));
         }
         for (name, bytes, kind) in &self.weights.packed_owned {
-            named_blocks.push((name.as_str(), kind.as_block(bytes)));
+            named_blocks.push((name.as_str(), crate::bind::as_block(*kind, bytes)));
         }
         // `mistral_cached_forward_program_with_experts`'s own `cached_len`
         // `Op::Input` (ROW 404/405's runtime bound the fused Metal
@@ -4523,7 +4523,7 @@ pub(super) fn qwen35moe_pre_gather_enabled(
     configured && architecture_name == Some("qwen35moe")
 }
 
-pub(super) fn qwen35moe_admit_low_copy(source: PackedOwnedKind, target: PackedOwnedKind) -> bool {
+pub(super) fn qwen35moe_admit_low_copy(source: Codec, target: Codec) -> bool {
     source == target
 }
 
