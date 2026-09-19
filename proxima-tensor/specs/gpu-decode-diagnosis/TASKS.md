@@ -12,8 +12,9 @@ measure ONCE. No coding until the map (slice 1) is complete.
 ## resume
 
 Last landed: batched-expert machinery on main 3e03ec4ba (inert); route hoist at worktree base 41da75882 (admission fires → gather bug live).
-Next action: slice 1 problem-map IN FLIGHT (a08a2950). When it returns "fully traced", dispatch ONE fix pass for the whole map (slice 2), then measure once (slice 3).
-Open question: does the map come back "fully traced" or "could not trace X"? If the latter, widen the read before any code — that is the process being corrected.
+Map v2 (a08a2950 deeper dig) RE-DIAGNOSED the crash, ruling out the v1 leads in code: #1 placement-drop is UNREACHABLE (expert_count=256 → single_range=None, load_model.rs:1260); buffer-race RULED OUT (DispatchType::Serial only, all nodes re-inserted/step). REAL lead: the fault report clamps a NEGATIVE fetched index to display "0" (push_gather_fault_check, signature_tokens_prelude.rs:~586); render_moe_topk's tournament `masked == max_value` (~1116) emits a -1 sentinel when no thread matches exact-float-equality → consumed as a negative expert gather index → crash. Latent (not the crash): #1, #2, #3, #4, #7 (PlanUniforms doc/code mismatch). NOTE: both slice-2 fix agents died on a transient SSL API error, applied nothing (worktree clean at 41da75882).
+Next action: CONFIRM the -1 hypothesis by instrumentation IN FLIGHT (adafe615) — read the real fault value + raw route buffer + whether a round has no tournament winner — then fix render_moe_topk ONLY if confirmed, else report the real mechanism. Then the latent findings (#2/#3/#4/#7) as hardening, then measure once.
+Open question: is the -1 pre-existing in render_moe_topk (batched gather's fault-check merely exposes it) or introduced by the route reorder? The confirm agent answers via "why does flag-off survive".
 
 ## struck
 
