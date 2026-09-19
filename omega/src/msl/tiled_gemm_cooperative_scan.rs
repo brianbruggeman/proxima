@@ -392,7 +392,7 @@ pub(super) fn push_tiled_gemm_body(
 /// [`kernel_cache_key`]'s doc).
 pub(super) fn tiled_gemm_threadgroup_width(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
 ) -> Option<u64> {
     // `head_v_dim` threads per threadgroup -- correctness-load-bearing, not
@@ -534,7 +534,7 @@ pub(super) fn tiled_gemm_threadgroup_width(
 /// "single source of truth" doc).
 pub(super) fn q4k_super_block_tiled(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     reduce_dims: &[u16],
 ) -> bool {
     // Mixed expert sources have per-entry codecs and compact payload bases;
@@ -549,7 +549,7 @@ pub(super) fn q4k_super_block_tiled(
     let packed: Vec<usize> = quantized
         .iter()
         .enumerate()
-        .filter_map(|(index, codec)| matches!(codec, Some(PackedCodec::Q4K)).then_some(index))
+        .filter_map(|(index, codec)| matches!(codec, Some(Codec::Q4K)).then_some(index))
         .collect();
     packed.len() == 1
         && resolved.operands()[packed[0]].1.stride(reduce_dim) == 1
@@ -585,7 +585,7 @@ pub(super) fn q4k_super_block_tiled(
 #[cfg(feature = "metal-wide-cooperative-reduce")]
 pub(super) fn cooperative_reduce_width(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     reduce_dims: &[u16],
 ) -> u64 {
     if q4k_super_block_tiled(resolved, quantized, reduce_dims) {
@@ -608,7 +608,7 @@ pub(super) fn cooperative_reduce_width(
 #[cfg(not(feature = "metal-wide-cooperative-reduce"))]
 pub(super) fn cooperative_reduce_width(
     _resolved: &BoundOp,
-    _quantized: &[Option<PackedCodec>],
+    _quantized: &[Option<Codec>],
     _reduce_dims: &[u16],
 ) -> u64 {
     SIMD_WIDTH
@@ -652,7 +652,7 @@ pub(super) fn push_cooperative_reduce_body(
     output_axes: &[u16],
     reduce_dims: &[u16],
     rank: usize,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
@@ -816,7 +816,7 @@ pub(super) fn push_cooperative_reduce_body(
         let packed: Vec<usize> = quantized
             .iter()
             .enumerate()
-            .filter_map(|(index, codec)| matches!(codec, Some(PackedCodec::Q4K)).then_some(index))
+            .filter_map(|(index, codec)| matches!(codec, Some(Codec::Q4K)).then_some(index))
             .collect();
         let run = Q4K_BLOCK_ELEMENTS / SIMD_WIDTH as usize;
         // The broadcast-write tail (`push_cooperative_reduce_tail`'s own doc)
@@ -1352,7 +1352,7 @@ pub(super) fn push_broadcast_epilogue_write(
 pub(super) fn render_scan(
     resolved: &BoundOp,
     entry: &str,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
 ) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op, init, ..

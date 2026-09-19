@@ -233,7 +233,7 @@ use crate::msl::{gather_count, kernel_cache_key, kernel_dispatch_shape, reductio
 use crate::sized::ARENA_TRANSIENT_CAP;
 #[cfg(feature = "metal-buffer-pool")]
 use crate::sized::OUTPUT_POOL_MAX_PER_BUCKET;
-use crate::{Binding, GridSpec, Kernel, PackedCodec, PackedOperands, emit};
+use crate::{Binding, GridSpec, Kernel, Codec, PackedOperands, emit};
 
 
 #[macro_use]

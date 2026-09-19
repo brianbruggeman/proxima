@@ -8,7 +8,7 @@ pub(super) fn push_packed_row_blocked_body(
     init: ReduceInit,
     output_axes: &[u16],
     rank: usize,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     element_type: &str,
     block: &PackedRowBlock,
     epilogue_body: &ComposedBody,
@@ -38,7 +38,7 @@ pub(super) fn push_packed_row_blocked_body(
         codec,
         ..
     } = *block;
-    let block_bytes = codec.block_bytes();
+    let block_bytes = codec_block_bytes(codec);
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
     // seeded on lane 0 only, exactly as the general cooperative path does:
@@ -54,7 +54,7 @@ pub(super) fn push_packed_row_blocked_body(
     // one byte load, one mask, one fma (`docs/discipline.md` ROW 74).
     {
         let run = Q4K_BLOCK_ELEMENTS / SIMD_WIDTH as usize;
-        let rows = codec.rows_per_simdgroup();
+        let rows = codec_rows_per_simdgroup(codec);
         source.push_str(&format!("    long group_first = output_index * {rows};\n"));
         source.push_str(&format!("    {element_type} sumf[{rows}];\n"));
         // when the seed and the algebraic identity are the textually same
@@ -127,14 +127,14 @@ pub(super) fn push_packed_row_blocked_body(
         let sub = Q4K_BLOCK_ELEMENTS / lanes_per_block;
         // Structural, not feature-gated: the paired-nibble/paired-lane body
         // applies to any codec whose block layout has one
-        // ([`PackedCodec::supports_pair_dot`]) when the dtype is real
+        // ([`Codec::supports_pair_dot`]) when the dtype is real
         // `Float32` -- a `DType` match, not the `element_type == "float"`
         // MSL-type-token comparison this replaced, which also admitted
         // `Int32`/`UInt32`/`Bool`/`Int8`/`UInt8` (every dtype `type_token`
         // happens to lower to the same MSL `float` storage type) and would
         // have run the scale/minimum float algebra below on integer data.
         let plain_product = !expert_source_mode
-            && codec.supports_pair_dot()
+            && codec_supports_pair_dot(codec)
             && resolved.dtype == DType::Float32
             && is_plain_product_reduce(resolved, reduce_op, weight, other);
         // `metal-q4k-single-fetch` (default-off): eliminates the redundant
@@ -160,7 +160,7 @@ pub(super) fn push_packed_row_blocked_body(
         // `sgitg`/`split` when the feature is on), so gating single-fetch off
         // here just means split-K wins whenever BOTH features are compiled
         // in, same "not invented to compose" posture as its other arms.
-        let use_single_fetch = matches!(codec, PackedCodec::Q4K)
+        let use_single_fetch = matches!(codec, Codec::Q4K)
             && !plain_product
             && cfg!(feature = "metal-q4k-single-fetch")
             && !cfg!(feature = "metal-q4k-split-k");
@@ -188,11 +188,11 @@ pub(super) fn push_packed_row_blocked_body(
         let use_ggml_port = plain_product
             && matches!(
                 codec,
-                PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K
+                Codec::Q4K | Codec::Q5K | Codec::Q6K
             )
             && cfg!(feature = "metal-q4k-ggml-port")
             && !cfg!(feature = "metal-q4k-split-k");
-        if use_ggml_port && matches!(codec, PackedCodec::Q6K) {
+        if use_ggml_port && matches!(codec, Codec::Q6K) {
             push_q6k_ggml_port_body(
                 source,
                 weight,
@@ -201,7 +201,7 @@ pub(super) fn push_packed_row_blocked_body(
                 block_bytes,
                 other_stride_is_one,
             );
-        } else if use_ggml_port && matches!(codec, PackedCodec::Q5K) {
+        } else if use_ggml_port && matches!(codec, Codec::Q5K) {
             push_q5k_ggml_port_body(
                 source,
                 weight,
@@ -325,7 +325,7 @@ pub(super) fn push_packed_row_blocked_body(
             source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
             source.push_str("            device const uchar *blk = blk_ptr[q];\n");
             match codec {
-                PackedCodec::Q2K => {
+                Codec::Q2K => {
                     source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
                     source.push_str(&format!(
                         "                {element_type} scratch[{}];\n",
@@ -348,7 +348,7 @@ pub(super) fn push_packed_row_blocked_body(
                     source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
                     source.push_str("            }\n");
                 }
-                PackedCodec::Q3K if plain_product => {
+                Codec::Q3K if plain_product => {
                     // `plain_product` is codec-agnostic (the `yl`/`yh` gather
                     // above is built once, shared by `Q4_K`/`Q3_K` and, when
                     // `metal-q5k-pair-dot` is on, `Q5_K` too) -- no separate
@@ -358,7 +358,7 @@ pub(super) fn push_packed_row_blocked_body(
                         "            sumf[q] = sumf[q] + q3k_pair_dot(blk, iq, ir, yl, yh);\n",
                     );
                 }
-                PackedCodec::Q3K => {
+                Codec::Q3K => {
                     // `Q3_K`'s sub-block width (16) is narrower than this
                     // loop's 32-element `sub` slot, unlike `Q5_K`'s matching
                     // 32-element sub-block -- amortizing one header decode
@@ -392,7 +392,7 @@ pub(super) fn push_packed_row_blocked_body(
                     source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
                     source.push_str("            }\n");
                 }
-                PackedCodec::Q4K => {
+                Codec::Q4K => {
                     if plain_product {
                         source.push_str(
                             "            sumf[q] = sumf[q] + q4k_pair_dot(blk, iq, ir, yl, yh);\n",
@@ -458,7 +458,7 @@ pub(super) fn push_packed_row_blocked_body(
                         source.push_str("            }\n");
                     }
                 }
-                PackedCodec::Q5K if plain_product => {
+                Codec::Q5K if plain_product => {
                     // See [`Q5K_PAIR_DOT_MSL`]: the same `yl`/`yh` two-word-load pairing `Q4_K`'s own
                     // `plain_product` arm above uses, extended with `Q5_K`'s `qh`
                     // high-bit plane. Reads the SAME `yl`/`yh` activation gather
@@ -469,7 +469,7 @@ pub(super) fn push_packed_row_blocked_body(
                         "            sumf[q] = sumf[q] + q5k_pair_dot(blk, iq, ir, yl, yh);\n",
                     );
                 }
-                PackedCodec::Q5K => {
+                Codec::Q5K => {
                     // No `q5k_run8`-style batched unpack yet — `Q5_K`'s `qh`
                     // high-bit plane means each element needs a `qs` nibble AND
                     // a `qh` bit from a DIFFERENT byte, the same shape gap
@@ -504,7 +504,7 @@ pub(super) fn push_packed_row_blocked_body(
                     source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
                     source.push_str("            }\n");
                 }
-                PackedCodec::Q6K if plain_product => {
+                Codec::Q6K if plain_product => {
                     // See [`Q6K_PAIR_DOT_MSL`]: the same paired-lane body `Q4_K`/`Q5_K`'s own
                     // `plain_product` arms use above, ported to `Q6_K`'s
                     // ql/qh/signed-scale layout. Reads the SAME `yl`/`yh`
@@ -515,7 +515,7 @@ pub(super) fn push_packed_row_blocked_body(
                         "            sumf[q] = sumf[q] + q6k_pair_dot(blk, iq, ir, yl, yh);\n",
                     );
                 }
-                PackedCodec::Q6K => {
+                Codec::Q6K => {
                     // No `q6k_run8`-style batched unpack yet — `Q6_K`'s bit
                     // layout does not reduce to two word loads the way `Q4_K`'s
                     // does (each element needs a `ql` byte, a `qh` byte, AND a
@@ -548,38 +548,38 @@ pub(super) fn push_packed_row_blocked_body(
                     source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
                     source.push_str("            }\n");
                 }
-                PackedCodec::Q8_0 => {
-                    return Err(EmitError::NonKQuantPackedCodec {
+                Codec::Q8_0 => {
+                    return Err(EmitError::NonKQuantCodec {
                         node: resolved.node,
                         codec: "q8_0",
                     });
                 }
-                PackedCodec::Q4_0 => {
-                    return Err(EmitError::NonKQuantPackedCodec {
+                Codec::Q4_0 => {
+                    return Err(EmitError::NonKQuantCodec {
                         node: resolved.node,
                         codec: "q4_0",
                     });
                 }
-                PackedCodec::Q5_1 => {
-                    return Err(EmitError::NonKQuantPackedCodec {
+                Codec::Q5_1 => {
+                    return Err(EmitError::NonKQuantCodec {
                         node: resolved.node,
                         codec: "q5_1",
                     });
                 }
-                PackedCodec::Q5_0 => {
-                    return Err(EmitError::NonKQuantPackedCodec {
+                Codec::Q5_0 => {
+                    return Err(EmitError::NonKQuantCodec {
                         node: resolved.node,
                         codec: "q5_0",
                     });
                 }
-                PackedCodec::Float16 => {
-                    return Err(EmitError::NonKQuantPackedCodec {
+                Codec::Float16 => {
+                    return Err(EmitError::NonKQuantCodec {
                         node: resolved.node,
                         codec: "float16",
                     });
                 }
-                PackedCodec::BFloat16 => {
-                    return Err(EmitError::NonKQuantPackedCodec {
+                Codec::BFloat16 => {
+                    return Err(EmitError::NonKQuantCodec {
                         node: resolved.node,
                         codec: "bfloat16",
                     });
@@ -1257,7 +1257,7 @@ pub(super) fn push_q5k_ggml_port_body(
 /// `is = 8*ip+l0/16` -> identical name. `N_R0_Q6_K = 1`
 /// (`ggml-metal-impl.h:38`) collapses ggml's own `row`/`nr0` loop to a
 /// single iteration, still written as `for q in 0..rows` so this stays in
-/// step with [`PackedCodec::rows_per_simdgroup`] rather than baking `1` in
+/// step with [`Codec::rows_per_simdgroup`] rather than baking `1` in
 /// the way `push_q4k_ggml_port_body` bakes `4`.
 ///
 /// Super-block iteration (`ggml-metal.metal:5387`): `for (i = ix; i < nb; i

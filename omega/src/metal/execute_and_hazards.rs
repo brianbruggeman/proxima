@@ -204,7 +204,7 @@ pub(super) fn execute_plan_inner(
             // on the GPU at the read (`msl::BF16_UNPACK_MSL`), never on the
             // host.
             // `Q3_K` uploads its raw super-block bytes unchanged, same as
-            // every other packed codec below -- `msl::PackedCodec::Q3K`'s
+            // every other packed codec below -- `msl::Codec::Q3K`'s
             // own unpack kernel (`q3k_element`) reads them at the GPU side.
             QuantizedBlock::Q3K(bytes)
             | QuantizedBlock::Q4K(bytes)

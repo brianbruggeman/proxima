@@ -67,7 +67,7 @@ use proxima_tensor::{
 
 use crate::error::EmitError;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
-use crate::msl::{Binding, PackedCodec, PackedOperands};
+use crate::msl::{Binding, Codec, PackedOperands};
 
 /// Every lane of one NVIDIA warp — fixed at 32 on every CUDA-capable GPU
 /// generation to date, the same "hardware-family fact, never a policy knob"
@@ -642,7 +642,7 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> u64 {
 /// reordering their combination across lanes is wrong, not merely imprecise.
 fn reduce_is_cooperative(
     resolved: &BoundOp,
-    _quantized: &[Option<PackedCodec>],
+    _quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
 ) -> bool {
     match &resolved.kind {
@@ -997,7 +997,7 @@ const Q3K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q3_k::QK_K;
 
 fn kernel_signature(
     source: &mut String,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     epilogue_operand_count: usize,
     gather_count: usize,
     entry: &str,
@@ -1007,7 +1007,7 @@ fn kernel_signature(
     for (index, &codec) in quantized.iter().enumerate() {
         let binding_type = match codec {
             None => element_type,
-            Some(PackedCodec::Float16) => "__half",
+            Some(Codec::Float16) => "__half",
             Some(_) => "unsigned char",
         };
         source.push_str(&format!(
@@ -1116,35 +1116,35 @@ fn operand_read(
     _node: NodeId,
     index: usize,
     offset: &str,
-    codec: Option<PackedCodec>,
+    codec: Option<Codec>,
 ) -> Result<String, EmitError> {
     match codec {
         None => Ok(format!("in{index}[{offset}]")),
-        Some(PackedCodec::Q2K) => Ok(format!(
+        Some(Codec::Q2K) => Ok(format!(
             "q2k_element(in{index} + ({offset} / {Q2K_BLOCK_ELEMENTS}) * {Q2K_BLOCK_BYTES}, (unsigned int)({offset} % {Q2K_BLOCK_ELEMENTS}))"
         )),
-        Some(PackedCodec::Q3K) => Ok(format!(
+        Some(Codec::Q3K) => Ok(format!(
             "q3k_element(in{index} + ({offset} / {Q3K_BLOCK_ELEMENTS}) * {Q3K_BLOCK_BYTES}, (unsigned int)({offset} % {Q3K_BLOCK_ELEMENTS}))"
         )),
-        Some(PackedCodec::Q4K) => Ok(format!(
+        Some(Codec::Q4K) => Ok(format!(
             "q4k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES}, (unsigned int)({offset} % {Q4K_BLOCK_ELEMENTS}))"
         )),
-        Some(PackedCodec::Q5K) => Ok(format!(
+        Some(Codec::Q5K) => Ok(format!(
             "q5k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q5K_BLOCK_BYTES}, (unsigned int)({offset} % {Q4K_BLOCK_ELEMENTS}))"
         )),
-        Some(PackedCodec::Q6K) => Ok(format!(
+        Some(Codec::Q6K) => Ok(format!(
             "q6k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q6K_BLOCK_BYTES}, (unsigned int)({offset} % {Q4K_BLOCK_ELEMENTS}))"
         )),
-        Some(PackedCodec::Q8_0) => Ok(format!(
+        Some(Codec::Q8_0) => Ok(format!(
             "q8_0_element(in{index} + ({offset} / {Q8_0_BLOCK_ELEMENTS}) * {Q8_0_BLOCK_BYTES}, (unsigned int)({offset} % {Q8_0_BLOCK_ELEMENTS}))"
         )),
-        Some(PackedCodec::Q4_0) => Ok(format!(
+        Some(Codec::Q4_0) => Ok(format!(
             "q4_0_element(in{index} + ({offset} / {Q4_0_BLOCK_ELEMENTS}) * {Q4_0_BLOCK_BYTES}, (unsigned int)({offset} % {Q4_0_BLOCK_ELEMENTS}))"
         )),
         // `__half` converts implicitly to `float` in CUDA C++, the same
         // "already a valid narrow-float buffer" shape MSL's `half` takes.
-        Some(PackedCodec::Float16) => Ok(format!("in{index}[{offset}]")),
-        Some(PackedCodec::BFloat16) => Ok(format!(
+        Some(Codec::Float16) => Ok(format!("in{index}[{offset}]")),
+        Some(Codec::BFloat16) => Ok(format!(
             "bf16_element(in{index} + ({offset} / {BFLOAT16_BLOCK_ELEMENTS}) * {BFLOAT16_BLOCK_BYTES}, (unsigned int)({offset} % {BFLOAT16_BLOCK_ELEMENTS}))"
         )),
     }
@@ -1153,7 +1153,7 @@ fn operand_read(
 fn render_elementwise(
     resolved: &BoundOp,
     entry: &str,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
 ) -> Result<String, EmitError> {
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
@@ -1282,7 +1282,7 @@ fn push_serial_reduce_body(
     reduce_rank_len: usize,
     operand_count: usize,
     gather_slots: &[Option<usize>],
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
@@ -1476,7 +1476,7 @@ fn push_cooperative_reduce_body(
     output_axes: &[u16],
     reduce_dims: &[u16],
     rank: usize,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
@@ -1707,7 +1707,7 @@ fn push_cooperative_reduce_body(
 fn render_reduce(
     resolved: &BoundOp,
     entry: &str,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
 ) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
@@ -1826,7 +1826,7 @@ fn render_reduce(
 fn render_scan(
     resolved: &BoundOp,
     entry: &str,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
 ) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op, init, ..
@@ -2424,9 +2424,9 @@ mod tests {
     #[test]
     fn q2k_and_q3k_emit_distinct_cuda_unpack_paths() {
         let (q2_bound, q2_packed) =
-            packed_elementwise_op(PackedCodec::Q2K, Q2K_BLOCK_BYTES, Q2K_BLOCK_ELEMENTS);
+            packed_elementwise_op(Codec::Q2K, Q2K_BLOCK_BYTES, Q2K_BLOCK_ELEMENTS);
         let (q3_bound, q3_packed) =
-            packed_elementwise_op(PackedCodec::Q3K, Q3K_BLOCK_BYTES, Q3K_BLOCK_ELEMENTS);
+            packed_elementwise_op(Codec::Q3K, Q3K_BLOCK_BYTES, Q3K_BLOCK_ELEMENTS);
         let q2 = emit_cuda(&q2_bound, &q2_packed).expect("q2k emits");
         let q3 = emit_cuda(&q3_bound, &q3_packed).expect("q3k emits");
         assert!(q2.source.contains("q2k_element"));
@@ -2435,7 +2435,7 @@ mod tests {
     }
 
     fn packed_elementwise_op(
-        codec: PackedCodec,
+        codec: Codec,
         block_bytes: usize,
         block_elements: usize,
     ) -> (BoundOp, PackedOperands) {
@@ -2475,7 +2475,7 @@ mod tests {
     #[test]
     fn q4k_operand_emits_q4k_element_read() {
         let (bound, packed) =
-            packed_elementwise_op(PackedCodec::Q4K, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS);
+            packed_elementwise_op(Codec::Q4K, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS);
         let kernel = emit_cuda(&bound, &packed).expect("emit succeeds");
         assert!(kernel.source.contains("q4k_element(in0"));
         assert!(kernel.source.contains(&format!("* {Q4K_BLOCK_BYTES}")));
@@ -2484,7 +2484,7 @@ mod tests {
     #[test]
     fn q5k_operand_emits_q5k_element_read() {
         let (bound, packed) =
-            packed_elementwise_op(PackedCodec::Q5K, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS);
+            packed_elementwise_op(Codec::Q5K, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS);
         let kernel = emit_cuda(&bound, &packed).expect("emit succeeds");
         assert!(kernel.source.contains("q5k_element(in0"));
     }
@@ -2492,7 +2492,7 @@ mod tests {
     #[test]
     fn q6k_operand_emits_q6k_element_read() {
         let (bound, packed) =
-            packed_elementwise_op(PackedCodec::Q6K, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS);
+            packed_elementwise_op(Codec::Q6K, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS);
         let kernel = emit_cuda(&bound, &packed).expect("emit succeeds");
         assert!(kernel.source.contains("q6k_element(in0"));
     }
@@ -2500,7 +2500,7 @@ mod tests {
     #[test]
     fn q8_0_operand_emits_q8_0_element_read() {
         let (bound, packed) =
-            packed_elementwise_op(PackedCodec::Q8_0, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS);
+            packed_elementwise_op(Codec::Q8_0, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS);
         let kernel = emit_cuda(&bound, &packed).expect("emit succeeds");
         assert!(kernel.source.contains("q8_0_element(in0"));
     }
@@ -2508,7 +2508,7 @@ mod tests {
     #[test]
     fn q4_0_operand_emits_q4_0_element_read() {
         let (bound, packed) =
-            packed_elementwise_op(PackedCodec::Q4_0, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS);
+            packed_elementwise_op(Codec::Q4_0, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS);
         let kernel = emit_cuda(&bound, &packed).expect("emit succeeds");
         assert!(kernel.source.contains("q4_0_element(in0"));
     }
@@ -2516,7 +2516,7 @@ mod tests {
     #[test]
     fn bfloat16_operand_emits_bf16_element_read() {
         let (bound, packed) = packed_elementwise_op(
-            PackedCodec::BFloat16,
+            Codec::BFloat16,
             BFLOAT16_BLOCK_BYTES,
             BFLOAT16_BLOCK_ELEMENTS,
         );
@@ -2810,9 +2810,9 @@ mod tests {
         let weight_node = bound.operands()[0].0;
 
         let mut q4k = PackedOperands::new();
-        q4k.insert(weight_node, PackedCodec::Q4K);
+        q4k.insert(weight_node, Codec::Q4K);
         let mut q5k = PackedOperands::new();
-        q5k.insert(weight_node, PackedCodec::Q5K);
+        q5k.insert(weight_node, Codec::Q5K);
 
         let kernel_q4k = emit_cuda(&bound, &q4k).expect("q4k emits");
         let kernel_q5k = emit_cuda(&bound, &q5k).expect("q5k emits");

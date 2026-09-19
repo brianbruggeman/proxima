@@ -72,7 +72,7 @@ metal-core = ["alloc"]
 # proxima-model-interop's `metal` feature.
 # The paired-nibble/paired-lane decode body (`msl.rs`'s `q4k_pair_dot`/
 # `q5k_pair_dot`/`q6k_pair_dot`) is selected for `Q4_K`/`Q5_K`/`Q6_K` by
-# `PackedCodec::supports_pair_dot` -- a structural fact of each codec's block
+# `Codec::supports_pair_dot` -- a structural fact of each codec's block
 # layout -- whenever the reduce is a plain `Float32` product, not by a
 # cargo feature (the former `metal-q5k-pair-dot`/`metal-q6k-pair-dot`
 # feature flags this comment used to name here). `Q5_K`'s body measured
@@ -405,7 +405,7 @@ pollster = { version = "1.0.1", optional = true }
 # every std target, including wgpu/Vulkan hosts; keep telemetry outside the
 # macOS-only Metal dependency table.
 proxima-telemetry = { workspace = true, optional = true }
-# per-codec block byte/element geometry `msl.rs`'s `PackedCodec` reads --
+# per-codec block byte/element geometry `msl.rs`'s `Codec` reads --
 # the one place those numbers are defined; alloc-tier only, `msl.rs` never
 # needs proxima-gguf's std-only parser/config surface.
 proxima-gguf = { path = "../proxima-gguf", default-features = false, features = ["alloc"] }
@@ -427,6 +427,7 @@ wgpu = { version = "30.0.1", default-features = false, features = [
     "metal",
     "vulkan",
 ], optional = true }
+proxima-primitives = { version = "0.1.0", path = "../proxima-primitives", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # objc2: the message-send runtime (Retained<T>, extern_methods!) every Metal

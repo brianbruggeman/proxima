@@ -63,7 +63,7 @@
 //! An operand named in the caller's [`crate::msl::PackedOperands`] table
 //! binds as raw bytes (`array<u32>`, word-addressed — WGSL storage has no
 //! byte-addressable type) instead of `array<f32>`, and every read goes
-//! through the matching [`crate::msl::PackedCodec`] unpack function
+//! through the matching [`crate::msl::Codec`] unpack function
 //! `packed_codec_functions_wgsl` generates for that operand — a word-based
 //! port of `crate::msl`'s own five packed-codec unpack functions plus
 //! `BFloat16`/`Float16`, specialized per operand index because WGSL rejects a
@@ -106,7 +106,7 @@ use proxima_tensor::{
 
 use crate::error::EmitError;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
-use crate::msl::{Binding, PackedCodec, PackedOperands, gather_count, gather_slots};
+use crate::msl::{Binding, Codec, PackedOperands, gather_count, gather_slots};
 
 /// Threads per workgroup every v1 WGSL kernel dispatches with. See
 /// [`crate::sized::WORKGROUP_SIZE`] and `omega-runtime.toml`'s `[wgsl]`.
@@ -197,8 +197,8 @@ pub fn emit_wgsl_with_policy(
     let entry = entry_name(resolved, packed_operands);
     let element_type = type_token(resolved.node, resolved.dtype, caps)?;
     let quantized = operand_codecs(resolved, packed_operands);
-    if quantized.contains(&Some(PackedCodec::Q3K)) {
-        return Err(EmitError::UnsupportedPackedCodec {
+    if quantized.contains(&Some(Codec::Q3K)) {
+        return Err(EmitError::UnsupportedCodec {
             node: resolved.node,
         });
     }
@@ -851,7 +851,7 @@ fn preamble(
     operand_count: usize,
     epilogue_operand_count: usize,
     gather_count: usize,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     element_type: &str,
     uniforms_struct: &str,
 ) {
@@ -1027,17 +1027,17 @@ fn cooperative_kernel_signature(source: &mut String, entry: &str, width: u32) {
     ));
 }
 
-fn codec_function_name(node: NodeId, codec: PackedCodec) -> Result<&'static str, EmitError> {
+fn codec_function_name(node: NodeId, codec: Codec) -> Result<&'static str, EmitError> {
     match codec {
-        PackedCodec::Q2K => Err(EmitError::UnsupportedPackedCodec { node }),
-        PackedCodec::Q3K => Err(EmitError::UnsupportedPackedCodec { node }),
-        PackedCodec::Q4K => Ok("q4k_element"),
-        PackedCodec::Q5K => Ok("q5k_element"),
-        PackedCodec::Q6K => Ok("q6k_element"),
-        PackedCodec::Q8_0 => Ok("q8_0_element"),
-        PackedCodec::Q4_0 => Ok("q4_0_element"),
-        PackedCodec::Float16 => Ok("f16_element"),
-        PackedCodec::BFloat16 => Ok("bf16_element"),
+        Codec::Q2K => Err(EmitError::UnsupportedCodec { node }),
+        Codec::Q3K => Err(EmitError::UnsupportedCodec { node }),
+        Codec::Q4K => Ok("q4k_element"),
+        Codec::Q5K => Ok("q5k_element"),
+        Codec::Q6K => Ok("q6k_element"),
+        Codec::Q8_0 => Ok("q8_0_element"),
+        Codec::Q4_0 => Ok("q4_0_element"),
+        Codec::Float16 => Ok("f16_element"),
+        Codec::BFloat16 => Ok("bf16_element"),
     }
 }
 
@@ -1052,13 +1052,13 @@ fn wgsl_operand_read(
     node: NodeId,
     index: usize,
     offset_expr: &str,
-    codec: Option<PackedCodec>,
+    codec: Option<Codec>,
 ) -> Result<String, EmitError> {
     match codec {
         None => Ok(format!("in{index}[{offset_expr}]")),
         Some(codec) => {
-            let elements = codec.block_elements();
-            let bytes = codec.block_bytes();
+            let elements = crate::msl::codec_block_elements(codec);
+            let bytes = crate::msl::codec_block_bytes(codec);
             let function = codec_function_name(node, codec)?;
             Ok(format!(
                 "{function}_{index}(({offset_expr} / {elements}) * {bytes}, {offset_expr} % {elements})"
@@ -1071,7 +1071,7 @@ fn render_elementwise(
     resolved: &BoundOp,
     entry: &str,
     element_type: &str,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
 ) -> Result<String, EmitError> {
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
@@ -1156,7 +1156,7 @@ fn render_reduce(
     resolved: &BoundOp,
     entry: &str,
     element_type: &str,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
 ) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -1375,7 +1375,7 @@ fn render_reduce_cooperative(
     resolved: &BoundOp,
     entry: &str,
     element_type: &str,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     width: u32,
 ) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
@@ -2149,9 +2149,9 @@ mod tests {
         let weight_node = bound.operands()[0].0;
 
         let mut q4k = PackedOperands::new();
-        q4k.insert(weight_node, PackedCodec::Q4K);
+        q4k.insert(weight_node, Codec::Q4K);
         let mut q5k = PackedOperands::new();
-        q5k.insert(weight_node, PackedCodec::Q5K);
+        q5k.insert(weight_node, Codec::Q5K);
 
         let kernel_q4k = emit_wgsl(&bound, WgslCaps::default(), &q4k).expect("q4k emits");
         let kernel_q5k = emit_wgsl(&bound, WgslCaps::default(), &q5k).expect("q5k emits");

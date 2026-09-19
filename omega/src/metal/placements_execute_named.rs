@@ -206,7 +206,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 upload_block_int32_as_float(&device, data, resident_name)?
             }
             // `Q3_K` uploads its raw super-block bytes unchanged, same as
-            // every other packed codec below -- `msl::PackedCodec::Q3K`'s
+            // every other packed codec below -- `msl::Codec::Q3K`'s
             // own unpack kernel (`q3k_element`) reads them at the GPU side.
             QuantizedBlock::Q3K(bytes)
             | QuantizedBlock::Q4K(bytes)
@@ -902,7 +902,7 @@ pub struct OpGpuTiming {
     pub output_axes: Vec<u16>,
     /// This operand's TENSOR bytes -- `element_count(shape) * bytes_per_element`,
     /// where `bytes_per_element` is the operand's own dtype width for a plain
-    /// buffer, or its `PackedCodec::block_bytes`/block-elements ratio for a
+    /// buffer, or its `Codec::block_bytes`/block-elements ratio for a
     /// packed one. See `operand_tensor_bytes`. Distinct from
     /// [`Self::bound_buffer_bytes`]: since a checkpoint mapping upload binds
     /// ONE buffer spanning the whole mmap (`checkpoint_mapping_offset`), that
@@ -925,7 +925,7 @@ pub struct OpGpuTiming {
     /// that same function's `quantized.len() != 2` check.
     pub operand_count: usize,
     /// The packed codec carried by this op's named operand, when present.
-    pub packed_codec: Option<PackedCodec>,
+    pub packed_codec: Option<Codec>,
     /// The emitted packed-kernel body, kept separate from the broad op kind.
     pub packed_kernel_variant: &'static str,
     /// [`crate::msl::diagnose_packed_row_block`]'s own verdict on THIS op,
@@ -1360,7 +1360,7 @@ pub(super) fn report_bound_operands(
         )
         && let Some(route) = route_values.first().copied().map(|value| value as usize)
         && let Some(descriptor) = expert_buffers.descriptor_records.get(route)
-        && descriptor.codec == PackedCodec::Q2K
+        && descriptor.codec == Codec::Q2K
         && let Some((_, _, None)) = bound.all_read_sources().nth(1)
         && let Some((activation_source, _, _)) = bound.all_read_sources().nth(1)
         && let Some((activation_buffer, activation_offset)) =

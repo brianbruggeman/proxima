@@ -16,7 +16,7 @@
 //! independent dequantize+dot reference fails loudly instead of silently.
 //!
 //! `Q6_K`'s pair-dot arm is selected by structure
-//! (`PackedCodec::supports_pair_dot`), not a cargo feature, so this op
+//! (`Codec::supports_pair_dot`), not a cargo feature, so this op
 //! always exercises the plain-product `y4` pointer's own stride-aware path
 //! (`other_stride_is_one` false here) rather than the GENERIC arm's
 //! `acts_row` hoist -- both arms share the same `other_stride`-aware

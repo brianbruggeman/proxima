@@ -9,7 +9,7 @@
 
 // `metal-q5k-pair-dot` no longer exists as a cargo feature (`omega/Cargo.
 // toml`'s own doc): the paired-nibble body is now selected by
-// `PackedCodec::supports_pair_dot`, a structural fact of the codec, and only
+// `Codec::supports_pair_dot`, a structural fact of the codec, and only
 // ever applies to `Q5_K`/`Q6_K`, never `Q4_K` -- so it was never a legitimate
 // member of this exclusion list, and naming it here after its removal would
 // make the whole cfg gate unsatisfiable under any real build (unknown
@@ -144,7 +144,7 @@ fn single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_bod
     let (program, sum) = matmul_program(TOKENS as u32, IN_DIM as u32, OUT_ROWS as u32);
     let shapes = proxima_tensor::infer(&program, &[]).expect("the synthetic program infers");
     let packed_operands: omega::PackedOperands =
-        [(NodeId(0), omega::PackedCodec::Q4K)].into_iter().collect();
+        [(NodeId(0), omega::Codec::Q4K)].into_iter().collect();
     let mut bound = proxima_tensor::bind(&program, &shapes, &[sum], NumericPolicy::default())
         .expect("the synthetic program binds");
     proxima_tensor::correct_packed_matmul_layouts(&mut bound, &[NodeId(0)].into_iter().collect());

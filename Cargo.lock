@@ -3189,6 +3189,7 @@ dependencies = [
  "proxima-build",
  "proxima-gguf",
  "proxima-onnx",
+ "proxima-primitives",
  "proxima-safetensors",
  "proxima-telemetry",
  "proxima-tensor",

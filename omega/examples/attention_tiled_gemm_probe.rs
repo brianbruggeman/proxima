@@ -114,7 +114,7 @@ fn main() {
     #[cfg(feature = "instrument")]
     let packed_operands: omega::PackedOperands = q4k_operands
         .iter()
-        .map(|node| (*node, omega::PackedCodec::Q4K))
+        .map(|node| (*node, omega::Codec::Q4K))
         .collect();
 
     // MIRRORS `metal::prepare` exactly, same as `real_forward_packed_probe.rs`.
@@ -190,7 +190,7 @@ fn main() {
 
         #[cfg(feature = "instrument")]
         {
-            let quantized: Vec<Option<omega::PackedCodec>> = operands
+            let quantized: Vec<Option<omega::Codec>> = operands
                 .iter()
                 .map(|(node, _, _)| packed_operands.get(node).copied())
                 .collect();

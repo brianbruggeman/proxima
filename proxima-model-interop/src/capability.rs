@@ -282,8 +282,8 @@ pub mod quant_format {
 
     /// `(cpu kernel, metal emitter, wgsl emitter, cuda emitter)` -- `Q3_K`
     /// is `metal`-only (`omega::wgsl::emit_wgsl`/`omega::cuda::emit_cuda`
-    /// both reject it via `EmitError::UnsupportedPackedCodec`/
-    /// `EmitError::CudaUnsupportedPackedCodec`); every other packed format
+    /// both reject it via `EmitError::UnsupportedCodec`/
+    /// `EmitError::CudaUnsupportedCodec`); every other packed format
     /// is `Supported` on all four (verified by reading the exhaustive
     /// `match` arms in `proxima-tensor/src/cpu.rs`, `omega/src/msl.rs`,
     /// `omega/src/wgsl.rs`, `omega/src/cuda.rs`; none carries a

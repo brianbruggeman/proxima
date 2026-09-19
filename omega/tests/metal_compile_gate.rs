@@ -197,7 +197,7 @@ fn tiled_gemm_q4k_kernel() -> omega::Kernel {
     let nests = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default()).expect("tiled gemm lowers");
     let weight_node = nests[0].operands()[0].0;
     let mut q4k = std::collections::BTreeMap::new();
-    q4k.insert(weight_node, omega::PackedCodec::Q4K);
+    q4k.insert(weight_node, omega::Codec::Q4K);
     let kernel = omega::emit(&nests[0], &q4k, proxima_tensor::NumericPolicy::default())
         .expect("tiled gemm emits");
     assert!(

@@ -38,7 +38,7 @@
 
 use std::collections::BTreeMap;
 
-use omega::msl::{PackedCodec, PackedOperands, emit};
+use omega::msl::{Codec, PackedOperands, emit};
 use proxima_tensor::{
     BoundOp, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit,
     ScalarOp, append, bind, infer, map,
@@ -67,7 +67,7 @@ struct WeightFamily {
     name: &'static str,
     in_dim: u32,
     out_dim: u32,
-    codec: PackedCodec,
+    codec: Codec,
 }
 
 const WEIGHT_FAMILIES: &[WeightFamily] = &[
@@ -75,31 +75,31 @@ const WEIGHT_FAMILIES: &[WeightFamily] = &[
         name: "attn_q.weight",
         in_dim: EMBEDDING,
         out_dim: EMBEDDING,
-        codec: PackedCodec::Q4K,
+        codec: Codec::Q4K,
     },
     WeightFamily {
         name: "ffn_gate.weight",
         in_dim: EMBEDDING,
         out_dim: FEED_FORWARD,
-        codec: PackedCodec::Q4K,
+        codec: Codec::Q4K,
     },
     WeightFamily {
         name: "ffn_up.weight",
         in_dim: EMBEDDING,
         out_dim: FEED_FORWARD,
-        codec: PackedCodec::Q4K,
+        codec: Codec::Q4K,
     },
     WeightFamily {
         name: "ffn_down.weight",
         in_dim: FEED_FORWARD,
         out_dim: EMBEDDING,
-        codec: PackedCodec::Q5K,
+        codec: Codec::Q5K,
     },
     WeightFamily {
         name: "output.weight",
         in_dim: EMBEDDING,
         out_dim: VOCAB,
-        codec: PackedCodec::Q6K,
+        codec: Codec::Q6K,
     },
 ];
 
@@ -111,18 +111,18 @@ const WEIGHT_FAMILIES: &[WeightFamily] = &[
 /// which every M=1 cell here does. Only `Q3_K` (not one of the three the
 /// ggml port covers) still emits its own `q3k_pair_dot(blk`; `WEIGHT_FAMILIES`
 /// never assigns it, so this only needs the two ggml-port markers.
-fn codec_marker(codec: PackedCodec) -> &'static str {
+fn codec_marker(codec: Codec) -> &'static str {
     match codec {
-        PackedCodec::Q3K => "q3k_pair_dot(blk",
-        PackedCodec::Q4K | PackedCodec::Q5K => "acc1_0",
-        PackedCodec::Q6K => "sums0",
-        PackedCodec::Q2K
-        | PackedCodec::Q8_0
-        | PackedCodec::Q4_0
-        | PackedCodec::Q5_1
-        | PackedCodec::Q5_0
-        | PackedCodec::Float16
-        | PackedCodec::BFloat16 => {
+        Codec::Q3K => "q3k_pair_dot(blk",
+        Codec::Q4K | Codec::Q5K => "acc1_0",
+        Codec::Q6K => "sums0",
+        Codec::Q2K
+        | Codec::Q8_0
+        | Codec::Q4_0
+        | Codec::Q5_1
+        | Codec::Q5_0
+        | Codec::Float16
+        | Codec::BFloat16 => {
             unreachable!("WEIGHT_FAMILIES never assigns a non-K-quant codec")
         }
     }

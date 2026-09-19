@@ -174,7 +174,7 @@ const ROWS_TO_CHECK: usize = 64;
 
 /// Shared body for both tests below -- both exercise the same
 /// paired-nibble `q5k_pair_dot` body `push_packed_row_blocked_body` selects
-/// by structure (`PackedCodec::supports_pair_dot`) whenever the reduce is a
+/// by structure (`Codec::supports_pair_dot`) whenever the reduce is a
 /// plain `Float32` product, at two tolerances: the looser 1e-4 bound names
 /// the tolerance the paired body's four-interleaved-sub-block-partial
 /// accumulation order actually needs against the scalar-oracle CPU path,

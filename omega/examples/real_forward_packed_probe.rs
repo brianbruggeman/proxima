@@ -107,7 +107,7 @@ fn main() {
     // still takes (that one stays codec-agnostic).
     let packed_operands: omega::PackedOperands = q4k_operands
         .iter()
-        .map(|node| (*node, omega::PackedCodec::Q4K))
+        .map(|node| (*node, omega::Codec::Q4K))
         .collect();
     println!(
         "matmul weight names={} resolved to q4k_operands={}",
@@ -174,7 +174,7 @@ fn main() {
 
         #[cfg(feature = "instrument")]
         {
-            let quantized: Vec<Option<omega::PackedCodec>> = op
+            let quantized: Vec<Option<omega::Codec>> = op
                 .operands()
                 .iter()
                 .map(|(node, _, _)| packed_operands.get(node).copied())

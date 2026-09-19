@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn grid_threads(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
 ) -> Result<u64, EmitError> {
@@ -102,7 +102,7 @@ pub(super) fn grid_threads(
                         .product(),
                 )?
             } else if let Some(block) = packed_row_block(resolved, quantized) {
-                // one simdgroup per `block.codec.rows_per_simdgroup()`
+                // one simdgroup per `codec_rows_per_simdgroup(block.codec)`
                 // feature rows, times the split-K factor (1 = no-op unless
                 // `metal-q4k-split-k` is active AND this shape is below the
                 // target simdgroup count), tiled again by
@@ -443,7 +443,7 @@ pub(super) fn push_body_steps(
 // `push_cooperative_reduce_body`'s own call site for the gate).
 pub(super) fn kernel_signature(
     source: &mut String,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     epilogue_operand_count: usize,
     gather_count: usize,
     entry: &str,
@@ -463,7 +463,7 @@ pub(super) fn kernel_signature(
         // `FLOAT16_BLOCK_BYTES`'s own doc.
         let binding_type = match codec {
             None => element_type,
-            Some(PackedCodec::Float16) => "half",
+            Some(Codec::Float16) => "half",
             Some(_) => "uchar",
         };
         source.push_str(&format!(
@@ -690,7 +690,7 @@ pub(super) fn preamble(source: &mut String) {
     // unconditional, same posture as `Q4K_UNPACK_MSL` above: an unused
     // `static inline` the kernel never calls costs nothing in the compiled
     // AIR, and the selector is now the codec's own layout
-    // ([`PackedCodec::supports_pair_dot`]), not a cargo feature.
+    // ([`Codec::supports_pair_dot`]), not a cargo feature.
     source.push_str(Q5K_PAIR_DOT_MSL);
     source.push('\n');
     source.push_str(Q6K_UNPACK_MSL);
@@ -723,42 +723,42 @@ pub(super) fn preamble(source: &mut String) {
 /// `(n / 256) * 144`. The uniforms stay in elements either way — only the
 /// read shape changes, which is the entire point of unpacking at the read
 /// instead of materializing a dequantized tensor first.
-pub(super) fn operand_read(index: usize, offset: &str, codec: Option<PackedCodec>) -> String {
+pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> String {
     match codec {
         None => format!("in{index}[{offset}]"),
-        Some(PackedCodec::Q2K) => format!(
+        Some(Codec::Q2K) => format!(
             "q2k_element(in{index} + ({offset} / {Q2K_BLOCK_ELEMENTS}) * {Q2K_BLOCK_BYTES}, (uint)({offset} % {Q2K_BLOCK_ELEMENTS}))"
         ),
-        Some(PackedCodec::Q3K) => format!(
+        Some(Codec::Q3K) => format!(
             "q3k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q3K_BLOCK_BYTES}, (uint)({offset} % {Q4K_BLOCK_ELEMENTS}))"
         ),
-        Some(PackedCodec::Q4K) => format!(
+        Some(Codec::Q4K) => format!(
             "q4k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES}, (uint)({offset} % {Q4K_BLOCK_ELEMENTS}))"
         ),
-        Some(PackedCodec::Q5K) => format!(
+        Some(Codec::Q5K) => format!(
             "q5k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q5K_BLOCK_BYTES}, (uint)({offset} % {Q4K_BLOCK_ELEMENTS}))"
         ),
-        Some(PackedCodec::Q6K) => format!(
+        Some(Codec::Q6K) => format!(
             "q6k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q6K_BLOCK_BYTES}, (uint)({offset} % {Q4K_BLOCK_ELEMENTS}))"
         ),
         // `Q8_0`'s block is 32 elements, not 256 -- its own
         // [`Q8_0_BLOCK_ELEMENTS`], never [`Q4K_BLOCK_ELEMENTS`].
-        Some(PackedCodec::Q8_0) => format!(
+        Some(Codec::Q8_0) => format!(
             "q8_0_element(in{index} + ({offset} / {Q8_0_BLOCK_ELEMENTS}) * {Q8_0_BLOCK_BYTES}, (uint)({offset} % {Q8_0_BLOCK_ELEMENTS}))"
         ),
         // `Q4_0`'s block is 32 elements, not 256 -- its own
         // [`Q4_0_BLOCK_ELEMENTS`], never [`Q4K_BLOCK_ELEMENTS`].
-        Some(PackedCodec::Q4_0) => format!(
+        Some(Codec::Q4_0) => format!(
             "q4_0_element(in{index} + ({offset} / {Q4_0_BLOCK_ELEMENTS}) * {Q4_0_BLOCK_BYTES}, (uint)({offset} % {Q4_0_BLOCK_ELEMENTS}))"
         ),
         // `Q5_1`'s block is 32 elements, not 256 -- its own
         // [`Q5_1_BLOCK_ELEMENTS`], never [`Q4K_BLOCK_ELEMENTS`].
-        Some(PackedCodec::Q5_1) => format!(
+        Some(Codec::Q5_1) => format!(
             "q5_1_element(in{index} + ({offset} / {Q5_1_BLOCK_ELEMENTS}) * {Q5_1_BLOCK_BYTES}, (uint)({offset} % {Q5_1_BLOCK_ELEMENTS}))"
         ),
         // `Q5_0`'s block is 32 elements, not 256 -- its own
         // [`Q5_0_BLOCK_ELEMENTS`], never [`Q4K_BLOCK_ELEMENTS`].
-        Some(PackedCodec::Q5_0) => format!(
+        Some(Codec::Q5_0) => format!(
             "q5_0_element(in{index} + ({offset} / {Q5_0_BLOCK_ELEMENTS}) * {Q5_0_BLOCK_BYTES}, (uint)({offset} % {Q5_0_BLOCK_ELEMENTS}))"
         ),
         // `Float16`'s buffer already binds as `device const half*`
@@ -766,11 +766,11 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<PackedCodec
         // exactly like a `None` operand -- MSL implicitly promotes the
         // resulting `half` to `float` wherever the body assigns it into a
         // `float` scratch slot, no cast needed.
-        Some(PackedCodec::Float16) => format!("in{index}[{offset}]"),
+        Some(Codec::Float16) => format!("in{index}[{offset}]"),
         // `BFloat16`'s block is 1 element, 2 bytes -- its own
         // [`BFLOAT16_BLOCK_ELEMENTS`]/[`BFLOAT16_BLOCK_BYTES`], never
         // [`Q4K_BLOCK_ELEMENTS`].
-        Some(PackedCodec::BFloat16) => format!(
+        Some(Codec::BFloat16) => format!(
             "bf16_element(in{index} + ({offset} / {BFLOAT16_BLOCK_ELEMENTS}) * {BFLOAT16_BLOCK_BYTES}, (uint)({offset} % {BFLOAT16_BLOCK_ELEMENTS}))"
         ),
     }
