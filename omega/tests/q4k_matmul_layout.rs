@@ -19,6 +19,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+use proxima_primitives::Codec;
 use proxima_tensor::cpu::evaluate_quantized;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
@@ -138,7 +139,7 @@ fn metal_agrees_with_cpu_and_the_independent_reference_on_a_q4k_weight_declared_
 
     let (program, sum) = matmul_program(IN_DIM as u32, OUT_DIM as u32);
     let blocks = [
-        QuantizedBlock::Q4K(&packed),
+        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
         QuantizedBlock::Float32(&activation),
     ];
 

@@ -9,6 +9,7 @@
 //! settle whether a foreign caller's quantized embedding table lowers.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use proxima_primitives::Codec;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::spec::{embedding_lookup, input_leaf};
 use proxima_tensor::{DType, Extent};
@@ -91,7 +92,7 @@ fn quantized_embedding_gather_matches_dequantized_reference_q8_0() {
 
     assert_quantized_gather_matches_reference(
         embedding,
-        QuantizedBlock::Q8_0(&table_bytes),
+        QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &table_bytes },
         &table_f32,
     );
 }
@@ -107,7 +108,7 @@ fn quantized_embedding_gather_matches_dequantized_reference_q4_k() {
 
     assert_quantized_gather_matches_reference(
         embedding,
-        QuantizedBlock::Q4K(&table_bytes),
+        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &table_bytes },
         &table_f32,
     );
 }

@@ -22,6 +22,7 @@ use core::mem::size_of;
 
 use objc2_metal::MTLBuffer;
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append,
@@ -183,7 +184,7 @@ fn build_fixture() -> Fixture {
     named.extend(
         weight_names
             .iter()
-            .map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Q4K(&[]))),
+            .map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &[] })),
     );
 
     let plan = omega::plan_named_with_placed_inputs(
@@ -261,7 +262,7 @@ impl Fixture {
         named.extend(
             self.weight_names
                 .iter()
-                .map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Q4K(&[]))),
+                .map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &[] })),
         );
         named
     }
@@ -483,7 +484,7 @@ fn raw_split_member_forces_its_own_dispatch() {
     let weight_names: Vec<String> = (0..RAW_SPLIT_ROUNDS).map(|round| format!("raw_weight_{round}")).collect();
     let mut named: Vec<(&str, proxima_tensor::QuantizedBlock<'_>)> =
         vec![("activation", proxima_tensor::QuantizedBlock::Float32(&[]))];
-    named.extend(weight_names.iter().map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Q4K(&[]))));
+    named.extend(weight_names.iter().map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &[] })));
 
     let plan = omega::plan_named_with_placed_inputs(
         &program,
@@ -694,7 +695,7 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
     let weight_names: Vec<String> = (0..LAZY_ROUNDS).map(|round| format!("lazy_weight_{round}")).collect();
     let mut named: Vec<(&str, proxima_tensor::QuantizedBlock<'_>)> =
         vec![("raw_activation", proxima_tensor::QuantizedBlock::Float32(&[]))];
-    named.extend(weight_names.iter().map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Q4K(&[]))));
+    named.extend(weight_names.iter().map(|name| (name.as_str(), proxima_tensor::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &[] })));
 
     let plan = omega::plan_named_with_placed_inputs(
         &program,

@@ -1543,10 +1543,10 @@ pub(super) fn dequantize_row(
     if matches!(
         block,
         QuantizedBlock::Float32(_)
-            | QuantizedBlock::Q4_0(_)
-            | QuantizedBlock::Q5_0(_)
-            | QuantizedBlock::Float16(_)
-            | QuantizedBlock::BFloat16(_)
+            | QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: _ }
+            | QuantizedBlock::Packed { codec: Codec::Q5_0, bytes: _ }
+            | QuantizedBlock::Packed { codec: Codec::Float16, bytes: _ }
+            | QuantizedBlock::Packed { codec: Codec::BFloat16, bytes: _ }
     ) {
         return Err(unaligned_row());
     }

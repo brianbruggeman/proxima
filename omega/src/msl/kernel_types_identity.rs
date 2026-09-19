@@ -1351,23 +1351,22 @@ static inline float bf16_element(device const uchar *block, uint index) {
 /// (guiding-principles §20 rules out a blanket impl / newtype to host one).
 #[cfg(feature = "std")]
 pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Option<Codec> {
-    match block {
-        QuantizedBlock::Q2K(_) => Some(Codec::Q2K),
-        QuantizedBlock::Q3K(_) => Some(Codec::Q3K),
-        QuantizedBlock::Q4K(_) => Some(Codec::Q4K),
-        QuantizedBlock::Q5K(_) => Some(Codec::Q5K),
-        QuantizedBlock::Q6K(_) => Some(Codec::Q6K),
-        QuantizedBlock::Q8_0(_) => Some(Codec::Q8_0),
-        QuantizedBlock::Q4_0(_) => Some(Codec::Q4_0),
-        QuantizedBlock::Q5_1(_) => Some(Codec::Q5_1),
-        QuantizedBlock::Q5_0(_) => Some(Codec::Q5_0),
-        QuantizedBlock::Float16(_) => Some(Codec::Float16),
-        QuantizedBlock::BFloat16(_) => Some(Codec::BFloat16),
-        QuantizedBlock::Float32(_)
-        | QuantizedBlock::Int32(_)
-        | QuantizedBlock::Iq4Nl(_)
-        | QuantizedBlock::Iq2Xs(_)
-        | QuantizedBlock::Iq3Xxs(_) => None,
+    let QuantizedBlock::Packed { codec, .. } = block else {
+        return None;
+    };
+    match codec {
+        Codec::Q2K
+        | Codec::Q3K
+        | Codec::Q4K
+        | Codec::Q5K
+        | Codec::Q6K
+        | Codec::Q8_0
+        | Codec::Q4_0
+        | Codec::Q5_1
+        | Codec::Q5_0
+        | Codec::Float16
+        | Codec::BFloat16 => Some(*codec),
+        _ => None,
     }
 }
 

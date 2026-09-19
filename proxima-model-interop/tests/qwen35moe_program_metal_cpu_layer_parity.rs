@@ -359,7 +359,7 @@ fn quantized_layer_parity(layer_count: u32, width: u32) -> Vec<(usize, f32)> {
                 let bytes = quantized_storage_iter
                     .next()
                     .expect("one packed buffer per quantized leaf");
-                QuantizedBlock::Q4K(bytes.as_slice())
+                QuantizedBlock::Packed { codec: Codec::Q4K, bytes: bytes.as_slice() }
             } else {
                 QuantizedBlock::Float32(data.as_slice())
             }

@@ -207,7 +207,7 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
     let (program, sum) =
         multi_axis_matmul_program(TOKENS as u32, IN_DIM as u32, HEADS as u32, HEAD_DIM as u32);
     let blocks = [
-        QuantizedBlock::Q4K(&packed),
+        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
         QuantizedBlock::Float32(&activation),
     ];
 

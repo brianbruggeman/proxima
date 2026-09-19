@@ -120,8 +120,8 @@ pub(crate) fn safetensors_tensor_as_packed_block<'file>(
             .ok_or_else(|| InteropError::MisalignedFloat32Tensor {
                 tensor: entry.name.clone(),
             }),
-        DType::Float16 => Ok(QuantizedBlock::Float16(bytes)),
-        DType::BFloat16 => Ok(QuantizedBlock::BFloat16(bytes)),
+        DType::Float16 => Ok(QuantizedBlock::Packed { codec: Codec::Float16, bytes }),
+        DType::BFloat16 => Ok(QuantizedBlock::Packed { codec: Codec::BFloat16, bytes }),
         other => Err(InteropError::UndecodableSafetensorsDType {
             tensor: entry.name.clone(),
             dtype: other,

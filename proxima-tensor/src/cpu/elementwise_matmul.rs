@@ -941,11 +941,11 @@ pub(super) type MatmulRowDotFn = fn(&[u8], &[u8]) -> Result<f32, TensorError>;
 pub(super) fn dot_fn_for(weight_block: QuantizedBlock<'_>) -> Option<MatmulRowDotFn> {
     match weight_block {
         #[cfg(feature = "q4k-int8-dot")]
-        QuantizedBlock::Q4K(_) => Some(dot_q4k_q8k),
+        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: _ } => Some(dot_q4k_q8k),
         #[cfg(feature = "q5k-int8-dot")]
-        QuantizedBlock::Q5K(_) => Some(dot_q5k_q8k),
+        QuantizedBlock::Packed { codec: Codec::Q5K, bytes: _ } => Some(dot_q5k_q8k),
         #[cfg(feature = "q6k-int8-dot")]
-        QuantizedBlock::Q6K(_) => Some(dot_q6k_q8k),
+        QuantizedBlock::Packed { codec: Codec::Q6K, bytes: _ } => Some(dot_q6k_q8k),
         _ => None,
     }
 }

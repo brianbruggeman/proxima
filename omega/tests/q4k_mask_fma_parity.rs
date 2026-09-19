@@ -131,7 +131,7 @@ fn masked_fma_q4k_matvec_matches_the_dequantized_f32_cpu_path_across_every_sub_b
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Q4K(&packed),
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],

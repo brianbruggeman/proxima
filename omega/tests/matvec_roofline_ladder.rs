@@ -161,6 +161,7 @@ use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::{QuantError, q4_k, q5_k, q6_k};
 use proxima_gguf::types::GgmlType;
+use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock,
@@ -1622,7 +1623,7 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         .collect();
     let mut blocks: Vec<QuantizedBlock<'_>> = weight_slices
         .iter()
-        .map(|slice| QuantizedBlock::Q4K(slice))
+        .map(|slice| QuantizedBlock::Packed { codec: Codec::Q4K, bytes: slice })
         .collect();
     blocks.push(QuantizedBlock::Float32(&activation));
 
@@ -1884,9 +1885,9 @@ impl ShapeCodec {
 
     fn quantized_block(self, bytes: &[u8]) -> QuantizedBlock<'_> {
         match self {
-            ShapeCodec::Q4K => QuantizedBlock::Q4K(bytes),
-            ShapeCodec::Q5K => QuantizedBlock::Q5K(bytes),
-            ShapeCodec::Q6K => QuantizedBlock::Q6K(bytes),
+            ShapeCodec::Q4K => QuantizedBlock::Packed { codec: Codec::Q4K, bytes },
+            ShapeCodec::Q5K => QuantizedBlock::Packed { codec: Codec::Q5K, bytes },
+            ShapeCodec::Q6K => QuantizedBlock::Packed { codec: Codec::Q6K, bytes },
         }
     }
 }

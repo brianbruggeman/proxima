@@ -224,7 +224,7 @@ fn metal_matches_cpu_on_real_q5_1_down_projection_bytes() {
 
     let (program, sum) = quantized_matmul_program(rows as u32, k as u32);
     let blocks = [
-        QuantizedBlock::Q5_1(&weight_bytes),
+        QuantizedBlock::Packed { codec: Codec::Q5_1, bytes: &weight_bytes },
         QuantizedBlock::Float32(&activation),
     ];
 

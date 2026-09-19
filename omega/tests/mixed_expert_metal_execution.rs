@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 
 use proxima_gguf::quant::{q2_k, q3_k, q4_k};
+use proxima_primitives::Codec;
 use proxima_tensor::cpu::{
     ExpertEntry, ExpertSource, QuantizedBlock,
     evaluate_quantized_named_exact_with_scratch_and_experts,
@@ -263,7 +264,7 @@ fn mixed_q2k_q4k_expert_source_executes_on_metal() {
     let routes = [2.0_f32, 0.0_f32];
     let activations = activation();
     let named = [
-        ("weight", QuantizedBlock::Q4K(&placeholder)),
+        ("weight", QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &placeholder }),
         ("route", QuantizedBlock::Float32(&routes)),
         ("activation", QuantizedBlock::Float32(&activations)),
     ];
@@ -271,19 +272,19 @@ fn mixed_q2k_q4k_expert_source_executes_on_metal() {
         .expect("the Q4_K placeholder supplies the plan's static shape");
     let entries = [
         ExpertEntry {
-            block: QuantizedBlock::Q2K(&low),
+            block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &low },
             out_dim: ROWS as u32,
             in_dim: WIDTH as u32,
             epoch: 3,
         },
         ExpertEntry {
-            block: QuantizedBlock::Q4K(&high),
+            block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &high },
             out_dim: ROWS as u32,
             in_dim: WIDTH as u32,
             epoch: 4,
         },
         ExpertEntry {
-            block: QuantizedBlock::Q4K(&high),
+            block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &high },
             out_dim: ROWS as u32,
             in_dim: WIDTH as u32,
             epoch: 5,
@@ -342,7 +343,7 @@ fn q3k_q4k_seven_rows_route_distinct_high_experts_matches_cpu() {
         .map(|index| ((index * 29 % 101) as f32 - 50.0) * 0.015)
         .collect();
     let named = [
-        ("weight", QuantizedBlock::Q4K(&placeholder)),
+        ("weight", QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &placeholder }),
         ("route", QuantizedBlock::Float32(&route_values)),
         ("activation", QuantizedBlock::Float32(&activations)),
     ];
@@ -351,9 +352,9 @@ fn q3k_q4k_seven_rows_route_distinct_high_experts_matches_cpu() {
     let entries: Vec<ExpertEntry<'_>> = (0..EXPERT_COUNT)
         .map(|expert| ExpertEntry {
             block: if expert % 2 == 0 {
-                QuantizedBlock::Q3K(&q3_bytes)
+                QuantizedBlock::Packed { codec: Codec::Q3K, bytes: &q3_bytes }
             } else {
-                QuantizedBlock::Q4K(&q4_bytes)
+                QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &q4_bytes }
             },
             out_dim: ROWS as u32,
             in_dim: WIDTH as u32,
@@ -416,7 +417,7 @@ fn mixed_expert_source_and_recurrent_state_placement_share_one_execution() {
     let activations = activation();
     let state_placeholder = [0.0_f32; STATE_ELEMENTS];
     let named = [
-        ("weight", QuantizedBlock::Q4K(&placeholder)),
+        ("weight", QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &placeholder }),
         ("route", QuantizedBlock::Float32(&routes)),
         ("activation", QuantizedBlock::Float32(&activations)),
         ("state", QuantizedBlock::Float32(&state_placeholder)),
@@ -432,19 +433,19 @@ fn mixed_expert_source_and_recurrent_state_placement_share_one_execution() {
 
     let entries = [
         ExpertEntry {
-            block: QuantizedBlock::Q2K(&low),
+            block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &low },
             out_dim: ROWS as u32,
             in_dim: WIDTH as u32,
             epoch: 3,
         },
         ExpertEntry {
-            block: QuantizedBlock::Q4K(&high),
+            block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &high },
             out_dim: ROWS as u32,
             in_dim: WIDTH as u32,
             epoch: 4,
         },
         ExpertEntry {
-            block: QuantizedBlock::Q4K(&high),
+            block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &high },
             out_dim: ROWS as u32,
             in_dim: WIDTH as u32,
             epoch: 5,
@@ -536,8 +537,8 @@ fn mixed_kernel_cache_keeps_each_route_index_binding() {
     let second_route = [1.0_f32];
     let activations = &activation()[..WIDTH];
     let named = [
-        ("first_weight", QuantizedBlock::Q4K(&placeholder)),
-        ("second_weight", QuantizedBlock::Q4K(&placeholder)),
+        ("first_weight", QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &placeholder }),
+        ("second_weight", QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &placeholder }),
         ("first_route", QuantizedBlock::Float32(&first_route)),
         ("second_route", QuantizedBlock::Float32(&second_route)),
         ("activation", QuantizedBlock::Float32(activations)),
@@ -552,19 +553,19 @@ fn mixed_kernel_cache_keeps_each_route_index_binding() {
     .expect("both structurally identical gathered reductions plan together");
     let entries = [
         ExpertEntry {
-            block: QuantizedBlock::Q2K(&low),
+            block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &low },
             out_dim: ROWS as u32,
             in_dim: WIDTH as u32,
             epoch: 3,
         },
         ExpertEntry {
-            block: QuantizedBlock::Q4K(&high),
+            block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &high },
             out_dim: ROWS as u32,
             in_dim: WIDTH as u32,
             epoch: 4,
         },
         ExpertEntry {
-            block: QuantizedBlock::Q4K(&high),
+            block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &high },
             out_dim: ROWS as u32,
             in_dim: WIDTH as u32,
             epoch: 5,
@@ -617,7 +618,7 @@ fn mixed_expert_source_rejects_unsupported_codec_before_device_execution() {
     let routes = [0.0_f32, 0.0_f32];
     let activations = activation();
     let named = [
-        ("weight", QuantizedBlock::Q4K(&placeholder)),
+        ("weight", QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &placeholder }),
         ("route", QuantizedBlock::Float32(&routes)),
         ("activation", QuantizedBlock::Float32(&activations)),
     ];
@@ -625,7 +626,7 @@ fn mixed_expert_source_rejects_unsupported_codec_before_device_execution() {
         .expect("the placeholder has a valid gathered Q4_K shape");
     let unsupported = [0_u8; 176];
     let entries = [ExpertEntry {
-        block: QuantizedBlock::Q5K(&unsupported),
+        block: QuantizedBlock::Packed { codec: Codec::Q5K, bytes: &unsupported },
         out_dim: ROWS as u32,
         in_dim: WIDTH as u32,
         epoch: 0,

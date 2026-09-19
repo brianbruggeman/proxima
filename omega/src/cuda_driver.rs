@@ -1134,21 +1134,21 @@ fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
 
 fn packed_bytes<'a>(block: &QuantizedBlock<'a>) -> &'a [u8] {
     match block {
-        QuantizedBlock::Q2K(bytes)
-        | QuantizedBlock::Q3K(bytes)
-        | QuantizedBlock::Q4K(bytes)
-        | QuantizedBlock::Q5K(bytes)
-        | QuantizedBlock::Q6K(bytes)
-        | QuantizedBlock::Q8_0(bytes)
-        | QuantizedBlock::Q4_0(bytes)
-        | QuantizedBlock::Float16(bytes)
-        | QuantizedBlock::BFloat16(bytes) => bytes,
+        QuantizedBlock::Packed { codec: Codec::Q2K, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q3K, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q4K, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q5K, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q6K, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q8_0, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q4_0, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Float16, bytes }
+        | QuantizedBlock::Packed { codec: Codec::BFloat16, bytes } => bytes,
         QuantizedBlock::Float32(_)
         | QuantizedBlock::Int32(_)
-        | QuantizedBlock::Q5_1(_)
-        | QuantizedBlock::Iq4Nl(_)
-        | QuantizedBlock::Iq2Xs(_)
-        | QuantizedBlock::Iq3Xxs(_) => &[],
+        | QuantizedBlock::Packed { codec: Codec::Q5_1, bytes: _ }
+        | QuantizedBlock::Packed { codec: Codec::Iq4Nl, bytes: _ }
+        | QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes: _ }
+        | QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes: _ } => &[],
     }
 }
 

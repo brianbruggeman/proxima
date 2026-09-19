@@ -17,6 +17,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     AxisTerm, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
@@ -144,7 +145,7 @@ fn assert_ggml_port_matches_reference_at_stride(label: &str, stride: i32) {
 
     let (program, sum) = matmul_program_strided_activation(IN_DIM as u32, OUT_DIM as u32, stride);
     let blocks = [
-        QuantizedBlock::Q4K(&packed),
+        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
         QuantizedBlock::Float32(&physical_activation),
     ];
 

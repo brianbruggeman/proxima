@@ -17,6 +17,7 @@ fn main() {
 #[cfg(all(feature = "metal", feature = "cpu", target_os = "macos"))]
 fn run() {
     use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    use proxima_primitives::Codec;
     use proxima_tensor::cpu::evaluate_quantized;
     use proxima_tensor::test_support::Lcg;
     use proxima_tensor::{
@@ -115,7 +116,7 @@ fn run() {
 
         let (program, sum) = matmul_program(IN_DIM as u32, out_dim as u32);
         let blocks = [
-            QuantizedBlock::Q4K(&packed),
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
             QuantizedBlock::Float32(&activation),
         ];
         let cpu = evaluate_quantized(&program, &[], &blocks, &[sum]).expect("cpu runs");

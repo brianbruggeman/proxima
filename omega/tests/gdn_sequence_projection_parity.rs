@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+use proxima_primitives::Codec;
 use proxima_tensor::spec::{
     Qwen35GdnSequenceTail, append_qwen35_gdn_sequence_tail_with_taps, input_leaf, scalar_constant,
 };
@@ -112,7 +113,7 @@ fn qwen35_sequence_tail_projection_matches_cpu_on_packed_weight() {
         QuantizedBlock::Float32(z_values.as_slice()),
         QuantizedBlock::Float32(head_eps_values.as_slice()),
         QuantizedBlock::Float32(norm_values.as_slice()),
-        QuantizedBlock::Q4K(weight_blocks.as_slice()),
+        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: weight_blocks.as_slice() },
     ];
 
     let cpu =

@@ -25,6 +25,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
+use proxima_primitives::Codec;
 use proxima_safetensors::{Manifest, SafetensorsParser};
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
@@ -176,7 +177,7 @@ fn metal_matmul_on_real_mlp_gate_biases_bf16_bytes_matches_the_dequantized_f32_c
         &packed_program,
         &[],
         &[
-            QuantizedBlock::BFloat16(&weight_bytes),
+            QuantizedBlock::Packed { codec: Codec::BFloat16, bytes: &weight_bytes },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
