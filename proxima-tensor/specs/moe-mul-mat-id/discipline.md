@@ -22,8 +22,21 @@ Per-token routed-expert product — fires every token, every MoE layer.
 
 ## Invariants engaged (guiding-principles — what each ruled out)
 - I1 batched indexed matmul, k as grid-z, k-independent products + one combine.
-- I2 algebra-preserving: Metal kernel + bind admission only; NO spec/builder
-  change. Ruled out: any Op-graph rewrite.
+- I2 algebra-preserving. AMENDED 2026-09-19 (a704796d): the original "NO
+  spec/builder change; ruled out any Op-graph rewrite" was too tight — it blocks
+  the ONLY path to the win. The real qwen35moe PerRoute builder
+  (mistral_layer_moe.rs:893-1046) emits expert routes INTERLEAVED with reduces, so
+  moe_round_group_is_contiguous's positional guard (route.0 <= leader_reduce.0)
+  declines → the collapse never fires. Proven bit-exact (route r+1 depends only on
+  round r's selection_scores, never any expert product): hoisting all k routes
+  before the products is a pure TOPOLOGICAL REORDER, no algebra/reduce-shape
+  change. SCOPED EXCEPTION granted: a bit-exact reorder of independent ops IS
+  permitted (it is not the semantic Op-graph rewrite I2 meant to forbid, which
+  stays forbidden). HARD GATE (ROW-543 protocol): land ONLY after a measured real
+  qwen35moe TTNT + PROXIMA_METAL_OP_PROFILE_STEP dispatch run shows op_count down
+  AND wall-clock NOT worse — ROW 543 hoisted routes via GroupedGateUp and regressed
+  57.8→74.9ms (from a slower reduce ADDRESSING mode; this keeps the fast per-route
+  reduce shape, so it should not recur, but that is an expectation until measured).
 - I3 default-off compile-time flag; main default byte-unchanged (firewall).
 - I4 no new proxima-library type unless the pipe question fails (answered by
   writing the expression). Ruled out: a `MergedExpertProduct` library type — the
