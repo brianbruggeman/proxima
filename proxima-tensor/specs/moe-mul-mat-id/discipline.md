@@ -81,6 +81,23 @@ The landed scaffold (85ac70da5) is correct-but-incomplete: safe (declines
 everywhere, default-off), but the admission drops the addresses — step 1 above is
 the real work.
 
+## Design fork resolved → option (b), info-preserving (2026-09-19)
+
+The op-collapse win requires the k round-siblings' per-round route/output
+addresses, which the admission DROPS. Two ways to restore them:
+- (a) arena buffer-aliasing — place the k route/output buffers contiguous so a
+  `base + r·stride` read reaches them. Placement-intent layer built + unit-tested
+  by a7115b44, then STASHED (`moe-placement-intent-wip-e72c27c99`, worktree). This
+  COMPENSATES for the information destruction.
+- (b) CHOSEN — do not drop the info: carry the k route indices as an operand
+  array so the batched op reads route[z], z∈0..k. This IS llama.cpp `mul_mat_id`
+  (array of expert ids + one batched indexed matmul), and per guiding-principles
+  "fix the information destruction, don't compensate for it" it is the correct
+  design. In flight (ac774d01), correct-fallback (CPU-first) allowed.
+Landed this session: bug fix e9db1860e/1141695c6 (exhaustive RoundBatchedReduce
+match in examples/scaling.rs — a break the scaffold 85ac70da5 introduced under
+`--features metal-moe-mul-mat-id --examples`).
+
 ## Notes
 Design (wf Design phase) avoids both prior traps: `round_count: Option<u32>` on
 BoundOp (None everywhere = byte-identical default, like `GridSpec.depth`), z rides
