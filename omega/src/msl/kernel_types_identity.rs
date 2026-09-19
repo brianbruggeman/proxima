@@ -1345,7 +1345,7 @@ static inline float bf16_element(device const uchar *block, uint index) {
 /// this only answers whether `Codec` has a variant for the block at all.
 /// `None` for the two non-quantized carriers ([`QuantizedBlock::Float32`]/
 /// `Int32`) and for the codecs with no `Codec`/unpack-kernel entry anywhere
-/// yet ([`QuantizedBlock::Iq4Nl`]/`Iq2Xs`/`Iq3Xxs`) — decode-only, CPU-side
+/// yet ([`Codec::Iq4Nl`]/`Iq2Xs`/`Iq3Xxs`) — decode-only, CPU-side
 /// so far (see `proxima_tensor::cpu`). Free function, not an inherent
 /// method: `Codec` is `proxima_primitives::Codec`, foreign to this crate
 /// (guiding-principles §20 rules out a blanket impl / newtype to host one).

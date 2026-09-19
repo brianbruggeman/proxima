@@ -1205,7 +1205,7 @@ where
 /// super-block at a time into a reused stack buffer via
 /// [`proxima_gguf::quant::q5_k::dequantize_block`], then folds against the
 /// matching activation slice with the same [`dot_fold_fused_multiply_add`]
-/// fold. This is [`QuantizedBlock::Q5K`]'s codec path whenever
+/// fold. This is [`Codec::Q5K`]'s codec path whenever
 /// `q5k-int8-dot` is off, and stays the codec path for non-matmul
 /// consumers regardless.
 ///
@@ -1434,7 +1434,7 @@ pub fn matmul_q2k_f32(
 
 /// [`dot_q4k_f32`]'s mechanism applied to `Q6_K`: dequantizes one
 /// super-block at a time via [`proxima_gguf::quant::q6_k::dequantize_block`],
-/// then folds against the matching activation slice. [`QuantizedBlock::Q6K`]'s
+/// then folds against the matching activation slice. [`Codec::Q6K`]'s
 /// codec path whenever `q6k-int8-dot` is off.
 ///
 /// # Errors
@@ -1519,7 +1519,7 @@ pub(super) const Q8_0_BLOCK_BYTES: usize = proxima_gguf::quant::q8_0::BLOCK_BYTE
 
 /// Decoded `f32` elements per `Q8_0` block (`QK8_0`, 32) -- unlike the
 /// `Q4_K`/`Q5_K`/`Q6_K` family, `Q8_0` has no shared super-block constant
-/// with them; see [`QuantizedBlock::Q8_0`]'s own doc for why this codec's
+/// with them; see [`Codec::Q8_0`]'s own doc for why this codec's
 /// much smaller block is the one that fits the key/value context cache's
 /// row width.
 pub(super) const Q8_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q8_0::QK8_0;
@@ -1606,8 +1606,8 @@ pub fn matmul_q8_0_f32(
 pub(super) const Q4_0_BLOCK_BYTES: usize = proxima_gguf::quant::q4_0::BLOCK_BYTES;
 
 /// Decoded `f32` elements per `Q4_0` block (`QK4_0`, 32) -- the same flat
-/// 32-element shape as [`QuantizedBlock::Q8_0`], not [`Q4K_BLOCK_ELEMENTS`]'s
-/// 256-wide super-block; see [`QuantizedBlock::Q4_0`]'s own doc.
+/// 32-element shape as [`Codec::Q8_0`], not [`Q4K_BLOCK_ELEMENTS`]'s
+/// 256-wide super-block; see [`Codec::Q4_0`]'s own doc.
 pub(super) const Q4_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_0::QK4_0;
 
 /// [`dot_q8_0_f32`]'s mechanism applied to `Q4_0`: dequantizes one
@@ -1687,8 +1687,8 @@ pub fn matmul_q4_0_f32(
 pub(super) const Q5_1_BLOCK_BYTES: usize = proxima_gguf::quant::q5_1::BLOCK_BYTES;
 
 /// Decoded `f32` elements per `Q5_1` block (`QK5_1`, 32) -- the same flat
-/// 32-element shape as [`QuantizedBlock::Q4_0`]/[`QuantizedBlock::Q8_0`];
-/// see [`QuantizedBlock::Q5_1`]'s own doc.
+/// 32-element shape as [`Codec::Q4_0`]/[`Codec::Q8_0`];
+/// see [`Codec::Q5_1`]'s own doc.
 pub(super) const Q5_1_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_1::QK5_1;
 
 /// [`dot_q4_0_f32`]'s mechanism applied to `Q5_1`: dequantizes one
@@ -1768,8 +1768,8 @@ pub fn matmul_q5_1_f32(
 pub(super) const Q5_0_BLOCK_BYTES: usize = proxima_gguf::quant::q5_0::BLOCK_BYTES;
 
 /// Decoded `f32` elements per `Q5_0` block (`QK5_0`, 32) -- the same flat
-/// 32-element shape as [`QuantizedBlock::Q4_0`]/[`QuantizedBlock::Q5_1`];
-/// see [`QuantizedBlock::Q5_0`]'s own doc.
+/// 32-element shape as [`Codec::Q4_0`]/[`Codec::Q5_1`];
+/// see [`Codec::Q5_0`]'s own doc.
 pub(super) const Q5_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_0::QK5_0;
 
 /// [`dot_q5_1_f32`]'s mechanism applied to `Q5_0`: dequantizes one
@@ -1852,8 +1852,8 @@ pub fn matmul_q5_0_f32(
 pub(super) const IQ4_NL_BLOCK_BYTES: usize = proxima_gguf::quant::iq4_nl::BLOCK_BYTES;
 
 /// Decoded `f32` elements per `IQ4_NL` block (`QK4_NL`, 32) -- the same flat
-/// 32-element shape as [`QuantizedBlock::Q4_0`]; see
-/// [`QuantizedBlock::Iq4Nl`]'s own doc.
+/// 32-element shape as [`Codec::Q4_0`]; see
+/// [`Codec::Iq4Nl`]'s own doc.
 pub(super) const IQ4_NL_BLOCK_ELEMENTS: usize = proxima_gguf::quant::iq4_nl::QK4_NL;
 
 /// [`dot_q4_0_f32`]'s mechanism applied to `IQ4_NL`: dequantizes one
@@ -1928,7 +1928,7 @@ pub fn matmul_iq4_nl_f32(
 }
 
 /// Packed bytes per `IQ2_XS` super-block -- 74 bytes for 256 elements
-/// ([`crate::cpu::QuantizedBlock::Iq2Xs`]'s own doc).
+/// ([`Codec::Iq2Xs`]'s own doc).
 pub(super) const IQ2_XS_BLOCK_BYTES: usize = proxima_gguf::quant::iq2_xs::BLOCK_BYTES;
 
 /// Decoded `f32` elements per `IQ2_XS` super-block (`QK_K`, 256) -- the same
@@ -2007,7 +2007,7 @@ pub fn matmul_iq2_xs_f32(
 }
 
 /// Packed bytes per `IQ3_XXS` super-block -- 98 bytes for 256 elements
-/// ([`crate::cpu::QuantizedBlock::Iq3Xxs`]'s own doc).
+/// ([`Codec::Iq3Xxs`]'s own doc).
 pub(super) const IQ3_XXS_BLOCK_BYTES: usize = proxima_gguf::quant::iq3_xxs::BLOCK_BYTES;
 
 /// Decoded `f32` elements per `IQ3_XXS` super-block (`QK_K`, 256) -- same
@@ -2085,8 +2085,8 @@ pub fn matmul_iq3_xxs_f32(
     )
 }
 
-/// Bytes per half-precision element -- both [`QuantizedBlock::Float16`]
-/// and [`QuantizedBlock::BFloat16`] are 2-byte formats
+/// Bytes per half-precision element -- both [`Codec::Float16`]
+/// and [`Codec::BFloat16`] are 2-byte formats
 /// ([`DType::size_bytes`] agrees for both).
 pub(super) const HALF_PRECISION_ELEMENT_BYTES: usize = 2;
 

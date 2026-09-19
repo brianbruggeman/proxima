@@ -236,7 +236,7 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // never reads it, so bind it unconditionally here rather than let a
     // rare feature combination trip an unused-parameter warning.
     let _ = session;
-    // A growable cache (`Q8_0`, see `QuantizedBlock::Q8_0`'s own doc) binds
+    // A growable cache (`Q8_0`, see `Codec::Q8_0`'s own doc) binds
     // a zero-length weight buffer on its very first call (`cached_len ==
     // 0`), which makes this reduce's own output axes multiply out to zero
     // elements too -- nothing to write, and no legal `rows` (weight rows /
