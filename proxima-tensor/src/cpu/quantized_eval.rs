@@ -665,7 +665,8 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
             // `moe_topk_extra` (ROW 569) is the same shape, generalized.
             let mut gdn_state = Vec::new();
             let mut moe_topk_extra = Vec::new();
-            run_node_into_with_gdn_state(
+            let mut round_extra: Vec<Vec<f32>> = Vec::new();
+            run_node_into_with_round_sink(
                 computed,
                 &buffers,
                 Some(&quantized_weights),
@@ -675,6 +676,7 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
                 &mut output,
                 Some(&mut gdn_state),
                 Some(&mut moe_topk_extra),
+                Some(&mut round_extra),
             )?;
             #[cfg(feature = "epilogue-profile-probe")]
             epilogue_profile_record(
@@ -699,6 +701,16 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
                     .zip(moe_topk_extra.iter().copied())
                 {
                     buffers[extra_node.0 as usize] = Some(Cow::Owned(vec![value]));
+                }
+            }
+            // round_outputs[0] is `computed.node` itself, already written
+            // above -- `round_outputs[1..]` are the k-1 round-sibling nodes
+            // `bind::apply_moe_round_group_fusion` dropped from the resolved
+            // list entirely, each now placed here at its own buffer slot the
+            // same way `MoeTopK`'s own extra outputs are, immediately above.
+            if let BoundOpKind::RoundBatchedReduce { round_outputs, .. } = &computed.kind {
+                for (extra_node, value) in round_outputs.iter().skip(1).zip(round_extra) {
+                    buffers[extra_node.0 as usize] = Some(Cow::Owned(value));
                 }
             }
             #[cfg(feature = "std")]

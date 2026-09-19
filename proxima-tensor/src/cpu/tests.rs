@@ -12484,3 +12484,188 @@ fn matmul_q2k_f32_matches_naive_dequantize_then_dot_matvec() {
         );
     }
 }
+
+/// Direct-construction proof that [`run_round_batched_reduce`] is bit-exact
+/// with the k standalone [`BoundOpKind::Reduce`]s
+/// `bind::apply_moe_round_group_fusion` collapses into one
+/// [`BoundOpKind::RoundBatchedReduce`] -- built straight from two real
+/// `moe_round_reduce_operand`-shaped `Reduce`s (`sum_k table[route[z], k] *
+/// x[k]`, the exact `gathered_expert_product` shape that matcher requires),
+/// bound once through `bind::bind`, then hand-collapsed into one
+/// `RoundBatchedReduce` the way `apply_moe_round_group_fusion` would once its
+/// own `moe_round_group_is_contiguous` gate admits a group -- proving the
+/// EXECUTOR side of this landing independent of whether that admission gate
+/// is flipped on.
+#[test]
+fn round_batched_reduce_matches_k_sequential_reduces() {
+    let n_experts: u32 = 3;
+    let width: u32 = 4;
+
+    let mut program = Vec::new();
+    let table = f32_block(
+        &mut program,
+        &[Extent::Static(n_experts), Extent::Static(width)],
+    );
+    let x = f32_block(&mut program, &[Extent::Static(width)]);
+    let route0 = block(&mut program, DType::Int32, &[Extent::Static(1)]);
+    let route1 = block(&mut program, DType::Int32, &[Extent::Static(1)]);
+
+    let gather_map = |route: NodeId| IndexMap::Computed {
+        indices: route,
+        index_map: map::projection(1, &[]),
+        base: map::IndexPattern {
+            iter_rank: 1,
+            axes: alloc::vec![
+                map::AxisIndex::default(),
+                map::AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(0)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let x_map = IndexMap::Affine(map::projection(1, &[0]));
+
+    let round_reduce = |program: &mut Vec<Op>, route: NodeId| -> NodeId {
+        let product = append(
+            program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(table, gather_map(route)), (x, x_map.clone())],
+                name: None,
+            },
+        );
+        append(
+            program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        )
+    };
+
+    let round0 = round_reduce(&mut program, route0);
+    let round1 = round_reduce(&mut program, route1);
+
+    let shapes = shape::infer(&program, &[]).expect("shape inference succeeds");
+    let resolved = bind::bind(
+        &program,
+        &shapes,
+        &[round0, round1],
+        NumericPolicy::bit_exact(),
+    )
+    .expect("bind succeeds");
+
+    let table_data: Vec<f32> = (0..n_experts * width)
+        .map(|value| value as f32 + 1.0)
+        .collect();
+    let x_data: Vec<f32> = alloc::vec![1.0, -2.0, 0.5, 3.0];
+    let route0_data = [2.0f32];
+    let route1_data = [0.0f32];
+
+    let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];
+    buffers[table.0 as usize] = Some(table_data);
+    buffers[x.0 as usize] = Some(x_data);
+    buffers[route0.0 as usize] = Some(route0_data.to_vec());
+    buffers[route1.0 as usize] = Some(route1_data.to_vec());
+
+    let bound_round0 = resolved
+        .iter()
+        .find(|op| op.node == round0)
+        .cloned()
+        .expect("round0 resolves to its own BoundOp");
+    let bound_round1 = resolved
+        .iter()
+        .find(|op| op.node == round1)
+        .cloned()
+        .expect("round1 resolves to its own BoundOp");
+
+    let mut reference0 = [0.0f32; 1];
+    run_node_into(&bound_round0, &buffers, None, None, None, false, &mut reference0)
+        .expect("round0 runs standalone as a plain Reduce");
+    let mut reference1 = [0.0f32; 1];
+    run_node_into(&bound_round1, &buffers, None, None, None, false, &mut reference1)
+        .expect("round1 runs standalone as a plain Reduce");
+
+    let BoundOpKind::Reduce {
+        element_body,
+        reduce_op,
+        init,
+        keep,
+        operands,
+        output_axes,
+        out_layout,
+        out_scatter,
+        epilogue_body,
+        epilogue_operands,
+        epilogue_broadcast_axes,
+    } = bound_round0.kind.clone()
+    else {
+        panic!("round0 must bind to a plain Reduce before the hand-collapse below");
+    };
+
+    let merged = BoundOp {
+        node: bound_round0.node,
+        dtype: bound_round0.dtype,
+        extents: bound_round0.extents.clone(),
+        kind: BoundOpKind::RoundBatchedReduce {
+            element_body,
+            reduce_op,
+            init,
+            keep,
+            operands,
+            output_axes,
+            out_layout,
+            out_scatter,
+            epilogue_body,
+            epilogue_operands,
+            epilogue_broadcast_axes,
+            round_count: 2,
+            round_routes: alloc::vec![route0, route1],
+            round_outputs: alloc::vec![round0, round1],
+        },
+    };
+
+    let mut merged_output = [0.0f32; 1];
+    let mut round_sink: Vec<Vec<f32>> = Vec::new();
+    run_node_into_with_round_sink(
+        &merged,
+        &buffers,
+        None,
+        None,
+        None,
+        false,
+        &mut merged_output,
+        None,
+        None,
+        Some(&mut round_sink),
+    )
+    .expect("round-batched reduce runs both rounds");
+
+    assert_eq!(
+        merged_output[0].to_bits(),
+        reference0[0].to_bits(),
+        "round 0 (written straight into the primary output) must be bit-exact with the \
+         standalone Reduce it replaces"
+    );
+    assert_eq!(
+        round_sink.len(),
+        1,
+        "round_sink must carry exactly round_count - 1 extra round outputs"
+    );
+    assert_eq!(
+        round_sink[0][0].to_bits(),
+        reference1[0].to_bits(),
+        "round 1 (routed through round_sink) must be bit-exact with the standalone Reduce it \
+         replaces"
+    );
+}
