@@ -656,8 +656,12 @@ impl MappedExpertSidecar {
                 length: u32::try_from(range.len())
                     .map_err(|_| InteropError::SidecarSizeOverflow)?,
             });
+            let block = crate::bind::as_block(descriptor.target_codec, &self.mapping[range])
+                .ok_or(InteropError::UnsupportedCodec {
+                    codec: descriptor.target_codec,
+                })?;
             entries.push(ExpertEntry {
-                block: crate::bind::as_block(descriptor.target_codec, &self.mapping[range]),
+                block,
                 out_dim: descriptor.out_dim,
                 in_dim: descriptor.in_dim,
                 epoch: 0,
@@ -1853,20 +1857,12 @@ fn packed_kind(ggml_type: GgmlType, tensor: &str) -> Result<Codec, InteropError>
     }
 }
 
+/// The sidecar wire tag for `codec` -- delegates to [`Codec::tag`] (this
+/// crate's own local copy drifted out of sync the moment `Codec` grew past
+/// the 11 codecs the sidecar format currently packs; see [`codec_from_tag`]
+/// for why the sidecar's own accepted range stays 0..=10 regardless).
 fn codec_tag(codec: Codec) -> u8 {
-    match codec {
-        Codec::Q2K => 0,
-        Codec::Q3K => 1,
-        Codec::Q4K => 2,
-        Codec::Q5K => 3,
-        Codec::Q6K => 4,
-        Codec::Q8_0 => 5,
-        Codec::Q4_0 => 6,
-        Codec::Float16 => 7,
-        Codec::BFloat16 => 8,
-        Codec::Q5_1 => 9,
-        Codec::Q5_0 => 10,
-    }
+    codec.tag()
 }
 
 fn codec_from_tag(tag: u8) -> Result<Codec, InteropError> {

@@ -1439,7 +1439,25 @@ pub(super) fn classify_packed_row_block(
         | Codec::Q5_1
         | Codec::Q5_0
         | Codec::Float16
-        | Codec::BFloat16 => {
+        | Codec::BFloat16
+        | Codec::Q4_1
+        | Codec::Q8_1
+        | Codec::Q8K
+        | Codec::Iq1S
+        | Codec::Iq1M
+        | Codec::Iq2Xxs
+        | Codec::Iq2Xs
+        | Codec::Iq2S
+        | Codec::Iq3Xxs
+        | Codec::Iq3S
+        | Codec::Iq4Nl
+        | Codec::Iq4Xs
+        | Codec::Tq10
+        | Codec::Tq20
+        | Codec::Mxfp4
+        | Codec::Nvfp4
+        | Codec::Q1_0
+        | Codec::Q2_0 => {
             return Err(PackedRowBlockRejection::NotKQuantCodec);
         }
     }

@@ -1384,6 +1384,30 @@ pub(crate) const fn codec_cache_token(codec: Codec) -> &'static str {
         Codec::Q5_0 => "q5_0",
         Codec::Float16 => "f16",
         Codec::BFloat16 => "bf16",
+        // No Metal unpack kernel exists for any of these 18 -- `PackedOperands`
+        // is only ever populated via `codec_from_quantized_block`
+        // (this module's own fn), which maps just the 11 codecs above, so
+        // these arms are unreachable by construction. Exhaustive anyway:
+        // `Codec` is `#[non_exhaustive]`-free and foreign here, so a new
+        // variant must force a decision at every match, not slip through.
+        Codec::Q4_1 => "q4_1",
+        Codec::Q8_1 => "q8_1",
+        Codec::Q8K => "q8k",
+        Codec::Iq1S => "iq1s",
+        Codec::Iq1M => "iq1m",
+        Codec::Iq2Xxs => "iq2xxs",
+        Codec::Iq2Xs => "iq2xs",
+        Codec::Iq2S => "iq2s",
+        Codec::Iq3Xxs => "iq3xxs",
+        Codec::Iq3S => "iq3s",
+        Codec::Iq4Nl => "iq4nl",
+        Codec::Iq4Xs => "iq4xs",
+        Codec::Tq10 => "tq10",
+        Codec::Tq20 => "tq20",
+        Codec::Mxfp4 => "mxfp4",
+        Codec::Nvfp4 => "nvfp4",
+        Codec::Q1_0 => "q1_0",
+        Codec::Q2_0 => "q2_0",
     }
 }
 
@@ -1405,6 +1429,27 @@ pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
         Codec::Q5_0 => Q5_0_BLOCK_BYTES,
         Codec::Float16 => FLOAT16_BLOCK_BYTES,
         Codec::BFloat16 => BFLOAT16_BLOCK_BYTES,
+        // Unreachable by construction -- see `codec_cache_token`'s doc.
+        // Sourced from `GgmlType::block_layout`, the authoritative block
+        // shape table, never hand-invented.
+        Codec::Q4_1 => GgmlType::Q4_1.block_layout().block_bytes as usize,
+        Codec::Q8_1 => GgmlType::Q8_1.block_layout().block_bytes as usize,
+        Codec::Q8K => GgmlType::Q8_K.block_layout().block_bytes as usize,
+        Codec::Iq1S => GgmlType::Iq1S.block_layout().block_bytes as usize,
+        Codec::Iq1M => GgmlType::Iq1M.block_layout().block_bytes as usize,
+        Codec::Iq2Xxs => GgmlType::Iq2Xxs.block_layout().block_bytes as usize,
+        Codec::Iq2Xs => GgmlType::Iq2Xs.block_layout().block_bytes as usize,
+        Codec::Iq2S => GgmlType::Iq2S.block_layout().block_bytes as usize,
+        Codec::Iq3Xxs => GgmlType::Iq3Xxs.block_layout().block_bytes as usize,
+        Codec::Iq3S => GgmlType::Iq3S.block_layout().block_bytes as usize,
+        Codec::Iq4Nl => GgmlType::Iq4Nl.block_layout().block_bytes as usize,
+        Codec::Iq4Xs => GgmlType::Iq4Xs.block_layout().block_bytes as usize,
+        Codec::Tq10 => GgmlType::Tq10.block_layout().block_bytes as usize,
+        Codec::Tq20 => GgmlType::Tq20.block_layout().block_bytes as usize,
+        Codec::Mxfp4 => GgmlType::Mxfp4.block_layout().block_bytes as usize,
+        Codec::Nvfp4 => GgmlType::Nvfp4.block_layout().block_bytes as usize,
+        Codec::Q1_0 => GgmlType::Q1_0.block_layout().block_bytes as usize,
+        Codec::Q2_0 => GgmlType::Q2_0.block_layout().block_bytes as usize,
     }
 }
 
@@ -1424,6 +1469,25 @@ pub(crate) const fn codec_block_elements(codec: Codec) -> usize {
         Codec::Q5_0 => Q5_0_BLOCK_ELEMENTS,
         Codec::Float16 => FLOAT16_BLOCK_ELEMENTS,
         Codec::BFloat16 => BFLOAT16_BLOCK_ELEMENTS,
+        // Unreachable by construction -- see `codec_cache_token`'s doc.
+        Codec::Q4_1 => GgmlType::Q4_1.block_layout().block_elements as usize,
+        Codec::Q8_1 => GgmlType::Q8_1.block_layout().block_elements as usize,
+        Codec::Q8K => GgmlType::Q8_K.block_layout().block_elements as usize,
+        Codec::Iq1S => GgmlType::Iq1S.block_layout().block_elements as usize,
+        Codec::Iq1M => GgmlType::Iq1M.block_layout().block_elements as usize,
+        Codec::Iq2Xxs => GgmlType::Iq2Xxs.block_layout().block_elements as usize,
+        Codec::Iq2Xs => GgmlType::Iq2Xs.block_layout().block_elements as usize,
+        Codec::Iq2S => GgmlType::Iq2S.block_layout().block_elements as usize,
+        Codec::Iq3Xxs => GgmlType::Iq3Xxs.block_layout().block_elements as usize,
+        Codec::Iq3S => GgmlType::Iq3S.block_layout().block_elements as usize,
+        Codec::Iq4Nl => GgmlType::Iq4Nl.block_layout().block_elements as usize,
+        Codec::Iq4Xs => GgmlType::Iq4Xs.block_layout().block_elements as usize,
+        Codec::Tq10 => GgmlType::Tq10.block_layout().block_elements as usize,
+        Codec::Tq20 => GgmlType::Tq20.block_layout().block_elements as usize,
+        Codec::Mxfp4 => GgmlType::Mxfp4.block_layout().block_elements as usize,
+        Codec::Nvfp4 => GgmlType::Nvfp4.block_layout().block_elements as usize,
+        Codec::Q1_0 => GgmlType::Q1_0.block_layout().block_elements as usize,
+        Codec::Q2_0 => GgmlType::Q2_0.block_layout().block_elements as usize,
     }
 }
 
