@@ -44,23 +44,42 @@ Per-token routed-expert product — fires every token, every MoE layer.
 
 | 4 | re-scaffold field→variant (a5c3e2aa) + landing gate (aa300d64) | — | — | — | — | — | DONE: `RoundBatchedReduce` variant (types_layout_boundop.rs:425-441, `round_count: u32`), ~20 backend match sites forced to explicit typed declines (cpu NotLowerable, msl/cuda/wgsl EpilogueNotSupported/Unsupported), no silent catch-all in a correctness path. Flag-off cfg-gated (gdn_moe_fusion_apply.rs:129-141, all `#[cfg(feature="metal-moe-mul-mat-id")]`) → flag-off CANNOT produce the variant → default byte-intact (verified by SOURCE READ + re-scaffold flag-off→Paris). Gate AC1/AC2/AC7 PASS. AC3 "critical fail" = mis-copied flag-ON binary (only flag-on emits "no CPU interpreter yet"; source proves flag-off can't). AC8: 1 file outside = a FORCED exhaustive-match arm in proxima-model-interop/tests (expected — the type-safe variant touches every consumer); AC8 refined to permit consumer-crate test arms. Also fixed latent `reduce_round_count` `_=>None` wildcard + 5 inline std::env paths |
 
-## Kernel plan (slice 2) — source-grounded, reuse the splice
+## ~~Kernel plan — reuse the splice~~ RETRACTED (was wrong)
 
-Read `omega/src/msl/emit_and_classify.rs:463-514` (the `metal-horizontal-merge`
-base-table splice). It ALREADY does what RoundBatchedReduce needs: it takes an
-emitted single-route packed-row kernel and (a) widens the scalar `uint gid
-[[thread_position_in_grid]]` to `uint3 merge_gid` (Metal rejects a scalar+vector
-mix, so widening the existing param is the only legal move — L465-477), (b)
-injects a `device const SliceBase* base_table` param, (c) prepends a preamble
-`uint gid = merge_gid.x; SliceBase merge_base = base_table[merge_gid.z];` then
-rebases `in{weight}`/`in{other}`/`out` to `merge_base.{weight,activation,output}_base`
-offsets, (d) rewrites the body's pointer refs via `replace_whole_word`. So the
-kernel slice does NOT rewrite the 4 render bodies (where a3e5a39e stalled) — it
-emits round 0's existing single-route packed-row kernel and splices per-ROUND
-z-addressing via a base_table of the k per-round (weight, activation, output)
-offsets. The arena eager-contiguous placement's job is exactly to make those k
-offsets contiguous so one base_table indexes them by `merge_gid.z = round`.
-Dispatch grid.z = round_count. This is a far smaller change than new codegen.
+~~Reuse the horizontal-merge base_table splice for RoundBatchedReduce.~~ WRONG,
+disproven by a1f04dc3 + my own read of `gdn_moe_fusion_apply.rs:1367-1423`. The
+splice needs real per-member (weight/activation/output) byte offsets from k
+SEPARATE BoundOps — but `apply_moe_round_group_fusion` DELETES rounds 1..k
+(`drop.extend(rest)`, `continue` at 1382/1386-1387) and carries only round 0's
+operands/out_layout unchanged into the `RoundBatchedReduce` (1404-1417). Their
+per-round route/output addresses are GONE post-bind, so a base_table has nothing
+correct to hold — filling it with round 0's address k times reads round 0 k
+times (the wrong-kernel case the type doc at 1355-1365 + 406-408 forbids, and the
+ROW-571 false positive G-collapse exists to catch).
+
+## Kernel plan (slice 2) — CORRECTED: the crux is bind/arena, not Metal
+
+The blocker is NOT a Metal-renderer gap. Both backends decline
+(`cpu/run_node.rs:205-208` NotLowerable; msl EpilogueNotSupported) BECAUSE the
+per-round data does not exist after fusion — the CPU decline (no codegen concern,
+only needs real addresses) is the proof the gap is upstream of both backends.
+The admission's own doc (gdn_moe_fusion_apply.rs:1355-1365) names the residual:
+the k route/output positions must be pre-placed CONTIGUOUS so a z-addressed read
+reaches every round through ONE MORE STRIDE. So slice 2 is, in order:
+1. BIND/ARENA (the crux): in `apply_moe_round_group_fusion`, for each group prove
+   the k rounds' `route` index buffers and output destinations have a uniform
+   per-round element stride (arena places them contiguously); carry that stride
+   into round 0's operand/out `Layout`s by widening `extents` with one round
+   axis; REJECT the group back to plain per-round `Reduce`s when not contiguous
+   (cheapest correct fix, option a). Only `route`/output vary per round — `stack`
+   (weight) and `x` (activation) are the SAME NodeId across rounds
+   (moe_round_reduce_operand 1261-1291), so there is no per-round weight base.
+2. METAL (mechanical, downstream): the z-read is `push_gather_fetch`'s EXISTING
+   per-axis `coord[dim]*stride[dim]` loop walking the new round axis — NOT the
+   SliceBase splice. GridSpec::depth = round_count is already wired.
+The landed scaffold (85ac70da5) is correct-but-incomplete: safe (declines
+everywhere, default-off), but the admission drops the addresses — step 1 above is
+the real work.
 
 ## Notes
 Design (wf Design phase) avoids both prior traps: `round_count: Option<u32>` on
