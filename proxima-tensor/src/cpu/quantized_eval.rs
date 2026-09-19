@@ -4,7 +4,7 @@ use super::*;
 /// operand — the entry point that actually reaches [`matmul_q4k_f32`], which
 /// [`evaluate`]/[`evaluate_parallel`] cannot: their `blocks: &[&[f32]]`
 /// parameter is f32-only by construction, so neither has anywhere to put a
-/// packed byte buffer. This function is that seam: [`QuantizedBlock::Q4K`]
+/// packed byte buffer. This function is that seam: [`Codec::Q4K`]
 /// entries are held back from the f32 buffer table and instead collected
 /// into a `NodeId -> &[u8]` side table that `run_reduce` consults (via
 /// `quantized_operand`) for the one `Reduce` node `is_quantized_matmul_operand`
