@@ -4,15 +4,13 @@
 //! can never independently drift. See `docs/compatibility.md`'s own header
 //! for how the two are kept in lockstep.
 //!
-//! Two tables, two different code enums as their source of truth:
+//! Two tables, both keyed off the same `Codec` identity now:
 //! [`GGML_CAPABILITY_TABLE`] mirrors the codec/topology/backend cells
 //! `tests/capability_matrix.rs` actually drives through
-//! `crate::LoadedModel`'s (`std`-gated) public `Pipe`; the quantized-packed-format table
-//! (built in `examples/generate_compatibility_doc.rs`, `metal`-feature-gated
-//! because it reads `omega::msl::PackedCodec`) mirrors every variant of that
-//! enum against the CPU kernel (`proxima_tensor::cpu::QuantizedBlock`) and
-//! the GPU emitters (`omega::msl`/`omega::wgsl`/`omega::cuda`) that dispatch
-//! on it.
+//! `crate::LoadedModel`'s (`std`-gated) public `Pipe`; [`quant_format`]'s
+//! table (built in `examples/generate_compatibility_doc.rs`,
+//! `metal`-feature-gated) mirrors every [`proxima_primitives::Codec`]
+//! variant against the CPU kernel (`proxima_tensor::cpu::QuantizedBlock`).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -265,92 +263,146 @@ pub fn supported_dense_cpu_codecs() -> Vec<GgmlType> {
         .collect()
 }
 
-/// Every [`omega::msl::PackedCodec`] variant against the CPU kernel
+/// Every [`proxima_primitives::Codec`] variant against the CPU kernel
 /// (`proxima_tensor::cpu::QuantizedBlock`, the same enum
-/// [`crate::bind::gguf_tensor_as_packed_block`] returns) and the three GPU
-/// source emitters that dispatch on the same codec
-/// (`omega::msl::emit`/`omega::wgsl::emit_wgsl`/`omega::cuda::emit`). Built
-/// from an exhaustive `match` on `PackedCodec` with no `_` arm below --
-/// `omega` gaining an eighth packed format fails this crate's own build
-/// before it can silently fail to appear here.
+/// [`crate::bind::gguf_tensor_as_packed_block`] returns) -- built from an
+/// exhaustive `match` on `Codec` with no `_` arm below -- `proxima_primitives`
+/// gaining a 30th codec fails this crate's own build before it can silently
+/// fail to appear here.
+///
+/// `Codec` carries 29 variants; only 14 have a CPU decode/matmul path
+/// (`proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type` returns
+/// `Some`, mirrored by [`ALL_CODECS`]'s `cpu_supported` field below) -- the
+/// other 15 are recognized (this table names every one) but no construction
+/// site in this crate or `proxima_tensor` ever builds a
+/// [`proxima_tensor::cpu::QuantizedBlock::Packed`] carrying one, matching
+/// `codec_to_decodable_ggml_type`'s own doc for why. This mirrors the CPU
+/// kernel's own support boundary only -- it does not claim anything about
+/// `omega`'s GPU emitters, which this module no longer reads (`omega::msl`'s
+/// own former codec identity enum was folded onto this same `Codec`, see
+/// that migration's own commit).
 #[cfg(feature = "metal")]
 pub mod quant_format {
     use alloc::string::String;
     use core::fmt::Write as _;
 
-    use omega::msl::PackedCodec;
+    use proxima_primitives::Codec;
 
-    /// `(cpu kernel, metal emitter, wgsl emitter, cuda emitter)` -- `Q3_K`
-    /// is `metal`-only (`omega::wgsl::emit_wgsl`/`omega::cuda::emit_cuda`
-    /// both reject it via `EmitError::UnsupportedCodec`/
-    /// `EmitError::CudaUnsupportedCodec`); every other packed format
-    /// is `Supported` on all four (verified by reading the exhaustive
-    /// `match` arms in `proxima-tensor/src/cpu.rs`, `omega/src/msl.rs`,
-    /// `omega/src/wgsl.rs`, `omega/src/cuda.rs`; none carries a
-    /// `todo!`/`unimplemented!` on any other codec arm).
-    const fn codec_name(codec: PackedCodec) -> &'static str {
+    /// This codec's GGML-style display name, matching
+    /// `proxima_tensor::cpu::epilogue::codec_name_for_error`'s own per-codec
+    /// strings (uppercased to match [`super::GgmlCell::codec_name`]'s
+    /// convention elsewhere in this file), not restated as a second
+    /// independent copy of that mapping.
+    const fn codec_name(codec: Codec) -> &'static str {
         match codec {
-            PackedCodec::Q2K => "Q2_K",
-            PackedCodec::Q3K => "Q3_K",
-            PackedCodec::Q4K => "Q4_K",
-            PackedCodec::Q5K => "Q5_K",
-            PackedCodec::Q6K => "Q6_K",
-            PackedCodec::Q8_0 => "Q8_0",
-            PackedCodec::Q4_0 => "Q4_0",
-            PackedCodec::Q5_1 => "Q5_1",
-            PackedCodec::Q5_0 => "Q5_0",
-            PackedCodec::Float16 => "F16",
-            PackedCodec::BFloat16 => "BF16",
+            Codec::Q2K => "Q2_K",
+            Codec::Q3K => "Q3_K",
+            Codec::Q4K => "Q4_K",
+            Codec::Q5K => "Q5_K",
+            Codec::Q6K => "Q6_K",
+            Codec::Q8_0 => "Q8_0",
+            Codec::Q4_0 => "Q4_0",
+            Codec::Q5_1 => "Q5_1",
+            Codec::Q5_0 => "Q5_0",
+            Codec::Iq4Nl => "IQ4_NL",
+            Codec::Iq2Xs => "IQ2_XS",
+            Codec::Iq3Xxs => "IQ3_XXS",
+            Codec::Float16 => "F16",
+            Codec::BFloat16 => "BF16",
+            Codec::Q4_1 => "Q4_1",
+            Codec::Q8_1 => "Q8_1",
+            Codec::Q8K => "Q8_K",
+            Codec::Iq1S => "IQ1_S",
+            Codec::Iq1M => "IQ1_M",
+            Codec::Iq2Xxs => "IQ2_XXS",
+            Codec::Iq2S => "IQ2_S",
+            Codec::Iq3S => "IQ3_S",
+            Codec::Iq4Xs => "IQ4_XS",
+            Codec::Tq10 => "TQ1_0",
+            Codec::Tq20 => "TQ2_0",
+            Codec::Mxfp4 => "MXFP4",
+            Codec::Nvfp4 => "NVFP4",
+            Codec::Q1_0 => "Q1_0",
+            Codec::Q2_0 => "Q2_0",
         }
     }
 
-    /// The 11 [`PackedCodec`] variants, exhaustively -- adding a 12th to
-    /// `omega::msl::PackedCodec` without adding it here is a compile error,
-    /// not a silently stale doc.
+    /// `true` for exactly the 14 [`Codec`] variants
+    /// `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type` maps to
+    /// `Some` (a CPU decode path exists); `false` for the other 15, which
+    /// that same function maps to `None` -- no construction site in this
+    /// crate or `proxima_tensor` ever builds a `QuantizedBlock::Packed`
+    /// carrying one of them.
+    const fn cpu_kernel_supported(codec: Codec) -> bool {
+        matches!(
+            codec,
+            Codec::Q4K
+                | Codec::Q5K
+                | Codec::Q3K
+                | Codec::Q2K
+                | Codec::Q6K
+                | Codec::Q8_0
+                | Codec::Q4_0
+                | Codec::Q5_1
+                | Codec::Q5_0
+                | Codec::Iq4Nl
+                | Codec::Iq2Xs
+                | Codec::Iq3Xxs
+                | Codec::Float16
+                | Codec::BFloat16
+        )
+    }
+
+    /// Every [`Codec`] variant, exhaustively -- adding a 30th to
+    /// `proxima_primitives::Codec` without adding it here is a compile
+    /// error, not a silently stale doc.
     ///
     /// `pub(super)` so [`super::quant_format_tests`] can derive its row-count
     /// assertion from `ALL_CODECS.len()` instead of a hardcoded integer.
-    pub(super) const ALL_CODECS: &[PackedCodec] = &[
-        PackedCodec::Q2K,
-        PackedCodec::Q3K,
-        PackedCodec::Q4K,
-        PackedCodec::Q5K,
-        PackedCodec::Q6K,
-        PackedCodec::Q8_0,
-        PackedCodec::Q4_0,
-        PackedCodec::Q5_1,
-        PackedCodec::Q5_0,
-        PackedCodec::Float16,
-        PackedCodec::BFloat16,
+    pub(super) const ALL_CODECS: &[Codec] = &[
+        Codec::Q4K,
+        Codec::Q5K,
+        Codec::Q6K,
+        Codec::Q8_0,
+        Codec::Q3K,
+        Codec::Q4_0,
+        Codec::Float16,
+        Codec::BFloat16,
+        Codec::Q2K,
+        Codec::Q5_1,
+        Codec::Q5_0,
+        Codec::Q4_1,
+        Codec::Q8_1,
+        Codec::Q8K,
+        Codec::Iq1S,
+        Codec::Iq1M,
+        Codec::Iq2Xxs,
+        Codec::Iq2Xs,
+        Codec::Iq2S,
+        Codec::Iq3Xxs,
+        Codec::Iq3S,
+        Codec::Iq4Nl,
+        Codec::Iq4Xs,
+        Codec::Tq10,
+        Codec::Tq20,
+        Codec::Mxfp4,
+        Codec::Nvfp4,
+        Codec::Q1_0,
+        Codec::Q2_0,
     ];
-
-    /// `Q3_K`, `Q5_1`, and `Q5_0` are metal-only so far -- see
-    /// [`codec_name`]'s own doc; `Q5_0` has no `omega::wgsl`/`omega::cuda`
-    /// emitter yet (only `omega::msl::Q5_0_UNPACK_MSL` exists), same
-    /// posture `Q5_1`/`Q3_K` already have.
-    fn emitter_support_columns(codec: PackedCodec) -> (&'static str, &'static str, &'static str) {
-        match codec {
-            PackedCodec::Q3K | PackedCodec::Q5_1 | PackedCodec::Q5_0 => {
-                ("supported", "unsupported", "unsupported")
-            }
-            _ => ("supported", "supported", "supported"),
-        }
-    }
 
     #[must_use]
     pub fn render_markdown() -> String {
         let mut out = String::new();
-        out.push_str(
-            "| packed codec | cpu kernel | metal emitter | wgsl emitter | cuda emitter |\n",
-        );
-        out.push_str("| --- | --- | --- | --- | --- |\n");
+        out.push_str("| packed codec | cpu kernel |\n");
+        out.push_str("| --- | --- |\n");
         for &codec in ALL_CODECS {
-            let (metal, wgsl, cuda) = emitter_support_columns(codec);
-            let _ = writeln!(
-                out,
-                "| {} | supported | {metal} | {wgsl} | {cuda} |",
-                codec_name(codec)
-            );
+            let status = if cpu_kernel_supported(codec) {
+                "supported"
+            } else {
+                "unsupported"
+            };
+            let _ = writeln!(out, "| {} | {status} |", codec_name(codec));
         }
         out
     }
@@ -420,29 +472,50 @@ mod quant_format_tests {
         assert_eq!(
             rendered.lines().count(),
             ALL_CODECS.len() + 2,
-            "one row per PackedCodec variant, 1 header row, 1 separator row"
+            "one row per Codec variant, 1 header row, 1 separator row"
         );
     }
 
     #[test]
-    fn q3_k_row_is_metal_only() {
+    fn all_codecs_covers_every_codec_variant_exactly_once() {
+        assert_eq!(
+            ALL_CODECS.len(),
+            29,
+            "proxima_primitives::Codec carries 29 variants today"
+        );
+    }
+
+    #[test]
+    fn q3_k_row_is_cpu_supported() {
         let rendered = render_markdown();
         let q3k_row = rendered.lines().find(|line| line.starts_with("| Q3_K "));
         assert_eq!(
             q3k_row,
-            Some("| Q3_K | supported | supported | unsupported | unsupported |"),
-            "Q3_K has a metal kernel but no wgsl/cuda emitter yet"
+            Some("| Q3_K | supported |"),
+            "Q3_K has a CPU matmul kernel (matmul_q3k_f32)"
         );
     }
 
     #[test]
-    fn q5_1_row_is_metal_only() {
+    fn q5_1_row_is_cpu_supported() {
         let rendered = render_markdown();
         let q5_1_row = rendered.lines().find(|line| line.starts_with("| Q5_1 "));
         assert_eq!(
             q5_1_row,
-            Some("| Q5_1 | supported | supported | unsupported | unsupported |"),
-            "Q5_1 has a metal kernel but no wgsl/cuda emitter yet"
+            Some("| Q5_1 | supported |"),
+            "Q5_1 has a CPU matmul kernel (matmul_q5_1_f32)"
+        );
+    }
+
+    #[test]
+    fn q4_1_row_is_recognized_but_unsupported() {
+        let rendered = render_markdown();
+        let q4_1_row = rendered.lines().find(|line| line.starts_with("| Q4_1 "));
+        assert_eq!(
+            q4_1_row,
+            Some("| Q4_1 | unsupported |"),
+            "Q4_1 has no CPU decode/matmul path yet \
+             (codec_to_decodable_ggml_type returns None)"
         );
     }
 }

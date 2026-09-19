@@ -8,9 +8,9 @@
 //! cargo run -p proxima-model-interop --example generate_compatibility_doc --features metal
 //! ```
 //!
-//! `--features metal` is required: the quantized-packed-format section
-//! reads `omega::msl::PackedCodec`, which only this crate's `metal` feature
-//! pulls in (`Cargo.toml`'s own `metal` feature comment explains why).
+//! `--features metal` is required: the quantized-packed-format section is
+//! gated on `metal` in `src/capability.rs` (`Cargo.toml`'s own `metal`
+//! feature comment explains why).
 #![allow(clippy::expect_used)]
 
 use std::fs;

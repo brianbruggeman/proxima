@@ -26,16 +26,34 @@ Generated from `src/capability.rs`'s own tables by `examples/generate_compatibil
 
 ## Quantized packed-format coverage
 
-| packed codec | cpu kernel | metal emitter | wgsl emitter | cuda emitter |
-| --- | --- | --- | --- | --- |
-| Q2_K | supported | supported | supported | supported |
-| Q3_K | supported | supported | unsupported | unsupported |
-| Q4_K | supported | supported | supported | supported |
-| Q5_K | supported | supported | supported | supported |
-| Q6_K | supported | supported | supported | supported |
-| Q8_0 | supported | supported | supported | supported |
-| Q4_0 | supported | supported | supported | supported |
-| Q5_1 | supported | supported | unsupported | unsupported |
-| Q5_0 | supported | supported | unsupported | unsupported |
-| F16 | supported | supported | supported | supported |
-| BF16 | supported | supported | supported | supported |
+| packed codec | cpu kernel |
+| --- | --- |
+| Q4_K | supported |
+| Q5_K | supported |
+| Q6_K | supported |
+| Q8_0 | supported |
+| Q3_K | supported |
+| Q4_0 | supported |
+| F16 | supported |
+| BF16 | supported |
+| Q2_K | supported |
+| Q5_1 | supported |
+| Q5_0 | supported |
+| Q4_1 | unsupported |
+| Q8_1 | unsupported |
+| Q8_K | unsupported |
+| IQ1_S | unsupported |
+| IQ1_M | unsupported |
+| IQ2_XXS | unsupported |
+| IQ2_XS | supported |
+| IQ2_S | unsupported |
+| IQ3_XXS | supported |
+| IQ3_S | unsupported |
+| IQ4_NL | supported |
+| IQ4_XS | unsupported |
+| TQ1_0 | unsupported |
+| TQ2_0 | unsupported |
+| MXFP4 | unsupported |
+| NVFP4 | unsupported |
+| Q1_0 | unsupported |
+| Q2_0 | unsupported |

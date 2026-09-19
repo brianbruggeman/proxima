@@ -30,9 +30,9 @@ fn ggml_matrix_section_matches_committed_doc() {
     );
 }
 
-/// The `metal`-gated half: needs `omega::msl::PackedCodec`, so it can only
-/// run in the same feature configuration the doc itself was generated
-/// under.
+/// The `metal`-gated half: [`quant_format`] is only compiled under `metal`,
+/// so it can only run in the same feature configuration the doc itself was
+/// generated under.
 #[cfg(feature = "metal")]
 #[test]
 fn quant_format_section_matches_committed_doc() {

@@ -11,7 +11,7 @@
 //! this row length: `704 = 22 * QK5_0` (32), not a multiple of `QK_K` (256).
 //!
 //! Before this file's companion source changes (`proxima-tensor`'s
-//! `QuantizedBlock::Q5_0` CPU kernel, `omega::msl::PackedCodec::Q5_0`'s
+//! `QuantizedBlock::Q5_0` CPU kernel, `omega::msl::Codec::Q5_0`'s
 //! unpack kernel, `proxima-model-interop::bind::Codec::Q5_0`), a
 //! `Q5_0` expert dequantized to `f32` on load -- 30 layers x 128 experts x
 //! [704, 2816] x 4 bytes/f32 is the multi-GB device allocation this file's
@@ -39,6 +39,7 @@ use std::fs::File;
 use proxima_gguf::parse_complete;
 use proxima_gguf::quant::q5_0::{BLOCK_BYTES, QK5_0, dequantize};
 use proxima_gguf::types::GgmlType;
+use proxima_primitives::Codec;
 use proxima_tensor::map::projection;
 use proxima_tensor::op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
 use proxima_tensor::{DType, IndexMap, QuantizedBlock};

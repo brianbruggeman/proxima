@@ -20,6 +20,7 @@
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
 use proxima_model_interop::qwen35moe::hparams::{Architecture, LayerKind};
 use proxima_model_interop::qwen35moe::qwen35moe_forward_program_at_width;
+use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};
 
