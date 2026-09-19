@@ -1529,7 +1529,6 @@ pub(super) fn dequantize_row(
     dim: usize,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
-    use proxima_gguf::quant::{iq2_xs, iq3_xxs, iq4_nl, q2_k, q3_k, q4_k, q5_1, q5_k, q6_k, q8_0};
     let unaligned_row = || TensorError::NotLowerable {
         node,
         reason: "quantized embedding row width does not divide the codec's own block width",
@@ -1561,20 +1560,8 @@ pub(super) fn dequantize_row(
     let row_bytes_slice = data
         .get(start..start + row_bytes)
         .ok_or_else(unaligned_row)?;
-    match block {
-        QuantizedBlock::Q4K(_) => q4_k::dequantize(row_bytes_slice, output),
-        QuantizedBlock::Q5K(_) => q5_k::dequantize(row_bytes_slice, output),
-        QuantizedBlock::Q3K(_) => q3_k::dequantize(row_bytes_slice, output),
-        QuantizedBlock::Q2K(_) => q2_k::dequantize(row_bytes_slice, output),
-        QuantizedBlock::Q6K(_) => q6_k::dequantize(row_bytes_slice, output),
-        QuantizedBlock::Q8_0(_) => q8_0::dequantize(row_bytes_slice, output),
-        QuantizedBlock::Iq4Nl(_) => iq4_nl::dequantize(row_bytes_slice, output),
-        QuantizedBlock::Q5_1(_) => q5_1::dequantize(row_bytes_slice, output),
-        QuantizedBlock::Iq2Xs(_) => iq2_xs::dequantize(row_bytes_slice, output),
-        QuantizedBlock::Iq3Xxs(_) => iq3_xxs::dequantize(row_bytes_slice, output),
-        _ => unreachable!("codec already matched above"),
-    }
-    .map_err(|_| unaligned_row())
+    let decode = block.dequantize_fn().ok_or_else(unaligned_row)?;
+    decode(row_bytes_slice, output).map_err(|_| unaligned_row())
 }
 
 /// [`evaluate_quantized_with_scratch`]'s own pre-materialization pass: if

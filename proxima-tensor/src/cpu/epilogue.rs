@@ -1795,6 +1795,43 @@ impl<'a> QuantizedBlock<'a> {
         }
     }
 
+    /// This codec's single-shot `dequantize` decoder, or `None` for
+    /// [`Self::Float32`]/[`Self::Int32`]/[`Self::Q4_0`]/[`Self::Q5_0`]/
+    /// [`Self::Float16`]/[`Self::BFloat16`] -- those six have a
+    /// [`Self::block_layout`] entry but no row-level decode path, so
+    /// [`crate::cpu::run_node::dequantize_row`] stays their sole caller of
+    /// `None` here rather than silently decoding through this table. Every
+    /// other codec's dispatch arm was already exactly one unconditional
+    /// `xxx::dequantize(row_bytes, output)` call, so this returns that same
+    /// function pointer rather than restating which decoder each codec maps
+    /// to a second time.
+    // clippy wants a `type` alias for the fn-pointer signature; a `type`
+    // alias is a new named type, disallowed for this slice (inline it).
+    #[allow(clippy::type_complexity)]
+    #[must_use]
+    pub const fn dequantize_fn(
+        &self,
+    ) -> Option<fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>> {
+        match self {
+            QuantizedBlock::Float32(_)
+            | QuantizedBlock::Int32(_)
+            | QuantizedBlock::Q4_0(_)
+            | QuantizedBlock::Q5_0(_)
+            | QuantizedBlock::Float16(_)
+            | QuantizedBlock::BFloat16(_) => None,
+            QuantizedBlock::Q4K(_) => Some(q4_k::dequantize),
+            QuantizedBlock::Q5K(_) => Some(q5_k::dequantize),
+            QuantizedBlock::Q3K(_) => Some(q3_k::dequantize),
+            QuantizedBlock::Q2K(_) => Some(q2_k::dequantize),
+            QuantizedBlock::Q6K(_) => Some(q6_k::dequantize),
+            QuantizedBlock::Q8_0(_) => Some(q8_0::dequantize),
+            QuantizedBlock::Iq4Nl(_) => Some(iq4_nl::dequantize),
+            QuantizedBlock::Q5_1(_) => Some(q5_1::dequantize),
+            QuantizedBlock::Iq2Xs(_) => Some(iq2_xs::dequantize),
+            QuantizedBlock::Iq3Xxs(_) => Some(iq3_xxs::dequantize),
+        }
+    }
+
     /// Rewraps `self`'s own codec discriminant around a different `'a`
     /// byte slice -- [`expert_entries_from_stack`]'s own per-expert slicing,
     /// and `run_reduce_quantized`'s per-position gather read, both need "the
