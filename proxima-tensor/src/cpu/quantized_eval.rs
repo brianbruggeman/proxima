@@ -1434,6 +1434,11 @@ pub fn evaluate_parallel(
                 buffers[extra_node.0 as usize] = Some(Cow::Owned(vec![value]));
             }
         }
+        if let BoundOpKind::RoundBatchedReduce { round_outputs, .. } = &computed.kind {
+            for (extra_node, value) in round_outputs.iter().skip(1).zip(node_output.round_extra) {
+                buffers[extra_node.0 as usize] = Some(Cow::Owned(value));
+            }
+        }
         live_now += 1;
         peak_live_buffers = peak_live_buffers.max(live_now);
         for retired in &retires[position] {
@@ -1496,6 +1501,7 @@ pub(super) struct ParallelNodeOutput {
     pub(super) primary: Vec<f32>,
     pub(super) gdn_state: Vec<f32>,
     pub(super) moe_topk_extra: Vec<f32>,
+    pub(super) round_extra: Vec<Vec<f32>>,
 }
 
 pub(super) fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
@@ -1540,6 +1546,7 @@ pub(super) fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
 
     let mut gdn_state = Vec::new();
     let mut moe_topk_extra = Vec::new();
+    let mut round_extra: Vec<Vec<f32>> = Vec::new();
     match chunks {
         Some(chunks) => run_chunks_threaded(&chunks, buffers, &mut output, workers)?,
         None => {
@@ -1554,7 +1561,7 @@ pub(super) fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
             }
             #[cfg(feature = "instrument")]
             let sequential_start = instrument::read_ticks();
-            run_node_into_with_gdn_state(
+            run_node_into_with_round_sink(
                 resolved,
                 buffers,
                 None,
@@ -1564,6 +1571,7 @@ pub(super) fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
                 &mut output,
                 Some(&mut gdn_state),
                 Some(&mut moe_topk_extra),
+                Some(&mut round_extra),
             )?;
             #[cfg(feature = "instrument")]
             counter!(
@@ -1582,6 +1590,7 @@ pub(super) fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
         primary: output,
         gdn_state,
         moe_topk_extra,
+        round_extra,
     })
 }
 
