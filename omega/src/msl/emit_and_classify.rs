@@ -34,16 +34,28 @@ pub(super) fn emit_inner(
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(resolved, &entry, &quantized),
-        // `moe_round_group_candidates`'s own round-merged fold -- the
-        // z-addressed gather-stride extension to `push_gather_fetch` this
-        // renderer needs to actually WALK the extra round axis is the named
-        // residual of this landing (docs/discipline.md's own MoE round-group
-        // note), so this declines rather than emit a kernel that ignores the
-        // extra axis and reads round 0 `k` times.
+        // `moe_round_group_candidates`'s own round-merged fold: round 0's
+        // body is rendered by the EXISTING `render_reduce` (bit-exact by
+        // construction, `round_zero_reduce_bound`'s own doc), then spliced
+        // (`splice_round_batched_reduce_base_table`) to walk
+        // `thread_position_in_grid.z` into a per-round `RoundBase` offset
+        // instead of reading round 0's own route/output `k` times.
+        #[cfg(feature = "metal-moe-mul-mat-id")]
+        BoundOpKind::RoundBatchedReduce { .. } => {
+            let round_zero = round_zero_reduce_bound(resolved);
+            render_reduce(
+                &round_zero,
+                &entry,
+                &quantized,
+                numeric_policy,
+                expert_source_mode,
+            )
+        }
+        #[cfg(not(feature = "metal-moe-mul-mat-id"))]
         BoundOpKind::RoundBatchedReduce { .. } => Err(EmitError::EpilogueNotSupported {
             node: resolved.node,
             reason: "round-merged reduce (BoundOpKind::RoundBatchedReduce) has no \
-                     z-addressed Metal renderer yet",
+                     z-addressed Metal renderer without metal-moe-mul-mat-id",
         }),
         BoundOpKind::Iota => render_iota(resolved, &entry),
         BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
@@ -61,7 +73,7 @@ pub(super) fn emit_inner(
     // `crate::metal::encode_op`'s own doc names that gap and the guard it
     // takes on its `resolved: None` (no plan-resolved merge sibling) path.
     let is_split_cached_attention = cached_attention_merge_needed(&resolved.kind, numeric_policy);
-    Ok(Kernel {
+    let kernel = Kernel {
         source,
         entry,
         bindings: if is_split_cached_attention {
@@ -74,7 +86,164 @@ pub(super) fn emit_inner(
             threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
             depth: reduce_round_count(resolved).unwrap_or(1),
         },
-    })
+    };
+    // The z-addressed splice runs AFTER `bindings`/`grid` are built, mirroring
+    // `splice_horizontal_merge_base_table`'s own call site
+    // (`ensure_merged_dispatches`): `round_table` is bound OUTSIDE
+    // `kernel.bindings` at `kernel.bindings.len()`, so splicing first would
+    // shift every index the splice's own preamble bakes into the source text.
+    #[cfg(feature = "metal-moe-mul-mat-id")]
+    let kernel = if let BoundOpKind::RoundBatchedReduce { .. } = &resolved.kind {
+        let mut kernel = kernel;
+        splice_round_batched_reduce_base_table(&mut kernel, resolved)?;
+        kernel
+    } else {
+        kernel
+    };
+    Ok(kernel)
+}
+
+/// The round-0 [`BoundOpKind::Reduce`] fold `moe_round_group_candidates`
+/// collapsed away -- the EXACT synthetic op `cpu::run_round_batched_reduce`
+/// builds for round 0 (`proxima_tensor::cpu::run_node::run_round_batched_reduce`'s
+/// own `round_bound`), mirrored here so this renderer emits the IDENTICAL
+/// kernel body the CPU interpreter runs for round 0. Delegating to the
+/// EXISTING `render_reduce`/`grid_threads`/`tiled_gemm_threadgroup_width`/
+/// `pack_reduce_uniforms` over this synthetic bound -- rather than teaching
+/// every one of those a round axis -- is what makes the rendered kernel
+/// bit-exact with the single `Reduce` this collapse replaced: every round
+/// dispatches the identical body, only the gathered route and the output
+/// slot move, via [`splice_round_batched_reduce_base_table`]'s own
+/// `round_gid.z`-indexed `RoundBase` offset.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+pub(crate) fn round_zero_reduce_bound(resolved: &BoundOp) -> BoundOp {
+    let BoundOpKind::RoundBatchedReduce {
+        element_body,
+        reduce_op,
+        init,
+        keep,
+        operands,
+        output_axes,
+        out_layout,
+        out_scatter,
+        epilogue_body,
+        epilogue_operands,
+        epilogue_broadcast_axes,
+        ..
+    } = &resolved.kind
+    else {
+        unreachable!("round_zero_reduce_bound is only called for a RoundBatchedReduce fold")
+    };
+    BoundOp {
+        node: resolved.node,
+        dtype: resolved.dtype,
+        extents: resolved.extents.clone(),
+        kind: BoundOpKind::Reduce {
+            element_body: element_body.clone(),
+            reduce_op: *reduce_op,
+            init: *init,
+            keep: *keep,
+            operands: operands.clone(),
+            output_axes: output_axes.clone(),
+            out_layout: out_layout.clone(),
+            out_scatter: out_scatter.clone(),
+            epilogue_body: epilogue_body.clone(),
+            epilogue_operands: epilogue_operands.clone(),
+            epilogue_broadcast_axes: epilogue_broadcast_axes.clone(),
+        },
+    }
+}
+
+/// Splices the z-indexed `RoundBase` preamble onto an already-emitted round-0
+/// reduce kernel (`round_zero_reduce_bound`'s own doc) -- the
+/// `metal-moe-mul-mat-id` counterpart to
+/// [`splice_horizontal_merge_base_table`], and structurally identical to it
+/// (same struct-decl/widened-`gid`/preamble/rename shape), with ONE
+/// deliberate difference: a round-batched fold's `k` round siblings share the
+/// SAME weight/activation buffers (`cpu::run_round_batched_reduce`'s own
+/// doc: only the gathered stack operand's route and the output move per
+/// round), so this slices ONLY the gathered route (`gather_idx{slot}`, the
+/// `Binding::Indices` buffer `round_routes[z]` addresses) and `out` --
+/// slicing the shared operand too would silently read the wrong slice every
+/// round the same way `splice_horizontal_merge_base_table`'s own doc warns
+/// against for ITS shared operand.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+pub(crate) fn splice_round_batched_reduce_base_table(
+    kernel: &mut Kernel,
+    resolved: &BoundOp,
+) -> Result<(), EmitError> {
+    let round_zero = round_zero_reduce_bound(resolved);
+    let gather_slot = round_zero
+        .operands()
+        .iter()
+        .position(|(_, _, lookup)| lookup.is_some())
+        .and_then(|index| gather_slots(&round_zero)[index])
+        .ok_or(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "a round-batched reduce with a gathered stack operand",
+            found: "no gathered operand",
+        })?;
+    let element_type = type_token(resolved.node, resolved.dtype)?;
+    let struct_decl = "struct RoundBase { ulong route_base; ulong output_base; };\n";
+    let signature = format!("kernel void {}(", kernel.entry);
+    let signature_start =
+        kernel
+            .source
+            .find(&signature)
+            .ok_or(EmitError::RenderKindMismatch {
+                node: resolved.node,
+                expected: "emitted kernel signature",
+                found: "missing",
+            })?;
+    let body_start = kernel.source[signature_start..]
+        .find(")\n{\n")
+        .map(|offset| signature_start + offset)
+        .ok_or(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "emitted kernel signature terminator",
+            found: "missing",
+        })?;
+    kernel.source.insert_str(signature_start, struct_decl);
+    let body_start_after_struct = body_start + struct_decl.len();
+    // Metal rejects a signature mixing a scalar and a vector
+    // `thread_position_in_grid` attribute -- see
+    // `splice_horizontal_merge_base_table`'s own doc for why the existing
+    // scalar `gid` widens to `uint3 round_gid` in place rather than a second
+    // parameter.
+    let scalar_gid = "    uint gid [[thread_position_in_grid]]";
+    let vector_gid = "    uint3 round_gid [[thread_position_in_grid]]";
+    let gid_offset = kernel.source[signature_start..body_start_after_struct]
+        .find(scalar_gid)
+        .ok_or(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "scalar thread_position_in_grid parameter",
+            found: "missing",
+        })?;
+    kernel.source.replace_range(
+        signature_start + gid_offset..signature_start + gid_offset + scalar_gid.len(),
+        vector_gid,
+    );
+    let width_delta = vector_gid.len() - scalar_gid.len();
+    let round_table_index = kernel.bindings.len();
+    let extra_params =
+        format!(",\n    device const RoundBase* round_table [[buffer({round_table_index})]]");
+    let adjusted_body_start = body_start_after_struct + width_delta;
+    kernel.source.insert_str(adjusted_body_start, &extra_params);
+    let preamble_start = adjusted_body_start + extra_params.len() + 3;
+    let preamble = format!(
+        "    uint gid = round_gid.x;\n    RoundBase round_base = round_table[round_gid.z];\n    device const float* sliced_route = (device const float*)((device const uchar*)gather_idx{gather_slot} + round_base.route_base);\n    device {element_type}* sliced_out = (device {element_type}*)((device uchar*)out + round_base.output_base);\n"
+    );
+    kernel.source.insert_str(preamble_start, &preamble);
+    let body_after_preamble = preamble_start + preamble.len();
+    let mut tail = replace_whole_word(
+        &kernel.source[body_after_preamble..],
+        &format!("gather_idx{gather_slot}"),
+        "sliced_route",
+    );
+    tail = replace_whole_word(&tail, "out", "sliced_out");
+    kernel.source.truncate(body_after_preamble);
+    kernel.source.push_str(&tail);
+    Ok(())
 }
 
 /// [`bind::BoundOpKind::RoundBatchedReduce::round_count`], widened to `u64`
@@ -520,7 +689,12 @@ pub(crate) fn splice_horizontal_merge_base_table(
 /// both neighbours of every candidate match are not identifier characters
 /// before accepting it. Generated MSL source is plain ASCII (identifiers and
 /// numeric literals only), so byte-wise scanning is exact here.
-#[cfg(feature = "metal-horizontal-merge")]
+///
+/// Shared by two splices: `metal-horizontal-merge`'s own
+/// `splice_horizontal_merge_base_table` and `metal-moe-mul-mat-id`'s
+/// `splice_round_batched_reduce_base_table` -- either feature alone must
+/// still compile this, since a build can enable one without the other.
+#[cfg(any(feature = "metal-horizontal-merge", feature = "metal-moe-mul-mat-id"))]
 pub(super) fn replace_whole_word(text: &str, identifier: &str, replacement: &str) -> String {
     let bytes = text.as_bytes();
     let pattern = identifier.as_bytes();
@@ -771,7 +945,13 @@ pub(crate) fn kernel_dispatch_shape(
             // either) -- `false` reproduces that pre-existing scope exactly.
             threads: grid_threads(resolved, &quantized, numeric_policy, false)?,
             threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
-            depth: 1,
+            // Plan-resolved (`resolve_steps`'s own `ResolvedStep::grid`, the
+            // production `execute_plan_with_placements` path) must agree
+            // with `emit_inner`'s own `GridSpec::depth` for the identical
+            // `resolved` -- see `reduce_round_count`'s doc; a stale `1` here
+            // would silently dispatch a spliced round-batched kernel with
+            // only round 0's own threadgroup, at the cache-HIT path only.
+            depth: reduce_round_count(resolved).unwrap_or(1),
         },
     ))
 }

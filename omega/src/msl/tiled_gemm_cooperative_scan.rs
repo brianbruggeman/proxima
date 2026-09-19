@@ -395,6 +395,16 @@ pub(super) fn tiled_gemm_threadgroup_width(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
 ) -> Option<u64> {
+    // `round_zero_reduce_bound`'s own doc: a round-batched fold's per-round
+    // dispatch geometry is whatever the round-0 `Reduce` this collapse
+    // replaced would use -- delegating keeps this in lock-step with
+    // `grid_threads`'s own identical delegation and with
+    // `render_reduce(round_zero, ..)`'s actual rendered body.
+    #[cfg(feature = "metal-moe-mul-mat-id")]
+    if let BoundOpKind::RoundBatchedReduce { .. } = &resolved.kind {
+        let round_zero = round_zero_reduce_bound(resolved);
+        return tiled_gemm_threadgroup_width(&round_zero, quantized, numeric_policy);
+    }
     // `head_v_dim` threads per threadgroup -- correctness-load-bearing, not
     // an occupancy hint: `grid_threads`' own `GatedDeltaNet` arm dispatches
     // `num_v_heads * head_v_dim` threads total, and this width is what makes

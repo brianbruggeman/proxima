@@ -763,6 +763,20 @@ pub(super) fn walk_last_reads<F: FnMut(NodeId, usize)>(resolved: &[BoundOp], mut
         {
             record(lookup.indices, position);
         }
+        // `round_routes[0]` is already the SAME `NodeId` `all_read_sources`
+        // just recorded (it is `operands`'s own gather `Lookup::indices` for
+        // round 0), so re-recording it here is a harmless duplicate insert.
+        // `round_routes[1..]` are NOT reachable through `operands` at all --
+        // a `RoundBatchedReduce` carries only round 0's own operand Lookup,
+        // per [`BoundOpKind::RoundBatchedReduce::round_routes`]'s own doc --
+        // so without this, a round-1..k route's own producer chain (and, on
+        // a real MoE graph, everything upstream of it) is invisible to this
+        // walk and gets retired before this op ever reads it.
+        if let BoundOpKind::RoundBatchedReduce { round_routes, .. } = &node.kind {
+            for route in round_routes {
+                record(*route, position);
+            }
+        }
     }
 }
 

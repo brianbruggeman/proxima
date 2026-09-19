@@ -144,15 +144,23 @@ pub(super) fn grid_threads(
             let rank = resolved.extents.len();
             resolved.extents[..rank.saturating_sub(1)].iter().product()
         }
-        // unreachable in practice: `emit` declines a round-merged fold
-        // before `grid_threads` is ever asked to size its dispatch --
-        // explicit typed error rather than a silent wildcard, the same
-        // discipline `emit_inner` itself applies.
+        // `round_zero_reduce_bound`'s own doc: the per-round thread count is
+        // whatever the round-0 `Reduce` this fold replaced would dispatch --
+        // `GridSpec::depth` (not this) carries the round axis. Delegating
+        // (rather than re-deriving `packed_row_block`/`tiled_gemm_block`
+        // classification here) is what keeps this in lock-step with
+        // `render_reduce(round_zero, ..)`'s own dispatch-style decision.
+        #[cfg(feature = "metal-moe-mul-mat-id")]
+        BoundOpKind::RoundBatchedReduce { .. } => {
+            let round_zero = round_zero_reduce_bound(resolved);
+            return grid_threads(&round_zero, quantized, numeric_policy, expert_source_mode);
+        }
+        #[cfg(not(feature = "metal-moe-mul-mat-id"))]
         BoundOpKind::RoundBatchedReduce { .. } => {
             return Err(EmitError::EpilogueNotSupported {
                 node: resolved.node,
                 reason: "round-merged reduce (BoundOpKind::RoundBatchedReduce) has no \
-                         Metal grid-sizing renderer yet",
+                         Metal grid-sizing renderer without metal-moe-mul-mat-id",
             });
         }
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => resolved.extents.iter().product(),

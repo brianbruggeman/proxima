@@ -137,7 +137,7 @@ pub fn bind_with_fusion(
     let built = if moe_round_group_fusion_disabled {
         built
     } else {
-        apply_moe_round_group_fusion(built, program)?
+        apply_moe_round_group_fusion(built, program, shapes)?
     };
     #[cfg(feature = "reduce-epilogue-fusion")]
     {
@@ -1345,31 +1345,115 @@ pub(super) fn moe_round_groups(program: &[Op]) -> Vec<MoeRoundGroup> {
 }
 
 /// `true` only when `group`'s own k round-sibling `route`/output positions
-/// already sit at one call-invariant, per-round-uniform element stride, so a
-/// single z-addressed read/write can reach every round through one more
-/// stride layered on top of round 0's own [`Layout`] -- the precondition
-/// [`apply_moe_round_group_fusion`]'s own doc names before it may re-kind a
-/// group into [`BoundOpKind::RoundBatchedReduce`].
-///
-/// Neither backend's buffer table places two different [`NodeId`]s at a
-/// call-invariant relative offset today: the CPU arena
-/// (`crate::cpu::arena::build_static_arena_with_constants`'s own
-/// `buffers: Vec<Option<Vec<f32>>>`) heap-allocates one independent `Vec`
-/// per node, and the Metal backend (`omega::metal`'s own
-/// `device_buffers: BTreeMap<NodeId, DeviceBuffer>`) device-allocates one
-/// independent buffer per node -- only `metal-horizontal-merge`'s own
-/// `ensure_merged_group_resolved` (`omega::metal::device_buffers_arena_plan`)
-/// allocates one shared, group-sized buffer with a controlled per-member
-/// offset, and that machinery is not wired for a [`MoeRoundGroup`]. Bind
-/// time itself runs BEFORE either buffer table exists, so it has no
-/// placement plan to consult either way. This always declines today --
-/// `false` unconditionally -- until an arena-side eager-placement pass
-/// gives a round group's `route`/output nodes that shared, strided
-/// allocation; this function is the seam a future placement plan reports
-/// through, not a computation over data bind time can see yet.
+/// are STRUCTURALLY uniform -- same element type, same element count, and
+/// (for the output side) the same [`Layout`] strides -- across every round.
+/// That uniformity is the precondition a single z-addressed base-table read
+/// (`omega`'s own `metal-horizontal-merge` splice shape,
+/// `docs/discipline.md`'s MoE round-group entry) needs to reach every round
+/// through one more stride layered on top of round 0's own addressing; it is
+/// NOT a decision about where any buffer lives. Bind time runs before either
+/// backend's buffer table exists (the CPU arena's `Vec<Option<Vec<f32>>>`
+/// and Metal's `device_buffers: BTreeMap<NodeId, DeviceBuffer>` are both
+/// built later), so this checks only what `built` -- the [`BoundOp`]s
+/// already resolved earlier in this same bind pass -- can prove: dtype,
+/// extents, and output layout match round 0's on every sibling. Mirrors
+/// `omega::metal::device_buffers_arena_plan::group_mergeable_positions`'s
+/// own split -- admit structurally here, defer the buffer-table placement
+/// decision to encode time ([`ensure_round_group_resolved`], the arena-side
+/// half this landing wires next).
 #[cfg(feature = "metal-moe-mul-mat-id")]
-fn moe_round_group_is_contiguous(_group: &MoeRoundGroup) -> bool {
-    false
+fn moe_round_group_is_contiguous(
+    group: &MoeRoundGroup,
+    program: &[Op],
+    shapes: &Shapes,
+    resolved: &BTreeMap<NodeId, &BoundOp>,
+) -> bool {
+    let Some((&leader_route, rest_routes)) = group.routes.split_first() else {
+        return false;
+    };
+    let Some((&leader_reduce, rest_reduces)) = group.reduces.split_first() else {
+        return false;
+    };
+    let Some(leader_reduce_bound) = resolved.get(&leader_reduce) else {
+        return false;
+    };
+    let Some(leader_layout) = round_batched_output_layout(leader_reduce_bound) else {
+        return false;
+    };
+    let Some(leader_route_signature) = route_signature(program, shapes, leader_route) else {
+        return false;
+    };
+    // The collapsed op keeps running at the LEADER's (round 0's) own
+    // position (`apply_moe_round_group_fusion`'s own rewrite never moves a
+    // node), so a later round's own route is only actually available there
+    // if its NodeId already precedes `leader_reduce`'s -- `NodeId`s are
+    // assigned in strict append order (`crate::op::append`'s own doc), so
+    // this is the SAME backward-reference invariant every other operand
+    // reference in this crate already depends on, just checked explicitly
+    // here because a round-sibling route is normally read from ITS OWN
+    // round's position, not round 0's. A per-route-unrolled program (no
+    // upstream batch-topk step) computes round `r`'s own route strictly
+    // AFTER round `r`'s own reduce in program order, which is always AFTER
+    // round 0's reduce for `r >= 1` -- declining that shape here is what
+    // stops the collapsed dispatch from reading a route buffer that has not
+    // been written yet (`TensorError::NotLowerable`, "operand buffer
+    // missing at evaluation time"). A batch router (`moe-topk-fusion`'s own
+    // `MoeTopK`) that resolves every round's route BEFORE any round's own
+    // reduce satisfies this trivially.
+    let routes_uniform = rest_routes.iter().all(|&node| {
+        node.0 <= leader_reduce.0
+            && route_signature(program, shapes, node)
+                .is_some_and(|signature| signature == leader_route_signature)
+    });
+    let reduces_uniform = rest_reduces.iter().all(|node| {
+        resolved.get(node).is_some_and(|member| {
+            round_member_signature_matches(member, leader_reduce_bound)
+                && round_batched_output_layout(member) == Some(leader_layout)
+        })
+    });
+    routes_uniform && reduces_uniform
+}
+
+/// `node`'s own element type and iteration shape, read straight from
+/// `program`/`shapes` rather than the bind pass's own `built` list -- a
+/// gather-index `route` is typically an [`Op::Input`] leaf
+/// (`crate::bind::moe_round_reduce_operand`'s own doc), which never has a
+/// [`BoundOp`] counterpart (`BoundOpKind`'s own module doc: "`Input` has no
+/// counterpart because a leaf never computes anything to resolve"), so
+/// `built` alone cannot answer this for the route side of a group the way
+/// [`round_batched_output_layout`] answers it for the reduce (output) side.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+fn route_signature<'shapes>(
+    program: &[Op],
+    shapes: &'shapes Shapes,
+    node: NodeId,
+) -> Option<(DType, &'shapes [u64])> {
+    let op = program.get(node.0 as usize)?;
+    Some((op.dtype(), shapes.of(node)))
+}
+
+/// `true` when `member` and `leader` carry the same element type and the
+/// same iteration extents -- the element-count/dtype half of
+/// [`moe_round_group_is_contiguous`]'s own structural check for a group's
+/// reduce (output) siblings, which -- unlike a `route` -- always has a
+/// [`BoundOp`] to read this from.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+fn round_member_signature_matches(member: &BoundOp, leader: &BoundOp) -> bool {
+    member.dtype == leader.dtype && member.extents == leader.extents
+}
+
+/// `bound`'s own `out_layout` when `bound` is still an unfused
+/// [`BoundOpKind::Reduce`] (every group member's own shape at this point in
+/// the bind pass, BEFORE [`apply_moe_round_group_fusion`] re-kinds the
+/// leader into [`BoundOpKind::RoundBatchedReduce`]); `None` for any other
+/// kind, which this predicate treats as a structural mismatch rather than a
+/// panic.
+#[cfg(feature = "metal-moe-mul-mat-id")]
+fn round_batched_output_layout(bound: &BoundOp) -> Option<&Layout> {
+    match &bound.kind {
+        BoundOpKind::Reduce { out_layout, .. } => Some(out_layout),
+        _ => None,
+    }
 }
 
 /// Runs [`moe_round_groups`] and rewrites `built` so each group's own k
@@ -1390,24 +1474,28 @@ fn moe_round_group_is_contiguous(_group: &MoeRoundGroup) -> bool {
 /// [`BoundOpKind::RoundBatchedReduce::round_routes`]/`round_outputs` below --
 /// a renderer walking `round_count` now has the SAME per-round addressing a
 /// renderer of the k separate `Reduce`s always had, just re-homed onto one
-/// `BoundOp`. `moe_round_group_is_contiguous`'s own doc explains the residual
-/// this still leaves: no backend's buffer table can WRITE `round_outputs[1..]`
-/// through a shared strided allocation yet, so this predicate declines every
-/// group (unconditionally `false`) until that arena-side placement work
-/// lands, even though the information itself is no longer lost at bind time.
+/// `BoundOp`. `moe_round_group_is_contiguous`'s own doc explains what it
+/// checks: dtype/extents/layout uniformity across a group's k rounds, proven
+/// from `built` alone -- it is silent on whether any backend's buffer table
+/// can actually WRITE `round_outputs[1..]` through a shared strided
+/// allocation, which is the arena-side placement work
+/// `omega::metal::device_buffers_arena_plan::ensure_round_group_resolved`
+/// (this landing's other half) is responsible for instead.
 #[cfg(feature = "metal-moe-mul-mat-id")]
 pub(super) fn apply_moe_round_group_fusion(
     built: Vec<BoundOp>,
     program: &[Op],
+    shapes: &Shapes,
 ) -> Result<Vec<BoundOp>, TensorError> {
     let groups = moe_round_groups(program);
     if groups.is_empty() {
         return Ok(built);
     }
+    let resolved: BTreeMap<NodeId, &BoundOp> = built.iter().map(|bound| (bound.node, bound)).collect();
     let mut round_siblings_by_node: BTreeMap<NodeId, (Vec<NodeId>, Vec<NodeId>)> = BTreeMap::new();
     let mut drop: BTreeSet<NodeId> = BTreeSet::new();
     for group in &groups {
-        if !moe_round_group_is_contiguous(group) {
+        if !moe_round_group_is_contiguous(group, program, shapes, &resolved) {
             continue;
         }
         let Some((&first, rest)) = group.reduces.split_first() else {
