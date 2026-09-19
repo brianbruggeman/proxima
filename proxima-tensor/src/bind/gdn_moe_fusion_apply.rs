@@ -1377,25 +1377,24 @@ fn moe_round_group_is_contiguous(_group: &MoeRoundGroup) -> bool {
 /// re-kinded from [`BoundOpKind::Reduce`] to
 /// [`BoundOpKind::RoundBatchedReduce`] with `round_count: k` -- `omega`'s own
 /// `GridSpec::depth` reads that field already (this landing's other half);
-/// rounds `1..k` are dropped from the rewritten program the same way
-/// [`apply_moe_topk_fusion`] drops its own absorbed nodes -- but ONLY for a
-/// group [`moe_round_group_is_contiguous`] admits. A group it declines is
-/// left with its k plain `Reduce`s untouched, so this rewrite is a no-op
-/// for every group until that predicate can say yes.
+/// rounds `1..k` are dropped from the rewritten program's own `BoundOp` LIST
+/// the same way [`apply_moe_topk_fusion`] drops its own absorbed nodes -- but
+/// ONLY for a group [`moe_round_group_is_contiguous`] admits. A group it
+/// declines is left with its k plain `Reduce`s untouched, so this rewrite is
+/// a no-op for every group until that predicate can say yes.
 ///
-/// This is the BIND-TIME half of the design only: round 0's own resolved
-/// operands (its `route`/`x`/`stack` [`Layout`]s) are carried forward
-/// UNCHANGED, which reproduces round 0's own single-route read for every
-/// round once a renderer walks `round_count` -- correct only once the k
-/// route/output positions are pre-placed contiguously so a z-addressed read
-/// can reach every round through one more stride, which is exactly
-/// [`moe_round_group_is_contiguous`]'s own admission gate. That arena-side
-/// eager-placement change is this landing's own named residual (`omega`'s
-/// Metal renderer would otherwise decline a [`BoundOpKind::RoundBatchedReduce`]
-/// fold with `EmitError::EpilogueNotSupported` rather than emit a kernel that
-/// reads round 0 `k` times, if this predicate ever let one reach it ungated);
-/// this function's own job is the graph-shape half — proving `built`
-/// collapses from k `BoundOp`s to 1 per ADMITTED round-sibling group.
+/// Unlike the prior shape of this rewrite, dropping rounds `1..k`'s own
+/// `BoundOp`s no longer drops their INFORMATION: `group.routes` (every
+/// round's own gather-index `NodeId`, not just round 0's) and `group.reduces`
+/// (every round's own output `NodeId`) both carry forward whole into
+/// [`BoundOpKind::RoundBatchedReduce::round_routes`]/`round_outputs` below --
+/// a renderer walking `round_count` now has the SAME per-round addressing a
+/// renderer of the k separate `Reduce`s always had, just re-homed onto one
+/// `BoundOp`. `moe_round_group_is_contiguous`'s own doc explains the residual
+/// this still leaves: no backend's buffer table can WRITE `round_outputs[1..]`
+/// through a shared strided allocation yet, so this predicate declines every
+/// group (unconditionally `false`) until that arena-side placement work
+/// lands, even though the information itself is no longer lost at bind time.
 #[cfg(feature = "metal-moe-mul-mat-id")]
 pub(super) fn apply_moe_round_group_fusion(
     built: Vec<BoundOp>,
@@ -1405,7 +1404,7 @@ pub(super) fn apply_moe_round_group_fusion(
     if groups.is_empty() {
         return Ok(built);
     }
-    let mut round_count_by_node: BTreeMap<NodeId, u32> = BTreeMap::new();
+    let mut round_siblings_by_node: BTreeMap<NodeId, (Vec<NodeId>, Vec<NodeId>)> = BTreeMap::new();
     let mut drop: BTreeSet<NodeId> = BTreeSet::new();
     for group in &groups {
         if !moe_round_group_is_contiguous(group) {
@@ -1414,7 +1413,7 @@ pub(super) fn apply_moe_round_group_fusion(
         let Some((&first, rest)) = group.reduces.split_first() else {
             continue;
         };
-        round_count_by_node.insert(first, group.reduces.len() as u32);
+        round_siblings_by_node.insert(first, (group.routes.clone(), group.reduces.clone()));
         drop.extend(rest.iter().copied());
     }
     let mut rewritten = Vec::with_capacity(built.len());
@@ -1422,7 +1421,8 @@ pub(super) fn apply_moe_round_group_fusion(
         if drop.contains(&bound.node) {
             continue;
         }
-        if let Some(&round_count) = round_count_by_node.get(&bound.node) {
+        if let Some((round_routes, round_outputs)) = round_siblings_by_node.get(&bound.node) {
+            let round_count = round_outputs.len() as u32;
             if let BoundOpKind::Reduce {
                 element_body,
                 reduce_op,
@@ -1450,6 +1450,8 @@ pub(super) fn apply_moe_round_group_fusion(
                     epilogue_operands,
                     epilogue_broadcast_axes,
                     round_count,
+                    round_routes: round_routes.clone(),
+                    round_outputs: round_outputs.clone(),
                 };
             }
         }

@@ -438,6 +438,32 @@ pub enum BoundOpKind {
         /// always `>= 2` (a single round never fires this fusion; see
         /// `crate::bind::moe_round_groups`'s own `>= 2` admission filter).
         round_count: u32,
+        /// `round_count`-length, one entry per round, in round order — round
+        /// `z`'s own gather-index `NodeId` (`crate::bind::moe_round_reduce_operand`'s
+        /// own `route`, the same value `operands`'s own stack `Lookup::indices`
+        /// carries for round 0 ONLY). This is the information [`BoundOpKind::Reduce`]
+        /// -> [`Self::RoundBatchedReduce`] collapse used to DROP (rounds `1..k`'s
+        /// own route nodes, along with their `BoundOp`s) — carrying the whole
+        /// array here, [`MoeTopK`](Self::MoeTopK)'s own `routes` shape, is what
+        /// lets a renderer read `round_routes[z]` for round `z` instead of
+        /// reading round 0's own `operands`'s `Lookup` `k` times. A renderer
+        /// walks `thread_position_in_grid.z` (or an equivalent per-round loop
+        /// index) into this array to pick the gather source for that round's
+        /// own dispatch, swapping it into `operands`'s stack `Lookup::indices`
+        /// before addressing.
+        round_routes: Vec<NodeId>,
+        /// `round_count`-length, one entry per round, in round order — round
+        /// `z`'s own output `NodeId`. `round_outputs[0]` is this op's own
+        /// primary `node` (the same "first output is the bound op's own node,
+        /// extra outputs are named fields" shape [`GatedDeltaNet::state_out`](Self::GatedDeltaNet)/
+        /// [`MoeTopK::routes`](Self::MoeTopK) already establish); `round_outputs[1..]`
+        /// are the k-1 round-sibling reduce nodes this collapse used to drop
+        /// entirely, now ordinary extra outputs written by the same dispatch
+        /// that writes `round_outputs[0]`'s buffer — every downstream
+        /// per-round consumer (`append_moe_round_output`'s own activation/
+        /// weight-scale chain) still reads the identical `NodeId` it always
+        /// did, unperturbed by whether this kind fired.
+        round_outputs: Vec<NodeId>,
     },
     /// The resolved counterpart of [`Op::Iota`]: no operands, no body — an
     /// executor derives every output value straight from its own position
