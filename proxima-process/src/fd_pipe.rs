@@ -26,7 +26,7 @@
 
 use std::future::Future;
 use std::io::{Read, Write};
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::Mutex;
 use std::thread;
 
@@ -39,7 +39,12 @@ use proxima_primitives::pipe::{
 };
 use proxima_primitives::sync::mpsc;
 
-/// Allocate a `pipe(2)` and return `(read_end, write_end)`.
+/// Allocate a close-on-exec `pipe(2)` and return `(read_end, write_end)`.
+///
+/// A process spawned after this pipe exists inherits both parent-side
+/// descriptors across `fork(2)`. Marking both ends close-on-exec at creation
+/// prevents that later child from retaining an unrelated writer after
+/// `exec(2)`, which would suppress EOF for the original child.
 pub(super) fn make_pipe() -> Result<(OwnedFd, OwnedFd), ProximaError> {
     let mut raw_fds: [libc::c_int; 2] = [0, 0];
     let result = unsafe { libc::pipe(raw_fds.as_mut_ptr()) };
@@ -51,7 +56,27 @@ pub(super) fn make_pipe() -> Result<(OwnedFd, OwnedFd), ProximaError> {
     }
     let read_fd = unsafe { OwnedFd::from_raw_fd(raw_fds[0]) };
     let write_fd = unsafe { OwnedFd::from_raw_fd(raw_fds[1]) };
+    set_close_on_exec(&read_fd)?;
+    set_close_on_exec(&write_fd)?;
     Ok((read_fd, write_fd))
+}
+
+fn set_close_on_exec(fd: &OwnedFd) -> Result<(), ProximaError> {
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+    if flags < 0 {
+        return Err(ProximaError::Body(format!(
+            "fcntl(F_GETFD) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    if result < 0 {
+        return Err(ProximaError::Body(format!(
+            "fcntl(F_SETFD) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
 }
 
 /// A `Pipe` whose request body drains into `write_fd` and whose
