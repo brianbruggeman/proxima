@@ -125,7 +125,7 @@ pub fn gguf_tensor_as_f32(
 ///
 /// `Q8_0` routes packed here rather than only through
 /// [`gguf_tensor_as_f32`]'s dequantize path: `proxima_tensor::cpu`'s own
-/// `matmul_q8_0_f32` walks `QuantizedBlock::Q8_0`'s raw bytes directly (same
+/// `matmul_q8_0_f32` walks `Codec::Q8_0`'s raw bytes directly (same
 /// per-row contiguous layout the k-quant matmul family assumes), and the GPU
 /// emitters (`omega::msl`/`omega::wgsl`/`omega::cuda`) already carry a
 /// `PackedCodec::Q8_0` arm -- the packed kernel has always supported this
@@ -136,8 +136,9 @@ pub fn gguf_tensor_as_f32(
 /// tensor carries no scale/block structure to dequantize, so there is no
 /// owned decode to fall back to -- [`gguf_tensor_as_f32`] has never had an
 /// `F16`/`Bf16` arm and gains none here. `proxima_tensor::cpu::matmul_f16_f32`/
-/// `matmul_bf16_f32` (the sole consumers of [`proxima_tensor::cpu::QuantizedBlock::Float16`]/
-/// [`proxima_tensor::cpu::QuantizedBlock::BFloat16`]) walk the exact same
+/// `matmul_bf16_f32` (the sole consumers of a [`proxima_tensor::cpu::QuantizedBlock::Packed`]
+/// carrying [`proxima_primitives::Codec::Float16`]/[`proxima_primitives::Codec::BFloat16`])
+/// walk the exact same
 /// `rows` contiguous per-row byte layout the k-quant matmul family does, so
 /// this function's existing "bytes straight out of the file, no transpose"
 /// contract already covers them -- routing, not new machinery.
@@ -2854,7 +2855,7 @@ mod tests {
         assert_eq!(state.packed.len(), 1, "exactly one packed weight bound");
         let bound_bytes = match &state.packed[0].1 {
             proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q8_0, bytes } => *bytes,
-            other => panic!("expected a QuantizedBlock::Q8_0, found {other:?}"),
+            other => panic!("expected a QuantizedBlock::Packed with Codec::Q8_0, found {other:?}"),
         };
         assert_eq!(
             bound_bytes,
@@ -2975,7 +2976,7 @@ mod tests {
         .expect("binds the corrupted q8_0 matmul weight");
         let bound_bytes = match &state.packed[0].1 {
             proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q8_0, bytes } => *bytes,
-            other => panic!("expected a QuantizedBlock::Q8_0, found {other:?}"),
+            other => panic!("expected a QuantizedBlock::Packed with Codec::Q8_0, found {other:?}"),
         };
 
         let (program, sum) = q8_0_matmul_program();
@@ -4373,7 +4374,7 @@ mod moe_memory_shape {
 
         let (_, block) = &state.packed[0];
         let proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: packed_bytes } = block else {
-            panic!("native q4_k stack must bind as QuantizedBlock::Q4K, got {block:?}");
+            panic!("native q4_k stack must bind as QuantizedBlock::Packed with Codec::Q4K, got {block:?}");
         };
 
         let per_expert_bytes = packed_floor_bytes() / EXPERT_COUNT as usize;

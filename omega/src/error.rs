@@ -128,7 +128,7 @@ pub enum EmitError {
 
     /// `wgsl::emit_wgsl` has no `Q3_K` unpack function -- `crate::msl`'s own
     /// `Codec::Q3K` is metal-only so far (`wgpu_driver::packed_operands_of`
-    /// already routes a `QuantizedBlock::Q3K` node to `None` for this same
+    /// already routes a `Codec::Q3K` node to `None` for this same
     /// reason); this is the typed rejection a caller who somehow threads a
     /// `Some(Codec::Q3K)` through directly still hits, rather than a
     /// generated `wgsl` calling a function that does not exist.

@@ -674,7 +674,7 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
              key/value context cache (`proxima-model-interop`'s cached decode loop, \
              `proxima_tensor::spec::mistral_cached_forward_program`) stores F32 unquantized \
              today; Q8_0 storage and its `matmul_q8_0_f32` kernel exist \
-             (`proxima_tensor::cpu::QuantizedBlock::Q8_0`) but the read path does not work \
+             (`proxima_tensor::cpu::QuantizedBlock::Packed` with `Codec::Q8_0`) but the read path does not work \
              end to end -- the quantized matmul dispatch only handles a flat \
              `weight[rows, k] x activation[batch, k]` matmul, while the cached-attention \
              reduces are batched reduces over a shared kv-head axis (the K-cache reduce \
