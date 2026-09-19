@@ -201,6 +201,24 @@ fn source_codec_name(codec: Codec) -> &'static str {
         Codec::BFloat16 => "bf16",
         Codec::Q5_1 => "q5_1",
         Codec::Q5_0 => "q5_0",
+        Codec::Q4_1 => "q4_1",
+        Codec::Q8_1 => "q8_1",
+        Codec::Q8K => "q8_k",
+        Codec::Iq1S => "iq1_s",
+        Codec::Iq1M => "iq1_m",
+        Codec::Iq2Xxs => "iq2_xxs",
+        Codec::Iq2Xs => "iq2_xs",
+        Codec::Iq2S => "iq2_s",
+        Codec::Iq3Xxs => "iq3_xxs",
+        Codec::Iq3S => "iq3_s",
+        Codec::Iq4Nl => "iq4_nl",
+        Codec::Iq4Xs => "iq4_xs",
+        Codec::Tq10 => "tq1_0",
+        Codec::Tq20 => "tq2_0",
+        Codec::Mxfp4 => "mxfp4",
+        Codec::Nvfp4 => "nvfp4",
+        Codec::Q1_0 => "q1_0",
+        Codec::Q2_0 => "q2_0",
     }
 }
 
@@ -217,6 +235,28 @@ fn dequantize_expert(codec: Codec, source: &[u8], output: &mut [f32]) -> Result<
         Codec::BFloat16 => bf16::dequantize(source, output),
         Codec::Q5_1 => q5_1::dequantize(source, output),
         Codec::Q5_0 => q5_0::dequantize(source, output),
+        // The 15 newly-recognized codecs with no `proxima_tensor::cpu`
+        // decode variant at all -- `crate::bind::as_block`'s own doc names
+        // the same set. A recode source/target neither this crate's
+        // `proxima_gguf::quant` bindings nor `QuantizedBlock` decode.
+        Codec::Q4_1 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "q4_1" }),
+        Codec::Q8_1 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "q8_1" }),
+        Codec::Q8K => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "q8_k" }),
+        Codec::Iq1S => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq1_s" }),
+        Codec::Iq1M => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq1_m" }),
+        Codec::Iq2Xxs => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq2_xxs" }),
+        Codec::Iq2S => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq2_s" }),
+        Codec::Iq3S => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq3_s" }),
+        Codec::Iq4Nl => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq4_nl" }),
+        Codec::Iq2Xs => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq2_xs" }),
+        Codec::Iq3Xxs => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq3_xxs" }),
+        Codec::Iq4Xs => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq4_xs" }),
+        Codec::Tq10 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "tq1_0" }),
+        Codec::Tq20 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "tq2_0" }),
+        Codec::Mxfp4 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "mxfp4" }),
+        Codec::Nvfp4 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "nvfp4" }),
+        Codec::Q1_0 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "q1_0" }),
+        Codec::Q2_0 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "q2_0" }),
     }
     .map_err(InteropError::from)
 }
@@ -295,21 +335,28 @@ struct ExpertCopy<'file> {
 }
 
 impl<'file> ExpertCopy<'file> {
-    fn entry(&self) -> ExpertEntry<'_> {
+    /// `None` when `self.codec` is one of the 15 [`Codec`] variants
+    /// [`crate::bind::as_block`] has no [`proxima_tensor::cpu::QuantizedBlock`]
+    /// decoder for -- see that function's own doc.
+    fn entry(&self) -> Option<ExpertEntry<'_>> {
         self.entry_with_bytes(self.bytes.as_slice())
     }
 
-    fn entry_with_bytes<'bytes>(&self, bytes: &'bytes [u8]) -> ExpertEntry<'bytes> {
+    fn entry_with_bytes<'bytes>(&self, bytes: &'bytes [u8]) -> Option<ExpertEntry<'bytes>> {
         self.entry_with_codec(bytes, self.codec)
     }
 
-    fn entry_with_codec<'bytes>(&self, bytes: &'bytes [u8], codec: Codec) -> ExpertEntry<'bytes> {
-        ExpertEntry {
-            block: crate::bind::as_block(codec, bytes),
+    fn entry_with_codec<'bytes>(
+        &self,
+        bytes: &'bytes [u8],
+        codec: Codec,
+    ) -> Option<ExpertEntry<'bytes>> {
+        Some(ExpertEntry {
+            block: crate::bind::as_block(codec, bytes)?,
             out_dim: self.out_dim,
             in_dim: self.in_dim,
             epoch: self.epoch,
-        }
+        })
     }
 }
 
@@ -815,8 +862,13 @@ impl<'file> ExpertSlab<'file> {
             let layer_entries = layer_slab
                 .experts
                 .iter()
-                .filter_map(|expert| expert.as_ref().map(ExpertCopy::entry))
-                .collect();
+                .filter_map(Option::as_ref)
+                .map(|expert| {
+                    expert
+                        .entry()
+                        .ok_or(InteropError::UnsupportedCodec { codec: expert.codec })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             entries.push((weight_node, layer_entries));
         }
         Ok(entries
@@ -862,8 +914,13 @@ impl<'file> ExpertSlab<'file> {
             let layer_entries = layer_slab
                 .experts
                 .iter()
-                .filter_map(|expert| expert.as_ref().map(ExpertCopy::entry))
-                .collect();
+                .filter_map(Option::as_ref)
+                .map(|expert| {
+                    expert
+                        .entry()
+                        .ok_or(InteropError::UnsupportedCodec { codec: expert.codec })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             entries.push((weight_node, layer_entries));
         }
         Ok(entries
@@ -921,24 +978,28 @@ impl<'file> ExpertSlab<'file> {
                 .experts
                 .iter()
                 .enumerate()
-                .filter_map(|(expert_index, expert)| {
-                    expert.as_ref().map(|expert| {
-                        let replacement = sidecar.and_then(|scratch| {
-                            projection.and_then(|projection| {
-                                scratch
-                                    .bytes(expert_index, projection)
-                                    .map(|bytes| (bytes, scratch.codec(expert_index, projection)))
-                            })
-                        });
-                        replacement.map_or_else(
+                .filter_map(|(expert_index, expert)| expert.as_ref().map(|expert| (expert_index, expert)))
+                .map(|(expert_index, expert)| {
+                    let replacement = sidecar.and_then(|scratch| {
+                        projection.and_then(|projection| {
+                            scratch
+                                .bytes(expert_index, projection)
+                                .map(|bytes| (bytes, scratch.codec(expert_index, projection)))
+                        })
+                    });
+                    let used_codec = replacement
+                        .as_ref()
+                        .map_or(expert.codec, |(_, codec)| codec.unwrap_or(expert.codec));
+                    replacement
+                        .map_or_else(
                             || expert.entry(),
                             |(bytes, codec)| {
                                 expert.entry_with_codec(bytes, codec.unwrap_or(expert.codec))
                             },
                         )
-                    })
+                        .ok_or(InteropError::UnsupportedCodec { codec: used_codec })
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             let projection =
                 projection.ok_or(InteropError::ExpertSlabIndexOutOfRange { layer, expert: 0 })?;
             entries.push((weight_node, projection, layer_entries));

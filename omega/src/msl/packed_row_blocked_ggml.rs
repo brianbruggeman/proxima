@@ -584,6 +584,31 @@ pub(super) fn push_packed_row_blocked_body(
                         codec: "bfloat16",
                     });
                 }
+                // Unreachable by construction (see `operand_read`'s doc on
+                // `PackedOperands`'s closed population), kept exhaustive.
+                Codec::Q4_1
+                | Codec::Q8_1
+                | Codec::Q8K
+                | Codec::Iq1S
+                | Codec::Iq1M
+                | Codec::Iq2Xxs
+                | Codec::Iq2Xs
+                | Codec::Iq2S
+                | Codec::Iq3Xxs
+                | Codec::Iq3S
+                | Codec::Iq4Nl
+                | Codec::Iq4Xs
+                | Codec::Tq10
+                | Codec::Tq20
+                | Codec::Mxfp4
+                | Codec::Nvfp4
+                | Codec::Q1_0
+                | Codec::Q2_0 => {
+                    return Err(EmitError::NonKQuantCodec {
+                        node: resolved.node,
+                        codec: "unsupported",
+                    });
+                }
             }
             source.push_str("        }\n");
             source.push_str(&format!(

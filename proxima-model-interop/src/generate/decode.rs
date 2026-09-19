@@ -1774,7 +1774,9 @@ impl<'file> LoadedModel<'file> {
                         named_blocks.push((name.as_str(), *block));
                     }
                     for (name, bytes, kind) in &self.weights.packed_owned {
-                        named_blocks.push((name.as_str(), crate::bind::as_block(*kind, bytes)));
+                        let block = crate::bind::as_block(*kind, bytes)
+                            .ok_or(InteropError::UnsupportedCodec { codec: *kind })?;
+                        named_blocks.push((name.as_str(), block));
                     }
                     // Rounds `cached_len` up to `ServingConfig::kv_bucket_tokens`
                     // (`kv_extent`'s own doc) -- `usize::MAX` in place of the
@@ -4310,7 +4312,9 @@ impl<'file> LoadedModel<'file> {
             named_blocks.push((name.as_str(), *block));
         }
         for (name, bytes, kind) in &self.weights.packed_owned {
-            named_blocks.push((name.as_str(), crate::bind::as_block(*kind, bytes)));
+            let block =
+                crate::bind::as_block(*kind, bytes).ok_or(InteropError::UnsupportedCodec { codec: *kind })?;
+            named_blocks.push((name.as_str(), block));
         }
         // `mistral_cached_forward_program_with_experts`'s own `cached_len`
         // `Op::Input` (ROW 404/405's runtime bound the fused Metal

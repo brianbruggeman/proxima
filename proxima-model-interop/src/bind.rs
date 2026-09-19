@@ -919,21 +919,45 @@ pub use proxima_primitives::Codec;
 
 /// Borrows `bytes` as the [`proxima_tensor::cpu::QuantizedBlock`] variant
 /// `codec` names -- the deferred half of the split [`BoundWeights::packed_owned`]'s
-/// own doc describes.
+/// own doc describes. `None` for a codec [`Codec`] now identifies (GPU
+/// dispatch, sidecar wire tag) that [`proxima_tensor::cpu::QuantizedBlock`]
+/// has never grown a CPU decode variant for -- the 15 newly-recognized
+/// formats (`Q4_1`/`Q8_1`/`Q8K`/the `Iq*` family minus `Iq4Nl`/`Iq2Xs`/
+/// `Iq3Xxs`/`Tq10`/`Tq20`/`Mxfp4`/`Nvfp4`/`Q1_0`/`Q2_0`) are identity-only
+/// today; a caller reaching one propagates [`InteropError::UnsupportedCodec`]
+/// rather than panicking.
 #[cfg(feature = "std")]
-pub(crate) fn as_block(codec: Codec, bytes: &[u8]) -> proxima_tensor::cpu::QuantizedBlock<'_> {
+pub(crate) fn as_block(codec: Codec, bytes: &[u8]) -> Option<proxima_tensor::cpu::QuantizedBlock<'_>> {
     match codec {
-        Codec::Q4K => proxima_tensor::cpu::QuantizedBlock::Q4K(bytes),
-        Codec::Q5K => proxima_tensor::cpu::QuantizedBlock::Q5K(bytes),
-        Codec::Q6K => proxima_tensor::cpu::QuantizedBlock::Q6K(bytes),
-        Codec::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes),
-        Codec::Q3K => proxima_tensor::cpu::QuantizedBlock::Q3K(bytes),
-        Codec::Q4_0 => proxima_tensor::cpu::QuantizedBlock::Q4_0(bytes),
-        Codec::Float16 => proxima_tensor::cpu::QuantizedBlock::Float16(bytes),
-        Codec::BFloat16 => proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes),
-        Codec::Q2K => proxima_tensor::cpu::QuantizedBlock::Q2K(bytes),
-        Codec::Q5_1 => proxima_tensor::cpu::QuantizedBlock::Q5_1(bytes),
-        Codec::Q5_0 => proxima_tensor::cpu::QuantizedBlock::Q5_0(bytes),
+        Codec::Q4K => Some(proxima_tensor::cpu::QuantizedBlock::Q4K(bytes)),
+        Codec::Q5K => Some(proxima_tensor::cpu::QuantizedBlock::Q5K(bytes)),
+        Codec::Q6K => Some(proxima_tensor::cpu::QuantizedBlock::Q6K(bytes)),
+        Codec::Q8_0 => Some(proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes)),
+        Codec::Q3K => Some(proxima_tensor::cpu::QuantizedBlock::Q3K(bytes)),
+        Codec::Q4_0 => Some(proxima_tensor::cpu::QuantizedBlock::Q4_0(bytes)),
+        Codec::Float16 => Some(proxima_tensor::cpu::QuantizedBlock::Float16(bytes)),
+        Codec::BFloat16 => Some(proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes)),
+        Codec::Q2K => Some(proxima_tensor::cpu::QuantizedBlock::Q2K(bytes)),
+        Codec::Q5_1 => Some(proxima_tensor::cpu::QuantizedBlock::Q5_1(bytes)),
+        Codec::Q5_0 => Some(proxima_tensor::cpu::QuantizedBlock::Q5_0(bytes)),
+        Codec::Iq4Nl => Some(proxima_tensor::cpu::QuantizedBlock::Iq4Nl(bytes)),
+        Codec::Iq2Xs => Some(proxima_tensor::cpu::QuantizedBlock::Iq2Xs(bytes)),
+        Codec::Iq3Xxs => Some(proxima_tensor::cpu::QuantizedBlock::Iq3Xxs(bytes)),
+        Codec::Q4_1
+        | Codec::Q8_1
+        | Codec::Q8K
+        | Codec::Iq1S
+        | Codec::Iq1M
+        | Codec::Iq2Xxs
+        | Codec::Iq2S
+        | Codec::Iq3S
+        | Codec::Iq4Xs
+        | Codec::Tq10
+        | Codec::Tq20
+        | Codec::Mxfp4
+        | Codec::Nvfp4
+        | Codec::Q1_0
+        | Codec::Q2_0 => None,
     }
 }
 
@@ -969,6 +993,28 @@ pub(crate) fn codec_from_ggml_type(ggml_type: GgmlType) -> Option<Codec> {
         GgmlType::Q2_K => Some(Codec::Q2K),
         GgmlType::Q5_1 => Some(Codec::Q5_1),
         GgmlType::Q5_0 => Some(Codec::Q5_0),
+        GgmlType::Q4_1 => Some(Codec::Q4_1),
+        GgmlType::Q8_1 => Some(Codec::Q8_1),
+        GgmlType::Q8_K => Some(Codec::Q8K),
+        GgmlType::Iq1S => Some(Codec::Iq1S),
+        GgmlType::Iq1M => Some(Codec::Iq1M),
+        GgmlType::Iq2Xxs => Some(Codec::Iq2Xxs),
+        GgmlType::Iq2Xs => Some(Codec::Iq2Xs),
+        GgmlType::Iq2S => Some(Codec::Iq2S),
+        GgmlType::Iq3Xxs => Some(Codec::Iq3Xxs),
+        GgmlType::Iq3S => Some(Codec::Iq3S),
+        GgmlType::Iq4Nl => Some(Codec::Iq4Nl),
+        GgmlType::Iq4Xs => Some(Codec::Iq4Xs),
+        GgmlType::Tq10 => Some(Codec::Tq10),
+        GgmlType::Tq20 => Some(Codec::Tq20),
+        GgmlType::Mxfp4 => Some(Codec::Mxfp4),
+        GgmlType::Nvfp4 => Some(Codec::Nvfp4),
+        GgmlType::Q1_0 => Some(Codec::Q1_0),
+        GgmlType::Q2_0 => Some(Codec::Q2_0),
+        // `F32`/the integer types/`F64` have no `Codec` counterpart.
+        // `GgmlType` is `#[non_exhaustive]` (a foreign, still-growing wire
+        // enum), so this wildcard also covers a future wire value neither
+        // crate has named yet.
         _ => None,
     }
 }
@@ -995,6 +1041,24 @@ fn codec_name_suffix(codec: Codec) -> &'static str {
         Codec::Q2K => "q2_k",
         Codec::Q5_1 => "q5_1",
         Codec::Q5_0 => "q5_0",
+        Codec::Q4_1 => "q4_1",
+        Codec::Q8_1 => "q8_1",
+        Codec::Q8K => "q8_k",
+        Codec::Iq1S => "iq1_s",
+        Codec::Iq1M => "iq1_m",
+        Codec::Iq2Xxs => "iq2_xxs",
+        Codec::Iq2Xs => "iq2_xs",
+        Codec::Iq2S => "iq2_s",
+        Codec::Iq3Xxs => "iq3_xxs",
+        Codec::Iq3S => "iq3_s",
+        Codec::Iq4Nl => "iq4_nl",
+        Codec::Iq4Xs => "iq4_xs",
+        Codec::Tq10 => "tq1_0",
+        Codec::Tq20 => "tq2_0",
+        Codec::Mxfp4 => "mxfp4",
+        Codec::Nvfp4 => "nvfp4",
+        Codec::Q1_0 => "q1_0",
+        Codec::Q2_0 => "q2_0",
     }
 }
 
@@ -1016,6 +1080,24 @@ pub(crate) fn codec_to_ggml_type(codec: Codec) -> GgmlType {
         Codec::Q2K => GgmlType::Q2_K,
         Codec::Q5_1 => GgmlType::Q5_1,
         Codec::Q5_0 => GgmlType::Q5_0,
+        Codec::Q4_1 => GgmlType::Q4_1,
+        Codec::Q8_1 => GgmlType::Q8_1,
+        Codec::Q8K => GgmlType::Q8_K,
+        Codec::Iq1S => GgmlType::Iq1S,
+        Codec::Iq1M => GgmlType::Iq1M,
+        Codec::Iq2Xxs => GgmlType::Iq2Xxs,
+        Codec::Iq2Xs => GgmlType::Iq2Xs,
+        Codec::Iq2S => GgmlType::Iq2S,
+        Codec::Iq3Xxs => GgmlType::Iq3Xxs,
+        Codec::Iq3S => GgmlType::Iq3S,
+        Codec::Iq4Nl => GgmlType::Iq4Nl,
+        Codec::Iq4Xs => GgmlType::Iq4Xs,
+        Codec::Tq10 => GgmlType::Tq10,
+        Codec::Tq20 => GgmlType::Tq20,
+        Codec::Mxfp4 => GgmlType::Mxfp4,
+        Codec::Nvfp4 => GgmlType::Nvfp4,
+        Codec::Q1_0 => GgmlType::Q1_0,
+        Codec::Q2_0 => GgmlType::Q2_0,
     }
 }
 
@@ -1456,6 +1538,27 @@ pub(crate) fn quantize_to_kind(
         // only -- see `Codec::Q5_0`'s own doc. Same reasoning as
         // `Codec::Q5_1`'s arm just above.
         Codec::Q5_0 => Err(QuantError::UnsupportedCodec { codec: "q5_0" }),
+        // None of these 18 ship a `proxima_gguf::quant` encoder (or, for
+        // most, a decoder either) -- recognized identity-wise (GPU select,
+        // sidecar wire tag) but not a `recode_tensor` target/source yet.
+        Codec::Q4_1 => Err(QuantError::UnsupportedCodec { codec: "q4_1" }),
+        Codec::Q8_1 => Err(QuantError::UnsupportedCodec { codec: "q8_1" }),
+        Codec::Q8K => Err(QuantError::UnsupportedCodec { codec: "q8_k" }),
+        Codec::Iq1S => Err(QuantError::UnsupportedCodec { codec: "iq1_s" }),
+        Codec::Iq1M => Err(QuantError::UnsupportedCodec { codec: "iq1_m" }),
+        Codec::Iq2Xxs => Err(QuantError::UnsupportedCodec { codec: "iq2_xxs" }),
+        Codec::Iq2Xs => Err(QuantError::UnsupportedCodec { codec: "iq2_xs" }),
+        Codec::Iq2S => Err(QuantError::UnsupportedCodec { codec: "iq2_s" }),
+        Codec::Iq3Xxs => Err(QuantError::UnsupportedCodec { codec: "iq3_xxs" }),
+        Codec::Iq3S => Err(QuantError::UnsupportedCodec { codec: "iq3_s" }),
+        Codec::Iq4Nl => Err(QuantError::UnsupportedCodec { codec: "iq4_nl" }),
+        Codec::Iq4Xs => Err(QuantError::UnsupportedCodec { codec: "iq4_xs" }),
+        Codec::Tq10 => Err(QuantError::UnsupportedCodec { codec: "tq1_0" }),
+        Codec::Tq20 => Err(QuantError::UnsupportedCodec { codec: "tq2_0" }),
+        Codec::Mxfp4 => Err(QuantError::UnsupportedCodec { codec: "mxfp4" }),
+        Codec::Nvfp4 => Err(QuantError::UnsupportedCodec { codec: "nvfp4" }),
+        Codec::Q1_0 => Err(QuantError::UnsupportedCodec { codec: "q1_0" }),
+        Codec::Q2_0 => Err(QuantError::UnsupportedCodec { codec: "q2_0" }),
     }
 }
 
@@ -3739,9 +3842,14 @@ mod tests {
             &mut state,
         )
         .expect_err("iq1_s has no proxima_gguf::quant encoder");
+        // `Codec` now recognizes `Iq1S` (`codec_from_ggml_type` is 1:1 over
+        // every `GgmlType` a `Codec` names), so the rejection moves one level
+        // deeper than `UnsupportedWeightPrecisionTarget` -- into
+        // `quantize_to_kind`'s own `UnsupportedCodec` arm, exactly the shape
+        // `codec_from_ggml_type`'s own doc already predicted for `Q5_1`/`Q5_0`.
         assert!(matches!(
             error,
-            InteropError::UnsupportedWeightPrecisionTarget { target, .. } if target == GgmlType::Iq1S
+            InteropError::Quant(QuantError::UnsupportedCodec { codec }) if codec == "iq1_s"
         ));
     }
 

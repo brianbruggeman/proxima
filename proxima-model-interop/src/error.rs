@@ -5,6 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_gguf::GgmlType;
+use proxima_primitives::Codec;
 use proxima_tensor::DType;
 use thiserror::Error;
 
@@ -76,6 +77,13 @@ pub enum InteropError {
     /// than propagating them).
     #[error("prefault: {0}")]
     PrefaultPoolUnavailable(String),
+
+    /// `crate::bind::as_block` was asked for `codec`, and no
+    /// `proxima_tensor::cpu::QuantizedBlock` variant decodes it -- one of
+    /// the codecs [`Codec`] recognizes for GPU-select/sidecar identity but
+    /// that this crate's CPU decode path has never implemented.
+    #[error("codec {codec:?} has no QuantizedBlock decoder")]
+    UnsupportedCodec { codec: Codec },
 
     /// `crate::bind::gguf_tensor_as_packed_block` (`std`-gated) found `tensor` stored as
     /// `F32` but its absolute file offset is not a multiple of

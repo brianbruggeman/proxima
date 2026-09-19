@@ -773,6 +773,31 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
         Some(Codec::BFloat16) => format!(
             "bf16_element(in{index} + ({offset} / {BFLOAT16_BLOCK_ELEMENTS}) * {BFLOAT16_BLOCK_BYTES}, (uint)({offset} % {BFLOAT16_BLOCK_ELEMENTS}))"
         ),
+        // No Metal unpack kernel exists for any of these 18 -- `PackedOperands`
+        // is only ever populated via `codec_from_quantized_block`, which
+        // maps just the 11 codecs above, so this arm is unreachable by
+        // construction; kept exhaustive so a future codec forces a decision
+        // here rather than slipping through.
+        Some(
+            Codec::Q4_1
+            | Codec::Q8_1
+            | Codec::Q8K
+            | Codec::Iq1S
+            | Codec::Iq1M
+            | Codec::Iq2Xxs
+            | Codec::Iq2Xs
+            | Codec::Iq2S
+            | Codec::Iq3Xxs
+            | Codec::Iq3S
+            | Codec::Iq4Nl
+            | Codec::Iq4Xs
+            | Codec::Tq10
+            | Codec::Tq20
+            | Codec::Mxfp4
+            | Codec::Nvfp4
+            | Codec::Q1_0
+            | Codec::Q2_0,
+        ) => format!("in{index}[{offset}]"),
     }
 }
 
