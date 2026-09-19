@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn render_elementwise(
     resolved: &BoundOp,
     entry: &str,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
 ) -> Result<String, EmitError> {
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
@@ -179,7 +179,7 @@ pub(super) fn dense_layout(layout: &Layout, extents: &[u64]) -> bool {
 pub(super) fn render_reduce(
     resolved: &BoundOp,
     entry: &str,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
 ) -> Result<String, EmitError> {
@@ -520,7 +520,7 @@ pub(super) fn push_serial_reduce_body(
     reduce_rank_len: usize,
     operand_count: usize,
     gather_slots: &[Option<usize>],
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
@@ -701,7 +701,7 @@ pub(super) fn is_plain_product_reduce(
 /// The row-blocked Q4_K header decode, one call site feature-gated between
 /// `q4k_header_for` (the shift-then-branch original) and `q4k_header_for_bf`
 /// (`metal-q4k-mask-fma`'s branch-free port, see [`Q4K_MASK_FMA_MSL`]).
-/// Split out of [`push_packed_row_blocked_body`]'s `PackedCodec::Q4K` arm so
+/// Split out of [`push_packed_row_blocked_body`]'s `Codec::Q4K` arm so
 /// the two `#[cfg]` bodies stay next to each other rather than interleaved
 /// with the surrounding match.
 #[cfg(not(feature = "metal-q4k-mask-fma"))]
@@ -974,7 +974,7 @@ pub(super) fn push_packed_row_multi_row_body(
     reduce_op: ScalarOp,
     init: ReduceInit,
     rank: usize,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     element_type: &str,
     block: &PackedRowBlock,
     epilogue_body: &ComposedBody,
@@ -988,7 +988,7 @@ pub(super) fn push_packed_row_multi_row_body(
     let feature_axes = &block.feature_axes;
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
-    let rows = block.codec.rows_per_simdgroup();
+    let rows = codec_rows_per_simdgroup(block.codec);
     let cap = crate::sized::PACKED_ROW_ACTIVATION_GROUP as usize;
     let (init_expr, _) = fold_init_tokens(init);
     let identity = cooperative_identity_token(resolved.node, reduce_op)?;
@@ -1103,9 +1103,9 @@ pub(super) fn push_packed_row_multi_row_body(
     // slot instead, which a routed weight requires regardless of codec.
     let fast_q4k = !expert_source_mode
         && !weight_gathered
-        && block.codec == PackedCodec::Q4K
+        && block.codec == Codec::Q4K
         && element_type == "float"
-        && quantized[weight] == Some(PackedCodec::Q4K)
+        && quantized[weight] == Some(Codec::Q4K)
         && quantized[other].is_none()
         && is_plain_product_reduce(resolved, reduce_op, weight, other);
     if fast_q4k {
@@ -1115,7 +1115,7 @@ pub(super) fn push_packed_row_multi_row_body(
             other,
             rows,
             cap,
-            block.codec.block_bytes(),
+            codec_block_bytes(block.codec),
         );
     } else {
         source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");

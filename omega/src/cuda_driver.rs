@@ -19,7 +19,7 @@ use cudarc::driver::{
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
 
 use crate::cuda::{CudaGridSpec, CudaKernel};
-use crate::msl::{Binding, PackedCodec, PackedOperands};
+use crate::msl::{Binding, Codec, PackedOperands};
 use proxima_tensor::{
     BoundOp, DType, Evaluated, NodeId, NumericPolicy, Op, QuantizedBlock, Shapes, bind_with_fusion,
     block_node_ids, infer, prune_dead, resolve_named_blocks,
@@ -1115,20 +1115,20 @@ impl CudaPlan {
 
 // `Q5_1`/`Q5_0` are excluded here the same way `Iq4Nl`/`Iq2Xs`/`Iq3Xxs` are --
 // no CUDA unpack kernel exists for either yet, so both stay routed through
-// `None` even though `PackedCodec::from_quantized_block` itself recognizes
+// `None` even though `codec_from_quantized_block` itself recognizes
 // them.
-fn packed_codec(block: &QuantizedBlock<'_>) -> Option<PackedCodec> {
-    match PackedCodec::from_quantized_block(block)? {
-        codec @ (PackedCodec::Q2K
-        | PackedCodec::Q3K
-        | PackedCodec::Q4K
-        | PackedCodec::Q5K
-        | PackedCodec::Q6K
-        | PackedCodec::Q8_0
-        | PackedCodec::Q4_0
-        | PackedCodec::Float16
-        | PackedCodec::BFloat16) => Some(codec),
-        PackedCodec::Q5_1 | PackedCodec::Q5_0 => None,
+fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
+    match crate::msl::codec_from_quantized_block(block)? {
+        codec @ (Codec::Q2K
+        | Codec::Q3K
+        | Codec::Q4K
+        | Codec::Q5K
+        | Codec::Q6K
+        | Codec::Q8_0
+        | Codec::Q4_0
+        | Codec::Float16
+        | Codec::BFloat16) => Some(codec),
+        Codec::Q5_1 | Codec::Q5_0 => None,
     }
 }
 

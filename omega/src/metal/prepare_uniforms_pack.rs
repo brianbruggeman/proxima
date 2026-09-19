@@ -310,7 +310,7 @@ pub(super) fn element_count(shape: &[u64]) -> usize {
 /// `source`'s own TENSOR byte count -- `element_count(shape) *
 /// bytes_per_element`, where `bytes_per_element` is exact for a plain buffer
 /// ([`DType::size_bytes`]) and a `block_bytes / block_elements` ratio for a
-/// packed operand ([`PackedCodec::block_bytes`]/`block_elements`). This is
+/// packed operand ([`Codec::block_bytes`]/`block_elements`). This is
 /// the value a per-operand byte-share table needs -- NOT
 /// `device_buffers[source].0.length()`, which reports the shared checkpoint-
 /// mapping buffer's own size for every tensor `checkpoint_mapping_offset`
@@ -345,7 +345,10 @@ pub(super) fn operand_tensor_bytes(
         None => element_count(shapes.of(source)) as u64,
     };
     match packed_operands.get(&source) {
-        Some(codec) => elements * codec.block_bytes() as u64 / codec.block_elements() as u64,
+        Some(codec) => {
+            elements * crate::msl::codec_block_bytes(codec) as u64
+                / crate::msl::codec_block_elements(codec) as u64
+        }
         None => elements * gpu_dtype(program, index_nodes, source).size_bytes() as u64,
     }
 }

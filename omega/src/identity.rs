@@ -38,12 +38,13 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use proxima_primitives::Codec;
 use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
     ReduceInit, ScalarOp, StepArg,
 };
 
-use crate::msl::{PackedCodec, PackedOperands};
+use crate::msl::PackedOperands;
 
 /// Which renderer is asking [`kernel_identity`] for a fingerprint — selects
 /// only the name prefix. Every other axis is computed the same way for
@@ -276,7 +277,7 @@ pub(crate) fn reduce_epilogue_is_identity(
 pub(crate) fn operand_codecs(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
-) -> Vec<Option<PackedCodec>> {
+) -> Vec<Option<Codec>> {
     resolved
         .operands()
         .iter()
@@ -289,19 +290,19 @@ pub(crate) fn operand_codecs(
 /// bodies, `crate::wgsl`'s `packed_element_fn`, `crate::cuda`'s `packed_
 /// element_expr`) needs this in its cache identity, or two operands
 /// differing only in codec can share one compiled kernel.
-fn codec_token(codec: Option<PackedCodec>) -> char {
+fn codec_token(codec: Option<Codec>) -> char {
     match codec {
-        Some(PackedCodec::Q2K) => '2',
-        Some(PackedCodec::Q3K) => '3',
-        Some(PackedCodec::Q4K) => '4',
-        Some(PackedCodec::Q5K) => '5',
-        Some(PackedCodec::Q6K) => '6',
-        Some(PackedCodec::Q8_0) => '8',
-        Some(PackedCodec::Q4_0) => '0',
-        Some(PackedCodec::Q5_1) => '1',
-        Some(PackedCodec::Q5_0) => 'z',
-        Some(PackedCodec::Float16) => 'h',
-        Some(PackedCodec::BFloat16) => 'b',
+        Some(Codec::Q2K) => '2',
+        Some(Codec::Q3K) => '3',
+        Some(Codec::Q4K) => '4',
+        Some(Codec::Q5K) => '5',
+        Some(Codec::Q6K) => '6',
+        Some(Codec::Q8_0) => '8',
+        Some(Codec::Q4_0) => '0',
+        Some(Codec::Q5_1) => '1',
+        Some(Codec::Q5_0) => 'z',
+        Some(Codec::Float16) => 'h',
+        Some(Codec::BFloat16) => 'b',
         None => 'f',
     }
 }

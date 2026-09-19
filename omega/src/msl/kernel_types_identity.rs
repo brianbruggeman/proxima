@@ -399,7 +399,7 @@ static inline float q3k_element(device const uchar *block, uint index) {
 pub const Q3K_BLOCK_BYTES: usize = proxima_gguf::quant::q3_k::BLOCK_BYTES;
 
 /// The paired plain-product body for `Q3_K`, structurally selected by
-/// `PackedCodec::supports_pair_dot` (no new Cargo feature -- `Q3_K` always
+/// `Codec::supports_pair_dot` (no new Cargo feature -- `Q3_K` always
 /// takes this arm when the reduce is a plain product, the same unconditional
 /// posture `Q4_K`'s own arm already has). Same `iq`/`ir` lane assignment and
 /// `yl`/`yh` activation gather `q4k_pair_dot`/`q5k_pair_dot` use
@@ -855,7 +855,7 @@ static inline float q6k_element(device const uchar *block, uint index) {
 pub const Q6K_BLOCK_BYTES: usize = proxima_gguf::quant::q6_k::BLOCK_BYTES;
 
 /// `Q6_K`'s counterpart to `q4k_pair_dot`/`q5k_pair_dot`, selected by
-/// `PackedCodec::supports_pair_dot` rather than a cargo feature -- routed
+/// `Codec::supports_pair_dot` rather than a cargo feature -- routed
 /// the same way, into the SAME codec-agnostic `yl`/`yh` activation gather
 /// `push_packed_row_blocked_body`'s `plain_product` preamble already builds
 /// for `Q4_K`/`Q5_K`. The lane
@@ -1045,7 +1045,7 @@ pub const Q5K_BLOCK_BYTES: usize = proxima_gguf::quant::q5_k::BLOCK_BYTES;
 
 /// The same paired-nibble, packed-word-load body `q4k_pair_dot` gives
 /// `Q4_K`'s `plain_product` arm, selected by
-/// `PackedCodec::supports_pair_dot` rather than a cargo feature
+/// `Codec::supports_pair_dot` rather than a cargo feature
 /// (`push_packed_row_blocked_body`) -- one `ulong` load per 8-byte `qs`/`qh`
 /// run, byte-extracted by shift rather than eight scalar `uchar` loads --
 /// extended with `Q5_K`'s `qh` high-bit plane -- ONE extra mask-select per
@@ -1108,7 +1108,7 @@ static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, th
 /// pair and no bit-packing at all -- genuinely a different SHAPE from the
 /// K-quant family above (no super-block; each level is already a full signed
 /// byte, not a nibble), not a widening or narrowing of one. It slots into
-/// the same PACKED-OPERAND mechanism ([`PackedCodec`], `operand_read`,
+/// the same PACKED-OPERAND mechanism ([`Codec`], `operand_read`,
 /// this preamble) as a fourth codec precisely because that mechanism is
 /// generic over block byte width and element count; it does NOT take the
 /// row-blocked (`classify_packed_row_block`) or tiled-GEMM
@@ -1287,7 +1287,7 @@ pub const Q5_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_0::QK5_0;
 
 /// `Float16`: not a quantization at all -- MSL's `half` is IEEE-754 binary16
 /// natively, so a `Float16` weight's bytes ARE a valid `half` buffer with no
-/// unpack function required. It still needs a [`PackedCodec`] slot (rather
+/// unpack function required. It still needs a [`Codec`] slot (rather
 /// than folding into the plain `operand_read`'s `None` arm) because the
 /// buffer must bind as `device const half*`, not whatever `float`/`half`
 /// `type_token` chose for the KERNEL's own accumulator dtype -- a router
@@ -1336,192 +1336,133 @@ static inline float bf16_element(device const uchar *block, uint index) {
 }
 "#;
 
-/// Which packed codec one operand's bytes are — the second axis [`emit`]
-/// needs alongside "is this operand packed at all" (a plain `bool` cannot
-/// distinguish `Q4_K`'s 144-byte super-block from `Q6_K`'s 210-byte one, or
-/// which unpack function reads it). `Copy`/`Eq` so it can sit directly in
-/// the `quantized` slice every render function already threads through,
-/// with no allocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// the ggml/gguf ecosystem's own name is `Q8_0` everywhere else this codec
-// appears (`GgmlType::Q8_0`, `QuantizedBlock::Q8_0`) -- the K-quant variants
-// dropped their underscore for a terser name, but there is no "Q80" spelling
-// anyone else uses, so this one variant keeps it instead of drifting from
-// its own wire name.
-#[allow(non_camel_case_types)]
-pub enum PackedCodec {
-    Q2K,
-    Q3K,
-    Q4K,
-    Q5K,
-    Q6K,
-    /// Flat 32-element block, no super-block structure — see
-    /// [`Q8_0_UNPACK_MSL`]'s own doc for how this differs in KIND from the
-    /// three K-quants above, not just in size.
-    Q8_0,
-    /// Flat 32-element block, one `f16` scale, no sub-block structure --
-    /// llama.cpp's simplest legacy 4-bit format. Same KIND-difference from
-    /// the K-quant family as [`Self::Q8_0`]; see [`Q4_0_UNPACK_MSL`]'s own
-    /// doc.
-    Q4_0,
-    /// Flat 32-element block, one `f16` scale AND one `f16` min, plus a
-    /// separate 5th-bit plane -- same KIND-difference from the K-quant
-    /// family as [`Self::Q8_0`]/[`Self::Q4_0`]; see [`Q5_1_UNPACK_MSL`]'s
-    /// own doc.
-    Q5_1,
-    /// Flat 32-element block, one `f16` scale, plus a separate 5th-bit
-    /// plane -- [`Self::Q5_1`] with the min term dropped, same KIND-
-    /// difference from the K-quant family as [`Self::Q8_0`]/[`Self::Q4_0`];
-    /// see [`Q5_0_UNPACK_MSL`]'s own doc.
-    Q5_0,
-    /// Not a quantization: `half`-native bytes, read directly through a
-    /// `device const half*` binding, no unpack function -- see
-    /// [`FLOAT16_BLOCK_BYTES`]'s own doc for why this still needs a codec
-    /// slot despite there being nothing to decode.
-    Float16,
-    /// Needs a real unpack (widen-by-shift, [`BF16_UNPACK_MSL`]) since MSL
-    /// has no native `bfloat` storage type -- see [`BFLOAT16_BLOCK_BYTES`]'s
-    /// own doc.
-    BFloat16,
+/// The [`Codec`] a raw [`QuantizedBlock`] carries, if any — the one place
+/// every driver (`cuda_driver::packed_codec`, `wgpu_driver::
+/// packed_operands_of`, `metal::device_buffers_arena_plan::
+/// packed_operands_of`) asks "is this operand packed, and under which
+/// codec." Each driver still decides its OWN supported subset (not every
+/// backend has an unpack kernel for every codec this returns `Some` for) —
+/// this only answers whether `Codec` has a variant for the block at all.
+/// `None` for the two non-quantized carriers ([`QuantizedBlock::Float32`]/
+/// `Int32`) and for the codecs with no `Codec`/unpack-kernel entry anywhere
+/// yet ([`QuantizedBlock::Iq4Nl`]/`Iq2Xs`/`Iq3Xxs`) — decode-only, CPU-side
+/// so far (see `proxima_tensor::cpu`). Free function, not an inherent
+/// method: `Codec` is `proxima_primitives::Codec`, foreign to this crate
+/// (guiding-principles §20 rules out a blanket impl / newtype to host one).
+#[cfg(feature = "std")]
+pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Option<Codec> {
+    match block {
+        QuantizedBlock::Q2K(_) => Some(Codec::Q2K),
+        QuantizedBlock::Q3K(_) => Some(Codec::Q3K),
+        QuantizedBlock::Q4K(_) => Some(Codec::Q4K),
+        QuantizedBlock::Q5K(_) => Some(Codec::Q5K),
+        QuantizedBlock::Q6K(_) => Some(Codec::Q6K),
+        QuantizedBlock::Q8_0(_) => Some(Codec::Q8_0),
+        QuantizedBlock::Q4_0(_) => Some(Codec::Q4_0),
+        QuantizedBlock::Q5_1(_) => Some(Codec::Q5_1),
+        QuantizedBlock::Q5_0(_) => Some(Codec::Q5_0),
+        QuantizedBlock::Float16(_) => Some(Codec::Float16),
+        QuantizedBlock::BFloat16(_) => Some(Codec::BFloat16),
+        QuantizedBlock::Float32(_)
+        | QuantizedBlock::Int32(_)
+        | QuantizedBlock::Iq4Nl(_)
+        | QuantizedBlock::Iq2Xs(_)
+        | QuantizedBlock::Iq3Xxs(_) => None,
+    }
 }
 
-impl PackedCodec {
-    /// The codec a raw [`QuantizedBlock`] carries, if any — the one place
-    /// every driver (`cuda_driver::packed_codec`, `wgpu_driver::
-    /// packed_operands_of`, `metal::device_buffers_arena_plan::
-    /// packed_operands_of`) asks "is this operand packed, and under which
-    /// codec." Each driver still decides its OWN supported subset (not
-    /// every backend has an unpack kernel for every codec this returns
-    /// `Some` for) — this only answers whether `PackedCodec` has a variant
-    /// for the block at all. `None` for the two non-quantized carriers
-    /// ([`QuantizedBlock::Float32`]/`Int32`) and for the codecs with no
-    /// `PackedCodec`/unpack-kernel entry anywhere yet
-    /// ([`QuantizedBlock::Iq4Nl`]/`Iq2Xs`/`Iq3Xxs`) — decode-only, CPU-side
-    /// so far (see `proxima_tensor::cpu`).
-    #[cfg(feature = "std")]
-    pub(crate) const fn from_quantized_block(block: &QuantizedBlock<'_>) -> Option<Self> {
-        match block {
-            QuantizedBlock::Q2K(_) => Some(Self::Q2K),
-            QuantizedBlock::Q3K(_) => Some(Self::Q3K),
-            QuantizedBlock::Q4K(_) => Some(Self::Q4K),
-            QuantizedBlock::Q5K(_) => Some(Self::Q5K),
-            QuantizedBlock::Q6K(_) => Some(Self::Q6K),
-            QuantizedBlock::Q8_0(_) => Some(Self::Q8_0),
-            QuantizedBlock::Q4_0(_) => Some(Self::Q4_0),
-            QuantizedBlock::Q5_1(_) => Some(Self::Q5_1),
-            QuantizedBlock::Q5_0(_) => Some(Self::Q5_0),
-            QuantizedBlock::Float16(_) => Some(Self::Float16),
-            QuantizedBlock::BFloat16(_) => Some(Self::BFloat16),
-            QuantizedBlock::Float32(_)
-            | QuantizedBlock::Int32(_)
-            | QuantizedBlock::Iq4Nl(_)
-            | QuantizedBlock::Iq2Xs(_)
-            | QuantizedBlock::Iq3Xxs(_) => None,
-        }
+pub(crate) const fn codec_cache_token(codec: Codec) -> &'static str {
+    match codec {
+        Codec::Q2K => "q2k",
+        Codec::Q3K => "q3k",
+        Codec::Q4K => "q4k",
+        Codec::Q5K => "q5k",
+        Codec::Q6K => "q6k",
+        Codec::Q8_0 => "q8_0",
+        Codec::Q4_0 => "q4_0",
+        Codec::Q5_1 => "q5_1",
+        Codec::Q5_0 => "q5_0",
+        Codec::Float16 => "f16",
+        Codec::BFloat16 => "bf16",
     }
+}
 
-    pub(crate) const fn cache_token(self) -> &'static str {
-        match self {
-            PackedCodec::Q2K => "q2k",
-            PackedCodec::Q3K => "q3k",
-            PackedCodec::Q4K => "q4k",
-            PackedCodec::Q5K => "q5k",
-            PackedCodec::Q6K => "q6k",
-            PackedCodec::Q8_0 => "q8_0",
-            PackedCodec::Q4_0 => "q4_0",
-            PackedCodec::Q5_1 => "q5_1",
-            PackedCodec::Q5_0 => "q5_0",
-            PackedCodec::Float16 => "f16",
-            PackedCodec::BFloat16 => "bf16",
-        }
+/// Bytes one block of this codec occupies — the multiplier [`operand_read`]
+/// and the row-blocked path need to step between blocks. Element count per
+/// block is shared ([`Q4K_BLOCK_ELEMENTS`]) across the K-quant family
+/// (`Q4K`/`Q5K`/`Q6K`) but NOT by `Q8_0`, which uses its own, much smaller
+/// [`Q8_0_BLOCK_ELEMENTS`].
+pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
+    match codec {
+        Codec::Q2K => Q2K_BLOCK_BYTES,
+        Codec::Q3K => Q3K_BLOCK_BYTES,
+        Codec::Q4K => Q4K_BLOCK_BYTES,
+        Codec::Q5K => Q5K_BLOCK_BYTES,
+        Codec::Q6K => Q6K_BLOCK_BYTES,
+        Codec::Q8_0 => Q8_0_BLOCK_BYTES,
+        Codec::Q4_0 => Q4_0_BLOCK_BYTES,
+        Codec::Q5_1 => Q5_1_BLOCK_BYTES,
+        Codec::Q5_0 => Q5_0_BLOCK_BYTES,
+        Codec::Float16 => FLOAT16_BLOCK_BYTES,
+        Codec::BFloat16 => BFLOAT16_BLOCK_BYTES,
     }
+}
 
-    /// Bytes one block of this codec occupies — the multiplier
-    /// [`operand_read`] and the row-blocked path need to step between
-    /// blocks. Element count per block is shared ([`Q4K_BLOCK_ELEMENTS`])
-    /// across the K-quant family (`Q4K`/`Q5K`/`Q6K`) but NOT by `Q8_0`,
-    /// which uses its own, much smaller [`Q8_0_BLOCK_ELEMENTS`].
-    pub(crate) const fn block_bytes(self) -> usize {
-        match self {
-            PackedCodec::Q2K => Q2K_BLOCK_BYTES,
-            PackedCodec::Q3K => Q3K_BLOCK_BYTES,
-            PackedCodec::Q4K => Q4K_BLOCK_BYTES,
-            PackedCodec::Q5K => Q5K_BLOCK_BYTES,
-            PackedCodec::Q6K => Q6K_BLOCK_BYTES,
-            PackedCodec::Q8_0 => Q8_0_BLOCK_BYTES,
-            PackedCodec::Q4_0 => Q4_0_BLOCK_BYTES,
-            PackedCodec::Q5_1 => Q5_1_BLOCK_BYTES,
-            PackedCodec::Q5_0 => Q5_0_BLOCK_BYTES,
-            PackedCodec::Float16 => FLOAT16_BLOCK_BYTES,
-            PackedCodec::BFloat16 => BFLOAT16_BLOCK_BYTES,
-        }
+/// Elements one block of this codec carries — [`crate::wgsl`]'s WGSL codec
+/// table needs this alongside [`codec_block_bytes`] the same way
+/// `operand_read`'s own `{offset} / N_ELEMENTS` / `{offset} % N_ELEMENTS`
+/// split does here, and `crate::metal`'s `operand_tensor_bytes` needs it to
+/// turn a packed operand's element count into its real byte count — gated on
+/// either caller's own feature, since neither is compiled by default.
+#[cfg(any(feature = "wgpu-backend", feature = "instrument"))]
+pub(crate) const fn codec_block_elements(codec: Codec) -> usize {
+    match codec {
+        Codec::Q2K | Codec::Q3K | Codec::Q4K | Codec::Q5K | Codec::Q6K => Q4K_BLOCK_ELEMENTS,
+        Codec::Q8_0 => Q8_0_BLOCK_ELEMENTS,
+        Codec::Q4_0 => Q4_0_BLOCK_ELEMENTS,
+        Codec::Q5_1 => Q5_1_BLOCK_ELEMENTS,
+        Codec::Q5_0 => Q5_0_BLOCK_ELEMENTS,
+        Codec::Float16 => FLOAT16_BLOCK_ELEMENTS,
+        Codec::BFloat16 => BFLOAT16_BLOCK_ELEMENTS,
     }
+}
 
-    /// Elements one block of this codec carries — [`crate::wgsl`]'s WGSL
-    /// codec table needs this alongside [`Self::block_bytes`] the same way
-    /// `operand_read`'s own `{offset} / N_ELEMENTS` / `{offset} % N_ELEMENTS`
-    /// split does here, and `crate::metal`'s `operand_tensor_bytes` needs it
-    /// to turn a packed operand's element count into its real byte count —
-    /// gated on either caller's own feature, since neither is compiled by
-    /// default.
-    #[cfg(any(feature = "wgpu-backend", feature = "instrument"))]
-    pub(crate) const fn block_elements(self) -> usize {
-        match self {
-            PackedCodec::Q2K
-            | PackedCodec::Q3K
-            | PackedCodec::Q4K
-            | PackedCodec::Q5K
-            | PackedCodec::Q6K => Q4K_BLOCK_ELEMENTS,
-            PackedCodec::Q8_0 => Q8_0_BLOCK_ELEMENTS,
-            PackedCodec::Q4_0 => Q4_0_BLOCK_ELEMENTS,
-            PackedCodec::Q5_1 => Q5_1_BLOCK_ELEMENTS,
-            PackedCodec::Q5_0 => Q5_0_BLOCK_ELEMENTS,
-            PackedCodec::Float16 => FLOAT16_BLOCK_ELEMENTS,
-            PackedCodec::BFloat16 => BFLOAT16_BLOCK_ELEMENTS,
-        }
-    }
+/// Whether this codec's block layout has a paired-nibble/paired-lane decode
+/// body (`q4k_pair_dot`/`q5k_pair_dot`/`q6k_pair_dot`) at all -- the
+/// structural fact `push_packed_row_blocked_body`'s `plain_product` gate
+/// reads, in place of a `cfg!(feature = "metal-q{5,6}k-pair-dot")` check.
+/// `Q4_K` (144 B, mult of 16), `Q5_K` (176 B, mult of 16, plus its `qh`
+/// high-bit plane), and `Q6_K` (210 B, NOT a mult of 4, hence the `ushort`
+/// loads in [`Q6K_PAIR_DOT_MSL`]) each have one; the flat 32-element legacy
+/// codecs and the two non-quantized codecs do not -- `classify_packed_row_
+/// block` rejects all four before this is ever consulted (`NotKQuantCodec`),
+/// so this only needs to be honest about the four K-quants, not defensive
+/// about the rest. `Q3_K` (110 B) has its own paired-lane body
+/// ([`Q3K_PAIR_DOT_MSL`]) despite a DIFFERENT byte addressing shape from the
+/// other three (four 2-bit levels per byte, not a nibble or nibble-plus-
+/// plane) -- see that body's own doc.
+pub(crate) const fn codec_supports_pair_dot(codec: Codec) -> bool {
+    matches!(codec, Codec::Q3K | Codec::Q4K | Codec::Q5K | Codec::Q6K)
+}
 
-    /// Whether this codec's block layout has a paired-nibble/paired-lane
-    /// decode body (`q4k_pair_dot`/`q5k_pair_dot`/`q6k_pair_dot`) at all --
-    /// the structural fact `push_packed_row_blocked_body`'s `plain_product`
-    /// gate reads, in place of a `cfg!(feature = "metal-q{5,6}k-pair-dot")`
-    /// check. `Q4_K` (144 B, mult of 16), `Q5_K` (176 B, mult of 16, plus its
-    /// `qh` high-bit plane), and `Q6_K` (210 B, NOT a mult of 4, hence the
-    /// `ushort` loads in [`Q6K_PAIR_DOT_MSL`]) each have one; the flat 32-
-    /// element legacy codecs and the two non-quantized codecs do not --
-    /// `classify_packed_row_block` rejects all four before this is ever
-    /// consulted (`NotKQuantCodec`), so this only needs to be honest about
-    /// the four K-quants, not defensive about the rest. `Q3_K` (110 B) has
-    /// its own paired-lane body ([`Q3K_PAIR_DOT_MSL`]) despite a DIFFERENT
-    /// byte addressing shape from the other three (four 2-bit levels per
-    /// byte, not a nibble or nibble-plus-plane) -- see that body's own doc.
-    pub(crate) const fn supports_pair_dot(self) -> bool {
-        matches!(
-            self,
-            PackedCodec::Q3K | PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K
-        )
-    }
-
-    /// Output rows one SIMD group folds at once in the row-blocked packed
-    /// path (`push_packed_row_blocked_body`'s generic `else` arm and
-    /// `push_packed_row_multi_row_body`; NOT `push_q4k_single_fetch_body`/
-    /// `push_q4k_ggml_port_body`, which are `Q4_K`-only and keep `4` baked
-    /// into their own `lane % 8u` arithmetic regardless of this value —
-    /// [`PACKED_ROWS_PER_GROUP`]'s doc). `Q6_K` decodes three raw-byte
-    /// fields per element (`ql`, `qh`, `scale`) versus `Q4_K`'s effectively
-    /// two, so batching 4 rows' worth of `sumf[q]` accumulators plus
-    /// per-row `weight_base[q]`/`other_base[q]` state costs more live
-    /// registers per lane for `Q6_K` than the same batching costs `Q4_K` —
-    /// matches ggml's own choice (`N_R0_Q6_K = 1`, `N_R0_Q4_K = 4`,
-    /// `ggml-metal-impl.h:32-39`). The lane assignment itself (`ix`/`it`/
-    /// `slot` spreading all 32 lanes across the reduction axis) does not
-    /// depend on this value — it only controls how many output rows share
-    /// one activation load.
-    pub(crate) const fn rows_per_simdgroup(self) -> usize {
-        match self {
-            PackedCodec::Q6K => 1,
-            _ => PACKED_ROWS_PER_GROUP,
-        }
+/// Output rows one SIMD group folds at once in the row-blocked packed path
+/// (`push_packed_row_blocked_body`'s generic `else` arm and
+/// `push_packed_row_multi_row_body`; NOT `push_q4k_single_fetch_body`/
+/// `push_q4k_ggml_port_body`, which are `Q4_K`-only and keep `4` baked into
+/// their own `lane % 8u` arithmetic regardless of this value —
+/// [`PACKED_ROWS_PER_GROUP`]'s doc). `Q6_K` decodes three raw-byte fields
+/// per element (`ql`, `qh`, `scale`) versus `Q4_K`'s effectively two, so
+/// batching 4 rows' worth of `sumf[q]` accumulators plus per-row
+/// `weight_base[q]`/`other_base[q]` state costs more live registers per lane
+/// for `Q6_K` than the same batching costs `Q4_K` — matches ggml's own
+/// choice (`N_R0_Q6_K = 1`, `N_R0_Q4_K = 4`, `ggml-metal-impl.h:32-39`). The
+/// lane assignment itself (`ix`/`it`/`slot` spreading all 32 lanes across
+/// the reduction axis) does not depend on this value — it only controls how
+/// many output rows share one activation load.
+pub(crate) const fn codec_rows_per_simdgroup(codec: Codec) -> usize {
+    match codec {
+        Codec::Q6K => 1,
+        _ => PACKED_ROWS_PER_GROUP,
     }
 }
 
@@ -1529,6 +1470,11 @@ impl PackedCodec {
 /// codec — the single source of truth [`emit`] (via the `quantized` slice it
 /// derives) and the Metal driver's `correct_packed_matmul_layouts` call both
 /// need, generalizing the Q4_K-only `BTreeSet<NodeId>` this crate carried
-/// before Q6_K support existed.
-pub type PackedOperands = BTreeMap<NodeId, PackedCodec>;
+/// before Q6_K support existed. `Codec` is `proxima_primitives::Codec` — the
+/// source-neutral packed-layout identity (see that type's own doc); this
+/// crate's per-codec derivations (`cache_token`, `block_bytes`,
+/// `supports_pair_dot`, `rows_per_simdgroup`, `from_quantized_block`) live as
+/// free functions in [`crate::identity`] since `Codec` is foreign here and
+/// cannot carry inherent methods (guiding-principles §20, no blanket impls).
+pub type PackedOperands = BTreeMap<NodeId, Codec>;
 

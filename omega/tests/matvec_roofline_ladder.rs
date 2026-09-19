@@ -1821,7 +1821,7 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
 /// `Q5_K` for the llama.cpp-inserted per-layer quality bump on 4 of 32
 /// `attn_v`/`ffn_down` tensors, `Q6_K` for the lone `output.weight` head --
 /// `proxima-tensor/docs/discipline.md` ROW 87's own printed inventory,
-/// cross-checked live against `omega::msl::emit`'s `PackedCodec::Q5K` arm
+/// cross-checked live against `omega::msl::emit`'s `Codec::Q5K` arm
 /// (`omega/src/msl.rs:4516-4527`, `q5k_pair_dot` selected the same way
 /// `q4k_pair_dot`/`q6k_pair_dot` are) -- Metal has a real production kernel
 /// for all three today, superseding the stale "no q5_k/q6_k unpack kernel"
@@ -3545,7 +3545,7 @@ const ROW350_CELL: u32 = 0;
 
 fn production_reduce_kernel(
     device: &ProtocolObject<dyn MTLDevice>,
-    codec: omega::PackedCodec,
+    codec: omega::Codec,
     rows: u32,
     k: u32,
 ) -> ProductionKernel {
@@ -3610,7 +3610,7 @@ fn production_reduce_kernel(
     // preamble differs enough that the byte-exact `setup_old`/`output_old`
     // patterns below do not match it) -- the rewrite targets the Q4K FFN
     // shapes only, which is 224 of this test's 225 dispatches anyway.
-    let source = if ROW350_CELL == 1 && matches!(codec, omega::PackedCodec::Q4K) {
+    let source = if ROW350_CELL == 1 && matches!(codec, omega::Codec::Q4K) {
         row350_direct_addressing_rewrite(&kernel.source)
     } else {
         kernel.source.clone()
@@ -3858,7 +3858,7 @@ fn run_row361_family_amortized(
         (
             "head",
             ShapeCodec::Q6K,
-            omega::PackedCodec::Q6K,
+            omega::Codec::Q6K,
             WHOLE_TOKEN_HEAD_ROWS,
             WHOLE_TOKEN_HEAD_K,
             900_000,
@@ -3876,9 +3876,9 @@ fn run_row361_family_amortized(
             ShapeCodec::Q4K
         };
         let packed_codec = if uses_q5k {
-            omega::PackedCodec::Q5K
+            omega::Codec::Q5K
         } else {
-            omega::PackedCodec::Q4K
+            omega::Codec::Q4K
         };
         (
             family.name,
@@ -4244,7 +4244,7 @@ fn whole_token_matvec_sequence_bare() {
         .map(|family| {
             production_reduce_kernel(
                 &device,
-                omega::PackedCodec::Q4K,
+                omega::Codec::Q4K,
                 family.rows as u32,
                 family.k as u32,
             )
@@ -4252,7 +4252,7 @@ fn whole_token_matvec_sequence_bare() {
         .collect();
     let head_kernel = production_reduce_kernel(
         &device,
-        omega::PackedCodec::Q6K,
+        omega::Codec::Q6K,
         WHOLE_TOKEN_HEAD_ROWS as u32,
         WHOLE_TOKEN_HEAD_K as u32,
     );

@@ -87,7 +87,7 @@ pub fn emit_with_uniform_expert_source(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     source_node: NodeId,
-    codec: PackedCodec,
+    codec: Codec,
 ) -> Result<Kernel, EmitError> {
     emit_with_expert_sources_mode(
         resolved,
@@ -103,7 +103,7 @@ pub(super) fn emit_with_expert_sources_mode(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     source_node: NodeId,
-    uniform_codec: Option<PackedCodec>,
+    uniform_codec: Option<Codec>,
 ) -> Result<Kernel, EmitError> {
     // A substituted expert source may select a different codec for every
     // routed expert. Do not specialize this operand to the checkpoint's
@@ -142,10 +142,10 @@ pub(super) fn emit_with_expert_sources_mode(
         let offset = format!("off{weight_index}");
         for codec in [
             None,
-            Some(PackedCodec::Q2K),
-            Some(PackedCodec::Q4K),
-            Some(PackedCodec::Q5K),
-            Some(PackedCodec::Q6K),
+            Some(Codec::Q2K),
+            Some(Codec::Q4K),
+            Some(Codec::Q5K),
+            Some(Codec::Q6K),
         ] {
             for offset_name in [
                 offset.as_str(),
@@ -173,7 +173,7 @@ pub(super) fn emit_with_expert_sources_mode(
                 let replacement = if let Some(codec) = uniform_codec {
                     format!(
                         "uniform_expert_element_from_offset_{}(expert_payloads, expert_descriptors, (uint)fetched{}, {offset_name}, {})",
-                        codec.cache_token(),
+                        codec_cache_token(codec),
                         weight_index,
                         expert_stride,
                     )
@@ -530,7 +530,7 @@ pub(super) fn replace_whole_word(text: &str, identifier: &str, replacement: &str
     not(all(feature = "metal", target_os = "macos")),
     allow(dead_code, reason = "sole caller is the macOS-only metal driver")
 )]
-pub(super) fn packed_row_block_shape_token(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> char {
+pub(super) fn packed_row_block_shape_token(resolved: &BoundOp, quantized: &[Option<Codec>]) -> char {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -570,7 +570,7 @@ pub(super) fn packed_row_block_shape_token(resolved: &BoundOp, quantized: &[Opti
 )]
 pub(super) fn packed_row_block_stride_is_one(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
 ) -> Option<bool> {
     let BoundOpKind::Reduce { .. } = &resolved.kind else {
         return None;
@@ -595,7 +595,7 @@ pub(super) fn packed_row_block_stride_is_one(
 )]
 pub(super) fn packed_row_block_direct_axis(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
 ) -> Option<u16> {
     let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
         return None;
@@ -624,7 +624,7 @@ pub(super) fn packed_row_block_direct_axis(
 )]
 pub(super) fn packed_row_block_grouped_axes(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
 ) -> Option<(u16, u16)> {
     let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
         return None;
@@ -634,7 +634,7 @@ pub(super) fn packed_row_block_grouped_axes(
         return None;
     }
     let (_, selected_axis, _, out_axis) = packed_row_direct_grouped_axes(resolved, output_axes)?;
-    let rows = block.codec.rows_per_simdgroup() as u64;
+    let rows = codec_rows_per_simdgroup(block.codec) as u64;
     if resolved.extents[out_axis as usize].is_multiple_of(rows) {
         Some((selected_axis, out_axis))
     } else {
@@ -828,7 +828,7 @@ pub(super) fn reduce_has_broadcast_epilogue(resolved: &BoundOp) -> bool {
 /// the same reason -- see [`reduce_has_broadcast_epilogue`]'s own doc.
 pub(super) fn reduce_is_cooperative_dispatch(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     policy: NumericPolicy,
     reduce_op: ScalarOp,
     init: ReduceInit,
@@ -863,7 +863,7 @@ pub(super) fn reduce_is_cooperative_dispatch(
 /// without this, a declined grouped-expert reduce silently fell back to
 /// `reduce-cooperative` with no record of which of the seven
 /// [`classify_packed_row_block`] conditions gave up on it.
-pub(super) fn packed_row_block_admitted(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> bool {
+pub(super) fn packed_row_block_admitted(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
     // The experimental mixed-source path must use the descriptor-aware
     // element reader; row-block pointer hoisting has a separate address ABI.
     if std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES").is_some() {
@@ -1240,7 +1240,7 @@ pub(super) struct PackedRowBlock {
     pub(super) reduce_dim: usize,
     /// which codec `weight`'s bytes are packed as — decides the block byte
     /// width and which unpack function the emitted body calls.
-    pub(super) codec: PackedCodec,
+    pub(super) codec: Codec,
     /// output axes the activation owns exclusively, outermost first --
     /// empty when the op's output axes do not split cleanly into a
     /// token/feature ownership partition (every axis then counts as a
@@ -1341,8 +1341,8 @@ pub enum PackedRowBlockRejection {
     /// default build keeps the generic cooperative gather-aware path until
     /// `metal-gathered-packed-row` has been enabled and measured.
     GatheredOperand,
-    /// The packed operand's codec is [`PackedCodec::Q8_0`] or
-    /// [`PackedCodec::Q4_0`] — this path's lane amortization
+    /// The packed operand's codec is [`Codec::Q8_0`] or
+    /// [`Codec::Q4_0`] — this path's lane amortization
     /// ([`Q4K_BLOCK_ELEMENTS`], 8 lanes per 32-element sub-block) is
     /// hard-coded to the K-quant family's shared 256-element super-block,
     /// which neither flat 32-element codec has an analogue for. Both
@@ -1400,7 +1400,7 @@ pub(super) fn axes_fold_contiguously(dims: &[u16], extents: &[u64], layout: &Lay
 /// seven conditions are spelled out, never two copies that could drift.
 pub(super) fn classify_packed_row_block(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
 ) -> Result<PackedRowBlock, PackedRowBlockRejection> {
     if !reduce_is_cooperative(resolved) {
         return Err(PackedRowBlockRejection::NotCooperativeReduce);
@@ -1417,7 +1417,7 @@ pub(super) fn classify_packed_row_block(
     if quantized.len() != 2 {
         return Err(PackedRowBlockRejection::OperandCountNotTwo);
     }
-    let packed: Vec<(usize, PackedCodec)> = quantized
+    let packed: Vec<(usize, Codec)> = quantized
         .iter()
         .enumerate()
         .filter_map(|(index, codec)| codec.map(|codec| (index, codec)))
@@ -1429,17 +1429,17 @@ pub(super) fn classify_packed_row_block(
     // non-K-quant codec by `==` -- an equality check against `Q8_0` alone
     // would have silently admitted `Q4_0` (or any future flat-block codec)
     // the moment its extent happened to be a multiple of 256. This match
-    // is exhaustive over `PackedCodec`, so a new codec added later forces a
+    // is exhaustive over `Codec`, so a new codec added later forces a
     // decision here instead of slipping through.
     match codec {
-        PackedCodec::Q3K | PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K => {}
-        PackedCodec::Q2K
-        | PackedCodec::Q8_0
-        | PackedCodec::Q4_0
-        | PackedCodec::Q5_1
-        | PackedCodec::Q5_0
-        | PackedCodec::Float16
-        | PackedCodec::BFloat16 => {
+        Codec::Q3K | Codec::Q4K | Codec::Q5K | Codec::Q6K => {}
+        Codec::Q2K
+        | Codec::Q8_0
+        | Codec::Q4_0
+        | Codec::Q5_1
+        | Codec::Q5_0
+        | Codec::Float16
+        | Codec::BFloat16 => {
             return Err(PackedRowBlockRejection::NotKQuantCodec);
         }
     }
@@ -1523,7 +1523,7 @@ pub(super) fn classify_packed_row_block(
 
 pub(super) fn packed_row_block(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
 ) -> Option<PackedRowBlock> {
     // The experimental mixed-source path must use the descriptor-aware
     // element reader; row-block pointer hoisting has a separate address ABI.
@@ -1550,7 +1550,7 @@ pub enum TiledGemmRejection {
     /// `classify_packed_row_block` itself rejected first; the tiled path
     /// can only narrow that gate's `Ok`, never rescue its `Err`.
     NotPackedRowBlock(PackedRowBlockRejection),
-    /// The packed operand's codec is not [`PackedCodec::Q4K`] -- Q5_K/Q6_K
+    /// The packed operand's codec is not [`Codec::Q4K`] -- Q5_K/Q6_K
     /// have no batched-unpack helper for this path yet (see
     /// `classify_tiled_gemm`'s own comment).
     NotQ4K,
@@ -1624,7 +1624,7 @@ pub(super) struct TiledGemmBlock {
 /// kernel does not exist as far as the rest of this module can observe.
 pub(super) fn classify_tiled_gemm(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
@@ -1650,7 +1650,7 @@ pub(super) fn classify_tiled_gemm(
         // Shipping them unmeasured on a correctness-critical GPU kernel
         // would violate the same discipline this landing's own gate
         // demands (principle 18).
-        if codec != PackedCodec::Q4K {
+        if codec != Codec::Q4K {
             return Err(TiledGemmRejection::NotQ4K);
         }
         // `simdgroup_multiply_accumulate` IS a sum-of-products -- there is
@@ -1745,7 +1745,7 @@ pub(super) fn classify_tiled_gemm(
 
 pub(super) fn tiled_gemm_block(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
@@ -1766,7 +1766,7 @@ pub(super) fn tiled_gemm_block(
 #[cfg(feature = "instrument")]
 pub fn diagnose_tiled_gemm_block(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
@@ -1785,7 +1785,7 @@ pub fn diagnose_tiled_gemm_block(
 #[cfg(feature = "instrument")]
 pub fn diagnose_packed_row_block(
     resolved: &BoundOp,
-    quantized: &[Option<PackedCodec>],
+    quantized: &[Option<Codec>],
 ) -> Result<(), PackedRowBlockRejection> {
     classify_packed_row_block(resolved, quantized).map(drop)
 }
@@ -1820,7 +1820,7 @@ pub(super) fn tiled_gemm_threadgroups(
 
 /// Split-K factor for a row-blocked packed matmul with `rows` OUTPUT rows
 /// (`output_total`), dispatching `base_simdgroups` simdgroups
-/// (`rows.div_ceil(codec.rows_per_simdgroup())`) -- how many simdgroups per
+/// (`rows.div_ceil(codec_rows_per_simdgroup(codec))`) -- how many simdgroups per
 /// threadgroup cooperate on ONE row-group's reduction axis so the
 /// dispatch's total simdgroup count reaches
 /// [`crate::sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`], capped at
@@ -1863,7 +1863,7 @@ pub(super) fn packed_row_split_factor(_base_simdgroups: u64, _rows: u64) -> u64 
 }
 
 /// Single source of truth for the row-blocked packed path's base simdgroup
-/// count (one per [`PackedCodec::rows_per_simdgroup`] feature rows, tiled
+/// count (one per [`codec_rows_per_simdgroup`] feature rows, tiled
 /// again by `ceil(token_total / crate::sized::PACKED_ROW_ACTIVATION_GROUP)`
 /// once more than one activation row folds per streamed weight row) and its
 /// derived split-K factor -- both [`grid_threads`] and
@@ -1873,8 +1873,8 @@ pub(super) fn packed_row_split_factor(_base_simdgroups: u64, _rows: u64) -> u64 
 /// axis, or exactly one activation row) collapses the token factor to `1`,
 /// so a caller passing `feature_total` for the whole output and `token_total
 /// == 1` gets today's byte-identical single-row dispatch shape.
-pub(super) fn packed_row_dispatch(feature_total: u64, token_total: u64, codec: PackedCodec) -> (u64, u64) {
-    let base = feature_total.div_ceil(codec.rows_per_simdgroup() as u64);
+pub(super) fn packed_row_dispatch(feature_total: u64, token_total: u64, codec: Codec) -> (u64, u64) {
+    let base = feature_total.div_ceil(codec_rows_per_simdgroup(codec) as u64);
     let split = packed_row_split_factor(base, feature_total);
     let token_groups = token_total.div_ceil(crate::sized::PACKED_ROW_ACTIVATION_GROUP);
     (base * token_groups, split)

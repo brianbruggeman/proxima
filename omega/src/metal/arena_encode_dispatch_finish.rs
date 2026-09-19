@@ -685,7 +685,7 @@ pub(super) fn encode_op(
         });
         if let Some(codec) = uniform_codec {
             cache_key.push_str("_uniform_expert_");
-            cache_key.push_str(codec.cache_token());
+            cache_key.push_str(crate::msl::codec_cache_token(codec));
             if std::env::var_os("PROXIMA_DEBUG_EXPERT_EMIT").is_some() {
                 eprintln!("expert lowering mode=uniform codec={codec:?} node={source_node:?}");
             }
@@ -1344,7 +1344,7 @@ pub(super) mod operand_tensor_bytes_tests {
     use proxima_tensor::{AlignedBuffer, DType, Extent, Op, infer};
 
     use super::{
-        BTreeSet, NodeId, PackedCodec, PackedOperands, device_and_queue, element_count,
+        BTreeSet, NodeId, Codec, PackedOperands, device_and_queue, element_count,
         operand_tensor_bytes, page_size, register_checkpoint_mapping, upload_packed_bytes,
     };
     use crate::msl::{Q4K_BLOCK_BYTES, Q5K_BLOCK_BYTES};
@@ -1367,7 +1367,7 @@ pub(super) mod operand_tensor_bytes_tests {
     fn q4k_operand_reports_rows_times_k_times_144_over_256() {
         let (program, shapes) = single_input_shapes(2 * 256);
         let mut packed_operands = PackedOperands::new();
-        packed_operands.insert(NodeId(0), PackedCodec::Q4K);
+        packed_operands.insert(NodeId(0), Codec::Q4K);
 
         let bytes = operand_tensor_bytes(
             &program,
@@ -1385,7 +1385,7 @@ pub(super) mod operand_tensor_bytes_tests {
     fn q5k_operand_reports_rows_times_k_times_176_over_256() {
         let (program, shapes) = single_input_shapes(3 * 256);
         let mut packed_operands = PackedOperands::new();
-        packed_operands.insert(NodeId(0), PackedCodec::Q5K);
+        packed_operands.insert(NodeId(0), Codec::Q5K);
 
         let bytes = operand_tensor_bytes(
             &program,
@@ -1447,7 +1447,7 @@ pub(super) mod operand_tensor_bytes_tests {
         let _ = &mut program;
 
         let mut packed_operands = PackedOperands::new();
-        packed_operands.insert(weight_node, PackedCodec::Q4K);
+        packed_operands.insert(weight_node, Codec::Q4K);
 
         let lookup = proxima_tensor::Lookup {
             indices: routes_node,
@@ -1527,7 +1527,7 @@ pub(super) mod operand_tensor_bytes_tests {
 
         let (program, shapes) = single_input_shapes(256);
         let mut packed_operands = PackedOperands::new();
-        packed_operands.insert(NodeId(0), PackedCodec::Q4K);
+        packed_operands.insert(NodeId(0), Codec::Q4K);
         let operand_bytes = operand_tensor_bytes(
             &program,
             &BTreeSet::new(),
@@ -3192,7 +3192,7 @@ pub(super) mod plan_query_rows_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(super) mod expert_payload_descriptor_tests {
     use super::{
-        BoundOp, BoundOpKind, ExpertPayloadDescriptor, MetalError, PackedCodec,
+        BoundOp, BoundOpKind, ExpertPayloadDescriptor, MetalError, Codec,
         expert_payload_descriptors, live_block_inputs, ordinary_block_uploads,
         pack_expert_payload_descriptors, reject_non_reducing_expert_staging,
         selected_expert_arena_descriptors, selected_expert_payloads,
@@ -3271,7 +3271,7 @@ pub(super) mod expert_payload_descriptor_tests {
             vec![
                 ExpertPayloadDescriptor {
                     expert_index: 0,
-                    codec: PackedCodec::Q2K,
+                    codec: Codec::Q2K,
                     byte_offset: 0,
                     byte_length: 84,
                     out_dim: 256,
@@ -3280,7 +3280,7 @@ pub(super) mod expert_payload_descriptor_tests {
                 },
                 ExpertPayloadDescriptor {
                     expert_index: 1,
-                    codec: PackedCodec::Q4K,
+                    codec: Codec::Q4K,
                     byte_offset: 84,
                     byte_length: 144,
                     out_dim: 256,
@@ -3349,7 +3349,7 @@ pub(super) mod expert_payload_descriptor_tests {
             .expect("selected Q6_K expert produces a compact table");
 
         assert_eq!(payload, high_bytes);
-        assert_eq!(descriptors[1].codec, PackedCodec::Q6K);
+        assert_eq!(descriptors[1].codec, Codec::Q6K);
         assert_eq!(descriptors[1].byte_length, high_bytes.len());
         let packed = pack_expert_payload_descriptors(NodeId(10), &descriptors)
             .expect("Q6_K descriptor fits the Metal ABI");
@@ -3483,7 +3483,7 @@ pub(super) mod expert_payload_descriptor_tests {
 
         let descriptors = expert_payload_descriptors(NodeId(9), &source)
             .expect("Q3_K has a mixed-expert MSL decoder");
-        assert_eq!(descriptors[0].codec, PackedCodec::Q3K);
+        assert_eq!(descriptors[0].codec, Codec::Q3K);
         assert_eq!(descriptors[0].byte_length, q3_bytes.len());
         let packed = pack_expert_payload_descriptors(NodeId(9), &descriptors)
             .expect("Q3_K descriptor fits the Metal ABI");

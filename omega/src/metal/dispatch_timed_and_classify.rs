@@ -379,7 +379,7 @@ pub(super) fn execute_plan_op_timed_inner(
             // on the GPU at the read (`msl::BF16_UNPACK_MSL`), never on the
             // host.
             // `Q3_K` uploads its raw super-block bytes unchanged, same as
-            // every other packed codec below -- `msl::PackedCodec::Q3K`'s
+            // every other packed codec below -- `msl::Codec::Q3K`'s
             // own unpack kernel (`q3k_element`) reads them at the GPU side.
             QuantizedBlock::Q3K(bytes)
             | QuantizedBlock::Q4K(bytes)
@@ -542,7 +542,7 @@ pub fn execute_plan_with_placements_op_timed(
             )?,
             QuantizedBlock::Int32(data) => upload_block_int32_as_float(&device, data, None)?,
             // `Q3_K` uploads its raw super-block bytes unchanged, same as
-            // every other packed codec below -- `msl::PackedCodec::Q3K`'s
+            // every other packed codec below -- `msl::Codec::Q3K`'s
             // own unpack kernel (`q3k_element`) reads them at the GPU side.
             QuantizedBlock::Q3K(bytes)
             | QuantizedBlock::Q4K(bytes)
@@ -924,7 +924,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
         u64,
         Option<String>,
         usize,
-        Option<PackedCodec>,
+        Option<Codec>,
         &'static str,
     );
     let mut metas: Vec<DispatchMeta> = Vec::with_capacity(position_count);
@@ -1424,7 +1424,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
 
     use super::classify_kind;
     use crate::msl::diagnose_packed_row_block;
-    use crate::{PackedCodec, PackedOperands};
+    use crate::{Codec, PackedOperands};
 
     /// The last node `program` builds -- see `msl::tests::terminal`'s own
     /// doc (ROW 541, `proxima-tensor/docs/discipline.md`): every fixture
@@ -1485,7 +1485,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
             .expect("one fused bound emitted")
     }
 
-    fn packed_operands_for(bound: &BoundOp, codec: PackedCodec) -> PackedOperands {
+    fn packed_operands_for(bound: &BoundOp, codec: Codec) -> PackedOperands {
         let mut codecs = BTreeMap::new();
         codecs.insert(bound.operands()[0].0, codec);
         codecs
@@ -1494,10 +1494,10 @@ pub(super) mod classify_kind_packed_row_marker_tests {
     #[test]
     fn every_k_quant_codec_classifies_as_packed_row_blocked_plain_product() {
         for codec in [
-            PackedCodec::Q3K,
-            PackedCodec::Q4K,
-            PackedCodec::Q5K,
-            PackedCodec::Q6K,
+            Codec::Q3K,
+            Codec::Q4K,
+            Codec::Q5K,
+            Codec::Q6K,
         ] {
             // Add-reduce over a plain `weight * activation` body selects the
             // `plain_product` pair-dot arm (`push_packed_row_blocked_body`'s
@@ -1516,10 +1516,10 @@ pub(super) mod classify_kind_packed_row_marker_tests {
     #[test]
     fn every_k_quant_codec_classifies_as_packed_row_blocked_scalar_fallback() {
         for codec in [
-            PackedCodec::Q3K,
-            PackedCodec::Q4K,
-            PackedCodec::Q5K,
-            PackedCodec::Q6K,
+            Codec::Q3K,
+            Codec::Q4K,
+            Codec::Q5K,
+            Codec::Q6K,
         ] {
             // A non-Add reduce op takes `push_packed_row_blocked_body`'s
             // per-element scalar fallback arm instead of the pair-dot arm.
@@ -1804,9 +1804,9 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         let up_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
         let down_stack = quantized_stack(EXPERT_COUNT, FEED_FORWARD, EMBEDDING);
         let mut packed_operands: PackedOperands = BTreeMap::new();
-        packed_operands.insert(expert_w_gate_node, PackedCodec::Q4K);
-        packed_operands.insert(expert_w_up_node, PackedCodec::Q4K);
-        packed_operands.insert(expert_w_down_node, PackedCodec::Q4K);
+        packed_operands.insert(expert_w_gate_node, Codec::Q4K);
+        packed_operands.insert(expert_w_up_node, Codec::Q4K);
+        packed_operands.insert(expert_w_down_node, Codec::Q4K);
         // the stacks are built purely to size the quantized codec buffers
         // `classify_kind`'s emit path never reads bytes -- kept alive so the
         // borrow checker sees them span the assertions below.
@@ -1842,7 +1842,7 @@ pub(super) mod classify_kind_packed_row_marker_tests {
                         || *node == expert_w_down_node
                 });
                 if touches_expert_weight {
-                    let quantized: Vec<Option<PackedCodec>> = bound
+                    let quantized: Vec<Option<Codec>> = bound
                         .operands()
                         .iter()
                         .map(|(node, _, _)| packed_operands.get(node).copied())
@@ -1980,9 +1980,9 @@ pub(super) mod classify_kind_packed_row_marker_tests {
                 .expect("the qwen35moe-shaped ffn binds");
 
         let mut packed_operands: PackedOperands = BTreeMap::new();
-        packed_operands.insert(expert_w_gate_node, PackedCodec::Q4K);
-        packed_operands.insert(expert_w_up_node, PackedCodec::Q4K);
-        packed_operands.insert(expert_w_down_node, PackedCodec::Q4K);
+        packed_operands.insert(expert_w_gate_node, Codec::Q4K);
+        packed_operands.insert(expert_w_up_node, Codec::Q4K);
+        packed_operands.insert(expert_w_down_node, Codec::Q4K);
         let gate_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
         let up_stack = quantized_stack(EXPERT_COUNT, EMBEDDING, FEED_FORWARD);
         let down_stack = quantized_stack(EXPERT_COUNT, FEED_FORWARD, EMBEDDING);
@@ -2066,7 +2066,7 @@ pub(super) fn diagnose_kind(bound: &BoundOp, packed_operands: &PackedOperands) -
     else {
         return None;
     };
-    let quantized: Vec<Option<PackedCodec>> = bound
+    let quantized: Vec<Option<Codec>> = bound
         .operands()
         .iter()
         .map(|(node, _, _)| packed_operands.get(node).copied())

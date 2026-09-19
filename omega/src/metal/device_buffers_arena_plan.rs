@@ -291,7 +291,7 @@ pub struct ExpertPayloadDescriptor {
     /// payload bytes but dense in route space so the kernel can retain O(1)
     /// `descriptor[expert]` addressing.
     pub expert_index: u32,
-    pub codec: PackedCodec,
+    pub codec: Codec,
     pub byte_offset: usize,
     pub byte_length: usize,
     pub out_dim: u32,
@@ -1722,7 +1722,7 @@ impl Plan {
 
 /// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has an
 /// unpack kernel for (`Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`, `Q5_1`,
-/// `Q5_0`, `Float16`, `BFloat16`), keyed to its [`PackedCodec`] — the single place this crate
+/// `Q5_0`, `Float16`, `BFloat16`), keyed to its [`Codec`] — the single place this crate
 /// decides "packed AND which codec," shared by [`plan`] and [`prepare`] so
 /// the two cannot drift on it. `Float16` earns a codec slot despite needing
 /// no unpack FUNCTION (see `msl::FLOAT16_BLOCK_BYTES`'s own doc) because its
@@ -1735,25 +1735,25 @@ pub(super) fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBloc
         .iter()
         .zip(blocks.iter())
         // decode-only codecs (CPU-only, see `proxima_tensor::cpu`) and the
-        // two non-quantized carriers fall out of `PackedCodec::
+        // two non-quantized carriers fall out of `Codec::
         // from_quantized_block` as `None`, exactly like before, and hit
         // `reject_unsupported_gpu_dtype`'s ordinary rejection rather than a
         // silent, wrong-shape upload.
-        .filter_map(|(node, block)| PackedCodec::from_quantized_block(block).map(|codec| (*node, codec)))
+        .filter_map(|(node, block)| crate::msl::codec_from_quantized_block(block).map(|codec| (*node, codec)))
         .collect()
 }
 
-/// The [`PackedCodec`] one expert-table entry's block carries, restricted to
+/// The [`Codec`] one expert-table entry's block carries, restricted to
 /// the four codecs mixed-expert lowering has a decoder for
 /// (`Q2_K`/`Q3_K`/`Q4_K`/`Q6_K`) — the shared subset
 /// [`expert_payload_descriptors`], [`selected_expert_payloads`], and
 /// [`selected_expert_arena_descriptors`] each re-derived identically before
-/// this. Any other block (including codecs [`PackedCodec::
+/// this. Any other block (including codecs [`Codec::
 /// from_quantized_block`] itself recognizes, like `Q4_0`/`Q8_0`) is rejected
 /// the same way an unrecognized block always was here.
-fn expert_codec(node: NodeId, block: &QuantizedBlock<'_>) -> Result<PackedCodec, MetalError> {
-    match PackedCodec::from_quantized_block(block) {
-        Some(codec @ (PackedCodec::Q2K | PackedCodec::Q3K | PackedCodec::Q4K | PackedCodec::Q6K)) => Ok(codec),
+fn expert_codec(node: NodeId, block: &QuantizedBlock<'_>) -> Result<Codec, MetalError> {
+    match crate::msl::codec_from_quantized_block(block) {
+        Some(codec @ (Codec::Q2K | Codec::Q3K | Codec::Q4K | Codec::Q6K)) => Ok(codec),
         _ => Err(MetalError::ExpertSourceUnsupported {
             node,
             reason: "mixed expert lowering only has Q2_K, Q3_K, Q4_K, and Q6_K decoders",
@@ -1952,10 +1952,10 @@ pub fn pack_expert_payload_descriptors(
     let mut bytes = Vec::with_capacity(descriptors.len() * 32);
     for descriptor in descriptors {
         let codec_tag: u32 = match descriptor.codec {
-            PackedCodec::Q2K => 1,
-            PackedCodec::Q3K => 4,
-            PackedCodec::Q4K => 2,
-            PackedCodec::Q6K => 3,
+            Codec::Q2K => 1,
+            Codec::Q3K => 4,
+            Codec::Q4K => 2,
+            Codec::Q6K => 3,
             _ => {
                 return Err(MetalError::ExpertSourceUnsupported {
                     node,

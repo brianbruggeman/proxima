@@ -65,13 +65,14 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+pub use proxima_primitives::Codec;
 use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
     NumericRewrite, ReduceInit, ScalarOp, StepArg, admit,
 };
 // `QuantizedBlock` itself is re-exported from the crate root only behind
 // `std` (see `proxima_tensor::lib`'s own `#[cfg(feature = "std")]` on it),
-// so `PackedCodec::from_quantized_block` -- the only user of it in this
+// so `codec_from_quantized_block` -- the only user of it in this
 // alloc-tier (`metal-core`) module -- stays gated the same way; an
 // alloc-only build never needed this method before and does not need it now.
 #[cfg(feature = "std")]

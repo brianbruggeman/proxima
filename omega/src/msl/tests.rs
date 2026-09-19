@@ -495,7 +495,7 @@ fn q4k_row_blocked_matmul_uses_paired_nibble_decode() {
     let bound = matmul_op(4, 256, 5);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
 
     assert!(
         packed_row_block(&bound, &operand_codecs(&bound, &q4k)).is_some(),
@@ -527,7 +527,7 @@ mod horizontal_merge_base_table_splice_tests {
 
     use proxima_tensor::NumericPolicy;
 
-    use super::super::{EmitError, PackedCodec, emit, splice_horizontal_merge_base_table};
+    use super::super::{EmitError, Codec, emit, splice_horizontal_merge_base_table};
     use super::matmul_op;
     use crate::identity::{KernelLanguage, MetalOnlyExtras, kernel_identity};
 
@@ -544,7 +544,7 @@ mod horizontal_merge_base_table_splice_tests {
         let bound = matmul_op(4, 256, 5);
         let weight_node = bound.operands()[0].0;
         let mut q4k = BTreeMap::new();
-        q4k.insert(weight_node, PackedCodec::Q4K);
+        q4k.insert(weight_node, Codec::Q4K);
 
         let unmerged = emit(&bound, &q4k, NumericPolicy::default()).expect("unmerged emits");
         let mut merged = unmerged.clone();
@@ -611,7 +611,7 @@ mod horizontal_merge_base_table_splice_tests {
         let bound = matmul_op(4, 256, 5);
         let weight_node = bound.operands()[0].0;
         let mut q4k = BTreeMap::new();
-        q4k.insert(weight_node, PackedCodec::Q4K);
+        q4k.insert(weight_node, Codec::Q4K);
         let policy = NumericPolicy::default();
 
         let unmerged_extras = MetalOnlyExtras::default();
@@ -639,17 +639,17 @@ mod horizontal_merge_base_table_splice_tests {
 }
 
 /// `Q5_K` sibling of the test above: the same Add-reduce-over-plain-
-/// product shape must select `q5k_pair_dot` (`PackedCodec::supports_pair_dot`,
+/// product shape must select `q5k_pair_dot` (`Codec::supports_pair_dot`,
 /// a structural fact of `Q5_K`'s block layout, not a cargo feature)
 /// rather than the scalar per-element `q5k_value` loop
-/// `push_packed_row_blocked_body`'s `PackedCodec::Q5K` arm falls back to
+/// `push_packed_row_blocked_body`'s `Codec::Q5K` arm falls back to
 /// when the reduce is not a plain product.
 #[test]
 fn q5k_row_blocked_matmul_uses_paired_nibble_decode() {
     let bound = matmul_op(4, 256, 5);
     let weight_node = bound.operands()[0].0;
     let mut q5k = BTreeMap::new();
-    q5k.insert(weight_node, PackedCodec::Q5K);
+    q5k.insert(weight_node, Codec::Q5K);
 
     assert!(
         packed_row_block(&bound, &operand_codecs(&bound, &q5k)).is_some(),
@@ -671,10 +671,10 @@ fn q5k_row_blocked_matmul_uses_paired_nibble_decode() {
 
 /// `Q6_K` sibling of `q5k_row_blocked_matmul_uses_paired_nibble_decode`:
 /// the same Add-reduce-over-plain-product shape must select
-/// `q6k_pair_dot` (`PackedCodec::supports_pair_dot`, a structural fact
+/// `q6k_pair_dot` (`Codec::supports_pair_dot`, a structural fact
 /// of `Q6_K`'s block layout, not a cargo feature) rather than the
 /// scalar per-element `q6k_value` loop `push_packed_row_blocked_body`'s
-/// `PackedCodec::Q6K` arm falls back to when the reduce is not a plain
+/// `Codec::Q6K` arm falls back to when the reduce is not a plain
 /// product. This subsumes the pair of feature-gated marker tests this
 /// landing replaced (`q6k_row_blocked_matmul_uses_paired_nibble_decode`/
 /// `_uses_scalar_decode_by_default`) -- there is now exactly one
@@ -684,7 +684,7 @@ fn q6k_row_blocked_matmul_uses_paired_nibble_decode() {
     let bound = matmul_op(4, 256, 5);
     let weight_node = bound.operands()[0].0;
     let mut q6k = BTreeMap::new();
-    q6k.insert(weight_node, PackedCodec::Q6K);
+    q6k.insert(weight_node, Codec::Q6K);
 
     assert!(
         packed_row_block(&bound, &operand_codecs(&bound, &q6k)).is_some(),
@@ -709,7 +709,7 @@ fn one_token_gathered_q4k_matmul_uses_row_blocked_gather_body() {
     let bound = gathered_matmul_op(1, 3, 4, 256);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
     let codecs = operand_codecs(&bound, &q4k);
 
     assert!(
@@ -733,7 +733,7 @@ fn expert_source_uses_descriptor_codec_instead_of_checkpoint_codec() {
     let bound = gathered_matmul_op(1, 3, 4, 256);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
     let kernel = emit_with_expert_sources(&bound, &q4k, NumericPolicy::default(), weight_node)
         .expect("emits expert source kernel");
     assert!(kernel.source.contains("mixed_expert_element_from_offset"));
@@ -761,13 +761,13 @@ fn uniform_expert_source_retains_packed_row_decoder() {
     let bound = gathered_matmul_op(1, 3, 4, 256);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
     let kernel = emit_with_uniform_expert_source(
         &bound,
         &q4k,
         NumericPolicy::default(),
         weight_node,
-        PackedCodec::Q4K,
+        Codec::Q4K,
     )
     .expect("emits uniform expert source kernel");
     assert!(kernel.source.contains("q4k_pair_dot("));
@@ -797,7 +797,7 @@ fn flattened_selected_axis_gathered_q4k_matmul_is_not_row_blocked_without_featur
     let bound = gathered_matmul_op(flattened_sequence_selected, 3, 4, 256);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
 
     assert_eq!(
         classify_packed_row_block(&bound, &operand_codecs(&bound, &q4k)).err(),
@@ -812,7 +812,7 @@ fn flattened_selected_axis_gathered_q4k_matmul_gathers_expert_base_once_per_toke
     let bound = gathered_matmul_op(2, 3, 4, 256);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
     let codecs = operand_codecs(&bound, &q4k);
 
     assert!(
@@ -865,7 +865,7 @@ fn gathered_packed_row_reads_each_selected_experts_slab_exactly_once() {
     let gathered = gathered_matmul_op(selected, experts, rows, k);
     let gathered_weight = gathered.operands()[0].0;
     let mut gathered_codecs = BTreeMap::new();
-    gathered_codecs.insert(gathered_weight, PackedCodec::Q4K);
+    gathered_codecs.insert(gathered_weight, Codec::Q4K);
     let gathered_block =
         classify_packed_row_block(&gathered, &operand_codecs(&gathered, &gathered_codecs))
             .expect("the gathered decode matvec shape classifies as packed-row");
@@ -898,7 +898,7 @@ fn gathered_packed_row_reads_each_selected_experts_slab_exactly_once() {
     let dense = matmul_op(1, k, rows);
     let dense_weight = dense.operands()[0].0;
     let mut dense_codecs = BTreeMap::new();
-    dense_codecs.insert(dense_weight, PackedCodec::Q4K);
+    dense_codecs.insert(dense_weight, Codec::Q4K);
     let dense_block = classify_packed_row_block(&dense, &operand_codecs(&dense, &dense_codecs))
         .expect("the dense decode matvec of the identical [rows, k] shape classifies as packed-row");
     let dense_feature_total: u64 = dense_block
@@ -939,7 +939,7 @@ fn q4k_row_blocked_matmul_defers_scale_to_once_per_sub_block_single_fetch() {
     let bound = matmul_op_f16(4, 256, 5);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
 
     assert!(
         packed_row_block(&bound, &operand_codecs(&bound, &q4k)).is_some(),
@@ -973,7 +973,7 @@ fn q4_0_codec_never_takes_the_row_blocked_path_even_at_a_256_extent() {
     let bound = matmul_op(4, 256, 5);
     let weight_node = bound.operands()[0].0;
     let mut q4_0 = BTreeMap::new();
-    q4_0.insert(weight_node, PackedCodec::Q4_0);
+    q4_0.insert(weight_node, Codec::Q4_0);
 
     assert_eq!(
         classify_packed_row_block(&bound, &operand_codecs(&bound, &q4_0)).err(),
@@ -1007,10 +1007,10 @@ fn q4_0_codec_never_takes_the_row_blocked_path_even_at_a_256_extent() {
 /// `BFloat16`'s `bf16_element` widen -- never the row-blocked path's
 /// `q4k_run8`/`q5k_value`/`q6k_value` calls.
 #[proxima::test]
-#[case::float16(PackedCodec::Float16, "in0[")]
-#[case::bfloat16(PackedCodec::BFloat16, "bf16_element(")]
+#[case::float16(Codec::Float16, "in0[")]
+#[case::bfloat16(Codec::BFloat16, "bf16_element(")]
 async fn half_precision_codec_never_takes_the_row_blocked_path_even_at_a_256_extent(
-    #[case] codec: PackedCodec,
+    #[case] codec: Codec,
     #[case] expected_read: &str,
 ) {
     let bound = matmul_op(4, 256, 5);
@@ -1054,7 +1054,7 @@ fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path() {
     let bound = matmul_op_with_reduce(4, 256, 5, ScalarOp::Maximum);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
 
     assert!(
         packed_row_block(&bound, &operand_codecs(&bound, &q4k)).is_some(),
@@ -1086,7 +1086,7 @@ fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path_single_fetch() {
     let bound = matmul_op_with_reduce(4, 256, 5, ScalarOp::Maximum);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
 
     assert!(
         packed_row_block(&bound, &operand_codecs(&bound, &q4k)).is_some(),
@@ -1316,7 +1316,7 @@ fn tiled_gemm_never_triggers_without_the_metal_tiled_gemm_feature() {
     let bound = tiled_gemm_op(16, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
 
     let source = emit(&bound, &q4k, NumericPolicy::default())
         .expect("emits")
@@ -1342,7 +1342,7 @@ fn decode_shape_stays_on_the_row_blocked_path_with_tiled_gemm_compiled_in() {
     let bound = tiled_gemm_op(1, 256, 4096);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
 
     assert!(
         tiled_gemm_block(
@@ -1378,7 +1378,7 @@ fn many_token_matmul_takes_the_tiled_gemm_path() {
     let bound = tiled_gemm_op(16, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
 
     assert!(
         tiled_gemm_block(
@@ -1416,7 +1416,7 @@ fn non_q4k_codec_never_takes_the_tiled_gemm_path() {
     let bound = tiled_gemm_op(16, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q6k = BTreeMap::new();
-    q6k.insert(weight_node, PackedCodec::Q6K);
+    q6k.insert(weight_node, Codec::Q6K);
 
     assert!(
         tiled_gemm_block(
@@ -1448,7 +1448,7 @@ fn multi_head_shaped_matmul_stays_on_the_row_blocked_path_regardless_of_token_co
     let bound = multi_head_matmul_op(32, 8, 128, 4096);
     let weight_node = bound.operands()[1].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
 
     let codecs = operand_codecs(&bound, &q4k);
     assert!(
@@ -1684,7 +1684,7 @@ fn routed_q4k_reduce_kernel() -> Kernel {
         .find(|bound| matches!(bound.kind, BoundOpKind::Reduce { .. }))
         .expect("reduction bound op exists");
     let mut packed = BTreeMap::new();
-    packed.insert(bound.operands()[0].0, PackedCodec::Q4K);
+    packed.insert(bound.operands()[0].0, Codec::Q4K);
     emit_with_expert_sources(
         &bound,
         &packed,
@@ -1998,9 +1998,9 @@ fn every_axis_that_changes_emitted_source_also_changes_kernel_cache_key() {
     let bound = matmul_op(4, 256, 5);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
     let mut q5k = BTreeMap::new();
-    q5k.insert(weight_node, PackedCodec::Q5K);
+    q5k.insert(weight_node, Codec::Q5K);
     assert_ne!(
         emit(&bound, &q4k, NumericPolicy::default())
             .expect("emits")
@@ -2144,9 +2144,9 @@ fn distinct_packed_codec_on_the_same_shape_yields_distinct_cache_keys_and_source
     let weight_node = bound.operands()[0].0;
 
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
     let mut q6k = BTreeMap::new();
-    q6k.insert(weight_node, PackedCodec::Q6K);
+    q6k.insert(weight_node, Codec::Q6K);
 
     let key_q4k =
         kernel_cache_key(&bound, &q4k, NumericPolicy::default()).expect("cache key builds");
@@ -2684,7 +2684,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         weight: 0,
         other: 1,
         reduce_dim: 1,
-        codec: PackedCodec::Q8_0,
+        codec: Codec::Q8_0,
         token_axes: Vec::new(),
         feature_axes: vec![0, 1],
     };
@@ -2696,7 +2696,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         ReduceInit::Zero,
         &[0, 1],
         2,
-        &[Some(PackedCodec::Q8_0), None],
+        &[Some(Codec::Q8_0), None],
         "float",
         &block,
         &ComposedBody::leaf(ScalarOp::Identity),
@@ -2706,7 +2706,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
     .expect_err("Q8_0 never reaches the row-blocked path");
     assert!(matches!(
         error,
-        EmitError::NonKQuantPackedCodec { codec: "q8_0", .. }
+        EmitError::NonKQuantCodec { codec: "q8_0", .. }
     ));
 }
 
@@ -2724,7 +2724,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
 #[cfg(feature = "metal-q4k-split-k")]
 #[test]
 fn split_k_engages_for_a_1024_row_op_and_declines_for_a_14336_row_op() {
-    let (base_starved, split_starved) = packed_row_dispatch(1024, 1, PackedCodec::Q4K);
+    let (base_starved, split_starved) = packed_row_dispatch(1024, 1, Codec::Q4K);
     assert!(
         split_starved > 1,
         "a 1024-row op (attn_k/attn_v shape) must engage split-K under the default \
@@ -2732,7 +2732,7 @@ fn split_k_engages_for_a_1024_row_op_and_declines_for_a_14336_row_op() {
          base_simdgroups={base_starved}"
     );
 
-    let (base_wide, split_wide) = packed_row_dispatch(14336, 1, PackedCodec::Q4K);
+    let (base_wide, split_wide) = packed_row_dispatch(14336, 1, Codec::Q4K);
     assert_eq!(
         split_wide, 1,
         "a 14336-row op (ffn_up/ffn_gate shape) must stay split-K's no-op factor: got \
@@ -2788,7 +2788,7 @@ fn packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul
     let bound = matmul_op(4, 256, 5);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
     let quantized = operand_codecs(&bound, &q4k);
 
     assert!(
@@ -2819,7 +2819,7 @@ fn ggml_port_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul() {
     let bound = matmul_op(4, 256, 5);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
     let quantized = operand_codecs(&bound, &q4k);
 
     assert!(
@@ -2855,7 +2855,7 @@ fn packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged() {
     let bound = matmul_op(4, 256, 5);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, PackedCodec::Q4K);
+    q4k.insert(weight_node, Codec::Q4K);
     let quantized = operand_codecs(&bound, &q4k);
 
     let block = packed_row_block(&bound, &quantized)
@@ -3193,7 +3193,7 @@ fn per_query_head_grid_narrows_threadgroup_width_without_changing_total_threads(
     *cached_key_rows = 0;
     *new_key_rows = 256;
 
-    let quantized: Vec<Option<PackedCodec>> = Vec::new();
+    let quantized: Vec<Option<Codec>> = Vec::new();
     let narrow_width =
         tiled_gemm_threadgroup_width(&narrow, &quantized, NumericPolicy::bit_exact())
             .expect("a CachedAttention op always has a threadgroup width");

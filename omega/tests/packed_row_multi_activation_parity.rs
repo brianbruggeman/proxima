@@ -29,11 +29,11 @@ enum Codec {
 }
 
 impl Codec {
-    fn packed(self) -> omega::PackedCodec {
+    fn packed(self) -> omega::Codec {
         match self {
-            Codec::Q4K => omega::PackedCodec::Q4K,
-            Codec::Q5K => omega::PackedCodec::Q5K,
-            Codec::Q6K => omega::PackedCodec::Q6K,
+            Codec::Q4K => omega::Codec::Q4K,
+            Codec::Q5K => omega::Codec::Q5K,
+            Codec::Q6K => omega::Codec::Q6K,
         }
     }
 

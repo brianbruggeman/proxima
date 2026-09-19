@@ -29,7 +29,7 @@
 //! Only [`proxima_tensor::QuantizedBlock::Float32`] blocks upload — every
 //! packed/narrow codec is rejected with [`WgpuError::UnsupportedBlock`]
 //! rather than dequantized on the host, matching [`crate::wgsl`]'s own v1
-//! scope (no [`crate::msl::PackedCodec`] table exists on this path).
+//! scope (no [`crate::msl::Codec`] table exists on this path).
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -44,7 +44,7 @@ use proxima_tensor::{
 };
 
 use crate::error::EmitError;
-use crate::msl::{Binding, PackedCodec, PackedOperands, gather_count};
+use crate::msl::{Binding, Codec, PackedOperands, gather_count};
 use crate::wgsl::{WgslCaps, WgslKernel, emit_wgsl_with_policy};
 
 /// Everything the wgpu driver can fail with.
@@ -165,30 +165,30 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
     block_nodes
         .iter()
         .zip(blocks.iter())
-        .filter_map(|(node, block)| match PackedCodec::from_quantized_block(block) {
+        .filter_map(|(node, block)| match crate::msl::codec_from_quantized_block(block) {
             Some(
-                codec @ (PackedCodec::Q4K
-                | PackedCodec::Q5K
-                | PackedCodec::Q6K
-                | PackedCodec::Q8_0
-                | PackedCodec::Q4_0
-                | PackedCodec::Float16
-                | PackedCodec::BFloat16),
+                codec @ (Codec::Q4K
+                | Codec::Q5K
+                | Codec::Q6K
+                | Codec::Q8_0
+                | Codec::Q4_0
+                | Codec::Float16
+                | Codec::BFloat16),
             ) => Some((*node, codec)),
-            // `PackedCodec::Q3K` exists (Metal has a real unpack kernel for
+            // `Codec::Q3K` exists (Metal has a real unpack kernel for
             // it) but `crate::wgsl` does not -- `None` here routes a `Q3_K`
             // node through `execute_plan`'s existing
             // `WgpuError::UnsupportedBlock` path, the same "codec has no
             // wgpu entry" rejection `emit_wgsl`'s own
-            // `EmitError::UnsupportedPackedCodec` raises for a caller who
+            // `EmitError::UnsupportedCodec` raises for a caller who
             // reaches it directly.
             //
             // `Q2K`/`Q5_1`/`Q5_0` take the same `None` route as `Q3K` above
             // -- no wgpu unpack entry exists for any of them yet, the same
             // "decode-only so far" reasoning `Iq4Nl`/`Iq2Xs`/`Iq3Xxs` (and
-            // `Float32`/`Int32`, which have no `PackedCodec` at all) already
-            // take through `PackedCodec::from_quantized_block`'s own `None`.
-            Some(PackedCodec::Q2K | PackedCodec::Q3K | PackedCodec::Q5_1 | PackedCodec::Q5_0) | None => None,
+            // `Float32`/`Int32`, which have no `Codec` at all) already
+            // take through `codec_from_quantized_block`'s own `None`.
+            Some(Codec::Q2K | Codec::Q3K | Codec::Q5_1 | Codec::Q5_0) | None => None,
         })
         .collect()
 }
@@ -246,13 +246,13 @@ fn packed_block_bytes_slice<'a>(
 }
 
 /// The exact packed byte length `elements` elements of `codec` occupy —
-/// `crate::msl::PackedCodec::block_bytes`/`block_elements`'s own product,
+/// `crate::msl::codec_block_bytes`/`codec_block_elements`'s own product,
 /// rounded up to a whole block: a partial trailing block is never legal
 /// GGUF, so `div_ceil` (not plain division) is what makes an off-by-one
 /// undersized upload a hard [`TensorError::InputSizeMismatch`] instead of a
 /// kernel silently reading past the buffer's end.
-fn packed_expected_bytes(codec: PackedCodec, elements: usize) -> usize {
-    elements.div_ceil(codec.block_elements()) * codec.block_bytes()
+fn packed_expected_bytes(codec: Codec, elements: usize) -> usize {
+    elements.div_ceil(crate::msl::codec_block_elements(codec)) * crate::msl::codec_block_bytes(codec)
 }
 
 fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {

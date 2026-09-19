@@ -127,20 +127,20 @@ pub enum EmitError {
     CudaUnsupportedOpKind { node: NodeId, kind: &'static str },
 
     /// `wgsl::emit_wgsl` has no `Q3_K` unpack function -- `crate::msl`'s own
-    /// `PackedCodec::Q3K` is metal-only so far (`wgpu_driver::packed_operands_of`
+    /// `Codec::Q3K` is metal-only so far (`wgpu_driver::packed_operands_of`
     /// already routes a `QuantizedBlock::Q3K` node to `None` for this same
     /// reason); this is the typed rejection a caller who somehow threads a
-    /// `Some(PackedCodec::Q3K)` through directly still hits, rather than a
+    /// `Some(Codec::Q3K)` through directly still hits, rather than a
     /// generated `wgsl` calling a function that does not exist.
     #[cfg(feature = "wgpu-backend")]
     #[error("node {node} reads a Q3_K operand, which the wgsl emitter does not support yet")]
-    UnsupportedPackedCodec { node: NodeId },
+    UnsupportedCodec { node: NodeId },
 
-    /// The cuda counterpart of [`Self::UnsupportedPackedCodec`] -- same gap,
+    /// The cuda counterpart of [`Self::UnsupportedCodec`] -- same gap,
     /// same reason.
     #[cfg(feature = "cuda")]
     #[error("node {node} reads a Q3_K operand, which the cuda emitter does not support yet")]
-    CudaUnsupportedPackedCodec { node: NodeId },
+    CudaUnsupportedCodec { node: NodeId },
 
     /// `crate::msl::render_reduce`'s own gate: every reduce renderer except
     /// the tiled `simdgroup_matrix` GEMM path funnels its output write
@@ -182,12 +182,12 @@ pub enum EmitError {
     NonCooperativeReduceOp { node: NodeId, op: &'static str },
 
     /// `classify_packed_row_block`'s `NotKQuantCodec` gate already rejects
-    /// `PackedCodec::Q8_0`/`PackedCodec::Q4_0`/`PackedCodec::Float16`/
-    /// `PackedCodec::BFloat16` before `packed_row_block` can ever return
+    /// `Codec::Q8_0`/`Codec::Q4_0`/`Codec::Float16`/
+    /// `Codec::BFloat16` before `packed_row_block` can ever return
     /// `Some` for one of them, so the row-blocked body's per-codec match
     /// never legitimately reaches one of these four arms.
     #[error("node {node} packed operand codec {codec} never reaches the row-blocked path")]
-    NonKQuantPackedCodec { node: NodeId, codec: &'static str },
+    NonKQuantCodec { node: NodeId, codec: &'static str },
 
     /// `classify_tiled_gemm`'s own `token_axes.is_empty() ||
     /// feature_axes.is_empty()` gate already rejects an empty group before

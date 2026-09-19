@@ -3,7 +3,7 @@
 //! guiding-principles §9. Same posture as `q4k_real_checkpoint_parity.rs`/
 //! `q5k_real_checkpoint_parity.rs`/`q6k_real_checkpoint_parity.rs`: metal's
 //! packed `Q3_K` matmul (`msl.rs`'s `Q3K_UNPACK_MSL`/`Q3K_PAIR_DOT_MSL`,
-//! selected by `push_packed_row_blocked_body`'s `PackedCodec::Q3K` arm)
+//! selected by `push_packed_row_blocked_body`'s `Codec::Q3K` arm)
 //! against `proxima_gguf::quant::q3_k::dequantize` + the CPU interpreter --
 //! never against a Python oracle (that comparison lives in
 //! `proxima-gguf/src/quant/q3_k.rs`'s own `#[ignore]`d
