@@ -1757,6 +1757,44 @@ impl<'a> QuantizedBlock<'a> {
         }
     }
 
+    /// This codec's single-shot `matmul_*_f32` kernel, or `None` for
+    /// [`Self::Float32`]/[`Self::Int32`] (never packed-block matmul inputs)
+    /// and for [`Self::Q4K`]/[`Self::Q5K`]/[`Self::Q6K`] (their own
+    /// `run_reduce_quantized` dispatch arm branches on `exact_activations`
+    /// and an `-int8-dot` feature into a wider-signature `_q8k_f32_impl`
+    /// call this table's uniform `fn(&[u8], usize, &[f32]) -> ..` cannot
+    /// carry, so those three stay hand-matched at the call site instead of
+    /// flowing through here). Every other codec's dispatch arm was already
+    /// exactly one unconditional `matmul_*_f32(weights, rows,
+    /// activation_row)` call, so this returns that same function pointer
+    /// rather than restating which kernel each codec maps to a second time.
+    // clippy wants a `type` alias for the fn-pointer signature; a `type`
+    // alias is a new named type, disallowed for this slice (inline it).
+    #[allow(clippy::type_complexity)]
+    #[must_use]
+    pub const fn matmul_f32_kernel(
+        &self,
+    ) -> Option<fn(&[u8], usize, &[f32]) -> Result<Vec<f32>, TensorError>> {
+        match self {
+            QuantizedBlock::Float32(_)
+            | QuantizedBlock::Int32(_)
+            | QuantizedBlock::Q4K(_)
+            | QuantizedBlock::Q5K(_)
+            | QuantizedBlock::Q6K(_) => None,
+            QuantizedBlock::Q3K(_) => Some(matmul_q3k_f32),
+            QuantizedBlock::Q2K(_) => Some(matmul_q2k_f32),
+            QuantizedBlock::Q8_0(_) => Some(matmul_q8_0_f32),
+            QuantizedBlock::Q4_0(_) => Some(matmul_q4_0_f32),
+            QuantizedBlock::Q5_1(_) => Some(matmul_q5_1_f32),
+            QuantizedBlock::Q5_0(_) => Some(matmul_q5_0_f32),
+            QuantizedBlock::Iq4Nl(_) => Some(matmul_iq4_nl_f32),
+            QuantizedBlock::Iq2Xs(_) => Some(matmul_iq2_xs_f32),
+            QuantizedBlock::Iq3Xxs(_) => Some(matmul_iq3_xxs_f32),
+            QuantizedBlock::Float16(_) => Some(matmul_f16_f32),
+            QuantizedBlock::BFloat16(_) => Some(matmul_bf16_f32),
+        }
+    }
+
     /// Rewraps `self`'s own codec discriminant around a different `'a`
     /// byte slice -- [`expert_entries_from_stack`]'s own per-expert slicing,
     /// and `run_reduce_quantized`'s per-position gather read, both need "the
