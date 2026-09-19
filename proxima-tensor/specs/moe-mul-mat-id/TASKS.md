@@ -17,9 +17,9 @@ builds `/tmp/ggf.off` / `/tmp/ggf.on`).
 
 ## resume
 
-Last landed slice: 1 (scaffold — local main 85ac70da5; spec eaa754403). Spec ADMITted after 6 audit rounds.
-Next action: slice 2 kernel campaign IN FLIGHT (a1f04dc3) — reuse the horizontal-merge base-table splice (emit_and_classify.rs:463-514) for RoundBatchedReduce, arena-contiguous per-round offsets; gates = flag-on France Paris, flag-on==flag-off parity, op-collapse 1211→≤200
-Open question, if any: memory residency — the 24GB model needs full prefault; reclaim Ollama before every flag-on GPU gate (a "N bytes non-resident" failure is environmental, not code)
+Last landed: scaffold (85ac70da5) + reject-path checkpoint (096810d1d) — flag-on is CORRECT-INERT (moe_round_group_is_contiguous → false, so every group rejected → per-round Reduces; flag-on == flag-off, both Paris, op_count 1211 unchanged, honestly NOT a win yet).
+Next action: slice 2 WIN IN FLIGHT (a7115b44) — the arena eager-placement pass: allocate one shared strided buffer per route/output family (round_count × per_round), place round r at r × stride (mirror ensure_merged_group_resolved device_buffers_arena_plan.rs:956-1111 keyed off MoeRoundGroup); then predicate reads the stride, Layout widens, declines become real emission. Correct-fallback allowed (CPU-first, or placement-only + precise remainder). Gate = op_count ≤200 + parity.
+Open question, if any: does packed-row collapse alone move TTNT? Est. ~19ms saved (1211×18µs→~120×18µs on the 25ms packed-row bucket) → TTNT ~57→~38ms; still above llama ~31ms, so the e2e parity claim (R4) likely needs all three components. Memory residency: reclaim Ollama before every flag-on GPU gate.
 
 ## struck
 
