@@ -408,6 +408,37 @@ pub enum BoundOpKind {
         /// `EmitError` does this for Metal).
         epilogue_broadcast_axes: SmallVec<[u16; MAX_INLINE_RANK]>,
     },
+    /// `k` round-sibling folds (the same [`ScalarOp`]/[`ReduceInit`]/
+    /// `operands` shape, differing only in which route each round gathers)
+    /// collapsed into one `BoundOp` by the `metal-moe-mul-mat-id` admission
+    /// (`crate::bind::moe_round_group_candidates`) — a SEPARATE variant from
+    /// [`BoundOpKind::Reduce`] rather than an `Option<u32>` field on it, so
+    /// every backend match is forced to handle or explicitly decline this
+    /// shape at compile time instead of silently falling through a `Reduce`
+    /// catch-all and rendering round 0 only. `extents` carries one extra
+    /// trailing axis of size `round_count` (the round axis), and a renderer
+    /// that understands it folds `thread_position_in_grid.z` into that
+    /// axis's own stride-addressed read/write the same way every other
+    /// iteration axis already resolves. Every other field mirrors
+    /// [`BoundOpKind::Reduce`]'s own doc exactly — see that variant for what
+    /// each one means.
+    RoundBatchedReduce {
+        element_body: ComposedBody,
+        reduce_op: ScalarOp,
+        init: ReduceInit,
+        keep: Keep,
+        operands: BoundOperands,
+        output_axes: SmallVec<[u16; MAX_INLINE_RANK]>,
+        out_layout: Layout,
+        out_scatter: Option<Lookup>,
+        epilogue_body: ComposedBody,
+        epilogue_operands: BoundOperands,
+        epilogue_broadcast_axes: SmallVec<[u16; MAX_INLINE_RANK]>,
+        /// How many round-sibling folds were collapsed into this one op —
+        /// always `>= 2` (a single round never fires this fusion; see
+        /// `crate::bind::moe_round_groups`'s own `>= 2` admission filter).
+        round_count: u32,
+    },
     /// The resolved counterpart of [`Op::Iota`]: no operands, no body — an
     /// executor derives every output value straight from its own position
     /// in `BoundOp::extents`, which is why this variant carries no fields of
@@ -439,6 +470,7 @@ impl BoundOpKind {
             BoundOpKind::Reduce {
                 keep: Keep::Scan, ..
             } => "keep::scan fold",
+            BoundOpKind::RoundBatchedReduce { .. } => "round_batched_reduce fold",
             BoundOpKind::Iota => "iota",
             BoundOpKind::Constant { .. } => "constant",
         }
@@ -462,7 +494,8 @@ impl BoundOp {
             | BoundOpKind::GatedDeltaNet { operands, .. }
             | BoundOpKind::MoeTopK { operands, .. }
             | BoundOpKind::Elementwise { operands, .. }
-            | BoundOpKind::Reduce { operands, .. } => operands,
+            | BoundOpKind::Reduce { operands, .. }
+            | BoundOpKind::RoundBatchedReduce { operands, .. } => operands,
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => &[],
         }
     }
@@ -488,6 +521,9 @@ impl BoundOp {
         let epilogue: &[(NodeId, Layout, Option<Lookup>)] = match &self.kind {
             BoundOpKind::Reduce {
                 epilogue_operands, ..
+            }
+            | BoundOpKind::RoundBatchedReduce {
+                epilogue_operands, ..
             } => epilogue_operands,
             BoundOpKind::CachedAttention { .. }
             | BoundOpKind::GatedDeltaNet { .. }
@@ -511,7 +547,8 @@ impl BoundOp {
             | BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. } => &EMPTY_BODY,
             BoundOpKind::Elementwise { body, .. } => body,
-            BoundOpKind::Reduce { element_body, .. } => element_body,
+            BoundOpKind::Reduce { element_body, .. }
+            | BoundOpKind::RoundBatchedReduce { element_body, .. } => element_body,
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => &EMPTY_BODY,
         }
     }
@@ -596,6 +633,11 @@ impl BoundOp {
             BoundOpKind::CachedAttention { .. }
             | BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. } => None,
+            // a round-merged fold is never split: `extents`' trailing round
+            // axis has no `rebase_chunk` handling yet (this variant's own
+            // doc), and every existing caller (`metal-moe-mul-mat-id`
+            // decode-only) never chunks this op anyway.
+            BoundOpKind::RoundBatchedReduce { .. } => None,
             BoundOpKind::Elementwise { .. } => (!self.extents.is_empty()).then_some(0),
             // `out_scatter: Some(_)` is a scatter: conservatively
             // ineligible for splitting. A chunked run would need
@@ -720,6 +762,11 @@ impl BoundOp {
                 // clone rather than needing its own rebase.
                 epilogue_broadcast_axes: epilogue_broadcast_axes.clone(),
             },
+            // unreachable in practice: `split_axis` returns `None` for
+            // `RoundBatchedReduce` (see its own arm above), kept explicit
+            // rather than a catch-all for the same reason `Iota`/`Constant`
+            // below are.
+            kind @ BoundOpKind::RoundBatchedReduce { .. } => kind.clone(),
             // unreachable in practice: `split_axis` returns `None` for
             // `Iota`, so `split`/`split_aligned` never call this for one —
             // kept explicit rather than a catch-all so a future change to

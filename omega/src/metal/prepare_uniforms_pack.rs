@@ -643,6 +643,34 @@ pub(super) fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
             (2 + outer_rank_len + operand_count + operand_count * rank_len + 1 + rank_len) * WORD
                 + gather_uniform_byte_len(gather, rank_len)
         }
+        // Never actually reaches `pack_uniforms_into` -- Metal declines a
+        // round-merged fold at `emit` (`omega::msl::emit_and_classify::
+        // emit_inner`), so this is a diagnostic-sum-only arm
+        // (`build_buffer_arena`'s own `uniform_bytes` estimate); mirrors the
+        // `Keep::Reduce` shape above field-for-field since a
+        // `RoundBatchedReduce` carries the identical uniform-relevant fields.
+        BoundOpKind::RoundBatchedReduce {
+            output_axes,
+            epilogue_operands,
+            ..
+        } => {
+            let output_rank_len = output_axes.len().max(1);
+            let reduce_rank_len = reduction_dims(bound, output_axes).len().max(1);
+            let epilogue_len = if epilogue_operands.is_empty() {
+                0
+            } else {
+                epilogue_operands.len() * (1 + output_rank_len)
+            };
+            (2 + output_rank_len
+                + reduce_rank_len
+                + operand_count
+                + operand_count * rank_len
+                + 1
+                + rank_len
+                + epilogue_len)
+                * WORD
+                + gather_uniform_byte_len(gather, rank_len)
+        }
         // Mirrors `render_gated_delta_net`'s own `struct Uniforms`: four
         // `long` fields (`n_tokens`, `query_key_head_stride`,
         // `query_key_dim_stride`, `inv_sqrt_key_dim_bits`) -- `kv_heads`/
@@ -686,6 +714,16 @@ pub(super) fn pack_uniforms_into(
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => pack_scan_uniforms(bound, scratch),
+        // unreachable in practice: `emit` declines a round-merged fold
+        // before any encode path ever asks this module to pack its
+        // uniforms -- an explicit typed error here anyway, never a silent
+        // pack of the wrong shape, the same discipline `emit_inner` itself
+        // applies.
+        BoundOpKind::RoundBatchedReduce { .. } => Err(EmitError::EpilogueNotSupported {
+            node: bound.node,
+            reason: "round-merged reduce (BoundOpKind::RoundBatchedReduce) has no \
+                     Metal uniform packer yet",
+        }),
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => {
             pack_leaf_uniforms(bound, scratch);
             Ok(())

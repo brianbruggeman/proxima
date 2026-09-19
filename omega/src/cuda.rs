@@ -198,6 +198,12 @@ pub fn emit_cuda_with_policy(
                 kind: "moe_topk",
             });
         }
+        BoundOpKind::RoundBatchedReduce { .. } => {
+            return Err(EmitError::CudaUnsupportedOpKind {
+                node: resolved.node,
+                kind: "round_batched_reduce",
+            });
+        }
     };
     Ok(CudaKernel {
         source,
@@ -418,7 +424,8 @@ pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitErro
         }
         BoundOpKind::CachedAttention { .. }
         | BoundOpKind::GatedDeltaNet { .. }
-        | BoundOpKind::MoeTopK { .. } => {
+        | BoundOpKind::MoeTopK { .. }
+        | BoundOpKind::RoundBatchedReduce { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
                 kind: resolved.kind.name(),
@@ -622,15 +629,17 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> u64 {
             let rank = resolved.extents.len();
             resolved.extents[..rank.saturating_sub(1)].iter().product()
         }
-        // `CachedAttention`/`GatedDeltaNet` never reach this function in
-        // practice -- `emit_cuda`'s own match on `resolved.kind` returns
-        // `EmitError::CudaUnsupportedOpKind` for either before `grid_threads`
-        // is ever called. Grouped with `Iota`/`Constant` only to satisfy
-        // exhaustiveness with a harmless value, never a real dispatch shape.
+        // `CachedAttention`/`GatedDeltaNet`/`RoundBatchedReduce` never reach
+        // this function in practice -- `emit_cuda`'s own match on
+        // `resolved.kind` returns `EmitError::CudaUnsupportedOpKind` for
+        // each before `grid_threads` is ever called. Grouped with
+        // `Iota`/`Constant` only to satisfy exhaustiveness with a harmless
+        // value, never a real dispatch shape.
         BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
         | BoundOpKind::GatedDeltaNet { .. }
-        | BoundOpKind::MoeTopK { .. } => resolved.extents.iter().product(),
+        | BoundOpKind::MoeTopK { .. }
+        | BoundOpKind::RoundBatchedReduce { .. } => resolved.extents.iter().product(),
         BoundOpKind::CachedAttention { .. } => resolved.extents.iter().product(),
     }
 }

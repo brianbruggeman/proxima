@@ -105,6 +105,18 @@ gated-delta-net-fusion = []
 # `moe_topk_candidates`. Same disciplined-component firewall: default-off
 # until a real-model A/B lands, alloc-tier only.
 moe-topk-fusion = []
+# Bind-time MoE round-sibling projection fusion (decode/n_tokens=1 only):
+# collapses the k round-sibling gate/up/down `Reduce` nodes
+# `append_moe_ffn`'s own `PerRoute` loop emits (one `BoundOp` per round) into
+# ONE `BoundOp` per (site, projection) carrying `round_count: Some(k)` --
+# `omega`'s Metal renderer then walks `thread_position_in_grid.z` as one more
+# stride-addressed iteration axis through the SAME generic gather loop every
+# other axis already uses. Declines (falls back to k separate `BoundOp`s)
+# whenever the k route/output positions the arena resolved are not already
+# contiguous -- see `bind/gdn_moe_fusion_apply.rs`'s
+# `moe_round_group_candidates`. Same disciplined-component firewall as
+# `moe-topk-fusion`: default-off until a real-model A/B lands.
+metal-moe-mul-mat-id = []
 # real execution-witness counters (elements/bytes/gather-vs-affine) plus
 # per-bound-op spans over `proxima-telemetry`'s legacy Metrics/Telemetry
 # surface — default-off, no effect on the default build or the no_std+alloc

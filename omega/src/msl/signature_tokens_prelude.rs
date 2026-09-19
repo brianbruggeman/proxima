@@ -144,6 +144,17 @@ pub(super) fn grid_threads(
             let rank = resolved.extents.len();
             resolved.extents[..rank.saturating_sub(1)].iter().product()
         }
+        // unreachable in practice: `emit` declines a round-merged fold
+        // before `grid_threads` is ever asked to size its dispatch --
+        // explicit typed error rather than a silent wildcard, the same
+        // discipline `emit_inner` itself applies.
+        BoundOpKind::RoundBatchedReduce { .. } => {
+            return Err(EmitError::EpilogueNotSupported {
+                node: resolved.node,
+                reason: "round-merged reduce (BoundOpKind::RoundBatchedReduce) has no \
+                         Metal grid-sizing renderer yet",
+            });
+        }
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => resolved.extents.iter().product(),
         // one thread per `(v_head, value_row)` pair -- `render_gated_delta_net`'s
         // own doc; `tiled_gemm_threadgroup_width`'s sibling arm widens the
@@ -332,6 +343,28 @@ pub(super) fn entry_name(resolved: &BoundOp) -> String {
             };
             format!(
                 "omega_{kind}_r{rank}_o{output_rank}_n{operand_count}_{body}_{reduce_body}_{init}{epilogue}"
+            )
+        }
+        // computed even though `emit_inner` always declines this kind
+        // before rendering a body -- `entry_name` runs unconditionally
+        // ahead of that decline (see this function's own call site), so
+        // this still needs a real (if never-compiled) name rather than
+        // panicking on an unmatched arm.
+        BoundOpKind::RoundBatchedReduce {
+            reduce_op,
+            init,
+            keep,
+            output_axes,
+            round_count,
+            ..
+        } => {
+            let body = body_token(resolved.element_body());
+            let kind = keep_token(*keep);
+            let reduce_body = op_token(*reduce_op);
+            let init = init_token(*init);
+            let output_rank = output_axes.len();
+            format!(
+                "omega_{kind}_r{rank}_o{output_rank}_n{operand_count}_{body}_{reduce_body}_{init}_k{round_count}"
             )
         }
         // no operand count, no body: an `Iota`'s whole structure is its

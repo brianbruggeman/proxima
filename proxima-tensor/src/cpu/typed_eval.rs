@@ -872,6 +872,12 @@ pub(super) fn run_typed_program<T: Element>(
             } => {
                 run_scan_typed(node, &buffers, &index_buffers, &mut output)?;
             }
+            BoundOpKind::RoundBatchedReduce { .. } => {
+                return Err(TensorError::NotLowerable {
+                    node: node.node,
+                    reason: "round-batched reduce binding is not wired into the typed executor",
+                });
+            }
             BoundOpKind::Iota => run_iota_typed(&mut output),
             BoundOpKind::Constant { value } => run_constant_typed(*value, &mut output),
         }
@@ -1037,6 +1043,12 @@ where
                 } => {
                     run_scan_typed(node, &buffers_in, &index_buffers, &mut output)?;
                 }
+                BoundOpKind::RoundBatchedReduce { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "round-batched reduce binding is not wired into the widened executor",
+                    });
+                }
                 BoundOpKind::Iota => run_iota_typed(&mut output),
                 BoundOpKind::Constant { value } => run_constant_typed(*value, &mut output),
             }
@@ -1089,6 +1101,12 @@ where
                     keep: Keep::Scan, ..
                 } => {
                     run_scan_typed(node, &buffers_out, &index_buffers, &mut output)?;
+                }
+                BoundOpKind::RoundBatchedReduce { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "round-batched reduce binding is not wired into the widened executor",
+                    });
                 }
                 BoundOpKind::Iota => run_iota_typed(&mut output),
                 BoundOpKind::Constant { value } => run_constant_typed(*value, &mut output),

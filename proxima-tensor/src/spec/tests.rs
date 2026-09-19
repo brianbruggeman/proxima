@@ -6667,6 +6667,12 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
             crate::bind::BoundOpKind::MoeTopK { .. } => {
                 panic!("this Mistral cached-forward program never binds a MoeTopK op")
             }
+            // This program has no MoE round-sibling routing at all
+            // (Mistral's own dense FFN, no `metal-moe-mul-mat-id` round
+            // groups to collapse), so this kind never appears here either.
+            crate::bind::BoundOpKind::RoundBatchedReduce { .. } => {
+                panic!("this Mistral cached-forward program never binds a RoundBatchedReduce op")
+            }
         }
     }
     assert_eq!(
