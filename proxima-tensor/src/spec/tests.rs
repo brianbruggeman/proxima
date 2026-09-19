@@ -1,4 +1,5 @@
 use super::*;
+use proxima_primitives::Codec;
 
 #[test]
 fn grouped_gathered_expert_product_infers_selected_axis() {
@@ -2588,7 +2589,7 @@ fn ssm_out_projection_reduce_isolated_packed_matches_dequantized_and_hand_comput
         &[],
         &[
             crate::cpu::QuantizedBlock::Float32(&gated_data),
-            crate::cpu::QuantizedBlock::Q4K(&packed),
+            crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
         ],
         &[cur],
     )
@@ -2813,7 +2814,7 @@ fn gathered_expert_product_over_a_packed_q4k_stack_reads_the_routed_experts_own_
 
     let run = |route_data: &[f32]| -> alloc::vec::Vec<f32> {
         let quantized_blocks = [
-            crate::cpu::QuantizedBlock::Q4K(&stacked_weight),
+            crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_weight },
             crate::cpu::QuantizedBlock::Float32(route_data),
             crate::cpu::QuantizedBlock::Float32(&activation),
         ];
@@ -2992,9 +2993,9 @@ fn quantized_moe_ffn_over_a_packed_q4k_expert_stack_matches_the_routed_experts_o
     let quantized_blocks = [
         crate::cpu::QuantizedBlock::Float32(&x),
         crate::cpu::QuantizedBlock::Float32(&gate_inp),
-        crate::cpu::QuantizedBlock::Q4K(&stacked_gate),
-        crate::cpu::QuantizedBlock::Q4K(&stacked_up),
-        crate::cpu::QuantizedBlock::Q4K(&stacked_down),
+        crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_gate },
+        crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_up },
+        crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &stacked_down },
     ];
     let evaluated = crate::cpu::evaluate_quantized(&program, &symbols, &quantized_blocks, &[root])
         .expect("the packed-stack routed ffn evaluates over Q4_K");
@@ -10546,7 +10547,7 @@ fn qg_product_qg_raw_per_head_channel_range_matches_between_thirteen_row_and_one
         &[ROWS as u64],
         &[
             ("normed", crate::cpu::QuantizedBlock::Float32(&normed_data)),
-            ("wq_flat", crate::cpu::QuantizedBlock::Q4K(&packed)),
+            ("wq_flat", crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed }),
         ],
         &[qg_raw_wide, q_split_wide],
     )
@@ -10566,7 +10567,7 @@ fn qg_product_qg_raw_per_head_channel_range_matches_between_thirteen_row_and_one
             &[1u64],
             &[
                 ("normed", crate::cpu::QuantizedBlock::Float32(&row_input)),
-                ("wq_flat", crate::cpu::QuantizedBlock::Q4K(&packed)),
+                ("wq_flat", crate::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed }),
             ],
             &[qg_raw_single, q_split_single],
         )

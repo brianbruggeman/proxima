@@ -206,20 +206,7 @@ pub(super) fn execute_plan_inner(
             // `Q3_K` uploads its raw super-block bytes unchanged, same as
             // every other packed codec below -- `msl::Codec::Q3K`'s
             // own unpack kernel (`q3k_element`) reads them at the GPU side.
-            QuantizedBlock::Q3K(bytes)
-            | QuantizedBlock::Q4K(bytes)
-            | QuantizedBlock::Q5K(bytes)
-            | QuantizedBlock::Q6K(bytes)
-            | QuantizedBlock::Q8_0(bytes)
-            | QuantizedBlock::Q4_0(bytes)
-            | QuantizedBlock::Q5_1(bytes)
-            | QuantizedBlock::Q5_0(bytes)
-            | QuantizedBlock::Q2K(bytes)
-            | QuantizedBlock::Iq4Nl(bytes)
-            | QuantizedBlock::Iq2Xs(bytes)
-            | QuantizedBlock::Iq3Xxs(bytes)
-            | QuantizedBlock::Float16(bytes)
-            | QuantizedBlock::BFloat16(bytes) => {
+            QuantizedBlock::Packed { bytes, .. } => {
                 upload_packed_bytes(&device, bytes, resident_name)?
             }
         };
@@ -727,11 +714,11 @@ pub(super) fn expert_source_signature(source: &proxima_tensor::cpu::ExpertSource
     };
     for entry in source.entries() {
         let codec = match entry.block {
-            QuantizedBlock::Q2K(_) => 1_u64,
-            QuantizedBlock::Q3K(_) => 2_u64,
-            QuantizedBlock::Q4K(_) => 3_u64,
-            QuantizedBlock::Q5K(_) => 4_u64,
-            QuantizedBlock::Q6K(_) => 5_u64,
+            QuantizedBlock::Packed { codec: Codec::Q2K, bytes: _ } => 1_u64,
+            QuantizedBlock::Packed { codec: Codec::Q3K, bytes: _ } => 2_u64,
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: _ } => 3_u64,
+            QuantizedBlock::Packed { codec: Codec::Q5K, bytes: _ } => 4_u64,
+            QuantizedBlock::Packed { codec: Codec::Q6K, bytes: _ } => 5_u64,
             _ => 0,
         };
         mix(codec);
@@ -769,10 +756,10 @@ pub(super) fn reject_non_reducing_expert_staging(
     for entry in source.entries() {
         if !matches!(
             entry.block,
-            QuantizedBlock::Q2K(_)
-                | QuantizedBlock::Q3K(_)
-                | QuantizedBlock::Q4K(_)
-                | QuantizedBlock::Q6K(_)
+            QuantizedBlock::Packed { codec: Codec::Q2K, bytes: _ }
+                | QuantizedBlock::Packed { codec: Codec::Q3K, bytes: _ }
+                | QuantizedBlock::Packed { codec: Codec::Q4K, bytes: _ }
+                | QuantizedBlock::Packed { codec: Codec::Q6K, bytes: _ }
         ) {
             return Err(MetalError::ExpertSourceUnsupported {
                 node,

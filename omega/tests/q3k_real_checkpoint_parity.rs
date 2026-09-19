@@ -22,6 +22,7 @@ use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::q3_k;
 use proxima_gguf::types::GgmlType;
+use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
@@ -236,7 +237,7 @@ fn metal_matmul_on_real_ffn_up_q3k_bytes_matches_the_dequantized_f32_cpu_path() 
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Q3K(sliced_weight),
+            QuantizedBlock::Packed { codec: Codec::Q3K, bytes: sliced_weight },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],

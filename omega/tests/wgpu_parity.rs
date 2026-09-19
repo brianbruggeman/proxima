@@ -354,7 +354,7 @@ fn packed_q4k_embedding_lookup_runs_on_wgpu_at_cpu_parity() {
     }
     let ids_data = [3.0f32, 255.0, 12.0, 0.0];
     let named = vec![
-        ("table", QuantizedBlock::Q4K(packed.as_slice())),
+        ("table", QuantizedBlock::Packed { codec: Codec::Q4K, bytes: packed.as_slice() }),
         ("ids", QuantizedBlock::Float32(&ids_data)),
     ];
 
@@ -767,7 +767,7 @@ fn packed_q4k_matmul_matches_the_dequantized_f32_cpu_path_on_wgpu() {
         QK_K,
         quantize,
         dequantize,
-        |bytes| QuantizedBlock::Q4K(bytes),
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q4K, bytes },
         1e-5,
     );
 }
@@ -781,7 +781,7 @@ fn packed_q5k_matmul_matches_the_dequantized_f32_cpu_path_on_wgpu() {
         QK_K,
         quantize,
         dequantize,
-        |bytes| QuantizedBlock::Q5K(bytes),
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q5K, bytes },
         1e-5,
     );
 }
@@ -795,7 +795,7 @@ fn packed_q6k_matmul_matches_the_dequantized_f32_cpu_path_on_wgpu() {
         QK_K,
         quantize,
         dequantize,
-        |bytes| QuantizedBlock::Q6K(bytes),
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q6K, bytes },
         1e-5,
     );
 }
@@ -809,7 +809,7 @@ fn packed_q8_0_matmul_matches_the_dequantized_f32_cpu_path_on_wgpu() {
         QK8_0,
         quantize,
         dequantize,
-        |bytes| QuantizedBlock::Q8_0(bytes),
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q8_0, bytes },
         1e-5,
     );
 }
@@ -823,7 +823,7 @@ fn packed_q4_0_matmul_matches_the_dequantized_f32_cpu_path_on_wgpu() {
         QK4_0,
         quantize,
         dequantize,
-        |bytes| QuantizedBlock::Q4_0(bytes),
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q4_0, bytes },
         1e-5,
     );
 }

@@ -11,6 +11,7 @@
 
 use conflaguration::Validate;
 use omega::MetalError;
+use proxima_primitives::Codec;
 use proxima_tensor::spec::{ProgramSpec, elementwise};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
@@ -1641,7 +1642,7 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path() {
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Q4K(&weight_blocks),
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_blocks },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
@@ -1754,7 +1755,7 @@ fn metal_matmul_on_one_q4k_super_block_matches_a_hand_rolled_dequantize_then_dot
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Q4K(&weight_blocks),
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_blocks },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
@@ -1848,7 +1849,7 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_ti
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Q4K(&weight_blocks),
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &weight_blocks },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
@@ -2006,7 +2007,7 @@ fn metal_matmul_on_packed_q6k_weights_matches_the_dequantized_f32_cpu_path() {
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Q6K(&weight_blocks),
+            QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &weight_blocks },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
@@ -2092,7 +2093,7 @@ fn metal_matmul_on_packed_q5k_weights_matches_the_dequantized_f32_cpu_path() {
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Q5K(&weight_blocks),
+            QuantizedBlock::Packed { codec: Codec::Q5K, bytes: &weight_blocks },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
@@ -2378,11 +2379,11 @@ async fn metal_matmul_parity_across_codec_and_dtype(
     };
     let (program, sum) = codec_matmul_program(rows, k, weight_dtype, compute_dtype);
     let weight_block = match (&packed_weight_blocks, codec) {
-        (Some(bytes), "q4_k") => QuantizedBlock::Q4K(bytes),
-        (Some(bytes), "q5_k") => QuantizedBlock::Q5K(bytes),
-        (Some(bytes), "q6_k") => QuantizedBlock::Q6K(bytes),
-        (Some(bytes), "q8_0") => QuantizedBlock::Q8_0(bytes),
-        (Some(bytes), "q4_0") => QuantizedBlock::Q4_0(bytes),
+        (Some(bytes), "q4_k") => QuantizedBlock::Packed { codec: Codec::Q4K, bytes },
+        (Some(bytes), "q5_k") => QuantizedBlock::Packed { codec: Codec::Q5K, bytes },
+        (Some(bytes), "q6_k") => QuantizedBlock::Packed { codec: Codec::Q6K, bytes },
+        (Some(bytes), "q8_0") => QuantizedBlock::Packed { codec: Codec::Q8_0, bytes },
+        (Some(bytes), "q4_0") => QuantizedBlock::Packed { codec: Codec::Q4_0, bytes },
         (Some(_), other) => panic!("unhandled codec case in this matrix: {other}"),
         (None, _) => QuantizedBlock::Float32(&weight_f32),
     };

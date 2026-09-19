@@ -32,6 +32,7 @@ fn run() {
     use std::time::Instant;
 
     use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+    use proxima_primitives::Codec;
     use proxima_tensor::test_support::Lcg;
     use proxima_tensor::{
         DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
@@ -102,7 +103,7 @@ fn run() {
         let activation = random_vec(13, k as usize);
         let (program, sum) = matvec_program(rows, k);
         let blocks = [
-            QuantizedBlock::Q4K(&packed),
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &packed },
             QuantizedBlock::Float32(&activation),
         ];
 

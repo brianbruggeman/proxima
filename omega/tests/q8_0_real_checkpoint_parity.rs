@@ -32,6 +32,7 @@ use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::q8_0;
 use proxima_gguf::types::GgmlType;
+use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
@@ -230,7 +231,7 @@ fn metal_matmul_on_real_attn_k_q8_0_bytes_matches_the_dequantized_f32_cpu_path()
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Q8_0(sliced_weight),
+            QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: sliced_weight },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],

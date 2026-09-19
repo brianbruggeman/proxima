@@ -381,20 +381,20 @@ pub(super) fn execute_plan_op_timed_inner(
             // `Q3_K` uploads its raw super-block bytes unchanged, same as
             // every other packed codec below -- `msl::Codec::Q3K`'s
             // own unpack kernel (`q3k_element`) reads them at the GPU side.
-            QuantizedBlock::Q3K(bytes)
-            | QuantizedBlock::Q4K(bytes)
-            | QuantizedBlock::Q5K(bytes)
-            | QuantizedBlock::Q6K(bytes)
-            | QuantizedBlock::Q8_0(bytes)
-            | QuantizedBlock::Q4_0(bytes)
-            | QuantizedBlock::Q5_1(bytes)
-            | QuantizedBlock::Q5_0(bytes)
-            | QuantizedBlock::Q2K(bytes)
-            | QuantizedBlock::Iq4Nl(bytes)
-            | QuantizedBlock::Iq2Xs(bytes)
-            | QuantizedBlock::Iq3Xxs(bytes)
-            | QuantizedBlock::Float16(bytes)
-            | QuantizedBlock::BFloat16(bytes) => {
+            QuantizedBlock::Packed { codec: Codec::Q3K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q4K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q5K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q6K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q8_0, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q4_0, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q5_1, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q5_0, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q2K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Iq4Nl, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Float16, bytes }
+            | QuantizedBlock::Packed { codec: Codec::BFloat16, bytes } => {
                 upload_packed_bytes(&device, bytes, resident_name)?
             }
         };
@@ -544,20 +544,20 @@ pub fn execute_plan_with_placements_op_timed(
             // `Q3_K` uploads its raw super-block bytes unchanged, same as
             // every other packed codec below -- `msl::Codec::Q3K`'s
             // own unpack kernel (`q3k_element`) reads them at the GPU side.
-            QuantizedBlock::Q3K(bytes)
-            | QuantizedBlock::Q4K(bytes)
-            | QuantizedBlock::Q5K(bytes)
-            | QuantizedBlock::Q6K(bytes)
-            | QuantizedBlock::Q8_0(bytes)
-            | QuantizedBlock::Q4_0(bytes)
-            | QuantizedBlock::Q5_1(bytes)
-            | QuantizedBlock::Q5_0(bytes)
-            | QuantizedBlock::Q2K(bytes)
-            | QuantizedBlock::Iq4Nl(bytes)
-            | QuantizedBlock::Iq2Xs(bytes)
-            | QuantizedBlock::Iq3Xxs(bytes)
-            | QuantizedBlock::Float16(bytes)
-            | QuantizedBlock::BFloat16(bytes) => {
+            QuantizedBlock::Packed { codec: Codec::Q3K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q4K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q5K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q6K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q8_0, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q4_0, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q5_1, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q5_0, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q2K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Iq4Nl, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Float16, bytes }
+            | QuantizedBlock::Packed { codec: Codec::BFloat16, bytes } => {
                 upload_packed_bytes(&device, bytes, resident_name)?
             }
         };
@@ -785,20 +785,20 @@ pub fn execute_plan_with_placements_dispatch_timed(
                 resident_name,
             )?,
             QuantizedBlock::Int32(data) => upload_block_int32_as_float(&device, data, None)?,
-            QuantizedBlock::Q3K(bytes)
-            | QuantizedBlock::Q4K(bytes)
-            | QuantizedBlock::Q5K(bytes)
-            | QuantizedBlock::Q6K(bytes)
-            | QuantizedBlock::Q8_0(bytes)
-            | QuantizedBlock::Q4_0(bytes)
-            | QuantizedBlock::Q5_1(bytes)
-            | QuantizedBlock::Q5_0(bytes)
-            | QuantizedBlock::Q2K(bytes)
-            | QuantizedBlock::Iq4Nl(bytes)
-            | QuantizedBlock::Iq2Xs(bytes)
-            | QuantizedBlock::Iq3Xxs(bytes)
-            | QuantizedBlock::Float16(bytes)
-            | QuantizedBlock::BFloat16(bytes) => {
+            QuantizedBlock::Packed { codec: Codec::Q3K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q4K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q5K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q6K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q8_0, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q4_0, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q5_1, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q5_0, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Q2K, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Iq4Nl, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes }
+            | QuantizedBlock::Packed { codec: Codec::Float16, bytes }
+            | QuantizedBlock::Packed { codec: Codec::BFloat16, bytes } => {
                 upload_packed_bytes(&device, bytes, resident_name)?
             }
         };

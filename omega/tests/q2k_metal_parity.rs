@@ -2,6 +2,7 @@
 #![allow(clippy::expect_used)]
 
 use proxima_gguf::quant::q2_k;
+use proxima_primitives::Codec;
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
     append, evaluate, map,
@@ -75,7 +76,7 @@ fn q2k_metal_matmul_matches_dequantized_cpu() {
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Q2K(&packed),
+            QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &packed },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_root],

@@ -553,7 +553,7 @@ pub(super) mod tests {
         assert_eq!(entry.epoch, 1, "the gather sees the boundary page");
         assert!(matches!(
             entry.block,
-            proxima_tensor::cpu::QuantizedBlock::Q4K(bytes) if bytes == routed_expert
+            proxima_tensor::cpu::QuantizedBlock::Packed { codec: Codec::Q4K, bytes } if bytes == routed_expert
         ));
     }
 

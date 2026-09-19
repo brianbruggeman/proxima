@@ -1277,112 +1277,174 @@ pub fn arena_named_input<'arena>(arena: &'arena StaticArena, name: &str) -> Opti
     arena_output(arena, node)
 }
 
-/// One [`evaluate_quantized`]-bound block: either a plain `f32`
+/// One [`evaluate_quantized`]-bound block: either a plain `f32`/`i32`
 /// [`Op::Input`] buffer, exactly what [`evaluate`]'s own `blocks: &[&[f32]]`
-/// carries, or the raw packed bytes of a `Q4_K`-quantized weight matrix.
-/// [`evaluate`]'s `blocks` parameter has no way to carry the second case — a
-/// quantized weight has no legitimate `&[f32]` view to hand through it
-/// without dequantizing first, which would defeat the entire point (see
-/// [`matmul_q4k_f32`]'s doc on what dequantizing first costs). Both variants
-/// bind positionally, in the same [`Op::Input`] program order [`evaluate`]'s
-/// `blocks` already uses — one binding convention, not two.
+/// carries, or the raw packed bytes of a quantized weight matrix tagged with
+/// the [`Codec`] that names its on-disk layout. [`evaluate`]'s `blocks`
+/// parameter has no way to carry the packed case — a quantized weight has no
+/// legitimate `&[f32]` view to hand through it without dequantizing first,
+/// which would defeat the entire point (see [`matmul_q4k_f32`]'s doc on what
+/// dequantizing first costs). All three variants bind positionally, in the
+/// same [`Op::Input`] program order [`evaluate`]'s `blocks` already uses --
+/// one binding convention, not three.
+///
+/// `Packed`'s own `codec` is `proxima_primitives::Codec` -- the one
+/// source-neutral codec identity `Codec`'s own doc names as replacing this
+/// type's former 14 separate per-codec discriminants (`Q4K`, `Q5K`, ...). A
+/// real `Packed` only ever carries a codec [`Self::as_decodable_ggml_type`]
+/// resolves to `Some` -- [`crate::bind::gguf_tensor_as_packed_block`]/`as_block`
+/// (`proxima-model-interop`) refuse the other 15 `Codec` variants at
+/// construction time, so [`Self::block_layout`]/[`Self::matmul_f32_kernel`]/
+/// [`Self::dequantize_fn`] returning `None` for those is defensive, never a
+/// path a well-formed `Packed` reaches.
 #[derive(Debug, Clone, Copy)]
 pub enum QuantizedBlock<'a> {
     Float32(&'a [f32]),
     Int32(&'a [i32]),
-    Q4K(&'a [u8]),
-    /// Raw packed `Q5_K` bytes -- same super-block shape as [`Self::Q4K`]
-    /// (256 elements, 8 sub-blocks of 32) plus a `qh` high-bit plane; see
-    /// [`proxima_gguf::quant::q5_k`] for the on-disk layout this borrows
-    /// unchanged.
-    Q5K(&'a [u8]),
-    /// Raw packed `Q3_K` bytes -- 256 elements, 16 sub-blocks of 16, one
-    /// signed 6-bit scale per sub-block and no per-sub-block min (`x =
-    /// d*sc*q`); see [`proxima_gguf::quant::q3_k`] for the on-disk layout
-    /// this borrows unchanged.
-    Q3K(&'a [u8]),
-    /// Raw packed `Q2_K` bytes -- 256 elements, 16 sub-blocks of 16, one
-    /// 4-bit scale AND 4-bit min per sub-block, packed one byte per
-    /// sub-block (`x = d*sc*q - dmin*m`); see
-    /// [`proxima_gguf::quant::q2_k`] for the on-disk layout this borrows
-    /// unchanged. No `dot_fn_for` entry (no shared int8-wide-fold path,
-    /// same reasoning as [`Self::Q3K`]) -- this codec's only CPU path is
-    /// the scalar dequantize-then-fold `dot_q2k_f32`.
-    Q2K(&'a [u8]),
-    /// Raw packed `Q6_K` bytes -- 256 elements, 16 sub-blocks of 16, one
-    /// signed 8-bit scale per sub-block and no `dmin` term; see
-    /// [`proxima_gguf::quant::q6_k`] for the on-disk layout this borrows
-    /// unchanged.
-    Q6K(&'a [u8]),
-    /// Raw packed `Q8_0` bytes -- 32-element blocks, one `f16` scale per
-    /// block, no sub-block structure at all; see
-    /// [`proxima_gguf::quant::q8_0`] for the on-disk layout this borrows
-    /// unchanged. The one variant this enum carries that the growable
-    /// per-layer key/value context cache (`proxima-model-interop`'s
-    /// `LayerCache`) actually binds -- its rows are `HEAD_DIM / 2`
-    /// elements wide, small enough that `Q4_K`/`Q5_K`/`Q6_K`'s 256-element
-    /// super-blocks would straddle more than one cached position, while a
-    /// 32-element `Q8_0` block divides a typical head dimension evenly.
-    Q8_0(&'a [u8]),
-    /// Raw packed `Q4_0` bytes -- 32-element blocks, one `f16` scale per
-    /// block, no sub-block structure and no shared super-block with the
-    /// K-quant family; see [`proxima_gguf::quant::q4_0`] for the on-disk
-    /// layout this borrows unchanged. Legacy llama.cpp's simplest and most
-    /// widely distributed 4-bit format -- unlike [`Self::Q4K`], no
-    /// sub-block scale/min hierarchy, just `value = scale * (nibble - 8)`.
-    Q4_0(&'a [u8]),
-    /// Raw packed `Q5_1` bytes -- 32-element blocks, one `f16` scale and
-    /// one `f16` min per block plus a 4-byte 5th-bit plane, no shared
-    /// super-block with the K-quant family; see
-    /// [`proxima_gguf::quant::q5_1`] for the on-disk layout this borrows
-    /// unchanged. The target checkpoint's SSM tensor codec (252 tensors,
-    /// 0.64 GB) -- decode-only, same reasoning as [`Self::Q4_0`] for why no
-    /// `dot_fn_for` entry exists (no shared int8-wide-fold path).
-    Q5_1(&'a [u8]),
-    /// Raw packed `Q5_0` bytes -- 32-element blocks, one `f16` scale per
-    /// block plus a 4-byte 5th-bit plane, no per-block min term (unlike
-    /// [`Self::Q5_1`]) and no shared super-block with the K-quant family;
-    /// see [`proxima_gguf::quant::q5_0`] for the on-disk layout this
-    /// borrows unchanged. `Q5_1` with the min dropped -- `value = d *
-    /// (level - 16)`, `level` the 5-bit nibble+`qh` union -- equivalently
-    /// `Q4_0` with a 5th bit. gemma4's `blk.{1..29}.ffn_down_exps.weight`
-    /// codec -- decode-only, same reasoning as [`Self::Q5_1`] for why no
-    /// `dot_fn_for` entry exists (no shared int8-wide-fold path).
-    Q5_0(&'a [u8]),
-    /// Raw packed `IQ4_NL` bytes -- 32-element blocks, one `f16` scale per
-    /// block, byte-identical shape to [`Self::Q4_0`] but with a non-linear
-    /// codebook (`kvalues_iq4nl`) instead of a fixed `nibble - 8` recenter;
-    /// see [`proxima_gguf::quant::iq4_nl`] for the on-disk layout this
-    /// borrows unchanged. The target checkpoint's per-layer-token-embedding
-    /// ngram table codec (dims `[160, 320001536]`, 28.8 GB) -- decode-only.
-    Iq4Nl(&'a [u8]),
-    /// Raw packed `IQ2_XS` bytes -- 256-element super-blocks, one `f16`
-    /// scale, 8 sub-block scale nibbles, and a 512-entry grid + 128-entry
-    /// sign codebook per element group; see
-    /// [`proxima_gguf::quant::iq2_xs`] for the on-disk layout this borrows
-    /// unchanged. Part of the `UD-Q2_K_XL` codec set -- decode-only.
-    Iq2Xs(&'a [u8]),
-    /// Raw packed `IQ3_XXS` bytes -- 256-element super-blocks, one `f16`
-    /// scale, 8 packed 32-bit aux words (4-bit sub-block scale + four 7-bit
-    /// sign fields), and a 256-entry grid codebook shared with no other
-    /// format; see [`proxima_gguf::quant::iq3_xxs`] for the on-disk layout
-    /// this borrows unchanged. Part of the `UD-Q2_K_XL` codec set --
-    /// decode-only.
-    Iq3Xxs(&'a [u8]),
-    /// Raw packed IEEE-754 binary16 bytes, little-endian, two per element,
-    /// no block or scale structure at all -- unlike every other
-    /// non-`Float32` variant above, a half-precision weight is not
-    /// quantized, only narrower: each element converts to `f32` entirely on
-    /// its own, with no neighbours' scale to consult. See [`matmul_f16_f32`]
-    /// for the composed convert-then-fold kernel this variant reaches, and
-    /// [`proxima_gguf::quant::f16`] for the on-disk layout this borrows
-    /// unchanged.
-    Float16(&'a [u8]),
-    /// Raw packed `bfloat16` bytes, little-endian, two per element -- same
-    /// per-element (non-block) shape as [`Self::Float16`], but a different
-    /// bit layout (8-bit exponent, 7-bit mantissa) needing its own
-    /// conversion. See [`matmul_bf16_f32`] and [`proxima_gguf::quant::bf16`].
-    BFloat16(&'a [u8]),
+    Packed { codec: Codec, bytes: &'a [u8] },
+}
+
+/// The [`proxima_gguf::GgmlType`] `codec` names, for every `Codec` a
+/// [`QuantizedBlock::Packed`] actually carries -- the single Codec->GgmlType
+/// table [`QuantizedBlock::block_layout`] composes down to instead of
+/// restating [`proxima_gguf::GgmlType::block_layout`]'s own per-codec byte
+/// constants a second time. `None` for the 15 `Codec` variants this crate's
+/// packed-block construction sites never produce (see [`QuantizedBlock`]'s
+/// own doc). Free function, not an inherent method or a trait -- `Codec` is
+/// `proxima_primitives::Codec`, foreign to this crate (guiding-principles
+/// §20 rules out a blanket impl / newtype to host one).
+#[must_use]
+pub(super) const fn codec_to_decodable_ggml_type(codec: Codec) -> Option<proxima_gguf::GgmlType> {
+    match codec {
+        Codec::Q4K => Some(proxima_gguf::GgmlType::Q4_K),
+        Codec::Q5K => Some(proxima_gguf::GgmlType::Q5_K),
+        Codec::Q3K => Some(proxima_gguf::GgmlType::Q3_K),
+        Codec::Q2K => Some(proxima_gguf::GgmlType::Q2_K),
+        Codec::Q6K => Some(proxima_gguf::GgmlType::Q6_K),
+        Codec::Q8_0 => Some(proxima_gguf::GgmlType::Q8_0),
+        Codec::Q4_0 => Some(proxima_gguf::GgmlType::Q4_0),
+        Codec::Q5_1 => Some(proxima_gguf::GgmlType::Q5_1),
+        Codec::Q5_0 => Some(proxima_gguf::GgmlType::Q5_0),
+        Codec::Iq4Nl => Some(proxima_gguf::GgmlType::Iq4Nl),
+        Codec::Iq2Xs => Some(proxima_gguf::GgmlType::Iq2Xs),
+        Codec::Iq3Xxs => Some(proxima_gguf::GgmlType::Iq3Xxs),
+        Codec::Float16 => Some(proxima_gguf::GgmlType::F16),
+        Codec::BFloat16 => Some(proxima_gguf::GgmlType::Bf16),
+        Codec::Q4_1
+        | Codec::Q8_1
+        | Codec::Q8K
+        | Codec::Iq1S
+        | Codec::Iq1M
+        | Codec::Iq2Xxs
+        | Codec::Iq2S
+        | Codec::Iq3S
+        | Codec::Iq4Xs
+        | Codec::Tq10
+        | Codec::Tq20
+        | Codec::Mxfp4
+        | Codec::Nvfp4
+        | Codec::Q1_0
+        | Codec::Q2_0 => None,
+    }
+}
+
+/// This codec's single-shot `matmul_*_f32` kernel, or `None` for a codec
+/// with no such kernel -- [`Self::Q4K`]/[`Self::Q5K`]/[`Self::Q6K`] included
+/// (their own `run_reduce_quantized` dispatch arm branches on
+/// `exact_activations` and an `-int8-dot` feature into a wider-signature
+/// `_q8k_f32_impl` call this table's uniform `fn(&[u8], usize, &[f32]) ->
+/// ..` cannot carry, so those three stay hand-matched at the call site
+/// instead of flowing through here). Every other decodable codec's dispatch
+/// arm was already exactly one unconditional `matmul_*_f32(weights, rows,
+/// activation_row)` call, so this returns that same function pointer rather
+/// than restating which kernel each codec maps to a second time.
+// clippy wants a `type` alias for the fn-pointer signature; a `type` alias
+// is a new named type, disallowed for this slice (inline it).
+#[allow(clippy::type_complexity)]
+#[must_use]
+pub(super) const fn codec_matmul_f32_kernel(
+    codec: Codec,
+) -> Option<fn(&[u8], usize, &[f32]) -> Result<Vec<f32>, TensorError>> {
+    match codec {
+        Codec::Q3K => Some(matmul_q3k_f32),
+        Codec::Q2K => Some(matmul_q2k_f32),
+        Codec::Q8_0 => Some(matmul_q8_0_f32),
+        Codec::Q4_0 => Some(matmul_q4_0_f32),
+        Codec::Q5_1 => Some(matmul_q5_1_f32),
+        Codec::Q5_0 => Some(matmul_q5_0_f32),
+        Codec::Iq4Nl => Some(matmul_iq4_nl_f32),
+        Codec::Iq2Xs => Some(matmul_iq2_xs_f32),
+        Codec::Iq3Xxs => Some(matmul_iq3_xxs_f32),
+        Codec::Float16 => Some(matmul_f16_f32),
+        Codec::BFloat16 => Some(matmul_bf16_f32),
+        Codec::Q4K
+        | Codec::Q5K
+        | Codec::Q6K
+        | Codec::Q4_1
+        | Codec::Q8_1
+        | Codec::Q8K
+        | Codec::Iq1S
+        | Codec::Iq1M
+        | Codec::Iq2Xxs
+        | Codec::Iq2S
+        | Codec::Iq3S
+        | Codec::Iq4Xs
+        | Codec::Tq10
+        | Codec::Tq20
+        | Codec::Mxfp4
+        | Codec::Nvfp4
+        | Codec::Q1_0
+        | Codec::Q2_0 => None,
+    }
+}
+
+/// This codec's single-shot `dequantize` decoder, or `None` for a codec with
+/// a [`codec_to_decodable_ggml_type`] entry but no row-level decode path
+/// (`Q4_0`/`Q5_0`/`Float16`/`BFloat16`) -- those stay
+/// [`crate::cpu::run_node::dequantize_row`]'s sole caller of `None` here
+/// rather than silently decoding through this table. Every other decodable
+/// codec's dispatch arm was already exactly one unconditional
+/// `xxx::dequantize(row_bytes, output)` call, so this returns that same
+/// function pointer rather than restating which decoder each codec maps to
+/// a second time.
+// clippy wants a `type` alias for the fn-pointer signature; a `type` alias
+// is a new named type, disallowed for this slice (inline it).
+#[allow(clippy::type_complexity)]
+#[must_use]
+pub(super) const fn codec_dequantize_fn(
+    codec: Codec,
+) -> Option<fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>> {
+    match codec {
+        Codec::Q4K => Some(q4_k::dequantize),
+        Codec::Q5K => Some(q5_k::dequantize),
+        Codec::Q3K => Some(q3_k::dequantize),
+        Codec::Q2K => Some(q2_k::dequantize),
+        Codec::Q6K => Some(q6_k::dequantize),
+        Codec::Q8_0 => Some(q8_0::dequantize),
+        Codec::Iq4Nl => Some(iq4_nl::dequantize),
+        Codec::Q5_1 => Some(q5_1::dequantize),
+        Codec::Iq2Xs => Some(iq2_xs::dequantize),
+        Codec::Iq3Xxs => Some(iq3_xxs::dequantize),
+        Codec::Q4_0
+        | Codec::Q5_0
+        | Codec::Float16
+        | Codec::BFloat16
+        | Codec::Q4_1
+        | Codec::Q8_1
+        | Codec::Q8K
+        | Codec::Iq1S
+        | Codec::Iq1M
+        | Codec::Iq2Xxs
+        | Codec::Iq2S
+        | Codec::Iq3S
+        | Codec::Iq4Xs
+        | Codec::Tq10
+        | Codec::Tq20
+        | Codec::Mxfp4
+        | Codec::Nvfp4
+        | Codec::Q1_0
+        | Codec::Q2_0 => None,
+    }
 }
 
 /// One expert's own gathered-reduce weight, resolved by
@@ -1698,9 +1760,9 @@ pub fn expert_entries_from_stack(
 
 impl<'a> QuantizedBlock<'a> {
     /// The packed byte slice underneath any codec, or `None` for
-    /// [`Self::Float32`] (which carries `&[f32]`, not packed bytes) --
-    /// [`ExpertSource`]'s own gather read uses this to swap an
-    /// [`ExpertEntry`]'s bytes into the per-codec matmul dispatch below
+    /// [`Self::Float32`]/[`Self::Int32`] (which carry decoded values, not
+    /// packed bytes) -- [`ExpertSource`]'s own gather read uses this to swap
+    /// an [`ExpertEntry`]'s bytes into the per-codec matmul dispatch below
     /// without re-deriving which variant carries a `&[u8]` payload a second
     /// time. Bound to `'a`, not `&self`'s own borrow, so a caller reading
     /// this out of a short-lived local (e.g. one loop iteration's own
@@ -1709,65 +1771,35 @@ impl<'a> QuantizedBlock<'a> {
     pub const fn packed_bytes(&self) -> Option<&'a [u8]> {
         match self {
             QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => None,
-            QuantizedBlock::Q4K(bytes)
-            | QuantizedBlock::Q5K(bytes)
-            | QuantizedBlock::Q3K(bytes)
-            | QuantizedBlock::Q2K(bytes)
-            | QuantizedBlock::Q6K(bytes)
-            | QuantizedBlock::Q8_0(bytes)
-            | QuantizedBlock::Q4_0(bytes)
-            | QuantizedBlock::Q5_1(bytes)
-            | QuantizedBlock::Q5_0(bytes)
-            | QuantizedBlock::Iq4Nl(bytes)
-            | QuantizedBlock::Iq2Xs(bytes)
-            | QuantizedBlock::Iq3Xxs(bytes)
-            | QuantizedBlock::Float16(bytes)
-            | QuantizedBlock::BFloat16(bytes) => Some(bytes),
+            QuantizedBlock::Packed { bytes, .. } => Some(bytes),
         }
     }
 
     /// Packed-block `(block_bytes, block_elements)` footprint for this
     /// codec, or `None` for [`Self::Float32`]/[`Self::Int32`] (decoded
-    /// values, not packed blocks) -- the one table
-    /// `run_reduce_quantized`, `build_matmul_stage_plan`, and
-    /// `dequantize_row` all compose down to instead of each hand-matching
-    /// the same per-codec constants a second and third time. Sourced from
-    /// the same `proxima_gguf::quant::*` block-size constants
-    /// [`proxima_gguf::GgmlType::block_layout`] wraps for its own codec
-    /// table.
+    /// values, not packed blocks) or a [`Codec`] with no decodable-here
+    /// entry -- the one table `run_reduce_quantized`, `build_matmul_stage_plan`,
+    /// and `dequantize_row` all compose down to instead of each
+    /// hand-matching the same per-codec constants a second and third time.
+    /// Sourced from [`proxima_gguf::GgmlType::block_layout`], the
+    /// authoritative on-disk-layout table [`codec_to_decodable_ggml_type`]
+    /// resolves `codec` against, rather than a parallel hand-copied set of
+    /// `Q*_BLOCK_BYTES`/`Q*_BLOCK_ELEMENTS` constants.
     #[must_use]
     pub const fn block_layout(&self) -> Option<(usize, usize)> {
-        match self {
-            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => None,
-            QuantizedBlock::Q4K(_) => Some((Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS)),
-            QuantizedBlock::Q5K(_) => Some((Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS)),
-            QuantizedBlock::Q3K(_) => Some((Q3K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS)),
-            QuantizedBlock::Q2K(_) => Some((Q2K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS)),
-            QuantizedBlock::Q6K(_) => Some((Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS)),
-            QuantizedBlock::Q8_0(_) => Some((Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS)),
-            QuantizedBlock::Q4_0(_) => Some((Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS)),
-            QuantizedBlock::Q5_1(_) => Some((Q5_1_BLOCK_BYTES, Q5_1_BLOCK_ELEMENTS)),
-            QuantizedBlock::Q5_0(_) => Some((Q5_0_BLOCK_BYTES, Q5_0_BLOCK_ELEMENTS)),
-            QuantizedBlock::Iq4Nl(_) => Some((IQ4_NL_BLOCK_BYTES, IQ4_NL_BLOCK_ELEMENTS)),
-            QuantizedBlock::Iq2Xs(_) => Some((IQ2_XS_BLOCK_BYTES, IQ2_XS_BLOCK_ELEMENTS)),
-            QuantizedBlock::Iq3Xxs(_) => Some((IQ3_XXS_BLOCK_BYTES, IQ3_XXS_BLOCK_ELEMENTS)),
-            QuantizedBlock::Float16(_) | QuantizedBlock::BFloat16(_) => {
-                Some((HALF_PRECISION_ELEMENT_BYTES, 1))
-            }
-        }
+        let QuantizedBlock::Packed { codec, .. } = self else {
+            return None;
+        };
+        let Some(ggml_type) = codec_to_decodable_ggml_type(*codec) else {
+            return None;
+        };
+        let layout = ggml_type.block_layout();
+        Some((layout.block_bytes as usize, layout.block_elements as usize))
     }
 
-    /// This codec's single-shot `matmul_*_f32` kernel, or `None` for
-    /// [`Self::Float32`]/[`Self::Int32`] (never packed-block matmul inputs)
-    /// and for [`Self::Q4K`]/[`Self::Q5K`]/[`Self::Q6K`] (their own
-    /// `run_reduce_quantized` dispatch arm branches on `exact_activations`
-    /// and an `-int8-dot` feature into a wider-signature `_q8k_f32_impl`
-    /// call this table's uniform `fn(&[u8], usize, &[f32]) -> ..` cannot
-    /// carry, so those three stay hand-matched at the call site instead of
-    /// flowing through here). Every other codec's dispatch arm was already
-    /// exactly one unconditional `matmul_*_f32(weights, rows,
-    /// activation_row)` call, so this returns that same function pointer
-    /// rather than restating which kernel each codec maps to a second time.
+    /// This codec's single-shot `matmul_*_f32` kernel -- see
+    /// [`codec_matmul_f32_kernel`] for the full per-codec table and its own
+    /// doc on why `Q4K`/`Q5K`/`Q6K` stay `None` here.
     // clippy wants a `type` alias for the fn-pointer signature; a `type`
     // alias is a new named type, disallowed for this slice (inline it).
     #[allow(clippy::type_complexity)]
@@ -1776,35 +1808,14 @@ impl<'a> QuantizedBlock<'a> {
         &self,
     ) -> Option<fn(&[u8], usize, &[f32]) -> Result<Vec<f32>, TensorError>> {
         match self {
-            QuantizedBlock::Float32(_)
-            | QuantizedBlock::Int32(_)
-            | QuantizedBlock::Q4K(_)
-            | QuantizedBlock::Q5K(_)
-            | QuantizedBlock::Q6K(_) => None,
-            QuantizedBlock::Q3K(_) => Some(matmul_q3k_f32),
-            QuantizedBlock::Q2K(_) => Some(matmul_q2k_f32),
-            QuantizedBlock::Q8_0(_) => Some(matmul_q8_0_f32),
-            QuantizedBlock::Q4_0(_) => Some(matmul_q4_0_f32),
-            QuantizedBlock::Q5_1(_) => Some(matmul_q5_1_f32),
-            QuantizedBlock::Q5_0(_) => Some(matmul_q5_0_f32),
-            QuantizedBlock::Iq4Nl(_) => Some(matmul_iq4_nl_f32),
-            QuantizedBlock::Iq2Xs(_) => Some(matmul_iq2_xs_f32),
-            QuantizedBlock::Iq3Xxs(_) => Some(matmul_iq3_xxs_f32),
-            QuantizedBlock::Float16(_) => Some(matmul_f16_f32),
-            QuantizedBlock::BFloat16(_) => Some(matmul_bf16_f32),
+            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => None,
+            QuantizedBlock::Packed { codec, .. } => codec_matmul_f32_kernel(*codec),
         }
     }
 
-    /// This codec's single-shot `dequantize` decoder, or `None` for
-    /// [`Self::Float32`]/[`Self::Int32`]/[`Self::Q4_0`]/[`Self::Q5_0`]/
-    /// [`Self::Float16`]/[`Self::BFloat16`] -- those six have a
-    /// [`Self::block_layout`] entry but no row-level decode path, so
-    /// [`crate::cpu::run_node::dequantize_row`] stays their sole caller of
-    /// `None` here rather than silently decoding through this table. Every
-    /// other codec's dispatch arm was already exactly one unconditional
-    /// `xxx::dequantize(row_bytes, output)` call, so this returns that same
-    /// function pointer rather than restating which decoder each codec maps
-    /// to a second time.
+    /// This codec's single-shot `dequantize` decoder -- see
+    /// [`codec_dequantize_fn`] for the full per-codec table and its own doc
+    /// on which decodable codecs have no row-level decode path.
     // clippy wants a `type` alias for the fn-pointer signature; a `type`
     // alias is a new named type, disallowed for this slice (inline it).
     #[allow(clippy::type_complexity)]
@@ -1813,54 +1824,29 @@ impl<'a> QuantizedBlock<'a> {
         &self,
     ) -> Option<fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>> {
         match self {
-            QuantizedBlock::Float32(_)
-            | QuantizedBlock::Int32(_)
-            | QuantizedBlock::Q4_0(_)
-            | QuantizedBlock::Q5_0(_)
-            | QuantizedBlock::Float16(_)
-            | QuantizedBlock::BFloat16(_) => None,
-            QuantizedBlock::Q4K(_) => Some(q4_k::dequantize),
-            QuantizedBlock::Q5K(_) => Some(q5_k::dequantize),
-            QuantizedBlock::Q3K(_) => Some(q3_k::dequantize),
-            QuantizedBlock::Q2K(_) => Some(q2_k::dequantize),
-            QuantizedBlock::Q6K(_) => Some(q6_k::dequantize),
-            QuantizedBlock::Q8_0(_) => Some(q8_0::dequantize),
-            QuantizedBlock::Iq4Nl(_) => Some(iq4_nl::dequantize),
-            QuantizedBlock::Q5_1(_) => Some(q5_1::dequantize),
-            QuantizedBlock::Iq2Xs(_) => Some(iq2_xs::dequantize),
-            QuantizedBlock::Iq3Xxs(_) => Some(iq3_xxs::dequantize),
+            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => None,
+            QuantizedBlock::Packed { codec, .. } => codec_dequantize_fn(*codec),
         }
     }
 
-    /// Rewraps `self`'s own codec discriminant around a different `'a`
-    /// byte slice -- [`expert_entries_from_stack`]'s own per-expert slicing,
-    /// and `run_reduce_quantized`'s per-position gather read, both need "the
+    /// Rewraps `self`'s own codec discriminant around a different `'a` byte
+    /// slice -- [`expert_entries_from_stack`]'s own per-expert slicing, and
+    /// `run_reduce_quantized`'s per-position gather read, both need "the
     /// same codec, different bytes" without restating this crate's own
-    /// codec list a second time. [`Self::Float32`] cannot itself hold
-    /// `&'a [u8]` (it wraps `&'a [f32]`), so that arm rewraps to an
-    /// arbitrary packed variant (`Q4K`) instead -- never reached in
-    /// practice, since [`Self::packed_bytes`] already returns `None` for
-    /// `Float32` and every caller of this method checks that first before
+    /// codec list a second time. [`Self::Float32`]/[`Self::Int32`] cannot
+    /// themselves hold `&'a [u8]`, so that arm rewraps to an arbitrary
+    /// packed codec (`Codec::Q4K`) instead -- never reached in practice,
+    /// since [`Self::packed_bytes`] already returns `None` for `Float32`/
+    /// `Int32` and every caller of this method checks that first before
     /// ever reaching here. Kept total rather than partial so this stays a
     /// plain function, not a fallible one, at every other call site.
     #[must_use]
     pub const fn with_bytes(&self, bytes: &'a [u8]) -> Self {
         match self {
-            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => QuantizedBlock::Q4K(bytes),
-            QuantizedBlock::Q4K(_) => QuantizedBlock::Q4K(bytes),
-            QuantizedBlock::Q5K(_) => QuantizedBlock::Q5K(bytes),
-            QuantizedBlock::Q3K(_) => QuantizedBlock::Q3K(bytes),
-            QuantizedBlock::Q2K(_) => QuantizedBlock::Q2K(bytes),
-            QuantizedBlock::Q6K(_) => QuantizedBlock::Q6K(bytes),
-            QuantizedBlock::Q8_0(_) => QuantizedBlock::Q8_0(bytes),
-            QuantizedBlock::Q4_0(_) => QuantizedBlock::Q4_0(bytes),
-            QuantizedBlock::Q5_1(_) => QuantizedBlock::Q5_1(bytes),
-            QuantizedBlock::Q5_0(_) => QuantizedBlock::Q5_0(bytes),
-            QuantizedBlock::Iq4Nl(_) => QuantizedBlock::Iq4Nl(bytes),
-            QuantizedBlock::Iq2Xs(_) => QuantizedBlock::Iq2Xs(bytes),
-            QuantizedBlock::Iq3Xxs(_) => QuantizedBlock::Iq3Xxs(bytes),
-            QuantizedBlock::Float16(_) => QuantizedBlock::Float16(bytes),
-            QuantizedBlock::BFloat16(_) => QuantizedBlock::BFloat16(bytes),
+            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => {
+                QuantizedBlock::Packed { codec: Codec::Q4K, bytes }
+            }
+            QuantizedBlock::Packed { codec, .. } => QuantizedBlock::Packed { codec: *codec, bytes },
         }
     }
 
@@ -1871,109 +1857,165 @@ impl<'a> QuantizedBlock<'a> {
     /// bytes and elements are not the same unit). The one definition every
     /// caller that needs "how many f32 elements does this packed buffer
     /// decode to" composes down to, instead of restating this per-codec
-    /// table itself.
+    /// table itself. Keyed on `codec`, not the removed per-codec variants --
+    /// each module's own `blocks_for_bytes`/`elements_for_blocks` pair has
+    /// no uniform signature across codecs (f16/bf16 have no
+    /// `elements_for_blocks` at all, a block already being one element
+    /// wide), so this stays a per-codec match rather than a shared function
+    /// pointer table.
     ///
     /// # Errors
-    /// [`TensorError::PackedBlockBytesNotAMultiple`] if a non-[`Self::Float32`]
-    /// variant's byte length is not a whole multiple of its codec's block
-    /// size -- never legitimate GGUF, only ever corrupt, truncated, or
-    /// misattributed bytes.
+    /// [`TensorError::PackedBlockBytesNotAMultiple`] if a
+    /// [`Self::Packed`] variant's byte length is not a whole multiple of
+    /// its codec's block size -- never legitimate GGUF, only ever corrupt,
+    /// truncated, or misattributed bytes.
     pub fn element_count(&self) -> Result<usize, TensorError> {
-        let (codec, bytes, block_bytes, blocks) = match self {
+        let (codec_name, bytes, block_bytes, blocks) = match self {
             QuantizedBlock::Float32(data) => return Ok(data.len()),
             QuantizedBlock::Int32(data) => return Ok(data.len()),
-            QuantizedBlock::Q4K(bytes) => (
-                "q4_k",
-                bytes.len(),
-                q4_k::BLOCK_BYTES,
-                q4_k::blocks_for_bytes(bytes.len()).map(q4_k::elements_for_blocks),
-            ),
-            QuantizedBlock::Q5K(bytes) => (
-                "q5_k",
-                bytes.len(),
-                q5_k::BLOCK_BYTES,
-                q5_k::blocks_for_bytes(bytes.len()).map(q5_k::elements_for_blocks),
-            ),
-            QuantizedBlock::Q3K(bytes) => (
-                "q3_k",
-                bytes.len(),
-                q3_k::BLOCK_BYTES,
-                q3_k::blocks_for_bytes(bytes.len()).map(q3_k::elements_for_blocks),
-            ),
-            QuantizedBlock::Q2K(bytes) => (
-                "q2_k",
-                bytes.len(),
-                q2_k::BLOCK_BYTES,
-                q2_k::blocks_for_bytes(bytes.len()).map(q2_k::elements_for_blocks),
-            ),
-            QuantizedBlock::Q6K(bytes) => (
-                "q6_k",
-                bytes.len(),
-                q6_k::BLOCK_BYTES,
-                q6_k::blocks_for_bytes(bytes.len()).map(q6_k::elements_for_blocks),
-            ),
-            QuantizedBlock::Q8_0(bytes) => (
-                "q8_0",
-                bytes.len(),
-                q8_0::BLOCK_BYTES,
-                q8_0::blocks_for_bytes(bytes.len()).map(q8_0::elements_for_blocks),
-            ),
-            QuantizedBlock::Q4_0(bytes) => (
-                "q4_0",
-                bytes.len(),
-                q4_0::BLOCK_BYTES,
-                q4_0::blocks_for_bytes(bytes.len()).map(q4_0::elements_for_blocks),
-            ),
-            QuantizedBlock::Q5_1(bytes) => (
-                "q5_1",
-                bytes.len(),
-                q5_1::BLOCK_BYTES,
-                q5_1::blocks_for_bytes(bytes.len()).map(q5_1::elements_for_blocks),
-            ),
-            QuantizedBlock::Q5_0(bytes) => (
-                "q5_0",
-                bytes.len(),
-                q5_0::BLOCK_BYTES,
-                q5_0::blocks_for_bytes(bytes.len()).map(q5_0::elements_for_blocks),
-            ),
-            QuantizedBlock::Iq4Nl(bytes) => (
-                "iq4_nl",
-                bytes.len(),
-                iq4_nl::BLOCK_BYTES,
-                iq4_nl::blocks_for_bytes(bytes.len()).map(iq4_nl::elements_for_blocks),
-            ),
-            QuantizedBlock::Iq2Xs(bytes) => (
-                "iq2_xs",
-                bytes.len(),
-                iq2_xs::BLOCK_BYTES,
-                iq2_xs::blocks_for_bytes(bytes.len()).map(iq2_xs::elements_for_blocks),
-            ),
-            QuantizedBlock::Iq3Xxs(bytes) => (
-                "iq3_xxs",
-                bytes.len(),
-                iq3_xxs::BLOCK_BYTES,
-                iq3_xxs::blocks_for_bytes(bytes.len()).map(iq3_xxs::elements_for_blocks),
-            ),
-            // f16/bf16 blocks are one element wide (`QK_F16`/`QK_BF16` == 1),
-            // so a block count already IS the element count -- neither module
-            // exposes its own `elements_for_blocks`.
-            QuantizedBlock::Float16(bytes) => (
-                "float16",
-                bytes.len(),
-                gguf_f16::BLOCK_BYTES,
-                gguf_f16::blocks_for_bytes(bytes.len()),
-            ),
-            QuantizedBlock::BFloat16(bytes) => (
-                "bfloat16",
-                bytes.len(),
-                gguf_bf16::BLOCK_BYTES,
-                gguf_bf16::blocks_for_bytes(bytes.len()),
-            ),
+            QuantizedBlock::Packed { codec, bytes } => match codec {
+                Codec::Q4K => (
+                    "q4_k",
+                    bytes.len(),
+                    q4_k::BLOCK_BYTES,
+                    q4_k::blocks_for_bytes(bytes.len()).map(q4_k::elements_for_blocks),
+                ),
+                Codec::Q5K => (
+                    "q5_k",
+                    bytes.len(),
+                    q5_k::BLOCK_BYTES,
+                    q5_k::blocks_for_bytes(bytes.len()).map(q5_k::elements_for_blocks),
+                ),
+                Codec::Q3K => (
+                    "q3_k",
+                    bytes.len(),
+                    q3_k::BLOCK_BYTES,
+                    q3_k::blocks_for_bytes(bytes.len()).map(q3_k::elements_for_blocks),
+                ),
+                Codec::Q2K => (
+                    "q2_k",
+                    bytes.len(),
+                    q2_k::BLOCK_BYTES,
+                    q2_k::blocks_for_bytes(bytes.len()).map(q2_k::elements_for_blocks),
+                ),
+                Codec::Q6K => (
+                    "q6_k",
+                    bytes.len(),
+                    q6_k::BLOCK_BYTES,
+                    q6_k::blocks_for_bytes(bytes.len()).map(q6_k::elements_for_blocks),
+                ),
+                Codec::Q8_0 => (
+                    "q8_0",
+                    bytes.len(),
+                    q8_0::BLOCK_BYTES,
+                    q8_0::blocks_for_bytes(bytes.len()).map(q8_0::elements_for_blocks),
+                ),
+                Codec::Q4_0 => (
+                    "q4_0",
+                    bytes.len(),
+                    q4_0::BLOCK_BYTES,
+                    q4_0::blocks_for_bytes(bytes.len()).map(q4_0::elements_for_blocks),
+                ),
+                Codec::Q5_1 => (
+                    "q5_1",
+                    bytes.len(),
+                    q5_1::BLOCK_BYTES,
+                    q5_1::blocks_for_bytes(bytes.len()).map(q5_1::elements_for_blocks),
+                ),
+                Codec::Q5_0 => (
+                    "q5_0",
+                    bytes.len(),
+                    q5_0::BLOCK_BYTES,
+                    q5_0::blocks_for_bytes(bytes.len()).map(q5_0::elements_for_blocks),
+                ),
+                Codec::Iq4Nl => (
+                    "iq4_nl",
+                    bytes.len(),
+                    iq4_nl::BLOCK_BYTES,
+                    iq4_nl::blocks_for_bytes(bytes.len()).map(iq4_nl::elements_for_blocks),
+                ),
+                Codec::Iq2Xs => (
+                    "iq2_xs",
+                    bytes.len(),
+                    iq2_xs::BLOCK_BYTES,
+                    iq2_xs::blocks_for_bytes(bytes.len()).map(iq2_xs::elements_for_blocks),
+                ),
+                Codec::Iq3Xxs => (
+                    "iq3_xxs",
+                    bytes.len(),
+                    iq3_xxs::BLOCK_BYTES,
+                    iq3_xxs::blocks_for_bytes(bytes.len()).map(iq3_xxs::elements_for_blocks),
+                ),
+                // f16/bf16 blocks are one element wide (`QK_F16`/`QK_BF16` ==
+                // 1), so a block count already IS the element count -- neither
+                // module exposes its own `elements_for_blocks`.
+                Codec::Float16 => (
+                    "float16",
+                    bytes.len(),
+                    gguf_f16::BLOCK_BYTES,
+                    gguf_f16::blocks_for_bytes(bytes.len()),
+                ),
+                Codec::BFloat16 => (
+                    "bfloat16",
+                    bytes.len(),
+                    gguf_bf16::BLOCK_BYTES,
+                    gguf_bf16::blocks_for_bytes(bytes.len()),
+                ),
+                // No packed-block construction site (`gguf_tensor_as_packed_block`/
+                // `as_block` in `proxima-model-interop`) ever produces a
+                // `Packed` carrying one of these 15 undecodable codecs -- see
+                // this type's own doc.
+                other => {
+                    return Err(TensorError::PackedBlockBytesNotAMultiple {
+                        codec: codec_name_for_error(*other),
+                        bytes: bytes.len(),
+                        block_bytes: 0,
+                    });
+                }
+            },
         };
         blocks.ok_or(TensorError::PackedBlockBytesNotAMultiple {
-            codec,
+            codec: codec_name,
             bytes,
             block_bytes,
         })
+    }
+}
+
+/// A stable diagnostic name for a [`Codec`] this crate never packs into a
+/// [`QuantizedBlock::Packed`] -- reached only if [`QuantizedBlock::element_count`]
+/// is ever called on a block a caller assembled by hand from a codec outside
+/// this crate's own construction sites, never through normal GGUF loading.
+const fn codec_name_for_error(codec: Codec) -> &'static str {
+    match codec {
+        Codec::Q4K => "q4_k",
+        Codec::Q5K => "q5_k",
+        Codec::Q6K => "q6_k",
+        Codec::Q8_0 => "q8_0",
+        Codec::Q3K => "q3_k",
+        Codec::Q4_0 => "q4_0",
+        Codec::Float16 => "float16",
+        Codec::BFloat16 => "bfloat16",
+        Codec::Q2K => "q2_k",
+        Codec::Q5_1 => "q5_1",
+        Codec::Q5_0 => "q5_0",
+        Codec::Iq4Nl => "iq4_nl",
+        Codec::Iq2Xs => "iq2_xs",
+        Codec::Iq3Xxs => "iq3_xxs",
+        Codec::Q4_1 => "q4_1",
+        Codec::Q8_1 => "q8_1",
+        Codec::Q8K => "q8_k",
+        Codec::Iq1S => "iq1_s",
+        Codec::Iq1M => "iq1_m",
+        Codec::Iq2Xxs => "iq2_xxs",
+        Codec::Iq2S => "iq2_s",
+        Codec::Iq3S => "iq3_s",
+        Codec::Iq4Xs => "iq4_xs",
+        Codec::Tq10 => "tq1_0",
+        Codec::Tq20 => "tq2_0",
+        Codec::Mxfp4 => "mxfp4",
+        Codec::Nvfp4 => "nvfp4",
+        Codec::Q1_0 => "q1_0",
+        Codec::Q2_0 => "q2_0",
     }
 }

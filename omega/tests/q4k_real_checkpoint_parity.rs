@@ -32,6 +32,7 @@ use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::q4_k;
 use proxima_gguf::types::GgmlType;
+use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
@@ -261,7 +262,7 @@ fn run_real_attn_q_parity(rows_to_check: usize) {
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Q4K(sliced_weight),
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: sliced_weight },
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],

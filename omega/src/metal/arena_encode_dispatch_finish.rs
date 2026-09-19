@@ -2249,7 +2249,7 @@ pub(super) mod block_node_attribution_tests {
         // `block_node_ids(&program)` is `[activation, weight]`, so this is
         // the opposite order.
         let blocks = [
-            QuantizedBlock::Q6K(&packed_weight),
+            QuantizedBlock::Packed { codec: proxima_primitives::Codec::Q6K, bytes: &packed_weight },
             QuantizedBlock::Float32(&activation_data),
         ];
 
@@ -2296,7 +2296,7 @@ pub(super) mod block_node_attribution_tests {
 
         let blocks = [
             QuantizedBlock::Float32(&activation_data),
-            QuantizedBlock::Q6K(&packed_weight),
+            QuantizedBlock::Packed { codec: proxima_primitives::Codec::Q6K, bytes: &packed_weight },
         ];
 
         plan(&program, &[], &blocks, &[], NumericPolicy::default())
@@ -3249,13 +3249,13 @@ pub(super) mod expert_payload_descriptor_tests {
         let high_bytes = [0_u8; 144];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Q2K(&low_bytes),
+                block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &low_bytes },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 11,
             },
             ExpertEntry {
-                block: QuantizedBlock::Q4K(&high_bytes),
+                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &high_bytes },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 12,
@@ -3303,13 +3303,13 @@ pub(super) mod expert_payload_descriptor_tests {
         let high_bytes = [2_u8; 144];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Q2K(&low_bytes),
+                block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &low_bytes },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 1,
             },
             ExpertEntry {
-                block: QuantizedBlock::Q4K(&high_bytes),
+                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &high_bytes },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 2,
@@ -3331,13 +3331,13 @@ pub(super) mod expert_payload_descriptor_tests {
         let high_bytes = [2_u8; 210];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Q4K(&low_bytes),
+                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &low_bytes },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 1,
             },
             ExpertEntry {
-                block: QuantizedBlock::Q6K(&high_bytes),
+                block: QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &high_bytes },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 2,
@@ -3362,13 +3362,13 @@ pub(super) mod expert_payload_descriptor_tests {
         let second = [2_u8; 210];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Q4K(&first),
+                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &first },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 1,
             },
             ExpertEntry {
-                block: QuantizedBlock::Q6K(&second),
+                block: QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &second },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 2,
@@ -3391,13 +3391,13 @@ pub(super) mod expert_payload_descriptor_tests {
         let arena = [0_u8; 256];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Q2K(&arena[7..91]),
+                block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &arena[7..91] },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 3,
             },
             ExpertEntry {
-                block: QuantizedBlock::Q2K(&arena[139..223]),
+                block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &arena[139..223] },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 4,
@@ -3439,19 +3439,19 @@ pub(super) mod expert_payload_descriptor_tests {
         let third = [3_u8; 144];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Q4K(&first),
+                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &first },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 1,
             },
             ExpertEntry {
-                block: QuantizedBlock::Q4K(&second),
+                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &second },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 2,
             },
             ExpertEntry {
-                block: QuantizedBlock::Q4K(&third),
+                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &third },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 3,
@@ -3474,7 +3474,7 @@ pub(super) mod expert_payload_descriptor_tests {
     fn mixed_hobbit_entries_accept_q3k_runtime_decoder() {
         let q3_bytes = [0_u8; 110];
         let entries = [ExpertEntry {
-            block: QuantizedBlock::Q3K(&q3_bytes),
+            block: QuantizedBlock::Packed { codec: Codec::Q3K, bytes: &q3_bytes },
             out_dim: 256,
             in_dim: 256,
             epoch: 0,
@@ -3495,7 +3495,7 @@ pub(super) mod expert_payload_descriptor_tests {
         let full_expert_stack = [0_u8; 4_096];
         let activation = [0.0_f32; 16];
         let blocks = [
-            QuantizedBlock::Q4K(&full_expert_stack),
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &full_expert_stack },
             QuantizedBlock::Float32(&activation),
         ];
         let ordinary = ordinary_block_uploads(
@@ -3520,7 +3520,7 @@ pub(super) mod expert_payload_descriptor_tests {
                 .iter()
                 .map(|(_, block, _)| match block {
                     QuantizedBlock::Float32(values) => core::mem::size_of_val(*values),
-                    QuantizedBlock::Q4K(bytes) => bytes.len(),
+                    QuantizedBlock::Packed { codec: Codec::Q4K, bytes } => bytes.len(),
                     _ => 0,
                 })
                 .sum::<usize>(),
@@ -3536,13 +3536,13 @@ pub(super) mod expert_payload_descriptor_tests {
         let second_expert = [0_u8; 144];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Q4K(&first_expert),
+                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &first_expert },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 1,
             },
             ExpertEntry {
-                block: QuantizedBlock::Q4K(&second_expert),
+                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &second_expert },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 2,
@@ -3552,7 +3552,7 @@ pub(super) mod expert_payload_descriptor_tests {
 
         let error = reject_non_reducing_expert_staging(
             NodeId(51),
-            QuantizedBlock::Q4K(&original_bytes),
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &original_bytes },
             &source,
         )
         .expect_err("a full-size staging table is not a low-memory substitution");
@@ -3573,13 +3573,13 @@ pub(super) mod expert_payload_descriptor_tests {
         let high_expert = [0_u8; 144];
         let entries = [
             ExpertEntry {
-                block: QuantizedBlock::Q2K(&low_expert),
+                block: QuantizedBlock::Packed { codec: Codec::Q2K, bytes: &low_expert },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 1,
             },
             ExpertEntry {
-                block: QuantizedBlock::Q4K(&high_expert),
+                block: QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &high_expert },
                 out_dim: 256,
                 in_dim: 256,
                 epoch: 2,
@@ -3589,7 +3589,7 @@ pub(super) mod expert_payload_descriptor_tests {
 
         reject_non_reducing_expert_staging(
             NodeId(52),
-            QuantizedBlock::Q4K(&original_bytes),
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: &original_bytes },
             &source,
         )
         .expect("a smaller mixed-codec table reduces the device upload");

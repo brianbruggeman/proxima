@@ -332,20 +332,7 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
                 buffers[node.0 as usize] =
                     Some(Cow::Owned(data.iter().map(|&value| value as f32).collect()));
             }
-            QuantizedBlock::Q4K(_)
-            | QuantizedBlock::Q5K(_)
-            | QuantizedBlock::Q3K(_)
-            | QuantizedBlock::Q2K(_)
-            | QuantizedBlock::Q6K(_)
-            | QuantizedBlock::Q8_0(_)
-            | QuantizedBlock::Q4_0(_)
-            | QuantizedBlock::Q5_1(_)
-            | QuantizedBlock::Q5_0(_)
-            | QuantizedBlock::Iq4Nl(_)
-            | QuantizedBlock::Iq2Xs(_)
-            | QuantizedBlock::Iq3Xxs(_)
-            | QuantizedBlock::Float16(_)
-            | QuantizedBlock::BFloat16(_) => {
+            QuantizedBlock::Packed { .. } => {
                 quantized_weights.insert(*node, block);
             }
         }

@@ -319,9 +319,9 @@ pub(crate) fn bind_lfm2_shortconv_in_proj<'file>(
                     state.owned.push((chunk_name, owned));
                 }
             },
-            GgmlType::Q4_K => state.packed.push((chunk_name, QuantizedBlock::Q4K(chunk))),
-            GgmlType::Q5_K => state.packed.push((chunk_name, QuantizedBlock::Q5K(chunk))),
-            GgmlType::Q6_K => state.packed.push((chunk_name, QuantizedBlock::Q6K(chunk))),
+            GgmlType::Q4_K => state.packed.push((chunk_name, QuantizedBlock::Packed { codec: Codec::Q4K, bytes: chunk })),
+            GgmlType::Q5_K => state.packed.push((chunk_name, QuantizedBlock::Packed { codec: Codec::Q5K, bytes: chunk })),
+            GgmlType::Q6_K => state.packed.push((chunk_name, QuantizedBlock::Packed { codec: Codec::Q6K, bytes: chunk })),
             other => {
                 return Err(InteropError::UnrepresentableGgmlType {
                     tensor: name,
@@ -888,7 +888,7 @@ mod tests {
 
     fn dequantize_chunk(chunk: &QuantizedBlock, elements: usize) -> Vec<f32> {
         match chunk {
-            QuantizedBlock::Q4K(bytes) => {
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes } => {
                 let mut output = vec![0.0f32; elements];
                 q4_k::dequantize(bytes, &mut output).expect("dequantize a split chunk");
                 output

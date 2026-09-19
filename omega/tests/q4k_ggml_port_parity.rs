@@ -24,6 +24,7 @@ use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::q4_k::{self, BLOCK_BYTES, QK_K, quantize};
 use proxima_gguf::types::GgmlType;
+use proxima_primitives::Codec;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
@@ -214,7 +215,7 @@ fn assert_matches_dequantized_oracle(
         &packed_program,
         &[],
         &[
-            QuantizedBlock::Q4K(weight_bytes),
+            QuantizedBlock::Packed { codec: Codec::Q4K, bytes: weight_bytes },
             QuantizedBlock::Float32(activation),
         ],
         &[packed_sum],

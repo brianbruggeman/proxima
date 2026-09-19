@@ -163,6 +163,7 @@ use std::thread;
 
 use prime::os::background::ProximaBackgroundPool;
 use prime::os::cohort::{ChunkIndex, CohortRound, CohortSession, ThreadCohort};
+use proxima_primitives::Codec;
 use proxima_primitives::block_on;
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::pipe::fan_in::Quorum;

@@ -990,11 +990,11 @@ pub(super) fn fused_quant_dot(
 ) -> Result<f32, TensorError> {
     match block {
         #[cfg(feature = "q4k-int8-dot")]
-        QuantizedBlock::Q4K(bytes) => dot_q4k_q8k(bytes, activation_q8k),
+        QuantizedBlock::Packed { codec: Codec::Q4K, bytes } => dot_q4k_q8k(bytes, activation_q8k),
         #[cfg(feature = "q5k-int8-dot")]
-        QuantizedBlock::Q5K(bytes) => dot_q5k_q8k(bytes, activation_q8k),
+        QuantizedBlock::Packed { codec: Codec::Q5K, bytes } => dot_q5k_q8k(bytes, activation_q8k),
         #[cfg(feature = "q6k-int8-dot")]
-        QuantizedBlock::Q6K(bytes) => dot_q6k_q8k(bytes, activation_q8k),
+        QuantizedBlock::Packed { codec: Codec::Q6K, bytes } => dot_q6k_q8k(bytes, activation_q8k),
         _ => Err(TensorError::NotLowerable {
             node: NodeId(0),
             reason: "QuantDot::Fused only supports a K-quant codec whose int8-dot feature is enabled",
@@ -1017,17 +1017,17 @@ pub(super) fn unfused_quant_dot(
     activation_q8k: &[u8],
 ) -> Result<f32, TensorError> {
     let (weight_bytes, block_bytes, qk_k): (&[u8], usize, usize) = match block {
-        QuantizedBlock::Q4K(bytes) => (
+        QuantizedBlock::Packed { codec: Codec::Q4K, bytes } => (
             bytes,
             proxima_gguf::quant::q4_k::BLOCK_BYTES,
             proxima_gguf::quant::q4_k::QK_K,
         ),
-        QuantizedBlock::Q5K(bytes) => (
+        QuantizedBlock::Packed { codec: Codec::Q5K, bytes } => (
             bytes,
             proxima_gguf::quant::q5_k::BLOCK_BYTES,
             proxima_gguf::quant::q5_k::QK_K,
         ),
-        QuantizedBlock::Q6K(bytes) => (
+        QuantizedBlock::Packed { codec: Codec::Q6K, bytes } => (
             bytes,
             proxima_gguf::quant::q6_k::BLOCK_BYTES,
             proxima_gguf::quant::q6_k::QK_K,
@@ -1054,9 +1054,9 @@ pub(super) fn unfused_quant_dot(
     let elements = block_count * qk_k;
     let mut weight_f32 = vec![0.0f32; elements];
     let dequantize_result = match block {
-        QuantizedBlock::Q4K(bytes) => proxima_gguf::quant::q4_k::dequantize(bytes, &mut weight_f32),
-        QuantizedBlock::Q5K(bytes) => proxima_gguf::quant::q5_k::dequantize(bytes, &mut weight_f32),
-        QuantizedBlock::Q6K(bytes) => proxima_gguf::quant::q6_k::dequantize(bytes, &mut weight_f32),
+        QuantizedBlock::Packed { codec: Codec::Q4K, bytes } => proxima_gguf::quant::q4_k::dequantize(bytes, &mut weight_f32),
+        QuantizedBlock::Packed { codec: Codec::Q5K, bytes } => proxima_gguf::quant::q5_k::dequantize(bytes, &mut weight_f32),
+        QuantizedBlock::Packed { codec: Codec::Q6K, bytes } => proxima_gguf::quant::q6_k::dequantize(bytes, &mut weight_f32),
         _ => unreachable!("codec already matched above"),
     };
     dequantize_result.map_err(|_| TensorError::QuantizedShapeMismatch {

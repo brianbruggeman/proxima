@@ -219,19 +219,19 @@ fn packed_block_bytes_slice<'a>(
     block: &QuantizedBlock<'a>,
 ) -> Result<&'a [u8], EmitError> {
     match block {
-        QuantizedBlock::Q2K(bytes)
-        | QuantizedBlock::Q3K(bytes)
-        | QuantizedBlock::Q4K(bytes)
-        | QuantizedBlock::Q5K(bytes)
-        | QuantizedBlock::Q6K(bytes)
-        | QuantizedBlock::Q8_0(bytes)
-        | QuantizedBlock::Q4_0(bytes)
-        | QuantizedBlock::Q5_1(bytes)
-        | QuantizedBlock::Iq4Nl(bytes)
-        | QuantizedBlock::Iq2Xs(bytes)
-        | QuantizedBlock::Iq3Xxs(bytes)
-        | QuantizedBlock::Float16(bytes)
-        | QuantizedBlock::BFloat16(bytes) => Ok(bytes),
+        QuantizedBlock::Packed { codec: Codec::Q2K, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q3K, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q4K, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q5K, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q6K, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q8_0, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q4_0, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Q5_1, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Iq4Nl, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes }
+        | QuantizedBlock::Packed { codec: Codec::Float16, bytes }
+        | QuantizedBlock::Packed { codec: Codec::BFloat16, bytes } => Ok(bytes),
         QuantizedBlock::Int32(_) => Err(EmitError::RenderKindMismatch {
             node,
             expected: "a packed (non-float32) block",
@@ -259,19 +259,19 @@ fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {
     match block {
         QuantizedBlock::Float32(_) => "float32",
         QuantizedBlock::Int32(_) => "int32",
-        QuantizedBlock::Q2K(_) => "q2_k",
-        QuantizedBlock::Q3K(_) => "q3_k",
-        QuantizedBlock::Q4K(_) => "q4_k",
-        QuantizedBlock::Q5K(_) => "q5_k",
-        QuantizedBlock::Q6K(_) => "q6_k",
-        QuantizedBlock::Q8_0(_) => "q8_0",
-        QuantizedBlock::Q4_0(_) => "q4_0",
-        QuantizedBlock::Q5_1(_) => "q5_1",
-        QuantizedBlock::Iq4Nl(_) => "iq4_nl",
-        QuantizedBlock::Iq2Xs(_) => "iq2_xs",
-        QuantizedBlock::Iq3Xxs(_) => "iq3_xxs",
-        QuantizedBlock::Float16(_) => "float16",
-        QuantizedBlock::BFloat16(_) => "bfloat16",
+        QuantizedBlock::Packed { codec: Codec::Q2K, bytes: _ } => "q2_k",
+        QuantizedBlock::Packed { codec: Codec::Q3K, bytes: _ } => "q3_k",
+        QuantizedBlock::Packed { codec: Codec::Q4K, bytes: _ } => "q4_k",
+        QuantizedBlock::Packed { codec: Codec::Q5K, bytes: _ } => "q5_k",
+        QuantizedBlock::Packed { codec: Codec::Q6K, bytes: _ } => "q6_k",
+        QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: _ } => "q8_0",
+        QuantizedBlock::Packed { codec: Codec::Q4_0, bytes: _ } => "q4_0",
+        QuantizedBlock::Packed { codec: Codec::Q5_1, bytes: _ } => "q5_1",
+        QuantizedBlock::Packed { codec: Codec::Iq4Nl, bytes: _ } => "iq4_nl",
+        QuantizedBlock::Packed { codec: Codec::Iq2Xs, bytes: _ } => "iq2_xs",
+        QuantizedBlock::Packed { codec: Codec::Iq3Xxs, bytes: _ } => "iq3_xxs",
+        QuantizedBlock::Packed { codec: Codec::Float16, bytes: _ } => "float16",
+        QuantizedBlock::Packed { codec: Codec::BFloat16, bytes: _ } => "bfloat16",
     }
 }
 
@@ -1317,7 +1317,7 @@ mod block_node_attribution_tests {
         // `block_node_ids(&program)` is `[activation, weight]`, so this is
         // the opposite order.
         let blocks = [
-            QuantizedBlock::Q6K(&packed_weight),
+            QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &packed_weight },
             QuantizedBlock::Float32(&activation_data),
         ];
 
@@ -1364,7 +1364,7 @@ mod block_node_attribution_tests {
 
         let blocks = [
             QuantizedBlock::Float32(&activation_data),
-            QuantizedBlock::Q6K(&packed_weight),
+            QuantizedBlock::Packed { codec: Codec::Q6K, bytes: &packed_weight },
         ];
 
         match plan(&program, &[], &blocks, &[]) {
