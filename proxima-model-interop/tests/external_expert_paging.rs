@@ -9,7 +9,7 @@
 //! capability matrix's own `F32` MoE cell) specifically so the stacked
 //! `_exps.weight` tensors bind through [`proxima_model_interop::bind::build_expert_slab`]'s
 //! zero-copy [`proxima_tensor::cpu::QuantizedBlock`] arm -- an `F32` MoE
-//! stack has no [`proxima_model_interop::PackedOwnedKind`] tag at all
+//! stack has no [`proxima_model_interop::Codec`] tag at all
 //! (that enum's own doc), so it is never bound into the slab, and would
 //! prove nothing about paging.
 //!
@@ -32,7 +32,7 @@ mod support;
 
 use proxima_gguf::GgmlType;
 use proxima_model_interop::expert_slab::encode_expert_copy;
-use proxima_model_interop::{InteropError, LoadedModel, PackedOwnedKind};
+use proxima_model_interop::{Codec, InteropError, LoadedModel};
 use proxima_primitives::pipe::Pipe;
 
 const PROMPT: &str = "The capital of France is";
@@ -104,7 +104,7 @@ async fn paging_an_expert_between_steps_bumps_its_epoch_and_decode_continues() {
         .page_expert(
             GATE_SITE,
             0,
-            PackedOwnedKind::Q4K,
+            Codec::Q4K,
             &paged_bytes,
             support::FEED_FORWARD,
             support::EMBEDDING,
@@ -178,7 +178,7 @@ async fn paging_an_out_of_range_expert_index_is_rejected() {
     let result = model.page_expert(
         GATE_SITE,
         support::EXPERT_COUNT as usize,
-        PackedOwnedKind::Q4K,
+        Codec::Q4K,
         &one_expert_q4k_bytes(support::FEED_FORWARD, support::EMBEDDING, 11),
         support::FEED_FORWARD,
         support::EMBEDDING,
@@ -250,7 +250,7 @@ fn load_real_output_moe_fixture(
 /// (`blk.0.ffn_{gate,up,down}_exps.weight`) -- the "hi" copy
 /// [`encode_expert_copy`]'s caller dequantizes before re-encoding as
 /// `Q2_K`, exactly the residency-downgrade shape
-/// [`proxima_model_interop::PackedOwnedKind::Q2K`]'s own doc names.
+/// [`proxima_model_interop::Codec::Q2K`]'s own doc names.
 fn paged_expert_hi_bytes(file_bytes: &[u8], tensor_name: &str) -> Vec<u8> {
     let parsed =
         proxima_gguf::parse_complete(file_bytes).expect("re-parses this test's own fixture");
@@ -284,7 +284,7 @@ fn paged_expert_q2k_bytes(
     let mut dequantized = vec![0.0f32; element_count];
     proxima_gguf::quant::q4_k::dequantize(&hi_bytes, &mut dequantized)
         .expect("the fixture's own Q4_K expert bytes dequantize cleanly");
-    encode_expert_copy(&dequantized, out_dim, in_dim, PackedOwnedKind::Q2K)
+    encode_expert_copy(&dequantized, out_dim, in_dim, Codec::Q2K)
         .expect("a full-size dequantized expert row set re-encodes to Q2_K")
 }
 
@@ -357,7 +357,7 @@ async fn q2k_paging_actually_changes_the_decoded_ids() {
         .page_expert(
             GATE_SITE,
             PAGED_EXPERT,
-            PackedOwnedKind::Q2K,
+            Codec::Q2K,
             &gate_q2k_bytes,
             support::FEED_FORWARD,
             support::EMBEDDING,
@@ -371,7 +371,7 @@ async fn q2k_paging_actually_changes_the_decoded_ids() {
         .page_expert(
             UP_SITE,
             PAGED_EXPERT,
-            PackedOwnedKind::Q2K,
+            Codec::Q2K,
             &up_q2k_bytes,
             support::FEED_FORWARD,
             support::EMBEDDING,
@@ -381,7 +381,7 @@ async fn q2k_paging_actually_changes_the_decoded_ids() {
         .page_expert(
             DOWN_SITE,
             PAGED_EXPERT,
-            PackedOwnedKind::Q2K,
+            Codec::Q2K,
             &down_q2k_bytes,
             support::EMBEDDING,
             support::FEED_FORWARD,
@@ -403,7 +403,7 @@ async fn q2k_paging_actually_changes_the_decoded_ids() {
         .page_expert(
             GATE_SITE,
             PAGED_EXPERT,
-            PackedOwnedKind::Q2K,
+            Codec::Q2K,
             &gate_q2k_bytes,
             support::FEED_FORWARD,
             support::EMBEDDING,
@@ -413,7 +413,7 @@ async fn q2k_paging_actually_changes_the_decoded_ids() {
         .page_expert(
             UP_SITE,
             PAGED_EXPERT,
-            PackedOwnedKind::Q2K,
+            Codec::Q2K,
             &up_q2k_bytes,
             support::FEED_FORWARD,
             support::EMBEDDING,
@@ -423,7 +423,7 @@ async fn q2k_paging_actually_changes_the_decoded_ids() {
         .page_expert(
             DOWN_SITE,
             PAGED_EXPERT,
-            PackedOwnedKind::Q2K,
+            Codec::Q2K,
             &down_q2k_bytes,
             support::EMBEDDING,
             support::FEED_FORWARD,

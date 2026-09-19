@@ -820,7 +820,7 @@ pub fn vocab_from_token_embedding(
 /// operand and so has no packed kernel), zero-copy packed blocks
 /// borrowed straight out of `file_bytes` (see [`bind_dense`]/
 /// [`bind_matmul_weight`]), and owned-but-still-quantized packed blocks
-/// (see [`PackedOwnedKind`]) for a MoE expert stack that has no single
+/// (see [`Codec`]) for a MoE expert stack that has no single
 /// contiguous on-disk byte range to borrow from (`bind_moe_expert_weights`'s
 /// restack fallback). `pub(crate)`: [`crate::generate::LoadedModel`]
 /// is the one place outside this module that constructs or reads one.
@@ -839,7 +839,7 @@ pub struct BoundWeights<'file> {
         alloc::string::String,
         proxima_tensor::cpu::QuantizedBlock<'file>,
     )>,
-    pub(crate) packed_owned: Vec<(alloc::string::String, Vec<u8>, PackedOwnedKind)>,
+    pub(crate) packed_owned: Vec<(alloc::string::String, Vec<u8>, Codec)>,
     pub(crate) precision: &'file [crate::serving::WeightPrecisionRule<'file>],
 }
 
@@ -898,182 +898,136 @@ impl<'file> BoundWeights<'file> {
 
     /// Every packed-but-still-quantized tensor this bind pass restacked
     /// into its own buffer rather than borrowing from `file_bytes`, plus
-    /// the [`PackedOwnedKind`] a caller re-wraps those bytes with -- see
-    /// [`PackedOwnedKind`]'s own doc for why these cannot live in
+    /// the [`Codec`] a caller re-wraps those bytes with -- see
+    /// [`Codec`]'s own doc for why these cannot live in
     /// [`Self::packed`] at `'file`.
     #[must_use]
-    pub fn packed_owned(&self) -> &[(alloc::string::String, Vec<u8>, PackedOwnedKind)] {
+    pub fn packed_owned(&self) -> &[(alloc::string::String, Vec<u8>, Codec)] {
         &self.packed_owned
     }
 }
 
-/// Which [`proxima_tensor::cpu::QuantizedBlock`] byte-borrowing variant to
-/// re-wrap a [`BoundWeights::packed_owned`] entry's bytes in at read time.
-/// Exists because `QuantizedBlock<'a>` borrows for a caller-chosen lifetime
-/// `'a`, but the bytes it would borrow here are a restacked buffer this
-/// crate allocated (`bind_moe_expert_weights`'s restack fallback), not a
-/// slice of `file_bytes` -- so [`BoundWeights`] cannot store the already-built
-/// enum at `'file` the way [`BoundWeights::packed`] does. Storing the raw
-/// bytes plus this tag instead lets [`crate::generate::LoadedModel`]
-/// construct the borrow fresh, each request, at whatever shorter lifetime
-/// that call site needs.
+/// [`proxima_primitives::Codec`] re-exported at this crate's root -- see
+/// its own doc for why the identity is a payload-less enum living in
+/// `proxima-primitives`, not here. The free functions below are this
+/// crate's [`Codec`] methods: a foreign type cannot host inherent impls,
+/// and `proxima-primitives` must not depend on `proxima-gguf`/
+/// `proxima-tensor`, so the methods these need live here as plain
+/// functions over `Codec` rather than as an extension trait.
 #[cfg(feature = "std")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PackedOwnedKind {
-    Q4K,
-    Q5K,
-    Q6K,
-    Q8_0,
-    /// Added alongside `recode_tensor`: `proxima_gguf::quant::q3_k` ships
-    /// both directions, and `recode_tensor`'s target set is "every codec
-    /// with an encoder", not the four this tag originally covered for
-    /// `bind_moe_expert_weights`'s restack fallback.
-    Q3K,
-    Q4_0,
-    Float16,
-    BFloat16,
-    /// Added for [`crate::expert_slab::encode_expert_copy`]: a residency
-    /// policy downgrading a resident MoE expert needs a codec smaller than
-    /// this checkpoint's own on-disk quantization, and `Q2_K` is the
-    /// smallest [`proxima_gguf::quant`] ships an encoder for. Not reachable
-    /// from [`Self::from_ggml_type`]'s checkpoint-load direction until a
-    /// caller actually needs `recode_tensor`'s `weight_precision` knob to
-    /// target `Q2_K` too -- today it is only ever constructed by
-    /// [`crate::expert_slab::encode_expert_copy`]'s own caller.
-    Q2K,
-    /// `Q5_1`: 32-element blocks, one `f16` scale and one `f16` min per
-    /// block plus a 4-byte 5th-bit plane (24 bytes/block); see
-    /// [`proxima_gguf::quant::q5_1`] for the on-disk layout. Decode-only --
-    /// that module ships `dequantize`/`dequantize_block` but no `quantize`,
-    /// so [`quantize_to_kind`] cannot encode INTO this kind (its arm errors).
-    /// Reachable from [`Self::from_ggml_type`] purely for the load-time
-    /// packed-vs-dequantize decision ([`bind_moe_stacked_experts`] and
-    /// friends), which only ever borrows already-on-disk `Q5_1` bytes and
-    /// never re-encodes them.
-    Q5_1,
-    /// `Q5_0`: 32-element blocks, one `f16` scale plus a 4-byte 5th-bit
-    /// plane (22 bytes/block, [`Self::Q5_1`] with the min term dropped);
-    /// see [`proxima_gguf::quant::q5_0`] for the on-disk layout.
-    /// Decode-only, same reasoning as [`Self::Q5_1`] for why
-    /// [`quantize_to_kind`] cannot encode INTO this kind. Reachable from
-    /// [`Self::from_ggml_type`] purely for the load-time
-    /// packed-vs-dequantize decision -- gemma4's
-    /// `blk.{1..29}.ffn_down_exps.weight` codec.
-    Q5_0,
+pub use proxima_primitives::Codec;
+
+/// Borrows `bytes` as the [`proxima_tensor::cpu::QuantizedBlock`] variant
+/// `codec` names -- the deferred half of the split [`BoundWeights::packed_owned`]'s
+/// own doc describes.
+#[cfg(feature = "std")]
+pub(crate) fn as_block(codec: Codec, bytes: &[u8]) -> proxima_tensor::cpu::QuantizedBlock<'_> {
+    match codec {
+        Codec::Q4K => proxima_tensor::cpu::QuantizedBlock::Q4K(bytes),
+        Codec::Q5K => proxima_tensor::cpu::QuantizedBlock::Q5K(bytes),
+        Codec::Q6K => proxima_tensor::cpu::QuantizedBlock::Q6K(bytes),
+        Codec::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes),
+        Codec::Q3K => proxima_tensor::cpu::QuantizedBlock::Q3K(bytes),
+        Codec::Q4_0 => proxima_tensor::cpu::QuantizedBlock::Q4_0(bytes),
+        Codec::Float16 => proxima_tensor::cpu::QuantizedBlock::Float16(bytes),
+        Codec::BFloat16 => proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes),
+        Codec::Q2K => proxima_tensor::cpu::QuantizedBlock::Q2K(bytes),
+        Codec::Q5_1 => proxima_tensor::cpu::QuantizedBlock::Q5_1(bytes),
+        Codec::Q5_0 => proxima_tensor::cpu::QuantizedBlock::Q5_0(bytes),
+    }
 }
 
+/// The [`GgmlType`] `ggml_type` corresponds to, or `None` for a codec
+/// neither [`bind_moe_expert_weights`]'s restack fallback nor
+/// [`recode_tensor`] can pack (`F32` stays dequantized-then-transposed:
+/// `run_reduce_quantized`'s gather rejects a `Float32` weight block
+/// outright, `proxima_tensor::cpu::run_reduce_quantized`'s own
+/// `shape_error` arm for that variant; and every remaining `GgmlType`
+/// with no [`proxima_gguf::quant`] DEcoder at all -- the `Iq*` family
+/// minus `Iq4Nl`, `Q4_1`/`Q8_1`, the integer/`F64`/`Tq*` types. `Q2_K`
+/// and `Q5_1` both map here now purely for this LOAD-time
+/// packed-vs-dequantize decision -- both have a complete decode path
+/// ([`proxima_gguf::quant::q2_k`]/[`proxima_gguf::quant::q5_1`]'s own
+/// `dequantize`, `proxima_tensor::cpu`'s matching `QuantizedBlock`
+/// variant, and an omega Metal unpack kernel) even though `Q5_1` has no
+/// [`proxima_gguf::quant::q5_1`] `quantize` (encode) function --
+/// [`quantize_to_kind`]'s `Q5_1` arm errors rather than silently
+/// mis-encoding, so [`recode_tensor`]'s `weight_precision` direction
+/// still refuses a `Q5_1` TARGET, just one level deeper than this
+/// function used to reject it.
 #[cfg(feature = "std")]
-impl PackedOwnedKind {
-    /// Borrows `bytes` as the [`proxima_tensor::cpu::QuantizedBlock`] variant
-    /// this tag names -- the deferred half of the split [`PackedOwnedKind`]'s
-    /// own doc describes.
-    pub fn as_block<'bytes>(
-        self,
-        bytes: &'bytes [u8],
-    ) -> proxima_tensor::cpu::QuantizedBlock<'bytes> {
-        match self {
-            PackedOwnedKind::Q4K => proxima_tensor::cpu::QuantizedBlock::Q4K(bytes),
-            PackedOwnedKind::Q5K => proxima_tensor::cpu::QuantizedBlock::Q5K(bytes),
-            PackedOwnedKind::Q6K => proxima_tensor::cpu::QuantizedBlock::Q6K(bytes),
-            PackedOwnedKind::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes),
-            PackedOwnedKind::Q3K => proxima_tensor::cpu::QuantizedBlock::Q3K(bytes),
-            PackedOwnedKind::Q4_0 => proxima_tensor::cpu::QuantizedBlock::Q4_0(bytes),
-            PackedOwnedKind::Float16 => proxima_tensor::cpu::QuantizedBlock::Float16(bytes),
-            PackedOwnedKind::BFloat16 => proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes),
-            PackedOwnedKind::Q2K => proxima_tensor::cpu::QuantizedBlock::Q2K(bytes),
-            PackedOwnedKind::Q5_1 => proxima_tensor::cpu::QuantizedBlock::Q5_1(bytes),
-            PackedOwnedKind::Q5_0 => proxima_tensor::cpu::QuantizedBlock::Q5_0(bytes),
-        }
+pub(crate) fn codec_from_ggml_type(ggml_type: GgmlType) -> Option<Codec> {
+    match ggml_type {
+        GgmlType::Q4_K => Some(Codec::Q4K),
+        GgmlType::Q5_K => Some(Codec::Q5K),
+        GgmlType::Q6_K => Some(Codec::Q6K),
+        GgmlType::Q8_0 => Some(Codec::Q8_0),
+        GgmlType::Q3_K => Some(Codec::Q3K),
+        GgmlType::Q4_0 => Some(Codec::Q4_0),
+        GgmlType::F16 => Some(Codec::Float16),
+        GgmlType::Bf16 => Some(Codec::BFloat16),
+        GgmlType::Q2_K => Some(Codec::Q2K),
+        GgmlType::Q5_1 => Some(Codec::Q5_1),
+        GgmlType::Q5_0 => Some(Codec::Q5_0),
+        _ => None,
     }
+}
 
-    /// The [`GgmlType`] this tag corresponds to, or `None` for a codec
-    /// neither [`bind_moe_expert_weights`]'s restack fallback nor
-    /// [`recode_tensor`] can pack (`F32` stays dequantized-then-transposed:
-    /// `run_reduce_quantized`'s gather rejects a `Float32` weight block
-    /// outright, `proxima_tensor::cpu::run_reduce_quantized`'s own
-    /// `shape_error` arm for that variant; and every remaining `GgmlType`
-    /// with no [`proxima_gguf::quant`] DEcoder at all -- the `Iq*` family
-    /// minus `Iq4Nl`, `Q4_1`/`Q8_1`, the integer/`F64`/`Tq*` types. `Q2_K`
-    /// and `Q5_1` both map here now purely for this LOAD-time
-    /// packed-vs-dequantize decision -- both have a complete decode path
-    /// ([`proxima_gguf::quant::q2_k`]/[`proxima_gguf::quant::q5_1`]'s own
-    /// `dequantize`, `proxima_tensor::cpu`'s matching `QuantizedBlock`
-    /// variant, and an omega Metal unpack kernel) even though `Q5_1` has no
-    /// [`proxima_gguf::quant::q5_1`] `quantize` (encode) function --
-    /// [`quantize_to_kind`]'s `Q5_1` arm errors rather than silently
-    /// mis-encoding, so [`recode_tensor`]'s `weight_precision` direction
-    /// still refuses a `Q5_1` TARGET, just one level deeper than this
-    /// function used to reject it.
-    pub(crate) fn from_ggml_type(ggml_type: GgmlType) -> Option<Self> {
-        match ggml_type {
-            GgmlType::Q4_K => Some(PackedOwnedKind::Q4K),
-            GgmlType::Q5_K => Some(PackedOwnedKind::Q5K),
-            GgmlType::Q6_K => Some(PackedOwnedKind::Q6K),
-            GgmlType::Q8_0 => Some(PackedOwnedKind::Q8_0),
-            GgmlType::Q3_K => Some(PackedOwnedKind::Q3K),
-            GgmlType::Q4_0 => Some(PackedOwnedKind::Q4_0),
-            GgmlType::F16 => Some(PackedOwnedKind::Float16),
-            GgmlType::Bf16 => Some(PackedOwnedKind::BFloat16),
-            GgmlType::Q2_K => Some(PackedOwnedKind::Q2K),
-            GgmlType::Q5_1 => Some(PackedOwnedKind::Q5_1),
-            GgmlType::Q5_0 => Some(PackedOwnedKind::Q5_0),
-            _ => None,
-        }
+/// The GGUF/llama.cpp lowercase codec name [`recode_tensor`] appends to
+/// a recoded tensor's own resident name (`<name>@<suffix>`) -- the
+/// proved-name discipline this crate follows for a bind-time recode:
+/// a rebind is a NEW name, never an in-place rewrite of the on-disk-
+/// codec entry's own name, so a plan already bound against the old name
+/// stays valid until the plan itself is dropped, and a later policy
+/// change is a rebind to a different name, never a silent swap under
+/// the name a compiled program already resolved.
+#[cfg(feature = "std")]
+fn codec_name_suffix(codec: Codec) -> &'static str {
+    match codec {
+        Codec::Q4K => "q4_k",
+        Codec::Q5K => "q5_k",
+        Codec::Q6K => "q6_k",
+        Codec::Q8_0 => "q8_0",
+        Codec::Q3K => "q3_k",
+        Codec::Q4_0 => "q4_0",
+        Codec::Float16 => "f16",
+        Codec::BFloat16 => "bf16",
+        Codec::Q2K => "q2_k",
+        Codec::Q5_1 => "q5_1",
+        Codec::Q5_0 => "q5_0",
     }
+}
 
-    /// The GGUF/llama.cpp lowercase codec name [`recode_tensor`] appends to
-    /// a recoded tensor's own resident name (`<name>@<suffix>`) -- the
-    /// proved-name discipline this crate follows for a bind-time recode:
-    /// a rebind is a NEW name, never an in-place rewrite of the on-disk-
-    /// codec entry's own name, so a plan already bound against the old name
-    /// stays valid until the plan itself is dropped, and a later policy
-    /// change is a rebind to a different name, never a silent swap under
-    /// the name a compiled program already resolved.
-    fn name_suffix(self) -> &'static str {
-        match self {
-            PackedOwnedKind::Q4K => "q4_k",
-            PackedOwnedKind::Q5K => "q5_k",
-            PackedOwnedKind::Q6K => "q6_k",
-            PackedOwnedKind::Q8_0 => "q8_0",
-            PackedOwnedKind::Q3K => "q3_k",
-            PackedOwnedKind::Q4_0 => "q4_0",
-            PackedOwnedKind::Float16 => "f16",
-            PackedOwnedKind::BFloat16 => "bf16",
-            PackedOwnedKind::Q2K => "q2_k",
-            PackedOwnedKind::Q5_1 => "q5_1",
-            PackedOwnedKind::Q5_0 => "q5_0",
-        }
+/// The on-disk [`GgmlType`] `codec` packs bytes as -- the reverse of
+/// [`codec_from_ggml_type`], needed by [`codec_byte_len_for`] to look up a
+/// codec's block layout without re-typing [`GgmlType::block_layout`]'s
+/// numbers a second time here.
+#[cfg(feature = "std")]
+pub(crate) fn codec_to_ggml_type(codec: Codec) -> GgmlType {
+    match codec {
+        Codec::Q4K => GgmlType::Q4_K,
+        Codec::Q5K => GgmlType::Q5_K,
+        Codec::Q6K => GgmlType::Q6_K,
+        Codec::Q8_0 => GgmlType::Q8_0,
+        Codec::Q3K => GgmlType::Q3_K,
+        Codec::Q4_0 => GgmlType::Q4_0,
+        Codec::Float16 => GgmlType::F16,
+        Codec::BFloat16 => GgmlType::Bf16,
+        Codec::Q2K => GgmlType::Q2_K,
+        Codec::Q5_1 => GgmlType::Q5_1,
+        Codec::Q5_0 => GgmlType::Q5_0,
     }
+}
 
-    /// The on-disk [`GgmlType`] this tag packs bytes as -- the reverse of
-    /// [`Self::from_ggml_type`], needed by [`Self::byte_len_for`] to look
-    /// up a codec's block layout without re-typing
-    /// [`GgmlType::block_layout`]'s numbers a second time here.
-    pub(crate) fn to_ggml_type(self) -> GgmlType {
-        match self {
-            PackedOwnedKind::Q4K => GgmlType::Q4_K,
-            PackedOwnedKind::Q5K => GgmlType::Q5_K,
-            PackedOwnedKind::Q6K => GgmlType::Q6_K,
-            PackedOwnedKind::Q8_0 => GgmlType::Q8_0,
-            PackedOwnedKind::Q3K => GgmlType::Q3_K,
-            PackedOwnedKind::Q4_0 => GgmlType::Q4_0,
-            PackedOwnedKind::Float16 => GgmlType::F16,
-            PackedOwnedKind::BFloat16 => GgmlType::Bf16,
-            PackedOwnedKind::Q2K => GgmlType::Q2_K,
-            PackedOwnedKind::Q5_1 => GgmlType::Q5_1,
-            PackedOwnedKind::Q5_0 => GgmlType::Q5_0,
-        }
-    }
-
-    /// Packed byte length for `element_count` elements of this codec --
-    /// `element_count / block_elements * block_bytes`, the same arithmetic
-    /// [`recode_tensor`] already does inline for its own `layout` lookup.
-    /// [`crate::expert_slab::encode_expert_copy`] uses this to size the
-    /// encode buffer before calling [`quantize_to_kind`].
-    pub(crate) fn byte_len_for(self, element_count: usize) -> usize {
-        let layout = self.to_ggml_type().block_layout();
-        (element_count as u64 / layout.block_elements * layout.block_bytes) as usize
-    }
+/// Packed byte length for `element_count` elements of `codec` --
+/// `element_count / block_elements * block_bytes`, the same arithmetic
+/// [`recode_tensor`] already does inline for its own `layout` lookup.
+/// [`crate::expert_slab::encode_expert_copy`] uses this to size the
+/// encode buffer before calling [`quantize_to_kind`].
+#[cfg(feature = "std")]
+pub(crate) fn codec_byte_len_for(codec: Codec, element_count: usize) -> usize {
+    let layout = codec_to_ggml_type(codec).block_layout();
+    (element_count as u64 / layout.block_elements * layout.block_bytes) as usize
 }
 
 /// A learned 1-D scale (RMSNorm weight) or `token_embd.weight` (indexed by
@@ -1344,7 +1298,7 @@ fn precision_target_for(
 /// fallback already uses), then re-encode at `target` and push the result
 /// into [`BoundWeights::owned`] (`target == GgmlType::F32`) or
 /// [`BoundWeights::packed_owned`] (every other target, tagged with the
-/// matching [`PackedOwnedKind`]) -- composing [`proxima_gguf::quant`]'s
+/// matching [`Codec`]) -- composing [`proxima_gguf::quant`]'s
 /// existing decoder/encoder pair rather than adding a new codec path.
 ///
 /// Never recodes on the token path: this runs once, at bind time, before
@@ -1352,7 +1306,7 @@ fn precision_target_for(
 /// inside a decode loop.
 ///
 /// Binds the recoded tensor under a NEW name, `{target_name}@{suffix}`
-/// (`f32` for an F32 target, [`PackedOwnedKind::name_suffix`] otherwise) --
+/// (`f32` for an F32 target, [`Codec::name_suffix`] otherwise) --
 /// never overwrites or replaces whatever entry `target_name` itself already
 /// names. This is the proved-name discipline a cache keyed by name (not by
 /// address) requires: a compiled plan resolves its own `Input` operand by
@@ -1415,7 +1369,7 @@ fn recode_tensor<'file>(
         );
         state.owned.push((recoded_name, final_buffer));
     } else {
-        let kind = PackedOwnedKind::from_ggml_type(target).ok_or_else(|| {
+        let kind = codec_from_ggml_type(target).ok_or_else(|| {
             InteropError::UnsupportedWeightPrecisionTarget {
                 tensor: source_name.into(),
                 target,
@@ -1435,7 +1389,7 @@ fn recode_tensor<'file>(
         let mut encoded = vec![0u8; byte_len];
         quantize_to_kind(kind, &decoded, &mut encoded)?;
         state.resident_bytes += byte_len;
-        let recoded_name = alloc::format!("{target_name}@{}", kind.name_suffix());
+        let recoded_name = alloc::format!("{target_name}@{}", codec_name_suffix(kind));
         emit_weight_recoded(&recoded_name, source_type, target, bytes_before, byte_len);
         state.packed_owned.push((recoded_name, encoded, kind));
     }
@@ -1470,38 +1424,38 @@ fn emit_weight_recoded(
 }
 
 /// [`recode_tensor`]'s encode dispatch -- one arm per
-/// [`PackedOwnedKind`] variant, each backed by a real
-/// [`proxima_gguf::quant`] `quantize` function. Takes [`PackedOwnedKind`]
+/// [`Codec`] variant, each backed by a real
+/// [`proxima_gguf::quant`] `quantize` function. Takes [`Codec`]
 /// rather than [`GgmlType`] so every arm is a codec [`proxima_gguf::quant`]
 /// actually ships an encoder for -- the type itself rules out the
-/// no-encoder case [`PackedOwnedKind::from_ggml_type`] already filtered,
+/// no-encoder case [`codec_from_ggml_type`] already filtered,
 /// instead of this function re-deciding it with an unreachable arm.
 #[cfg(feature = "std")]
 pub(crate) fn quantize_to_kind(
-    kind: PackedOwnedKind,
+    kind: Codec,
     decoded: &[f32],
     output: &mut [u8],
 ) -> Result<(), QuantError> {
     match kind {
-        PackedOwnedKind::Q8_0 => q8_0::quantize(decoded, output),
-        PackedOwnedKind::Q4K => q4_k::quantize(decoded, output),
-        PackedOwnedKind::Q5K => q5_k::quantize(decoded, output),
-        PackedOwnedKind::Q6K => q6_k::quantize(decoded, output),
-        PackedOwnedKind::Q3K => q3_k::quantize(decoded, output),
-        PackedOwnedKind::Q4_0 => q4_0::quantize(decoded, output),
-        PackedOwnedKind::Float16 => f16::quantize(decoded, output),
-        PackedOwnedKind::BFloat16 => bf16::quantize(decoded, output),
-        PackedOwnedKind::Q2K => q2_k::quantize(decoded, output),
+        Codec::Q8_0 => q8_0::quantize(decoded, output),
+        Codec::Q4K => q4_k::quantize(decoded, output),
+        Codec::Q5K => q5_k::quantize(decoded, output),
+        Codec::Q6K => q6_k::quantize(decoded, output),
+        Codec::Q3K => q3_k::quantize(decoded, output),
+        Codec::Q4_0 => q4_0::quantize(decoded, output),
+        Codec::Float16 => f16::quantize(decoded, output),
+        Codec::BFloat16 => bf16::quantize(decoded, output),
+        Codec::Q2K => q2_k::quantize(decoded, output),
         // `proxima_gguf::quant::q5_1` ships `dequantize`/`dequantize_block`
-        // only -- see `PackedOwnedKind::Q5_1`'s own doc. Reachable only via
+        // only -- see `Codec::Q5_1`'s own doc. Reachable only via
         // `recode_tensor`'s `weight_precision` TARGET direction (the
         // load-time packed check never calls this function); errors instead
         // of silently mis-encoding.
-        PackedOwnedKind::Q5_1 => Err(QuantError::UnsupportedCodec { codec: "q5_1" }),
+        Codec::Q5_1 => Err(QuantError::UnsupportedCodec { codec: "q5_1" }),
         // `proxima_gguf::quant::q5_0` ships `dequantize`/`dequantize_block`
-        // only -- see `PackedOwnedKind::Q5_0`'s own doc. Same reasoning as
-        // `PackedOwnedKind::Q5_1`'s arm just above.
-        PackedOwnedKind::Q5_0 => Err(QuantError::UnsupportedCodec { codec: "q5_0" }),
+        // only -- see `Codec::Q5_0`'s own doc. Same reasoning as
+        // `Codec::Q5_1`'s arm just above.
+        Codec::Q5_0 => Err(QuantError::UnsupportedCodec { codec: "q5_0" }),
     }
 }
 
@@ -1568,12 +1522,10 @@ pub(crate) fn bind_matmul_weight_paired<'file>(
         };
         state.packed.push((target_name, block));
     } else {
-        let kind = PackedOwnedKind::from_ggml_type(codec).ok_or(
-            InteropError::UnrepresentableGgmlType {
-                tensor: gate_name.into(),
-                ggml_type: codec,
-            },
-        )?;
+        let kind = codec_from_ggml_type(codec).ok_or(InteropError::UnrepresentableGgmlType {
+            tensor: gate_name.into(),
+            ggml_type: codec,
+        })?;
         let gate_bytes = &file_bytes[gate_range.start as usize..gate_range.end as usize];
         let up_bytes = &file_bytes[up_range.start as usize..up_range.end as usize];
         let mut owned = vec![0u8; gate_bytes.len() + up_bytes.len()];
@@ -1650,12 +1602,10 @@ pub(crate) fn bind_matmul_weight_triple<'file>(
         };
         state.packed.push((target_name, block));
     } else {
-        let kind = PackedOwnedKind::from_ggml_type(codec).ok_or(
-            InteropError::UnrepresentableGgmlType {
-                tensor: q_name.into(),
-                ggml_type: codec,
-            },
-        )?;
+        let kind = codec_from_ggml_type(codec).ok_or(InteropError::UnrepresentableGgmlType {
+            tensor: q_name.into(),
+            ggml_type: codec,
+        })?;
         let q_bytes = &file_bytes[q_range.start as usize..q_range.end as usize];
         let k_bytes = &file_bytes[k_range.start as usize..k_range.end as usize];
         let v_bytes = &file_bytes[v_range.start as usize..v_range.end as usize];
@@ -1680,7 +1630,7 @@ fn head_private_copy_requested() -> bool {
 /// [`bind_matmul_weight`]'s ROW 328 counterpart: binds the SAME packed
 /// bytes through [`BoundWeights::packed_owned`] (an owned `Vec<u8>` copy)
 /// instead of [`BoundWeights::packed`] (a zero-copy borrow into
-/// `file_bytes`) -- the existing split [`PackedOwnedKind`]'s own doc
+/// `file_bytes`) -- the existing split [`Codec`]'s own doc
 /// already describes for [`bind_moe_expert_weights`]'s restack fallback,
 /// reused here rather than adding a second owned-bytes mechanism. Same
 /// shape, same quantization codec, same compiled kernel; the only
@@ -1690,10 +1640,10 @@ fn head_private_copy_requested() -> bool {
 /// no-copy lookup misses and it uploads a private/resident copy instead --
 /// exactly the isolation this row's private-copy arm needs.
 ///
-/// A codec [`PackedOwnedKind`] has no tag for (`Q3_K`, `Q4_0`, `F16`,
+/// A codec [`Codec`] has no tag for (`Q3_K`, `Q4_0`, `F16`,
 /// `BFloat16`) falls back to the normal zero-copy [`bind_matmul_weight`]
 /// bind unchanged, so this knob never fails a checkpoint whose head is not
-/// one of the four `PackedOwnedKind` codecs -- it only changes behavior for
+/// one of the four `Codec` codecs -- it only changes behavior for
 /// the `Q6_K` shape this row's own openchat fixture actually has.
 ///
 /// # Errors
@@ -1718,18 +1668,10 @@ fn bind_matmul_weight_private_copy<'file>(
         }
         Ok(block) => {
             let owned = match block {
-                proxima_tensor::cpu::QuantizedBlock::Q4K(bytes) => {
-                    Some((bytes, PackedOwnedKind::Q4K))
-                }
-                proxima_tensor::cpu::QuantizedBlock::Q5K(bytes) => {
-                    Some((bytes, PackedOwnedKind::Q5K))
-                }
-                proxima_tensor::cpu::QuantizedBlock::Q6K(bytes) => {
-                    Some((bytes, PackedOwnedKind::Q6K))
-                }
-                proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes) => {
-                    Some((bytes, PackedOwnedKind::Q8_0))
-                }
+                proxima_tensor::cpu::QuantizedBlock::Q4K(bytes) => Some((bytes, Codec::Q4K)),
+                proxima_tensor::cpu::QuantizedBlock::Q5K(bytes) => Some((bytes, Codec::Q5K)),
+                proxima_tensor::cpu::QuantizedBlock::Q6K(bytes) => Some((bytes, Codec::Q6K)),
+                proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes) => Some((bytes, Codec::Q8_0)),
                 _ => None,
             };
             match owned {
@@ -1822,7 +1764,7 @@ fn restack_error_as_interop_error(
 /// ANY codec [`gguf_tensor_as_packed_block`] decodes zero-copy -- not just
 /// `F32`.
 ///
-/// Bound zero-copy whenever [`PackedOwnedKind::from_ggml_type`] recognizes
+/// Bound zero-copy whenever [`codec_from_ggml_type`] recognizes
 /// the codec (`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`Q3_K`/`Q4_0`/`F16`/`Bf16`) --
 /// the exact codec set [`bind_moe_expert_weights`]'s own restack (per-
 /// expert-tensor) fallback already trusts as packed with no transpose
@@ -1838,7 +1780,7 @@ fn restack_error_as_interop_error(
 /// checkpoint's own `Q4_K`/`Q6_K` `_exps` tensors and a synthetic `Q4_K`
 /// 2-expert stack respectively).
 ///
-/// `F32` alone still needs no [`PackedOwnedKind`] check: [`aligned_f32_view`]
+/// `F32` alone still needs no [`Codec`] check: [`aligned_f32_view`]
 /// already fails loudly ([`InteropError::MisalignedFloat32Tensor`]) rather
 /// than silently falling back, and [`QuantizedBlock::Float32`] is the one
 /// variant [`proxima_tensor::cpu`]'s evaluator binds as a plain `&[f32]`
@@ -1852,7 +1794,7 @@ fn restack_error_as_interop_error(
 /// out_dim, in_dim]`, not one 2-D matrix, so a plain global transpose would
 /// scramble the expert axis into the wrong place in memory) -- but every
 /// codec that arm actually decodes already returns a typed
-/// [`QuantizedBlock`] variant [`PackedOwnedKind::from_ggml_type`] also
+/// [`QuantizedBlock`] variant [`codec_from_ggml_type`] also
 /// recognizes, so in practice this fallback is now unreachable for any
 /// codec this crate can decode; it stays as the typed-error path for a
 /// checkpoint using a codec neither function has ever seen.
@@ -1877,7 +1819,7 @@ fn bind_moe_stacked_experts<'file>(
         Ok(block @ proxima_tensor::cpu::QuantizedBlock::Float32(_)) => {
             state.packed.push((name, block));
         }
-        Ok(block) if PackedOwnedKind::from_ggml_type(tensor.ggml_type).is_some() => {
+        Ok(block) if codec_from_ggml_type(tensor.ggml_type).is_some() => {
             state.packed.push((name, block));
         }
         Ok(_) | Err(_) => {
@@ -1920,7 +1862,7 @@ fn bind_moe_stacked_experts<'file>(
 /// `per_expert_bytes` from the gathered axis's own extent and slices
 /// `expert_index * per_expert_bytes` out of the packed buffer per token (see
 /// that function's own doc and [`bind_moe_stacked_experts`]'s). So this
-/// fallback now binds any codec [`PackedOwnedKind`] names --
+/// fallback now binds any codec [`Codec`] names --
 /// `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0` -- as an owned-but-still-packed buffer
 /// ([`BoundWeights::packed_owned`]) instead of dequantizing: `restack_into`'s
 /// byte-concatenation is already exactly the contiguous `[expert, rows, k]`
@@ -1989,7 +1931,7 @@ pub fn bind_moe_expert_weights<'file>(
     restack_into(&mut stacked_bytes, &plan, &sources)
         .map_err(|error| restack_error_as_interop_error(layer, projection, error))?;
 
-    if let Some(kind) = PackedOwnedKind::from_ggml_type(plan.ggml_type) {
+    if let Some(kind) = codec_from_ggml_type(plan.ggml_type) {
         state.resident_bytes += stacked_bytes.len();
         state.packed_owned.push((stacked_name, stacked_bytes, kind));
         return Ok(());
@@ -2279,31 +2221,27 @@ pub(crate) fn bind_all_weights<'file>(
 }
 
 /// [`QuantizedBlock`](proxima_tensor::cpu::QuantizedBlock)'s byte-carrying
-/// variants paired with the [`PackedOwnedKind`] tag
+/// variants paired with the [`Codec`] tag
 /// [`crate::expert_slab::ExpertSlab::bind_layer_stack`] needs -- the same
 /// per-variant match [`bind_matmul_weight_private_copy`] already runs,
-/// generalized to every codec [`PackedOwnedKind`] names rather than just the
+/// generalized to every codec [`Codec`] names rather than just the
 /// four that function's own private-copy knob cares about. `None` for
-/// `Float32`/`Q2K`/anything else [`PackedOwnedKind`] has no tag for -- a
+/// `Float32`/`Q2K`/anything else [`Codec`] has no tag for -- a
 /// dense-`F32` or restacked-owned MoE weight never reaches
 /// [`build_expert_slab`] at all (see that function's own doc for why).
 #[cfg(feature = "std")]
 fn quantized_block_as_owned_bytes(
     block: proxima_tensor::cpu::QuantizedBlock<'_>,
-) -> Option<(&[u8], PackedOwnedKind)> {
+) -> Option<(&[u8], Codec)> {
     match block {
-        proxima_tensor::cpu::QuantizedBlock::Q4K(bytes) => Some((bytes, PackedOwnedKind::Q4K)),
-        proxima_tensor::cpu::QuantizedBlock::Q5K(bytes) => Some((bytes, PackedOwnedKind::Q5K)),
-        proxima_tensor::cpu::QuantizedBlock::Q6K(bytes) => Some((bytes, PackedOwnedKind::Q6K)),
-        proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes) => Some((bytes, PackedOwnedKind::Q8_0)),
-        proxima_tensor::cpu::QuantizedBlock::Q3K(bytes) => Some((bytes, PackedOwnedKind::Q3K)),
-        proxima_tensor::cpu::QuantizedBlock::Q4_0(bytes) => Some((bytes, PackedOwnedKind::Q4_0)),
-        proxima_tensor::cpu::QuantizedBlock::Float16(bytes) => {
-            Some((bytes, PackedOwnedKind::Float16))
-        }
-        proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes) => {
-            Some((bytes, PackedOwnedKind::BFloat16))
-        }
+        proxima_tensor::cpu::QuantizedBlock::Q4K(bytes) => Some((bytes, Codec::Q4K)),
+        proxima_tensor::cpu::QuantizedBlock::Q5K(bytes) => Some((bytes, Codec::Q5K)),
+        proxima_tensor::cpu::QuantizedBlock::Q6K(bytes) => Some((bytes, Codec::Q6K)),
+        proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes) => Some((bytes, Codec::Q8_0)),
+        proxima_tensor::cpu::QuantizedBlock::Q3K(bytes) => Some((bytes, Codec::Q3K)),
+        proxima_tensor::cpu::QuantizedBlock::Q4_0(bytes) => Some((bytes, Codec::Q4_0)),
+        proxima_tensor::cpu::QuantizedBlock::Float16(bytes) => Some((bytes, Codec::Float16)),
+        proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes) => Some((bytes, Codec::BFloat16)),
         _ => None,
     }
 }
@@ -3590,7 +3528,7 @@ mod tests {
     }
 
     /// (a): a `weight_precision` rule recoding one `Q4_K` tensor to `Q8_0`
-    /// lands in [`BoundWeights::packed_owned`] tagged [`PackedOwnedKind::Q8_0`],
+    /// lands in [`BoundWeights::packed_owned`] tagged [`Codec::Q8_0`],
     /// `bytes_after` matches `Q8_0`'s own block arithmetic for the tensor's
     /// dims, and dequantizing the recoded bytes agrees with dequantizing the
     /// original `Q4_K` bytes within `Q8_0`'s own computed quantization error
@@ -3655,7 +3593,7 @@ mod tests {
             recoded_name, "recoded@q8_0",
             "a recode binds under a NEW proved name, never overwriting `target_name` itself"
         );
-        assert_eq!(*kind, PackedOwnedKind::Q8_0);
+        assert_eq!(*kind, Codec::Q8_0);
 
         let expected_bytes = element_count / q8_0::QK8_0 * q8_0::BLOCK_BYTES;
         assert_eq!(recoded_bytes.len(), expected_bytes);
@@ -7535,7 +7473,7 @@ mod real_mixtral_file {
     /// exact file), so `bind_moe_expert_weights` (`bind.rs`) falls back to
     /// `discover_experts`/`plan_stack`/`restack_into` -- but that fallback no
     /// longer dequantizes to owned `f32`: it binds the restacked buffer
-    /// packed instead (`BoundWeights::packed_owned`, [`PackedOwnedKind`]),
+    /// packed instead (`BoundWeights::packed_owned`, [`Codec`]),
     /// now that `proxima_tensor::cpu::run_reduce_quantized`'s gather arm
     /// resolves `per_expert_bytes` directly out of a packed `QuantizedBlock`
     /// (closed separately from this change; see

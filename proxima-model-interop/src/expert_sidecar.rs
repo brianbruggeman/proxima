@@ -18,7 +18,7 @@ use std::sync::Arc;
 use memmap2::Mmap;
 use proxima_gguf::{GgmlType, ParsedGguf};
 
-use crate::bind::PackedOwnedKind;
+use crate::bind::Codec;
 use crate::expert_slab::{ExpertProjection, ExpertSlab};
 use crate::residency::{ExpertAddress, ResidencyAction, ServeDecision, ServePrecision};
 use crate::{InteropError, recode_expert_into};
@@ -48,7 +48,7 @@ pub struct ExpertStackSpec<'name> {
     pub expert_count: u32,
     pub out_dim: u32,
     pub in_dim: u32,
-    pub target_codec: PackedOwnedKind,
+    pub target_codec: Codec,
 }
 
 /// Descriptor returned for each expert written to the sidecar.
@@ -59,8 +59,8 @@ pub struct ExpertSidecarDescriptor {
     pub expert: u32,
     pub out_dim: u32,
     pub in_dim: u32,
-    pub source_codec: PackedOwnedKind,
-    pub target_codec: PackedOwnedKind,
+    pub source_codec: Codec,
+    pub target_codec: Codec,
     pub source_offset: u64,
     pub source_bytes: u64,
     pub data_offset: u64,
@@ -110,7 +110,7 @@ pub struct MappedExpertSidecar {
 pub(crate) struct CheckpointAdmission<'admission> {
     pub(crate) checkpoint_mapping: Option<&'admission [u8]>,
     pub(crate) current_decisions: &'admission [ServeDecision],
-    pub(crate) admit_low_copy: fn(PackedOwnedKind, PackedOwnedKind) -> bool,
+    pub(crate) admit_low_copy: fn(Codec, Codec) -> bool,
 }
 
 /// Reusable owner for the low-codec ranges selected by one routed layer.
@@ -129,7 +129,7 @@ pub(crate) struct ExpertSidecarReadScratch {
     high_cache_bytes: usize,
     high_cache_limit: usize,
     descriptor_slots: Vec<[Option<usize>; 3]>,
-    codec_slots: Vec<[Option<PackedOwnedKind>; 3]>,
+    codec_slots: Vec<[Option<Codec>; 3]>,
     used_buffers: usize,
     pub(crate) ranges_read: usize,
     pub(crate) bytes_read: usize,
@@ -425,11 +425,7 @@ impl ExpertSidecarReadScratch {
         self.buffers.get(buffer_index).map(Vec::as_slice)
     }
 
-    pub(crate) fn codec(
-        &self,
-        expert: usize,
-        projection: ExpertProjection,
-    ) -> Option<PackedOwnedKind> {
+    pub(crate) fn codec(&self, expert: usize, projection: ExpertProjection) -> Option<Codec> {
         self.codec_slots.get(expert)?[projection.index()]
     }
 
@@ -661,7 +657,7 @@ impl MappedExpertSidecar {
                     .map_err(|_| InteropError::SidecarSizeOverflow)?,
             });
             entries.push(ExpertEntry {
-                block: descriptor.target_codec.as_block(&self.mapping[range]),
+                block: crate::bind::as_block(descriptor.target_codec, &self.mapping[range]),
                 out_dim: descriptor.out_dim,
                 in_dim: descriptor.in_dim,
                 epoch: 0,
@@ -1122,8 +1118,10 @@ impl MappedExpertSidecar {
                     }
                 }
                 if !mapped_low {
-                    let expected = codec
-                        .byte_len_for(descriptor.out_dim as usize * descriptor.in_dim as usize);
+                    let expected = crate::bind::codec_byte_len_for(
+                        codec,
+                        descriptor.out_dim as usize * descriptor.in_dim as usize,
+                    );
                     if byte_length != expected {
                         return Err(invalid_sidecar(format!(
                             "high expert range has {byte_length} bytes, expected {expected}"
@@ -1289,7 +1287,7 @@ impl MappedExpertSidecar {
         start: u64,
         length: u64,
         mapping_len: usize,
-        codec: PackedOwnedKind,
+        codec: Codec,
     ) -> Result<core::ops::Range<usize>, InteropError> {
         let start = usize::try_from(start).map_err(|_| InteropError::SidecarSizeOverflow)?;
         let length = usize::try_from(length).map_err(|_| InteropError::SidecarSizeOverflow)?;
@@ -1306,7 +1304,7 @@ impl MappedExpertSidecar {
         let expected_elements = (descriptor.out_dim as usize)
             .checked_mul(descriptor.in_dim as usize)
             .ok_or(InteropError::SidecarSizeOverflow)?;
-        let expected_bytes = codec.byte_len_for(expected_elements);
+        let expected_bytes = crate::bind::codec_byte_len_for(codec, expected_elements);
         if length != expected_bytes {
             return Err(invalid_sidecar(format!(
                 "layer {} expert {} projection {} has {length} bytes, expected {expected_bytes}",
@@ -1586,8 +1584,9 @@ impl ExpertSidecar {
                         .and_then(|columns| rows.checked_mul(columns))
                 })
                 .ok_or(InteropError::SidecarSizeOverflow)?;
-            let expected_source_bytes = source_codec.byte_len_for(element_count);
-            let expected_data_bytes = target_codec.byte_len_for(element_count);
+            let expected_source_bytes =
+                crate::bind::codec_byte_len_for(source_codec, element_count);
+            let expected_data_bytes = crate::bind::codec_byte_len_for(target_codec, element_count);
             if source_bytes != expected_source_bytes as u64 {
                 return Err(invalid_sidecar(format!(
                     "descriptor {descriptor_index} source bytes {source_bytes} do not match {expected_source_bytes} bytes for {out_dim}x{in_dim}"
@@ -1695,7 +1694,7 @@ pub fn write_expert_sidecar<W: Write + Seek>(
     parsed: &ParsedGguf,
     file_bytes: &[u8],
     stacks: &[ExpertStackSpec<'_>],
-    target_codec: PackedOwnedKind,
+    target_codec: Codec,
     scratch: &mut [f32],
     output: &mut [u8],
     destination: &mut W,
@@ -1767,7 +1766,7 @@ pub fn write_expert_sidecar<W: Write + Seek>(
                 },
             ));
         }
-        let expected_output = spec.target_codec.byte_len_for(expected_elements);
+        let expected_output = crate::bind::codec_byte_len_for(spec.target_codec, expected_elements);
         if output.len() < expected_output {
             return Err(InteropError::Quant(
                 proxima_gguf::quant::QuantError::OutputSizeMismatch {
@@ -1834,19 +1833,19 @@ pub fn write_expert_sidecar<W: Write + Seek>(
     })
 }
 
-fn packed_kind(ggml_type: GgmlType, tensor: &str) -> Result<PackedOwnedKind, InteropError> {
+fn packed_kind(ggml_type: GgmlType, tensor: &str) -> Result<Codec, InteropError> {
     match ggml_type {
-        GgmlType::Q2_K => Ok(PackedOwnedKind::Q2K),
-        GgmlType::Q3_K => Ok(PackedOwnedKind::Q3K),
-        GgmlType::Q4_K => Ok(PackedOwnedKind::Q4K),
-        GgmlType::Q5_K => Ok(PackedOwnedKind::Q5K),
-        GgmlType::Q6_K => Ok(PackedOwnedKind::Q6K),
-        GgmlType::Q8_0 => Ok(PackedOwnedKind::Q8_0),
-        GgmlType::Q4_0 => Ok(PackedOwnedKind::Q4_0),
-        GgmlType::F16 => Ok(PackedOwnedKind::Float16),
-        GgmlType::Bf16 => Ok(PackedOwnedKind::BFloat16),
-        GgmlType::Q5_1 => Ok(PackedOwnedKind::Q5_1),
-        GgmlType::Q5_0 => Ok(PackedOwnedKind::Q5_0),
+        GgmlType::Q2_K => Ok(Codec::Q2K),
+        GgmlType::Q3_K => Ok(Codec::Q3K),
+        GgmlType::Q4_K => Ok(Codec::Q4K),
+        GgmlType::Q5_K => Ok(Codec::Q5K),
+        GgmlType::Q6_K => Ok(Codec::Q6K),
+        GgmlType::Q8_0 => Ok(Codec::Q8_0),
+        GgmlType::Q4_0 => Ok(Codec::Q4_0),
+        GgmlType::F16 => Ok(Codec::Float16),
+        GgmlType::Bf16 => Ok(Codec::BFloat16),
+        GgmlType::Q5_1 => Ok(Codec::Q5_1),
+        GgmlType::Q5_0 => Ok(Codec::Q5_0),
         other => Err(InteropError::UnrepresentableGgmlType {
             tensor: tensor.to_owned(),
             ggml_type: other,
@@ -1854,35 +1853,35 @@ fn packed_kind(ggml_type: GgmlType, tensor: &str) -> Result<PackedOwnedKind, Int
     }
 }
 
-fn codec_tag(codec: PackedOwnedKind) -> u8 {
+fn codec_tag(codec: Codec) -> u8 {
     match codec {
-        PackedOwnedKind::Q2K => 0,
-        PackedOwnedKind::Q3K => 1,
-        PackedOwnedKind::Q4K => 2,
-        PackedOwnedKind::Q5K => 3,
-        PackedOwnedKind::Q6K => 4,
-        PackedOwnedKind::Q8_0 => 5,
-        PackedOwnedKind::Q4_0 => 6,
-        PackedOwnedKind::Float16 => 7,
-        PackedOwnedKind::BFloat16 => 8,
-        PackedOwnedKind::Q5_1 => 9,
-        PackedOwnedKind::Q5_0 => 10,
+        Codec::Q2K => 0,
+        Codec::Q3K => 1,
+        Codec::Q4K => 2,
+        Codec::Q5K => 3,
+        Codec::Q6K => 4,
+        Codec::Q8_0 => 5,
+        Codec::Q4_0 => 6,
+        Codec::Float16 => 7,
+        Codec::BFloat16 => 8,
+        Codec::Q5_1 => 9,
+        Codec::Q5_0 => 10,
     }
 }
 
-fn codec_from_tag(tag: u8) -> Result<PackedOwnedKind, InteropError> {
+fn codec_from_tag(tag: u8) -> Result<Codec, InteropError> {
     match tag {
-        0 => Ok(PackedOwnedKind::Q2K),
-        1 => Ok(PackedOwnedKind::Q3K),
-        2 => Ok(PackedOwnedKind::Q4K),
-        3 => Ok(PackedOwnedKind::Q5K),
-        4 => Ok(PackedOwnedKind::Q6K),
-        5 => Ok(PackedOwnedKind::Q8_0),
-        6 => Ok(PackedOwnedKind::Q4_0),
-        7 => Ok(PackedOwnedKind::Float16),
-        8 => Ok(PackedOwnedKind::BFloat16),
-        9 => Ok(PackedOwnedKind::Q5_1),
-        10 => Ok(PackedOwnedKind::Q5_0),
+        0 => Ok(Codec::Q2K),
+        1 => Ok(Codec::Q3K),
+        2 => Ok(Codec::Q4K),
+        3 => Ok(Codec::Q5K),
+        4 => Ok(Codec::Q6K),
+        5 => Ok(Codec::Q8_0),
+        6 => Ok(Codec::Q4_0),
+        7 => Ok(Codec::Float16),
+        8 => Ok(Codec::BFloat16),
+        9 => Ok(Codec::Q5_1),
+        10 => Ok(Codec::Q5_0),
         _ => Err(invalid_sidecar(format!("unknown codec tag {tag}"))),
     }
 }
@@ -2021,7 +2020,7 @@ mod tests {
             expert_count: 2,
             out_dim: 1,
             in_dim: 256,
-            target_codec: PackedOwnedKind::Q2K,
+            target_codec: Codec::Q2K,
         }];
         let mut scratch = [0.0f32; 256];
         let mut output = [0u8; 84];
@@ -2030,7 +2029,7 @@ mod tests {
             &parsed,
             &source,
             &specification,
-            PackedOwnedKind::Q2K,
+            Codec::Q2K,
             &mut scratch,
             &mut output,
             &mut sidecar,
@@ -2065,7 +2064,7 @@ mod tests {
         let page = result
             .page(sidecar.get_ref(), 0, 1, "ffn_gate")
             .expect("the sidecar exposes a zero-copy page descriptor");
-        assert_eq!(page.codec, PackedOwnedKind::Q2K);
+        assert_eq!(page.codec, Codec::Q2K);
         assert_eq!(page.bytes.len(), 84);
 
         let loaded = ExpertSidecar::from_bytes(sidecar.get_ref())
@@ -2117,7 +2116,7 @@ mod tests {
                 expert_count: 1,
                 out_dim: 1,
                 in_dim: 256,
-                target_codec: PackedOwnedKind::Q2K,
+                target_codec: Codec::Q2K,
             },
             ExpertStackSpec {
                 layer: 0,
@@ -2126,7 +2125,7 @@ mod tests {
                 expert_count: 1,
                 out_dim: 1,
                 in_dim: 256,
-                target_codec: PackedOwnedKind::Q2K,
+                target_codec: Codec::Q2K,
             },
             ExpertStackSpec {
                 layer: 0,
@@ -2135,7 +2134,7 @@ mod tests {
                 expert_count: 1,
                 out_dim: 1,
                 in_dim: 256,
-                target_codec: PackedOwnedKind::Q2K,
+                target_codec: Codec::Q2K,
             },
         ];
         let mut decode_scratch = [0.0_f32; 256];
@@ -2145,7 +2144,7 @@ mod tests {
             &parsed,
             &source,
             &specifications,
-            PackedOwnedKind::Q2K,
+            Codec::Q2K,
             &mut decode_scratch,
             &mut encoded_expert,
             &mut sidecar_bytes,
@@ -2166,36 +2165,12 @@ mod tests {
             .with_checkpoint_file(checkpoint_file);
 
         let mut slab = ExpertSlab::new();
-        slab.bind_layer_stack(
-            0,
-            NodeId(1),
-            PackedOwnedKind::Q4K,
-            &source[0..144],
-            1,
-            1,
-            256,
-        )
-        .expect("binds gate stack");
-        slab.bind_layer_stack(
-            1,
-            NodeId(2),
-            PackedOwnedKind::Q4K,
-            &source[144..288],
-            1,
-            1,
-            256,
-        )
-        .expect("binds up stack");
-        slab.bind_layer_stack(
-            2,
-            NodeId(3),
-            PackedOwnedKind::Q4K,
-            &source[288..432],
-            1,
-            1,
-            256,
-        )
-        .expect("binds down stack");
+        slab.bind_layer_stack(0, NodeId(1), Codec::Q4K, &source[0..144], 1, 1, 256)
+            .expect("binds gate stack");
+        slab.bind_layer_stack(1, NodeId(2), Codec::Q4K, &source[144..288], 1, 1, 256)
+            .expect("binds up stack");
+        slab.bind_layer_stack(2, NodeId(3), Codec::Q4K, &source[288..432], 1, 1, 256)
+            .expect("binds down stack");
         slab.register_model_layer_site(0, ExpertProjection::Gate, 0);
         slab.register_model_layer_site(0, ExpertProjection::Up, 1);
         slab.register_model_layer_site(0, ExpertProjection::Down, 2);
@@ -2349,7 +2324,7 @@ mod tests {
             expert_count: expert_count as u32,
             out_dim: 1,
             in_dim: 256,
-            target_codec: PackedOwnedKind::Q2K,
+            target_codec: Codec::Q2K,
         });
         let mut decode_scratch = [0.0_f32; 256];
         let mut encoded_expert = [0_u8; 84];
@@ -2358,7 +2333,7 @@ mod tests {
             &parsed,
             &checkpoint,
             &specifications,
-            PackedOwnedKind::Q2K,
+            Codec::Q2K,
             &mut decode_scratch,
             &mut encoded_expert,
             &mut sidecar_bytes,
@@ -2378,7 +2353,7 @@ mod tests {
             slab.bind_layer_stack(
                 site,
                 NodeId(site as u32 + 1),
-                PackedOwnedKind::Q4K,
+                Codec::Q4K,
                 &checkpoint[start..start + projection_bytes],
                 expert_count,
                 1,
@@ -2457,7 +2432,7 @@ mod tests {
         unknown_codec.extend_from_slice(&0u32.to_le_bytes());
         unknown_codec.extend_from_slice(&1u32.to_le_bytes());
         unknown_codec.extend_from_slice(&256u32.to_le_bytes());
-        unknown_codec.extend_from_slice(&[255, codec_tag(PackedOwnedKind::Q2K)]);
+        unknown_codec.extend_from_slice(&[255, codec_tag(Codec::Q2K)]);
         unknown_codec.extend_from_slice(&0u16.to_le_bytes());
         unknown_codec.extend_from_slice(&0u64.to_le_bytes());
         unknown_codec.extend_from_slice(&144u64.to_le_bytes());
@@ -2504,7 +2479,7 @@ mod tests {
                 expert_count: 1,
                 out_dim: 1,
                 in_dim: 256,
-                target_codec: PackedOwnedKind::Q2K,
+                target_codec: Codec::Q2K,
             },
             ExpertStackSpec {
                 layer: 0,
@@ -2513,7 +2488,7 @@ mod tests {
                 expert_count: 1,
                 out_dim: 1,
                 in_dim: 256,
-                target_codec: PackedOwnedKind::Q2K,
+                target_codec: Codec::Q2K,
             },
             ExpertStackSpec {
                 layer: 0,
@@ -2522,7 +2497,7 @@ mod tests {
                 expert_count: 1,
                 out_dim: 1,
                 in_dim: 256,
-                target_codec: PackedOwnedKind::Q2K,
+                target_codec: Codec::Q2K,
             },
         ];
         let mut scratch = [0.0_f32; 256];
@@ -2532,7 +2507,7 @@ mod tests {
             &parsed,
             &checkpoint,
             &specifications,
-            PackedOwnedKind::Q2K,
+            Codec::Q2K,
             &mut scratch,
             &mut output,
             &mut bytes,
@@ -2552,7 +2527,7 @@ mod tests {
             slab.bind_layer_stack(
                 site,
                 proxima_tensor::NodeId(site as u32),
-                PackedOwnedKind::Q4K,
+                Codec::Q4K,
                 &checkpoint[site * 144..(site + 1) * 144],
                 1,
                 1,

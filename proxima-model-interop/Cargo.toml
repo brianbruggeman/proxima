@@ -384,8 +384,8 @@ required-features = ["std"]
 name = "tokenize_local"
 required-features = ["std"]
 
-# Writes an expert sidecar file via `write_expert_sidecar`/`ExpertStackSpec`/
-# `PackedOwnedKind` (all `#[cfg(feature = "std")]` re-exports in `lib.rs`) and
+# Writes an expert sidecar file via `write_expert_sidecar`/`ExpertStackSpec`
+# (all `#[cfg(feature = "std")]` re-exports in `lib.rs`) and
 # reads config through `conflaguration::Settings`, which `std` alone pulls in
 # as an optional dep -- same `std`-only reason as the examples above.
 [[example]]

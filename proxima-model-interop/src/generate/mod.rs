@@ -167,7 +167,7 @@ use proxima_tensor::spec::{DuplicateHeadPosition, mistral_single_range_cached_fo
 
 use crate::architecture::{Architecture, StepInput, StepInputContext, bind_symbols};
 use crate::bind::{
-    BoundWeights, ModelArchitecture, PackedOwnedKind, architecture_from_metadata, bind_all_weights,
+    BoundWeights, Codec, ModelArchitecture, architecture_from_metadata, bind_all_weights,
 };
 use crate::error::InteropError;
 use crate::hf_bind::bind_all_weights_from_safetensors;

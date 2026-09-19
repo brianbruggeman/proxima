@@ -5,7 +5,7 @@
 //! next step boundary.  Applying those actions is the only operation here
 //! that touches [`crate::ExpertSlab`].
 
-use crate::bind::PackedOwnedKind;
+use crate::bind::Codec;
 use crate::{ExpertSlab, InteropError};
 
 /// A layer/expert coordinate in a model's routed-expert matrix.
@@ -88,7 +88,7 @@ impl<const CAPACITY: usize> PrefetchCandidates<CAPACITY> {
 /// A high-precision expert source that may be borrowed by [`ExpertSlab`].
 #[derive(Debug, Clone, Copy)]
 pub struct ExpertPage<'bytes> {
-    pub codec: PackedOwnedKind,
+    pub codec: Codec,
     pub bytes: &'bytes [u8],
     pub out_dim: u32,
     pub in_dim: u32,
@@ -497,7 +497,7 @@ mod tests {
         ExpertAddress, ExpertPage, ExpertResidency, ResidencyAction, ResidencyConfig, RoutedExpert,
         ServePrecision,
     };
-    use crate::{ExpertSlab, PackedOwnedKind};
+    use crate::{Codec, ExpertSlab};
     use proxima_tensor::NodeId;
 
     const CONFIG: ResidencyConfig = ResidencyConfig {
@@ -524,7 +524,7 @@ mod tests {
             .apply_at_boundary(slab, actions, |address| {
                 let start = address.expert * 144;
                 Ok(ExpertPage {
-                    codec: PackedOwnedKind::Q4K,
+                    codec: Codec::Q4K,
                     bytes: &bytes[start..start + 144],
                     out_dim: 32,
                     in_dim: 32,
@@ -537,7 +537,7 @@ mod tests {
     fn stationary_trace_keeps_the_hot_expert_and_serves_high_after_boundary() {
         let bytes = stack();
         let mut slab = ExpertSlab::new();
-        slab.bind_layer_stack(0, NodeId(1), PackedOwnedKind::Q4K, &bytes, 4, 32, 32)
+        slab.bind_layer_stack(0, NodeId(1), Codec::Q4K, &bytes, 4, 32, 32)
             .expect("the four-expert stack binds");
         let mut policy = ExpertResidency::<1, 4>::new(CONFIG);
 
@@ -573,7 +573,7 @@ mod tests {
     fn shifting_trace_replaces_a_dwelled_resident_at_the_boundary() {
         let bytes = stack();
         let mut slab = ExpertSlab::new();
-        slab.bind_layer_stack(0, NodeId(1), PackedOwnedKind::Q4K, &bytes, 4, 32, 32)
+        slab.bind_layer_stack(0, NodeId(1), Codec::Q4K, &bytes, 4, 32, 32)
             .expect("the four-expert stack binds");
         let mut policy = ExpertResidency::<1, 4>::new(CONFIG);
 
@@ -660,7 +660,7 @@ mod tests {
         let actions = policy.reconcile::<4>().expect("one action fits");
         let mut slab = ExpertSlab::new();
         let bytes = stack();
-        slab.bind_layer_stack(0, NodeId(1), PackedOwnedKind::Q4K, &bytes, 4, 32, 32)
+        slab.bind_layer_stack(0, NodeId(1), Codec::Q4K, &bytes, 4, 32, 32)
             .expect("the predictor fixture binds its expert stack");
         apply(&mut policy, &mut slab, &actions, &bytes);
 

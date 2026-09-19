@@ -10,8 +10,8 @@ use core::ops::ControlFlow;
 
 #[cfg(test)]
 use super::{
-    DecodeMetrics, LoadedModel, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache,
-    TokenEvent, build_position_inputs, collect_future_gather_cuts, decode_until_stop_or_budget,
+    DecodeMetrics, LoadedModel, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache, TokenEvent,
+    build_position_inputs, collect_future_gather_cuts, decode_until_stop_or_budget,
     first_nonfinite_node_value, kv_extent, lock_expert_slab, qwen35moe_admit_low_copy,
     qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
     should_release_monolithic_sources, step_batch_needs_logits, visit_qwen35moe_router_boundary,
@@ -46,8 +46,8 @@ pub(super) mod tests {
         RouterExpertCounts, RouterLogits, SsmLayerCache, collect_future_gather_cuts,
         first_nonfinite_node_value, kv_extent, lock_expert_slab, qwen35moe_admit_low_copy,
         qwen35moe_monolithic_all_low_enabled, qwen35moe_pre_gather_enabled,
-        should_release_monolithic_sources, step_batch_needs_logits, visit_qwen35moe_router_boundary,
-        visit_qwen35moe_router_selections,
+        should_release_monolithic_sources, step_batch_needs_logits,
+        visit_qwen35moe_router_boundary, visit_qwen35moe_router_selections,
     };
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::{map_expert_sources_to_segment, use_metal_output_placements};
@@ -56,7 +56,7 @@ pub(super) mod tests {
         qwen35_dense_attention_placed_byte_length, qwen35_dense_attention_placement_enabled,
         retain_qwen35_segment_readbacks,
     };
-    use crate::bind::PackedOwnedKind;
+    use crate::bind::Codec;
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -114,22 +114,10 @@ pub(super) mod tests {
 
     #[test]
     fn qwen35moe_low_copy_admission_requires_byte_preserving_codec() {
-        assert!(qwen35moe_admit_low_copy(
-            PackedOwnedKind::Q4K,
-            PackedOwnedKind::Q4K
-        ));
-        assert!(qwen35moe_admit_low_copy(
-            PackedOwnedKind::Q6K,
-            PackedOwnedKind::Q6K
-        ));
-        assert!(!qwen35moe_admit_low_copy(
-            PackedOwnedKind::Q4K,
-            PackedOwnedKind::Q3K
-        ));
-        assert!(!qwen35moe_admit_low_copy(
-            PackedOwnedKind::Q6K,
-            PackedOwnedKind::Q2K
-        ));
+        assert!(qwen35moe_admit_low_copy(Codec::Q4K, Codec::Q4K));
+        assert!(qwen35moe_admit_low_copy(Codec::Q6K, Codec::Q6K));
+        assert!(!qwen35moe_admit_low_copy(Codec::Q4K, Codec::Q3K));
+        assert!(!qwen35moe_admit_low_copy(Codec::Q6K, Codec::Q2K));
     }
 
     #[test]
@@ -410,7 +398,7 @@ pub(super) mod tests {
             .bind_layer_stack(
                 0,
                 proxima_tensor::op::NodeId(1),
-                crate::bind::PackedOwnedKind::Q4K,
+                crate::bind::Codec::Q4K,
                 &checkpoint_expert,
                 1,
                 32,
@@ -419,14 +407,7 @@ pub(super) mod tests {
             .expect("the routed layer binds before evaluation");
 
         lock_expert_slab(&slab)
-            .page_expert(
-                0,
-                0,
-                crate::bind::PackedOwnedKind::Q4K,
-                &routed_expert,
-                32,
-                32,
-            )
+            .page_expert(0, 0, crate::bind::Codec::Q4K, &routed_expert, 32, 32)
             .expect("the current route may change residency before gather");
 
         let mut locked = lock_expert_slab(&slab);
@@ -439,7 +420,7 @@ pub(super) mod tests {
         let during_gather = gather_phase.as_slab_mut().page_expert(
             0,
             0,
-            crate::bind::PackedOwnedKind::Q4K,
+            crate::bind::Codec::Q4K,
             &checkpoint_expert,
             32,
             32,
@@ -455,14 +436,7 @@ pub(super) mod tests {
         drop(gather_phase);
         drop(locked);
         lock_expert_slab(&slab)
-            .page_expert(
-                0,
-                0,
-                crate::bind::PackedOwnedKind::Q4K,
-                &checkpoint_expert,
-                32,
-                32,
-            )
+            .page_expert(0, 0, crate::bind::Codec::Q4K, &checkpoint_expert, 32, 32)
             .expect("paging succeeds again once the gather phase's StepGuard drops");
     }
 
@@ -516,7 +490,7 @@ pub(super) mod tests {
         slab.bind_layer_stack(
             0,
             weight_node,
-            crate::bind::PackedOwnedKind::Q4K,
+            crate::bind::Codec::Q4K,
             &checkpoint_expert,
             1,
             32,
@@ -545,7 +519,7 @@ pub(super) mod tests {
                 slab.page_expert(
                     layer,
                     routes[0].expert,
-                    crate::bind::PackedOwnedKind::Q4K,
+                    crate::bind::Codec::Q4K,
                     &routed_expert,
                     32,
                     32,
@@ -555,14 +529,8 @@ pub(super) mod tests {
         )
         .expect("the residency callback runs while the gather boundary is open");
 
-        let mutation_after_boundary = slab.page_expert(
-            0,
-            0,
-            crate::bind::PackedOwnedKind::Q4K,
-            &checkpoint_expert,
-            32,
-            32,
-        );
+        let mutation_after_boundary =
+            slab.page_expert(0, 0, crate::bind::Codec::Q4K, &checkpoint_expert, 32, 32);
         assert!(matches!(
             mutation_after_boundary,
             Err(crate::InteropError::ExpertSwapDuringStep {

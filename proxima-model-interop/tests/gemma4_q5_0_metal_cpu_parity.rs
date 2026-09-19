@@ -12,7 +12,7 @@
 //!
 //! Before this file's companion source changes (`proxima-tensor`'s
 //! `QuantizedBlock::Q5_0` CPU kernel, `omega::msl::PackedCodec::Q5_0`'s
-//! unpack kernel, `proxima-model-interop::bind::PackedOwnedKind::Q5_0`), a
+//! unpack kernel, `proxima-model-interop::bind::Codec::Q5_0`), a
 //! `Q5_0` expert dequantized to `f32` on load -- 30 layers x 128 experts x
 //! [704, 2816] x 4 bytes/f32 is the multi-GB device allocation this file's
 //! own memory-collapse claim rests on. This file proves the KERNEL half
