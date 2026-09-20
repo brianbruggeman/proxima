@@ -3902,3 +3902,158 @@ mod ple_stage_b_tests {
         }
     }
 }
+
+/// [`LayerFfnConfig::exclusive_dense_post_norm`]: Gemma 4 E2B/E4B's dense-
+/// only `FfnCombination::Exclusive` branch needs its own
+/// `blk.{layer}.post_ffw_norm.weight` sandwich norm on the dense FFN output
+/// before the residual add (the un-normed FFN output growing the residual
+/// unboundedly every layer was gemma4-E2B's actual root cause: real-blob
+/// diagnostic `mean_abs` grew to ~4700 by layer 4, then this crate's own
+/// `logit_softcap`-less first-token argmax landed on an unrelated vocab
+/// entry instead of "Paris" -- both symptoms of an undamped residual).
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod exclusive_dense_post_norm_tests {
+    use super::*;
+
+    const EMBEDDING: u32 = 4;
+    const FEED_FORWARD: u32 = 2;
+    const EPS: f32 = 1e-6;
+    const POST_MIXER: [f32; 4] = [0.3, -0.2, 0.1, 0.4];
+    const FFN_NORM_WEIGHT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+    /// `[embedding, feed_forward]`, embedding-major -- [`append_dense_swiglu_ffn`]'s
+    /// own `"dg->sdg"` einsum pattern for `w_gate`/`w_up`.
+    const W_GATE: [[f32; 2]; 4] = [[0.1, -0.2], [0.3, 0.1], [-0.1, 0.2], [0.05, 0.15]];
+    const W_UP: [[f32; 2]; 4] = [[-0.05, 0.2], [0.15, -0.1], [0.2, 0.05], [-0.1, 0.3]];
+    /// `[feed_forward, embedding]`, feed-forward-major -- `w_down`'s own
+    /// `"gd->sgd"` pattern.
+    const W_DOWN: [[f32; 4]; 2] = [[0.2, -0.1, 0.05, 0.3], [-0.15, 0.25, 0.1, -0.2]];
+    /// Deliberately non-uniform, so a norm bug that silently passes `x`
+    /// through unchanged (`gamma` never multiplied in) cannot hide behind
+    /// an all-ones gamma the way [`FFN_NORM_WEIGHT`] above does.
+    const POST_FFW_NORM_WEIGHT: [f32; 4] = [1.5, 0.5, 2.0, 1.0];
+
+    fn flatten_in_major<const IN: usize, const OUT: usize>(table: &[[f32; OUT]; IN]) -> Vec<f32> {
+        table.iter().flat_map(|row| row.iter().copied()).collect()
+    }
+
+    /// Builds and evaluates one dense-FFN layer (`leading_dense_block_count
+    /// = 1` selects [`FfnCombination::Exclusive`]'s dense branch for layer
+    /// 0), returning the post-residual-add hidden state for the requested
+    /// `exclusive_dense_post_norm` setting.
+    fn evaluate_layer(exclusive_dense_post_norm: bool) -> Vec<f32> {
+        let mut program = Vec::new();
+        let post_mixer = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
+            "post_mixer",
+        );
+        let ffn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EMBEDDING)],
+            "blk.0.ffn_norm.weight",
+        );
+        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let ones = scalar_constant(&mut program, 1.0);
+        let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+
+        let ffn_config = LayerFfnConfig {
+            exclusive_dense_post_norm,
+            ..LayerFfnConfig::exclusive()
+        };
+        let mut moe_sites = Vec::new();
+        let root = append_lfm2_layer_ffn(
+            &mut program,
+            0,
+            post_mixer,
+            ffn_norm_weight,
+            EMBEDDING,
+            FEED_FORWARD,
+            0,
+            0,
+            0,
+            1,
+            ones,
+            inv_dim,
+            eps,
+            &ffn_config,
+            None,
+            0,
+            &mut moe_sites,
+        )
+        .expect("append_lfm2_layer_ffn lowers");
+
+        let w_gate = flatten_in_major(&W_GATE);
+        let w_up = flatten_in_major(&W_UP);
+        let w_down = flatten_in_major(&W_DOWN);
+        let eps_block = [EPS];
+        let symbols: [u64; 1] = [1];
+
+        // Bound positionally, in declaration order: `post_mixer`,
+        // `ffn_norm.weight`, `eps`, then `append_dense_swiglu_ffn`'s own
+        // gate/up/down triple, then (only when `exclusive_dense_post_norm`
+        // is `true`) this fix's own `post_ffw_norm.weight`.
+        let mut blocks: Vec<&[f32]> = alloc::vec![
+            &POST_MIXER,
+            &FFN_NORM_WEIGHT,
+            &eps_block,
+            w_gate.as_slice(),
+            w_up.as_slice(),
+            w_down.as_slice(),
+        ];
+        if exclusive_dense_post_norm {
+            blocks.push(&POST_FFW_NORM_WEIGHT);
+        }
+
+        let evaluated = crate::cpu::evaluate(&program, &symbols, &blocks, &[root])
+            .expect("exclusive dense-FFN layer evaluates");
+        evaluated.root().to_vec()
+    }
+
+    /// `exclusive_dense_post_norm: true` must apply `rmsnorm(ffn_out,
+    /// post_ffw_norm.weight)` to the dense branch's raw output before the
+    /// residual add -- verified against a CLOSED-FORM RMSNorm computed
+    /// independently from the `false` run's own measured raw FFN output
+    /// (`x_false - post_mixer`), not by mirroring [`rmsnorm`]'s own op
+    /// sequence, so a wiring bug in the composition is actually caught.
+    #[test]
+    fn true_applies_post_ffw_norm_to_the_dense_branch_before_the_residual_add() {
+        let x_false = evaluate_layer(false);
+        let x_true = evaluate_layer(true);
+
+        let ffn_out_raw: Vec<f32> = x_false
+            .iter()
+            .zip(POST_MIXER.iter())
+            .map(|(total, mixer)| total - mixer)
+            .collect();
+        let mean_square = ffn_out_raw.iter().map(|value| value * value).sum::<f32>()
+            / ffn_out_raw.len() as f32;
+        let inv_rms = 1.0 / (mean_square + EPS).sqrt();
+        let expected: Vec<f32> = ffn_out_raw
+            .iter()
+            .zip(POST_FFW_NORM_WEIGHT.iter())
+            .zip(POST_MIXER.iter())
+            .map(|((raw, gamma), mixer)| raw * inv_rms * gamma + mixer)
+            .collect();
+
+        for (actual, target) in x_true.iter().zip(expected.iter()) {
+            assert!(
+                (actual - target).abs() < 1e-4,
+                "x_true = {x_true:?}, expected {expected:?}"
+            );
+        }
+
+        let max_abs_diff = x_true
+            .iter()
+            .zip(x_false.iter())
+            .map(|(with_norm, without_norm)| (with_norm - without_norm).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs_diff > 1e-3,
+            "post_ffw_norm must actually change the dense branch's output, \
+             not pass it through unchanged: max_abs_diff={max_abs_diff}"
+        );
+    }
+}
