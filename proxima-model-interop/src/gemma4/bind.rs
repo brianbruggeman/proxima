@@ -60,19 +60,23 @@ use super::program::gemma4_sliding_rope_table;
 
 /// Enumerates every tensor name `gemma4::hparams::from_metadata`'s own
 /// `Architecture` implies. Confirmed against the real `qwen3.6`-sibling
-/// `gemma4` checkpoint (`examples/gemma4_dump.rs` /
-/// `examples/gemma4_layer_scan.rs`): every layer carries 22 tensors EXCEPT
-/// `attn_v.weight`, which is absent on the five full-attention layers
-/// (indices 5, 11, 17, 23, 29 on the real checkpoint) and present only on
-/// sliding-window layers -- 25 layers of 22 plus 5 layers of 21, plus
-/// 3 global tensors, is exactly the real header's 658. On a shared-KV
-/// checkpoint (`attention.shared_kv_layers > 0`, e.g. `gemma4:e2b-it-qat`),
-/// every TRAILING layer from `block_count - shared_kv_layers` onward
-/// (confirmed against the real header by an `UnknownTensor` load error on
-/// `blk.15.attn_k_norm.weight`) carries none of `attn_k.weight`,
-/// `attn_k_norm.weight`, or `attn_v.weight` at all -- see
-/// `gemma4_layer_schedule`'s own `shared_kv_source_layer` for which
-/// own-KV layer supplies them instead.
+/// `gemma4` MoE checkpoint (`examples/gemma4_dump.rs` /
+/// `examples/gemma4_layer_scan.rs`, `shared_kv_layers == 0`): every layer
+/// carries 22 tensors EXCEPT `attn_v.weight`, which is absent on the five
+/// full-attention layers (indices 5, 11, 17, 23, 29 on the real checkpoint)
+/// and present only on sliding-window layers -- 25 layers of 22 plus
+/// 5 layers of 21, plus 3 global tensors, is exactly the real header's 658.
+/// On a shared-KV checkpoint (`attention.shared_kv_layers > 0`, e.g.
+/// `gemma4:e2b-it-qat`) this does NOT hold: every own-KV layer (`layer <
+/// block_count - shared_kv_layers`), sliding or full, carries its own
+/// `attn_v.weight` (confirmed against the real E2B header -- `blk.4`,
+/// `blk.9`, `blk.14`, the three full own-KV layers among the first 15,
+/// each list `attn_v.weight`). Every TRAILING layer from
+/// `block_count - shared_kv_layers` onward (confirmed against the real
+/// header by an `UnknownTensor` load error on `blk.15.attn_k_norm.weight`)
+/// carries none of `attn_k.weight`, `attn_k_norm.weight`, or
+/// `attn_v.weight` at all -- see `gemma4_layer_schedule`'s own
+/// `shared_kv_source_layer` for which own-KV layer supplies them instead.
 #[must_use]
 pub fn gemma4_tensor_names(architecture: &Architecture) -> Vec<String> {
     let mut names = Vec::new();
@@ -106,7 +110,11 @@ pub fn gemma4_tensor_names(architecture: &Architecture) -> Vec<String> {
         if !is_shared_kv {
             suffixes.push("attn_k.weight");
             suffixes.push("attn_k_norm.weight");
-            if is_sliding {
+            // Mirrors `bind_gemma4_weights`'s own `attn_v.weight` bind gate
+            // and `gemma4_layer_schedule`'s own `value_source_kind` gate --
+            // MoE's full layers alone lack `attn_v.weight` (`is_sliding`);
+            // a shared-KV checkpoint's (E2B/E4B) own-KV layers ALL carry it.
+            if is_sliding || architecture.shared_kv_layers > 0 {
                 suffixes.push("attn_v.weight");
             }
         }
@@ -361,7 +369,11 @@ pub fn bind_gemma4_weights<'file>(
                 &mut state,
             )?;
         }
-        if is_sliding && !is_shared_kv {
+        // Mirrors `gemma4_layer_schedule`'s own `value_source_kind` gate --
+        // MoE keeps `is_sliding` (a full layer has no `attn_v.weight` on
+        // disk); E2B/E4B (`shared_kv_layers > 0`) binds every own-KV
+        // layer's real `attn_v.weight` unconditionally.
+        if (is_sliding || architecture.shared_kv_layers > 0) && !is_shared_kv {
             bind_matmul_weight(
                 parsed,
                 file_bytes,
@@ -647,12 +659,14 @@ pub struct Gemma4Arch;
 /// The builtin `gemma4` registration value.
 pub static GEMMA4: Gemma4Arch = Gemma4Arch;
 
-/// Sliding layers use [`ValueSourceKind::ProjectedV`] (a real
-/// `attn_v.weight`) and the SWA RoPE table; full layers use
-/// [`ValueSourceKind::SharedWithKey`] (no `attn_v.weight` on disk -- the key
-/// projection's own output stands in for `V`) and the full-length RoPE
-/// table. Both use [`RopePairing::SplitHalf`] (Gemma's own half-split
-/// rotation, not Llama/Mistral's interleaved pairing).
+/// Sliding layers always use [`ValueSourceKind::ProjectedV`] (a real
+/// `attn_v.weight`) and the SWA RoPE table; full layers use the full-length
+/// RoPE table and [`ValueSourceKind::ProjectedV`] too UNLESS this is a MoE
+/// checkpoint (`shared_kv_layers == 0`), where a full layer genuinely has
+/// no `attn_v.weight` on disk and [`ValueSourceKind::SharedWithKey`] (the
+/// key projection's own output stands in for `V`) is correct instead. Both
+/// use [`RopePairing::SplitHalf`] (Gemma's own half-split rotation, not
+/// Llama/Mistral's interleaved pairing).
 /// Every gemma4 layer is [`LayerKind::Attention`], runs dense SwiGLU over
 /// the shared `ffn_norm`-normed input and routed MoE over its OWN
 /// `pre_ffw_norm_2`-normed input (`routed_pre_norm: true`), each with its
@@ -785,7 +799,27 @@ fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
                     head_dim: architecture.key_length,
                     kv_heads,
                     mask_window: None,
-                    value_source_kind: ValueSourceKind::SharedWithKey,
+                    // MoE (12B/26B/31B, `shared_kv_layers == 0`): a full
+                    // layer genuinely has no `attn_v.weight` on disk --
+                    // `SharedWithKey` (unchanged). E2B/E4B
+                    // (`shared_kv_layers > 0`): every own-KV layer, sliding
+                    // OR full, carries its own real `attn_v.weight`
+                    // (confirmed against the real `gemma4:e2b-it-qat`
+                    // header -- `blk.4`/`blk.9`/`blk.14`, the three full
+                    // own-KV layers, each list `attn_v.weight` among their
+                    // 17 tensors) -- `SharedWithKey` here would silently
+                    // substitute the key projection for a real, present `V`
+                    // weight instead of reading it. `shared_kv_layers > 0`
+                    // is this crate's own established E2B-vs-MoE
+                    // discriminator (already gates `is_shared_kv`/PLE
+                    // above); the trailing shared-KV override below
+                    // supersedes this for actually-shared layers regardless
+                    // of what is set here.
+                    value_source_kind: if architecture.shared_kv_layers > 0 {
+                        ValueSourceKind::ProjectedV
+                    } else {
+                        ValueSourceKind::SharedWithKey
+                    },
                     key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos",
@@ -1119,5 +1153,188 @@ mod shared_kv_reuse_map_tests {
         let pattern = period_five_pattern(35);
         let full_count = pattern.iter().filter(|&&is_sliding| !is_sliding).count();
         assert_eq!(full_count, 7);
+    }
+}
+
+/// Regression coverage for the bug this crate shipped once: `bind` and the
+/// forward program each independently gate `attn_k.weight`/
+/// `attn_k_norm.weight`/`attn_v.weight` per layer, and nothing forced the
+/// two gates to agree -- `gemma4_layer_schedule` used to gate
+/// `ValueSourceKind::ProjectedV` (and therefore the forward program's own
+/// `attn_v.weight` [`proxima_tensor::op::Op::Input`] leaf) on `is_sliding`
+/// alone, the MoE convention, while E2B/E4B's own-KV FULL layers (`blk.4`,
+/// `blk.9`, `blk.14` on the real `gemma4:e2b-it-qat` checkpoint) carry a
+/// real `attn_v.weight` regardless of sliding vs full. This test builds the
+/// ACTUAL forward program `Gemma4Arch::bind` builds (not a hand-simulated
+/// stand-in) for a synthetic E2B-shaped [`Architecture`] whose
+/// `sliding_window_pattern`/`shared_kv_layers`/`block_count` are the real
+/// checkpoint's own measured values (a real header dump against
+/// `~/.ollama/models/blobs/sha256-3646b4c...` on 2026-09-20), then asserts
+/// the forward program's own declared `Input` leaf names for these three
+/// per-layer weights equal exactly the name set [`bind_gemma4_weights`]'s
+/// own gates would bind -- no declared-but-unbound leaf, and no bound
+/// leaf the forward program never asks for either.
+#[cfg(test)]
+mod declared_leaves_match_bound_leaves_tests {
+    use super::*;
+    use proxima_tensor::op::Op;
+
+    /// The real `gemma4:e2b-it-qat` checkpoint's own measured
+    /// `sliding_window_pattern`/`shared_kv_layers`/`block_count` (header
+    /// dump, 2026-09-20) -- every other field is a plausible dense-E2B
+    /// value uninvolved in the attn_k/attn_k_norm/attn_v declare-vs-bind
+    /// gate this test exercises.
+    fn e2b_shaped_architecture() -> Architecture {
+        let sliding_window_pattern: Vec<bool> =
+            (0..35u32).map(|index| (index + 1) % 5 != 0).collect();
+        let mut feed_forward_by_layer = alloc::vec![6144u32; 15];
+        feed_forward_by_layer.extend(alloc::vec![12288u32; 20]);
+        Architecture {
+            vocab: 1,
+            embedding: 1536,
+            block_count: 35,
+            feed_forward: 6144,
+            feed_forward_by_layer,
+            expert_feed_forward: 0,
+            expert_count: 0,
+            expert_used_count: 0,
+            head_count: 8,
+            kv_heads_by_layer: alloc::vec![1; 35],
+            rms_epsilon: 1e-6,
+            key_length: 512,
+            value_length: 512,
+            sliding_window: 512,
+            key_length_swa: 256,
+            value_length_swa: 256,
+            sliding_window_pattern,
+            shared_kv_layers: 20,
+            rope_freq_base: 1_000_000.0,
+            rope_freq_base_swa: 10_000.0,
+            rope_dimension_count: 512,
+            rope_dimension_count_swa: 256,
+            final_logit_softcapping: 30.0,
+            ple_dim: 256,
+        }
+    }
+
+    /// The name set [`bind_gemma4_weights`]'s own per-layer gates would
+    /// bind for `suffix` -- reproduces those gates verbatim (not a
+    /// re-derivation) so this test fails the moment either site's
+    /// condition drifts from the other.
+    fn bound_leaf_names(
+        architecture: &Architecture,
+        suffix: &str,
+    ) -> alloc::collections::BTreeSet<String> {
+        let first_shared_idx = architecture
+            .block_count
+            .saturating_sub(architecture.shared_kv_layers);
+        architecture
+            .sliding_window_pattern
+            .iter()
+            .enumerate()
+            .filter_map(|(layer_index, &is_sliding)| {
+                let layer = layer_index as u32;
+                let is_shared_kv = layer >= first_shared_idx;
+                let bound = match suffix {
+                    "attn_k.weight" | "attn_k_norm.weight" => !is_shared_kv,
+                    "attn_v.weight" => {
+                        (is_sliding || architecture.shared_kv_layers > 0) && !is_shared_kv
+                    }
+                    other => unreachable!("unexpected suffix {other}"),
+                };
+                bound.then(|| format!("blk.{layer}.{suffix}"))
+            })
+            .collect()
+    }
+
+    /// The name set the ACTUAL forward program (`lfm2_forward_program_with_experts`
+    /// over `gemma4_layer_schedule`'s own output, the exact call
+    /// `Gemma4Arch::bind` makes) declares as an `Input` leaf for `suffix`.
+    fn declared_leaf_names(
+        architecture: &Architecture,
+        suffix: &str,
+    ) -> alloc::collections::BTreeSet<String> {
+        let schedule = gemma4_layer_schedule(architecture);
+        let (program, _logits, _moe_sites) = lfm2_forward_program_with_experts(
+            architecture.vocab,
+            architecture.embedding,
+            architecture.feed_forward,
+            architecture.expert_feed_forward,
+            architecture.head_count,
+            architecture.block_count,
+            architecture.expert_count,
+            architecture.expert_used_count,
+            architecture.block_count,
+            0,
+            &schedule,
+            Some(EmbeddingScale::Sqrt),
+            (architecture.final_logit_softcapping > 0.0)
+                .then_some(architecture.final_logit_softcapping),
+            true,
+            (architecture.ple_dim > 0).then_some(architecture.ple_dim),
+        )
+        .expect("gemma4 e2b-shaped forward program lowers");
+
+        program
+            .iter()
+            .filter_map(|op| match op {
+                Op::Input {
+                    name: Some(name), ..
+                } => Some(name.clone()),
+                _ => None,
+            })
+            .filter(|name| name.ends_with(suffix) && name.starts_with("blk."))
+            .collect()
+    }
+
+    #[test]
+    fn e2b_declared_attn_v_leaves_equal_bound_attn_v_leaves() {
+        let architecture = e2b_shaped_architecture();
+        let declared = declared_leaf_names(&architecture, "attn_v.weight");
+        let bound = bound_leaf_names(&architecture, "attn_v.weight");
+        assert_eq!(
+            declared, bound,
+            "forward program declares attn_v.weight leaves the binder does not bind (or vice versa)"
+        );
+        // The three real full own-KV layers this bug silently dropped --
+        // pins the invariant to the actual header fact, not just set
+        // equality (an empty-vs-empty pair would also satisfy `assert_eq`
+        // above).
+        for full_own_kv_layer in [4, 9, 14] {
+            let name = format!("blk.{full_own_kv_layer}.attn_v.weight");
+            assert!(
+                declared.contains(&name),
+                "expected {name} to be declared (full own-KV E2B layer has a real attn_v.weight)"
+            );
+        }
+    }
+
+    #[test]
+    fn e2b_declared_attn_k_and_attn_k_norm_leaves_equal_bound_leaves() {
+        let architecture = e2b_shaped_architecture();
+        for suffix in ["attn_k.weight", "attn_k_norm.weight"] {
+            let declared = declared_leaf_names(&architecture, suffix);
+            let bound = bound_leaf_names(&architecture, suffix);
+            assert_eq!(declared, bound, "{suffix} declare/bind set mismatch");
+        }
+    }
+
+    /// The MoE path (`shared_kv_layers == 0`) must keep the exact prior
+    /// gate: only sliding layers declare/bind `attn_v.weight` -- proves the
+    /// E2B fix above did not widen MoE's own set.
+    #[test]
+    fn moe_declared_attn_v_leaves_stay_gated_on_is_sliding_only() {
+        let mut architecture = e2b_shaped_architecture();
+        architecture.shared_kv_layers = 0;
+        let declared = declared_leaf_names(&architecture, "attn_v.weight");
+        let bound = bound_leaf_names(&architecture, "attn_v.weight");
+        assert_eq!(declared, bound);
+        for full_layer in [4, 9, 14] {
+            let name = format!("blk.{full_layer}.attn_v.weight");
+            assert!(
+                !declared.contains(&name),
+                "MoE full layer {name} must stay SharedWithKey (no attn_v.weight)"
+            );
+        }
     }
 }
