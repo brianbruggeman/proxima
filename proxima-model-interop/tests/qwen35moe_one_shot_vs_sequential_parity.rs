@@ -420,6 +420,9 @@ fn run_sequential() -> ParitySample {
                 Qwen35LayerRoots::Attention(_) => {
                     unreachable!("synthetic architecture never uses the even/odd shape")
                 }
+                Qwen35LayerRoots::SharedFromLayer(_) => {
+                    unreachable!("qwen3.5 has no cross-layer shared-KV layers")
+                }
             }
             let _ = layer;
         }

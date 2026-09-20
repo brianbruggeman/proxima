@@ -155,6 +155,7 @@ mod tests {
                     LayerCacheState::Ssm(layer_cache) => {
                         layer_cache.advance(&synthetic, &synthetic, synthetic.len());
                     }
+                    LayerCacheState::SharedFromLayer => {}
                 }
             }
             let last = *positions.last().expect("evaluate is never called with zero positions");

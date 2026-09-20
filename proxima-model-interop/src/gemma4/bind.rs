@@ -22,28 +22,17 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
-// `gemma4_layer_schedule`'s own per-layer schedule types are consulted only
-// by the cacheless path below -- the `gemma4-kv-cache` path builds its
-// schedule from `proxima_tensor::spec::gemma4_descriptor` instead (see
-// `Gemma4Arch::bind`'s own `#[cfg(feature = "gemma4-kv-cache")]` split
-// below), so importing them unconditionally would leave them unused under
-// that feature, a warning that `workspace.lints.rust.warnings = "deny"`
-// turns into a `cargo check` failure.
-#[cfg(not(feature = "gemma4-kv-cache"))]
+// `gemma4_layer_schedule`'s own per-layer schedule (real E2B/E4B/12B/26B/31B
+// shape, `architecture`-derived) is the SINGLE schedule source for both
+// engines below -- [`CacheStrategy`] is a runtime choice off `architecture`
+// (`Gemma4Arch::bind`'s own doc on `descriptor.cache_strategy`), not a
+// `#[cfg]` fork, so every one of these is compiled in unconditionally.
 use proxima_tensor::spec::{
-    Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
-    KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
-    ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind,
+    Activation, AttentionScoreScale, CacheStrategy, EmbeddingScale, ExpertGatingFunc,
+    FfnCombination, KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind,
+    LayerSchedule, ModelDescriptor, ParallelDenseMoeConfig, Qwen35LayerRoots, RopePairing,
+    RopeTableSel, ValueSourceKind, build_forward,
 };
-// Each build uses exactly one of these two forward-program builders (see
-// `Gemma4Arch::bind`'s own `#[cfg(feature = "gemma4-kv-cache")]` split
-// below) -- importing both unconditionally would leave the unused one a
-// warning that `workspace.lints.rust.warnings = "deny"` turns into a
-// `cargo check` failure.
-#[cfg(not(feature = "gemma4-kv-cache"))]
-use proxima_tensor::spec::lfm2_forward_program_with_experts;
-#[cfg(feature = "gemma4-kv-cache")]
-use proxima_tensor::spec::{CacheStrategy, Qwen35LayerRoots, build_forward, gemma4_descriptor};
 
 use crate::architecture::{
     Architecture as ArchitectureTrait, BoundProgram, StepInput, StepInputContext,
@@ -697,7 +686,6 @@ pub static GEMMA4: Gemma4Arch = Gemma4Arch;
 /// `proxima-tensor::spec::tests::gemma4_synthetic_parity::shared_kv_worked_example`
 /// for the synthetic-forward proof that the wiring reuses rather than
 /// re-derives.
-#[cfg_attr(feature = "gemma4-kv-cache", allow(dead_code))]
 fn shared_kv_source_layer(sliding_window_pattern: &[bool], first_shared_idx: u32, layer: usize) -> u32 {
     let is_sliding = sliding_window_pattern[layer];
     (0..first_shared_idx as usize)
@@ -711,7 +699,6 @@ fn shared_kv_source_layer(sliding_window_pattern: &[bool], first_shared_idx: u32
         .unwrap_or_else(|| first_shared_idx.saturating_sub(1))
 }
 
-#[cfg(not(feature = "gemma4-kv-cache"))]
 fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
     // E2B/E4B (`expert_count == 0`) carry no routed-expert tensors at all
     // (`bind_gemma4_weights`'s own `expert_count > 0` split) -- their
@@ -889,88 +876,129 @@ impl ArchitectureTrait for Gemma4Arch {
         let architecture = from_metadata(parsed)?;
         let weights = bind_gemma4_weights(parsed, file_bytes, &architecture)?;
 
-        // `gemma4-kv-cache` (default-off): routes through the generic
-        // `ModelDescriptor`/`build_forward` path (`proxima_tensor::spec`)
-        // instead of calling
-        // `lfm2_two_range_cached_forward_program_with_experts` directly --
-        // `gemma4_descriptor` bakes the SAME real-checkpoint shape
-        // `gemma4_layer_schedule` below derives from `architecture` at bind
-        // time (proven field-for-field identical by the real registry
-        // probe cited on `gemma4_descriptor`'s own constants), so swapping
-        // the call site changes nothing about the emitted program -- see
-        // `lfm2_two_range_cached_forward_program_with_experts`'s own module
-        // doc for why a decode step's cost drops from O(n^2) to O(1) in
-        // prior sequence length once `layer_roots` below is non-empty. The
+        // RUNTIME choice, not `#[cfg]`: `gemma4_layer_schedule` derives the
+        // SAME real-checkpoint shape (sliding/full split, matformer FFN
+        // widths, PLE, shared-KV) for every gemma4 variant, fed once into
+        // `build_forward` here -- `descriptor.cache_strategy` is the one
+        // thing that varies, decided below from `architecture` itself.
+        // `CacheStrategy::TwoRange` is
+        // `lfm2_two_range_cached_forward_program_with_experts`: a decode
+        // step's cost drops from O(n^2) to O(1) in prior sequence length
+        // once `layer_roots` below is non-empty (proven for the
+        // no-shared-KV shape by `proxima-tensor`'s own
+        // `two_range_cached_gemma4_matches_prefill_oracle_with_decode_loop_realistic_zero_padding`/
+        // `..._two_step_decode_matches_one_shot_prefill_oracle`/
+        // `build_forward_two_range_matches_direct_builder_call`, and for
+        // gemma4 E2B's `KeySourceKind::SharedFromLayer`/
+        // `ValueSourceKind::SharedFromLayer` shape by
+        // `two_range_cached_gemma4_shared_kv_layer_matches_cacheless_oracle`
+        // -- all against the cacheless engine as oracle, all < 1e-4). The
         // TWO-range engine, not the single-range one: gemma4's own first
         // step (`single_position_step == false` below) processes the WHOLE
         // prompt as one `cached_len=0` call, and a single merged softmax
         // has no self-consistent way to include that call's own new
         // positions in `kv_cache.{layer}.*` before they exist
         // (`lfm2_single_range_cached.rs`'s own module doc) -- proven by
-        // `proxima-tensor`'s own
         // `single_range_cached_gemma4_diverges_on_zero_cache_matches_when_self_range_is_folded`
-        // (zero-cache max-abs-diff 0.39 vs the prefill oracle) and closed by
-        // `two_range_cached_gemma4_matches_prefill_oracle_with_decode_loop_realistic_zero_padding`/
-        // `..._two_step_decode_matches_one_shot_prefill_oracle`/
-        // `build_forward_two_range_matches_direct_builder_call` (all
-        // < 1e-4 / < 1e-6 against the SAME oracle, fed exactly what this
-        // crate's existing growing-cache decode loop already provides --
-        // no decode-loop change).
-        #[cfg(feature = "gemma4-kv-cache")]
-        let (program, logits, layer_roots, moe_sites) = {
-            let mut descriptor = gemma4_descriptor(architecture.vocab);
-            descriptor.cache_strategy = CacheStrategy::TwoRange;
-            let (program, logits, cache_roots, moe_sites, _layer_residuals, _hidden) =
-                build_forward(&descriptor, true)?;
-            let layer_roots: Vec<Qwen35LayerRoots> = cache_roots
-                .into_iter()
-                .map(Qwen35LayerRoots::Attention)
-                .collect();
-            (program, logits, layer_roots, moe_sites)
+        // (zero-cache max-abs-diff 0.39 vs the prefill oracle).
+        //
+        // `CacheStrategy::Cacheless` is the safe fallback: every gemma4
+        // layer is `LayerKind::Attention` (the two-range engine's own
+        // requirement), so the ONLY axis that can make a checkpoint
+        // unsupported today is one this match does not yet know how to
+        // prove correct end-to-end against a real checkpoint -- there is
+        // none such left as of this change, so every gemma4 shape routes
+        // through `TwoRange`; a future architecture variant this schedule
+        // cannot express falls back here rather than building a wrong
+        // program silently.
+        let schedule = gemma4_layer_schedule(&architecture);
+        let logit_softcap = (architecture.final_logit_softcapping > 0.0)
+            .then_some(architecture.final_logit_softcapping);
+        // `leading_dense_block_count`: every layer's own `FfnCombination`
+        // (set by `gemma4_layer_schedule` above) is `ParallelDenseMoe` for a
+        // real MoE checkpoint, which ignores this argument entirely (both
+        // branches always run) -- `0` here reproduces that prior behaviour
+        // byte-for-byte. For a dense checkpoint (`expert_count == 0`) every
+        // layer's combination is `FfnCombination::Exclusive` instead, whose
+        // dense-vs-routed choice is `layer < leading_dense_block_count`
+        // (`append_lfm2_layer_ffn`) -- `block_count` here makes that
+        // condition true for every layer, so the (absent, unbound) routed
+        // branch is never built.
+        let leading_dense_block_count = if architecture.expert_count > 0 {
+            0
+        } else {
+            architecture.block_count
         };
-        #[cfg(not(feature = "gemma4-kv-cache"))]
-        let (program, logits, layer_roots, moe_sites) = {
-            let schedule = gemma4_layer_schedule(&architecture);
-            let logit_softcap = (architecture.final_logit_softcapping > 0.0)
-                .then_some(architecture.final_logit_softcapping);
-            // `leading_dense_block_count`: every layer's own
-            // `FfnCombination` (set by `gemma4_layer_schedule` above) is
-            // `ParallelDenseMoe` for a real MoE checkpoint, which ignores
-            // this argument entirely (both branches always run) -- `0` here
-            // reproduces that prior behaviour byte-for-byte. For a dense
-            // checkpoint (`expert_count == 0`) every layer's combination is
-            // `FfnCombination::Exclusive` instead, whose dense-vs-routed
-            // choice is `layer < leading_dense_block_count`
-            // (`append_lfm2_layer_ffn`) -- `block_count` here makes that
-            // condition true for every layer, so the (absent, unbound)
-            // routed branch is never built.
-            let leading_dense_block_count = if architecture.expert_count > 0 {
-                0
-            } else {
-                architecture.block_count
-            };
-            let (program, logits, moe_sites) = lfm2_forward_program_with_experts(
-                architecture.vocab,
-                architecture.embedding,
-                architecture.feed_forward,
-                architecture.expert_feed_forward,
-                architecture.head_count,
-                architecture.block_count,
-                architecture.expert_count,
-                architecture.expert_used_count,
-                leading_dense_block_count,
-                0,
-                &schedule,
-                Some(EmbeddingScale::Sqrt),
-                logit_softcap,
-                true,
-                // `gemma4_layer_schedule`'s own `LayerFfnConfig::ple` flag
-                // (set alongside this same `architecture.ple_dim > 0` check)
-                // is what per-layer INJECTS Stage B; this is the checkpoint-
-                // wide toggle that builds Stage A's preamble at all.
-                (architecture.ple_dim > 0).then_some(architecture.ple_dim),
-            )?;
-            (program, logits, Vec::new(), moe_sites)
+        let cache_strategy = if schedule.iter().all(|entry| entry.kind == LayerKind::Attention) {
+            CacheStrategy::TwoRange
+        } else {
+            CacheStrategy::Cacheless
+        };
+        let descriptor = ModelDescriptor {
+            vocab: architecture.vocab,
+            embedding: architecture.embedding,
+            feed_forward: architecture.feed_forward,
+            expert_feed_forward: architecture.expert_feed_forward,
+            query_heads: architecture.head_count,
+            block_count: architecture.block_count,
+            expert_count: architecture.expert_count,
+            expert_used_count: architecture.expert_used_count,
+            leading_dense_block_count,
+            l_cache: 0,
+            embedding_scale: Some(EmbeddingScale::Sqrt),
+            logit_softcap,
+            layers: schedule.clone(),
+            cache_strategy,
+            // `gemma4_layer_schedule`'s own `LayerFfnConfig::ple` flag (set
+            // alongside this same `architecture.ple_dim > 0` check) is what
+            // per-layer INJECTS Stage B; this is the checkpoint-wide toggle
+            // that builds Stage A's preamble at all.
+            ple_dim: (architecture.ple_dim > 0).then_some(architecture.ple_dim),
+            qk_norm: false,
+            qkv_biases: false,
+            paired_gate_up_reduce: false,
+            fused_qkv_reduce: false,
+        };
+        let (program, logits, cache_roots, moe_sites, _layer_residuals, _hidden) =
+            build_forward(&descriptor, true)?;
+        let layer_roots: Vec<Qwen35LayerRoots> = match cache_strategy {
+            CacheStrategy::TwoRange => {
+                // `cache_roots` holds one entry per REAL cache-owning layer,
+                // in layer order (`lfm2_two_range_cached_forward_program_with_experts`'s
+                // own `stored_kv`/`cache_roots.push` doc: a
+                // `KeySourceKind::SharedFromLayer` layer owns none) -- this
+                // zips it back against `schedule`'s own per-layer
+                // discriminant to rebuild the full, positionally-real
+                // `Qwen35LayerRoots` vec `LoadedModel::declared_layer_cache_names_and_widths`
+                // needs (one entry per layer index, `SharedFromLayer`
+                // included).
+                let expected_cache_owning_layers = schedule
+                    .iter()
+                    .filter(|entry| entry.attention.key_source_kind == KeySourceKind::ProjectedK)
+                    .count();
+                if cache_roots.len() != expected_cache_owning_layers {
+                    return Err(InteropError::Gemma4TwoRangeCacheRootsCountMismatch {
+                        produced: cache_roots.len(),
+                        expected: expected_cache_owning_layers,
+                    });
+                }
+                let mut cache_roots = cache_roots.into_iter();
+                schedule
+                    .iter()
+                    .map(|entry| match entry.attention.key_source_kind {
+                        KeySourceKind::ProjectedK => Qwen35LayerRoots::Attention(
+                            // count checked equal, just above.
+                            cache_roots.next().unwrap_or_else(|| {
+                                unreachable!("cache_roots length already checked above")
+                            }),
+                        ),
+                        KeySourceKind::SharedFromLayer(source) => {
+                            Qwen35LayerRoots::SharedFromLayer(source)
+                        }
+                    })
+                    .collect()
+            }
+            CacheStrategy::Cacheless | CacheStrategy::SingleRange => Vec::new(),
         };
 
         let tied_embeddings = find_tensor(parsed, "output.weight").is_err();
@@ -1180,10 +1208,16 @@ mod shared_kv_reuse_map_tests {
 /// per-layer weights equal exactly the name set [`bind_gemma4_weights`]'s
 /// own gates would bind -- no declared-but-unbound leaf, and no bound
 /// leaf the forward program never asks for either.
-#[cfg(all(test, not(feature = "gemma4-kv-cache")))]
+#[cfg(test)]
 mod declared_leaves_match_bound_leaves_tests {
     use super::*;
     use proxima_tensor::op::Op;
+    // This test module exercises `gemma4_layer_schedule`'s own declared-vs-
+    // bound leaf contract directly against the cacheless engine -- an
+    // engine-shape check independent of which `CacheStrategy`
+    // `Gemma4Arch::bind` picks at runtime, so it imports its own builder
+    // rather than the module-level `build_forward`.
+    use proxima_tensor::spec::lfm2_forward_program_with_experts;
 
     /// The real `gemma4:e2b-it-qat` checkpoint's own measured
     /// `sliding_window_pattern`/`shared_kv_layers`/`block_count` (header
