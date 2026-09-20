@@ -862,23 +862,25 @@ fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
         .collect()
 }
 
-impl ArchitectureTrait for Gemma4Arch {
-    fn name(&self) -> &'static str {
-        "gemma4"
-    }
-
-    fn kv_cache_shape(&self) -> crate::architecture::KvCacheShape {
-        crate::architecture::KvCacheShape::Custom
-    }
-
-    #[cfg(feature = "std")]
-    fn bind<'file>(
-        &self,
-        parsed: &ParsedGguf,
-        file_bytes: &'file [u8],
-    ) -> Result<BoundProgram<'file>, InteropError> {
-        let architecture = from_metadata(parsed)?;
-        let weights = bind_gemma4_weights(parsed, file_bytes, &architecture)?;
+/// [`Gemma4Arch::bind`]'s body, parameterized on `last_row_only`
+/// (`lfm2_two_range_cached_forward_program_with_experts`'s own trailing
+/// flag -- see its doc: `true` gathers the LM head to the last new
+/// position only, `false` leaves every new position's own row in
+/// `logits_root`, `[new_count, vocab]`). `Gemma4Arch::bind` above calls
+/// this with `true` unchanged, so the registered decode/prefill path is
+/// byte-for-byte what it was before this function existed.
+/// [`bind_gemma4_all_positions_logits`] is the only other caller, with
+/// `false` -- the additive SLICE 2a readout a speculative-decode verify
+/// step needs (per-position logits for every candidate token from ONE
+/// forward, not just the sampled last position).
+#[cfg(feature = "std")]
+fn bind_gemma4_with_last_row_only<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    last_row_only: bool,
+) -> Result<BoundProgram<'file>, InteropError> {
+    let architecture = from_metadata(parsed)?;
+    let weights = bind_gemma4_weights(parsed, file_bytes, &architecture)?;
 
         // RUNTIME choice, not `#[cfg]`: `gemma4_layer_schedule` derives the
         // SAME real-checkpoint shape (sliding/full split, matformer FFN
@@ -964,7 +966,7 @@ impl ArchitectureTrait for Gemma4Arch {
             fused_qkv_reduce: false,
         };
         let (program, logits, cache_roots, moe_sites, _layer_residuals, _hidden) =
-            build_forward(&descriptor, true)?;
+            build_forward(&descriptor, last_row_only)?;
         let layer_roots: Vec<Qwen35LayerRoots> = match cache_strategy {
             CacheStrategy::TwoRange => {
                 // `cache_roots` holds one entry per REAL cache-owning layer,
@@ -1037,6 +1039,42 @@ impl ArchitectureTrait for Gemma4Arch {
             moe_sites,
             single_position_step: false,
         })
+}
+
+/// SLICE 2a verify readout: the additive, opt-in counterpart to
+/// [`Gemma4Arch::bind`] (which always gathers `logits_root` to the last new
+/// position -- `bind_gemma4_with_last_row_only`'s own doc). Binds the exact
+/// same weights/program shape with `last_row_only: false`, so `logits_root`
+/// evaluates to every new position's own row, `[new_count, vocab]`, not
+/// just the last. A speculative-decode verify step feeds this a K-token
+/// candidate span (`context.new_start = cached_len`, one forward call) and
+/// reads back K rows of logits instead of K separate single-position
+/// decode steps -- `Gemma4Arch::bind`'s own program, decode loop, and
+/// `logits_root` shape are untouched by this function existing.
+#[cfg(feature = "std")]
+pub fn bind_gemma4_all_positions_logits<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+) -> Result<BoundProgram<'file>, InteropError> {
+    bind_gemma4_with_last_row_only(parsed, file_bytes, false)
+}
+
+impl ArchitectureTrait for Gemma4Arch {
+    fn name(&self) -> &'static str {
+        "gemma4"
+    }
+
+    fn kv_cache_shape(&self) -> crate::architecture::KvCacheShape {
+        crate::architecture::KvCacheShape::Custom
+    }
+
+    #[cfg(feature = "std")]
+    fn bind<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+    ) -> Result<BoundProgram<'file>, InteropError> {
+        bind_gemma4_with_last_row_only(parsed, file_bytes, true)
     }
 
     #[cfg(not(feature = "std"))]
