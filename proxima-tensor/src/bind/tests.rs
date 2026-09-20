@@ -499,11 +499,16 @@ fn row_364_per_layer_bound_op_list() {
 
     assert_eq!(
         bound.len(),
-        28,
+        19,
         "row 364 artifact: one-layer single-range decode program's bound op count \
          (main at the same shape through the same builder: 34 -- three RMSNorm \
          sites each drop from a Reduce plus a separate Elementwise tail to one \
-         fused Reduce, see `docs/discipline.md` ROW 364)"
+         fused Reduce, see `docs/discipline.md` ROW 364; 28 -> 19 is \
+         `134975f83`'s reachable-only `bind_plain` landing after this row's own \
+         28 was measured -- output-parity is preserved, see \
+         `reduce_epilogue_fusion_matches_the_unfused_program_on_the_real_single_range_shape`, \
+         which runs this exact single-layer single-range path and gets \
+         max_abs_error=0 against the unfused reference)"
     );
 }
 
@@ -650,8 +655,15 @@ fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_s
 
     assert_eq!(
         plain.len(),
-        939,
-        "openchat-shaped single-range baseline bound operation count"
+        875,
+        "openchat-shaped single-range baseline bound operation count \
+         (939 -> 875 is `134975f83`'s reachable-only `bind_plain` landing -- \
+         `bind_plain` now skips ops outside `live::reachable`'s backward \
+         closure from `outputs` instead of binding every program position, \
+         so this baseline no longer includes provably dead ops that could \
+         never reach a requested output; correctness is structural, not \
+         merely measured, since an unreachable node cannot affect any \
+         output by definition)"
     );
     assert_eq!(
         cached_only.len(),
