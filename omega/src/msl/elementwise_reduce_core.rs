@@ -1567,5 +1567,22 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     // that body shares neither `acc1_0` nor any named helper call with its
     // Q4_K/Q5_K ggml-port siblings.
     "sums0",
+    // `Q4_0`/`Q8_0` are flat (non-K-quant) codecs but still route through
+    // `emit_and_classify`'s packed-row whitelist (`Codec::Q4_0 | Codec::Q8_0`
+    // arm) -- this table went stale for them the same way it did for `Q3_K`
+    // (see this const's own doc above). `push_packed_row_blocked_body`'s
+    // single-row arm (`packed_row_blocked_ggml.rs`) emits
+    // `q4_0_super_element(blk`/`q8_0_super_element(blk`; the classifier's
+    // `op_profile_kind` count for gemma4-E2B's ~275 Q4_0 dispatches fell
+    // through this gap into `"reduce-cooperative"` before these two markers.
+    "q4_0_super_element(blk",
+    "q8_0_super_element(blk",
+    // `push_packed_row_multi_row_body`'s generic (non-`fast_q4k`) loop reads
+    // through `signature_tokens_prelude::operand_read` instead of the
+    // single-row body's named helpers -- for `Q4_0`/`Q8_0` that renders
+    // `q4_0_element(in`/`q8_0_element(in` (no `blk` local, unlike the
+    // single-row arm above), so it needs its own, distinct marker text.
+    "q4_0_element(in",
+    "q8_0_element(in",
 ];
 

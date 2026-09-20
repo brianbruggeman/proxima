@@ -1508,6 +1508,50 @@ pub(super) mod classify_kind_packed_row_marker_tests {
         }
     }
 
+    /// `Q4_0`/`Q8_0` are flat (non-K-quant) codecs that still route through
+    /// `push_packed_row_blocked_body`'s single-row arm
+    /// (`m=1`, `packed_row_block_token_total(block, ..) == 1`) for gemma4-E2B's
+    /// decode-shaped dispatches -- `op_profile_codec` already counted ~275 of
+    /// these on the fast packed-row path while `op_profile_kind` mislabeled
+    /// every one `reduce-cooperative` because [`PACKED_ROW_BODY_MARKERS`]
+    /// carried no `Q4_0`/`Q8_0` entry (this const's own doc). `m=1` (not the
+    /// K-quant fixtures' `m=4`) is deliberate: it is the single-row body this
+    /// bug actually hit, not the multi-row body the K-quant fixtures above
+    /// exercise.
+    #[test]
+    fn q4_0_and_q8_0_single_row_dispatch_classifies_as_packed_row_blocked() {
+        for codec in [Codec::Q4_0, Codec::Q8_0] {
+            let bound = matmul_op_with_reduce(1, 256, 5, ScalarOp::Add);
+            let packed_operands = packed_operands_for(&bound, codec);
+            assert_eq!(
+                classify_kind(&bound, &packed_operands),
+                "reduce-packed-row-blocked",
+                "{codec:?} single-row packed-row dispatch must classify as \
+                 reduce-packed-row-blocked, not fall through to reduce-cooperative"
+            );
+        }
+    }
+
+    /// Same gap, the batched (`m>1`) multi-row body
+    /// (`push_packed_row_multi_row_body`'s generic, non-`fast_q4k` loop),
+    /// which renders through `operand_read` (`q4_0_element(in`/
+    /// `q8_0_element(in`) rather than the single-row body's named helpers
+    /// (`q4_0_super_element(blk`/`q8_0_super_element(blk`) -- a distinct
+    /// marker text, so a distinct test.
+    #[test]
+    fn q4_0_and_q8_0_multi_row_dispatch_classifies_as_packed_row_blocked() {
+        for codec in [Codec::Q4_0, Codec::Q8_0] {
+            let bound = matmul_op_with_reduce(4, 256, 5, ScalarOp::Add);
+            let packed_operands = packed_operands_for(&bound, codec);
+            assert_eq!(
+                classify_kind(&bound, &packed_operands),
+                "reduce-packed-row-blocked",
+                "{codec:?} multi-row packed-row dispatch must classify as \
+                 reduce-packed-row-blocked, not fall through to reduce-cooperative"
+            );
+        }
+    }
+
     /// The `[sequence, selected, d_in, d_out]` gather
     /// [`grouped_gathered_expert_product`] (`proxima_tensor::spec`,
     /// `spec.rs:1617-1654`) builds, generalized to accept an `x` of any
