@@ -1158,6 +1158,34 @@ static inline float q8_0_super_element(device const uchar *superblock, uint inde
 }
 "#;
 
+/// Batched-unpack fast arm for `Q8_0`, mirroring [`Q4K_UNPACK_MSL`]'s
+/// `q4k_pair_dot`'s posture (decode the block's one scale ONCE, then walk
+/// its packed levels
+/// against the already-gathered activation run) but flat, not paired-lane:
+/// `Q8_0` has no nibble packing at all, so there is no `iq`/`ir` lane split
+/// to thread through -- one lane's `slot` already IS one whole real 32-
+/// element block (`push_packed_row_blocked_body`'s single-row `Codec::Q8_0`
+/// arm), so this takes that lane's already-loaded `acts[32]` run directly
+/// instead of re-deriving a `yl`/`yh` pair the way the K-quant paired-lane
+/// bodies do. [`Q8_0_SUPER_ELEMENT_MSL`]'s `q8_0_element` re-reads `d_bits`
+/// from `block[0..2]` on EVERY call -- the per-element posture this body
+/// replaces -- so decoding `d` once here amortizes that redundant f16 load
+/// across all 32 elements, the same amortization `q4k_header_for` gives
+/// `Q4_K`'s own per-element path.
+pub const Q8_0_PAIR_DOT_MSL: &str = r#"
+static inline float q8_0_pair_dot(device const uchar *superblock, uint slot, thread const float *acts) {
+    device const uchar *block = superblock + (slot / 32u) * 34u;
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float d = (float)as_type<half>(d_bits);
+    device const uchar *levels = block + 2;
+    float result = 0.0f;
+    for (uint j = 0u; j < 32u; ++j) {
+        result += d * (float)((char)levels[j]) * acts[j];
+    }
+    return result;
+}
+"#;
+
 /// Bytes one `Q8_0` block occupies -- read from
 /// `proxima_gguf::quant::q8_0::BLOCK_BYTES`; pinned in
 /// `omega/tests/q8_0_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
@@ -1216,6 +1244,43 @@ static inline float q4_0_element(device const uchar *block, uint index) {
 pub const Q4_0_SUPER_ELEMENT_MSL: &str = r#"
 static inline float q4_0_super_element(device const uchar *superblock, uint index) {
     return q4_0_element(superblock + (index / 32u) * 18u, index % 32u);
+}
+"#;
+
+/// Batched-unpack fast arm for `Q4_0`, the primitive this landing exists to
+/// add: `reduce-packed-row-blocked` is the #1 GPU-time bucket in gemma4-E2B
+/// decode (39.6%, 275 dispatches/step) and every `Q4_0` weight matvec went
+/// through [`Q4_0_SUPER_ELEMENT_MSL`]'s `q4_0_super_element`, which re-reads
+/// `d_bits` from `block[0..2]` and re-derives the nibble mask on EVERY
+/// element -- the same per-element posture the K-quant codecs' own
+/// `q4k_pair_dot`/[`Q5K_PAIR_DOT_MSL`]/[`Q6K_PAIR_DOT_MSL`] batched arms
+/// exist to amortize away.
+///
+/// Same posture as [`Q8_0_PAIR_DOT_MSL`], not the K-quant paired-lane shape:
+/// `Q4_0` has no super-block scale/min pair and no `iq`/`ir` lane split to
+/// thread through -- `push_packed_row_blocked_body`'s single-row `Codec::
+/// Q4_0` arm already spreads one whole real 32-element block onto one
+/// lane's `slot`, so this decodes that lane's `d` ONCE, then walks the
+/// block's 16 packed-nibble bytes directly against the already-gathered
+/// `acts[32]` run: byte `j`'s low nibble is element `j` (`acts[j]`), its
+/// high nibble is element `16 + j` (`acts[j + 16]`) -- the exact index
+/// convention [`Q4_0_UNPACK_MSL`]'s `q4_0_element` already uses (`index %
+/// 16u` selects the byte, `index < 16u` selects which nibble).
+pub const Q4_0_PAIR_DOT_MSL: &str = r#"
+static inline float q4_0_pair_dot(device const uchar *superblock, uint slot, thread const float *acts) {
+    device const uchar *block = superblock + (slot / 32u) * 18u;
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float d = (float)as_type<half>(d_bits);
+    device const uchar *qs = block + 2;
+    float result = 0.0f;
+    for (uint j = 0u; j < 16u; ++j) {
+        uchar byte = qs[j];
+        float low = (float)((int)(byte & 0x0Fu) - 8);
+        float high = (float)((int)(byte >> 4u) - 8);
+        result += d * low * acts[j];
+        result += d * high * acts[j + 16u];
+    }
+    return result;
 }
 "#;
 

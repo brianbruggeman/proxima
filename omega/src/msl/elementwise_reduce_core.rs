@@ -1577,6 +1577,17 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     // through this gap into `"reduce-cooperative"` before these two markers.
     "q4_0_super_element(blk",
     "q8_0_super_element(blk",
+    // `Codec::Q4_0 if is_plain_product_reduce`/`Codec::Q8_0 if is_plain_
+    // product_reduce` (`packed_row_blocked_ggml.rs`, perf/q4_0-pair-dot):
+    // the batched fast arm added alongside this landing, ported from the
+    // K-quant codecs' own `q4k_pair_dot`/`q5k_pair_dot`/`q6k_pair_dot`
+    // shape. Same gap this table's own doc above names for `q4_0_super_
+    // element(blk`/`q8_0_super_element(blk`: a marker added for the OLD
+    // per-element bodies without one for the new batched body silently
+    // undercounts every plain-product `Q4_0`/`Q8_0` dispatch back into
+    // `"reduce-cooperative"`.
+    "q4_0_pair_dot(blk",
+    "q8_0_pair_dot(blk",
     // `push_packed_row_multi_row_body`'s generic (non-`fast_q4k`) loop reads
     // through `signature_tokens_prelude::operand_read` instead of the
     // single-row body's named helpers -- for `Q4_0`/`Q8_0` that renders
