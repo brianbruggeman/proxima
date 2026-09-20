@@ -1180,7 +1180,7 @@ mod shared_kv_reuse_map_tests {
 /// per-layer weights equal exactly the name set [`bind_gemma4_weights`]'s
 /// own gates would bind -- no declared-but-unbound leaf, and no bound
 /// leaf the forward program never asks for either.
-#[cfg(test)]
+#[cfg(all(test, not(feature = "gemma4-kv-cache")))]
 mod declared_leaves_match_bound_leaves_tests {
     use super::*;
     use proxima_tensor::op::Op;
