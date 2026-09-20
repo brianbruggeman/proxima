@@ -463,8 +463,7 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // slab swap) routes a gathered node into the per-position loop below,
     // which resolves the gather itself.
     #[cfg(feature = "q4k-int8-dot")]
-    if leading_total == 1
-        && !exact_activations
+    if !exact_activations
         && weight_gather.is_none()
         && let QuantizedBlock::Packed { codec: Codec::Q4K, bytes: _ } = weight_block
     {
