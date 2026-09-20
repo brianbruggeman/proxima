@@ -415,7 +415,7 @@ fn causal_mask_cached_windowed(
 /// two-block online-softmax combine, generalized with the exact same
 /// per-layer knobs [`append_lfm2_single_range_cached_attention`] already
 /// threads ([`ValueSource`], [`RopePairing`], `post_attention_norm`,
-/// `value_norm`, [`causal_mask_cached_windowed`] for the SWA cache-side
+/// `value_norm`, `causal_mask_cached_windowed` for the SWA cache-side
 /// bound). The cache block scores ONLY genuine history
 /// (`causal_mask_cached_windowed` excludes every padded row at or past
 /// `cached_len`); the local block scores this call's own new positions
@@ -1190,7 +1190,7 @@ pub fn lfm2_single_range_cached_forward_program_with_experts(
 /// a cache leaf that does not hold them yet, so `kv_cache.{layer}.k_even`/
 /// `k_odd`/`v` may be fed EXACTLY what `proxima-model-interop`'s existing
 /// growing-cache decode loop already provides -- real history for
-/// `[0, cached_len)`, [`causal_mask_cached_windowed`]-excluded padding past
+/// `[0, cached_len)`, `causal_mask_cached_windowed`-excluded padding past
 /// it -- with no pre-fold and no decode-loop change. Same schedule/knob
 /// contract as the single-range builder (every entry must be
 /// [`LayerKind::Attention`]); the returned roots are the same

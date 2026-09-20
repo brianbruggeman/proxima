@@ -1291,8 +1291,8 @@ pub fn arena_named_input<'arena>(arena: &'arena StaticArena, name: &str) -> Opti
 /// `Packed`'s own `codec` is `proxima_primitives::Codec` -- the one
 /// source-neutral codec identity `Codec`'s own doc names as replacing this
 /// type's former 14 separate per-codec discriminants (`Q4K`, `Q5K`, ...). A
-/// real `Packed` only ever carries a codec [`Self::as_decodable_ggml_type`]
-/// resolves to `Some` -- [`crate::bind::gguf_tensor_as_packed_block`]/`as_block`
+/// real `Packed` only ever carries a codec `codec_to_decodable_ggml_type`
+/// resolves to `Some` -- `gguf_tensor_as_packed_block`/`as_block`
 /// (`proxima-model-interop`) refuse the other 15 `Codec` variants at
 /// construction time, so [`Self::block_layout`]/[`Self::matmul_f32_kernel`]/
 /// [`Self::dequantize_fn`] returning `None` for those is defensive, never a
@@ -1782,7 +1782,7 @@ impl<'a> QuantizedBlock<'a> {
     /// and `dequantize_row` all compose down to instead of each
     /// hand-matching the same per-codec constants a second and third time.
     /// Sourced from [`proxima_gguf::GgmlType::block_layout`], the
-    /// authoritative on-disk-layout table [`codec_to_decodable_ggml_type`]
+    /// authoritative on-disk-layout table `codec_to_decodable_ggml_type`
     /// resolves `codec` against, rather than a parallel hand-copied set of
     /// `Q*_BLOCK_BYTES`/`Q*_BLOCK_ELEMENTS` constants.
     #[must_use]
@@ -1798,7 +1798,7 @@ impl<'a> QuantizedBlock<'a> {
     }
 
     /// This codec's single-shot `matmul_*_f32` kernel -- see
-    /// [`codec_matmul_f32_kernel`] for the full per-codec table and its own
+    /// `codec_matmul_f32_kernel` for the full per-codec table and its own
     /// doc on why `Q4K`/`Q5K`/`Q6K` stay `None` here.
     // clippy wants a `type` alias for the fn-pointer signature; a `type`
     // alias is a new named type, disallowed for this slice (inline it).
@@ -1814,7 +1814,7 @@ impl<'a> QuantizedBlock<'a> {
     }
 
     /// This codec's single-shot `dequantize` decoder -- see
-    /// [`codec_dequantize_fn`] for the full per-codec table and its own doc
+    /// `codec_dequantize_fn` for the full per-codec table and its own doc
     /// on which decodable codecs have no row-level decode path.
     // clippy wants a `type` alias for the fn-pointer signature; a `type`
     // alias is a new named type, disallowed for this slice (inline it).

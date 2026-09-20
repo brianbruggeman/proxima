@@ -13,7 +13,7 @@ use crate::error::TensorError;
 /// unit-stride, over the shapes named per field below. `query`/`key` are
 /// addressed by [`GdnPrefillScan::query_key_head_stride`]/
 /// `query_key_dim_stride` instead of an assumed fixed order:
-/// [`crate::bind`]'s own matcher binds them at one of two DIFFERENT physical
+/// [`mod@crate::bind`]'s own matcher binds them at one of two DIFFERENT physical
 /// conventions depending on whether a `repeat_kv_heads` broadcast sat above
 /// them (`BoundOpKind::GatedDeltaNet`'s own doc), so this scan reads by
 /// stride rather than by name.

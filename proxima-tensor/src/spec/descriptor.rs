@@ -20,8 +20,8 @@ pub enum CacheStrategy {
     /// `v`) -- a genuinely different scoring algebra from both other
     /// variants: the cached block is NEVER masked (a cached position is
     /// definitionally in the past of every new query, per that function's
-    /// own doc on its `is_future` usage), where [`Cacheless`]'s block-local
-    /// mask has no cache to skip and [`TwoRange`]'s own single-range
+    /// own doc on its `is_future` usage), where [`CacheStrategy::Cacheless`]'s block-local
+    /// mask has no cache to skip and [`CacheStrategy::TwoRange`]'s own single-range
     /// counterpart -- [`lfm2_single_range_cached_forward_program_with_experts`],
     /// the plausible reuse candidate this variant's own doc first
     /// considered -- masks the cached block with a `cached_len`-aware
@@ -32,7 +32,7 @@ pub enum CacheStrategy {
     /// parameter. [`build_forward`]'s own arm therefore calls
     /// [`mistral_cached_forward_program_with_experts_and_layer_taps`]
     /// directly -- the SAME "dispatch to an existing, unmodified builder"
-    /// shape [`TwoRange`]'s own arm already uses.
+    /// shape [`CacheStrategy::TwoRange`]'s own arm already uses.
     SingleRange,
 }
 
@@ -292,7 +292,7 @@ const MISTRAL_EXPERT_USED_COUNT: u32 = 0;
 /// doc, `proxima-tensor/src/spec/tests.rs`, for the byte-identical proof
 /// this field's value makes true).
 ///
-/// `expert_feed_forward` reuses [`MISTRAL_FEED_FORWARD`] rather than a
+/// `expert_feed_forward` reuses `MISTRAL_FEED_FORWARD` rather than a
 /// separate constant: unlike gemma4's split dense/routed widths,
 /// `mistral_cached_forward_program_with_experts_and_layer_taps`'s own MoE
 /// branch (`append_mistral_cached_moe_layer`,
@@ -300,7 +300,7 @@ const MISTRAL_EXPERT_USED_COUNT: u32 = 0;
 /// `ffn_gate_exps.weight`/`ffn_up_exps.weight`/`ffn_down_exps.weight` off
 /// the SAME `feed_forward` parameter the dense branch uses -- one width,
 /// not two. `leading_dense_block_count` is set to the full
-/// [`MISTRAL_BLOCK_COUNT`] ("every layer is dense") rather than `0`
+/// `MISTRAL_BLOCK_COUNT` ("every layer is dense") rather than `0`
 /// because openchat-3.5-1210 itself is dense (`expert_count == 0`); this
 /// builder picks dense-vs-MoE for the WHOLE checkpoint, not per layer, so
 /// this field is likewise inert for mistral until a future slice wires it.
@@ -491,7 +491,7 @@ pub type BuildForwardProgram = (
 ///
 /// [`BuildForwardProgram`]'s own doc names each element -- the same
 /// named-tuple-alias precedent
-/// [`MistralMoeForwardProgramWithLayerTaps`] already sets for a
+/// `MistralMoeForwardProgramWithLayerTaps` already sets for a
 /// same-shaped return.
 pub fn build_forward(
     descriptor: &ModelDescriptor,

@@ -337,7 +337,7 @@ pub enum TensorError {
     #[error("layer {layer} names shared-KV source layer {source_layer}, which has no own-KV to reuse")]
     SharedKvSourceNotAvailable { layer: u32, source_layer: u32 },
 
-    /// [`crate::spec::lfm2_single_range_cached`]'s merged-cache decode
+    /// [`crate::spec::lfm2_single_range_cached_forward_program_with_experts`]'s merged-cache decode
     /// forward has no cross-layer `stored_kv` pass yet -- unlike
     /// [`crate::spec::lfm2_forward_program_with_experts`] (the prefill
     /// engine this crate's shared-KV worked-example targets), this cached
