@@ -8,5 +8,7 @@ mod bind;
 pub mod hparams;
 pub mod program;
 
-pub use bind::{GEMMA4, Gemma4Arch, bind_gemma4_weights, gemma4_tensor_names};
+pub use bind::{
+    GEMMA4, Gemma4Arch, bind_gemma4_all_positions_logits, bind_gemma4_weights, gemma4_tensor_names,
+};
 pub use hparams::{Architecture, from_metadata};

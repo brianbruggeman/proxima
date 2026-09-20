@@ -14916,6 +14916,377 @@ mod gemma4_synthetic_parity {
         );
     }
 
+    /// SLICE 2a's own correctness contract: a speculative-decode VERIFY step
+    /// needs per-position logits for every one of K candidate positions from
+    /// ONE forward call (`last_row_only: false`, `logits_root` evaluates to
+    /// `[new_count, vocab]` -- `attention_forward.rs`'s own doc on
+    /// `gather_last_row`/`last_row_only`) to equal, position for position,
+    /// what K SEPARATE single-position decode steps over the same growing
+    /// context produce (`last_row_only: true`, the registered
+    /// `Gemma4Arch::bind` decode-loop shape, one token appended per step).
+    /// If the two readouts ever disagreed, a verify step built on the
+    /// all-positions forward would accept or reject candidate tokens against
+    /// the WRONG logits. Same `ids`/weights/schedule as
+    /// [`two_range_cached_gemma4_two_step_decode_matches_one_shot_prefill_oracle`]
+    /// immediately above (that test only reads the one-shot program's own
+    /// KV-cache side-outputs, never its `logits` row -- this test is the one
+    /// that actually reads and asserts on them).
+    #[test]
+    fn two_range_cached_gemma4_all_positions_one_shot_matches_incremental_single_position_decode()
+     {
+        let ids = [1usize, 3, 2];
+        let embedding_table = wave("token_embd.weight", VOCAB * EMBEDDING);
+        let output_norm = norm_wave("output_norm.weight", EMBEDDING);
+
+        let positions: Vec<usize> = (0..SEQ).collect();
+        let (cos_full, sin_full) =
+            rope_table_partial(&positions, ROPE_BASE_FULL, HEAD_DIM, ROTARY_PAIRS_FULL);
+        let (cos_swa, sin_swa) = rope_table(&positions, ROPE_BASE_SWA, HEAD_DIM);
+
+        let layer0 = layer_weights(0, true);
+        let layer1 = layer_weights(1, false);
+
+        let ffn_config = LayerFfnConfig {
+            post_attention_norm: true,
+            combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
+                dense_post_norm: true,
+                routed_post_norm: true,
+                combined_post_norm: true,
+                routed_pre_norm: true,
+                router_scale: true,
+                expert_output_scale: true,
+            }),
+            output_scale: true,
+            routed_gating: ExpertGatingFunc::Softmax,
+            routed_expert_bias: false,
+            dense_feed_forward: None,
+            exclusive_dense_post_norm: false,
+            activation: Activation::GeluTanh,
+            ple: false,
+        };
+        let schedule = alloc::vec![
+            LayerSchedule {
+                kind: LayerKind::Attention,
+                attention: LayerAttentionConfig {
+                    head_dim: HEAD_DIM as u32,
+                    kv_heads: KV_HEADS as u32,
+                    mask_window: Some(SWA_WINDOW as u32),
+                    value_source_kind: ValueSourceKind::ProjectedV,
+                    key_source_kind: KeySourceKind::ProjectedK,
+                    rope_table: RopeTableSel {
+                        cos_name: "rope_cos_swa",
+                        sin_name: "rope_sin_swa"
+                    },
+                    rope_pairing: RopePairing::SplitHalf {
+                        pairs: PAIRS as u32
+                    },
+                    score_scale: AttentionScoreScale::Unscaled,
+                    value_norm: true,
+                },
+                ffn: ffn_config,
+            },
+            LayerSchedule {
+                kind: LayerKind::Attention,
+                attention: LayerAttentionConfig {
+                    head_dim: HEAD_DIM as u32,
+                    kv_heads: KV_HEADS as u32,
+                    mask_window: None,
+                    value_source_kind: ValueSourceKind::SharedWithKey,
+                    key_source_kind: KeySourceKind::ProjectedK,
+                    rope_table: RopeTableSel {
+                        cos_name: "rope_cos",
+                        sin_name: "rope_sin"
+                    },
+                    rope_pairing: RopePairing::SplitHalf {
+                        pairs: PAIRS as u32
+                    },
+                    score_scale: AttentionScoreScale::Unscaled,
+                    value_norm: true,
+                },
+                ffn: ffn_config,
+            },
+        ];
+
+        let ids_i32: Vec<i32> = ids.iter().map(|&id| id as i32).collect();
+        let ids_f32: Vec<f32> = ids_i32.iter().map(|&id| id as f32).collect();
+        let eps_data = alloc::vec![EPS; SEQ];
+
+        let common_named: Vec<(&str, &[f32])> = alloc::vec![
+            ("token_embd.weight", embedding_table.as_slice()),
+            ("output_norm.weight", output_norm.as_slice()),
+            ("output.weight", {
+                let mut out = alloc::vec![0.0f32; EMBEDDING * VOCAB];
+                for v in 0..VOCAB {
+                    for i in 0..EMBEDDING {
+                        out[i * VOCAB + v] = embedding_table[v * EMBEDDING + i];
+                    }
+                }
+                out.leak()
+            }),
+            ("blk.0.attn_norm.weight", layer0.attn_norm.as_slice()),
+            (
+                "blk.0.post_attention_norm.weight",
+                layer0.post_attention_norm.as_slice()
+            ),
+            ("blk.0.attn_q_norm.weight", layer0.q_norm.as_slice()),
+            ("blk.0.attn_k_norm.weight", layer0.k_norm.as_slice()),
+            ("blk.0.attn_q.weight", layer0.wq.as_slice()),
+            ("blk.0.attn_k.weight", layer0.wk.as_slice()),
+            (
+                "blk.0.attn_v.weight",
+                layer0
+                    .wv
+                    .as_ref()
+                    .expect("sliding layer carries attn_v")
+                    .as_slice()
+            ),
+            ("blk.0.attn_output.weight", layer0.wo.as_slice()),
+            (
+                "blk.0.layer_output_scale.weight",
+                core::slice::from_ref(&layer0.output_scale)
+            ),
+            ("blk.0.ffn_norm.weight", layer0.ffn_norm.as_slice()),
+            (
+                "blk.0.post_ffw_norm_1.weight",
+                layer0.post_ffw_norm_1.as_slice()
+            ),
+            (
+                "blk.0.post_ffw_norm_2.weight",
+                layer0.post_ffw_norm_2.as_slice()
+            ),
+            (
+                "blk.0.post_ffw_norm.weight",
+                layer0.post_ffw_norm.as_slice()
+            ),
+            (
+                "blk.0.pre_ffw_norm_2.weight",
+                layer0.pre_ffw_norm_2.as_slice()
+            ),
+            ("blk.0.ffn_gate.weight", layer0.ffn_gate.as_slice()),
+            ("blk.0.ffn_up.weight", layer0.ffn_up.as_slice()),
+            ("blk.0.ffn_down.weight", layer0.ffn_down.as_slice()),
+            ("blk.0.ffn_gate_inp.weight", layer0.gate_inp.as_slice()),
+            ("blk.0.ffn_gate_inp.scale", layer0.gate_inp_scale.as_slice()),
+            ("blk.0.ffn_gate_exps.weight", layer0.gate_exps.as_slice()),
+            ("blk.0.ffn_up_exps.weight", layer0.up_exps.as_slice()),
+            ("blk.0.ffn_down_exps.weight", layer0.down_exps.as_slice()),
+            (
+                "blk.0.ffn_down_exps.scale",
+                layer0.down_exps_scale.as_slice()
+            ),
+            ("blk.1.attn_norm.weight", layer1.attn_norm.as_slice()),
+            (
+                "blk.1.post_attention_norm.weight",
+                layer1.post_attention_norm.as_slice()
+            ),
+            ("blk.1.attn_q_norm.weight", layer1.q_norm.as_slice()),
+            ("blk.1.attn_k_norm.weight", layer1.k_norm.as_slice()),
+            ("blk.1.attn_q.weight", layer1.wq.as_slice()),
+            ("blk.1.attn_k.weight", layer1.wk.as_slice()),
+            ("blk.1.attn_output.weight", layer1.wo.as_slice()),
+            (
+                "blk.1.layer_output_scale.weight",
+                core::slice::from_ref(&layer1.output_scale)
+            ),
+            ("blk.1.ffn_norm.weight", layer1.ffn_norm.as_slice()),
+            (
+                "blk.1.post_ffw_norm_1.weight",
+                layer1.post_ffw_norm_1.as_slice()
+            ),
+            (
+                "blk.1.post_ffw_norm_2.weight",
+                layer1.post_ffw_norm_2.as_slice()
+            ),
+            (
+                "blk.1.post_ffw_norm.weight",
+                layer1.post_ffw_norm.as_slice()
+            ),
+            (
+                "blk.1.pre_ffw_norm_2.weight",
+                layer1.pre_ffw_norm_2.as_slice()
+            ),
+            ("blk.1.ffn_gate.weight", layer1.ffn_gate.as_slice()),
+            ("blk.1.ffn_up.weight", layer1.ffn_up.as_slice()),
+            ("blk.1.ffn_down.weight", layer1.ffn_down.as_slice()),
+            ("blk.1.ffn_gate_inp.weight", layer1.gate_inp.as_slice()),
+            ("blk.1.ffn_gate_inp.scale", layer1.gate_inp_scale.as_slice()),
+            ("blk.1.ffn_gate_exps.weight", layer1.gate_exps.as_slice()),
+            ("blk.1.ffn_up_exps.weight", layer1.up_exps.as_slice()),
+            ("blk.1.ffn_down_exps.weight", layer1.down_exps.as_slice()),
+            (
+                "blk.1.ffn_down_exps.scale",
+                layer1.down_exps_scale.as_slice()
+            ),
+        ];
+
+        // -- ONE forward, ALL K=3 positions: `last_row_only=false`, this
+        // slice's own additive readout mode
+        // (`proxima-model-interop::gemma4::bind_gemma4_all_positions_logits`
+        // is the same knob threaded one level up). `logits_all` evaluates to
+        // `[SEQ, VOCAB]` -- every new position's own row, not just the last.
+        let (program_all, logits_all, _cache_roots_all, _moe_sites_all) =
+            lfm2_two_range_cached_forward_program_with_experts(
+                VOCAB as u32,
+                EMBEDDING as u32,
+                FEED_FORWARD as u32,
+                EXPERT_FF as u32,
+                QUERY_HEADS as u32,
+                2,
+                EXPERT_COUNT as u32,
+                EXPERT_USED as u32,
+                0,
+                &schedule,
+                Some(EmbeddingScale::Sqrt),
+                Some(SOFTCAP),
+                false,
+                None,
+            )
+            .expect("the all-positions two-range cached program lowers");
+
+        let empty: [f32; 0] = [];
+        let mut one_shot_named = common_named.clone();
+        one_shot_named.push(("ids", ids_f32.as_slice()));
+        one_shot_named.push(("eps", eps_data.as_slice()));
+        one_shot_named.push(("rope_cos_swa", flatten(&cos_swa).leak()));
+        one_shot_named.push(("rope_sin_swa", flatten(&sin_swa).leak()));
+        one_shot_named.push(("rope_cos", flatten(&cos_full).leak()));
+        one_shot_named.push(("rope_sin", flatten(&sin_full).leak()));
+        one_shot_named.push(("cached_len", [0.0f32].as_slice()));
+        one_shot_named.push(("kv_cache.0.k_even", empty.as_slice()));
+        one_shot_named.push(("kv_cache.0.k_odd", empty.as_slice()));
+        one_shot_named.push(("kv_cache.0.v", empty.as_slice()));
+        one_shot_named.push(("kv_cache.1.k_even", empty.as_slice()));
+        one_shot_named.push(("kv_cache.1.k_odd", empty.as_slice()));
+        one_shot_named.push(("kv_cache.1.v", empty.as_slice()));
+        let one_shot_symbols = [SEQ as u64, 0u64];
+        let one_shot_evaluated = crate::cpu::evaluate_named(
+            &program_all,
+            &one_shot_symbols,
+            &one_shot_named,
+            &[logits_all],
+        )
+        .expect("all-positions one-shot forward evaluates");
+        let one_shot_logits = one_shot_evaluated
+            .get(logits_all)
+            .expect("one-shot logits present")
+            .0
+            .to_vec();
+        assert_eq!(
+            one_shot_logits.len(),
+            SEQ * VOCAB,
+            "last_row_only=false must return every new position's own row, [{SEQ}, {VOCAB}]"
+        );
+
+        // -- K=3 SEPARATE single-position decode steps, `last_row_only=true`
+        // (the registered `Gemma4Arch::bind` shape), cached_len growing
+        // 0 -> 1 -> 2 exactly the way `proxima-model-interop`'s decode loop
+        // folds one token's own cache output into the next step's input.
+        let (program_last, logits_last, cache_roots, _moe_sites_last) =
+            lfm2_two_range_cached_forward_program_with_experts(
+                VOCAB as u32,
+                EMBEDDING as u32,
+                FEED_FORWARD as u32,
+                EXPERT_FF as u32,
+                QUERY_HEADS as u32,
+                2,
+                EXPERT_COUNT as u32,
+                EXPERT_USED as u32,
+                0,
+                &schedule,
+                Some(EmbeddingScale::Sqrt),
+                Some(SOFTCAP),
+                true,
+                None,
+            )
+            .expect("the last-row-only two-range cached program lowers");
+
+        let mut layer0_k_even: Vec<f32> = Vec::new();
+        let mut layer0_k_odd: Vec<f32> = Vec::new();
+        let mut layer0_v: Vec<f32> = Vec::new();
+        let mut layer1_k_even: Vec<f32> = Vec::new();
+        let mut layer1_k_odd: Vec<f32> = Vec::new();
+        let mut layer1_v: Vec<f32> = Vec::new();
+        let mut incremental_logits: Vec<f32> = Vec::with_capacity(SEQ * VOCAB);
+
+        for (step, &id) in ids.iter().enumerate() {
+            let cached_len = step;
+            let mut step_named = common_named.clone();
+            step_named.push(("ids", &ids_f32[step..step + 1]));
+            step_named.push(("eps", &eps_data[step..step + 1]));
+            step_named.push(("rope_cos_swa", flatten(&cos_swa[step..step + 1]).leak()));
+            step_named.push(("rope_sin_swa", flatten(&sin_swa[step..step + 1]).leak()));
+            step_named.push(("rope_cos", flatten(&cos_full[step..step + 1]).leak()));
+            step_named.push(("rope_sin", flatten(&sin_full[step..step + 1]).leak()));
+            let cached_len_data = [cached_len as f32];
+            step_named.push(("cached_len", cached_len_data.as_slice()));
+            step_named.push(("kv_cache.0.k_even", layer0_k_even.as_slice()));
+            step_named.push(("kv_cache.0.k_odd", layer0_k_odd.as_slice()));
+            step_named.push(("kv_cache.0.v", layer0_v.as_slice()));
+            step_named.push(("kv_cache.1.k_even", layer1_k_even.as_slice()));
+            step_named.push(("kv_cache.1.k_odd", layer1_k_odd.as_slice()));
+            step_named.push(("kv_cache.1.v", layer1_v.as_slice()));
+            let lm_head_row_data = [0.0f32];
+            step_named.push(("lm_head_row", lm_head_row_data.as_slice()));
+            let step_symbols = [1u64, cached_len as u64];
+            let mut step_roots: Vec<NodeId> = alloc::vec![logits_last];
+            for (even, odd, value) in &cache_roots {
+                step_roots.push(*even);
+                step_roots.push(*odd);
+                step_roots.push(*value);
+            }
+            let step_evaluated =
+                crate::cpu::evaluate_named(&program_last, &step_symbols, &step_named, &step_roots)
+                    .unwrap_or_else(|error| {
+                        panic!("incremental decode step {step} (id={id}) evaluates: {error:?}")
+                    });
+            let step_logits = step_evaluated
+                .get(logits_last)
+                .expect("step logits present")
+                .0
+                .to_vec();
+            incremental_logits.extend_from_slice(&step_logits);
+            // Each step's own cache-root output holds ONLY that step's OWN
+            // new `new_count` positions (`two_range_cached_gemma4_two_step_decode_matches_one_shot_prefill_oracle`'s
+            // own step1/step2 shapes above prove this: step1's `new_count=2`
+            // output is fed straight into step2's `kv_bound=2` input with no
+            // further folding needed because step1 started from an EMPTY
+            // cache). A genuine one-token-at-a-time decode starts every step
+            // AFTER the first from a non-empty history, so this loop grows
+            // its own running buffer by APPENDING each step's fresh slice --
+            // exactly `LayerCache::append`'s own fold, real host-side state
+            // `proxima-model-interop`'s decode loop carries between steps.
+            layer0_k_even.extend_from_slice(
+                step_evaluated.get(cache_roots[0].0).expect("layer0 k_even").0,
+            );
+            layer0_k_odd.extend_from_slice(
+                step_evaluated.get(cache_roots[0].1).expect("layer0 k_odd").0,
+            );
+            layer0_v.extend_from_slice(step_evaluated.get(cache_roots[0].2).expect("layer0 v").0);
+            layer1_k_even.extend_from_slice(
+                step_evaluated.get(cache_roots[1].0).expect("layer1 k_even").0,
+            );
+            layer1_k_odd.extend_from_slice(
+                step_evaluated.get(cache_roots[1].1).expect("layer1 k_odd").0,
+            );
+            layer1_v.extend_from_slice(step_evaluated.get(cache_roots[1].2).expect("layer1 v").0);
+        }
+
+        for position in 0..SEQ {
+            let one_shot_row = &one_shot_logits[position * VOCAB..(position + 1) * VOCAB];
+            let incremental_row = &incremental_logits[position * VOCAB..(position + 1) * VOCAB];
+            let diff = max_abs_diff(one_shot_row, incremental_row);
+            std::println!(
+                "verify_readout position={position} diff={diff} one_shot={one_shot_row:?} \
+                 incremental={incremental_row:?}"
+            );
+            assert!(
+                diff < TOLERANCE,
+                "position {position}: the all-positions one-shot K-forward's own row must match \
+                 the incremental single-position decode's row at the same position -- found {diff}"
+            );
+        }
+    }
+
     /// Bisects [`gemma4_synthetic_parity_localizes_first_divergence`]'s
     /// `attn0` divergence: ONE token means softmax is trivially `1.0` over a
     /// single key and no masking arithmetic engages at all -- if THIS still
