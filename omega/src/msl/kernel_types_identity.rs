@@ -197,12 +197,13 @@ pub struct Kernel {
 pub enum Binding {
     Input(NodeId),
     /// Codec-specific payload bytes for a mixed expert source. The matching
-    /// [`ExpertDescriptors`] binding selects the byte span and decoder for
-    /// each routed expert index.
+    /// [`Self::ExpertDescriptors`] binding selects the byte span and decoder
+    /// for each routed expert index.
     ExpertPayloads(NodeId),
     /// Per-expert codec and byte-span records for a mixed expert source.
-    /// Kept separate from [`ExpertPayloads`] so the payloads remain borrowed
-    /// mapped ranges rather than one concatenated staging allocation.
+    /// Kept separate from [`Self::ExpertPayloads`] so the payloads remain
+    /// borrowed mapped ranges rather than one concatenated staging
+    /// allocation.
     ExpertDescriptors(NodeId),
     /// The `indices` buffer a gathered operand fetches from.
     Indices(NodeId),
@@ -250,7 +251,7 @@ pub struct GridSpec {
     /// occupancy-driven width the driver already picks.
     pub threadgroup_width: Option<u64>,
     /// Z-extent of the dispatch grid -- `1` for every kernel today. Exists so
-    /// [`crate::metal::dispatch`] can grow a third grid axis for a future
+    /// `crate::metal::dispatch` can grow a third grid axis for a future
     /// batched dispatch (multiple independent same-shape ops sharing one
     /// pipeline, addressed by `threadgroup_position_in_grid.z`) without a
     /// signature change; `1` reproduces today's `MTLSize { depth: 1, .. }`
@@ -1119,7 +1120,7 @@ static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, th
 /// It DOES take the row-blocked (`classify_packed_row_block`) fast path:
 /// eight real `Q8_0` blocks (32 elements, 34 bytes each) sit contiguously in
 /// exactly the byte span one K-quant super-block ([`Q4K_BLOCK_ELEMENTS`] =
-/// 256 elements) occupies, so [`crate::msl::codec_row_block_step_bytes`]
+/// 256 elements) occupies, so `crate::msl::codec_row_block_step_bytes`
 /// treats every 8-block run as one super-block for that path's addressing,
 /// and [`Q8_0_SUPER_ELEMENT_MSL`] is the matching per-element read inside
 /// it.
@@ -1172,9 +1173,18 @@ pub const Q8_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q8_0::QK8_0;
 /// scale/min pair (unlike `Q4_K`) and no second `min` field (unlike
 /// `Q4_1`). Same KIND-difference from the K-quant family that `Q8_0`'s
 /// own doc draws: no super-block, so this codec does not take the
-/// row-blocked (`classify_packed_row_block`) or tiled-GEMM
-/// (`classify_tiled_gemm`) fast paths either -- it always renders through
-/// the fully generic per-element accessor below.
+/// tiled-GEMM (`classify_tiled_gemm`) fast path, which hard-codes the
+/// K-quants' `simdgroup_matrix` batched-unpack shape this codec has no
+/// analogue for -- `Q4_0` always renders through the fully generic
+/// per-element accessor below on that path.
+///
+/// It DOES take the row-blocked (`classify_packed_row_block`) fast path,
+/// the same way `Q8_0` does: eight real `Q4_0` blocks (32 elements, 18 bytes
+/// each) sit contiguously in exactly the byte span one K-quant super-block
+/// ([`Q4K_BLOCK_ELEMENTS`] = 256 elements) occupies, so
+/// `crate::msl::codec_row_block_step_bytes` treats every 8-block run as one
+/// super-block for that path's addressing, and [`Q4_0_SUPER_ELEMENT_MSL`] is
+/// the matching per-element read inside it.
 ///
 /// Ports `proxima_gguf::quant::q4_0::dequantize_block` exactly: each packed
 /// byte carries two 4-bit levels, `value = (nibble - 8) * d`.
@@ -1190,6 +1200,22 @@ static inline float q4_0_element(device const uchar *block, uint index) {
     uchar byte = block[2u + (index % 16u)];
     int nibble = (index < 16u) ? (int)(byte & 0x0Fu) : (int)(byte >> 4u);
     return (float)(nibble - 8) * d;
+}
+"#;
+
+/// The row-blocked packed path's per-superblock-relative `Q4_0` accessor --
+/// mirrors [`Q8_0_SUPER_ELEMENT_MSL`] exactly, same posture: `Q4_0` has no
+/// super-block of its own, but eight real 32-element `Q4_0` blocks (18 bytes
+/// each) sit contiguously in exactly the byte span one K-quant super-block
+/// ([`Q4K_BLOCK_ELEMENTS`] = 256 elements) occupies, so `index / 32` selects
+/// which of the eight real blocks packed into that span, and the remainder
+/// feeds [`Q4_0_UNPACK_MSL`]'s own per-block decode (`q4_0_element`)
+/// unchanged. `18` is [`Q4_0_BLOCK_BYTES`] and `32` is [`Q4_0_BLOCK_ELEMENTS`],
+/// both inlined as literals here the same way [`Q8_0_SUPER_ELEMENT_MSL`]
+/// inlines its own fixed layout constants.
+pub const Q4_0_SUPER_ELEMENT_MSL: &str = r#"
+static inline float q4_0_super_element(device const uchar *superblock, uint index) {
+    return q4_0_element(superblock + (index / 32u) * 18u, index % 32u);
 }
 "#;
 
@@ -1372,7 +1398,21 @@ static inline float bf16_element(device const uchar *block, uint index) {
 /// so far (see `proxima_tensor::cpu`). Free function, not an inherent
 /// method: `Codec` is `proxima_primitives::Codec`, foreign to this crate
 /// (guiding-principles §20 rules out a blanket impl / newtype to host one).
-#[cfg(feature = "std")]
+// arm-only-used: every real caller (`cuda_driver::packed_codec`,
+// `wgpu_driver::packed_operands_of`, `metal::device_buffers_arena_plan::
+// packed_operands_of`, this doc's own list) lives behind a driver feature
+// that is off in a default x86_64 build (`cuda-driver`/`wgpu-backend` are
+// non-default; `metal` additionally requires `target_os = "macos"`) --
+// without this the function is genuinely dead there, not merely unused in
+// one crate's tests.
+#[cfg(all(
+    feature = "std",
+    any(
+        all(feature = "metal", target_os = "macos"),
+        feature = "cuda-driver",
+        feature = "wgpu-backend"
+    )
+))]
 pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Option<Codec> {
     let QuantizedBlock::Packed { codec, .. } = block else {
         return None;
@@ -1480,15 +1520,17 @@ pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
 /// (256)-wide addressing span that arm's `weight_base[q] / Q4K_BLOCK_ELEMENTS`
 /// division assumes. Equal to [`codec_block_bytes`] for every K-quant codec,
 /// whose own block already IS that 256-element super-block. [`Codec::Q8_0`]
-/// is a flat 32-element block, so its step is eight real blocks' worth of
-/// bytes -- see [`Q8_0_SUPER_ELEMENT_MSL`]'s own doc for why eight
-/// contiguous `Q8_0` blocks span exactly the same 256 elements. No other
-/// codec reaches this function (`classify_packed_row_block` whitelists only
-/// `Q3_K`/`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`), so the fallback arm is exactly
+/// and [`Codec::Q4_0`] are flat 32-element blocks, so their step is eight
+/// real blocks' worth of bytes -- see [`Q8_0_SUPER_ELEMENT_MSL`]/
+/// [`Q4_0_SUPER_ELEMENT_MSL`]'s own docs for why eight contiguous blocks
+/// span exactly the same 256 elements. No other codec reaches this function
+/// (`classify_packed_row_block` whitelists only
+/// `Q3_K`/`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`Q4_0`), so the fallback arm is exactly
 /// [`codec_block_bytes`], never invented for a codec this path never sees.
 pub(crate) const fn codec_row_block_step_bytes(codec: Codec) -> usize {
     match codec {
         Codec::Q8_0 => Q8_0_BLOCK_BYTES * (Q4K_BLOCK_ELEMENTS / Q8_0_BLOCK_ELEMENTS),
+        Codec::Q4_0 => Q4_0_BLOCK_BYTES * (Q4K_BLOCK_ELEMENTS / Q4_0_BLOCK_ELEMENTS),
         _ => codec_block_bytes(codec),
     }
 }
@@ -1578,7 +1620,7 @@ pub(crate) const fn codec_rows_per_simdgroup(codec: Codec) -> usize {
 /// source-neutral packed-layout identity (see that type's own doc); this
 /// crate's per-codec derivations (`cache_token`, `block_bytes`,
 /// `supports_pair_dot`, `rows_per_simdgroup`, `from_quantized_block`) live as
-/// free functions in [`crate::identity`] since `Codec` is foreign here and
+/// free functions in `crate::identity` since `Codec` is foreign here and
 /// cannot carry inherent methods (guiding-principles §20, no blanket impls).
 pub type PackedOperands = BTreeMap<NodeId, Codec>;
 

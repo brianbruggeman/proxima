@@ -1110,37 +1110,36 @@ fn q4k_row_blocked_matmul_defers_scale_to_once_per_sub_block_single_fetch() {
     );
 }
 
-/// The landmine `Q8_0`'s own landing closed (`PackedRowBlockRejection::
-/// NotKQuantCodec`, added because an EARLIER equality-only check would
-/// have silently admitted any non-K-quant codec whose extent happened
-/// to be a multiple of 256): `Q4_0`'s own block is 32 elements, and 256
-/// is ALSO a whole multiple of that, so an extent-only gate could
-/// wrongly admit it into the K-quant row-blocked kernel. The codec
-/// check must reject `Q4_0` explicitly, before the extent is ever
-/// consulted.
+/// `classify_packed_row_block` now admits [`Codec::Q4_0`] the same way it
+/// admits [`Codec::Q8_0`] (`emit_and_classify.rs`'s whitelist match):
+/// `Q4_0`'s own block is 32 elements, and eight contiguous real blocks span
+/// exactly the same 256-element byte span one K-quant super-block occupies,
+/// so [`Q4_0_SUPER_ELEMENT_MSL`] emulates the super-block-relative read this
+/// path needs instead of falling back to the fully generic per-element
+/// accessor. See [`push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel`]
+/// below for the emitter-level half of this proof.
 #[test]
-fn q4_0_codec_never_takes_the_row_blocked_path_even_at_a_256_extent() {
+fn q4_0_codec_takes_the_row_blocked_path_at_a_256_extent() {
     let bound = matmul_op(4, 256, 5);
     let weight_node = bound.operands()[0].0;
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
 
-    assert_eq!(
-        classify_packed_row_block(&bound, &operand_codecs(&bound, &q4_0)).err(),
-        Some(PackedRowBlockRejection::NotKQuantCodec),
-        "Q4_0 must be rejected by codec, not admitted just because 256 is a multiple of its own block size"
+    assert!(
+        classify_packed_row_block(&bound, &operand_codecs(&bound, &q4_0)).is_ok(),
+        "Q4_0 must be admitted by codec now that Q4_0_SUPER_ELEMENT_MSL emulates its super-block read"
     );
     assert!(
-        packed_row_block(&bound, &operand_codecs(&bound, &q4_0)).is_none(),
-        "packed_row_block must agree with classify_packed_row_block's own rejection"
+        packed_row_block(&bound, &operand_codecs(&bound, &q4_0)).is_some(),
+        "packed_row_block must agree with classify_packed_row_block's own admission"
     );
 
     let source = emit(&bound, &q4_0, NumericPolicy::default())
         .expect("emits")
         .source;
     assert!(
-        source.contains("q4_0_element("),
-        "a Q4_0 weight must render through the generic per-element accessor:\n{source}"
+        source.contains("q4_0_super_element("),
+        "a row-blocked Q4_0 weight must call the superblock-relative accessor:\n{source}"
     );
     assert!(
         !source.contains("q4k_run8(blk")
@@ -2824,13 +2823,15 @@ fn cooperative_identity_token_rejects_a_non_cooperative_reduce_op() {
 
 /// [`push_packed_row_blocked_body`]'s per-codec match, reached with a
 /// hand-built [`PackedRowBlock`] naming a codec that is neither a K-quant
-/// nor `Q8_0` -- [`classify_packed_row_block`]'s own `NotKQuantCodec` gate
-/// never builds one of these in practice, so this drives the emitter's
-/// internal contract directly rather than through [`emit`]. `Q4_0` (not
-/// `Q8_0`) is the still-rejected exemplar: `Q8_0` gained a row-blocked arm
-/// (see `codec_row_block_step_bytes`/`Q8_0_SUPER_ELEMENT_MSL`'s own docs)
-/// and is proved to SUCCEED through this same function by
-/// [`push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel`] below,
+/// nor `Q8_0`/`Q4_0` -- [`classify_packed_row_block`]'s own `NotKQuantCodec`
+/// gate never builds one of these in practice, so this drives the emitter's
+/// internal contract directly rather than through [`emit`]. `Q5_1` is the
+/// still-rejected exemplar: `Q8_0` and `Q4_0` each gained a row-blocked arm
+/// (see `codec_row_block_step_bytes`/`Q8_0_SUPER_ELEMENT_MSL`/
+/// `Q4_0_SUPER_ELEMENT_MSL`'s own docs) and are proved to SUCCEED through
+/// this same function by
+/// [`push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel`]/
+/// [`push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel`] below,
 /// not rejected here anymore.
 #[test]
 fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
@@ -2839,7 +2840,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         weight: 0,
         other: 1,
         reduce_dim: 1,
-        codec: Codec::Q4_0,
+        codec: Codec::Q5_1,
         token_axes: Vec::new(),
         feature_axes: vec![0, 1],
     };
@@ -2851,17 +2852,17 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         ReduceInit::Zero,
         &[0, 1],
         2,
-        &[Some(Codec::Q4_0), None],
+        &[Some(Codec::Q5_1), None],
         "float",
         &block,
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
         false,
     )
-    .expect_err("Q4_0 never reaches the row-blocked path");
+    .expect_err("Q5_1 never reaches the row-blocked path");
     assert!(matches!(
         error,
-        EmitError::NonKQuantCodec { codec: "q4_0", .. }
+        EmitError::NonKQuantCodec { codec: "q5_1", .. }
     ));
 }
 
@@ -2902,6 +2903,46 @@ fn push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel() {
     assert!(
         source.contains("q8_0_super_element"),
         "row-blocked Q8_0 body must call the superblock-relative accessor: {source}"
+    );
+}
+
+/// [`classify_packed_row_block`] now admits [`Codec::Q4_0`] the same way it
+/// admits [`Codec::Q8_0`] (`emit_and_classify.rs`'s whitelist match) and
+/// [`push_packed_row_blocked_body`] renders a real kernel body for it
+/// instead of `EmitError::NonKQuantCodec` -- the gate-level half of the
+/// proof; the greedy-decode token-parity run against the pre-change
+/// baseline (`Q4_0` falling to the generic cooperative reduce) is the
+/// execution-level half.
+#[test]
+fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
+    let bound = matmul_op(4, 256, 3);
+    let block = PackedRowBlock {
+        weight: 0,
+        other: 1,
+        reduce_dim: 1,
+        codec: Codec::Q4_0,
+        token_axes: Vec::new(),
+        feature_axes: vec![0, 1],
+    };
+    let mut source = String::new();
+    push_packed_row_blocked_body(
+        &mut source,
+        &bound,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        &[0, 1],
+        2,
+        &[Some(Codec::Q4_0), None],
+        "float",
+        &block,
+        &ComposedBody::leaf(ScalarOp::Identity),
+        &[],
+        false,
+    )
+    .expect("Q4_0 now reaches the row-blocked path and renders a kernel body");
+    assert!(
+        source.contains("q4_0_super_element"),
+        "row-blocked Q4_0 body must call the superblock-relative accessor: {source}"
     );
 }
 

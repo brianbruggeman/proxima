@@ -728,6 +728,11 @@ static inline float q8_0_element(device const uchar *block, uint index) {
 }
 
 
+static inline float q8_0_super_element(device const uchar *superblock, uint index) {
+    return q8_0_element(superblock + (index / 32u) * 34u, index % 32u);
+}
+
+
 // element `index` (0..32) of one Q4_0 block, byte-for-byte the value
 // proxima_gguf::quant::q4_0::dequantize_block writes at the same index.
 static inline float q4_0_element(device const uchar *block, uint index) {
@@ -736,6 +741,11 @@ static inline float q4_0_element(device const uchar *block, uint index) {
     uchar byte = block[2u + (index % 16u)];
     int nibble = (index < 16u) ? (int)(byte & 0x0Fu) : (int)(byte >> 4u);
     return (float)(nibble - 8) * d;
+}
+
+
+static inline float q4_0_super_element(device const uchar *superblock, uint index) {
+    return q4_0_element(superblock + (index / 32u) * 18u, index % 32u);
 }
 
 

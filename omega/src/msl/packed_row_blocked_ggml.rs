@@ -587,10 +587,33 @@ pub(super) fn push_packed_row_blocked_body(
                     source.push_str("            }\n");
                 }
                 Codec::Q4_0 => {
-                    return Err(EmitError::NonKQuantCodec {
-                        node: resolved.node,
-                        codec: "q4_0",
-                    });
+                    // `sub` (32) is exactly `Q4_0_BLOCK_ELEMENTS`: this
+                    // lane's whole 32-element slot IS one real `Q4_0` block,
+                    // so `q4_0_super_element` decodes it a scale-load-plus-
+                    // nibble-load at a time, same per-element posture as
+                    // `Codec::Q8_0`'s own arm above (no batched unpack yet
+                    // -- a follow-up optimization, not a correctness gap).
+                    source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
+                    source.push_str(&format!(
+                        "                {element_type} scratch[{}];\n",
+                        operand_count.max(1)
+                    ));
+                    source.push_str(&format!(
+                        "                scratch[{weight}] = q4_0_super_element(blk, slot + (uint)e);\n"
+                    ));
+                    source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
+                    let value_expr = push_body_steps(
+                        source,
+                        resolved.element_body(),
+                        "                ",
+                        element_type,
+                    );
+                    source.push_str(&format!(
+                        "                {element_type} value = {value_expr};\n"
+                    ));
+                    let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+                    source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
+                    source.push_str("            }\n");
                 }
                 Codec::Q5_1 => {
                     return Err(EmitError::NonKQuantCodec {

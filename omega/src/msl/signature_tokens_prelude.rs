@@ -750,6 +750,8 @@ pub(super) fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(Q4_0_UNPACK_MSL);
     source.push('\n');
+    source.push_str(Q4_0_SUPER_ELEMENT_MSL);
+    source.push('\n');
     source.push_str(Q5_1_UNPACK_MSL);
     source.push('\n');
     source.push_str(Q5_0_UNPACK_MSL);
