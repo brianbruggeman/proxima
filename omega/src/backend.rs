@@ -352,7 +352,8 @@ pub enum Plan {
 /// re-runs `infer`/`bind` every call — so "planning" here is exactly the
 /// caller-owned pieces that DO persist across calls: the program itself
 /// (owned, so the [`Plan`] outlives the caller's borrowed slices) and the
-/// reusable scratch [`evaluate_quantized_named_with_scratch`] takes, so
+/// reusable scratch
+/// [`evaluate_quantized_named_with_scratch_and_experts`] takes, so
 /// repeated [`execute_plan_named`] calls keep reusing the same buffers
 /// instead of reintroducing the per-call allocation that function's own
 /// `scratch` parameters exist to avoid.
@@ -773,8 +774,9 @@ fn plan_named_cpu(
 /// [`plan_named_cpu`]'s exact-activation counterpart -- the ONLY
 /// difference is [`CpuPlan::exact_activations`], read back by
 /// [`execute_plan_named_cpu`] to pick
-/// [`evaluate_quantized_named_exact_with_scratch`] over
-/// [`evaluate_quantized_named_with_scratch`]. A sibling function rather
+/// [`evaluate_quantized_named_exact_with_scratch_and_experts`] over
+/// [`evaluate_quantized_named_with_scratch_and_experts`]. A sibling function
+/// rather
 /// than a parameter on [`plan_named_cpu`] itself so every one of that
 /// function's existing callers (`plan_named`'s `Engine::Cpu` arm) is
 /// untouched.
