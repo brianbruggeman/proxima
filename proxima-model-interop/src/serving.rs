@@ -474,9 +474,9 @@ pub struct ServingConfig<'model> {
     /// Not an upstream llama-server flag -- marks every plan's own
     /// `Op::Iota`/`Op::Constant` leaf (`omega::metal::Plan::
     /// mark_plan_time_constants_resident`'s own doc) resident the same way
-    /// [`crate::generate::BackendRuntime::build_placed_plan`]'s
+    /// `crate::generate::BackendRuntime::build_placed_plan`'s
     /// `resident_names` already marks checkpoint weights: computed once by
-    /// its first real dispatch, then read back from [`Plan::device_buffers`]
+    /// its first real dispatch, then read back from `Plan::device_buffers`
     /// on every later call against that plan instead of re-dispatching a
     /// kernel for it every token. `false` (this field's default) is today's
     /// shipped behavior, unchanged.
@@ -487,7 +487,7 @@ pub struct ServingConfig<'model> {
     /// `generate::decode::run_decode_loop_placed_kv` against that step's
     /// own `metal_stage_totals()` snapshot. `0` (this field's default)
     /// disables the check -- unmeasured until a caller opts in. `N > 0`
-    /// returns [`InteropError::TooManyCommandBuffers`] the first step that
+    /// returns `InteropError::TooManyCommandBuffers` the first step that
     /// exceeds it, instead of silently letting a future full-graph
     /// regression multiply command-buffer submissions per token.
     pub max_command_buffers_per_token: usize,
@@ -500,13 +500,13 @@ pub struct ServingConfig<'model> {
     /// call site yet (ROW 587's own residual).
     pub overlap_transfer_compute: bool,
     /// I11 scheduling level 1 of 3: request admission. See
-    /// [`AdmissionSchedule`]'s own doc for the one site that consults it.
+    /// `AdmissionSchedule`'s own doc for the one site that consults it.
     pub admission_schedule: AdmissionSchedule,
     /// I11 scheduling level 2 of 3: phase scheduling (prefill vs decode).
-    /// See [`PhaseSchedule`]'s own doc for the one site that consults it.
+    /// See `PhaseSchedule`'s own doc for the one site that consults it.
     pub phase_schedule: PhaseSchedule,
     /// I11 scheduling level 3 of 3: per-layer expert residency. See
-    /// [`ExpertResidencySchedule`]'s own doc for the one site that
+    /// `ExpertResidencySchedule`'s own doc for the one site that
     /// consults it.
     pub expert_residency_schedule: ExpertResidencySchedule,
 }
