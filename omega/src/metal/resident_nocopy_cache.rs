@@ -1050,13 +1050,15 @@ pub static PLAN_UNIFORM_WRITES: Counter = Counter::new("omega.metal.plan_uniform
 /// [`DispatchType::Serial`] rather than not existing at all.
 pub static BARRIERS_EMITTED: Counter = Counter::new("omega.metal.concurrent.barriers_emitted");
 
-/// Every [`hazard_step`] call -- one per bound-op position under
+/// Every `hazard_step` call -- one per bound-op position under
 /// [`DispatchType::Concurrent`], including a horizontal-merge member with
 /// `z > 0` that never dispatches: a miss there would silently drop that
 /// member's own RAW/WAW/WAR bookkeeping (`handle_merged_position`'s own
 /// doc), so this is the direct witness that every member's output was
-/// recorded regardless of how many actual dispatches [`ENCODE_DISPATCH_CALLS`]
-/// shows for the same step count.
+/// recorded regardless of how many actual dispatches
+/// `crate::metal::ENCODE_DISPATCH_CALLS` shows for the same step count
+/// (`feature = "instrument"`-gated, unlike this counter, so not doc-linkable
+/// under a default build).
 pub static HAZARD_STEP_CALLS: Counter = Counter::new("omega.metal.concurrent.hazard_step_calls");
 
 /// How many `split_by_shared_buffers` candidates were refused because the

@@ -278,7 +278,8 @@ pub enum MetalError {
     },
 }
 
-/// The plan-time description of one expert payload in an [`ExpertSource`].
+/// The plan-time description of one expert payload in an
+/// [`ExpertSource`](proxima_tensor::cpu::ExpertSource).
 ///
 /// The descriptor is deliberately independent of a Metal buffer: HOBBIT can
 /// keep the payload in an mmap and a later lowering can bind one buffer per
@@ -1485,7 +1486,7 @@ impl Plan {
             .collect();
     }
 
-    /// Extends [`Self::resident_nodes`] with every `Op::Iota`/`Op::Constant`
+    /// Extends `Self::resident_nodes` with every `Op::Iota`/`Op::Constant`
     /// leaf this plan's own `prepared.resolved` dispatches -- both are pure
     /// functions of their own `extent`/`value` (op.rs's own doc: "nothing
     /// external binds to it"), so the first call's real dispatch computes a
@@ -1495,7 +1496,7 @@ impl Plan {
     /// that set for free: the retirement loop's own `resident_nodes` check
     /// (`execute_plan_with_placements`'s own doc) stops dropping this node's
     /// `device_buffers` entry after the call that computed it, and
-    /// [`resident_pinned_retires`] stops handing its `BufferArena` slot back
+    /// `resident_pinned_retires` stops handing its `BufferArena` slot back
     /// to a later position -- without either site needing to know this node
     /// is a leaf rather than a checkpoint block.
     pub fn mark_plan_time_constants_resident(&mut self) {
@@ -1865,7 +1866,8 @@ fn expert_codec(node: NodeId, block: &QuantizedBlock<'_>) -> Result<Codec, Metal
 /// Describes the borrowed payloads in one expert substitution table.
 ///
 /// This is the lowering boundary for HOBBIT: the residency decision remains
-/// a borrowed [`ExpertSource`] while Metal receives codec-aware byte spans.
+/// a borrowed [`ExpertSource`](proxima_tensor::cpu::ExpertSource) while Metal
+/// receives codec-aware byte spans.
 /// Keeping the spans separate is important because Q2_K, Q4_K, and Q6_K
 /// blocks do not have the same byte width; joining them into one packed operand would
 /// make the second expert's address wrong.
