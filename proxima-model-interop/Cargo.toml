@@ -274,6 +274,7 @@ workspace = true
 
 [dev-dependencies]
 libc.workspace = true
+criterion.workspace = true
 half = { version = "2.7.1", default-features = false }
 proxima-tensor = { path = "../proxima-tensor", features = ["config", "std", "test-support"] }
 rustix.workspace = true
@@ -435,3 +436,16 @@ required-features = ["std"]
 [[example]]
 name = "gemma4_tokenizer_wholestring_bpe"
 required-features = ["std"]
+
+# SLICE 1 forward decomposition harness (`bench/forward-decomposition`):
+# root-causes the multi-position gpu_exec floor by splitting the gemma4-E2B
+# Metal forward into named components, each on the compile axis
+# (`omega::metal::pipeline_for`'s cache-miss cost) and the execution axis
+# (`omega::metal::metal_stage_totals`'s `gpu_exec_ticks`) separately.
+# `metal` pulls in `dep:omega` + `instrument` pulls in `omega?/instrument`
+# (this crate's own `instrument` feature doc), both required to reach the
+# pipeline-compile/gpu-exec split this bench reports.
+[[bench]]
+name = "gemma4_forward_decomposition"
+harness = false
+required-features = ["metal", "instrument"]
