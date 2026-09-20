@@ -52,6 +52,16 @@ pub struct Architecture {
     pub key_length_swa: u32,
     pub value_length_swa: u32,
     pub sliding_window_pattern: Vec<bool>,
+    /// `{family}.attention.shared_kv_layers` -- the count of TRAILING
+    /// layers (`block_count - shared_kv_layers` through `block_count - 1`)
+    /// that carry no `attn_k.weight`/`attn_v.weight`/`attn_k_norm.weight`
+    /// tensors of their own at all (confirmed against the real
+    /// `gemma4:e2b-it-qat` header: an `UnknownTensor` load error on
+    /// `blk.15.attn_k_norm.weight` when `block_count=35` and this key reads
+    /// `20`). `0` (the default `metadata_u32_optional` returns when the key
+    /// is absent, e.g. E4B/12B/26B/31B) means every layer owns its own
+    /// K/V -- this crate's prior behaviour, unchanged.
+    pub shared_kv_layers: u32,
     pub rope_freq_base: f32,
     pub rope_freq_base_swa: f32,
     pub rope_dimension_count: u32,
@@ -109,6 +119,7 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<Architecture, InteropError> 
         key_length_swa: metadata_u32(parsed, &prefix("attention.key_length_swa"))?,
         value_length_swa: metadata_u32(parsed, &prefix("attention.value_length_swa"))?,
         sliding_window_pattern,
+        shared_kv_layers: metadata_u32_optional(parsed, &prefix("attention.shared_kv_layers")),
         rope_freq_base,
         rope_freq_base_swa: metadata_f32_optional(
             parsed,

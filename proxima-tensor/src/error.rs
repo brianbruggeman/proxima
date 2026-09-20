@@ -318,6 +318,36 @@ pub enum TensorError {
     #[error("full_attention_interval must be >= 1, got {full_attention_interval}")]
     InvalidFullAttentionInterval { full_attention_interval: u32 },
 
+    /// [`crate::spec::append_attention_mixer`]'s `value_source ==
+    /// ValueSource::SharedWithKey` reads this layer's OWN raw `K` projection
+    /// as `V` -- a shape only meaningful when `key_source ==
+    /// KeySource::Projected` actually built that local `K`. Gemma 4 E2B's
+    /// cross-layer shared-KV shape (`key_source == KeySource::Shared`) has
+    /// no local `K` to reuse this way; a schedule combining the two is
+    /// malformed.
+    #[error("attention mixer combines ValueSource::SharedWithKey with a cross-layer KeySource::Shared -- no local K to reuse as V")]
+    SharedWithKeyRequiresProjectedKey,
+
+    /// [`crate::spec::lfm2_forward_program_with_experts`]'s per-layer
+    /// `key_source_kind`/`value_source_kind: SharedFromLayer(source)` names
+    /// a source layer whose own `K`/`V` this pass has not yet computed --
+    /// either the source index is `>=` the current layer (forward
+    /// reference) or the named layer never ran as an owning attention layer
+    /// (`LayerKind::ShortConv`, or itself another `SharedFromLayer`).
+    #[error("layer {layer} names shared-KV source layer {source_layer}, which has no own-KV to reuse")]
+    SharedKvSourceNotAvailable { layer: u32, source_layer: u32 },
+
+    /// [`crate::spec::lfm2_single_range_cached`]'s merged-cache decode
+    /// forward has no cross-layer `stored_kv` pass yet -- unlike
+    /// [`crate::spec::lfm2_forward_program_with_experts`] (the prefill
+    /// engine this crate's shared-KV worked-example targets), this cached
+    /// forward scores against a MERGED multi-round cache per layer, so
+    /// wiring `ValueSourceKind::SharedFromLayer` here needs the merged
+    /// cache's own source-layer's merged K/V, not a same-pass NodeId --
+    /// separate forward-graph work, not yet built.
+    #[error("layer {layer} names ValueSourceKind::SharedFromLayer({source_layer}), unsupported in the merged-cache decode forward")]
+    SharedKvUnsupportedInCachedForward { layer: u32, source_layer: u32 },
+
     /// [`crate::numeric::admit`] rejected a rewrite: `granted` does not
     /// grant every permission `rewrite`'s
     /// [`crate::numeric::NumericRewrite::required_permissions`] names.

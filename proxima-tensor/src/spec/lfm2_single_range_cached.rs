@@ -116,6 +116,7 @@ pub fn append_lfm2_single_range_cached_attention(
             )?
         }
         ValueSource::SharedWithKey => k_new_raw,
+        ValueSource::Shared(v) => v,
     };
     // Gemma 4's `v_norm` -- same weightless per-kv-head RMSNorm, no RoPE,
     // [`append_attention_mixer`]'s own doc walks through.
@@ -510,6 +511,7 @@ pub fn append_lfm2_two_range_cached_attention(
             )?
         }
         ValueSource::SharedWithKey => k_new_raw,
+        ValueSource::Shared(v) => v,
     };
     let v_new = if value_norm {
         rmsnorm_per_head_no_scale(program, v_new_raw, inv_head_dim, eps, "u")?
@@ -990,6 +992,9 @@ pub fn lfm2_single_range_cached_forward_program_with_experts(
                 ValueSource::Projected(wv)
             }
             ValueSourceKind::SharedWithKey => ValueSource::SharedWithKey,
+            ValueSourceKind::SharedFromLayer(source) => {
+                return Err(TensorError::SharedKvUnsupportedInCachedForward { layer, source_layer: source });
+            }
         };
         let wo = input_leaf(
             &mut program,
@@ -1350,6 +1355,9 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
                 ValueSource::Projected(wv)
             }
             ValueSourceKind::SharedWithKey => ValueSource::SharedWithKey,
+            ValueSourceKind::SharedFromLayer(source) => {
+                return Err(TensorError::SharedKvUnsupportedInCachedForward { layer, source_layer: source });
+            }
         };
         let wo = input_leaf(
             &mut program,

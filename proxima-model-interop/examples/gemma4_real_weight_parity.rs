@@ -20,8 +20,9 @@ use proxima_model_interop::gemma4::from_metadata;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
-    LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ParallelDenseMoeConfig,
-    RopePairing, RopeTableSel, ValueSourceKind, lfm2_forward_program_with_experts,
+    KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
+    ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind,
+    lfm2_forward_program_with_experts,
 };
 
 /// Finds the [`NodeId`] of the `Op::Input` leaf named `name` -- `op::append`'s
@@ -74,6 +75,7 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
                     kv_heads,
                     mask_window: Some(architecture.sliding_window),
                     value_source_kind: ValueSourceKind::ProjectedV,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos_swa",
                         sin_name: "rope_sin_swa",
@@ -90,6 +92,7 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
                     kv_heads,
                     mask_window: None,
                     value_source_kind: ValueSourceKind::SharedWithKey,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos",
                         sin_name: "rope_sin",
