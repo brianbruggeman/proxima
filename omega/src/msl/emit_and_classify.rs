@@ -1551,19 +1551,24 @@ pub enum PackedRowBlockRejection {
     /// default build keeps the generic cooperative gather-aware path until
     /// `metal-gathered-packed-row` has been enabled and measured.
     GatheredOperand,
-    /// The packed operand's codec is [`Codec::Q8_0`] or
-    /// [`Codec::Q4_0`] — this path's lane amortization
+    /// The packed operand's codec is [`Codec::Q5_1`]/[`Codec::Q5_0`] or one
+    /// of the other non-admitted codecs — this path's lane amortization
     /// ([`Q4K_BLOCK_ELEMENTS`], 8 lanes per 32-element sub-block) is
-    /// hard-coded to the K-quant family's shared 256-element super-block,
-    /// which neither flat 32-element codec has an analogue for. Both
-    /// always take the fully generic per-element path instead (see
-    /// [`Q8_0_UNPACK_MSL`]/[`Q4_0_UNPACK_MSL`]'s own docs). Checked by
-    /// WHITELISTING the three K-quant variants rather than blacklisting
-    /// `Q8_0` alone -- an equality check against one non-K-quant codec
-    /// silently admits any OTHER non-K-quant codec whose extent happens to
-    /// be a multiple of 256 (`docs/discipline.md`'s own landmine: `Q8_0`'s
-    /// addition was caught only because this was rewritten as a match, not
-    /// because the single `==` check would have caught `Q4_0` too).
+    /// hard-coded to the K-quant family's shared 256-element super-block.
+    /// [`Codec::Q8_0`] and [`Codec::Q4_0`] are also flat 32-element codecs
+    /// with no super-block of their own, but both admit anyway: eight
+    /// contiguous real blocks span exactly one 256-element super-block, so
+    /// [`Q8_0_SUPER_ELEMENT_MSL`]/[`Q4_0_SUPER_ELEMENT_MSL`] emulate the
+    /// super-block relative read this path needs (see those items' own
+    /// docs). Every other non-admitted codec has no such eight-block
+    /// coincidence and always takes the fully generic per-element path
+    /// instead. Checked by WHITELISTING the admitted variants rather than
+    /// blacklisting one codec by `==` -- an equality check against one
+    /// non-K-quant codec silently admits any OTHER non-K-quant codec whose
+    /// extent happens to be a multiple of 256 (`docs/discipline.md`'s own
+    /// landmine: `Q8_0`'s addition was caught only because this was
+    /// rewritten as a match, not because a single `==` check would have
+    /// caught `Q4_0`, `Q5_1`, or `Q5_0` too).
     NotKQuantCodec,
     /// The reduce folds ZERO axes into its output — degenerate, never
     /// observed on a real matmul (kept so the match stays exhaustive over
@@ -1635,21 +1640,21 @@ pub(super) fn classify_packed_row_block(
     let [(weight, codec)] = packed[..] else {
         return Err(PackedRowBlockRejection::NotExactlyOnePackedOperand);
     };
-    // Whitelist the K-quant family (plus `Q8_0`) explicitly rather than
-    // blacklisting one codec by `==` -- an equality check against `Q4_0`
-    // alone would have silently admitted any future flat-block codec the
-    // moment its extent happened to be a multiple of 256. This match is
-    // exhaustive over `Codec`, so a new codec added later forces a decision
-    // here instead of slipping through. `Q8_0` is not a K-quant codec (no
-    // super-block of its own), but `push_packed_row_blocked_body`'s
-    // single-row `else` arm addresses it correctly via
-    // `codec_row_block_step_bytes`/`Q8_0_SUPER_ELEMENT_MSL` (eight
-    // contiguous 32-element `Q8_0` blocks span exactly one K-quant
-    // super-block's 256 elements) -- see those items' own docs.
+    // Whitelist the K-quant family (plus `Q8_0`/`Q4_0`) explicitly rather
+    // than blacklisting one codec by `==` -- an equality check against a
+    // single non-K-quant codec would have silently admitted any future
+    // flat-block codec the moment its extent happened to be a multiple of
+    // 256. This match is exhaustive over `Codec`, so a new codec added
+    // later forces a decision here instead of slipping through. `Q8_0`/
+    // `Q4_0` are not K-quant codecs (no super-block of their own), but
+    // `push_packed_row_blocked_body`'s single-row `else` arm addresses both
+    // correctly via `codec_row_block_step_bytes`/`Q8_0_SUPER_ELEMENT_MSL`/
+    // `Q4_0_SUPER_ELEMENT_MSL` (eight contiguous 32-element blocks span
+    // exactly one K-quant super-block's 256 elements) -- see those items'
+    // own docs.
     match codec {
-        Codec::Q3K | Codec::Q4K | Codec::Q5K | Codec::Q6K | Codec::Q8_0 => {}
+        Codec::Q3K | Codec::Q4K | Codec::Q5K | Codec::Q6K | Codec::Q8_0 | Codec::Q4_0 => {}
         Codec::Q2K
-        | Codec::Q4_0
         | Codec::Q5_1
         | Codec::Q5_0
         | Codec::Float16
