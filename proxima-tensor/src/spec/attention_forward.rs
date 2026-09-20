@@ -1119,7 +1119,17 @@ pub(crate) fn append_routed_expert_ffn(
 /// IDENTICAL post-attention/FFN sequence over its own merged-cache
 /// attention output -- this composition has no dependency on how
 /// `post_mixer` was computed (block-local vs merged-cache scoring), only
-/// on what it IS, so nothing here changes for a cached caller.
+/// on what it IS, so nothing here changes for a cached caller. `ple_input`
+/// (`Some` only when [`lfm2_forward_program_with_experts`]'s own `ple_dim`
+/// is `Some`, [`ple_layer_input`]'s own return value for this `layer`) is
+/// Stage B's own per-layer-embedding (PLE) injection input -- consumed only
+/// when `ffn_config.ple` is ALSO `true` (gemma4.go:1349-1361): gate/GeGLU
+/// (`inp_gate`/[`Activation::GeluTanh`]) against `ple_input`, `proj`, a
+/// plain [`rmsnorm`] via `post_norm`, added into the residual right after
+/// the FFN residual add above and BEFORE [`LayerFfnConfig::output_scale`]'s
+/// own whole-layer multiply -- `output_scale` already IS Stage B's own
+/// trailing `* layer_output_scale` (gemma4.go:1359-1361), reused here
+/// rather than re-declared.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn append_lfm2_layer_ffn(
     program: &mut Vec<Op>,
@@ -1136,6 +1146,8 @@ pub(crate) fn append_lfm2_layer_ffn(
     inv_dim: NodeId,
     eps: NodeId,
     ffn_config: &LayerFfnConfig,
+    ple_input: Option<NodeId>,
+    ple_dim: u32,
     moe_sites: &mut Vec<MoeSite>,
 ) -> Result<NodeId, TensorError> {
     let normed2 = rmsnorm(program, post_mixer, ffn_norm_weight, inv_dim, eps)?;
@@ -1277,6 +1289,72 @@ pub(crate) fn append_lfm2_layer_ffn(
         ScalarOp::Add,
         &[(ffn_out, "sd->sd"), (post_mixer, "sd->sd")],
     )?;
+
+    if let (true, Some(ple_input)) = (ffn_config.ple, ple_input) {
+        let inp_gate = input_leaf(
+            program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(ple_dim)],
+            &alloc::format!("blk.{layer}.inp_gate.weight"),
+        );
+        let gate_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(x, "sd->sdo"), (inp_gate, "do->sdo")],
+        )?;
+        let gate_raw = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            gate_product,
+            "sdo->sdo",
+            "so->sdo",
+        )?;
+        let gate_act = append_activation(program, gate_raw, ones, Activation::GeluTanh)?;
+        let gated = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(gate_act, "so->so"), (ple_input, "so->so")],
+        )?;
+
+        let proj = input_leaf(
+            program,
+            DType::Float32,
+            alloc::vec![Extent::Static(ple_dim), Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.proj.weight"),
+        );
+        let projected_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(gated, "so->sod"), (proj, "od->sod")],
+        )?;
+        let projected_raw = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            projected_product,
+            "sod->sod",
+            "sd->sod",
+        )?;
+        let post_norm_weight = input_leaf(
+            program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.post_norm.weight"),
+        );
+        let projected_normed = rmsnorm(program, projected_raw, post_norm_weight, inv_dim, eps)?;
+        x = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            &[(x, "sd->sd"), (projected_normed, "sd->sd")],
+        )?;
+    }
 
     if ffn_config.output_scale {
         let output_scale = input_leaf(
@@ -1938,6 +2016,8 @@ pub fn lfm2_forward_program_with_experts(
             inv_dim,
             eps,
             ffn_config,
+            ple_layer_inputs[layer as usize],
+            ple_dim.unwrap_or(0),
             &mut moe_sites,
         )?;
     }
@@ -3519,8 +3599,11 @@ mod ple_stage_a_tests {
     use super::*;
 
     /// `H=4` hidden state fed into `per_layer_model_proj` -- the worked
-    /// example's own `h0`.
-    const H0: [f32; 4] = [1.0, 0.5, -0.5, 0.2];
+    /// example's own `h0`. `pub(super)`: [`super::ple_stage_b_tests`] reuses
+    /// this and [`E_RAW`]/[`PROJ_NORM_WEIGHT`]/[`proj_table_in_major`] to
+    /// chain Stage A's own construction into its Stage B test, rather than
+    /// re-declaring the same fixture.
+    pub(super) const H0: [f32; 4] = [1.0, 0.5, -0.5, 0.2];
     /// `per_layer_model_proj.weight`, declared `[embedding, ple_total]`
     /// (in, out) -- the worked example's `W_proj` (`P` rows of `H` each,
     /// out-major) transposed to this crate's in-major leaf convention.
@@ -3528,17 +3611,17 @@ mod ple_stage_a_tests {
         [0.1, 0.2, -0.1, 0.05],
         [-0.05, 0.1, 0.2, 0.1],
     ];
-    const PROJ_NORM_WEIGHT: [f32; 2] = [1.2, 0.8];
+    pub(super) const PROJ_NORM_WEIGHT: [f32; 2] = [1.2, 0.8];
     /// The single token's already-gathered per-layer-token embedding row
     /// (`per_layer_token_embd.weight`'s one vocab row, `vocab=1`) -- the
     /// worked example's own `e_raw`.
-    const E_RAW: [f32; 2] = [0.3, -0.2];
+    pub(super) const E_RAW: [f32; 2] = [0.3, -0.2];
     const EPS: f32 = 1e-6;
 
     /// [`W_PROJ_OUT_MAJOR`] transposed to `[in, out]` row-major, the layout
     /// [`append_ple_shared_projections`]'s own `"sd->sdo"`/`"do->sdo"`
     /// matmul pattern reads `per_layer_model_proj.weight` through.
-    fn proj_table_in_major() -> Vec<f32> {
+    pub(super) fn proj_table_in_major() -> Vec<f32> {
         let mut flat = Vec::with_capacity(H0.len() * PROJ_NORM_WEIGHT.len());
         for input_index in 0..H0.len() {
             for row in &W_PROJ_OUT_MAJOR {
@@ -3606,6 +3689,193 @@ mod ple_stage_a_tests {
             assert!(
                 (actual - target).abs() < 1e-4,
                 "per_layer_input = {per_layer_input:?}, expected {expected:?}"
+            );
+        }
+    }
+}
+
+/// Gemma 4's per-layer-embedding (PLE) Stage B injection --
+/// [`append_lfm2_layer_ffn`]'s own `ffn_config.ple` branch against the
+/// derived worked example's `h_final` (`gemma4.go:1349-1361`), chained onto
+/// [`ple_stage_a_tests`]'s own Stage A machinery so this test exercises the
+/// SAME two-stage composition `lfm2_forward_program_with_experts` runs, not
+/// a hand-reconstructed shortcut.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod ple_stage_b_tests {
+    use super::ple_stage_a_tests::{E_RAW, H0, PROJ_NORM_WEIGHT, proj_table_in_major};
+    use super::*;
+
+    /// The post-FFN-residual hidden state Stage B injects into -- the
+    /// worked example's own `h1`.
+    const H1: [f32; 4] = [0.8, -0.3, 0.6, 0.1];
+    /// `blk.{layer}.inp_gate.weight`, declared `[embedding, ple_dim]` (in,
+    /// out) -- the worked example's `W_gate` (`P` rows of `H` each,
+    /// out-major) transposed to this crate's in-major leaf convention, the
+    /// same transform [`proj_table_in_major`] applies to `W_proj`.
+    const W_GATE_OUT_MAJOR: [[f32; 4]; 2] = [
+        [0.2, -0.1, 0.3, 0.05],
+        [0.1, 0.2, -0.2, 0.15],
+    ];
+    /// `blk.{layer}.proj.weight`, declared `[ple_dim, embedding]` (in,
+    /// out) -- the worked example's `W_proj2` (`H` rows of `P` each,
+    /// out-major already, since `proj`'s OWN `in` axis is `ple_dim`).
+    const W_PROJ2_OUT_MAJOR: [[f32; 2]; 4] = [
+        [0.5, -0.3],
+        [0.2, 0.4],
+        [-0.1, 0.6],
+        [0.3, 0.1],
+    ];
+    const POST_NORM_WEIGHT: [f32; 4] = [1.1, 0.9, 1.0, 1.05];
+    const LAYER_OUTPUT_SCALE: f32 = 0.98;
+    const EPS: f32 = 1e-6;
+
+    /// `W_GATE_OUT_MAJOR` transposed to `[in, out]` row-major.
+    fn inp_gate_table_in_major() -> Vec<f32> {
+        let mut flat = Vec::with_capacity(H0.len() * PROJ_NORM_WEIGHT.len());
+        for input_index in 0..H0.len() {
+            for row in &W_GATE_OUT_MAJOR {
+                flat.push(row[input_index]);
+            }
+        }
+        flat
+    }
+
+    /// `W_PROJ2_OUT_MAJOR` transposed to `[in, out]` row-major -- `proj`'s
+    /// own `in` axis is `ple_dim` (`W_PROJ2_OUT_MAJOR`'s column axis), so
+    /// this transpose runs the opposite direction from
+    /// [`inp_gate_table_in_major`]'s.
+    fn proj2_table_in_major() -> Vec<f32> {
+        let mut flat = Vec::with_capacity(PROJ_NORM_WEIGHT.len() * H0.len());
+        for input_index in 0..PROJ_NORM_WEIGHT.len() {
+            for row in &W_PROJ2_OUT_MAJOR {
+                flat.push(row[input_index]);
+            }
+        }
+        flat
+    }
+
+    /// Builds and evaluates Stage A (reusing
+    /// [`append_ple_shared_projections`]/[`ple_layer_input`], one token,
+    /// one layer) chained into Stage B (`append_lfm2_layer_ffn`'s own
+    /// `ffn_config.ple` branch, dense FFN zeroed via an all-zero
+    /// `ffn_down.weight` so `post_mixer + ffn_out` reproduces the worked
+    /// example's own `h1` exactly, without needing a second independent
+    /// FFN oracle), and returns `h_final`.
+    fn evaluate_stage_b() -> Vec<f32> {
+        let ple_dim = PROJ_NORM_WEIGHT.len() as u32;
+        let embedding = H0.len() as u32;
+
+        let mut program = Vec::new();
+        let ids = input_leaf(
+            &mut program,
+            DType::Int32,
+            alloc::vec![Extent::Symbolic(0)],
+            "ids",
+        );
+        let h0 = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(embedding)],
+            "h0",
+        );
+        let shared =
+            append_ple_shared_projections(&mut program, ids, h0, 1, embedding, ple_dim, ple_dim)
+                .expect("append_ple_shared_projections lowers");
+        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let ple_input = ple_layer_input(&mut program, &shared, eps, 0, ple_dim)
+            .expect("ple_layer_input lowers");
+
+        let ffn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            "blk.0.ffn_norm.weight",
+        );
+        let post_mixer = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(embedding)],
+            "post_mixer",
+        );
+        let ones = scalar_constant(&mut program, 1.0);
+        let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+        let ffn_config = LayerFfnConfig {
+            ple: true,
+            output_scale: true,
+            ..LayerFfnConfig::exclusive()
+        };
+        let mut moe_sites = Vec::new();
+        let root = append_lfm2_layer_ffn(
+            &mut program,
+            0,
+            post_mixer,
+            ffn_norm_weight,
+            embedding,
+            1,
+            0,
+            0,
+            0,
+            1,
+            ones,
+            inv_dim,
+            eps,
+            &ffn_config,
+            Some(ple_input),
+            ple_dim,
+            &mut moe_sites,
+        )
+        .expect("append_lfm2_layer_ffn lowers");
+
+        let proj_table = proj_table_in_major();
+        let inp_gate_table = inp_gate_table_in_major();
+        let proj2_table = proj2_table_in_major();
+        let ffn_norm_ones: [f32; 4] = [1.0; 4];
+        let zero_gate: [f32; 4] = [0.0; 4];
+        let zero_down: [f32; 4] = [0.0; 4];
+        let eps_block: [f32; 1] = [EPS];
+        let scale_block: [f32; 1] = [LAYER_OUTPUT_SCALE];
+        let symbols: [u64; 1] = [1];
+        // Bound positionally, in the exact order each `Input` leaf was
+        // declared above: `ids`, `h0`, then `append_ple_shared_projections`'s
+        // own three leaves, `eps`, then this function's own `ffn_norm.weight`/
+        // `post_mixer`, then `append_lfm2_layer_ffn`'s own dense-FFN triple
+        // (zeroed) and Stage B triple, and finally `output_scale`'s leaf.
+        let blocks: [&[f32]; 15] = [
+            &[0.0],
+            &H0,
+            &E_RAW,
+            proj_table.as_slice(),
+            &PROJ_NORM_WEIGHT,
+            &eps_block,
+            &ffn_norm_ones,
+            &H1,
+            &zero_gate,
+            &zero_gate,
+            &zero_down,
+            inp_gate_table.as_slice(),
+            proj2_table.as_slice(),
+            &POST_NORM_WEIGHT,
+            &scale_block,
+        ];
+
+        let evaluated = crate::cpu::evaluate(&program, &symbols, &blocks, &[root])
+            .expect("ple stage B evaluates");
+        evaluated.root().to_vec()
+    }
+
+    /// The worked example's own oracle (`worked_example.py`, `h_final`):
+    /// dense FFN zeroed, GeGLU Stage B injection, plain RMSNorm `post_norm`,
+    /// then the whole-layer `layer_output_scale` multiply.
+    #[test]
+    fn h_final_matches_worked_example() {
+        let h_final = evaluate_stage_b();
+        let expected = [2.4774, 0.33322, 0.36438, 1.1137];
+        assert_eq!(h_final.len(), expected.len());
+        for (actual, target) in h_final.iter().zip(expected.iter()) {
+            assert!(
+                (actual - target).abs() < 1e-4,
+                "h_final = {h_final:?}, expected {expected:?}"
             );
         }
     }
