@@ -745,6 +745,12 @@ fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
         // is `metadata_u32_per_layer`'s scalar-broadcast, so this override
         // reproduces the prior single-width behaviour byte-for-byte there).
         dense_feed_forward: None,
+        // E2B/E4B's dense-only `FfnCombination::Exclusive` path needs its
+        // own `blk.{layer}.post_ffw_norm.weight` sandwich norm
+        // (`gemma4.go`'s `PostFFNorm`) -- unread when `combination` is
+        // `ParallelDenseMoe` (12B/26B/31B), which applies its own
+        // `combined_post_norm` on the SAME tensor name instead.
+        exclusive_dense_post_norm: true,
         // `architecture.ple_dim > 0` (E2B/E4B) -- every layer of a PLE
         // checkpoint injects it (`gemma4.go:1349-1361` has no per-layer-type
         // branch), paired with this call site's own `Some(architecture.ple_dim)`

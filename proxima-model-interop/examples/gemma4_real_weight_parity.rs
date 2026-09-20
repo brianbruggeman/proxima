@@ -61,6 +61,7 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
         routed_gating: ExpertGatingFunc::Softmax,
         routed_expert_bias: false,
         dense_feed_forward: None,
+        exclusive_dense_post_norm: false,
         activation: Activation::GeluTanh,
         ple: false,
     };
