@@ -7,7 +7,7 @@
 //! Two tables, both keyed off the same `Codec` identity now:
 //! [`GGML_CAPABILITY_TABLE`] mirrors the codec/topology/backend cells
 //! `tests/capability_matrix.rs` actually drives through
-//! `crate::LoadedModel`'s (`std`-gated) public `Pipe`; [`quant_format`]'s
+//! `crate::LoadedModel`'s (`std`-gated) public `Pipe`; `quant_format`'s
 //! table (built in `examples/generate_compatibility_doc.rs`,
 //! `metal`-feature-gated) mirrors every [`proxima_primitives::Codec`]
 //! variant against the CPU kernel (`proxima_tensor::cpu::QuantizedBlock`).

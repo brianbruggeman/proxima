@@ -157,7 +157,7 @@ pub enum InteropError {
     HybridMoeProgramUnsupported { name: String },
 
     /// `crate::gemma4::bind::Gemma4Arch::bind`'s own `CacheStrategy::TwoRange`
-    /// arm rebuilds a full, per-layer [`proxima_tensor::spec::Qwen35LayerRoots`]
+    /// arm rebuilds a full, per-layer `proxima_tensor::spec::Qwen35LayerRoots`
     /// vec by zipping the SAME schedule it fed `build_forward` against that
     /// call's own returned `cache_roots` (one entry per
     /// `KeySourceKind::ProjectedK` layer) -- this fires only if those two
@@ -173,7 +173,7 @@ pub enum InteropError {
     /// `crate::gemma4::bind::bind_gemma4_weights`'s fused
     /// `blk.{layer}.ffn_gate_up_exps.weight` cannot be split into the two
     /// separate `ffn_gate_exps.weight`/`ffn_up_exps.weight` leaves
-    /// [`proxima_tensor::spec::lfm2_forward_program_with_experts`]'s routed
+    /// `proxima_tensor::spec::lfm2_forward_program_with_experts`'s routed
     /// FFN declares without a full dequant first: the real checkpoint's
     /// `expert_feed_forward` (the split boundary) is not a whole multiple of
     /// the tensor's own codec `block_elements`, so no packed byte offset
