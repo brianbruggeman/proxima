@@ -437,6 +437,14 @@ required-features = ["std"]
 name = "gemma4_tokenizer_wholestring_bpe"
 required-features = ["std"]
 
+# no manifest entry existed for this example at all (pure autodiscovery), so
+# `cargo build --examples` / `cargo nextest run` with default features tried
+# to compile it and failed on `LoadedModel` (std-gated) -- every sibling
+# example above already declares this same gate.
+[[example]]
+name = "speculative_decode_parity"
+required-features = ["std"]
+
 # SLICE 1 forward decomposition harness (`bench/forward-decomposition`):
 # root-causes the multi-position gpu_exec floor by splitting the gemma4-E2B
 # Metal forward into named components, each on the compile axis
