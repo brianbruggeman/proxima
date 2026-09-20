@@ -569,7 +569,6 @@ impl<'file> ExpertSlab<'file> {
     /// the step unconditionally -- on an early `?` return as much as on the
     /// ordinary path -- so a caller can no longer forget the matching close
     /// the way a free-standing `end_step` call could be skipped.
-    #[must_use]
     pub fn begin_step(&mut self) -> StepGuard<'_, 'file> {
         self.open_step();
         StepGuard { slab: self }
