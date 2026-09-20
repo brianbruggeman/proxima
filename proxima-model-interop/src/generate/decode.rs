@@ -142,28 +142,43 @@ impl<'file> LoadedModel<'file> {
                 _ => None,
             })
             .collect();
+        // Stays FULL LENGTH, one entry per `self.layer_roots` index --
+        // [`Qwen35LayerRoots`]'s own doc: the decode loop's growth step
+        // (`LoadedModel::run_decode_loop_observed_seeded`'s own
+        // `active_layer_roots.iter().enumerate()` / `layer_caches[layer]`)
+        // indexes `layer_caches` by the REAL architecture layer number, in
+        // lockstep with `self.layer_roots` -- filtering a shared-KV layer
+        // out of this vec would desync every later layer's index. A
+        // shared-KV layer's own `DeclaredCacheKind::SharedFromLayer` entry
+        // carries no leaf names and costs nothing at fill/grow time
+        // ([`LayerCacheNames::SharedFromLayer`]'s own doc).
         let mut layer_cache_kinds: Vec<DeclaredCacheKind> =
             Vec::with_capacity(self.layer_roots.len());
         for (layer, roots) in self.layer_roots.iter().enumerate() {
             let bound = bound_cache_kind(roots);
-            let declared = match declared_cache_kind(&program_input_names, layer) {
-                Some(declared) => declared,
-                None => {
+            let declared = declared_cache_kind(&program_input_names, layer);
+            match (bound, declared) {
+                (DeclaredCacheKind::SharedFromLayer, None) => {
+                    // by design: this layer reads a donor layer's own
+                    // already-declared leaves in-graph, never its own.
+                    layer_cache_kinds.push(DeclaredCacheKind::SharedFromLayer);
+                }
+                (_, None) => {
                     return Err(InteropError::LayerCacheLeavesMissing {
                         layer,
                         kind: bound.label(),
                         expected: bound.expected_leaf_templates(),
                     });
                 }
-            };
-            if declared != bound {
-                return Err(InteropError::LayerCacheKindMismatch {
-                    layer,
-                    declared: declared.label(),
-                    bound: bound.label(),
-                });
+                (_, Some(declared)) if declared != bound => {
+                    return Err(InteropError::LayerCacheKindMismatch {
+                        layer,
+                        declared: declared.label(),
+                        bound: bound.label(),
+                    });
+                }
+                (_, Some(declared)) => layer_cache_kinds.push(declared),
             }
-            layer_cache_kinds.push(declared);
         }
         let cache_names: Vec<LayerCacheNames> = layer_cache_kinds
             .iter()
@@ -184,6 +199,7 @@ impl<'file> LoadedModel<'file> {
                     conv_history: alloc::format!("ssm_cache.{layer}.conv_history"),
                     state: alloc::format!("ssm_cache.{layer}.state"),
                 },
+                DeclaredCacheKind::SharedFromLayer => LayerCacheNames::SharedFromLayer,
             })
             .collect();
         let layer_row_widths: Vec<LayerPadRowWidths> = cache_names
@@ -246,6 +262,9 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(not(feature = "instrument"))]
                     let _ = (conv_history, state);
                     LayerCacheState::Ssm(SsmLayerCache::new(*conv_history_len, *state_len))
+                }
+                (LayerCacheNames::SharedFromLayer, LayerPadRowWidths::SharedFromLayer) => {
+                    LayerCacheState::SharedFromLayer
                 }
                 _ => unreachable!(
                     "cache_names/layer_row_widths built from the same layer_roots, in lockstep"
@@ -1995,6 +2014,13 @@ impl<'file> LoadedModel<'file> {
                                 let _ = state_is_placed;
                                 roots.push(*state_out);
                             }
+                            // gemma4 E2B's cross-layer shared-KV layer: no
+                            // `K`/`V` root of its own to request -- its
+                            // attention op already reads the donor layer's
+                            // own already-requested nodes in-graph
+                            // (`Qwen35LayerRoots::SharedFromLayer`'s own
+                            // doc), so nothing is pushed here.
+                            Qwen35LayerRoots::SharedFromLayer(_) => {}
                         }
                     }
                     if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_OUTPUT").is_some()
@@ -3252,6 +3278,14 @@ impl<'file> LoadedModel<'file> {
                                     cache.advance_conv_history(qkv_mixed_data, conv_history_len);
                                 }
                             }
+                            // gemma4 E2B's cross-layer shared-KV layer: no
+                            // state of its own to append to -- its `K`/`V`
+                            // were never requested as separate roots for
+                            // this layer index (the earlier
+                            // `roots.extend` loop's own `SharedFromLayer`
+                            // no-op arm), so there is nothing here to fold
+                            // in either.
+                            (Qwen35LayerRoots::SharedFromLayer(_), LayerCacheState::SharedFromLayer) => {}
                             _ => unreachable!(
                                 "layer_roots/layer_caches built from the same layer_roots, in lockstep"
                             ),

@@ -486,6 +486,11 @@ pub(super) enum LayerCacheState {
     Attention(LayerCache),
     DenseAttention(Qwen35DenseAttentionCache),
     Ssm(SsmLayerCache),
+    /// gemma4 E2B's cross-layer shared-KV layer
+    /// ([`Qwen35LayerRoots::SharedFromLayer`]'s own doc): no state of its
+    /// own to grow, fill, or read back -- its `K`/`V` live entirely in the
+    /// donor layer's own [`LayerCacheState`] entry.
+    SharedFromLayer,
 }
 
 /// Diagnostic-only (history-carry bisection step 3): `(element_count,
@@ -515,6 +520,7 @@ pub(super) fn layer_cache_checksum(cache: &LayerCacheState) -> (usize, f64) {
             cache.conv_history.len() + cache.state.len(),
             sum_abs(&cache.conv_history) + sum_abs(&cache.state),
         ),
+        LayerCacheState::SharedFromLayer => (0, 0.0),
     }
 }
 
@@ -583,6 +589,10 @@ pub(super) enum LayerCacheNames {
         conv_history: String,
         state: String,
     },
+    /// gemma4 E2B's cross-layer shared-KV layer -- declares no
+    /// `Op::Input` leaf at all (`DeclaredCacheKind::SharedFromLayer`'s own
+    /// doc), so this variant carries no names to feed at step time.
+    SharedFromLayer,
 }
 
 /// Which of the three per-layer cache shapes a layer's `Op::Input` leaves
@@ -599,6 +609,15 @@ pub(super) enum DeclaredCacheKind {
     Attention,
     DenseAttention,
     Ssm,
+    /// gemma4 E2B's cross-layer shared-KV layer
+    /// ([`Qwen35LayerRoots::SharedFromLayer`]'s own doc): this layer
+    /// declares NO `kv_cache.{layer}.*`/`ssm_cache.{layer}.*` `Op::Input`
+    /// leaves at all, by design -- its `K`/`V` are a donor layer's
+    /// already-declared leaves, read a second time in-graph. The one
+    /// `DeclaredCacheKind` a layer resolves to when
+    /// [`declared_cache_kind`] finds none of the other three shapes AND
+    /// `self.layer_roots` says this layer is bound `SharedFromLayer`.
+    SharedFromLayer,
 }
 
 impl DeclaredCacheKind {
@@ -607,6 +626,7 @@ impl DeclaredCacheKind {
             Self::Attention => "kv_cache.{layer}.{k_even,k_odd,v}",
             Self::DenseAttention => "kv_cache.{layer}.{k_first,k_second,k_pass,v}",
             Self::Ssm => "ssm_cache.{layer}.{conv_history,state}",
+            Self::SharedFromLayer => "(none -- reads a donor layer's own leaves)",
         }
     }
 
@@ -615,7 +635,8 @@ impl DeclaredCacheKind {
     /// [`declared_layer_cache_names_and_widths`] fills in `{layer}` from,
     /// surfaced verbatim in [`InteropError::LayerCacheLeavesMissing`] so
     /// the error names precisely what the architecture's `bind` failed to
-    /// emit.
+    /// emit. Empty for [`Self::SharedFromLayer`] -- this layer must
+    /// declare none, not "declares them differently".
     pub(super) fn expected_leaf_templates(self) -> &'static [&'static str] {
         match self {
             Self::Attention => &[
@@ -630,6 +651,7 @@ impl DeclaredCacheKind {
                 "kv_cache.{layer}.v",
             ],
             Self::Ssm => &["ssm_cache.{layer}.conv_history", "ssm_cache.{layer}.state"],
+            Self::SharedFromLayer => &[],
         }
     }
 }
@@ -666,6 +688,7 @@ pub(super) fn bound_cache_kind(roots: &Qwen35LayerRoots) -> DeclaredCacheKind {
         Qwen35LayerRoots::Attention(_) => DeclaredCacheKind::Attention,
         Qwen35LayerRoots::DenseAttention(_) => DeclaredCacheKind::DenseAttention,
         Qwen35LayerRoots::Ssm { .. } => DeclaredCacheKind::Ssm,
+        Qwen35LayerRoots::SharedFromLayer(_) => DeclaredCacheKind::SharedFromLayer,
     }
 }
 
@@ -770,6 +793,8 @@ pub(super) enum LayerPadRowWidths {
         conv_history_len: usize,
         state_len: usize,
     },
+    /// gemma4 E2B's cross-layer shared-KV layer -- no leaf, no row width.
+    SharedFromLayer,
 }
 
 /// Builds [`LayerPadRowWidths`] for one layer from its own
@@ -802,6 +827,7 @@ pub(super) fn layer_pad_row_widths(program: &[Op], names: &LayerCacheNames) -> L
             conv_history_len: cache_leaf_total_elements(program, conv_history).unwrap_or(0),
             state_len: cache_leaf_total_elements(program, state).unwrap_or(0),
         },
+        LayerCacheNames::SharedFromLayer => LayerPadRowWidths::SharedFromLayer,
     }
 }
 
@@ -865,6 +891,7 @@ pub(super) fn push_kv_named_blocks<'call>(
                 qwen35_dense_pad_scratch[layer].fill(cache, &shape, layer)?;
             }
             (LayerCacheState::Ssm(_), LayerPadRowWidths::Ssm { .. }) => {}
+            (LayerCacheState::SharedFromLayer, LayerPadRowWidths::SharedFromLayer) => {}
             _ => unreachable!(
                 "layer_row_widths built from the same cache_names as layer_caches, in lockstep"
             ),
@@ -922,6 +949,11 @@ pub(super) fn push_kv_named_blocks<'call>(
             ) => {
                 named_blocks.extend(cache.named_blocks(conv_history, state));
             }
+            (
+                LayerCacheNames::SharedFromLayer,
+                LayerCacheState::SharedFromLayer,
+                LayerPadRowWidths::SharedFromLayer,
+            ) => {}
             _ => unreachable!(
                 "cache_names/layer_caches/layer_row_widths built from the same layer_roots, in lockstep"
             ),

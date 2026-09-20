@@ -160,21 +160,6 @@ cached-attention-streaming = [
     "proxima-tensor/cached-attention-streaming",
     "omega?/cached-attention-streaming",
 ]
-# Engages `proxima_tensor::spec::lfm2_single_range_cached_forward_program_with_experts`
-# for gemma4 decode (`crate::gemma4::bind::Gemma4Arch::bind`) in place of
-# `lfm2_forward_program_with_experts`'s cacheless full re-prefill path --
-# every other architecture's decode step reuses a growing KV cache
-# (`cached-attention-streaming`'s own single-range engines); gemma4's own
-# forward-program builder never had a cached counterpart until this one.
-# Default-off, deliberately NOT folded into `metal`'s default shape above:
-# unproven correctness (no differential CPU-oracle test against the
-# cacheless path lands with this feature yet) and unbenched perf, unlike
-# every feature `metal` does imply. `proxima-tensor` itself needs no
-# matching feature -- that crate's own spec module compiles unconditionally,
-# the same as every sibling `*_cached` module (`single_range_moe_cached`,
-# `mistral_forward_cached`); only THIS crate's choice of which builder to
-# call is gated.
-gemma4-kv-cache = []
 # Passthrough to `proxima-tensor/gated-delta-net-fusion` and
 # `omega/gated-delta-net-fusion` -- same shape as `cached-attention-streaming`
 # above: default-off, individually selectable so a caller can exercise the

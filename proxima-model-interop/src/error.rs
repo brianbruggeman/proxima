@@ -156,6 +156,20 @@ pub enum InteropError {
     #[error("architecture {name:?} needs its own hybrid MoE forward program")]
     HybridMoeProgramUnsupported { name: String },
 
+    /// `crate::gemma4::bind::Gemma4Arch::bind`'s own `CacheStrategy::TwoRange`
+    /// arm rebuilds a full, per-layer [`proxima_tensor::spec::Qwen35LayerRoots`]
+    /// vec by zipping the SAME schedule it fed `build_forward` against that
+    /// call's own returned `cache_roots` (one entry per
+    /// `KeySourceKind::ProjectedK` layer) -- this fires only if those two
+    /// counts ever disagree, which would mean `lfm2_two_range_cached_forward_program_with_experts`
+    /// pushed a different number of roots than the schedule declares
+    /// cache-owning layers, an internal builder bug rather than anything a
+    /// checkpoint's own header data could trigger.
+    #[error(
+        "gemma4 two-range build produced {produced} CachedLayerRoots, schedule declares {expected} cache-owning layers"
+    )]
+    Gemma4TwoRangeCacheRootsCountMismatch { produced: usize, expected: usize },
+
     /// `crate::gemma4::bind::bind_gemma4_weights`'s fused
     /// `blk.{layer}.ffn_gate_up_exps.weight` cannot be split into the two
     /// separate `ffn_gate_exps.weight`/`ffn_up_exps.weight` leaves
