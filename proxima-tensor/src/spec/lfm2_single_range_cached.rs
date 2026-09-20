@@ -1094,6 +1094,12 @@ pub fn lfm2_single_range_cached_forward_program_with_experts(
             inv_dim,
             eps,
             ffn_config,
+            // No `LayerKind::Attention`-only cached engine has ever needed
+            // PLE (`FfnCombination::Exclusive` is this schedule kind's own
+            // shape) -- `lfm2_forward_program_with_experts`'s own preamble
+            // is the one caller that builds `ple_dim`/per-layer PLE input.
+            None,
+            0,
             &mut moe_sites,
         )?;
 
@@ -1459,6 +1465,12 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
             inv_dim,
             eps,
             ffn_config,
+            // No `LayerKind::Attention`-only cached engine has ever needed
+            // PLE (`FfnCombination::Exclusive` is this schedule kind's own
+            // shape) -- `lfm2_forward_program_with_experts`'s own preamble
+            // is the one caller that builds `ple_dim`/per-layer PLE input.
+            None,
+            0,
             &mut moe_sites,
         )?;
 

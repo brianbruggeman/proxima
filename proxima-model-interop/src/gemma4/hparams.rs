@@ -67,6 +67,15 @@ pub struct Architecture {
     pub rope_dimension_count: u32,
     pub rope_dimension_count_swa: u32,
     pub final_logit_softcapping: f32,
+    /// `{family}.embedding_length_per_layer_input` -- Gemma 4 E2B/E4B's
+    /// per-layer-embedding (PLE) width (`256` on the real E2B checkpoint,
+    /// gemma4.go's own `HiddenSizePerLayer`). `0` (the default
+    /// `metadata_u32_optional` returns when the key is absent, e.g.
+    /// 12B/26B/31B) means this checkpoint carries no PLE tensors at all --
+    /// [`crate::gemma4::bind::gemma4_layer_schedule`]'s own `ple_dim > 0`
+    /// check is what gates both the tensor names and the schedule's
+    /// `LayerFfnConfig::ple` flag on it.
+    pub ple_dim: u32,
 }
 
 pub fn from_metadata(parsed: &ParsedGguf) -> Result<Architecture, InteropError> {
@@ -137,5 +146,6 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<Architecture, InteropError> 
             &prefix("final_logit_softcapping"),
             0.0,
         ),
+        ple_dim: metadata_u32_optional(parsed, &prefix("embedding_length_per_layer_input")),
     })
 }

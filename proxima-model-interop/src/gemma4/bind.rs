@@ -110,6 +110,15 @@ pub fn gemma4_tensor_names(architecture: &Architecture) -> Vec<String> {
                 suffixes.push("attn_v.weight");
             }
         }
+        // Per-layer-embedding (PLE) Stage B's own three per-block leaves --
+        // absent (E4B/12B/26B/31B, `ple_dim == 0`) means this checkpoint
+        // carries no PLE tensors at all (`hparams::Architecture::ple_dim`'s
+        // own doc).
+        if architecture.ple_dim > 0 {
+            suffixes.push("inp_gate.weight");
+            suffixes.push("proj.weight");
+            suffixes.push("post_norm.weight");
+        }
         for suffix in suffixes {
             names.push(format!("blk.{layer}.{suffix}"));
         }
@@ -118,6 +127,13 @@ pub fn gemma4_tensor_names(architecture: &Architecture) -> Vec<String> {
     names.push(String::from("token_embd.weight"));
     names.push(String::from("output_norm.weight"));
     names.push(String::from("rope_freqs.weight"));
+    // Per-layer-embedding (PLE) Stage A's own three shared, whole-checkpoint
+    // leaves -- see the per-layer trio above for the per-block half.
+    if architecture.ple_dim > 0 {
+        names.push(String::from("per_layer_token_embd.weight"));
+        names.push(String::from("per_layer_model_proj.weight"));
+        names.push(String::from("per_layer_proj_norm.weight"));
+    }
     names
 }
 
@@ -220,6 +236,38 @@ pub fn bind_gemma4_weights<'file>(
         &mut state,
     )?;
     bind_rope_freqs(parsed, file_bytes, &mut state)?;
+
+    // Per-layer-embedding (PLE) Stage A's own three shared, whole-checkpoint
+    // leaves. `per_layer_token_embd.weight` is a lookup table
+    // (`attention_forward.rs`'s `append_ple_shared_projections` reads it
+    // through `embedding_lookup`, the same gather `token_embd.weight`
+    // above uses) so it binds `bind_dense`, not `bind_matmul_weight`, the
+    // same convention `token_embd.weight` itself uses.
+    // `per_layer_model_proj.weight` is a plain `[in, out]` matmul weight.
+    if architecture.ple_dim > 0 {
+        let ple_total = architecture.ple_dim * architecture.block_count;
+        bind_dense(
+            parsed,
+            file_bytes,
+            "per_layer_token_embd.weight".into(),
+            &mut state,
+        )?;
+        bind_matmul_weight(
+            parsed,
+            file_bytes,
+            "per_layer_model_proj.weight".into(),
+            ple_total as usize,
+            embedding,
+            &mut state,
+        )?;
+        bind_norm(
+            parsed,
+            file_bytes,
+            "per_layer_proj_norm.weight".into(),
+            GEMMA4_NORM_SHIFT,
+            &mut state,
+        )?;
+    }
 
     if find_tensor(parsed, "output.weight").is_ok() {
         bind_matmul_weight(
@@ -337,6 +385,39 @@ pub fn bind_gemma4_weights<'file>(
             format!("blk.{layer}.layer_output_scale.weight"),
             &mut state,
         )?;
+
+        // Per-layer-embedding (PLE) Stage B's own three per-block leaves --
+        // `attention_forward.rs`'s `append_lfm2_layer_ffn` declares
+        // `inp_gate.weight`/`proj.weight` as `[in, out]` matmul weights
+        // (`bind_matmul_weight`'s own convention, same as `ffn_gate`/
+        // `ffn_up`/`ffn_down` above) and `post_norm.weight` as a plain
+        // RMSNorm gamma (`bind_norm`, [`GEMMA4_NORM_SHIFT`]).
+        if architecture.ple_dim > 0 {
+            let ple_dim = architecture.ple_dim as usize;
+            bind_matmul_weight(
+                parsed,
+                file_bytes,
+                format!("blk.{layer}.inp_gate.weight"),
+                ple_dim,
+                embedding,
+                &mut state,
+            )?;
+            bind_matmul_weight(
+                parsed,
+                file_bytes,
+                format!("blk.{layer}.proj.weight"),
+                embedding,
+                ple_dim,
+                &mut state,
+            )?;
+            bind_norm(
+                parsed,
+                file_bytes,
+                format!("blk.{layer}.post_norm.weight"),
+                GEMMA4_NORM_SHIFT,
+                &mut state,
+            )?;
+        }
 
         bind_norm(
             parsed,
@@ -650,10 +731,12 @@ fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
         // is `metadata_u32_per_layer`'s scalar-broadcast, so this override
         // reproduces the prior single-width behaviour byte-for-byte there).
         dense_feed_forward: None,
-        // Wired in the PLE-injection slice, not this one -- see
-        // `lfm2_forward_program_with_experts`'s own `ple_dim` parameter,
-        // still `None` at this call site below.
-        ple: false,
+        // `architecture.ple_dim > 0` (E2B/E4B) -- every layer of a PLE
+        // checkpoint injects it (`gemma4.go:1349-1361` has no per-layer-type
+        // branch), paired with this call site's own `Some(architecture.ple_dim)`
+        // below at `lfm2_forward_program_with_experts` -- Stage A's preamble
+        // only runs, and this flag is only consulted, when BOTH agree.
+        ple: architecture.ple_dim > 0,
     };
     // `attention.shared_kv_layers` (0 for E4B/12B/26B/31B, 20 for E2B):
     // `first_shared_idx` is the first TRAILING layer with no own
@@ -722,11 +805,12 @@ fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
             // -- `attention_forward.rs`'s `KeySourceKind::SharedFromLayer`/
             // `ValueSourceKind::SharedFromLayer` skip declaring those three
             // leaves entirely for this layer, reading the named own-KV
-            // layer's post-rope K / post-norm V instead. `value_norm` stays
-            // `true` (harmless -- `ValueSource::Shared` already carries a
-            // post-norm `V`; `append_attention_mixer`'s own doc notes
-            // re-normalizing it would double-apply, so gemma4 E2B's shared
-            // layers must NOT also request `value_norm`).
+            // layer's post-rope K / post-norm V instead. `value_norm` is
+            // forced `false` below -- `ValueSource::Shared` already carries
+            // a post-norm `V` (the source layer normalized it once);
+            // `append_attention_mixer`'s own doc notes re-normalizing it
+            // here would double-apply, so gemma4 E2B's shared layers must
+            // NOT also request `value_norm`.
             let attention = if layer as u32 >= first_shared_idx {
                 let source = shared_kv_source_layer(
                     &architecture.sliding_window_pattern,
@@ -840,11 +924,11 @@ impl ArchitectureTrait for Gemma4Arch {
                 Some(EmbeddingScale::Sqrt),
                 logit_softcap,
                 true,
-                // Wired in the PLE-injection slice -- see this function's
-                // module doc for why every gemma4 layer needs both this
-                // `Some(ple_dim)` AND `LayerFfnConfig::ple` before Stage A's
-                // preamble actually runs.
-                None,
+                // `gemma4_layer_schedule`'s own `LayerFfnConfig::ple` flag
+                // (set alongside this same `architecture.ple_dim > 0` check)
+                // is what per-layer INJECTS Stage B; this is the checkpoint-
+                // wide toggle that builds Stage A's preamble at all.
+                (architecture.ple_dim > 0).then_some(architecture.ple_dim),
             )?;
             (program, logits, Vec::new(), moe_sites)
         };
