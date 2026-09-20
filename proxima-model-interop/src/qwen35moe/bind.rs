@@ -225,6 +225,18 @@ impl ArchitectureTrait for Qwen35MoeArch {
         "qwen35moe"
     }
 
+    fn kv_cache_shape(&self) -> crate::architecture::KvCacheShape {
+        crate::architecture::KvCacheShape::Monolithic
+    }
+
+    fn ffn_routing(&self) -> crate::architecture::FfnRouting {
+        crate::architecture::FfnRouting::Routed
+    }
+
+    fn diagnostic_reduce_flags_apply(&self) -> bool {
+        false
+    }
+
     fn bind<'file>(
         &self,
         parsed: &ParsedGguf,
@@ -253,6 +265,7 @@ impl ArchitectureTrait for Qwen35MoeArch {
             rope_freq_base: qwen_architecture.rope_freq_base,
             rms_epsilon: qwen_architecture.rms_epsilon,
             tied_embeddings: false,
+            force_split_half_rope: false,
         };
         Ok(BoundProgram {
             weights,

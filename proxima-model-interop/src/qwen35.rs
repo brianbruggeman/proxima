@@ -644,6 +644,14 @@ impl crate::architecture::Architecture for Qwen35Arch {
         "qwen35"
     }
 
+    fn kv_cache_shape(&self) -> crate::architecture::KvCacheShape {
+        crate::architecture::KvCacheShape::Custom
+    }
+
+    fn diagnostic_reduce_flags_apply(&self) -> bool {
+        false
+    }
+
     fn bind<'file>(
         &self,
         parsed: &ParsedGguf,
@@ -674,6 +682,7 @@ impl crate::architecture::Architecture for Qwen35Arch {
             rope_freq_base: qwen_architecture.rope_freq_base,
             rms_epsilon: qwen_architecture.rms_epsilon,
             tied_embeddings: false,
+            force_split_half_rope: false,
         };
         Ok(crate::architecture::BoundProgram {
             weights,

@@ -484,7 +484,10 @@ impl<'file> LoadedModel<'file> {
         &mut self,
         sidecar: crate::expert_sidecar::MappedExpertSidecar,
     ) -> Result<(), InteropError> {
-        if self.architecture_impl.map(Architecture::name) != Some("qwen35moe") {
+        if !self
+            .architecture_impl
+            .is_some_and(|architecture| architecture.ffn_routing() == crate::architecture::FfnRouting::Routed)
+        {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: self.architecture_impl.map_or_else(
                     || String::from("unknown"),
@@ -650,7 +653,10 @@ impl<'file> LoadedModel<'file> {
         ) -> Result<Output, InteropError>,
     {
         let architecture = self.architecture_impl.map_or("unknown", Architecture::name);
-        if architecture != "qwen35moe" {
+        if !self
+            .architecture_impl
+            .is_some_and(|architecture| architecture.ffn_routing() == crate::architecture::FfnRouting::Routed)
+        {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(architecture),
                 reason: String::from("the bound model is not a routed qwen35moe graph"),
@@ -1280,7 +1286,7 @@ impl<'file> LoadedModel<'file> {
         let qwen35_pre_gather_requested = qwen35moe_pre_gather_enabled(
             serving_config.qwen35moe_pre_gather,
             self.architecture_impl
-                .map(|architecture| architecture.name()),
+                .is_some_and(|architecture| architecture.ffn_routing() == crate::architecture::FfnRouting::Routed),
         );
         #[cfg(feature = "metal")]
         let monolithic_high_mmap_requested = qwen35_pre_gather_requested
@@ -1335,7 +1341,7 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let qwen35moe_architecture = self
             .architecture_impl
-            .is_some_and(|architecture| architecture.name() == "qwen35moe");
+            .is_some_and(|architecture| architecture.kv_cache_shape() == crate::architecture::KvCacheShape::Monolithic);
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let dense_attention_placement_enabled = !monolithic_all_low_requested
             && qwen35_dense_attention_placement_enabled(
@@ -1443,7 +1449,7 @@ impl<'file> LoadedModel<'file> {
         let residency_budget = serving_config.qwen35moe_residency_budget_bytes;
         let mut qwen35moe_residency = if self
             .architecture_impl
-            .is_some_and(|architecture| architecture.name() == "qwen35moe")
+            .is_some_and(|architecture| architecture.ffn_routing() == crate::architecture::FfnRouting::Routed)
             && self.expert_sidecar.is_some()
             && residency_budget > 0
         {
@@ -1768,9 +1774,6 @@ impl<'file> LoadedModel<'file> {
                         self.architecture.rms_epsilon,
                         self.architecture_impl
                             .as_ref()
-                            .is_some_and(|architecture| architecture.name() == "qwen35moe"),
-                        self.architecture_impl
-                            .as_ref()
                             .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
                     );
                     #[cfg(feature = "instrument")]
@@ -1942,8 +1945,9 @@ impl<'file> LoadedModel<'file> {
                         Vec::with_capacity(1 + active_layer_roots.len() * 3);
                     let monolithic_prefill_requested = qwen35moe_pre_gather_enabled(
                         serving_config.qwen35moe_pre_gather,
-                        self.architecture_impl
-                            .map(|architecture| architecture.name()),
+                        self.architecture_impl.is_some_and(|architecture| {
+                            architecture.ffn_routing() == crate::architecture::FfnRouting::Routed
+                        }),
                     ) && runtime.uses_gpu()
                         && _step == 0
                         && serving_config.qwen35moe_monolithic_all_low;
@@ -2152,12 +2156,14 @@ impl<'file> LoadedModel<'file> {
 
                     if let Some(name) =
                         missing_program_input(active_program, &named_blocks).filter(|name| {
-                            !(serving_config.qwen35moe_pre_gather
-                                && self
-                                    .architecture_impl
-                                    .is_some_and(|architecture| architecture.name() == "qwen35moe")
-                                && (name.contains("_exps.weight")
-                                    || name.starts_with("gdn_prefill.")))
+                            !(qwen35moe_pre_gather_enabled(
+                                serving_config.qwen35moe_pre_gather,
+                                self.architecture_impl.is_some_and(|architecture| {
+                                    architecture.ffn_routing()
+                                        == crate::architecture::FfnRouting::Routed
+                                }),
+                            ) && (name.contains("_exps.weight")
+                                || name.starts_with("gdn_prefill.")))
                         })
                     {
                         return Err(InteropError::MissingStepInput { name });
@@ -2249,8 +2255,9 @@ impl<'file> LoadedModel<'file> {
                     // reachable only in `active_program`'s own numbering).
                     let pre_gather = qwen35moe_pre_gather_enabled(
                         serving_config.qwen35moe_pre_gather,
-                        self.architecture_impl
-                            .map(|architecture| architecture.name()),
+                        self.architecture_impl.is_some_and(|architecture| {
+                            architecture.ffn_routing() == crate::architecture::FfnRouting::Routed
+                        }),
                     ) && !monolithic_high_mmap_requested
                         && !one_evaluation_prefill;
                     #[cfg(feature = "metal")]
@@ -3570,8 +3577,9 @@ impl<'file> LoadedModel<'file> {
                 let residency_boundary_requested = qwen35moe_residency.is_some()
                     && qwen35moe_pre_gather_enabled(
                         serving_config.qwen35moe_pre_gather,
-                        self.architecture_impl
-                            .map(|architecture| architecture.name()),
+                        self.architecture_impl.is_some_and(|architecture| {
+                            architecture.ffn_routing() == crate::architecture::FfnRouting::Routed
+                        }),
                     )
                     && runtime.uses_gpu()
                     && !monolithic_high_mmap_requested;
@@ -3788,9 +3796,6 @@ impl<'file> LoadedModel<'file> {
                     self.architecture.head_dim,
                     self.architecture.rope_freq_base,
                     self.architecture.rms_epsilon,
-                    self.architecture_impl
-                        .as_ref()
-                        .is_some_and(|architecture| architecture.name() == "qwen35moe"),
                     self.architecture_impl
                         .as_ref()
                         .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
@@ -4309,9 +4314,6 @@ impl<'file> LoadedModel<'file> {
             self.architecture.rms_epsilon,
             self.architecture_impl
                 .as_ref()
-                .is_some_and(|architecture| architecture.name() == "qwen35moe"),
-            self.architecture_impl
-                .as_ref()
                 .and_then(|architecture| architecture.rope_freq_factors(&self.weights)),
         );
 
@@ -4404,11 +4406,9 @@ impl<'file> LoadedModel<'file> {
         // The qwen35moe diagnostic can request an interior routed node, so
         // keep it on the partition-isolated seam. Other one-shot forwards
         // retain the ordinary evaluator and its normal cache bookkeeping.
-        let evaluated = if self
-            .architecture_impl
-            .as_ref()
-            .is_some_and(|architecture| architecture.name() == "qwen35moe")
-        {
+        let evaluated = if self.architecture_impl.as_ref().is_some_and(|architecture| {
+            architecture.ffn_routing() == crate::architecture::FfnRouting::Routed
+        }) {
             runtime.evaluate_segment(
                 &self.program,
                 &symbols,
@@ -4561,11 +4561,8 @@ pub(super) fn use_metal_output_placements(
     monolithic_all_low || has_recurrent_state
 }
 
-pub(super) fn qwen35moe_pre_gather_enabled(
-    configured: bool,
-    architecture_name: Option<&str>,
-) -> bool {
-    configured && architecture_name == Some("qwen35moe")
+pub(super) fn qwen35moe_pre_gather_enabled(configured: bool, routed_experts: bool) -> bool {
+    configured && routed_experts
 }
 
 pub(super) fn qwen35moe_admit_low_copy(source: Codec, target: Codec) -> bool {

@@ -17,14 +17,18 @@
 //! separate MoE arm (`crate::architecture::Architecture`'s own doc on
 //! `DenseArch` being the un-registered-by-name fallback, not a name match).
 //!
-//! Qwen2 is the one name this binder still reads: split-half (NEOX) RoPE
-//! with no QK-norm tensors at all is a combination `checkpoint_has_qk_norm`
-//! cannot express (`proxima_tensor::spec::mistral_descriptor_from_shape`'s
-//! own `rope_pairing` parameter doc), so `"qwen2"` selects
-//! `RopePairing::SplitHalf` as a config VALUE fed into the one generic
-//! [`build_forward`] call every other architecture already takes -- not a
-//! second program-construction call. Every other field this binder passes
-//! is identical between the two cases.
+//! Qwen2's split-half (NEOX) RoPE with no QK-norm tensors at all is a
+//! combination `checkpoint_has_qk_norm` cannot express
+//! (`proxima_tensor::spec::mistral_descriptor_from_shape`'s own
+//! `rope_pairing` parameter doc). This binder never compares
+//! `general.architecture` against `"qwen2"` itself: `general.architecture`
+//! is read once, at [`crate::bind::architecture_from_metadata`], which sets
+//! [`crate::bind::ModelArchitecture::force_split_half_rope`] from the name
+//! and carries the result as data -- this binder only reads that field to
+//! select `RopePairing::SplitHalf` as a config VALUE fed into the one
+//! generic [`build_forward`] call every other architecture already takes,
+//! not a second program-construction call. Every other field this binder
+//! passes is identical between the two cases.
 //!
 //! Does not carry `load_with_paired_gate_up_reduce`/`load_with_fused_qkv_reduce`'s
 //! diagnostic reduce flags -- those are per-call A/B knobs
@@ -42,7 +46,6 @@ use proxima_tensor::spec::{
 use crate::architecture::{Architecture, BoundProgram};
 use crate::bind::{
     architecture_from_metadata, bind_all_weights, checkpoint_has_qk_norm, checkpoint_qkv_biases,
-    metadata_str,
 };
 use crate::error::InteropError;
 use crate::task::{ModelTask, classify_task};
@@ -71,7 +74,6 @@ impl Architecture for DenseArch {
         // do not silently select a representative value for this uniform
         // program.
         architecture.uniform_kv_heads()?;
-        let architecture_name = metadata_str(parsed, "general.architecture")?;
         // `&[]`: this entry point takes no `ServingConfig`, so there is no
         // `weight_precision` rule set to thread here yet --
         // `crate::bind::bind_all_weights`'s own doc names this as the
@@ -105,8 +107,7 @@ impl Architecture for DenseArch {
         // `build_forward_matches_direct_builder_call_at_real_mistral_dims`
         // and `build_forward_matches_direct_builder_call_at_real_qwen2_dims`
         // (`proxima-tensor/src/spec/tests.rs`).
-        let is_qwen2 = architecture_name == "qwen2";
-        let rope_pairing = if is_qwen2 || qk_norm {
+        let rope_pairing = if architecture.force_split_half_rope || qk_norm {
             RopePairing::SplitHalf {
                 pairs: architecture.head_dim / 2,
             }
@@ -126,7 +127,11 @@ impl Architecture for DenseArch {
             // Qwen2's own dedicated builder always hardcoded `false` here
             // regardless of `qk_norm` above -- reproduce that unconditionally
             // rather than trusting a real checkpoint's own metadata to agree.
-            if is_qwen2 { false } else { qk_norm },
+            if architecture.force_split_half_rope {
+                false
+            } else {
+                qk_norm
+            },
             checkpoint_qkv_biases(parsed, &architecture)?,
             false,
             false,

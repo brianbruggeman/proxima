@@ -76,8 +76,8 @@ mod transform;
 
 #[cfg(feature = "std")]
 pub use architecture::{
-    Architecture, ArchitectureRegistry, BoundProgram, StepInput, StepInputContext, StepState,
-    bind_symbols, symbols,
+    Architecture, ArchitectureRegistry, BoundProgram, FfnRouting, KvCacheShape, StepInput,
+    StepInputContext, StepState, bind_symbols, symbols,
 };
 #[cfg(feature = "std")]
 pub use bind::gguf_tensor_as_packed_block;

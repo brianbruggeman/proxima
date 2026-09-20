@@ -203,6 +203,7 @@ pub fn architecture_from_hf_config(config: &HfConfig) -> ModelArchitecture {
         rope_freq_base: config.rope_theta,
         rms_epsilon: config.rms_norm_eps,
         tied_embeddings: config.tie_word_embeddings,
+        force_split_half_rope: false,
     }
 }
 
@@ -303,6 +304,7 @@ mod tests {
                 rope_freq_base: 1_000_000.0,
                 rms_epsilon: 1e-6,
                 tied_embeddings: false,
+                force_split_half_rope: false,
             },
             "feed_forward must read moe_intermediate_size (768), not intermediate_size (6144), \
              once expert_count is nonzero"
@@ -342,6 +344,7 @@ mod tests {
                 rope_freq_base: proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
                 rms_epsilon: 1e-5,
                 tied_embeddings: false,
+                force_split_half_rope: false,
             },
             "kv_heads falls back to query_heads, head_dim to hidden_size/num_attention_heads, \
              expert_count/expert_used_count to 0, rope_theta to the sizing-config default, \
@@ -428,6 +431,7 @@ mod tests {
                 rope_freq_base: 100_000.0,
                 rms_epsilon: 1e-5,
                 tied_embeddings: true,
+                force_split_half_rope: false,
             },
             "head_dim must derive as hidden_size/num_attention_heads (576/9=64) since no explicit \
              head_dim key is present, and tied_embeddings must read config's tie_word_embeddings"

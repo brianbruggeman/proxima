@@ -65,7 +65,7 @@ impl<'file> LoadedModel<'file> {
         if self.router_roots.is_empty()
             || self
                 .architecture_impl
-                .is_none_or(|architecture| architecture.name() != "qwen35moe")
+                .is_none_or(|architecture| architecture.ffn_routing() != crate::architecture::FfnRouting::Routed)
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(
@@ -88,7 +88,7 @@ impl<'file> LoadedModel<'file> {
         if self.qwen35moe_layer_diagnostics.is_empty()
             || self
                 .architecture_impl
-                .is_none_or(|architecture| architecture.name() != "qwen35moe")
+                .is_none_or(|architecture| architecture.ffn_routing() != crate::architecture::FfnRouting::Routed)
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(
@@ -128,7 +128,7 @@ impl<'file> LoadedModel<'file> {
         if self.qwen35moe_layer_diagnostics.is_empty()
             || self
                 .architecture_impl
-                .is_none_or(|architecture| architecture.name() != "qwen35moe")
+                .is_none_or(|architecture| architecture.ffn_routing() != crate::architecture::FfnRouting::Routed)
         {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(
@@ -2548,24 +2548,25 @@ impl<'file> LoadedModel<'file> {
         // for why this seam exists. `paired_gate_up_reduce`/`fused_qkv_reduce`
         // are per-call diagnostic knobs `Architecture::bind`'s fixed
         // signature does not carry (`crate::dense::DenseArch`'s own doc on
-        // why), and (documented on both flag-carrying constructors) have
-        // "no effect on a qwen35 checkpoint" -- so a qwen35 checkpoint
-        // always takes this registry path regardless of either flag, and
-        // only a non-qwen35 checkpoint with a flag set falls through to
-        // the narrow inline path below.
-        let general_architecture = crate::bind::metadata_str(parsed, "general.architecture")?;
+        // why), and [`crate::architecture::Architecture::diagnostic_reduce_flags_apply`]
+        // is `false` for an architecture whose `bind` never reads either flag
+        // (documented on both flag-carrying constructors as "no effect on a
+        // qwen35 checkpoint") -- so that architecture always takes this
+        // registry path regardless of either flag, and only an architecture
+        // that DOES read the flags, with one set, falls through to the
+        // narrow inline path below.
+        let resolved = registry.resolve(parsed)?;
         if std::env::var_os("PROXIMA_DEBUG_ARCH_ROUTE").is_some() {
             eprintln!(
-                "architecture route value={general_architecture:?} qwen35moe={} flags=({}, {})",
-                general_architecture == "qwen35moe",
+                "architecture route value={:?} diagnostic_reduce_flags_apply={} flags=({}, {})",
+                resolved.name(),
+                resolved.diagnostic_reduce_flags_apply(),
                 paired_gate_up_reduce,
                 fused_qkv_reduce,
             );
         }
-        if matches!(general_architecture, "qwen35" | "qwen35moe")
-            || (!paired_gate_up_reduce && !fused_qkv_reduce)
+        if !resolved.diagnostic_reduce_flags_apply() || (!paired_gate_up_reduce && !fused_qkv_reduce)
         {
-            let resolved = registry.resolve(parsed)?;
             let bound = resolved.bind(parsed, file_bytes)?;
             #[cfg(all(feature = "metal", target_os = "macos"))]
             let step_state = resolved.step_state(parsed)?;
@@ -2602,7 +2603,8 @@ impl<'file> LoadedModel<'file> {
             // materially different device-buffer design, not a mechanical
             // port).
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            let single_range = if matches!(resolved.name(), "qwen35" | "gemma4") {
+            let single_range = if resolved.kv_cache_shape() != crate::architecture::KvCacheShape::Uniform
+            {
                 None
             } else {
                 let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
@@ -2636,7 +2638,7 @@ impl<'file> LoadedModel<'file> {
                 router_roots: bound.router_roots,
                 moe_sites: bound.moe_sites,
                 single_position_step: bound.single_position_step,
-                qwen35moe_hparams: (resolved.name() == "qwen35moe")
+                qwen35moe_hparams: (resolved.ffn_routing() == crate::architecture::FfnRouting::Routed)
                     .then(|| crate::qwen35moe::hparams::from_metadata(parsed).ok())
                     .flatten(),
                 model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
@@ -2880,10 +2882,12 @@ impl<'file> LoadedModel<'file> {
 /// Regression coverage for the SECOND gemma4-E2B forward crash
 /// (`Metal(Tensor(UnboundInputName("blk.15.attn_k.weight")))`, measured
 /// against the real `gemma4:e2b-it-qat` checkpoint on Metal): `Self::load`'s
-/// `matches!(resolved.name(), "qwen35" | "gemma4")` gate above is what stops
+/// `resolved.kv_cache_shape() != KvCacheShape::Uniform` gate above
+/// (`crate::architecture::Architecture::kv_cache_shape` returns
+/// `KvCacheShape::Custom` for `Gemma4Arch`) is what stops
 /// `build_single_range_program` from ever running for gemma4, and this
-/// module proves both halves of why that gate is necessary, without loading
-/// any checkpoint.
+/// module proves both halves of why that gate is necessary, without
+/// loading any checkpoint.
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 mod gemma4_single_range_exclusion_tests {
     use super::*;
@@ -2911,6 +2915,7 @@ mod gemma4_single_range_exclusion_tests {
             rope_freq_base: 1_000_000.0,
             rms_epsilon: 1e-6,
             tied_embeddings: false,
+            force_split_half_rope: false,
         }
     }
 
@@ -2945,13 +2950,16 @@ mod gemma4_single_range_exclusion_tests {
         );
     }
 
-    /// The actual production gate covers gemma4 -- reproduced here as a
-    /// name check so a rename of either match arm at `Self::load` breaks
-    /// this test rather than silently reopening the panic this fix closed.
+    /// The actual production gate reads
+    /// [`crate::architecture::Architecture::kv_cache_shape`] -- reproduced
+    /// here directly so flipping `Gemma4Arch`'s override back to the trait
+    /// default breaks this test rather than silently reopening the panic
+    /// this fix closed.
     #[test]
     fn load_single_range_exclusion_covers_gemma4() {
-        assert!(
-            matches!(crate::gemma4::GEMMA4.name(), "qwen35" | "gemma4"),
+        assert_ne!(
+            crate::gemma4::GEMMA4.kv_cache_shape(),
+            crate::architecture::KvCacheShape::Uniform,
             "gemma4 must stay excluded from the placed-KV single-range program"
         );
     }
