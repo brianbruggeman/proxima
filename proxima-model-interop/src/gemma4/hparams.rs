@@ -18,7 +18,8 @@ use proxima_gguf::pipe::ParsedGguf;
 
 use crate::bind::{
     metadata_bool_per_layer, metadata_f32_optional, metadata_str, metadata_u32,
-    metadata_u32_optional_or, metadata_u32_per_layer, vocab_from_token_embedding,
+    metadata_u32_optional, metadata_u32_optional_or, metadata_u32_per_layer,
+    vocab_from_token_embedding,
 };
 use crate::error::InteropError;
 
@@ -27,7 +28,18 @@ pub struct Architecture {
     pub vocab: u32,
     pub embedding: u32,
     pub block_count: u32,
+    /// `{family}.feed_forward_length`'s first entry -- kept for callers that
+    /// still want a single representative dense-FFN width (e.g. parity
+    /// logging). The authoritative per-layer widths this matformer-style
+    /// checkpoint (Gemma 4 E2B/E4B) actually carries live in
+    /// [`Self::feed_forward_by_layer`]; a uniform checkpoint (12B/26B/31B)
+    /// has every entry equal to this one.
     pub feed_forward: u32,
+    /// `{family}.feed_forward_length`, one entry per block --
+    /// [`metadata_u32_per_layer`] broadcasts a scalar (12B/26B/31B) to
+    /// `block_count` equal entries, and preserves an array (E2B/E4B, whose
+    /// matformer variable-width dense FFN this key stores per layer) as-is.
+    pub feed_forward_by_layer: Vec<u32>,
     pub expert_feed_forward: u32,
     pub expert_count: u32,
     pub expert_used_count: u32,
@@ -66,15 +78,24 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<Architecture, InteropError> 
         proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
     );
     let rope_dimension_count = metadata_u32(parsed, &prefix("rope.dimension_count"))?;
+    let feed_forward_by_layer =
+        metadata_u32_per_layer(parsed, &prefix("feed_forward_length"), block_count)?;
+    let feed_forward = *feed_forward_by_layer.first().unwrap_or(&0);
 
     Ok(Architecture {
         vocab: vocab_from_token_embedding(parsed, embedding)?,
         embedding,
         block_count,
-        feed_forward: metadata_u32(parsed, &prefix("feed_forward_length"))?,
-        expert_feed_forward: metadata_u32(parsed, &prefix("expert_feed_forward_length"))?,
-        expert_count: metadata_u32(parsed, &prefix("expert_count"))?,
-        expert_used_count: metadata_u32(parsed, &prefix("expert_used_count"))?,
+        feed_forward,
+        feed_forward_by_layer,
+        // MoE-only keys (12B/26B/31B carry all three; E2B/E4B are dense and
+        // carry none) -- absent means "this checkpoint is not
+        // mixture-of-experts", not a malformed file, the same shape
+        // `crate::bind`'s own `metadata_u32_optional` already uses for
+        // every other family's dense-vs-MoE split.
+        expert_feed_forward: metadata_u32_optional(parsed, &prefix("expert_feed_forward_length")),
+        expert_count: metadata_u32_optional(parsed, &prefix("expert_count")),
+        expert_used_count: metadata_u32_optional(parsed, &prefix("expert_used_count")),
         head_count: metadata_u32(parsed, &prefix("attention.head_count"))?,
         kv_heads_by_layer,
         rms_epsilon: metadata_f32_optional(

@@ -59,6 +59,7 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
         output_scale: true,
         routed_gating: ExpertGatingFunc::Softmax,
         routed_expert_bias: false,
+        dense_feed_forward: None,
         activation: Activation::GeluTanh,
     };
     let schedule: Vec<LayerSchedule> = architecture
