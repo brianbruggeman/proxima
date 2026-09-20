@@ -197,8 +197,10 @@ metal-tiled-gemm = ["omega?/metal-tiled-gemm"]
 # count, `mistral_single_range_cached_forward_program` in place of the
 # two-range online-softmax program) in place of the always-on
 # `LayerCache`-growing path. `metal` must also be enabled -- this feature
-# has no effect without it, since `PlacedBuffer` is Metal-only.
-metal-output-placement = ["omega?/metal-output-placement"]
+# has no effect without it, since `PlacedBuffer` is Metal-only, and
+# `error.rs`'s `Metal(omega::metal::MetalError)` variant (gated on this
+# feature) needs `omega` in scope, which only `metal` (`dep:omega`) supplies.
+metal-output-placement = ["metal", "omega?/metal-output-placement"]
 # passthrough to `omega/metal-buffer-pool` so the decode harness can measure that arm.
 metal-buffer-pool = ["omega?/metal-buffer-pool"]
 # passthrough to `omega/metal-plan-stable-buffers` so the decode harness can measure that arm.
