@@ -457,3 +457,13 @@ required-features = ["std"]
 name = "gemma4_forward_decomposition"
 harness = false
 required-features = ["metal", "instrument"]
+
+# SLICE 3 kernel-level new_count sweep (`bench/kernel-newcount-sweep`):
+# unconfounds SLICE 1/2's width-1-vs-width>1 comparison (BOS-inflated real
+# forward floors at width-2; width-1 decode uses a different renderer) by
+# isolating four kernels at real gemma4-E2B dims and sweeping `new_count`
+# directly -- an isolated kernel program has no BOS token riding along.
+[[bench]]
+name = "gemma4_kernel_newcount_sweep"
+harness = false
+required-features = ["metal", "instrument"]
