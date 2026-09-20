@@ -106,10 +106,9 @@ pub(super) mod tests {
 
     #[test]
     fn qwen35moe_pre_gather_admission_depends_only_on_config_and_architecture() {
-        assert!(qwen35moe_pre_gather_enabled(true, Some("qwen35moe")));
-        assert!(!qwen35moe_pre_gather_enabled(false, Some("qwen35moe")));
-        assert!(!qwen35moe_pre_gather_enabled(true, Some("qwen3")));
-        assert!(!qwen35moe_pre_gather_enabled(true, None));
+        assert!(qwen35moe_pre_gather_enabled(true, true));
+        assert!(!qwen35moe_pre_gather_enabled(false, true));
+        assert!(!qwen35moe_pre_gather_enabled(true, false));
     }
 
     #[test]
@@ -783,7 +782,6 @@ pub(super) mod tests {
             architecture.head_dim,
             architecture.rope_freq_base,
             architecture.rms_epsilon,
-            false,
             None,
         );
 
@@ -2411,6 +2409,7 @@ pub(super) mod memory_fit_gate_tests {
             rope_freq_base: 10_000.0,
             rms_epsilon: 1e-5,
             tied_embeddings: false,
+            force_split_half_rope: false,
         }
     }
 

@@ -867,6 +867,10 @@ impl ArchitectureTrait for Gemma4Arch {
         "gemma4"
     }
 
+    fn kv_cache_shape(&self) -> crate::architecture::KvCacheShape {
+        crate::architecture::KvCacheShape::Custom
+    }
+
     #[cfg(feature = "std")]
     fn bind<'file>(
         &self,
@@ -1017,6 +1021,7 @@ impl ArchitectureTrait for Gemma4Arch {
             rope_freq_base: architecture.rope_freq_base,
             rms_epsilon: architecture.rms_epsilon,
             tied_embeddings,
+            force_split_half_rope: false,
         };
 
         Ok(BoundProgram {

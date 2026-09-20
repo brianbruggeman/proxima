@@ -202,6 +202,40 @@ pub struct StepState {
     pub ssm_state_bytes: u64,
 }
 
+/// [`Architecture::kv_cache_shape`]'s value -- what the DECODE loop
+/// composes or matches on, never [`Architecture::name`]. `Uniform` is the
+/// one shape `crate::generate::pregather`'s single-range cached forward
+/// program (`mistral_single_range_cached_forward_program`, dense-Mistral-
+/// only) is valid for; `Custom` covers both qwen35 (hybrid attention +
+/// state-space layers the single-range builder has no concept of) and
+/// gemma4 (its own proven-correct two-range `SharedFromLayer` path already
+/// covers its trailing shared-KV layers -- porting cross-layer KV reuse
+/// into the single-range scheme is a materially different device-buffer
+/// design, not a mechanical port); `Monolithic` is qwen35moe's combined
+/// MoE-routed FFN + `GatedDeltaNet` recurrent state, whose decode-step
+/// cache leaves must stay device-resident and segment-isolated together
+/// (the dense-attention-placement gate, residency-budget sizing, MRoPE
+/// position build, missing-program-input tolerance for unresolved expert
+/// leaves, and partition-isolated one-shot evaluator all match on this one
+/// variant).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvCacheShape {
+    Uniform,
+    Custom,
+    Monolithic,
+}
+
+/// [`Architecture::ffn_routing`]'s value -- `Routed` (qwen35moe only) gates
+/// expert-sidecar attachment, the partition-isolated pre-gather execution
+/// entry point, and whether qwen35moe's own router hyperparameters apply;
+/// `Dense` is every other architecture this crate ships, whose forward
+/// program evaluates the same FFN every layer unconditionally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfnRouting {
+    Dense,
+    Routed,
+}
+
 /// One checkpoint family's bind + forward-program pipeline, registered
 /// against [`crate::generate::LoadedModel::load`]'s dispatch instead of
 /// hard-coded into it. See `qwen35.rs`'s `Qwen35Arch` for the worked
@@ -294,6 +328,46 @@ pub trait Architecture: Send + Sync {
     ) -> Option<&'weights [f32]> {
         let _ = weights;
         None
+    }
+
+    /// This architecture's decode-time KV-cache shape -- the forward/decode/
+    /// pregather path composes or matches on this value, never on
+    /// [`Architecture::name`]. Distinct from `proxima_tensor::spec::CacheStrategy`
+    /// (a BIND-time choice of which forward-program builder to call, already
+    /// consumed inside `crate::gemma4::bind::Gemma4Arch::bind`): this is a
+    /// DECODE-time shape describing what the already-built program's cache
+    /// needs from the runtime loop, read once per step rather than
+    /// re-derived from a name comparison at each of the loop's several call
+    /// sites. Default [`KvCacheShape::Uniform`]: every architecture this
+    /// crate ships except qwen35/qwen35moe/gemma4 has one uniform per-layer
+    /// cache the generic single-range fast path already covers.
+    fn kv_cache_shape(&self) -> KvCacheShape {
+        KvCacheShape::Uniform
+    }
+
+    /// This architecture's feed-forward routing shape -- gates
+    /// expert-sidecar attachment, the partition-isolated pre-gather
+    /// execution entry point, and whether
+    /// [`crate::qwen35moe::hparams::from_metadata`]'s router
+    /// hyperparameters apply at all. Default [`FfnRouting::Dense`]: every
+    /// architecture this crate ships except qwen35moe evaluates the same
+    /// dense FFN every layer, unconditionally.
+    fn ffn_routing(&self) -> FfnRouting {
+        FfnRouting::Dense
+    }
+
+    /// `false` for an architecture whose [`Architecture::bind`] never reads
+    /// `paired_gate_up_reduce`/`fused_qkv_reduce` (qwen35's hybrid layers,
+    /// qwen35moe's routed FFN weights -- `crate::generate::LoadedModel::load_with_paired_gate_up_reduce`/
+    /// `load_with_fused_qkv_reduce`'s own docs on "no effect on a `qwen35`
+    /// checkpoint or a mixture-of-experts checkpoint"), so
+    /// `crate::generate::LoadedModel::load_inner`'s registry
+    /// route applies unconditionally to them regardless of either flag.
+    /// Default `true`: every other architecture this crate ships reads at
+    /// least one of the two flags inside `bind`, so the registry route only
+    /// applies there when neither flag diverts to the narrow inline path.
+    fn diagnostic_reduce_flags_apply(&self) -> bool {
+        true
     }
 }
 
@@ -507,6 +581,7 @@ mod tests {
                     rope_freq_base: 0.0,
                     rms_epsilon: 0.0,
                     tied_embeddings: false,
+                    force_split_half_rope: false,
                 },
                 program: Vec::new(),
                 logits_root: NodeId(0),

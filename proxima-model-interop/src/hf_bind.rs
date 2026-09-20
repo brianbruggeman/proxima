@@ -766,6 +766,7 @@ mod tests {
             rope_freq_base: proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
             rms_epsilon: 1e-5,
             tied_embeddings: false,
+            force_split_half_rope: false,
         }
     }
 

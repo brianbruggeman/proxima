@@ -999,7 +999,6 @@ pub(super) fn build_position_inputs(
     head_dim: u32,
     rope_freq_base: f32,
     rms_epsilon: f32,
-    _qwen35_mrope: bool,
     rope_freqs: Option<&[f32]>,
 ) -> PositionInputs {
     let new_count = new_ids.len();
@@ -1057,22 +1056,13 @@ mod rope_freqs_tests {
         rope_freqs.extend(alloc::vec![1.0e30_f32; 192]);
         let positions = [1u32, 100, 4096];
 
-        let full_rotation = build_position_inputs(
-            &positions,
-            0,
-            head_dim,
-            rope_freq_base,
-            1e-5,
-            false,
-            None,
-        );
+        let full_rotation = build_position_inputs(&positions, 0, head_dim, rope_freq_base, 1e-5, None);
         let scaled = build_position_inputs(
             &positions,
             0,
             head_dim,
             rope_freq_base,
             1e-5,
-            false,
             Some(&rope_freqs),
         );
 
