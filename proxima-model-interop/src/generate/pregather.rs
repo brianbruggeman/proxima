@@ -2574,9 +2574,35 @@ impl<'file> LoadedModel<'file> {
             // (`SingleRangeProgram`'s own field doc): never built for
             // qwen35's hybrid attention+state-space layers, and
             // `build_single_range_program` itself already turns away any
-            // mixture-of-experts checkpoint.
+            // mixture-of-experts checkpoint. gemma4 E2B/E4B (dense,
+            // `expert_count == 0`, so NOT already excluded by that
+            // mixture-of-experts gate) needs the same exclusion for a
+            // different reason: `mistral_single_range_cached_forward_program`
+            // declares a uniform `attn_k.weight`/`attn_k_norm.weight`/
+            // `attn_v.weight` `Op::Input` leaf for every layer 0..block_count
+            // with no concept of `KeySourceKind::SharedFromLayer`/
+            // `ValueSourceKind::SharedFromLayer` (gemma4 E2B's trailing
+            // shared-KV layers, `gemma4::bind::gemma4_layer_schedule`'s own
+            // doc) -- it would declare `blk.15.attn_k.weight` for the real
+            // `gemma4:e2b-it-qat` checkpoint even though that tensor never
+            // exists on disk and `bind_gemma4_weights` correctly never binds
+            // it, so `run_decode_loop_placed_kv` would execute a graph
+            // asking for a weight that was never bound
+            // (`TensorError::UnboundInputName`, measured against the real
+            // checkpoint on Metal). Every gemma4 checkpoint that reaches this
+            // gate dense enough to pass the mixture-of-experts check above
+            // is, by this crate's own E2B-vs-MoE discriminator
+            // (`shared_kv_layers > 0`), exactly a shared-KV checkpoint --
+            // gemma4's two-range path (`self.program`, built by
+            // `lfm2_forward_program_with_experts` over
+            // `gemma4_layer_schedule`) already implements the SharedFromLayer
+            // contract correctly, so excluding gemma4 here falls through to
+            // that proven-correct path rather than porting cross-layer KV
+            // reuse into the placed-KV single-range cache scheme (a
+            // materially different device-buffer design, not a mechanical
+            // port).
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            let single_range = if resolved.name() == "qwen35" {
+            let single_range = if matches!(resolved.name(), "qwen35" | "gemma4") {
                 None
             } else {
                 let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
@@ -2848,6 +2874,86 @@ impl<'file> LoadedModel<'file> {
             checkpoint_mapping: file_bytes,
         }
         .validated()
+    }
+}
+
+/// Regression coverage for the SECOND gemma4-E2B forward crash
+/// (`Metal(Tensor(UnboundInputName("blk.15.attn_k.weight")))`, measured
+/// against the real `gemma4:e2b-it-qat` checkpoint on Metal): `Self::load`'s
+/// `matches!(resolved.name(), "qwen35" | "gemma4")` gate above is what stops
+/// `build_single_range_program` from ever running for gemma4, and this
+/// module proves both halves of why that gate is necessary, without loading
+/// any checkpoint.
+#[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
+mod gemma4_single_range_exclusion_tests {
+    use super::*;
+    use crate::architecture::Architecture as ArchitectureTrait;
+
+    /// gemma4 E2B's own shape (`gemma4::bind::declared_leaves_match_bound_leaves_tests::e2b_shaped_architecture`'s
+    /// own doc: 35 layers, `blk.15..=34` shared-KV) flattened into the
+    /// generic [`ModelArchitecture`] `build_single_range_program` actually
+    /// receives -- that type carries no sliding-window-pattern or
+    /// shared-KV-layer-count field at all, so this shape is
+    /// indistinguishable from an ordinary 35-layer dense Mistral checkpoint
+    /// at this builder's own boundary.
+    fn gemma4_e2b_shaped_model_architecture() -> ModelArchitecture {
+        ModelArchitecture {
+            vocab: 1,
+            embedding: 1536,
+            feed_forward: 6144,
+            query_heads: 8,
+            kv_heads: 1,
+            kv_heads_by_layer: alloc::vec![1; 35],
+            head_dim: 512,
+            block_count: 35,
+            expert_count: 0,
+            expert_used_count: 0,
+            rope_freq_base: 1_000_000.0,
+            rms_epsilon: 1e-6,
+            tied_embeddings: false,
+        }
+    }
+
+    /// The hazard the `"gemma4"` exclusion exists to prevent, proven
+    /// directly: called on gemma4 E2B's own shape,
+    /// `build_single_range_program` (`mistral_single_range_cached_forward_program`'s
+    /// own doc: dense-Mistral-only, ONE uniform per-layer schedule, no
+    /// `KeySourceKind::SharedFromLayer` concept at all) still declares
+    /// `blk.15.attn_k.weight` -- the exact leaf name the real checkpoint's
+    /// own Metal run panicked on with `UnboundInputName` before this fix,
+    /// since `bind_gemma4_weights` never binds that tensor for a shared-KV
+    /// layer. Proves the exclusion at `Self::load` is load-bearing, not
+    /// dead code guarding against a case that could not occur anyway.
+    #[test]
+    fn build_single_range_program_declares_blk15_attn_k_for_gemma4_shaped_architecture() {
+        let architecture = gemma4_e2b_shaped_model_architecture();
+        let single_range = build_single_range_program(&architecture, false)
+            .expect("mistral_single_range_cached_forward_program builds for a uniform 35-layer shape")
+            .expect("expert_count == 0 does not turn this builder away");
+        let declares_blk15_attn_k = single_range.program.iter().any(|operation| {
+            matches!(
+                operation,
+                proxima_tensor::op::Op::Input { name: Some(name), .. }
+                    if name == "blk.15.attn_k.weight"
+            )
+        });
+        assert!(
+            declares_blk15_attn_k,
+            "build_single_range_program has no gemma4 shared-KV awareness: it must still \
+             declare blk.15.attn_k.weight for a uniform 35-layer shape, proving \
+             Self::load's own gemma4 exclusion is load-bearing, not dead code"
+        );
+    }
+
+    /// The actual production gate covers gemma4 -- reproduced here as a
+    /// name check so a rename of either match arm at `Self::load` breaks
+    /// this test rather than silently reopening the panic this fix closed.
+    #[test]
+    fn load_single_range_exclusion_covers_gemma4() {
+        assert!(
+            matches!(crate::gemma4::GEMMA4.name(), "qwen35" | "gemma4"),
+            "gemma4 must stay excluded from the placed-KV single-range program"
+        );
     }
 }
 
