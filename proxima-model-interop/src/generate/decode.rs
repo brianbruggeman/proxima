@@ -1846,6 +1846,7 @@ impl<'file> LoadedModel<'file> {
                             LayerCacheState::Ssm(cache) => {
                                 (cache.conv_history.len() + cache.state.len()) as u64
                             }
+                            LayerCacheState::SharedFromLayer => 0,
                         })
                         .sum();
                     #[cfg(feature = "instrument")]
