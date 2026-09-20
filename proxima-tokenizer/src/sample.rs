@@ -479,8 +479,8 @@ fn sample_general(
 /// already sliced to its own `repeat_last_n` window; this function does
 /// no windowing of its own. Returns `None` only if `logits` is empty.
 ///
-/// `temperature <= 0.0` takes [`greedy_fast_path`] instead of
-/// [`sample_general`] whenever [`greedy_fast_path_is_safe`] holds --
+/// `temperature <= 0.0` takes `greedy_fast_path` instead of
+/// `sample_general` whenever `greedy_fast_path_is_safe` holds --
 /// bit-identical output, zero vocab-sized allocation.
 #[must_use]
 pub fn sample_next_token(
