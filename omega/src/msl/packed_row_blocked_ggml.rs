@@ -556,14 +556,41 @@ pub(super) fn push_packed_row_blocked_body(
                     source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
                     source.push_str("            }\n");
                 }
+                Codec::Q8_0
+                    if is_plain_product_reduce(resolved, reduce_op, weight, other)
+                        && resolved.dtype == DType::Float32 =>
+                {
+                    // BATCHED ARM, mirroring the K-quant codecs' own
+                    // scale-deferred `is_plain_product_reduce` arms
+                    // (`Codec::Q4K`'s below, `push_q4k_product_reduce_body`):
+                    // `Q8_0`'s whole 32-element slot IS one real block,
+                    // already matching this preamble's `acts[sub]` gather
+                    // one-for-one, so `q8_0_pair_dot` decodes that block's
+                    // one `d` scale ONCE and walks it against `acts` directly
+                    // -- see [`Q8_0_PAIR_DOT_MSL`]'s own doc for why this
+                    // replaces `q8_0_super_element`'s per-element re-decode
+                    // instead of extending `push_q4k_plain_product_y4_
+                    // address`'s `yl`/`yh` pairing (`Q8_0` has no nibble
+                    // packing to pair across). The `DType::Float32` guard
+                    // mirrors `plain_product`'s own gate above (line ~146):
+                    // `acts` is declared `{element_type} acts[sub]`, and
+                    // `q8_0_pair_dot`'s MSL signature is fixed to `float
+                    // *acts` -- a `half`-typed `acts` array would not bind
+                    // to it (found by `metal_matmul_parity_across_codec_and_
+                    // dtype::q4_0_at_float16`'s sibling case, same gap,
+                    // same fix, for `Codec::Q4_0` below).
+                    source.push_str(
+                        "            sumf[q] = sumf[q] + q8_0_pair_dot(blk, slot, acts);\n",
+                    );
+                }
                 Codec::Q8_0 => {
                     // `sub` (32) is exactly `Q8_0_BLOCK_ELEMENTS`: this
                     // lane's whole 32-element slot IS one real `Q8_0` block,
                     // so `q8_0_super_element` decodes it a scale-load-plus-
-                    // level-load at a time, same per-element posture as
-                    // `Q2_K`/`Q3_K`'s own default arms above (no batched
-                    // unpack yet -- a follow-up optimization, not a
-                    // correctness gap).
+                    // level-load at a time. The `is_plain_product_reduce`
+                    // arm above replaces this per-element loop whenever the
+                    // reduce is a plain product; this fallback stays for
+                    // reduce shapes that identity does not cover.
                     source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
                     source.push_str(&format!(
                         "                {element_type} scratch[{}];\n",
@@ -586,13 +613,42 @@ pub(super) fn push_packed_row_blocked_body(
                     source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
                     source.push_str("            }\n");
                 }
+                Codec::Q4_0
+                    if is_plain_product_reduce(resolved, reduce_op, weight, other)
+                        && resolved.dtype == DType::Float32 =>
+                {
+                    // BATCHED ARM -- the #1 GPU-time bucket in gemma4-E2B
+                    // decode (`reduce-packed-row-blocked`, 39.6%, 275
+                    // dispatches/step) ran through the per-element fallback
+                    // below on every one of those dispatches. Same posture as
+                    // the `Codec::Q8_0 if is_plain_product_reduce` arm above
+                    // and the K-quant codecs' own scale-deferred arms
+                    // (`Codec::Q4K`'s below): `Q4_0`'s whole 32-element slot
+                    // IS one real block, already matching this preamble's
+                    // `acts[sub]` gather one-for-one, so `q4_0_pair_dot`
+                    // decodes that block's one `d` scale ONCE and walks its
+                    // 16 packed-nibble bytes against `acts` directly -- see
+                    // [`Q4_0_PAIR_DOT_MSL`]'s own doc. The `DType::Float32`
+                    // guard mirrors `plain_product`'s own gate above (line
+                    // ~146): `acts` is declared `{element_type} acts[sub]`,
+                    // and `q4_0_pair_dot`'s MSL signature is fixed to `float
+                    // *acts` -- a `half`-typed `acts` array does not bind to
+                    // it (`metal_matmul_parity_across_codec_and_dtype::
+                    // q4_0_at_float16` caught this: "no matching function
+                    // for call to 'q4_0_pair_dot'" against a `half[32]`
+                    // argument).
+                    source.push_str(
+                        "            sumf[q] = sumf[q] + q4_0_pair_dot(blk, slot, acts);\n",
+                    );
+                }
                 Codec::Q4_0 => {
                     // `sub` (32) is exactly `Q4_0_BLOCK_ELEMENTS`: this
                     // lane's whole 32-element slot IS one real `Q4_0` block,
                     // so `q4_0_super_element` decodes it a scale-load-plus-
-                    // nibble-load at a time, same per-element posture as
-                    // `Codec::Q8_0`'s own arm above (no batched unpack yet
-                    // -- a follow-up optimization, not a correctness gap).
+                    // nibble-load at a time. The `is_plain_product_reduce`
+                    // arm above replaces this per-element loop whenever the
+                    // reduce is a plain product; this fallback stays for
+                    // reduce shapes that identity does not cover.
                     source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
                     source.push_str(&format!(
                         "                {element_type} scratch[{}];\n",

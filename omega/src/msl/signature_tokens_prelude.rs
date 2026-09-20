@@ -748,9 +748,17 @@ pub(super) fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(Q8_0_SUPER_ELEMENT_MSL);
     source.push('\n');
+    // unconditional, same posture as `Q5K_PAIR_DOT_MSL` above: the selector
+    // is `is_plain_product_reduce`, decided at EMIT time by
+    // `push_packed_row_blocked_body`'s `Codec::Q8_0` arm, not a cargo
+    // feature -- an unused `static inline` costs nothing in the compiled AIR.
+    source.push_str(Q8_0_PAIR_DOT_MSL);
+    source.push('\n');
     source.push_str(Q4_0_UNPACK_MSL);
     source.push('\n');
     source.push_str(Q4_0_SUPER_ELEMENT_MSL);
+    source.push('\n');
+    source.push_str(Q4_0_PAIR_DOT_MSL);
     source.push('\n');
     source.push_str(Q5_1_UNPACK_MSL);
     source.push('\n');

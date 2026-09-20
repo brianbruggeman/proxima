@@ -1116,8 +1116,13 @@ fn q4k_row_blocked_matmul_defers_scale_to_once_per_sub_block_single_fetch() {
 /// exactly the same 256-element byte span one K-quant super-block occupies,
 /// so [`Q4_0_SUPER_ELEMENT_MSL`] emulates the super-block-relative read this
 /// path needs instead of falling back to the fully generic per-element
-/// accessor. See [`push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel`]
-/// below for the emitter-level half of this proof.
+/// accessor. `matmul_op`'s reduce is a plain product (`Add` of `Multiply`),
+/// so [`push_packed_row_blocked_body`]'s `Codec::Q4_0 if is_plain_product_
+/// reduce` arm fires and the body calls the batched `q4_0_pair_dot`, not
+/// the per-element `q4_0_super_element` this test asserted before
+/// perf/q4_0-pair-dot landed the batched arm -- see
+/// [`push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel`] below
+/// for the emitter-level half of this proof.
 #[test]
 fn q4_0_codec_takes_the_row_blocked_path_at_a_256_extent() {
     let bound = matmul_op(4, 256, 5);
@@ -1138,14 +1143,43 @@ fn q4_0_codec_takes_the_row_blocked_path_at_a_256_extent() {
         .expect("emits")
         .source;
     assert!(
-        source.contains("q4_0_super_element("),
-        "a row-blocked Q4_0 weight must call the superblock-relative accessor:\n{source}"
+        source.contains("q4_0_pair_dot(blk"),
+        "a plain-product row-blocked Q4_0 weight must call the batched pair-dot accessor:\n{source}"
+    );
+    assert!(
+        !source.contains("q4_0_super_element(blk"),
+        "the batched arm must fully replace the per-element accessor for a plain product:\n{source}"
     );
     assert!(
         !source.contains("q4k_run8(blk")
             && !source.contains("q5k_value(blk")
             && !source.contains("q6k_value(blk"),
         "a Q4_0 weight must never emit a K-quant row-blocked unpack call:\n{source}"
+    );
+}
+
+/// Companion to [`q4_0_codec_takes_the_row_blocked_path_at_a_256_extent`]:
+/// proves the per-element `q4_0_super_element` fallback still fires for a
+/// reduce shape `is_plain_product_reduce` does not cover (`Maximum` here,
+/// not `Add` of a bare `Multiply`) -- the same "batched arm is conditional,
+/// not absolute" proof the K-quant codecs' own fallback arms rely on.
+#[test]
+fn q4_0_codec_falls_back_to_per_element_for_a_non_plain_product_reduce() {
+    let bound = matmul_op_with_reduce(4, 256, 5, ScalarOp::Maximum);
+    let weight_node = bound.operands()[0].0;
+    let mut q4_0 = BTreeMap::new();
+    q4_0.insert(weight_node, Codec::Q4_0);
+
+    let source = emit(&bound, &q4_0, NumericPolicy::default())
+        .expect("emits")
+        .source;
+    assert!(
+        source.contains("q4_0_super_element(blk"),
+        "a non-plain-product Q4_0 reduce must keep the per-element accessor:\n{source}"
+    );
+    assert!(
+        !source.contains("q4_0_pair_dot(blk"),
+        "the batched arm requires is_plain_product_reduce and must not fire here:\n{source}"
     );
 }
 
@@ -2901,8 +2935,8 @@ fn push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel() {
     )
     .expect("Q8_0 now reaches the row-blocked path and renders a kernel body");
     assert!(
-        source.contains("q8_0_super_element"),
-        "row-blocked Q8_0 body must call the superblock-relative accessor: {source}"
+        source.contains("q8_0_pair_dot(blk"),
+        "row-blocked Q8_0 body for a plain-product reduce must call the batched pair-dot accessor: {source}"
     );
 }
 
@@ -2941,8 +2975,8 @@ fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
     )
     .expect("Q4_0 now reaches the row-blocked path and renders a kernel body");
     assert!(
-        source.contains("q4_0_super_element"),
-        "row-blocked Q4_0 body must call the superblock-relative accessor: {source}"
+        source.contains("q4_0_pair_dot(blk"),
+        "row-blocked Q4_0 body for a plain-product reduce must call the batched pair-dot accessor: {source}"
     );
 }
 

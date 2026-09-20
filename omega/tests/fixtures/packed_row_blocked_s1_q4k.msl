@@ -733,6 +733,19 @@ static inline float q8_0_super_element(device const uchar *superblock, uint inde
 }
 
 
+static inline float q8_0_pair_dot(device const uchar *superblock, uint slot, thread const float *acts) {
+    device const uchar *block = superblock + (slot / 32u) * 34u;
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float d = (float)as_type<half>(d_bits);
+    device const uchar *levels = block + 2;
+    float result = 0.0f;
+    for (uint j = 0u; j < 32u; ++j) {
+        result += d * (float)((char)levels[j]) * acts[j];
+    }
+    return result;
+}
+
+
 // element `index` (0..32) of one Q4_0 block, byte-for-byte the value
 // proxima_gguf::quant::q4_0::dequantize_block writes at the same index.
 static inline float q4_0_element(device const uchar *block, uint index) {
@@ -746,6 +759,23 @@ static inline float q4_0_element(device const uchar *block, uint index) {
 
 static inline float q4_0_super_element(device const uchar *superblock, uint index) {
     return q4_0_element(superblock + (index / 32u) * 18u, index % 32u);
+}
+
+
+static inline float q4_0_pair_dot(device const uchar *superblock, uint slot, thread const float *acts) {
+    device const uchar *block = superblock + (slot / 32u) * 18u;
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float d = (float)as_type<half>(d_bits);
+    device const uchar *qs = block + 2;
+    float result = 0.0f;
+    for (uint j = 0u; j < 16u; ++j) {
+        uchar byte = qs[j];
+        float low = (float)((int)(byte & 0x0Fu) - 8);
+        float high = (float)((int)(byte >> 4u) - 8);
+        result += d * low * acts[j];
+        result += d * high * acts[j + 16u];
+    }
+    return result;
 }
 
 
