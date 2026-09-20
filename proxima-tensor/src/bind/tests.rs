@@ -3407,22 +3407,16 @@ mod reduce_epilogue_fusion_tests {
 
     #[test]
     fn reduce_then_residual_add_fuses_into_one_epilogued_reduce() {
-        let (program, reduced, consumer, _x, extra_x_use) = reduce_then_residual_add_program();
+        let (program, reduced, consumer, _x, _extra_x_use) = reduce_then_residual_add_program();
         let shapes = shape::infer(&program, &[]).expect("residual-add program infers");
-        let plain = bind_plain(
-            &program,
-            &shapes,
-            &[extra_x_use],
-            NumericPolicy::bit_exact(),
-        )
-        .expect("plain bind succeeds");
-        let fused = bind(
-            &program,
-            &shapes,
-            &[extra_x_use],
-            NumericPolicy::bit_exact(),
-        )
-        .expect("fused bind succeeds");
+        // `consumer` -- not `extra_x_use`, which never reads `reduced` at all
+        // -- must be the requested output, or `bind`'s own reachability pass
+        // prunes `consumer` as dead code before fusion ever runs and this
+        // test asserts about a `BoundOp` that was never built.
+        let plain = bind_plain(&program, &shapes, &[consumer], NumericPolicy::bit_exact())
+            .expect("plain bind succeeds");
+        let fused = bind(&program, &shapes, &[consumer], NumericPolicy::bit_exact())
+            .expect("fused bind succeeds");
 
         assert_eq!(
             fused.len(),
@@ -3540,7 +3534,7 @@ mod reduce_epilogue_fusion_tests {
 
     #[test]
     fn a_reduce_with_two_consumers_does_not_fuse() {
-        let (program, reduced, consumer, _x, extra_x_use) = reduce_then_residual_add_program();
+        let (program, reduced, consumer, _x, _extra_x_use) = reduce_then_residual_add_program();
         let identity = || IndexMap::Affine(map::projection(1, &[0]));
         let mut program = program;
         let second_consumer = append(
@@ -3553,10 +3547,16 @@ mod reduce_epilogue_fusion_tests {
             },
         );
         let shapes = shape::infer(&program, &[]).expect("two-consumer program infers");
+        // both real readers of `reduced` -- `consumer` and `second_consumer`
+        // -- must be requested outputs, or `bind`'s own reachability pass
+        // (`live::reachable`) prunes the unrequested one as dead code before
+        // `reduce_epilogue_fusion` ever sees it, leaving `reduced` with a
+        // single live reader and defeating the two-consumer scenario this
+        // test exists to cover.
         let fused = bind(
             &program,
             &shapes,
-            &[extra_x_use, second_consumer],
+            &[consumer, second_consumer],
             NumericPolicy::bit_exact(),
         )
         .expect("two-consumer program still binds");
