@@ -2605,7 +2605,11 @@ impl<'file> LoadedModel<'file> {
                             expert_source_substitutions,
                         )?
                     };
-                    #[cfg(feature = "instrument")]
+                    #[cfg(all(
+                        feature = "metal-output-placement",
+                        feature = "instrument",
+                        target_os = "macos"
+                    ))]
                     if let Some((_, output_buffer, _)) = ssm_output_placements.first() {
                         debug!(
                             step = (cached_len + batch_index) as u64,
@@ -2848,7 +2852,7 @@ impl<'file> LoadedModel<'file> {
                         && _step == 0
                         && split_prefill
                     {
-                        #[cfg(feature = "instrument")]
+                        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                         eprintln!(
                             "prefill_batch batch_index={} cached_len={} evaluate_ms={:.3} gpu_exec_calls={} gpu_exec_ms={:.3}",
                             batch_index,
@@ -2857,7 +2861,7 @@ impl<'file> LoadedModel<'file> {
                             metal_stage.gpu_exec_calls,
                             ticks_to_nanos(metal_stage.gpu_exec_ticks) as f64 / 1e6,
                         );
-                        #[cfg(feature = "instrument")]
+                        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                         eprintln!(
                             "prefill_batch_stages batch_index={} prepare_ms={:.3} emit_ms={:.3} pipeline_lookup_ms={:.3} pipeline_misses={} pipeline_compile_ms={:.3} op_setup_ms={:.3} block_upload_ms={:.3} readback_ms={:.3}",
                             batch_index,
@@ -2870,7 +2874,7 @@ impl<'file> LoadedModel<'file> {
                             ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
                             ticks_to_nanos(metal_stage.readback_ticks) as f64 / 1e6,
                         );
-                        #[cfg(not(feature = "instrument"))]
+                        #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
                         eprintln!(
                             "prefill_batch batch_index={} cached_len={} evaluate_ms=unavailable",
                             batch_index, cached_len,
@@ -2879,7 +2883,7 @@ impl<'file> LoadedModel<'file> {
                     if std::env::var_os("PROXIMA_DEBUG_TOKEN_STAGES").is_some()
                         && !(_step == 0 && split_prefill)
                     {
-                        #[cfg(feature = "instrument")]
+                        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                         eprintln!(
                             "token_stages step={} cached_len={} evaluate_ms={:.3} gpu_exec_ms={:.3} prepare_ms={:.3} pipeline_misses={} pipeline_compile_ms={:.3} op_setup_ms={:.3} block_upload_ms={:.3} readback_ms={:.3}",
                             _step,
@@ -2893,7 +2897,7 @@ impl<'file> LoadedModel<'file> {
                             ticks_to_nanos(metal_stage.block_upload_ticks) as f64 / 1e6,
                             ticks_to_nanos(metal_stage.readback_ticks) as f64 / 1e6,
                         );
-                        #[cfg(not(feature = "instrument"))]
+                        #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
                         eprintln!(
                             "token_stages step={} cached_len={} evaluate_ms=unavailable",
                             _step, cached_len,
