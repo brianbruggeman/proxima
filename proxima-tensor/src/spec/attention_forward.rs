@@ -270,6 +270,14 @@ pub struct LayerFfnConfig {
     /// crate today) reproduces the prior hardcoded SiLU chain
     /// node-for-node; Gemma 4 sets `GeluTanh` for its GeGLU FFN.
     pub activation: Activation,
+    /// `Some(width)` overrides this layer's dense-branch FFN width in place
+    /// of [`lfm2_forward_program_with_experts`]'s crate-wide `feed_forward`
+    /// argument -- Gemma 4 E2B/E4B's matformer checkpoint stores a
+    /// per-layer `feed_forward_length` array rather than one uniform width
+    /// (`gemma4::hparams::Architecture::feed_forward_by_layer`). `None`
+    /// (every caller in this crate before Gemma 4 E2B) reproduces the
+    /// prior uniform-width behaviour unchanged.
+    pub dense_feed_forward: Option<u32>,
 }
 
 impl LayerFfnConfig {
@@ -285,6 +293,7 @@ impl LayerFfnConfig {
             routed_gating: ExpertGatingFunc::Sigmoid,
             routed_expert_bias: true,
             activation: Activation::Silu,
+            dense_feed_forward: None,
         }
     }
 }
@@ -1031,6 +1040,7 @@ pub(crate) fn append_lfm2_layer_ffn(
     moe_sites: &mut Vec<MoeSite>,
 ) -> Result<NodeId, TensorError> {
     let normed2 = rmsnorm(program, post_mixer, ffn_norm_weight, inv_dim, eps)?;
+    let feed_forward = ffn_config.dense_feed_forward.unwrap_or(feed_forward);
 
     let ffn_out = match ffn_config.combination {
         FfnCombination::Exclusive => {

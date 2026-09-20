@@ -12674,6 +12674,7 @@ mod gemma4_synthetic_parity {
             output_scale: true,
             routed_gating: ExpertGatingFunc::Softmax,
             routed_expert_bias: false,
+            dense_feed_forward: None,
             activation: Activation::GeluTanh,
         };
         let schedule = alloc::vec![
@@ -13051,6 +13052,7 @@ mod gemma4_synthetic_parity {
             output_scale: true,
             routed_gating: ExpertGatingFunc::Softmax,
             routed_expert_bias: false,
+            dense_feed_forward: None,
             activation: Activation::GeluTanh,
         };
         let schedule = alloc::vec![
@@ -13363,6 +13365,7 @@ mod gemma4_synthetic_parity {
             output_scale: true,
             routed_gating: ExpertGatingFunc::Softmax,
             routed_expert_bias: false,
+            dense_feed_forward: None,
             activation: Activation::GeluTanh,
         };
         let schedule = alloc::vec![
@@ -13645,6 +13648,7 @@ mod gemma4_synthetic_parity {
             output_scale: true,
             routed_gating: ExpertGatingFunc::Softmax,
             routed_expert_bias: false,
+            dense_feed_forward: None,
             activation: Activation::GeluTanh,
         };
         let layers = alloc::vec![
@@ -13894,6 +13898,7 @@ mod gemma4_synthetic_parity {
             output_scale: true,
             routed_gating: ExpertGatingFunc::Softmax,
             routed_expert_bias: false,
+            dense_feed_forward: None,
             activation: Activation::GeluTanh,
         };
 
@@ -14158,6 +14163,7 @@ mod gemma4_synthetic_parity {
             output_scale: true,
             routed_gating: ExpertGatingFunc::Softmax,
             routed_expert_bias: false,
+            dense_feed_forward: None,
             activation: Activation::GeluTanh,
         };
         let schedule = alloc::vec![

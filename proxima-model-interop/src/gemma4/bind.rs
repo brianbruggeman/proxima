@@ -197,7 +197,6 @@ pub fn bind_gemma4_weights<'file>(
     let mut state = BoundWeights::new(&[]);
     let embedding = architecture.embedding as usize;
     let expert_count = architecture.expert_count as usize;
-    let feed_forward = architecture.feed_forward as usize;
 
     bind_dense(parsed, file_bytes, "token_embd.weight".into(), &mut state)?;
     bind_norm(
@@ -239,6 +238,7 @@ pub fn bind_gemma4_weights<'file>(
         } as usize;
         let kv_heads = architecture.kv_heads_by_layer[layer_index] as usize;
         let query_heads = architecture.head_count as usize;
+        let feed_forward = architecture.feed_forward_by_layer[layer_index] as usize;
 
         bind_norm(
             parsed,
@@ -316,34 +316,6 @@ pub fn bind_gemma4_weights<'file>(
             GEMMA4_NORM_SHIFT,
             &mut state,
         )?;
-        bind_norm(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.post_ffw_norm_1.weight"),
-            GEMMA4_NORM_SHIFT,
-            &mut state,
-        )?;
-        bind_norm(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.post_ffw_norm_2.weight"),
-            GEMMA4_NORM_SHIFT,
-            &mut state,
-        )?;
-        bind_norm(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.post_ffw_norm.weight"),
-            GEMMA4_NORM_SHIFT,
-            &mut state,
-        )?;
-        bind_norm(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.pre_ffw_norm_2.weight"),
-            GEMMA4_NORM_SHIFT,
-            &mut state,
-        )?;
         bind_matmul_weight(
             parsed,
             file_bytes,
@@ -368,61 +340,110 @@ pub fn bind_gemma4_weights<'file>(
             feed_forward,
             &mut state,
         )?;
-        bind_matmul_weight_transposed_f32(
-            parsed,
-            file_bytes,
-            &format!("blk.{layer}.ffn_gate_inp.weight"),
-            format!("blk.{layer}.ffn_gate_inp.weight"),
-            expert_count,
-            embedding,
-            &mut state,
-        )?;
-        // `[embedding]` F32, NOT a dequant scale -- `ffn_gate_inp.weight`
-        // is already F32 with its own values; this is the SEPARATE
-        // architectural router-input scale. `append_routed_expert_ffn`'s
-        // `router_scale` knob binds this raw (no `1 +` offset) as the
-        // gamma of a `with_scale=False` RMSNorm over the router's own
-        // input, then multiplies by the constant `embedding**-0.5`, before
-        // the router projection (`Gemma4TextRouter.forward`). Confirmed
-        // via `gemma4_dump` (`examples/gemma4_dump.rs`): `ggml_type=F32`,
-        // `dims=[2816]`.
-        bind_dense(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.ffn_gate_inp.scale"),
-            &mut state,
-        )?;
 
-        let expert_feed_forward = architecture.expert_feed_forward as usize;
-        bind_gemma4_fused_gate_up_experts(
-            parsed,
-            file_bytes,
-            layer,
-            expert_count,
-            expert_feed_forward,
-            embedding,
-            &mut state,
-        )?;
-        bind_moe_expert_weights(
-            parsed,
-            file_bytes,
-            layer,
-            "ffn_down",
-            architecture.expert_count,
-            embedding,
-            expert_feed_forward,
-            &mut state,
-        )?;
-        // `[expert_count]` F32, ARCHITECTURAL (not a dequant scale --
-        // `ffn_down_exps.weight` is Q5_1 with its own block scales). Folded
-        // into each selected expert's combination weight,
-        // [`append_moe_ffn`]'s own doc on `MoeFfnSpec::expert_scale`.
-        bind_dense(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.ffn_down_exps.scale"),
-            &mut state,
-        )?;
+        // E2B/E4B are DENSE (`expert_count == 0`, see
+        // `hparams::from_metadata`'s own `metadata_u32_optional` read) --
+        // the real checkpoint carries no `ffn_gate_inp.*`/`ffn_*_exps.*`/
+        // `post_ffw_norm_1`/`post_ffw_norm_2`/`pre_ffw_norm_2` tensors at
+        // all (confirmed against the real gemma4-E2B blob: `strings` over
+        // its GGUF header finds none of these names), only a single
+        // `post_ffw_norm.weight` -- binding any of the MoE-only leaves on
+        // that checkpoint would fail with `MissingMetadataKey`/
+        // `UnknownTensor`. 12B/26B/31B (`expert_count > 0`) still bind the
+        // full MoE set exactly as before.
+        if expert_count > 0 {
+            bind_norm(
+                parsed,
+                file_bytes,
+                format!("blk.{layer}.post_ffw_norm_1.weight"),
+                GEMMA4_NORM_SHIFT,
+                &mut state,
+            )?;
+            bind_norm(
+                parsed,
+                file_bytes,
+                format!("blk.{layer}.post_ffw_norm_2.weight"),
+                GEMMA4_NORM_SHIFT,
+                &mut state,
+            )?;
+            bind_norm(
+                parsed,
+                file_bytes,
+                format!("blk.{layer}.post_ffw_norm.weight"),
+                GEMMA4_NORM_SHIFT,
+                &mut state,
+            )?;
+            bind_norm(
+                parsed,
+                file_bytes,
+                format!("blk.{layer}.pre_ffw_norm_2.weight"),
+                GEMMA4_NORM_SHIFT,
+                &mut state,
+            )?;
+            bind_matmul_weight_transposed_f32(
+                parsed,
+                file_bytes,
+                &format!("blk.{layer}.ffn_gate_inp.weight"),
+                format!("blk.{layer}.ffn_gate_inp.weight"),
+                expert_count,
+                embedding,
+                &mut state,
+            )?;
+            // `[embedding]` F32, NOT a dequant scale -- `ffn_gate_inp.weight`
+            // is already F32 with its own values; this is the SEPARATE
+            // architectural router-input scale. `append_routed_expert_ffn`'s
+            // `router_scale` knob binds this raw (no `1 +` offset) as the
+            // gamma of a `with_scale=False` RMSNorm over the router's own
+            // input, then multiplies by the constant `embedding**-0.5`, before
+            // the router projection (`Gemma4TextRouter.forward`). Confirmed
+            // via `gemma4_dump` (`examples/gemma4_dump.rs`): `ggml_type=F32`,
+            // `dims=[2816]`.
+            bind_dense(
+                parsed,
+                file_bytes,
+                format!("blk.{layer}.ffn_gate_inp.scale"),
+                &mut state,
+            )?;
+
+            let expert_feed_forward = architecture.expert_feed_forward as usize;
+            bind_gemma4_fused_gate_up_experts(
+                parsed,
+                file_bytes,
+                layer,
+                expert_count,
+                expert_feed_forward,
+                embedding,
+                &mut state,
+            )?;
+            bind_moe_expert_weights(
+                parsed,
+                file_bytes,
+                layer,
+                "ffn_down",
+                architecture.expert_count,
+                embedding,
+                expert_feed_forward,
+                &mut state,
+            )?;
+            // `[expert_count]` F32, ARCHITECTURAL (not a dequant scale --
+            // `ffn_down_exps.weight` is Q5_1 with its own block scales). Folded
+            // into each selected expert's combination weight,
+            // [`append_moe_ffn`]'s own doc on `MoeFfnSpec::expert_scale`.
+            bind_dense(
+                parsed,
+                file_bytes,
+                format!("blk.{layer}.ffn_down_exps.scale"),
+                &mut state,
+            )?;
+        } else {
+            bind_norm(
+                parsed,
+                file_bytes,
+                format!("blk.{layer}.post_ffw_norm.weight"),
+                GEMMA4_NORM_SHIFT,
+                &mut state,
+            )?;
+        }
     }
 
     Ok(state)
@@ -532,20 +553,38 @@ pub static GEMMA4: Gemma4Arch = Gemma4Arch;
 /// field means.
 #[cfg(not(feature = "gemma4-kv-cache"))]
 fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
-    let ffn = LayerFfnConfig {
-        post_attention_norm: true,
-        combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
+    // E2B/E4B (`expert_count == 0`) carry no routed-expert tensors at all
+    // (`bind_gemma4_weights`'s own `expert_count > 0` split) -- their
+    // per-layer FFN is dense-only SwiGLU/GeGLU, [`FfnCombination::Exclusive`]
+    // with `leading_dense_block_count == block_count` at the
+    // `lfm2_forward_program_with_experts` call site
+    // ([`Gemma4Arch::bind`]) so every layer takes the dense branch and the
+    // routed branch is never built. 12B/26B/31B (`expert_count > 0`) keep
+    // the real parallel dense+MoE shape unchanged.
+    let combination = if architecture.expert_count > 0 {
+        FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
             dense_post_norm: true,
             routed_post_norm: true,
             combined_post_norm: true,
             routed_pre_norm: true,
             router_scale: true,
             expert_output_scale: true,
-        }),
+        })
+    } else {
+        FfnCombination::Exclusive
+    };
+    let ffn = LayerFfnConfig {
+        post_attention_norm: true,
+        combination,
         output_scale: true,
         routed_gating: ExpertGatingFunc::Softmax,
         routed_expert_bias: false,
         activation: Activation::GeluTanh,
+        // per-layer below: `feed_forward_by_layer[layer]` (E2B/E4B's own
+        // matformer variable dense-FFN width; a uniform checkpoint's array
+        // is `metadata_u32_per_layer`'s scalar-broadcast, so this override
+        // reproduces the prior single-width behaviour byte-for-byte there).
+        dense_feed_forward: None,
     };
     architecture
         .sliding_window_pattern
@@ -553,6 +592,10 @@ fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
         .enumerate()
         .map(|(layer, &is_sliding)| {
             let kv_heads = architecture.kv_heads_by_layer[layer];
+            let ffn = LayerFfnConfig {
+                dense_feed_forward: Some(architecture.feed_forward_by_layer[layer]),
+                ..ffn
+            };
             let attention = if is_sliding {
                 LayerAttentionConfig {
                     head_dim: architecture.key_length_swa,
@@ -662,6 +705,22 @@ impl ArchitectureTrait for Gemma4Arch {
             let schedule = gemma4_layer_schedule(&architecture);
             let logit_softcap = (architecture.final_logit_softcapping > 0.0)
                 .then_some(architecture.final_logit_softcapping);
+            // `leading_dense_block_count`: every layer's own
+            // `FfnCombination` (set by `gemma4_layer_schedule` above) is
+            // `ParallelDenseMoe` for a real MoE checkpoint, which ignores
+            // this argument entirely (both branches always run) -- `0` here
+            // reproduces that prior behaviour byte-for-byte. For a dense
+            // checkpoint (`expert_count == 0`) every layer's combination is
+            // `FfnCombination::Exclusive` instead, whose dense-vs-routed
+            // choice is `layer < leading_dense_block_count`
+            // (`append_lfm2_layer_ffn`) -- `block_count` here makes that
+            // condition true for every layer, so the (absent, unbound)
+            // routed branch is never built.
+            let leading_dense_block_count = if architecture.expert_count > 0 {
+                0
+            } else {
+                architecture.block_count
+            };
             let (program, logits, moe_sites) = lfm2_forward_program_with_experts(
                 architecture.vocab,
                 architecture.embedding,
@@ -671,7 +730,7 @@ impl ArchitectureTrait for Gemma4Arch {
                 architecture.block_count,
                 architecture.expert_count,
                 architecture.expert_used_count,
-                0,
+                leading_dense_block_count,
                 0,
                 &schedule,
                 Some(EmbeddingScale::Sqrt),
