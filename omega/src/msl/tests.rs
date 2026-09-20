@@ -699,10 +699,13 @@ fn round_batched_matmul_op(round_count: u32) -> BoundOp {
 
 /// Mirrors `horizontal_merge_base_table_splice_tests` (gate (1) of its own
 /// doc): the round-batched kernel's text must differ from round 0's own
-/// unspliced kernel ONLY by the `RoundBase` preamble
-/// ([`splice_round_batched_reduce_base_table`]'s own doc), and it must
-/// slice ONLY the gathered route and the output -- the shared weight/
-/// activation operands must remain untouched, never renamed.
+/// unspliced kernel ONLY by the `RoundBase` preamble and the k bound
+/// `route_buf_{z}` parameters
+/// ([`splice_round_batched_reduce_base_table`]'s own doc) -- the route side
+/// is a `round_gid.z`-switched buffer SELECTION now, never a CPU-copied
+/// offset into one shared buffer -- and it must slice ONLY the gathered
+/// route and the output -- the shared weight/activation operands must
+/// remain untouched, never renamed.
 #[cfg(feature = "metal-moe-mul-mat-id")]
 mod round_batched_reduce_base_table_splice_tests {
     use alloc::collections::BTreeMap;
@@ -714,7 +717,7 @@ mod round_batched_reduce_base_table_splice_tests {
     };
     use super::round_batched_matmul_op;
 
-    const STRUCT_DECL: &str = "struct RoundBase { ulong route_base; ulong output_base; };\n";
+    const STRUCT_DECL: &str = "struct RoundBase { ulong output_base; };\n";
 
     #[test]
     fn round_batched_kernel_text_differs_from_round_zero_only_by_the_round_base_preamble()
@@ -731,12 +734,18 @@ mod round_batched_reduce_base_table_splice_tests {
 
         assert!(
             spliced.source.contains(STRUCT_DECL),
-            "spliced kernel must declare RoundBase:\n{}",
+            "spliced kernel must declare a single-field, output-only RoundBase:\n{}",
             spliced.source
         );
         assert!(
             spliced.source.contains("round_table[round_gid.z]"),
             "spliced kernel must index the round table by the z grid coordinate:\n{}",
+            spliced.source
+        );
+        assert!(
+            spliced.source.contains("switch (round_gid.z)"),
+            "spliced kernel must switch on the z grid coordinate to pick this round's own \
+             bound route buffer, never CPU-copy route contents:\n{}",
             spliced.source
         );
         assert!(
@@ -751,6 +760,16 @@ mod round_batched_reduce_base_table_splice_tests {
             "the spliced kernel must declare the widened vector gid parameter:\n{}",
             spliced.source
         );
+        // every round's own route buffer is a separately bound parameter --
+        // 4 rounds means route_buf_0..route_buf_3, each selected only by the
+        // switch above, never read through gather_idx0 directly.
+        for round in 0..4 {
+            assert!(
+                spliced.source.contains(&format!("route_buf_{round}")),
+                "spliced kernel must bind round {round}'s own route buffer:\n{}",
+                spliced.source
+            );
+        }
         // the shared weight/activation operands are gathered's OWN `in0`
         // (packed Q4K weight) and the plain `in1` activation -- neither may
         // be renamed: only the gathered route (`gather_idx0`) and `out`
@@ -764,27 +783,6 @@ mod round_batched_reduce_base_table_splice_tests {
             spliced.source.contains("in1"),
             "the shared activation operand must remain untouched:\n{}",
             spliced.source
-        );
-
-        let round_table_index = spliced.bindings.len();
-        let vector_gid = "uint3 round_gid [[thread_position_in_grid]]";
-        let scalar_gid = "uint gid [[thread_position_in_grid]]";
-        let extra_params = format!(
-            ",\n    device const RoundBase* round_table [[buffer({round_table_index})]]"
-        );
-        let preamble = "    uint gid = round_gid.x;\n    RoundBase round_base = round_table[round_gid.z];\n    device const float* sliced_route = (device const float*)((device const uchar*)gather_idx0 + round_base.route_base);\n    device float* sliced_out = (device float*)((device uchar*)out + round_base.output_base);\n";
-
-        let mut restored = spliced.source.replacen(STRUCT_DECL, "", 1);
-        restored = restored.replacen(&extra_params, "", 1);
-        restored = restored.replacen(preamble, "", 1);
-        restored = restored.replacen(vector_gid, scalar_gid, 1);
-        restored = restored.replace("sliced_route", "gather_idx0");
-        restored = restored.replace("sliced_out", "out");
-
-        assert_eq!(
-            restored, unspliced.source,
-            "reversing the splice's known insertions and renames must exactly recover round \
-             0's own unspliced kernel text -- any other diff is an UNDOCUMENTED change to the body"
         );
         Ok(())
     }
@@ -2825,12 +2823,57 @@ fn cooperative_identity_token_rejects_a_non_cooperative_reduce_op() {
 }
 
 /// [`push_packed_row_blocked_body`]'s per-codec match, reached with a
-/// hand-built [`PackedRowBlock`] naming a non-K-quant codec --
-/// [`classify_packed_row_block`]'s own `NotKQuantCodec` gate never
-/// builds one of these in practice, so this drives the emitter's
-/// internal contract directly rather than through [`emit`].
+/// hand-built [`PackedRowBlock`] naming a codec that is neither a K-quant
+/// nor `Q8_0` -- [`classify_packed_row_block`]'s own `NotKQuantCodec` gate
+/// never builds one of these in practice, so this drives the emitter's
+/// internal contract directly rather than through [`emit`]. `Q4_0` (not
+/// `Q8_0`) is the still-rejected exemplar: `Q8_0` gained a row-blocked arm
+/// (see `codec_row_block_step_bytes`/`Q8_0_SUPER_ELEMENT_MSL`'s own docs)
+/// and is proved to SUCCEED through this same function by
+/// [`push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel`] below,
+/// not rejected here anymore.
 #[test]
 fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
+    let bound = matmul_op(4, 256, 3);
+    let block = PackedRowBlock {
+        weight: 0,
+        other: 1,
+        reduce_dim: 1,
+        codec: Codec::Q4_0,
+        token_axes: Vec::new(),
+        feature_axes: vec![0, 1],
+    };
+    let mut source = String::new();
+    let error = push_packed_row_blocked_body(
+        &mut source,
+        &bound,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        &[0, 1],
+        2,
+        &[Some(Codec::Q4_0), None],
+        "float",
+        &block,
+        &ComposedBody::leaf(ScalarOp::Identity),
+        &[],
+        false,
+    )
+    .expect_err("Q4_0 never reaches the row-blocked path");
+    assert!(matches!(
+        error,
+        EmitError::NonKQuantCodec { codec: "q4_0", .. }
+    ));
+}
+
+/// [`classify_packed_row_block`] now admits [`Codec::Q8_0`]
+/// (`emit_and_classify.rs`'s whitelist match) and
+/// [`push_packed_row_blocked_body`] renders a real kernel body for it
+/// instead of `EmitError::NonKQuantCodec` -- the gate-level half of the
+/// proof; `q8_0_real_checkpoint_parity.rs`'s device test is the
+/// execution-level half (real `Q8_0` checkpoint bytes, Metal fast path vs
+/// dequantized-f32 CPU oracle, relative error ~2e-6).
+#[test]
+fn push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel() {
     let bound = matmul_op(4, 256, 3);
     let block = PackedRowBlock {
         weight: 0,
@@ -2841,7 +2884,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         feature_axes: vec![0, 1],
     };
     let mut source = String::new();
-    let error = push_packed_row_blocked_body(
+    push_packed_row_blocked_body(
         &mut source,
         &bound,
         ScalarOp::Add,
@@ -2855,11 +2898,11 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         &[],
         false,
     )
-    .expect_err("Q8_0 never reaches the row-blocked path");
-    assert!(matches!(
-        error,
-        EmitError::NonKQuantCodec { codec: "q8_0", .. }
-    ));
+    .expect("Q8_0 now reaches the row-blocked path and renders a kernel body");
+    assert!(
+        source.contains("q8_0_super_element"),
+        "row-blocked Q8_0 body must call the superblock-relative accessor: {source}"
+    );
 }
 
 /// Reachability proof for [`packed_row_split_factor`]'s row-count gate

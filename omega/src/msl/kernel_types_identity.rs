@@ -1111,12 +1111,18 @@ static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, th
 /// the same PACKED-OPERAND mechanism ([`Codec`], `operand_read`,
 /// this preamble) as a fourth codec precisely because that mechanism is
 /// generic over block byte width and element count; it does NOT take the
-/// row-blocked (`classify_packed_row_block`) or tiled-GEMM
-/// (`classify_tiled_gemm`) fast paths, both of which hard-code the
-/// K-quants' shared 256-element super-block and 8-lane amortization scheme
-/// this codec has no analogue for -- `Q8_0` always renders through the fully
-/// generic per-element accessor below, same as any codec those two paths
-/// reject.
+/// tiled-GEMM (`classify_tiled_gemm`) fast path, which hard-codes the
+/// K-quants' `simdgroup_matrix` batched-unpack shape this codec has no
+/// analogue for -- `Q8_0` always renders through the fully generic
+/// per-element accessor below on that path.
+///
+/// It DOES take the row-blocked (`classify_packed_row_block`) fast path:
+/// eight real `Q8_0` blocks (32 elements, 34 bytes each) sit contiguously in
+/// exactly the byte span one K-quant super-block ([`Q4K_BLOCK_ELEMENTS`] =
+/// 256 elements) occupies, so [`crate::msl::codec_row_block_step_bytes`]
+/// treats every 8-block run as one super-block for that path's addressing,
+/// and [`Q8_0_SUPER_ELEMENT_MSL`] is the matching per-element read inside
+/// it.
 ///
 /// Ports `proxima_gguf::quant::q8_0::dequantize_block` exactly: `x = q*d`
 /// per element, no sub-block structure at all.
@@ -1131,6 +1137,23 @@ static inline float q8_0_element(device const uchar *block, uint index) {
     float d = (float)as_type<half>(d_bits);
     char level = (char)block[2u + index];
     return (float)level * d;
+}
+"#;
+
+/// The row-blocked packed path's per-superblock-relative `Q8_0` accessor --
+/// mirrors `q2k_element`/`q3k_element`'s own `(superblock_ptr,
+/// index_0_255)` convention so `push_packed_row_blocked_body`'s single-row
+/// `else` arm can call it exactly like the K-quant codecs it already
+/// handles, even though `Q8_0` has no super-block of its own: `index / 32`
+/// selects which of the eight real 32-element blocks packed into that span,
+/// and the remainder feeds [`Q8_0_UNPACK_MSL`]'s own per-block decode
+/// (`q8_0_element`) unchanged. `34` is [`Q8_0_BLOCK_BYTES`] and `32` is
+/// [`Q8_0_BLOCK_ELEMENTS`], both inlined as literals here the same way every
+/// other codec's superblock-relative accessor inlines its own fixed layout
+/// constants -- pinned against drift by `omega/tests/q8_0_unpack.rs`.
+pub const Q8_0_SUPER_ELEMENT_MSL: &str = r#"
+static inline float q8_0_super_element(device const uchar *superblock, uint index) {
+    return q8_0_element(superblock + (index / 32u) * 34u, index % 32u);
 }
 "#;
 
@@ -1449,6 +1472,24 @@ pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
         Codec::Nvfp4 => GgmlType::Nvfp4.block_layout().block_bytes as usize,
         Codec::Q1_0 => GgmlType::Q1_0.block_layout().block_bytes as usize,
         Codec::Q2_0 => GgmlType::Q2_0.block_layout().block_bytes as usize,
+    }
+}
+
+/// Bytes `push_packed_row_blocked_body`'s single-row `else` arm steps by
+/// when it advances one row's block pointer across the `Q4K_BLOCK_ELEMENTS`
+/// (256)-wide addressing span that arm's `weight_base[q] / Q4K_BLOCK_ELEMENTS`
+/// division assumes. Equal to [`codec_block_bytes`] for every K-quant codec,
+/// whose own block already IS that 256-element super-block. [`Codec::Q8_0`]
+/// is a flat 32-element block, so its step is eight real blocks' worth of
+/// bytes -- see [`Q8_0_SUPER_ELEMENT_MSL`]'s own doc for why eight
+/// contiguous `Q8_0` blocks span exactly the same 256 elements. No other
+/// codec reaches this function (`classify_packed_row_block` whitelists only
+/// `Q3_K`/`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`), so the fallback arm is exactly
+/// [`codec_block_bytes`], never invented for a codec this path never sees.
+pub(crate) const fn codec_row_block_step_bytes(codec: Codec) -> usize {
+    match codec {
+        Codec::Q8_0 => Q8_0_BLOCK_BYTES * (Q4K_BLOCK_ELEMENTS / Q8_0_BLOCK_ELEMENTS),
+        _ => codec_block_bytes(codec),
     }
 }
 

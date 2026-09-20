@@ -12,11 +12,15 @@
 //! `Q8_0` is a flat 32-element block with no super-block structure at all --
 //! genuinely different in KIND from `Q4_K`/`Q5_K`/`Q6_K`'s shared 256-element
 //! super-block, not a widening or narrowing of one (see
-//! `omega::msl::Q8_0_UNPACK_MSL`'s own doc). It therefore takes Metal's fully
-//! generic per-element path, not the row-blocked fast path the K-quants can
-//! reach -- this test proves that generic path is bit-correct against real
-//! checkpoint bytes, the same contract `q4k`/`q5k`/`q6k_real_checkpoint_parity.rs`
-//! prove for their own codec.
+//! `omega::msl::Q8_0_UNPACK_MSL`'s own doc). `blk.0.attn_k.weight`'s `k=4096`
+//! is a whole multiple of 256, so this op now takes the row-blocked fast
+//! path (`classify_packed_row_block` whitelists `Q8_0` alongside the
+//! K-quants; eight contiguous `Q8_0` blocks span exactly one K-quant
+//! super-block's 256 elements -- see `codec_row_block_step_bytes`'s own
+//! doc) rather than the fully generic per-element path this test exercised
+//! before that landing -- this test proves the fast path is bit-correct
+//! against real checkpoint bytes, the same contract
+//! `q4k`/`q5k`/`q6k_real_checkpoint_parity.rs` prove for their own codec.
 //!
 //! Skips (does not fail) when the real file is not present on this host --
 //! matching `q6k_real_checkpoint_parity.rs`'s own posture, which this file's

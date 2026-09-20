@@ -1635,16 +1635,20 @@ pub(super) fn classify_packed_row_block(
     let [(weight, codec)] = packed[..] else {
         return Err(PackedRowBlockRejection::NotExactlyOnePackedOperand);
     };
-    // Whitelist the K-quant family explicitly rather than blacklisting one
-    // non-K-quant codec by `==` -- an equality check against `Q8_0` alone
-    // would have silently admitted `Q4_0` (or any future flat-block codec)
-    // the moment its extent happened to be a multiple of 256. This match
-    // is exhaustive over `Codec`, so a new codec added later forces a
-    // decision here instead of slipping through.
+    // Whitelist the K-quant family (plus `Q8_0`) explicitly rather than
+    // blacklisting one codec by `==` -- an equality check against `Q4_0`
+    // alone would have silently admitted any future flat-block codec the
+    // moment its extent happened to be a multiple of 256. This match is
+    // exhaustive over `Codec`, so a new codec added later forces a decision
+    // here instead of slipping through. `Q8_0` is not a K-quant codec (no
+    // super-block of its own), but `push_packed_row_blocked_body`'s
+    // single-row `else` arm addresses it correctly via
+    // `codec_row_block_step_bytes`/`Q8_0_SUPER_ELEMENT_MSL` (eight
+    // contiguous 32-element `Q8_0` blocks span exactly one K-quant
+    // super-block's 256 elements) -- see those items' own docs.
     match codec {
-        Codec::Q3K | Codec::Q4K | Codec::Q5K | Codec::Q6K => {}
+        Codec::Q3K | Codec::Q4K | Codec::Q5K | Codec::Q6K | Codec::Q8_0 => {}
         Codec::Q2K
-        | Codec::Q8_0
         | Codec::Q4_0
         | Codec::Q5_1
         | Codec::Q5_0
