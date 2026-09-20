@@ -1088,6 +1088,20 @@ impl ArchitectureTrait for Gemma4Arch {
         })
     }
 
+    /// [`bind_gemma4_all_positions_logits`]'s own trait-level entry point --
+    /// this crate's only [`Architecture::speculative_verify_program`]
+    /// override (that method's own doc on why a capability method, never a
+    /// `name() == "gemma4"` check, is what gates speculative decode's
+    /// verify step).
+    #[cfg(feature = "std")]
+    fn speculative_verify_program<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+    ) -> Result<Option<BoundProgram<'file>>, InteropError> {
+        bind_gemma4_all_positions_logits(parsed, file_bytes).map(Some)
+    }
+
     /// Feeds the sliding-window RoPE table the `rope_cos_swa`/`rope_sin_swa`
     /// leaves declare (`LayerAttentionConfig::rope_table`,
     /// [`gemma4_layer_schedule`]) -- the decode loop's builtin

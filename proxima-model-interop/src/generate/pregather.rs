@@ -2610,6 +2610,20 @@ impl<'file> LoadedModel<'file> {
                 let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
                 build_single_range_program(&bound.architecture, qk_norm)?
             };
+            // Capability-derived, never a name comparison -- see
+            // [`crate::architecture::Architecture::speculative_verify_program`]'s
+            // own doc. `Gemma4Arch` is this crate's only override today;
+            // every other registered architecture's default `Ok(None)`
+            // keeps this field `None`.
+            let speculative_verify_program = resolved
+                .speculative_verify_program(parsed, file_bytes)?
+                .map(|verify_bound| {
+                    (
+                        verify_bound.program,
+                        verify_bound.logits_root,
+                        verify_bound.layer_roots,
+                    )
+                });
             let bound = bound;
             let expert_slab =
                 crate::bind::build_expert_slab(&bound.architecture, &bound.program, &bound.weights);
@@ -2645,6 +2659,7 @@ impl<'file> LoadedModel<'file> {
                 checkpoint_bytes: file_bytes.len(),
                 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                 single_range,
+                speculative_verify_program,
                 checkpoint_mapping: file_bytes,
             }
             .validated();
@@ -2763,6 +2778,12 @@ impl<'file> LoadedModel<'file> {
             checkpoint_bytes: file_bytes.len(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
+            // Never gemma4 -- this is the plain dense-Mistral-shape builder
+            // (`mistral_cached_forward_program_with_experts_and_layer_taps`),
+            // and gemma4 always resolves through the registry `resolved.bind`
+            // branch above instead (`Self::speculative_verify_program`'s own
+            // doc).
+            speculative_verify_program: None,
             checkpoint_mapping: file_bytes,
         }
         .validated()
@@ -2873,6 +2894,10 @@ impl<'file> LoadedModel<'file> {
             checkpoint_bytes: file_bytes.len(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
+            // safetensors carries no GGUF `general.architecture` this crate
+            // reads as `"gemma4"` -- never eligible (same reasoning as
+            // `Self::load`'s dense-path `None` above).
+            speculative_verify_program: None,
             checkpoint_mapping: file_bytes,
         }
         .validated()

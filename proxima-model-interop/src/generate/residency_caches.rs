@@ -105,6 +105,97 @@ impl LayerCache {
         self.k_odd.extend_from_slice(odd);
         self.v.extend_from_slice(value);
     }
+
+    /// [`Self::append`]'s inverse for speculative decode's KV-rewind: a
+    /// verify forward writes K/V for every drafted position, but
+    /// [`proxima_tokenizer::draft::speculative_accept_greedy`] only commits
+    /// a prefix of them. `keep_positions` is the committed length in
+    /// POSITIONS (this layer's `cached_len` after the rewind, not before
+    /// this step's append) -- `even_odd_row`/`v_row` are the same per-
+    /// position row widths [`KvPadShape`] already carries, so this call
+    /// mirrors `append`'s own row-based growth exactly, just shrinking
+    /// instead of extending. A no-op when `keep_positions` is not shorter
+    /// than what is already cached (nothing to rewind).
+    ///
+    /// Called from [`super::decode::LoadedModel::run_decode_loop_observed_seeded`]'s
+    /// speculative-decode verify branch: a forward over
+    /// `[current, draft...]` appends `new_count` positions' worth of K/V,
+    /// and this rewinds every layer back to the `verified.accepted + 1`
+    /// that survived.
+    pub(super) fn truncate(&mut self, keep_positions: usize, even_odd_row: usize, v_row: usize) {
+        self.k_even.truncate(keep_positions * even_odd_row);
+        self.k_odd.truncate(keep_positions * even_odd_row);
+        self.v.truncate(keep_positions * v_row);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod layer_cache_truncate_tests {
+    use super::LayerCache;
+
+    /// The KV-rewind shape a speculative-decode verify step needs: a
+    /// forward over `[current, draft_1, draft_2, draft_3]` (4 positions)
+    /// appends 4 positions' worth of K/V, but only 2 drafts were accepted
+    /// (plus the bonus token already sampled from position 2's own row,
+    /// which needs no K/V of its own yet) -- rewinding to `keep_positions =
+    /// 2` must land exactly where two real `append` calls would have.
+    #[test]
+    fn truncate_after_partial_accept_matches_incrementally_appended_prefix() {
+        let even_odd_row = 3;
+        let v_row = 2;
+        let positions: [(Vec<f32>, Vec<f32>, Vec<f32>); 4] = [
+            (vec![1.0, 1.1, 1.2], vec![1.3, 1.4, 1.5], vec![1.6, 1.7]),
+            (vec![2.0, 2.1, 2.2], vec![2.3, 2.4, 2.5], vec![2.6, 2.7]),
+            (vec![3.0, 3.1, 3.2], vec![3.3, 3.4, 3.5], vec![3.6, 3.7]),
+            (vec![4.0, 4.1, 4.2], vec![4.3, 4.4, 4.5], vec![4.6, 4.7]),
+        ];
+
+        let mut incremental = LayerCache::new();
+        for (even, odd, value) in positions.iter().take(2) {
+            incremental.append(even, odd, value);
+        }
+
+        let mut speculative = LayerCache::new();
+        let even_batch: Vec<f32> = positions.iter().flat_map(|(even, _, _)| even.clone()).collect();
+        let odd_batch: Vec<f32> = positions.iter().flat_map(|(_, odd, _)| odd.clone()).collect();
+        let value_batch: Vec<f32> = positions.iter().flat_map(|(_, _, value)| value.clone()).collect();
+        speculative.append(&even_batch, &odd_batch, &value_batch);
+        speculative.truncate(2, even_odd_row, v_row);
+
+        assert_eq!(speculative.k_even, incremental.k_even);
+        assert_eq!(speculative.k_odd, incremental.k_odd);
+        assert_eq!(speculative.v, incremental.v);
+    }
+
+    /// Every draft accepted (`keep_positions == positions already written`):
+    /// truncate is a no-op, the common case when the draft is fully right.
+    #[test]
+    fn truncate_at_full_length_is_a_no_op() {
+        let mut cache = LayerCache::new();
+        cache.append(&[1.0, 2.0], &[3.0, 4.0], &[5.0]);
+        let before = cache.clone();
+
+        cache.truncate(1, 2, 1);
+
+        assert_eq!(cache.k_even, before.k_even);
+        assert_eq!(cache.k_odd, before.k_odd);
+        assert_eq!(cache.v, before.v);
+    }
+
+    /// Zero accepted (`keep_positions == 0`, the first draft token itself
+    /// disagreed): rewinds all the way back to empty.
+    #[test]
+    fn truncate_to_zero_positions_empties_every_leaf() {
+        let mut cache = LayerCache::new();
+        cache.append(&[1.0, 2.0], &[3.0, 4.0], &[5.0, 6.0]);
+
+        cache.truncate(0, 2, 2);
+
+        assert!(cache.k_even.is_empty());
+        assert!(cache.k_odd.is_empty());
+        assert!(cache.v.is_empty());
+    }
 }
 
 /// [`LayerCache`]'s bucket-padded mirror -- the two-range decode loop's own
