@@ -81,6 +81,15 @@ pub struct ModelDescriptor {
     pub logit_softcap: Option<f32>,
     pub layers: Vec<LayerSchedule>,
     pub cache_strategy: CacheStrategy,
+    /// gemma4 E2B/E4B's per-layer-embedding preamble width
+    /// (`lfm2_forward_program_with_experts`'s own `ple_dim` parameter doc,
+    /// `Some(256)` for E2B) -- consulted by [`CacheStrategy::Cacheless`] and
+    /// [`CacheStrategy::TwoRange`] alike (both route to a PLE-aware
+    /// builder); `None` for every checkpoint with no PLE tensors, and inert
+    /// under [`CacheStrategy::SingleRange`], which has no PLE concept at
+    /// all -- same "unused when the arm never reads it" precedent
+    /// [`Self::qk_norm`]'s own doc already sets.
+    pub ple_dim: Option<u32>,
     /// Qwen3-style per-head QK-norm, consulted ONLY by
     /// [`CacheStrategy::SingleRange`]'s arm
     /// (`mistral_cached_forward_program_with_experts_and_layer_taps`'s own
@@ -239,6 +248,11 @@ pub fn gemma4_descriptor(vocab: u32) -> ModelDescriptor {
         logit_softcap: Some(GEMMA4_LOGIT_SOFTCAP),
         layers,
         cache_strategy: CacheStrategy::Cacheless,
+        // 26B-A4B carries no PLE tensors (`GEMMA4_*` constants' own doc:
+        // this function bakes only the 26B header shape) -- a real E2B/E4B
+        // build routes through `proxima-model-interop`'s own
+        // architecture-derived descriptor instead of this function.
+        ple_dim: None,
         // inert: neither `Cacheless` nor `TwoRange` ever reads these four
         // fields (`ModelDescriptor::qk_norm`'s own doc) -- gemma4 has no
         // concept of any of them.
@@ -400,6 +414,9 @@ pub fn mistral_descriptor_from_shape(
         logit_softcap: None,
         layers,
         cache_strategy: CacheStrategy::SingleRange,
+        // `CacheStrategy::SingleRange` has no PLE concept at all -- same
+        // inertness as `Self::qk_norm`'s own doc.
+        ple_dim: None,
         qk_norm,
         qkv_biases,
         paired_gate_up_reduce,
@@ -514,6 +531,7 @@ pub fn build_forward(
                     descriptor.embedding_scale,
                     descriptor.logit_softcap,
                     last_row_only,
+                    descriptor.ple_dim,
                 )?;
             Ok((program, logits, cache_roots, moe_sites, Vec::new(), None))
         }
@@ -533,7 +551,7 @@ pub fn build_forward(
                 descriptor.embedding_scale,
                 descriptor.logit_softcap,
                 last_row_only,
-                None,
+                descriptor.ple_dim,
             )?;
             Ok((program, logits, Vec::new(), moe_sites, Vec::new(), None))
         }

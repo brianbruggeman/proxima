@@ -444,9 +444,8 @@ pub fn append_lfm2_two_range_cached_attention(
     group: u32,
     attn_norm_weight: NodeId,
     q_norm_weight: NodeId,
-    k_norm_weight: NodeId,
+    key_source: KeySource,
     wq: NodeId,
-    wk: NodeId,
     value_source: ValueSource,
     wo: NodeId,
     rope_pairing: RopePairing,
@@ -475,22 +474,42 @@ pub fn append_lfm2_two_range_cached_attention(
     )?;
     let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
 
-    let k_new_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed, "si->sudi"), (wk, "iud->sudi")],
-    )?;
-    let k_new_raw = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        k_new_product,
-        "sudi->sudi",
-        "sud->sudi",
-    )?;
-    let k_new = rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+    // `KeySource::Shared` (gemma4 E2B's cross-layer shared-KV,
+    // `KeySourceKind::SharedFromLayer(source)`): no `attn_k.weight`/
+    // `attn_k_norm.weight` leaf exists for this layer at all, so its `K`
+    // is the donor layer's own already-rotated, already-k-norm'd halves,
+    // reused verbatim -- `k_new_raw` (unrotated K) is only meaningful for
+    // `ValueSource::SharedWithKey` below, which gemma4 E2B's shared layers
+    // never combine with `KeySource::Shared` (`KeySourceKind`'s own doc:
+    // shared-KV always shares BOTH K and V), so `k_new_raw` need not exist
+    // in this arm.
+    let (k_new_raw_for_shared_with_key, rotated_k_new_even, rotated_k_new_odd) = match key_source {
+        KeySource::Projected { wk, k_norm_weight } => {
+            let k_new_product = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(normed, "si->sudi"), (wk, "iud->sudi")],
+            )?;
+            let k_new_raw = reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                k_new_product,
+                "sudi->sudi",
+                "sud->sudi",
+            )?;
+            let k_new = rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+            let (rotated_even, rotated_odd) =
+                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, rope_pairing)?;
+            (Some(k_new_raw), rotated_even, rotated_odd)
+        }
+        KeySource::Shared {
+            rotated_even,
+            rotated_odd,
+        } => (None, rotated_even, rotated_odd),
+    };
 
     let v_new_raw = match value_source {
         ValueSource::Projected(wv) => {
@@ -510,7 +529,8 @@ pub fn append_lfm2_two_range_cached_attention(
                 "sud->sudi",
             )?
         }
-        ValueSource::SharedWithKey => k_new_raw,
+        ValueSource::SharedWithKey => k_new_raw_for_shared_with_key
+            .ok_or(TensorError::SharedWithKeyRequiresProjectedKey)?,
         ValueSource::Shared(v) => v,
     };
     let v_new = if value_norm {
@@ -520,8 +540,6 @@ pub fn append_lfm2_two_range_cached_attention(
     };
 
     let (rotated_q_even, rotated_q_odd) = fused_rope_pair(program, q, 'h', cos_new, sin_new, rope_pairing)?;
-    let (rotated_k_new_even, rotated_k_new_odd) =
-        fused_rope_pair(program, k_new, 'u', cos_new, sin_new, rope_pairing)?;
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
@@ -1181,6 +1199,24 @@ pub fn lfm2_single_range_cached_forward_program_with_experts(
     Ok((program, logits, cache_roots, MoeSites(moe_sites)))
 }
 
+/// [`lfm2_two_range_cached_forward_program_with_experts`]'s own per-layer
+/// `stored_kv` entry: a donor (real cache-owning) layer's post-rope `K`
+/// halves and post-norm `V` (the exact nodes gemma4 E2B's
+/// `KeySourceKind::SharedFromLayer(source)`/`ValueSourceKind::SharedFromLayer(source)`
+/// needs to reuse verbatim), plus that SAME donor's own already-declared
+/// `k_even_cache`/`k_odd_cache`/`v_cache` `Op::Input` nodes -- a shared
+/// layer's cache-range score reads these too, in-graph, rather than
+/// declaring a second leaf for data the decode loop already feeds once.
+#[derive(Debug, Clone, Copy)]
+struct StoredSharedKv {
+    rotated_k_even: NodeId,
+    rotated_k_odd: NodeId,
+    v_new: NodeId,
+    k_even_cache: NodeId,
+    k_odd_cache: NodeId,
+    v_cache: NodeId,
+}
+
 /// [`lfm2_single_range_cached_forward_program_with_experts`]'s two-range
 /// counterpart -- the fix for the divergence that function's OWN merged
 /// single softmax cannot express (this module's own header doc): every
@@ -1210,6 +1246,12 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
     embedding_scale: Option<EmbeddingScale>,
     logit_softcap: Option<f32>,
     last_row_only: bool,
+    // gemma4 E2B/E4B's per-layer-embedding preamble
+    // (`lfm2_forward_program_with_experts`'s own `ple_dim` parameter doc) --
+    // `None` for every checkpoint with no PLE tensors (12B/26B/31B), so this
+    // builder's prior callers (none of whom ever passed a PLE-bearing
+    // schedule) see no change in the emitted program.
+    ple_dim: Option<u32>,
 ) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>, MoeSites), TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
@@ -1257,6 +1299,25 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
     let ones = scalar_constant(&mut program, 1.0);
     let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
 
+    // Stage A preamble (`lfm2_forward_program_with_experts`'s own doc on
+    // `ple_shared`/`ple_layer_inputs`, mirrored verbatim here): `x` is still
+    // `h0`, the post-embedding-scale hidden state BEFORE the layer loop
+    // below reassigns it -- the real input `append_ple_shared_projections`
+    // needs, not any later layer's hidden state.
+    let ple_shared = match ple_dim {
+        Some(ple_dim) => Some(append_ple_shared_projections(
+            &mut program,
+            ids,
+            x,
+            vocab,
+            embedding,
+            ple_dim,
+            ple_dim * block_count,
+        )?),
+        None => None,
+    };
+    let mut ple_layer_inputs: Vec<Option<NodeId>> = alloc::vec![None; block_count as usize];
+
     // Block-local windowed mask (this call's own new-vs-new range) --
     // dedup'd per unique `mask_window` by the shared resource pre-pass, the
     // same way the single-range builder's own `is_future` was.
@@ -1290,6 +1351,16 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
 
     let mut cache_roots: Vec<CachedLayerRoots> = Vec::with_capacity(block_count as usize);
     let mut moe_sites: Vec<MoeSite> = Vec::new();
+    // One slot per block, populated only for a layer that owns a real
+    // `K`/`V` projection and its own `kv_cache.{layer}.*` leaves -- a later
+    // `KeySourceKind::SharedFromLayer(source)`/`ValueSourceKind::SharedFromLayer(source)`
+    // schedule entry (gemma4 E2B's cross-layer shared-KV) reads
+    // `stored_kv[source]` instead of declaring its own leaves at all, the
+    // same "never re-project, never re-declare a leaf" contract
+    // `lfm2_forward_program_with_experts`'s own `stored_kv` already uses for
+    // the cacheless path (`attention_forward.rs`'s own doc on it). See
+    // [`StoredSharedKv`] for what each field carries.
+    let mut stored_kv: Vec<Option<StoredSharedKv>> = alloc::vec![None; block_count as usize];
 
     for (layer, entry) in schedule.iter().enumerate() {
         let layer = layer as u32;
@@ -1325,6 +1396,11 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
         } else {
             None
         };
+        if let (Some(shared), Some(ple_dim)) = (&ple_shared, ple_dim) {
+            ple_layer_inputs[layer as usize] =
+                Some(ple_layer_input(&mut program, shared, eps, layer, ple_dim)?);
+        }
+
 
         let wq = input_leaf(
             &mut program,
@@ -1336,19 +1412,46 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
             ],
             &alloc::format!("blk.{layer}.attn_q.weight"),
         );
-        let wk = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![
-                Extent::Static(embedding),
-                Extent::Static(kv_heads),
-                Extent::Static(head_dim)
-            ],
-            &alloc::format!("blk.{layer}.attn_k.weight"),
-        );
-        let value_source = match config.value_source_kind {
-            ValueSourceKind::ProjectedV => {
-                let wv = input_leaf(
+        // gemma4 E2B shares BOTH `K` and `V` from the same donor layer
+        // (`KeySourceKind::SharedFromLayer`'s own doc: ollama's own
+        // `gemma4.go` reads one donor's `sharedHistory` for both, never `K`
+        // alone) -- this builder's own cache-leaf declarations below are
+        // gated on `key_source_kind` alone, so a schedule entry naming
+        // `SharedFromLayer` on one axis but not the other is rejected here
+        // rather than silently misdeclaring (or missing) a leaf.
+        let shared_source = match (config.key_source_kind, config.value_source_kind) {
+            (KeySourceKind::SharedFromLayer(key_source), ValueSourceKind::SharedFromLayer(value_source)) => {
+                if key_source != value_source {
+                    return Err(TensorError::SharedKvUnsupportedInCachedForward {
+                        layer,
+                        source_layer: value_source,
+                    });
+                }
+                Some(key_source)
+            }
+            (KeySourceKind::SharedFromLayer(source), _) | (_, ValueSourceKind::SharedFromLayer(source)) => {
+                return Err(TensorError::SharedKvUnsupportedInCachedForward { layer, source_layer: source });
+            }
+            (KeySourceKind::ProjectedK, _) => None,
+        };
+
+        let (key_source, value_source, k_even_cache, k_odd_cache, v_cache) = match shared_source {
+            Some(source) => {
+                let donor = stored_kv[source as usize]
+                    .ok_or(TensorError::SharedKvSourceNotAvailable { layer, source_layer: source })?;
+                (
+                    KeySource::Shared {
+                        rotated_even: donor.rotated_k_even,
+                        rotated_odd: donor.rotated_k_odd,
+                    },
+                    ValueSource::Shared(donor.v_new),
+                    donor.k_even_cache,
+                    donor.k_odd_cache,
+                    donor.v_cache,
+                )
+            }
+            None => {
+                let wk = input_leaf(
                     &mut program,
                     DType::Float32,
                     alloc::vec![
@@ -1356,15 +1459,73 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
                         Extent::Static(kv_heads),
                         Extent::Static(head_dim)
                     ],
-                    &alloc::format!("blk.{layer}.attn_v.weight"),
+                    &alloc::format!("blk.{layer}.attn_k.weight"),
                 );
-                ValueSource::Projected(wv)
-            }
-            ValueSourceKind::SharedWithKey => ValueSource::SharedWithKey,
-            ValueSourceKind::SharedFromLayer(source) => {
-                return Err(TensorError::SharedKvUnsupportedInCachedForward { layer, source_layer: source });
+                let k_norm_weight = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(head_dim)],
+                    &alloc::format!("blk.{layer}.attn_k_norm.weight"),
+                );
+                let value_source = match config.value_source_kind {
+                    ValueSourceKind::ProjectedV => {
+                        let wv = input_leaf(
+                            &mut program,
+                            DType::Float32,
+                            alloc::vec![
+                                Extent::Static(embedding),
+                                Extent::Static(kv_heads),
+                                Extent::Static(head_dim)
+                            ],
+                            &alloc::format!("blk.{layer}.attn_v.weight"),
+                        );
+                        ValueSource::Projected(wv)
+                    }
+                    ValueSourceKind::SharedWithKey => ValueSource::SharedWithKey,
+                    ValueSourceKind::SharedFromLayer(source) => {
+                        return Err(TensorError::SharedKvUnsupportedInCachedForward { layer, source_layer: source });
+                    }
+                };
+                let k_even_cache = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![
+                        Extent::Symbolic(1),
+                        Extent::Static(kv_heads),
+                        Extent::Static(pairs)
+                    ],
+                    &alloc::format!("kv_cache.{layer}.k_even"),
+                );
+                let k_odd_cache = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![
+                        Extent::Symbolic(1),
+                        Extent::Static(kv_heads),
+                        Extent::Static(pairs)
+                    ],
+                    &alloc::format!("kv_cache.{layer}.k_odd"),
+                );
+                let v_cache = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![
+                        Extent::Symbolic(1),
+                        Extent::Static(kv_heads),
+                        Extent::Static(head_dim)
+                    ],
+                    &alloc::format!("kv_cache.{layer}.v"),
+                );
+                (
+                    KeySource::Projected { wk, k_norm_weight },
+                    value_source,
+                    k_even_cache,
+                    k_odd_cache,
+                    v_cache,
+                )
             }
         };
+
         let wo = input_leaf(
             &mut program,
             DType::Float32,
@@ -1381,43 +1542,6 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
             DType::Float32,
             alloc::vec![Extent::Static(head_dim)],
             &alloc::format!("blk.{layer}.attn_q_norm.weight"),
-        );
-        let k_norm_weight = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(head_dim)],
-            &alloc::format!("blk.{layer}.attn_k_norm.weight"),
-        );
-
-        let k_even_cache = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![
-                Extent::Symbolic(1),
-                Extent::Static(kv_heads),
-                Extent::Static(pairs)
-            ],
-            &alloc::format!("kv_cache.{layer}.k_even"),
-        );
-        let k_odd_cache = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![
-                Extent::Symbolic(1),
-                Extent::Static(kv_heads),
-                Extent::Static(pairs)
-            ],
-            &alloc::format!("kv_cache.{layer}.k_odd"),
-        );
-        let v_cache = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![
-                Extent::Symbolic(1),
-                Extent::Static(kv_heads),
-                Extent::Static(head_dim)
-            ],
-            &alloc::format!("kv_cache.{layer}.v"),
         );
 
         let (post_mixer, layer_roots) = append_lfm2_two_range_cached_attention(
@@ -1437,9 +1561,8 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
             group,
             attn_norm_weight,
             q_norm_weight,
-            k_norm_weight,
+            key_source,
             wq,
-            wk,
             value_source,
             wo,
             config.rope_pairing,
@@ -1449,6 +1572,18 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
             k_odd_cache,
             v_cache,
         )?;
+
+        if shared_source.is_none() {
+            let (rotated_k_even, rotated_k_odd, v_new) = layer_roots;
+            stored_kv[layer as usize] = Some(StoredSharedKv {
+                rotated_k_even,
+                rotated_k_odd,
+                v_new,
+                k_even_cache,
+                k_odd_cache,
+                v_cache,
+            });
+        }
 
         x = append_lfm2_layer_ffn(
             &mut program,
@@ -1465,16 +1600,20 @@ pub fn lfm2_two_range_cached_forward_program_with_experts(
             inv_dim,
             eps,
             ffn_config,
-            // No `LayerKind::Attention`-only cached engine has ever needed
-            // PLE (`FfnCombination::Exclusive` is this schedule kind's own
-            // shape) -- `lfm2_forward_program_with_experts`'s own preamble
-            // is the one caller that builds `ple_dim`/per-layer PLE input.
-            None,
-            0,
+            ple_layer_inputs[layer as usize],
+            ple_dim.unwrap_or(0),
             &mut moe_sites,
         )?;
 
-        cache_roots.push(layer_roots);
+        // A shared-KV layer owns no `kv_cache.{layer}.*` leaves of its own
+        // (`stored_kv`'s own doc) -- `cache_roots` stays exactly the set of
+        // real cache-owning layers, in layer order, the same "degenerate
+        // default for a layer this engine's cache does not cover" shape
+        // `descriptor::build_forward`'s own `CacheStrategy::Cacheless` arm
+        // already sets for `cache_roots` as a whole.
+        if shared_source.is_none() {
+            cache_roots.push(layer_roots);
+        }
     }
 
     let output_norm_weight = input_leaf(

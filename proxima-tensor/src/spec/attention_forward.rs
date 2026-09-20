@@ -2853,6 +2853,19 @@ pub enum Qwen35LayerRoots {
         qkv_mixed: NodeId,
         state_out: NodeId,
     },
+    /// gemma4 E2B's cross-layer shared-KV layer
+    /// (`KeySourceKind::SharedFromLayer`/`ValueSourceKind::SharedFromLayer`,
+    /// this crate's own [`lfm2_two_range_cached_forward_program_with_experts`]
+    /// doc on `stored_kv`) -- this layer owns no `kv_cache.{layer}.*`
+    /// `Op::Input` leaves of its own at all (its `K`/`V` are the named
+    /// `source` layer's already-declared leaves, read a second time
+    /// in-graph), so it carries no [`CachedLayerRoots`]-shaped payload to
+    /// thread back either. Kept as its own variant rather than folded into
+    /// `Attention` so a foreign caller's own cache-validation loop
+    /// (`proxima-model-interop`'s `DeclaredCacheKind::SharedFromLayer`) can
+    /// tell "no leaves, by design" apart from "leaves missing, a bug" for
+    /// this exact layer index.
+    SharedFromLayer(u32),
 }
 
 /// Qwen3.5's whole-model incremental forward program: `full_attention_interval`
