@@ -419,6 +419,14 @@ required-features = ["std"]
 name = "gemma4_decode_probe"
 required-features = ["std"]
 
+# bench/decode-gbps-baseline MEASUREMENT 0a/0b: real decode, reads
+# per-step wall vs the aggregate `metal_stage_totals().gpu_exec_ticks`
+# counter via the already-wired `PROXIMA_DEBUG_METAL_STAGES` env var --
+# no new instrumentation, same shape as `gemma4_dispatch_profile_widths`.
+[[example]]
+name = "decode_gbps_baseline"
+required-features = ["std", "metal", "instrument"]
+
 # Drives `proxima_tokenizer::{vocab::Vocab, gguf::vocab_from_metadata, encode,
 # unigram::encode_fragment}` -- same `std`-only reason as `tokenize_local`.
 [[example]]
