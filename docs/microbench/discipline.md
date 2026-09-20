@@ -335,3 +335,276 @@ with CoV ≤5.4%, and compounds over 35 layers into Component 1's own
 6. **Widths 1 and 9 investigated directly**: width=1's `EpilogueNotSupported`
    gap (Component 3+4) and the width-5-to-9 second regime break (Component
    1) are both real, reproducible, and unexplained by this slice.
+
+## SLICE 2 (re-noted — the original section was lost before landing)
+
+**What SLICE 2 established** (recorded in the SLICE 3 task brief, restated
+here since the file that originally held it was never committed): the
+multi-position (`new_count > 1`) forward floor is MICRO-level — one command
+buffer, dispatch count width-invariant at 1661 dispatches regardless of
+`new_count` — and the width-SCALING cost is ONE kind,
+`reduce-cooperative` (the SIMD-tree reduce used for both the attention-score
+reduce and the RMSNorm `value_norm` broadcast-epilogue,
+`omega/src/msl/emit_and_classify.rs:988-1001`), whose reduction LENGTH
+scales with `new_count`. That finding was measured only at widths 2-9
+(`WIDTHS` in `gemma4_forward_decomposition.rs`), which mixes the ~704ms
+fixed prefill floor with whatever `reduce-cooperative`'s own scaling
+contributes — SLICE 2 could not separate the two. **SLICE 3 (below) is the
+separation.**
+
+## SLICE 3 (`bench/kernel-newcount-sweep`) — unconfounding `new_count` at the
+## kernel level
+
+Branch `bench/kernel-newcount-sweep`, base `5c2e8054d`. Harness:
+`proxima-model-interop/benches/gemma4_kernel_newcount_sweep.rs`.
+
+**The confound this slice removes**: SLICE 1/2's Component 1 sweep
+(`WIDTHS = [1, 2, 4, 8]` in the real-forward harness) never actually
+measures `new_count=1` cleanly — `prompt_for_width`'s own doc notes real
+BOS tokenization floors the tokenized width at 2, and a genuine
+single-position decode uses a DIFFERENT renderer path than the
+multi-position verify path SLICE 1's Component 3+4 hit the
+`EpilogueNotSupported` gap on. No real-forward measurement ever isolates
+"what does `new_count` alone cost" from "what does the BOS-inflated
+width-2 floor cost". This slice unconfounds it by measuring four kernels
+in ISOLATION — no BOS token, no full-program epilogue gate riding along —
+at real gemma4-E2B dims, swept `new_count` ∈ {1,2,4,8,16}.
+
+Run:
+
+```sh
+CARGO_TARGET_DIR=<scratch>/target-uc cargo bench -p proxima-model-interop \
+    --bench gemma4_kernel_newcount_sweep --features "metal instrument"
+```
+
+`ollama stop gemma4:e2b-it-qat` first. Host loadout for this run: `uptime`
+load average 4.36/7.82/14.04 (not a quiet box — 3-day uptime, background
+load present; CoV reported per cell, cells above 5% flagged). Build
+profile: `cargo bench`'s own bench profile (optimized + debuginfo), never
+compared against a debug build. All 20/10-sample criterion cells; every raw
+per-iteration record also printed (`gemma4_kernel_newcount_sweep kernel=...
+wall_ns=... exec_ns=...` lines) so every row below is grep-able from the
+run's own stdout, not only the criterion summary.
+
+**Zero-UNSUPPORTED headline, itself a finding**: unlike SLICE 1's
+`one_layer_sliding` component (real full layer, `EpilogueNotSupported` at
+`width=1`), **every one of the four isolated kernels lowered and ran
+cleanly at `new_count=1`**, including the RMSNorm broadcast-epilogue
+kernel — the exact op shape (`x*inv_rms` folded into the reduce) SLICE 1
+could not exercise at width=1. This is the direct proof the task brief
+asked for: an isolated kernel has no BOS and no full-program epilogue gate,
+so `new_count=1` IS measurable there even though it is not measurable in
+the real 35-layer forward.
+
+### Per-kernel cost(new_count) — median/N/CoV, and the fitted fixed+slope
+
+Fit: `cost(new_count) = fixed_floor + slope · new_count`, ordinary least
+squares over the 5 measured points (medians, `gemma4_kernel_newcount_sweep`
+raw records, compile-warmup record excluded from every group).
+
+**1. `reduce-cooperative` — attention-score shape** (`[new_count, 256] x
+[256, key_count]^T`, `head_dim=256`, real gemma4-E2B sliding-layer dim,
+`key_count=256` fixed for this sweep):
+
+| new_count | N | median | CoV | notes |
+|---|---|---|---|---|
+| 1 | 3450 | 447.5 µs | 7.7% | |
+| 2 | 7113 | 440.96 µs | 14.6% | |
+| 4 | 6693 | 433.92 µs | 17.9% | |
+| 8 | 5643 | 457.67 µs | 7.5% | |
+| 16 | 6693 | 460.25 µs | 68.0% (report range: 280 µs–22.7 ms, rare outlier iterations; median is the honest read) |
+
+**Fit: fixed_floor ≈ 439.7 µs, slope ≈ 1.35 µs/position** — a slope
+0.3% of the floor, i.e. statistically indistinguishable from zero given
+12-18% per-cell CoV. **No measurable `new_count` scaling in 1..16.**
+
+**2. `reduce-cooperative` — attention-score shape, `key_count` sweep**
+(`new_count=1` fixed, `key_count` ∈ {64,128,256,512}):
+
+| key_count | N | median | CoV |
+|---|---|---|---|
+| 64 | 6903 | 438.71 µs | 12.7% |
+| 128 | 6273 | 429.33 µs | 155.4% (one 53.5 ms outlier iteration; median unaffected) |
+| 256 | 5853 | 428.75 µs | 19.7% |
+| 512 | 6903 | 318.96 µs | 14.6% |
+
+**Fit: slope ≈ -0.27 µs/key** — negative, i.e. **no real key_count
+scaling either; flat within noise across 64..512 keys.** The 512-key cell
+reading LOWER than the others is noise/floor artifact, not a real
+inverse relationship — recorded as observed, not explained away.
+
+**3. `reduce-cooperative` — RMSNorm broadcast-epilogue shape** (reduce
+over `EMBEDDING=1536`, one row per `new_count`, the exact
+`value_norm`-style op SLICE 1/2 named):
+
+| new_count | N | median | CoV |
+|---|---|---|---|
+| 1 | 10026 | 247.0 µs | 11.6% |
+| 2 | 10237 | 241.17 µs | 12.1% |
+| 4 | 10027 | 252.79 µs | 17.8% |
+| 8 | 10237 | 242.88 µs | 14.9% |
+| 16 | 9607 | 264.42 µs | 15.1% |
+
+**Fit: fixed_floor ≈ 242.4 µs, slope ≈ 1.18 µs/position** — again a slope
+<0.5% of the floor. **No measurable `new_count` scaling in 1..16, despite
+this being architecturally a genuine PER-POSITION cost (one reduce+epilogue
+row per position).**
+
+**4. Packed-row Q4_0 matvec** (REAL `blk.0.attn_k.weight` bytes,
+`[1536, 256]`, activation `[1536, new_count]`):
+
+| new_count | N | median | CoV |
+|---|---|---|---|
+| 1 | 9816 | 246.5 µs | 17.1% |
+| 2 | 6272 | 399.96 µs | 15.8% |
+| 4 | 6902 | 312.69 µs | 10.5% |
+| 8 | 7533 | 329.54 µs | 17.8% |
+| 16 | 6483 | 553.13 µs | 19.8% |
+
+**Fit: fixed_floor ≈ 269.9 µs, slope ≈ 15.9 µs/position.** Noisy
+(non-monotonic middle points, 10-20% CoV) but a real net upward trend
+(246.5 µs → 553.1 µs, 2.24x for 16x width) — unlike the two reduce shapes
+above, this kernel shows a genuine, if small, `new_count` slope.
+
+**5. LM-head unembed** (`[new_count, 1536] x [262144, 1536]^T`):
+
+| new_count | N | median | CoV |
+|---|---|---|---|
+| 1 | 22 | 76.13 ms | 13.0% |
+| 2 | 23 | 143.08 ms | 3.0% |
+| 4 | 13 | 218.31 ms | 1.5% |
+| 8 | 11 | 372.04 ms | 2.2% |
+| 16 | 11 | 675.35 ms | 0.3% |
+
+**Fit (all 5 points): fixed_floor ≈ 54.9 ms, slope ≈ 39.1 ms/position.**
+**Fit (width ≥2 only, excluding the width=1 point): fixed_floor ≈ 66 ms,
+slope ≈ 37.6-38.4 ms/position** — highly consistent step-to-step (66.95,
+37.6, 38.4, 37.9 ms/unit marginal slope between consecutive widths).
+**width=1 is anomalous**: actual 76.13 ms vs ~94 ms the full-fit line
+predicts, and vs the ≥2-only fit's own 66+38=104 ms — `new_count=1` costs
+LESS than either linear extrapolation predicts. Kept, not smoothed over:
+this is the SAME shape of "width=1 behaves differently" pattern SLICE 1
+found at the full-forward level, now reproduced at the isolated LM-head
+KERNEL level — unexplained by this slice, named as a follow-up.
+
+### THE UNCONFOUNDED ANSWER — is `reduce-cooperative` a fixed floor or genuine scaling?
+
+**Fixed floor, not scaling — at both real shapes this slice measured, over
+`new_count` 1..16 and `key_count` 64..512.** Both `reduce-cooperative`
+kernels (attention-score, RMSNorm broadcast-epilogue) show a slope under
+2 µs/unit against a 240-460 µs floor — noise, not signal, at 12-18% CoV.
+This is the answer SLICE 1/2's confounded width-2-to-9 sweep could not
+give: `reduce-cooperative`'s OWN dispatch cost does not grow with
+`new_count` in this range; whatever scaling SLICE 2 observed in the
+confounded full-forward sweep must come from elsewhere (candidates below,
+under Aggregation) or from a `new_count` range this slice did not sweep
+(residual, named not measured: prefill widths beyond 16 are untested here).
+
+### Compile vs execution axis (kept)
+
+Every sample's `exec_ns` (the `gpu_exec_ticks`-derived
+`command_buffer.commit()`→`waitUntilCompleted()` bracket) was logged
+alongside `wall_ns`. At `new_count=2`: attention-score reduce 404.7 µs
+`exec_ns` of 440.96 µs wall (91.8%); RMSNorm epilogue 197.3 µs of 241.17 µs
+(81.8%); packed-row matvec 341.7 µs of 399.96 µs (85.4%); LM-head 109.9 ms
+of 143.08 ms (76.8%). `compile_ns`/`pipeline_misses` are 0 in every
+post-warmup record (one miss per program shape, all absorbed into
+criterion's own warm-up phase, excluded from every stats group above) —
+confirms this slice, like SLICE 1, is reading STEADY-STATE execution cost,
+not compile cost. The ~15-24% of wall time NOT in `gpu_exec_ticks` is
+`omega::execute`'s own per-call CPU-side cost (infer/bind/plan build) —
+paid FRESH every call here because this bench uses the `execute()`
+convenience wrapper, unlike a production decode loop that reuses one
+cached plan across steps.
+
+### Aggregation — does Σ(isolated kernel costs) ≈ the full-forward exec?
+
+**Partial sum** (1 attention-score reduce + 1 RMSNorm epilogue + 1
+packed-row Q4_0 matvec — the THREE kernels this slice measured, NOT the
+full op mix of a real layer, which also has q/v/o projections and three
+FFN projections at `feed_forward=6144`, ~24x wider than the `attn_k`
+projection measured here) at `new_count=2`: 440,958 + 241,167 + 399,958 =
+**1,082,083 ns ≈ 1.08 ms**.
+
+Compared against SLICE 1/2's OWN measured `one_layer_sliding` (the real,
+fused, ALL-ops single layer) at width=2: **18.09 ms** (N=196, SLICE 1's
+own table). **Partial-Σ / full-layer ≈ 6.0% accounted.**
+
+**Two honest reads, not one, per the evidence this slice actually has**:
+
+1. **~94% of a real layer's cost is in ops this slice never isolated** —
+   the other 6 projections, RoPE, softmax, gating. The ONE projection
+   shape measured (`attn_k`, `in=1536, out=256`) is among the SMALLEST in
+   the layer; `feed_forward=6144`-wide FFN projections are the likely
+   dominant unmeasured cost, not reduce-cooperative.
+2. **The Σ itself is not a fair per-op cost inside the real batched
+   forward.** SLICE 2 established the real forward runs its 1661
+   dispatches through ONE command buffer; this slice's 3 kernels each pay
+   their OWN separate `execute()` round trip (3 independent command
+   buffers, each carrying the ~250-450 µs floor documented above). Inside
+   the real batched buffer, that floor is paid ONCE for the whole buffer,
+   not once per op — so even the 6% figure likely OVERSTATES what these 3
+   ops cost when they run batched. The true marginal per-op cost inside
+   the real forward is closer to each op's own `gpu_exec_ticks` share of
+   ONE shared command buffer, which this slice's isolated-kernel harness
+   structurally cannot measure (same limitation SLICE 1's Component 5 named
+   for KV upload).
+
+**What this DOES settle**: `reduce-cooperative`'s own summed dispatch cost
+is a poor candidate for SLICE 1's ~704 ms full-forward floor. Even a
+generous DERIVED extrapolation — 2 `reduce-cooperative` calls/layer
+(attention-score + `value_norm`) × 35 layers × ~350 µs average measured
+cost — is **≈24.5 ms, about 3.5% of the 704 ms floor** (principle 18:
+tagged DERIVED, never measured for all 70 instances). This is a NEGATIVE
+result, kept because it eliminates a candidate: the floor is not
+"many small `reduce-cooperative` dispatches", it has to be either the
+larger FFN/attention GEMM compute this slice did not isolate, or genuine
+per-forward setup (`BackendRuntime::new`'s device-buffer allocation, KV
+upload, embedding lookup) — the same candidates SLICE 1's own Aggregation
+section already named as unmeasured.
+
+### Kernel that could not lower at `new_count=1`
+
+**None.** All four kernels probed and ran cleanly at `new_count=1`
+(0/24 `status=UNSUPPORTED` records across the whole run). This directly
+narrows SLICE 1's `EpilogueNotSupported` finding: the broadcast-reduce
+epilogue Metal renderer itself DOES support `new_count=1` (proven here,
+timed, real numbers) — so SLICE 1's real-layer failure is not a renderer
+gap in the epilogue path in general. The failing `if` in
+`elementwise_reduce_core.rs:224-247` has THREE ways to reject
+(`!matches_reduce_dims`, `!reduce_is_cooperative_dispatch(...)`,
+`tiled_gemm_block(...).is_some()`, `packed_row_block(...).is_some()`) —
+this slice's minimal program only ever exercises the first two (and both
+pass at every width). **The exact fix target, now unconfounded**: trace
+which of `tiled_gemm_block`/`packed_row_block` classifies the REAL layer's
+`value_norm` reduce node as eligible at `new_count=1` specifically (a real
+layer has packed-row-blocked matvecs elsewhere in the same program; at
+`width=1` the `value_norm` reduce's own shape may coincide with one of
+those classifiers' admission window in a way it does not at `width≥2`).
+This is a trace-and-confirm task against
+`classify_packed_row_block`/`tiled_gemm_block` on the real bound program,
+not a renderer-writing task — NOT measured by this slice, stated as the
+follow-up it earns.
+
+### Follow-ups this slice makes easy to add next
+
+1. **Sweep `new_count` past 16** — prefill widths of 32/64/128+ to check
+   whether `reduce-cooperative`'s flat-floor finding holds at realistic
+   prefill widths, or whether a slope only emerges past this slice's
+   ceiling.
+2. **Measure the other 6 projection shapes per layer** (q/v/o proj,
+   FFN gate/up/down at `feed_forward=6144`) — the aggregation section's
+   own "94% unaccounted" gap needs these, not another reduce-shape probe,
+   to close.
+3. **Trace the real-layer `value_norm` node's classifier verdict at
+   `width=1`** (`classify_packed_row_block`/`tiled_gemm_block`) — the exact
+   fix target this slice narrowed but did not itself trace.
+4. **A batched-command-buffer version of this slice's 3-kernel Σ** (one
+   `plan`/`execute_plan` call carrying all 3 ops, mirroring
+   `rmsnorm_fused_epilogue_cost.rs`'s own `INSTANCES`-chains-in-one-buffer
+   technique) — would settle the aggregation section's second honest read
+   (whether the 6%-accounted figure is inflated by per-call floor
+   duplication) with a real number instead of an argument.
+5. **`--save-baseline` wiring**, same gap SLICE 1 named — this slice's own
+   numbers are re-provable from the run command + grep on the raw records,
+   not yet comparable to a named prior run without re-running by hand.
