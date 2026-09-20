@@ -338,12 +338,22 @@ pub struct LayerFfnConfig {
     /// (every caller in this crate before Gemma 4 E2B) reproduces the
     /// prior uniform-width behaviour unchanged.
     pub dense_feed_forward: Option<u32>,
+    /// `true` injects this layer's per-layer-embedding (PLE) contribution
+    /// (gemma4.go:1349-1361: gate/GeGLU/proj/`post_norm`, added into the
+    /// residual right after the FFN residual add, BEFORE
+    /// [`Self::output_scale`]'s own multiply) -- see
+    /// [`lfm2_forward_program_with_experts`]'s own `ple_dim` parameter for
+    /// the checkpoint-wide toggle this per-layer flag composes with: PLE
+    /// only runs when BOTH `ple_dim` is `Some` and this layer's own `ple`
+    /// is `true`. `false` (every caller today) reproduces the prior
+    /// unmodified residual.
+    pub ple: bool,
 }
 
 impl LayerFfnConfig {
     /// [`lfm2_forward_program_with_experts`]'s prior fixed behaviour: no
     /// post-attention norm, exclusive dense/routed FFN selection, no
-    /// output scale.
+    /// output scale, no per-layer-embedding injection.
     #[must_use]
     pub const fn exclusive() -> Self {
         LayerFfnConfig {
@@ -354,6 +364,7 @@ impl LayerFfnConfig {
             routed_expert_bias: true,
             activation: Activation::Silu,
             dense_feed_forward: None,
+            ple: false,
         }
     }
 }
@@ -1407,6 +1418,160 @@ where
     Ok(attention_resources)
 }
 
+/// The two whole-checkpoint tensors every layer's own per-layer-embedding
+/// (PLE) input slices out of -- gemma4.go's `computePLEInputs` preamble
+/// (`gemma4.go:1276-1301`), built ONCE regardless of `block_count` since
+/// neither `proj_flat` nor `emb_flat` depends on `layer`. Kept as raw
+/// `[s, ple_total]` tensors (`ple_total = block_count * ple_dim`) rather
+/// than a materialized `[s, block_count, ple_dim]` reshape --
+/// [`ple_layer_input`] slices each layer's own `ple_dim`-wide window
+/// directly off these two, via [`map::AxisIndex`]'s slice-by-nonzero-offset
+/// case ([`crate::map`]'s own doc table), the same way [`gather_last_row`]'s
+/// sibling ops already address a tensor's axis by more than a bare
+/// projection.
+pub(crate) struct PleSharedProjections {
+    /// `per_layer_model_proj(h0) * (1/sqrt(embedding))`, unnormalized --
+    /// [`ple_layer_input`] applies [`Self::proj_norm_weight`]'s RMSNorm
+    /// AFTER slicing, per gemma4.go:1297.
+    pub(crate) proj_flat: NodeId,
+    /// `per_layer_token_embd(ids) * sqrt(ple_dim)`.
+    pub(crate) emb_flat: NodeId,
+    /// `per_layer_proj_norm.weight`, shared across every layer.
+    pub(crate) proj_norm_weight: NodeId,
+    pub(crate) inv_ple_dim: NodeId,
+}
+
+/// Stage A preamble (gemma4.go:1276-1297): the per-token matmul
+/// (`per_layer_model_proj`) and gather (`per_layer_token_embd`) every
+/// layer's own [`ple_layer_input`] call slices from, computed once before
+/// the layer loop starts. `h0` is the caller's own post-embedding-scale
+/// hidden state (`x` at the top of [`lfm2_forward_program_with_experts`],
+/// BEFORE the layer loop reassigns it) -- Gemma 4's `per_layer_model_proj`
+/// input is always the model's initial embedding, never a later layer's
+/// hidden state (`gemma4.go:1291`, `h` there is the preamble's own `h0`).
+pub(crate) fn append_ple_shared_projections(
+    program: &mut Vec<Op>,
+    ids: NodeId,
+    h0: NodeId,
+    vocab: u32,
+    embedding: u32,
+    ple_dim: u32,
+    ple_total: u32,
+) -> Result<PleSharedProjections, TensorError> {
+    let emb_table = input_leaf(
+        program,
+        DType::Float32,
+        alloc::vec![Extent::Static(vocab), Extent::Static(ple_total)],
+        "per_layer_token_embd.weight",
+    );
+    let emb_gathered = embedding_lookup(program, emb_table, ids);
+    let emb_scale = scalar_constant(program, (ple_dim as f32).sqrt());
+    let emb_flat = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(emb_gathered, "sd->sd"), (emb_scale, "->sd")],
+    )?;
+
+    let proj_table = input_leaf(
+        program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding), Extent::Static(ple_total)],
+        "per_layer_model_proj.weight",
+    );
+    let proj_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(h0, "sd->sdo"), (proj_table, "do->sdo")],
+    )?;
+    let proj_raw = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        proj_product,
+        "sdo->sdo",
+        "so->sdo",
+    )?;
+    let proj_scale = scalar_constant(program, 1.0 / (embedding as f32).sqrt());
+    let proj_flat = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(proj_raw, "so->so"), (proj_scale, "->so")],
+    )?;
+
+    let proj_norm_weight = input_leaf(
+        program,
+        DType::Float32,
+        alloc::vec![Extent::Static(ple_dim)],
+        "per_layer_proj_norm.weight",
+    );
+    let inv_ple_dim = scalar_constant(program, 1.0 / ple_dim as f32);
+
+    Ok(PleSharedProjections {
+        proj_flat,
+        emb_flat,
+        proj_norm_weight,
+        inv_ple_dim,
+    })
+}
+
+/// Stage A per-layer slice + norm + combine (gemma4.go:1297-1301): this
+/// `layer`'s own `ple_dim`-wide window of [`PleSharedProjections::proj_flat`]
+/// (RMSNorm'd, no `+1` offset -- plain [`rmsnorm`], Gemma 4's
+/// `per_layer_proj_norm` carries the full effective gamma already) added to
+/// this layer's own window of [`PleSharedProjections::emb_flat`], scaled by
+/// `1/sqrt(2)`. The window offset is `layer * ple_dim`, spelled as
+/// [`elementwise`]'s own `"s,d+{offset}@{ple_dim}->sd"` notation -- a
+/// slice-by-nonzero-offset read ([`crate::map`]'s doc table), with
+/// `@{ple_dim}` stating the window's true width directly
+/// (`parse_axis_expr`'s own doc) since a nonzero offset no longer defines
+/// the iteration extent from the operand's own on-disk width.
+pub(crate) fn ple_layer_input(
+    program: &mut Vec<Op>,
+    shared: &PleSharedProjections,
+    eps: NodeId,
+    layer: u32,
+    ple_dim: u32,
+) -> Result<NodeId, TensorError> {
+    let offset = layer * ple_dim;
+    let window = alloc::format!("s,d+{offset}@{ple_dim}->sd");
+    let proj_slice = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Identity,
+        &[(shared.proj_flat, window.as_str())],
+    )?;
+    let emb_slice = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Identity,
+        &[(shared.emb_flat, window.as_str())],
+    )?;
+    let proj_normed = rmsnorm(
+        program,
+        proj_slice,
+        shared.proj_norm_weight,
+        shared.inv_ple_dim,
+        eps,
+    )?;
+    let summed = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(proj_normed, "sd->sd"), (emb_slice, "sd->sd")],
+    )?;
+    let combine_scale = scalar_constant(program, core::f32::consts::FRAC_1_SQRT_2);
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(summed, "sd->sd"), (combine_scale, "->sd")],
+    )
+}
+
 /// LFM2.5-8B-A1B's hybrid forward pass: `block_count` blocks, each either
 /// `append_attention_mixer` or `append_lfm2_conv_mixer` per its own
 /// `schedule[layer].kind` (derived by [`LayerKind::from_tensor_names`] from the
@@ -1442,7 +1607,14 @@ where
 /// residual behaviour node-for-node. `embedding_scale`
 /// ([`EmbeddingScale`]) and `logit_softcap` are `None` for every caller
 /// today, reproducing the prior unscaled embedding and untransformed
-/// final logits.
+/// final logits. `ple_dim` (`Some(256)` for gemma4 E2B, `None` for every
+/// other caller) is the checkpoint-wide per-layer-embedding (PLE) toggle --
+/// `Some` builds [`PleSharedProjections`] once via
+/// [`append_ple_shared_projections`] and slices this loop's own
+/// `per_layer_input` per layer via [`ple_layer_input`]; a layer only
+/// INJECTS it (Stage B) when its own `schedule[layer].ffn.ple` is also
+/// `true`. `None` (every caller before Gemma 4 E2B) skips Stage A
+/// entirely, reproducing this function's prior program byte-for-byte.
 #[allow(clippy::too_many_arguments)]
 pub fn lfm2_forward_program_with_experts(
     vocab: u32,
@@ -1459,6 +1631,7 @@ pub fn lfm2_forward_program_with_experts(
     embedding_scale: Option<EmbeddingScale>,
     logit_softcap: Option<f32>,
     last_row_only: bool,
+    ple_dim: Option<u32>,
 ) -> Result<(Vec<Op>, NodeId, MoeSites), TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
@@ -1499,6 +1672,27 @@ pub fn lfm2_forward_program_with_experts(
     let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
 
+    // Stage A preamble (gemma4.go:1276-1301): `x` here is still `h0`, the
+    // post-embedding-scale hidden state BEFORE the layer loop below
+    // reassigns it -- [`append_ple_shared_projections`]'s own doc on why
+    // that (not any later layer's hidden state) is `per_layer_model_proj`'s
+    // real input. Populated per layer just below the loop's own
+    // `ffn_config` binding, in [`ple_layer_inputs`], for
+    // [`append_lfm2_layer_ffn`]'s Stage B to consume.
+    let ple_shared = match ple_dim {
+        Some(ple_dim) => Some(append_ple_shared_projections(
+            &mut program,
+            ids,
+            x,
+            vocab,
+            embedding,
+            ple_dim,
+            ple_dim * block_count,
+        )?),
+        None => None,
+    };
+    let mut ple_layer_inputs: Vec<Option<NodeId>> = alloc::vec![None; block_count as usize];
+
     let attention_resources =
         build_attention_layer_resources(&mut program, schedule, query_heads, |program, window| {
             causal_mask_windowed(program, window)
@@ -1538,6 +1732,11 @@ pub fn lfm2_forward_program_with_experts(
         } else {
             None
         };
+
+        if let (Some(shared), Some(ple_dim)) = (&ple_shared, ple_dim) {
+            ple_layer_inputs[layer as usize] =
+                Some(ple_layer_input(&mut program, shared, eps, layer, ple_dim)?);
+        }
 
         let post_mixer = match kind {
             LayerKind::Attention => {
@@ -3303,6 +3502,110 @@ mod activation_tests {
             assert!(
                 (activated_value - expected).abs() < 1e-5,
                 "gelu_tanh({value}) = {activated_value}, expected {expected}"
+            );
+        }
+    }
+}
+
+/// Gemma 4's per-layer-embedding (PLE) Stage A construction --
+/// [`append_ple_shared_projections`]/[`ple_layer_input`] against the derived
+/// worked example (`gemma4.go:1276-1301`, `H=4` embedding, `P=2`
+/// `ple_dim`, one token, one layer), a fabricated fixture small enough to
+/// hand-verify but exercising the exact same gather/matmul/RMSNorm/combine
+/// composition the real 262144-vocab/8960-wide checkpoint runs.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod ple_stage_a_tests {
+    use super::*;
+
+    /// `H=4` hidden state fed into `per_layer_model_proj` -- the worked
+    /// example's own `h0`.
+    const H0: [f32; 4] = [1.0, 0.5, -0.5, 0.2];
+    /// `per_layer_model_proj.weight`, declared `[embedding, ple_total]`
+    /// (in, out) -- the worked example's `W_proj` (`P` rows of `H` each,
+    /// out-major) transposed to this crate's in-major leaf convention.
+    const W_PROJ_OUT_MAJOR: [[f32; 4]; 2] = [
+        [0.1, 0.2, -0.1, 0.05],
+        [-0.05, 0.1, 0.2, 0.1],
+    ];
+    const PROJ_NORM_WEIGHT: [f32; 2] = [1.2, 0.8];
+    /// The single token's already-gathered per-layer-token embedding row
+    /// (`per_layer_token_embd.weight`'s one vocab row, `vocab=1`) -- the
+    /// worked example's own `e_raw`.
+    const E_RAW: [f32; 2] = [0.3, -0.2];
+    const EPS: f32 = 1e-6;
+
+    /// [`W_PROJ_OUT_MAJOR`] transposed to `[in, out]` row-major, the layout
+    /// [`append_ple_shared_projections`]'s own `"sd->sdo"`/`"do->sdo"`
+    /// matmul pattern reads `per_layer_model_proj.weight` through.
+    fn proj_table_in_major() -> Vec<f32> {
+        let mut flat = Vec::with_capacity(H0.len() * PROJ_NORM_WEIGHT.len());
+        for input_index in 0..H0.len() {
+            for row in &W_PROJ_OUT_MAJOR {
+                flat.push(row[input_index]);
+            }
+        }
+        flat
+    }
+
+    /// Builds and evaluates Stage A for one token, one layer (`layer = 0`,
+    /// so the slice window in [`ple_layer_input`] is a no-op offset), and
+    /// returns `per_layer_input`.
+    fn evaluate_stage_a() -> Vec<f32> {
+        let mut program = Vec::new();
+        let ids = input_leaf(
+            &mut program,
+            DType::Int32,
+            alloc::vec![Extent::Symbolic(0)],
+            "ids",
+        );
+        let h0 = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(H0.len() as u32)],
+            "h0",
+        );
+        let shared = append_ple_shared_projections(
+            &mut program,
+            ids,
+            h0,
+            1,
+            H0.len() as u32,
+            PROJ_NORM_WEIGHT.len() as u32,
+            PROJ_NORM_WEIGHT.len() as u32,
+        )
+        .expect("append_ple_shared_projections lowers");
+        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let root = ple_layer_input(&mut program, &shared, eps, 0, PROJ_NORM_WEIGHT.len() as u32)
+            .expect("ple_layer_input lowers");
+
+        let proj_table = proj_table_in_major();
+        let symbols: [u64; 1] = [1];
+        let blocks: [&[f32]; 6] = [
+            &[0.0],
+            &H0,
+            &E_RAW,
+            proj_table.as_slice(),
+            &PROJ_NORM_WEIGHT,
+            &[EPS],
+        ];
+        let evaluated = crate::cpu::evaluate(&program, &symbols, &blocks, &[root])
+            .expect("ple stage A evaluates");
+        evaluated.root().to_vec()
+    }
+
+    /// The worked example's own oracle (`worked_example.py`,
+    /// `per_layer_input (combined)`): `proj_scale = 1/sqrt(H)`, RMSNorm (no
+    /// `+1` offset), `emb_scale = sqrt(P)`, `combine_scale = 1/sqrt(2)`.
+    #[test]
+    fn per_layer_input_matches_worked_example() {
+        let per_layer_input = evaluate_stage_a();
+        let expected = [1.4469, -0.43526];
+        assert_eq!(per_layer_input.len(), expected.len());
+        for (actual, target) in per_layer_input.iter().zip(expected.iter()) {
+            assert!(
+                (actual - target).abs() < 1e-4,
+                "per_layer_input = {per_layer_input:?}, expected {expected:?}"
             );
         }
     }

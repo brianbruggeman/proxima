@@ -650,6 +650,10 @@ fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
         // is `metadata_u32_per_layer`'s scalar-broadcast, so this override
         // reproduces the prior single-width behaviour byte-for-byte there).
         dense_feed_forward: None,
+        // Wired in the PLE-injection slice, not this one -- see
+        // `lfm2_forward_program_with_experts`'s own `ple_dim` parameter,
+        // still `None` at this call site below.
+        ple: false,
     };
     // `attention.shared_kv_layers` (0 for E4B/12B/26B/31B, 20 for E2B):
     // `first_shared_idx` is the first TRAILING layer with no own
@@ -836,6 +840,11 @@ impl ArchitectureTrait for Gemma4Arch {
                 Some(EmbeddingScale::Sqrt),
                 logit_softcap,
                 true,
+                // Wired in the PLE-injection slice -- see this function's
+                // module doc for why every gemma4 layer needs both this
+                // `Some(ple_dim)` AND `LayerFfnConfig::ple` before Stage A's
+                // preamble actually runs.
+                None,
             )?;
             (program, logits, Vec::new(), moe_sites)
         };

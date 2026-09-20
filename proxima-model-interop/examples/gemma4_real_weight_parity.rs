@@ -62,6 +62,7 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
         routed_expert_bias: false,
         dense_feed_forward: None,
         activation: Activation::GeluTanh,
+        ple: false,
     };
     let schedule: Vec<LayerSchedule> = architecture
         .sliding_window_pattern
@@ -128,6 +129,7 @@ fn gemma4_program(architecture: &proxima_model_interop::gemma4::Architecture) ->
         Some(EmbeddingScale::Sqrt),
         logit_softcap,
         true,
+        None,
     )
     .expect("build gemma4 program (mirrors Gemma4Arch::bind)");
     (program, logits)

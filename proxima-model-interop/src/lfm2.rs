@@ -673,6 +673,7 @@ pub fn run_lfm2_prefill(
         None,
         None,
         false,
+        None,
     )?;
 
     let mut ids = proxima_tokenizer::encode_with_bos_eos(
@@ -785,6 +786,7 @@ pub fn lfm2_forward_values(
         None,
         None,
         false,
+        None,
     )?;
 
     let inputs = build_lfm2_position_inputs(

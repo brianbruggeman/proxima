@@ -225,6 +225,7 @@ fn main() {
         None,
         None,
         false,
+        None,
     )
     .expect("build full lfm2 program to walk this layer's node ids");
 
