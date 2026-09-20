@@ -2326,46 +2326,13 @@ pub fn mistral_cached_forward_program_with_experts_and_layer_taps(
     )
 }
 
-/// Qwen2's dense/MoE graph variant. Qwen2 uses split-half (NEOX) RoPE even
-/// though it has no QK-norm weights, so its pairing must be selected from the
-/// architecture name rather than inferred from the presence of norm tensors.
-#[allow(clippy::too_many_arguments)]
-pub fn qwen2_cached_forward_program_with_experts_and_layer_taps(
-    vocab: u32,
-    embedding: u32,
-    feed_forward: u32,
-    query_heads: u32,
-    kv_heads: u32,
-    head_dim: u32,
-    block_count: u32,
-    expert_count: u32,
-    expert_used_count: u32,
-    qkv_biases: bool,
-    paired_gate_up_reduce: bool,
-    fused_qkv_reduce: bool,
-    last_row_only: bool,
-) -> Result<MistralMoeForwardProgramWithLayerTaps, TensorError> {
-    mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
-        vocab,
-        embedding,
-        feed_forward,
-        query_heads,
-        kv_heads,
-        head_dim,
-        block_count,
-        expert_count,
-        expert_used_count,
-        false,
-        qkv_biases,
-        paired_gate_up_reduce,
-        fused_qkv_reduce,
-        last_row_only,
-        RopePairing::SplitHalf {
-            pairs: head_dim / 2,
-        },
-    )
-}
-
+/// Qwen2 uses split-half (NEOX) RoPE even though it has no QK-norm weights,
+/// so its pairing is selected from the architecture name rather than
+/// inferred from the presence of norm tensors -- see
+/// [`crate::spec::mistral_descriptor_from_shape`]'s own `rope_pairing` parameter, which
+/// the `proxima-model-interop` dense-architecture binder feeds with
+/// `RopePairing::SplitHalf { pairs: head_dim / 2 }` for a `"qwen2"`
+/// checkpoint instead of a dedicated builder.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
     vocab: u32,

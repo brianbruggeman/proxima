@@ -721,10 +721,25 @@ fn mistral_cached_forward_program_with_experts_qk_norm_changes_the_moe_program()
 /// regress to using QK-norm presence as a pairing proxy.
 #[test]
 fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
-    let (qwen2_program, _, _, _, _) = qwen2_cached_forward_program_with_experts_and_layer_taps(
-        32_000, 256, 128, 4, 2, 64, 1, 0, 0, false, false, false, false,
-    )
-    .expect("qwen2 program lowers");
+    let (qwen2_program, _, _, _, _) =
+        mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
+            32_000,
+            256,
+            128,
+            4,
+            2,
+            64,
+            1,
+            0,
+            0,
+            false,
+            false,
+            false,
+            false,
+            false,
+            RopePairing::SplitHalf { pairs: 32 },
+        )
+        .expect("qwen2-shaped split-half program lowers");
     let (generic_program, _, _, _, _) = mistral_cached_forward_program_with_experts_and_layer_taps(
         32_000, 256, 128, 4, 2, 64, 1, 0, 0, false, false, false, false, false,
     )
@@ -14467,6 +14482,93 @@ mod gemma4_synthetic_parity {
              surface ForwardRoots::hidden, the node LoadedModel::embed's \
              pooling path reads, not just logits"
         );
+        assert_eq!(cache_roots_a, cache_roots_b, "cache roots mismatch");
+        assert_eq!(moe_a.0.len(), moe_b.0.len(), "moe site count mismatch");
+        assert_eq!(
+            layer_residuals_a, layer_residuals_b,
+            "layer-residual roots mismatch"
+        );
+
+        let first_divergence = program_a
+            .iter()
+            .zip(program_b.iter())
+            .enumerate()
+            .find(|(_, (op_a, op_b))| op_a != op_b);
+        assert!(
+            first_divergence.is_none(),
+            "op graphs diverge at index {:?}: a={:?} b={:?}",
+            first_divergence.as_ref().map(|(index, _)| *index),
+            first_divergence.as_ref().map(|(_, (op_a, _))| *op_a),
+            first_divergence.as_ref().map(|(_, (_, op_b))| *op_b),
+        );
+    }
+
+    /// [`build_forward_matches_direct_builder_call_at_real_mistral_dims`]'s
+    /// own Qwen2 counterpart -- proves [`mistral_descriptor_from_shape`]'s
+    /// `rope_pairing` parameter plus [`CacheStrategy::SingleRange`]'s
+    /// [`build_forward`] arm reproduce the deleted
+    /// `qwen2_cached_forward_program_with_experts_and_layer_taps` byte-for-byte
+    /// at real Qwen2-7B dims: `qk_norm=false` (Qwen2 carries no per-head
+    /// QK-norm tensors) with `RopePairing::SplitHalf` threaded explicitly,
+    /// the exact two values that deleted builder hardcoded rather than
+    /// inferred.
+    #[test]
+    fn build_forward_matches_direct_builder_call_at_real_qwen2_dims() {
+        const REAL_VOCAB: u32 = 151_936;
+        const REAL_EMBEDDING: u32 = 3584;
+        const REAL_FEED_FORWARD: u32 = 18944;
+        const REAL_QUERY_HEADS: u32 = 28;
+        const REAL_KV_HEADS: u32 = 4;
+        const REAL_HEAD_DIM: u32 = 128;
+        const REAL_BLOCK_COUNT: u32 = 28;
+        let rope_pairing = RopePairing::SplitHalf {
+            pairs: REAL_HEAD_DIM / 2,
+        };
+
+        let (program_a, roots_a, cache_roots_a, layer_residuals_a, moe_a) =
+            mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
+                REAL_VOCAB,
+                REAL_EMBEDDING,
+                REAL_FEED_FORWARD,
+                REAL_QUERY_HEADS,
+                REAL_KV_HEADS,
+                REAL_HEAD_DIM,
+                REAL_BLOCK_COUNT,
+                0,
+                0,
+                false,
+                true,
+                false,
+                false,
+                true,
+                rope_pairing,
+            )
+            .expect("direct real qwen2-dims build");
+
+        let descriptor_b = mistral_descriptor_from_shape(
+            REAL_VOCAB,
+            REAL_EMBEDDING,
+            REAL_FEED_FORWARD,
+            REAL_QUERY_HEADS,
+            REAL_KV_HEADS,
+            REAL_HEAD_DIM,
+            REAL_BLOCK_COUNT,
+            0,
+            0,
+            false,
+            true,
+            false,
+            false,
+            rope_pairing,
+        );
+        assert_eq!(descriptor_b.cache_strategy, CacheStrategy::SingleRange);
+
+        let (program_b, logits_b, cache_roots_b, moe_b, layer_residuals_b, hidden_b) =
+            build_forward(&descriptor_b, true).expect("build_forward real qwen2-dims build");
+
+        assert_eq!(program_a.len(), program_b.len(), "op count mismatch");
+        assert_eq!(roots_a.logits, logits_b, "root node id mismatch");
+        assert_eq!(Some(roots_a.hidden), hidden_b, "hidden root mismatch");
         assert_eq!(cache_roots_a, cache_roots_b, "cache roots mismatch");
         assert_eq!(moe_a.0.len(), moe_b.0.len(), "moe site count mismatch");
         assert_eq!(

@@ -1,9 +1,9 @@
 //! The [`crate::architecture::Architecture`] registered as
 //! [`crate::architecture::ArchitectureRegistry::with_builtin`]'s fallback --
 //! every checkpoint `crate::generate::LoadedModel::load_inner`'s `else` arm
-//! has ever accepted (`llama`, `mistral`, `qwen3`, `mixtral`, and any other
-//! `general.architecture` this crate has no dedicated hybrid binder for).
-//! Composes exactly what that `else` arm always called:
+//! has ever accepted (`llama`, `mistral`, `qwen2`, `qwen3`, `mixtral`, and
+//! any other `general.architecture` this crate has no dedicated hybrid
+//! binder for). Composes exactly what that `else` arm always called:
 //! [`crate::bind::architecture_from_metadata`],
 //! [`crate::bind::checkpoint_has_qk_norm`], and (routed through
 //! [`proxima_tensor::spec::build_forward`]'s `CacheStrategy::SingleRange`
@@ -17,6 +17,15 @@
 //! separate MoE arm (`crate::architecture::Architecture`'s own doc on
 //! `DenseArch` being the un-registered-by-name fallback, not a name match).
 //!
+//! Qwen2 is the one name this binder still reads: split-half (NEOX) RoPE
+//! with no QK-norm tensors at all is a combination `checkpoint_has_qk_norm`
+//! cannot express (`proxima_tensor::spec::mistral_descriptor_from_shape`'s
+//! own `rope_pairing` parameter doc), so `"qwen2"` selects
+//! `RopePairing::SplitHalf` as a config VALUE fed into the one generic
+//! [`build_forward`] call every other architecture already takes -- not a
+//! second program-construction call. Every other field this binder passes
+//! is identical between the two cases.
+//!
 //! Does not carry `load_with_paired_gate_up_reduce`/`load_with_fused_qkv_reduce`'s
 //! diagnostic reduce flags -- those are per-call A/B knobs
 //! (`crate::generate::LoadedModel::load_with_paired_gate_up_reduce`'s own
@@ -27,8 +36,7 @@
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
-    Qwen35LayerRoots, build_forward, mistral_descriptor_from_shape,
-    qwen2_cached_forward_program_with_experts_and_layer_taps,
+    Qwen35LayerRoots, RopePairing, build_forward, mistral_descriptor_from_shape,
 };
 
 use crate::architecture::{Architecture, BoundProgram};
@@ -83,66 +91,49 @@ impl Architecture for DenseArch {
         // `mistral_cached_forward_program_with_experts_and_layer_taps`'s
         // own doc on that flag and `proxima-tensor/docs/discipline.md`
         // ROW 418/421 for the measured cost of computing every row instead.
-        let (program, logits_root, hidden_root, cache_roots, layer_residuals, moe_sites) =
-            if architecture_name == "qwen2" {
-                let (program, roots, cache_roots, layer_residuals, moe_sites) =
-                    qwen2_cached_forward_program_with_experts_and_layer_taps(
-                        architecture.vocab,
-                        architecture.embedding,
-                        architecture.feed_forward,
-                        architecture.query_heads,
-                        architecture.kv_heads,
-                        architecture.head_dim,
-                        architecture.block_count,
-                        architecture.expert_count,
-                        architecture.expert_used_count,
-                        checkpoint_qkv_biases(parsed, &architecture)?,
-                        false,
-                        false,
-                        last_row_only,
-                    )?;
-                (
-                    program,
-                    roots.logits,
-                    Some(roots.hidden),
-                    cache_roots,
-                    layer_residuals,
-                    moe_sites,
-                )
-            } else {
-                // Routes through the generic `ModelDescriptor`/`build_forward`
-                // path (`proxima_tensor::spec`) instead of calling
-                // `mistral_cached_forward_program_with_experts_and_layer_taps`
-                // directly -- `mistral_descriptor_from_shape` builds its
-                // descriptor straight off THIS checkpoint's own parsed
-                // `architecture` (not `mistral_descriptor`'s hardcoded
-                // openchat-3.5-1210 constants, which only that one proven
-                // shape matches), so `build_forward`'s own
-                // `CacheStrategy::SingleRange` arm calls the exact same
-                // builder with the exact same argument set this match arm
-                // passed directly before -- proven byte-identical at the
-                // real openchat-3.5-1210 dims by
-                // `build_forward_matches_direct_builder_call_at_real_mistral_dims`
-                // (`proxima-tensor/src/spec/tests.rs`), hidden root included.
-                let descriptor = mistral_descriptor_from_shape(
-                    architecture.vocab,
-                    architecture.embedding,
-                    architecture.feed_forward,
-                    architecture.query_heads,
-                    architecture.kv_heads,
-                    architecture.head_dim,
-                    architecture.block_count,
-                    architecture.expert_count,
-                    architecture.expert_used_count,
-                    qk_norm,
-                    checkpoint_qkv_biases(parsed, &architecture)?,
-                    false,
-                    false,
-                );
-                let (program, logits, cache_roots, moe_sites, layer_residuals, hidden) =
-                    build_forward(&descriptor, last_row_only)?;
-                (program, logits, hidden, cache_roots, layer_residuals, moe_sites)
-            };
+        // Qwen2 has no QK-norm tensors at all (`qk_norm` above is `false`
+        // for it either way) but still needs split-half RoPE -- a
+        // combination `checkpoint_has_qk_norm` cannot express, so its
+        // pairing is selected from the architecture name instead
+        // (`proxima_tensor::spec::mistral_descriptor_from_shape`'s own
+        // `rope_pairing` parameter doc). Every other checkpoint keeps the
+        // qk_norm-inferred pairing `mistral_descriptor_from_shape` has
+        // always applied. Both cases now route through the identical
+        // `mistral_descriptor_from_shape` + `build_forward` call below --
+        // proven byte-identical to the prior direct-builder calls at the
+        // real openchat-3.5-1210 (mistral) and qwen2 dims by
+        // `build_forward_matches_direct_builder_call_at_real_mistral_dims`
+        // and `build_forward_matches_direct_builder_call_at_real_qwen2_dims`
+        // (`proxima-tensor/src/spec/tests.rs`).
+        let is_qwen2 = architecture_name == "qwen2";
+        let rope_pairing = if is_qwen2 || qk_norm {
+            RopePairing::SplitHalf {
+                pairs: architecture.head_dim / 2,
+            }
+        } else {
+            RopePairing::Interleaved
+        };
+        let descriptor = mistral_descriptor_from_shape(
+            architecture.vocab,
+            architecture.embedding,
+            architecture.feed_forward,
+            architecture.query_heads,
+            architecture.kv_heads,
+            architecture.head_dim,
+            architecture.block_count,
+            architecture.expert_count,
+            architecture.expert_used_count,
+            // Qwen2's own dedicated builder always hardcoded `false` here
+            // regardless of `qk_norm` above -- reproduce that unconditionally
+            // rather than trusting a real checkpoint's own metadata to agree.
+            if is_qwen2 { false } else { qk_norm },
+            checkpoint_qkv_biases(parsed, &architecture)?,
+            false,
+            false,
+            rope_pairing,
+        );
+        let (program, logits_root, cache_roots, moe_sites, layer_residuals, hidden_root) =
+            build_forward(&descriptor, last_row_only)?;
         Ok(BoundProgram {
             weights,
             architecture,

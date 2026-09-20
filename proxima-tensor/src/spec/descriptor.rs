@@ -360,6 +360,12 @@ pub fn mistral_descriptor_from_shape(
     qkv_biases: bool,
     paired_gate_up_reduce: bool,
     fused_qkv_reduce: bool,
+    // caller-supplied rather than inferred from `qk_norm` -- Qwen2 is
+    // split-half RoPE with no QK-norm tensors at all, so `qk_norm` alone
+    // cannot pick the pairing (`mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`'s
+    // own doc on the Qwen2 case this parameter now carries as data instead
+    // of a dedicated builder).
+    rope_pairing: RopePairing,
 ) -> ModelDescriptor {
     let ffn = LayerFfnConfig {
         post_attention_norm: false,
@@ -383,7 +389,7 @@ pub fn mistral_descriptor_from_shape(
             cos_name: "rope_cos",
             sin_name: "rope_sin",
         },
-        rope_pairing: RopePairing::Interleaved,
+        rope_pairing,
         score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(head_dim),
         value_norm: false,
     };
@@ -445,6 +451,9 @@ pub fn mistral_descriptor(vocab: u32) -> ModelDescriptor {
         false,
         false,
         false,
+        // no QK-norm means the old `qk_norm`-inferred default -- interleaved,
+        // never Qwen2's split-half.
+        RopePairing::Interleaved,
     )
 }
 
@@ -496,9 +505,11 @@ pub type BuildForwardProgram = (
 /// trailing positional argument.
 ///
 /// [`CacheStrategy::SingleRange`] dispatches to
-/// `mistral_cached_forward_program_with_experts_and_layer_taps` directly,
-/// unchanged -- see that variant's own doc for why (a genuinely different
-/// cache-scoring algebra, not a knob the other two engines can express).
+/// `mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`
+/// directly, passing this descriptor's own `attention.rope_pairing` rather
+/// than re-inferring it from `qk_norm` -- see that variant's own doc for why
+/// (a genuinely different cache-scoring algebra, not a knob the other two
+/// engines can express).
 /// That builder's per-layer residual outputs are this function's own fifth
 /// return element, empty for [`CacheStrategy::Cacheless`]/
 /// [`CacheStrategy::TwoRange`] (neither engine tracks them) -- the same
@@ -587,8 +598,14 @@ pub fn build_forward(
                 });
             }
             let attention = first.attention;
+            // `attention.rope_pairing` is this descriptor's own data, not
+            // re-inferred from `qk_norm` here -- Qwen2 needs split-half RoPE
+            // with `qk_norm` still `false` (no QK-norm tensors at all), a
+            // combination the qk_norm-inferring wrapper cannot express (its
+            // own doc on that limitation, `mistral_descriptor_from_shape`'s
+            // `rope_pairing` parameter above).
             let (program, roots, cache_roots, layer_residuals, moe_sites) =
-                mistral_cached_forward_program_with_experts_and_layer_taps(
+                mistral_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
                     descriptor.vocab,
                     descriptor.embedding,
                     descriptor.feed_forward,
@@ -603,6 +620,7 @@ pub fn build_forward(
                     descriptor.paired_gate_up_reduce,
                     descriptor.fused_qkv_reduce,
                     last_row_only,
+                    attention.rope_pairing,
                 )?;
             Ok((
                 program,
