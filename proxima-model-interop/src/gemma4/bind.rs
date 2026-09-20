@@ -1209,6 +1209,7 @@ mod shared_kv_reuse_map_tests {
 /// own gates would bind -- no declared-but-unbound leaf, and no bound
 /// leaf the forward program never asks for either.
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod declared_leaves_match_bound_leaves_tests {
     use super::*;
     use proxima_tensor::op::Op;
