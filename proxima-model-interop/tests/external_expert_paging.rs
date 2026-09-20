@@ -211,7 +211,7 @@ const PAGED_EXPERT: usize = 0;
 /// on their original `Q4_K` bytes, which is why the single-site version of
 /// this test could decode identically before and after a page: `down(silu(gate(x))
 /// * up(x))` still ran `up`/`down` unperturbed, and one layer's gate-only
-/// precision drop was not guaranteed to move the greedy argmax.
+///   precision drop was not guaranteed to move the greedy argmax.
 const UP_SITE: usize = 1;
 const DOWN_SITE: usize = 2;
 
