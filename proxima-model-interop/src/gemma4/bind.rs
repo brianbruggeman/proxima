@@ -32,8 +32,8 @@ use proxima_gguf::pipe::ParsedGguf;
 #[cfg(not(feature = "gemma4-kv-cache"))]
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
-    LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ParallelDenseMoeConfig,
-    RopePairing, RopeTableSel, ValueSourceKind,
+    KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
+    ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind,
 };
 // Each build uses exactly one of these two forward-program builders (see
 // `Gemma4Arch::bind`'s own `#[cfg(feature = "gemma4-kv-cache")]` split
@@ -65,15 +65,24 @@ use super::program::gemma4_sliding_rope_table;
 /// `attn_v.weight`, which is absent on the five full-attention layers
 /// (indices 5, 11, 17, 23, 29 on the real checkpoint) and present only on
 /// sliding-window layers -- 25 layers of 22 plus 5 layers of 21, plus
-/// 3 global tensors, is exactly the real header's 658.
+/// 3 global tensors, is exactly the real header's 658. On a shared-KV
+/// checkpoint (`attention.shared_kv_layers > 0`, e.g. `gemma4:e2b-it-qat`),
+/// every TRAILING layer from `block_count - shared_kv_layers` onward
+/// (confirmed against the real header by an `UnknownTensor` load error on
+/// `blk.15.attn_k_norm.weight`) carries none of `attn_k.weight`,
+/// `attn_k_norm.weight`, or `attn_v.weight` at all -- see
+/// `gemma4_layer_schedule`'s own `shared_kv_source_layer` for which
+/// own-KV layer supplies them instead.
 #[must_use]
 pub fn gemma4_tensor_names(architecture: &Architecture) -> Vec<String> {
     let mut names = Vec::new();
+    let first_shared_idx = architecture
+        .block_count
+        .saturating_sub(architecture.shared_kv_layers);
 
     for (layer, &is_sliding) in architecture.sliding_window_pattern.iter().enumerate() {
+        let is_shared_kv = layer as u32 >= first_shared_idx;
         let mut suffixes = alloc::vec![
-            "attn_k.weight",
-            "attn_k_norm.weight",
             "attn_norm.weight",
             "attn_output.weight",
             "attn_q.weight",
@@ -94,8 +103,12 @@ pub fn gemma4_tensor_names(architecture: &Architecture) -> Vec<String> {
             "post_ffw_norm_2.weight",
             "pre_ffw_norm_2.weight",
         ];
-        if is_sliding {
-            suffixes.push("attn_v.weight");
+        if !is_shared_kv {
+            suffixes.push("attn_k.weight");
+            suffixes.push("attn_k_norm.weight");
+            if is_sliding {
+                suffixes.push("attn_v.weight");
+            }
         }
         for suffix in suffixes {
             names.push(format!("blk.{layer}.{suffix}"));
@@ -229,8 +242,12 @@ pub fn bind_gemma4_weights<'file>(
         )?;
     }
 
+    let first_shared_idx = architecture
+        .block_count
+        .saturating_sub(architecture.shared_kv_layers);
     for (layer_index, &is_sliding) in architecture.sliding_window_pattern.iter().enumerate() {
         let layer = layer_index as u32;
+        let is_shared_kv = layer >= first_shared_idx;
         let head_dim = if is_sliding {
             architecture.key_length_swa
         } else {
@@ -261,13 +278,23 @@ pub fn bind_gemma4_weights<'file>(
             GEMMA4_NORM_SHIFT,
             &mut state,
         )?;
-        bind_norm(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.attn_k_norm.weight"),
-            GEMMA4_NORM_SHIFT,
-            &mut state,
-        )?;
+        // Shared-KV layers (E2B: blk.15..=34, `is_shared_kv`) carry none of
+        // `attn_k.weight`/`attn_k_norm.weight`/`attn_v.weight` on disk at
+        // all (confirmed by an `UnknownTensor` load error on
+        // `blk.15.attn_k_norm.weight` against the real checkpoint) --
+        // `gemma4_layer_schedule`'s own `KeySourceKind::SharedFromLayer`/
+        // `ValueSourceKind::SharedFromLayer` never declare `Input` leaves
+        // for them, so binding them here would look up a tensor the
+        // forward program never asks for.
+        if !is_shared_kv {
+            bind_norm(
+                parsed,
+                file_bytes,
+                format!("blk.{layer}.attn_k_norm.weight"),
+                GEMMA4_NORM_SHIFT,
+                &mut state,
+            )?;
+        }
         bind_matmul_weight(
             parsed,
             file_bytes,
@@ -276,15 +303,17 @@ pub fn bind_gemma4_weights<'file>(
             embedding,
             &mut state,
         )?;
-        bind_matmul_weight(
-            parsed,
-            file_bytes,
-            format!("blk.{layer}.attn_k.weight"),
-            kv_heads * head_dim,
-            embedding,
-            &mut state,
-        )?;
-        if is_sliding {
+        if !is_shared_kv {
+            bind_matmul_weight(
+                parsed,
+                file_bytes,
+                format!("blk.{layer}.attn_k.weight"),
+                kv_heads * head_dim,
+                embedding,
+                &mut state,
+            )?;
+        }
+        if is_sliding && !is_shared_kv {
             bind_matmul_weight(
                 parsed,
                 file_bytes,
@@ -551,6 +580,42 @@ pub static GEMMA4: Gemma4Arch = Gemma4Arch;
 /// no `exp_probs_b` bias, unlike [`FfnCombination::Exclusive`]'s LFM2 shape
 /// -- see [`proxima_tensor::spec::LayerFfnConfig`]'s own doc for what each
 /// field means.
+/// The operative §14 reference for gemma4 (a distinct architecture from
+/// gemma3n -- no AltUp/Laurel, its own forward) is ollama's own gemma4
+/// runner, `mlxrunner/model/gemma4/gemma4.go` (github.com/ollama/ollama
+/// v0.34.2): `TextConfig`'s own KV-sharing-map build (`gemma4.go:590-611`)
+/// walks `firstShared..NumHiddenLayers` and, for each shared layer, finds
+/// "the last non-shared layer of the same type" (`gemma4.go:599-606`) --
+/// the MOST RECENT own-KV layer (index `< firstShared`) whose
+/// `isLayerSliding` result matches. `isLayerSliding`'s own fallback formula
+/// (`gemma4.go:644-651`, used whenever `LayerTypes` metadata is absent) is
+/// `(layerIdx+1) % SlidingWindowPattern != 0`, with `SlidingWindowPattern`
+/// defaulting to `5` (`gemma4.go:529-531`) -- period-5 global attention,
+/// 0-indexed, matching this checkpoint's `sliding_window=512` metadata
+/// (7 full layers over 35 blocks, `35 / 5 == 7`). For the real
+/// `gemma4:e2b-it-qat` checkpoint (`block_count=35`, `shared_kv_layers=20`,
+/// `first_shared_idx=15`) this resolves to exactly two source layers: 13
+/// (last own-KV sliding layer) for every sliding shared layer, 14 (last
+/// own-KV full layer) for every full shared layer -- see this file's own
+/// `shared_kv_reuse_map_tests` module for the full 20-entry table this
+/// function reproduces layer-by-layer, and
+/// `proxima-tensor::spec::tests::gemma4_synthetic_parity::shared_kv_worked_example`
+/// for the synthetic-forward proof that the wiring reuses rather than
+/// re-derives.
+#[cfg_attr(feature = "gemma4-kv-cache", allow(dead_code))]
+fn shared_kv_source_layer(sliding_window_pattern: &[bool], first_shared_idx: u32, layer: usize) -> u32 {
+    let is_sliding = sliding_window_pattern[layer];
+    (0..first_shared_idx as usize)
+        .rev()
+        .find(|&candidate| sliding_window_pattern[candidate] == is_sliding)
+        .map(|index| index as u32)
+        // Only reachable if layers `0..first_shared_idx` have NO
+        // representative of this attention type at all -- not the real
+        // checkpoint's shape (both types appear among its first 15
+        // blocks). A safe deterministic fallback rather than a panic.
+        .unwrap_or_else(|| first_shared_idx.saturating_sub(1))
+}
+
 #[cfg(not(feature = "gemma4-kv-cache"))]
 fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
     // E2B/E4B (`expert_count == 0`) carry no routed-expert tensors at all
@@ -586,6 +651,14 @@ fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
         // reproduces the prior single-width behaviour byte-for-byte there).
         dense_feed_forward: None,
     };
+    // `attention.shared_kv_layers` (0 for E4B/12B/26B/31B, 20 for E2B):
+    // `first_shared_idx` is the first TRAILING layer with no own
+    // `attn_k.weight`/`attn_v.weight`/`attn_k_norm.weight` at all -- see
+    // `gemma4_tensor_names`'s own doc for the tensor-presence side of this
+    // split.
+    let first_shared_idx = architecture
+        .block_count
+        .saturating_sub(architecture.shared_kv_layers);
     architecture
         .sliding_window_pattern
         .iter()
@@ -602,6 +675,7 @@ fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
                     kv_heads,
                     mask_window: Some(architecture.sliding_window),
                     value_source_kind: ValueSourceKind::ProjectedV,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos_swa",
                         sin_name: "rope_sin_swa",
@@ -625,6 +699,7 @@ fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
                     kv_heads,
                     mask_window: None,
                     value_source_kind: ValueSourceKind::SharedWithKey,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos",
                         sin_name: "rope_sin",
@@ -637,6 +712,31 @@ fn gemma4_layer_schedule(architecture: &Architecture) -> Vec<LayerSchedule> {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                 }
+            };
+            // Trailing shared-KV layers (E2B: blk.15..=34) have no
+            // `attn_k.weight`/`attn_v.weight`/`attn_k_norm.weight` on disk
+            // -- `attention_forward.rs`'s `KeySourceKind::SharedFromLayer`/
+            // `ValueSourceKind::SharedFromLayer` skip declaring those three
+            // leaves entirely for this layer, reading the named own-KV
+            // layer's post-rope K / post-norm V instead. `value_norm` stays
+            // `true` (harmless -- `ValueSource::Shared` already carries a
+            // post-norm `V`; `append_attention_mixer`'s own doc notes
+            // re-normalizing it would double-apply, so gemma4 E2B's shared
+            // layers must NOT also request `value_norm`).
+            let attention = if layer as u32 >= first_shared_idx {
+                let source = shared_kv_source_layer(
+                    &architecture.sliding_window_pattern,
+                    first_shared_idx,
+                    layer,
+                );
+                LayerAttentionConfig {
+                    key_source_kind: KeySourceKind::SharedFromLayer(source),
+                    value_source_kind: ValueSourceKind::SharedFromLayer(source),
+                    value_norm: false,
+                    ..attention
+                }
+            } else {
+                attention
             };
             LayerSchedule {
                 kind: LayerKind::Attention,
@@ -851,5 +951,80 @@ impl ArchitectureTrait for Gemma4Arch {
             .iter()
             .find(|(name, _)| name == "rope_freqs.weight")
             .map(|(_, values)| values.as_slice())
+    }
+}
+
+#[cfg(test)]
+mod shared_kv_reuse_map_tests {
+    use super::shared_kv_source_layer;
+
+    /// ollama's `mlxrunner/model/gemma4/gemma4.go` `isLayerSliding` fallback
+    /// (`gemma4.go:644-651`): `(layerIdx+1) % SlidingWindowPattern != 0`,
+    /// `SlidingWindowPattern` defaulting to `5` (`gemma4.go:529-531`),
+    /// 0-indexed -- the global/local period gemma4 E2B's `sliding_window=512`
+    /// metadata implies (7 full layers over 35 blocks, `35 / 5 == 7`). `true`
+    /// means sliding, matching `Architecture::sliding_window_pattern`'s own
+    /// convention.
+    fn period_five_pattern(block_count: usize) -> Vec<bool> {
+        (0..block_count).map(|i| (i + 1) % 5 != 0).collect()
+    }
+
+    /// The worked example this slice derived by hand from
+    /// `gemma4.go`'s `TextConfig` KV-sharing-map build (`gemma4.go:590-611`,
+    /// see `shared_kv_source_layer`'s own doc above for the full citation --
+    /// derivation notes in this session's scratchpad `sharedkv_derivation.md`):
+    /// for `block_count=35`, `shared_kv_layers=20` (`first_shared_idx=15`),
+    /// the 16 sliding shared layers (15,16,17,18,20,21,22,23,25,26,27,28,30,
+    /// 31,32,33) all reuse own-KV layer 13 (the last sliding layer among
+    /// 0..15), and the 4 full shared layers (19,24,29,34) all reuse own-KV
+    /// layer 14 (the last full layer among 0..15) -- exactly 20 pairs,
+    /// matching the real GGUF header's `attention.shared_kv_layers=20`.
+    #[test]
+    fn gemma4_e2b_shared_kv_reuse_map_matches_hand_derived_table() {
+        let pattern = period_five_pattern(35);
+        let first_shared_idx = 15;
+
+        let expected: [(usize, u32); 20] = [
+            (15, 13),
+            (16, 13),
+            (17, 13),
+            (18, 13),
+            (19, 14),
+            (20, 13),
+            (21, 13),
+            (22, 13),
+            (23, 13),
+            (24, 14),
+            (25, 13),
+            (26, 13),
+            (27, 13),
+            (28, 13),
+            (29, 14),
+            (30, 13),
+            (31, 13),
+            (32, 13),
+            (33, 13),
+            (34, 14),
+        ];
+
+        for (shared_layer, expected_source) in expected {
+            let source = shared_kv_source_layer(&pattern, first_shared_idx, shared_layer);
+            assert_eq!(
+                source, expected_source,
+                "layer {shared_layer} expected to reuse source layer {expected_source}, got {source}"
+            );
+        }
+    }
+
+    /// The formula-derived pattern must itself imply exactly 7 full-attention
+    /// layers over 35 blocks (`35 / 5`) -- a sanity check on
+    /// [`period_five_pattern`] independent of the reuse-map assertion above,
+    /// so a broken pattern generator cannot silently pass the main test by
+    /// accident.
+    #[test]
+    fn period_five_pattern_has_seven_full_attention_layers_over_thirty_five_blocks() {
+        let pattern = period_five_pattern(35);
+        let full_count = pattern.iter().filter(|&&is_sliding| !is_sliding).count();
+        assert_eq!(full_count, 7);
     }
 }

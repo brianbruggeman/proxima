@@ -12,6 +12,40 @@ use super::*;
 pub enum ValueSource {
     Projected(NodeId),
     SharedWithKey,
+    /// The source layer's own already-rmsnorm'd, un-roped `V` node --
+    /// gemma4 E2B's cross-layer shared-KV shape ([`ValueSourceKind::SharedFromLayer`]).
+    /// No `attn_v.weight` leaf exists for this layer at all; the value comes
+    /// from whatever layer computed it, verbatim (no re-projection, no
+    /// re-norm).
+    Shared(NodeId),
+}
+
+/// Where [`append_attention_mixer`] reads its per-head `K` tensor from,
+/// mirroring [`ValueSource`] -- [`Self::Projected`] runs the existing
+/// `wk` projection + k-norm + RoPE chain; [`Self::Shared`] is gemma4 E2B's
+/// cross-layer shared-KV shape: the source layer's own POST-rope,
+/// POST-k-norm `K` halves, reused verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    Projected { wk: NodeId, k_norm_weight: NodeId },
+    Shared { rotated_even: NodeId, rotated_odd: NodeId },
+}
+
+/// [`append_attention_mixer`]'s own output: the layer's post-residual
+/// hidden state (what every caller before shared-KV existed used as the
+/// function's sole return value), plus this layer's post-rope `K` halves
+/// and post-norm `V` -- the exact nodes a LATER schedule entry's
+/// `KeySourceKind::SharedFromLayer`/`ValueSourceKind::SharedFromLayer`
+/// needs to reuse verbatim (gemma4 E2B). A caller with no shared-KV layers
+/// downstream simply discards the two extra fields, so this is not a
+/// breaking change in spirit -- only in the tuple shape every existing
+/// call site already had to update.
+#[derive(Debug, Clone, Copy)]
+pub struct AttentionMixerOutput {
+    pub residual: NodeId,
+    pub rotated_k_even: NodeId,
+    pub rotated_k_odd: NodeId,
+    pub v: NodeId,
 }
 
 /// Technique: Gemma value-shares-key attention (`ValueSource::SharedWithKey`) -- see `docs/design/technique-taxonomy.md#attention`.
@@ -26,6 +60,32 @@ pub enum ValueSource {
 pub enum ValueSourceKind {
     ProjectedV,
     SharedWithKey,
+    /// Gemma 4 E2B's cross-layer shared-KV shape (`attention.shared_kv_layers`
+    /// in the GGUF header): this layer has no `attn_v.weight` on disk at
+    /// all -- its `V` is the named source layer's own already-computed,
+    /// un-roped, rmsnorm'd `V` node, reused verbatim. The `u32` is the
+    /// 0-indexed source layer.
+    SharedFromLayer(u32),
+}
+
+/// Where a [`LayerAttentionConfig`] layer's `K` weight leaf comes from,
+/// mirroring [`ValueSourceKind`] -- [`Self::ProjectedK`] is every existing
+/// caller's behaviour (a real `attn_k.weight`/`attn_k_norm.weight` pair on
+/// disk). [`Self::SharedFromLayer`] is gemma4 E2B's shared-KV shape: no
+/// `attn_k.weight`/`attn_k_norm.weight` leaves exist for this layer, so
+/// [`lfm2_forward_program_with_experts`] must not declare them -- the `K`
+/// this layer's attention math uses is the named source layer's own
+/// post-rope, post-k-norm `K` halves. Shared-KV shares BOTH `K` and `V` --
+/// ollama's `mlxrunner/model/gemma4/gemma4.go` `Attention.Forward` reads one
+/// donor's `sharedHistory` for both (`gemma4.go:1392-1449`: `kv := donor`,
+/// then `k, v = kv.history.K(), kv.history.V()` or `kv.k, kv.v`), never K
+/// alone -- so a schedule entry with `key_source_kind: SharedFromLayer(n)`
+/// always pairs with `value_source_kind: SharedFromLayer(n)` for the same
+/// `n`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySourceKind {
+    ProjectedK,
+    SharedFromLayer(u32),
 }
 
 /// Technique: Gemma local-global dual-base RoPE (`DualBaseRope { base, base_swa }`) -- see `docs/design/technique-taxonomy.md#positional`.
@@ -333,6 +393,9 @@ pub struct LayerAttentionConfig {
     /// (whole-prefix causal) case.
     pub mask_window: Option<u32>,
     pub value_source_kind: ValueSourceKind,
+    /// Mirrors [`Self::value_source_kind`] -- see [`KeySourceKind`]'s own
+    /// doc. Shared-KV pairs the same source-layer index on both fields.
+    pub key_source_kind: KeySourceKind,
     pub rope_table: RopeTableSel,
     pub rope_pairing: RopePairing,
     /// The multiplier applied to raw attention scores before the causal
@@ -503,15 +566,14 @@ pub fn append_attention_mixer(
     group: u32,
     attn_norm_weight: NodeId,
     q_norm_weight: NodeId,
-    k_norm_weight: NodeId,
     wq: NodeId,
-    wk: NodeId,
+    key_source: KeySource,
     value_source: ValueSource,
     wo: NodeId,
     rope_pairing: RopePairing,
     post_attention_norm_weight: Option<NodeId>,
     value_norm: bool,
-) -> Result<NodeId, TensorError> {
+) -> Result<AttentionMixerOutput, TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
     let q_product = elementwise(
@@ -534,22 +596,38 @@ pub fn append_attention_mixer(
     // reshape, BEFORE `apply_rotary_pos_emb` -- never after.
     let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
 
-    let k_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed, "si->sudi"), (wk, "iud->sudi")],
-    )?;
-    let k_raw = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        k_product,
-        "sudi->sudi",
-        "sud->sudi",
-    )?;
-    let k = rmsnorm_per_head(program, k_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+    // `k_raw` (the un-normed, un-roped local `K` projection) is `Some` only
+    // when this layer actually owns a `K` projection -- `ValueSource::SharedWithKey`
+    // (intra-layer, `V` stands in for `K`'s own raw output) is the one
+    // caller that reads it; a cross-layer `KeySource::Shared` layer has no
+    // local projection to offer, checked below.
+    let (rotated_k_even, rotated_k_odd, k_raw) = match key_source {
+        KeySource::Projected { wk, k_norm_weight } => {
+            let k_product = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(normed, "si->sudi"), (wk, "iud->sudi")],
+            )?;
+            let k_raw = reduce(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                k_product,
+                "sudi->sudi",
+                "sud->sudi",
+            )?;
+            let k = rmsnorm_per_head(program, k_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+            let (rotated_even, rotated_odd) =
+                fused_rope_pair(program, k, 'u', cos, sin, rope_pairing)?;
+            (rotated_even, rotated_odd, Some(k_raw))
+        }
+        KeySource::Shared {
+            rotated_even,
+            rotated_odd,
+        } => (rotated_even, rotated_odd, None),
+    };
 
     let v_raw = match value_source {
         ValueSource::Projected(wv) => {
@@ -569,12 +647,18 @@ pub fn append_attention_mixer(
                 "sud->sudi",
             )?
         }
-        ValueSource::SharedWithKey => k_raw,
+        ValueSource::SharedWithKey => {
+            k_raw.ok_or(TensorError::SharedWithKeyRequiresProjectedKey)?
+        }
+        ValueSource::Shared(v) => v,
     };
     // Gemma 4's `v_norm` (`Gemma4TextAttention.forward`,
     // `modeling_gemma4.py:1256-1265`): weightless per-kv-head RMSNorm, no
     // RoPE. Every non-Gemma-4 caller passes `value_norm: false` and gets the
-    // prior raw-`V` node back unchanged.
+    // prior raw-`V` node back unchanged. `ValueSource::Shared` callers
+    // already pass a source layer's post-norm `V` (see
+    // `AttentionMixerOutput::v`), so `value_norm` is always `false` for
+    // them -- applying it twice would double-normalize.
     let v = if value_norm {
         rmsnorm_per_head_no_scale(program, v_raw, inv_head_dim, eps, "u")?
     } else {
@@ -583,9 +667,6 @@ pub fn append_attention_mixer(
 
     let (rotated_q_even, rotated_q_odd) =
         fused_rope_pair(program, q, 'h', cos, sin, rope_pairing)?;
-
-    let (rotated_k_even, rotated_k_odd) =
-        fused_rope_pair(program, k, 'u', cos, sin, rope_pairing)?;
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
@@ -748,12 +829,19 @@ pub fn append_attention_mixer(
         None => attn_out,
     };
 
-    elementwise(
+    let residual = elementwise(
         program,
         DType::Float32,
         ScalarOp::Add,
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
-    )
+    )?;
+
+    Ok(AttentionMixerOutput {
+        residual,
+        rotated_k_even,
+        rotated_k_odd,
+        v,
+    })
 }
 
 /// The dense-triple SwiGLU FFN branch [`lfm2_forward_program_with_experts`]
@@ -1417,6 +1505,12 @@ pub fn lfm2_forward_program_with_experts(
         })?;
     let mut attention_layer_index: usize = 0;
     let mut moe_sites: Vec<MoeSite> = Vec::new();
+    // One slot per block, populated only for `LayerKind::Attention` entries
+    // that own a real `K`/`V` projection -- a later
+    // `KeySourceKind::SharedFromLayer(source)`/`ValueSourceKind::SharedFromLayer(source)`
+    // schedule entry (gemma4 E2B's cross-layer shared-KV) reads
+    // `stored_kv[source as usize]` rather than re-projecting.
+    let mut stored_kv: Vec<Option<(NodeId, NodeId, NodeId)>> = alloc::vec![None; block_count as usize];
 
     for (layer, entry) in schedule.iter().enumerate() {
         let layer = layer as u32;
@@ -1472,16 +1566,36 @@ pub fn lfm2_forward_program_with_experts(
                     ],
                     &alloc::format!("blk.{layer}.attn_q.weight"),
                 );
-                let wk = input_leaf(
-                    &mut program,
-                    DType::Float32,
-                    alloc::vec![
-                        Extent::Static(embedding),
-                        Extent::Static(kv_heads),
-                        Extent::Static(head_dim)
-                    ],
-                    &alloc::format!("blk.{layer}.attn_k.weight"),
-                );
+                let key_source = match config.key_source_kind {
+                    KeySourceKind::ProjectedK => {
+                        let wk = input_leaf(
+                            &mut program,
+                            DType::Float32,
+                            alloc::vec![
+                                Extent::Static(embedding),
+                                Extent::Static(kv_heads),
+                                Extent::Static(head_dim)
+                            ],
+                            &alloc::format!("blk.{layer}.attn_k.weight"),
+                        );
+                        let k_norm_weight = input_leaf(
+                            &mut program,
+                            DType::Float32,
+                            alloc::vec![Extent::Static(head_dim)],
+                            &alloc::format!("blk.{layer}.attn_k_norm.weight"),
+                        );
+                        KeySource::Projected { wk, k_norm_weight }
+                    }
+                    KeySourceKind::SharedFromLayer(source) => {
+                        let (rotated_even, rotated_odd, _) = stored_kv
+                            [source as usize]
+                            .ok_or(TensorError::SharedKvSourceNotAvailable { layer, source_layer: source })?;
+                        KeySource::Shared {
+                            rotated_even,
+                            rotated_odd,
+                        }
+                    }
+                };
                 let value_source = match config.value_source_kind {
                     ValueSourceKind::ProjectedV => {
                         let wv = input_leaf(
@@ -1497,6 +1611,11 @@ pub fn lfm2_forward_program_with_experts(
                         ValueSource::Projected(wv)
                     }
                     ValueSourceKind::SharedWithKey => ValueSource::SharedWithKey,
+                    ValueSourceKind::SharedFromLayer(source) => {
+                        let (_, _, v) = stored_kv[source as usize]
+                            .ok_or(TensorError::SharedKvSourceNotAvailable { layer, source_layer: source })?;
+                        ValueSource::Shared(v)
+                    }
                 };
                 let wo = input_leaf(
                     &mut program,
@@ -1515,13 +1634,7 @@ pub fn lfm2_forward_program_with_experts(
                     alloc::vec![Extent::Static(head_dim)],
                     &alloc::format!("blk.{layer}.attn_q_norm.weight"),
                 );
-                let k_norm_weight = input_leaf(
-                    &mut program,
-                    DType::Float32,
-                    alloc::vec![Extent::Static(head_dim)],
-                    &alloc::format!("blk.{layer}.attn_k_norm.weight"),
-                );
-                append_attention_mixer(
+                let mixer_output = append_attention_mixer(
                     &mut program,
                     x,
                     inv_dim,
@@ -1536,15 +1649,20 @@ pub fn lfm2_forward_program_with_experts(
                     group,
                     attn_norm_weight,
                     q_norm_weight,
-                    k_norm_weight,
                     wq,
-                    wk,
+                    key_source,
                     value_source,
                     wo,
                     config.rope_pairing,
                     post_attention_norm_weight,
                     config.value_norm,
-                )?
+                )?;
+                stored_kv[layer as usize] = Some((
+                    mixer_output.rotated_k_even,
+                    mixer_output.rotated_k_odd,
+                    mixer_output.v,
+                ));
+                mixer_output.residual
             }
             LayerKind::ShortConv => {
                 // `b_proj`/`c_proj`/`x_proj` are the real checkpoint's single

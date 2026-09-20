@@ -39,8 +39,8 @@ use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
 use proxima_tensor::op::NodeId;
 use proxima_tensor::spec::{
-    AttentionScoreScale, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
-    RopePairing, RopeTableSel, ValueSourceKind, lfm2_forward_program_with_experts,
+    AttentionScoreScale, KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind,
+    LayerSchedule, RopePairing, RopeTableSel, ValueSourceKind, lfm2_forward_program_with_experts,
 };
 use proxima_tokenizer::Vocab;
 
@@ -614,6 +614,7 @@ pub fn uniform_lfm2_schedule(architecture: &Lfm2Architecture) -> Vec<LayerSchedu
         kv_heads: architecture.kv_heads,
         mask_window: None,
         value_source_kind: ValueSourceKind::ProjectedV,
+        key_source_kind: KeySourceKind::ProjectedK,
         rope_table: RopeTableSel {
             cos_name: "rope_cos",
             sin_name: "rope_sin",

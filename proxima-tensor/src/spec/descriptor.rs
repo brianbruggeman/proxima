@@ -185,6 +185,7 @@ pub fn gemma4_descriptor(vocab: u32) -> ModelDescriptor {
                     kv_heads: GEMMA4_KV_HEADS_FULL,
                     mask_window: None,
                     value_source_kind: ValueSourceKind::SharedWithKey,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos",
                         sin_name: "rope_sin",
@@ -201,6 +202,7 @@ pub fn gemma4_descriptor(vocab: u32) -> ModelDescriptor {
                     kv_heads: GEMMA4_KV_HEADS_SWA,
                     mask_window: Some(GEMMA4_SLIDING_WINDOW),
                     value_source_kind: ValueSourceKind::ProjectedV,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos_swa",
                         sin_name: "rope_sin_swa",
@@ -358,6 +360,7 @@ pub fn mistral_descriptor_from_shape(
         kv_heads,
         mask_window: None,
         value_source_kind: ValueSourceKind::ProjectedV,
+        key_source_kind: KeySourceKind::ProjectedK,
         rope_table: RopeTableSel {
             cos_name: "rope_cos",
             sin_name: "rope_sin",

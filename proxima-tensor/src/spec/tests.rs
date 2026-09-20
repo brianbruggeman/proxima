@@ -7814,6 +7814,7 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
                 kv_heads: 8,
                 mask_window: None,
                 value_source_kind: ValueSourceKind::ProjectedV,
+                key_source_kind: KeySourceKind::ProjectedK,
                 rope_table: RopeTableSel {
                     cos_name: "rope_cos",
                     sin_name: "rope_sin",
@@ -7869,6 +7870,7 @@ async fn lfm2_forward_program_rejects_a_layer_schedule_length_mismatch() {
         kv_heads: 8,
         mask_window: None,
         value_source_kind: ValueSourceKind::ProjectedV,
+        key_source_kind: KeySourceKind::ProjectedK,
         rope_table: RopeTableSel {
             cos_name: "rope_cos",
             sin_name: "rope_sin",
@@ -12368,6 +12370,11 @@ mod gemma4_synthetic_parity {
                 ValueSource::Projected(wv)
             }
             ValueSourceKind::SharedWithKey => ValueSource::SharedWithKey,
+            ValueSourceKind::SharedFromLayer(_) => panic!(
+                "engine_attention_only is a single-layer isolated-primitive harness; \
+                 cross-layer shared-KV needs a real multi-layer forward, exercised by \
+                 the shared_kv module's own worked-example tests instead"
+            ),
         };
         let wo = input_leaf(
             &mut program,
@@ -12402,9 +12409,11 @@ mod gemma4_synthetic_parity {
             GROUP as u32,
             attn_norm,
             q_norm,
-            k_norm,
             wq,
-            wk,
+            KeySource::Projected {
+                wk,
+                k_norm_weight: k_norm,
+            },
             value_source,
             wo,
             RopePairing::SplitHalf {
@@ -12413,7 +12422,8 @@ mod gemma4_synthetic_parity {
             Some(post_attn_norm),
             true,
         )
-        .expect("isolated attention mixer lowers");
+        .expect("isolated attention mixer lowers")
+        .residual;
 
         let x_data = flatten(resid);
         let eps_data = alloc::vec![EPS; seq];
@@ -12685,6 +12695,7 @@ mod gemma4_synthetic_parity {
                     kv_heads: KV_HEADS as u32,
                     mask_window: Some(SWA_WINDOW as u32),
                     value_source_kind: ValueSourceKind::ProjectedV,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos_swa",
                         sin_name: "rope_sin_swa"
@@ -12704,6 +12715,7 @@ mod gemma4_synthetic_parity {
                     kv_heads: KV_HEADS as u32,
                     mask_window: None,
                     value_source_kind: ValueSourceKind::SharedWithKey,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos",
                         sin_name: "rope_sin"
@@ -13063,6 +13075,7 @@ mod gemma4_synthetic_parity {
                     kv_heads: KV_HEADS as u32,
                     mask_window: Some(SWA_WINDOW as u32),
                     value_source_kind: ValueSourceKind::ProjectedV,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos_swa",
                         sin_name: "rope_sin_swa"
@@ -13082,6 +13095,7 @@ mod gemma4_synthetic_parity {
                     kv_heads: KV_HEADS as u32,
                     mask_window: None,
                     value_source_kind: ValueSourceKind::SharedWithKey,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos",
                         sin_name: "rope_sin"
@@ -13376,6 +13390,7 @@ mod gemma4_synthetic_parity {
                     kv_heads: KV_HEADS as u32,
                     mask_window: Some(SWA_WINDOW as u32),
                     value_source_kind: ValueSourceKind::ProjectedV,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos_swa",
                         sin_name: "rope_sin_swa"
@@ -13395,6 +13410,7 @@ mod gemma4_synthetic_parity {
                     kv_heads: KV_HEADS as u32,
                     mask_window: None,
                     value_source_kind: ValueSourceKind::SharedWithKey,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos",
                         sin_name: "rope_sin"
@@ -13659,6 +13675,7 @@ mod gemma4_synthetic_parity {
                     kv_heads: KV_HEADS as u32,
                     mask_window: Some(SWA_WINDOW as u32),
                     value_source_kind: ValueSourceKind::ProjectedV,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos_swa",
                         sin_name: "rope_sin_swa"
@@ -13678,6 +13695,7 @@ mod gemma4_synthetic_parity {
                     kv_heads: KV_HEADS as u32,
                     mask_window: None,
                     value_source_kind: ValueSourceKind::SharedWithKey,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos",
                         sin_name: "rope_sin"
@@ -13914,6 +13932,7 @@ mod gemma4_synthetic_parity {
                         kv_heads,
                         mask_window: Some(REAL_SLIDING_WINDOW),
                         value_source_kind: ValueSourceKind::ProjectedV,
+                        key_source_kind: KeySourceKind::ProjectedK,
                         rope_table: RopeTableSel {
                             cos_name: "rope_cos_swa",
                             sin_name: "rope_sin_swa",
@@ -13930,6 +13949,7 @@ mod gemma4_synthetic_parity {
                         kv_heads,
                         mask_window: None,
                         value_source_kind: ValueSourceKind::SharedWithKey,
+                        key_source_kind: KeySourceKind::ProjectedK,
                         rope_table: RopeTableSel {
                             cos_name: "rope_cos",
                             sin_name: "rope_sin",
@@ -14174,6 +14194,7 @@ mod gemma4_synthetic_parity {
                     kv_heads: KV_HEADS as u32,
                     mask_window: Some(SWA_WINDOW as u32),
                     value_source_kind: ValueSourceKind::ProjectedV,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos_swa",
                         sin_name: "rope_sin_swa"
@@ -14193,6 +14214,7 @@ mod gemma4_synthetic_parity {
                     kv_heads: KV_HEADS as u32,
                     mask_window: None,
                     value_source_kind: ValueSourceKind::SharedWithKey,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos",
                         sin_name: "rope_sin"
@@ -15195,5 +15217,285 @@ mod gemma4_synthetic_parity {
             "v       engine={engine_v:?} reference={reference_v:?} diff={}",
             max_abs_diff(&engine_v, &reference_v)
         );
+    }
+
+    /// Worked example for gemma4 E2B's cross-layer shared-KV
+    /// ([`ValueSourceKind::SharedFromLayer`]/[`KeySourceKind::SharedFromLayer`]):
+    /// a shared layer fed a source layer's already-computed post-rope `K` /
+    /// post-norm `V` must produce the EXACT SAME attention output as an
+    /// independent own-KV layer holding numerically identical `K`/`V`
+    /// weights -- proving [`append_attention_mixer`]'s `KeySource::Shared`/
+    /// `ValueSource::Shared` path REUSES the source layer's nodes rather
+    /// than silently re-deriving its own.
+    mod shared_kv_worked_example {
+        use super::*;
+
+        /// Three attention "layers" share one `x`/`attn_norm`/`q_norm`/`wq`/`wo`
+        /// (so `Q` is identical across all three): layer `x_source` is a real
+        /// own-KV layer; layer `y_shared` reads `x_source`'s post-rope `K` /
+        /// post-norm `V` via `KeySource::Shared`/`ValueSource::Shared` (the
+        /// production wiring `lfm2_forward_program_with_experts` builds for a
+        /// `SharedFromLayer` schedule entry); layer `z_control` is an
+        /// INDEPENDENT own-KV layer whose `wk`/`k_norm`/`wv` leaves are bound
+        /// to the SAME numeric data as `x_source`'s, under different leaf
+        /// names, so it re-derives (not reuses) numerically identical `K`/`V`.
+        /// `y_shared` and `z_control` must evaluate to the same output.
+        #[test]
+        fn shared_from_layer_reuses_source_kv_exactly() {
+            let seq = SEQ;
+            let mut program = Vec::new();
+
+            let x = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+                "x",
+            );
+            let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+            let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+            let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0);
+            let inv_head_dim = scalar_constant(&mut program, 1.0 / HEAD_DIM as f32);
+            let cos = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0), Extent::Static(PAIRS as u32)],
+                "cos",
+            );
+            let sin = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0), Extent::Static(PAIRS as u32)],
+                "sin",
+            );
+            let group_ones = op::append(
+                &mut program,
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![
+                        Extent::Static(KV_HEADS as u32),
+                        Extent::Static(GROUP as u32)
+                    ],
+                    value: 1.0,
+                },
+            );
+            let (is_future, neg_infinity) =
+                causal_mask_windowed(&mut program, None).expect("causal mask lowers");
+            let attn_norm = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(EMBEDDING as u32)],
+                "attn_norm",
+            );
+            let q_norm = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(HEAD_DIM as u32)],
+                "q_norm",
+            );
+            let wq = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(EMBEDDING as u32),
+                    Extent::Static(QUERY_HEADS as u32),
+                    Extent::Static(HEAD_DIM as u32)
+                ],
+                "wq",
+            );
+            let wo = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(KV_HEADS as u32),
+                    Extent::Static(GROUP as u32),
+                    Extent::Static(HEAD_DIM as u32),
+                    Extent::Static(EMBEDDING as u32),
+                ],
+                "wo",
+            );
+            let kv_leaf = |program: &mut Vec<Op>, name: &str| {
+                input_leaf(
+                    program,
+                    DType::Float32,
+                    alloc::vec![
+                        Extent::Static(EMBEDDING as u32),
+                        Extent::Static(KV_HEADS as u32),
+                        Extent::Static(HEAD_DIM as u32)
+                    ],
+                    name,
+                )
+            };
+            let k_norm_leaf = |program: &mut Vec<Op>, name: &str| {
+                input_leaf(
+                    program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(HEAD_DIM as u32)],
+                    name,
+                )
+            };
+
+            // Layer `x_source`: real own-KV projection.
+            let wk_x = kv_leaf(&mut program, "wk_x");
+            let k_norm_x = k_norm_leaf(&mut program, "k_norm_x");
+            let wv_x = kv_leaf(&mut program, "wv_x");
+            let source = append_attention_mixer(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                inv_sqrt_head_dim,
+                inv_head_dim,
+                cos,
+                sin,
+                group_ones,
+                is_future,
+                neg_infinity,
+                GROUP as u32,
+                attn_norm,
+                q_norm,
+                wq,
+                KeySource::Projected {
+                    wk: wk_x,
+                    k_norm_weight: k_norm_x,
+                },
+                ValueSource::Projected(wv_x),
+                wo,
+                RopePairing::SplitHalf {
+                    pairs: PAIRS as u32,
+                },
+                None,
+                false,
+            )
+            .expect("source layer lowers");
+
+            // Layer `y_shared`: production shared-KV wiring -- borrows
+            // `source`'s own post-rope K / post-norm V verbatim.
+            let shared_output = append_attention_mixer(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                inv_sqrt_head_dim,
+                inv_head_dim,
+                cos,
+                sin,
+                group_ones,
+                is_future,
+                neg_infinity,
+                GROUP as u32,
+                attn_norm,
+                q_norm,
+                wq,
+                KeySource::Shared {
+                    rotated_even: source.rotated_k_even,
+                    rotated_odd: source.rotated_k_odd,
+                },
+                ValueSource::Shared(source.v),
+                wo,
+                RopePairing::SplitHalf {
+                    pairs: PAIRS as u32,
+                },
+                None,
+                false,
+            )
+            .expect("shared layer lowers")
+            .residual;
+
+            // Layer `z_control`: independent own-KV projection, bound to
+            // NUMERICALLY IDENTICAL weight data under separate leaf names --
+            // proves the comparison is not merely NodeId identity.
+            let wk_z = kv_leaf(&mut program, "wk_z");
+            let k_norm_z = k_norm_leaf(&mut program, "k_norm_z");
+            let wv_z = kv_leaf(&mut program, "wv_z");
+            let control_output = append_attention_mixer(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                inv_sqrt_head_dim,
+                inv_head_dim,
+                cos,
+                sin,
+                group_ones,
+                is_future,
+                neg_infinity,
+                GROUP as u32,
+                attn_norm,
+                q_norm,
+                wq,
+                KeySource::Projected {
+                    wk: wk_z,
+                    k_norm_weight: k_norm_z,
+                },
+                ValueSource::Projected(wv_z),
+                wo,
+                RopePairing::SplitHalf {
+                    pairs: PAIRS as u32,
+                },
+                None,
+                false,
+            )
+            .expect("control layer lowers")
+            .residual;
+
+            let x_data = wave("shared_kv_x", seq * EMBEDDING);
+            let eps_data = alloc::vec![EPS; seq];
+            let positions: Vec<usize> = (0..seq).collect();
+            let (cos_table, sin_table) = rope_table(&positions, ROPE_BASE_FULL, HEAD_DIM);
+            let cos_data = flatten(&cos_table);
+            let sin_data = flatten(&sin_table);
+            let attn_norm_data = norm_wave("shared_kv_attn_norm", EMBEDDING);
+            let q_norm_data = norm_wave("shared_kv_q_norm", HEAD_DIM);
+            let wq_data = wave("shared_kv_wq", EMBEDDING * QUERY_HEADS * HEAD_DIM);
+            let wo_data = wave("shared_kv_wo", KV_HEADS * GROUP * HEAD_DIM * EMBEDDING);
+            let wk_data = wave("shared_kv_wk", EMBEDDING * KV_HEADS * HEAD_DIM);
+            let k_norm_data = norm_wave("shared_kv_k_norm", HEAD_DIM);
+            let wv_data = wave("shared_kv_wv", EMBEDDING * KV_HEADS * HEAD_DIM);
+
+            let named: Vec<(&str, &[f32])> = alloc::vec![
+                ("x", x_data.as_slice()),
+                ("eps", eps_data.as_slice()),
+                ("cos", cos_data.as_slice()),
+                ("sin", sin_data.as_slice()),
+                ("attn_norm", attn_norm_data.as_slice()),
+                ("q_norm", q_norm_data.as_slice()),
+                ("wq", wq_data.as_slice()),
+                ("wo", wo_data.as_slice()),
+                ("wk_x", wk_data.as_slice()),
+                ("k_norm_x", k_norm_data.as_slice()),
+                ("wv_x", wv_data.as_slice()),
+                // `z_control`'s own leaves, bound to the SAME arrays as
+                // `x_source`'s -- separate names, identical bytes.
+                ("wk_z", wk_data.as_slice()),
+                ("k_norm_z", k_norm_data.as_slice()),
+                ("wv_z", wv_data.as_slice()),
+            ];
+
+            let evaluated = crate::cpu::evaluate_named(
+                &program,
+                &[seq as u64],
+                &named,
+                &[shared_output, control_output],
+            )
+            .expect("shared-kv worked example evaluates");
+
+            let shared = evaluated
+                .get(shared_output)
+                .expect("shared layer output present")
+                .0
+                .to_vec();
+            let control = evaluated
+                .get(control_output)
+                .expect("control layer output present")
+                .0
+                .to_vec();
+
+            let diff = max_abs_diff(&shared, &control);
+            assert!(
+                diff <= TOLERANCE,
+                "shared-KV layer diverged from an equivalent own-KV control layer: \
+                 shared={shared:?} control={control:?} diff={diff}"
+            );
+        }
     }
 }
