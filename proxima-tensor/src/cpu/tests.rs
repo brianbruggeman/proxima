@@ -11615,6 +11615,71 @@ fn matmul_q4k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_g
     }
 }
 
+/// [`matmul_q4k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_gguf_bytes`]
+/// at real prefill widths: `run_reduce_quantized` (`run_reduce_scan.rs`)
+/// currently gates its `Q4_K` wide-fold call site to `leading_total == 1`,
+/// routing every multi-position prefill through the per-position loop
+/// instead of this already-proven wide path. This test proves the wide
+/// path itself is correct at `leading_total` values a real prefill uses
+/// (16 and 32 tokens), independent of that call-site gate, on the same
+/// real `Q4_K` bytes and by the same narrow-call comparison as the
+/// `leading_total = 3` case above.
+#[cfg(feature = "q4k-int8-dot")]
+#[test]
+fn matmul_q4k_q8k_f32_wide_matches_narrow_calls_at_prefill_widths_on_real_gguf_bytes() {
+    let path = std::path::Path::new(REAL_OPENCHAT_GGUF_PATH);
+    let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
+        eprintln!("real gguf file not found at {REAL_OPENCHAT_GGUF_PATH}; test skipped");
+        return;
+    };
+    let Some((weight_bytes, in_dim, out_dim)) = real_tensor_bytes(
+        &mut file,
+        &parsed,
+        file_len,
+        "blk.0.attn_q.weight",
+        proxima_gguf::types::GgmlType::Q4_K,
+    ) else {
+        return;
+    };
+
+    for leading_total in [16usize, 32usize] {
+        let activation: Vec<f32> = (0..leading_total)
+            .flat_map(|position| {
+                random_vec(900 + position as u64, in_dim)
+                    .into_iter()
+                    .map(|value| value - 0.5)
+            })
+            .collect();
+
+        let wide =
+            matmul_q4k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None)
+                .expect("wide fold call");
+        assert_eq!(
+            wide.len(),
+            out_dim * leading_total,
+            "leading_total={leading_total}: wide output is not row-major [row][position]"
+        );
+
+        let mut max_diff = 0.0f32;
+        for position in 0..leading_total {
+            let activation_row = &activation[position * in_dim..(position + 1) * in_dim];
+            let narrow = matmul_q4k_q8k_f32(&weight_bytes, out_dim, activation_row)
+                .expect("narrow per-position call");
+            for row in 0..out_dim {
+                let diff = (wide[row * leading_total + position] - narrow[row]).abs();
+                max_diff = max_diff.max(diff);
+                assert_eq!(
+                    wide[row * leading_total + position],
+                    narrow[row],
+                    "leading_total={leading_total} row={row} position={position}: \
+                     folded and per-position paths diverged"
+                );
+            }
+        }
+        eprintln!("leading_total={leading_total}: max_diff={max_diff} (bit-exact required)");
+    }
+}
+
 /// [`matmul_q4k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_gguf_bytes`]'s
 /// exact mechanism, ported to `Q5_K`: [`matmul_q5k_q8k_f32_impl`] now
 /// takes `leading_total` and folds every position's dot into one pass
