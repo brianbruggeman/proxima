@@ -38,7 +38,15 @@ pub(super) fn push_packed_row_blocked_body(
         codec,
         ..
     } = *block;
-    let block_bytes = codec_block_bytes(codec);
+    // `codec_row_block_step_bytes`, not plain `codec_block_bytes`: the
+    // preamble below steps `blk_ptr[q]` by `Q4K_BLOCK_ELEMENTS`-wide spans
+    // (`weight_base[q] / Q4K_BLOCK_ELEMENTS`) regardless of codec -- equal
+    // to `codec_block_bytes` for every K-quant codec, but `Q8_0`'s own block
+    // is 32 elements, so its step must be eight real blocks' worth of bytes.
+    // The two `use_ggml_port`/`use_single_fetch` bodies below that also take
+    // a `block_bytes` parameter never see `Q8_0` (gated to `Q4K`/`Q5K`/
+    // `Q6K`), so this substitution is a no-op for every codec but `Q8_0`.
+    let block_bytes = codec_row_block_step_bytes(codec);
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
     // seeded on lane 0 only, exactly as the general cooperative path does:
@@ -549,10 +557,34 @@ pub(super) fn push_packed_row_blocked_body(
                     source.push_str("            }\n");
                 }
                 Codec::Q8_0 => {
-                    return Err(EmitError::NonKQuantCodec {
-                        node: resolved.node,
-                        codec: "q8_0",
-                    });
+                    // `sub` (32) is exactly `Q8_0_BLOCK_ELEMENTS`: this
+                    // lane's whole 32-element slot IS one real `Q8_0` block,
+                    // so `q8_0_super_element` decodes it a scale-load-plus-
+                    // level-load at a time, same per-element posture as
+                    // `Q2_K`/`Q3_K`'s own default arms above (no batched
+                    // unpack yet -- a follow-up optimization, not a
+                    // correctness gap).
+                    source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
+                    source.push_str(&format!(
+                        "                {element_type} scratch[{}];\n",
+                        operand_count.max(1)
+                    ));
+                    source.push_str(&format!(
+                        "                scratch[{weight}] = q8_0_super_element(blk, slot + (uint)e);\n"
+                    ));
+                    source.push_str(&format!("                scratch[{other}] = acts[e];\n"));
+                    let value_expr = push_body_steps(
+                        source,
+                        resolved.element_body(),
+                        "                ",
+                        element_type,
+                    );
+                    source.push_str(&format!(
+                        "                {element_type} value = {value_expr};\n"
+                    ));
+                    let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+                    source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
+                    source.push_str("            }\n");
                 }
                 Codec::Q4_0 => {
                     return Err(EmitError::NonKQuantCodec {
