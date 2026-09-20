@@ -18,6 +18,14 @@ Last landed slice: 0 of the campaign (component 1 scaffold landed; kernel crux c
 Next action: land component 1's bind/arena fix (moe-mul-mat-id slice 2), get its packed-row op_count ≤200 + parity, then measure component-1-only TTNT before starting component 2's spec
 Open question, if any: does closing packed-row alone move TTNT measurably, or is the e2e win gated on all three together? (R4 measures all-on; component-1-only TTNT is the early read)
 
+## 2026-09-19 decode-dense session (proxima-wt-hoist)
+
+- Component 1 (batched-reduce) CORRECTNESS verified at KB/MB scale (Float32 bit-exact + Q4K within the codebase's quant-noise budget vs an f32 oracle; gpu-decode-diagnosis). BUT its op_count≤200 + TTNT AC (slice 1 / slice 4) is STILL unmeasured — parked on the single 24GB `gguf_generate` run, which needs owner RAM authorization ("don't consume RAM without permission").
+- Small-dense-decode scoping (qwen3:0.6b, MEASURED): LAUNCH-bound — 513 dispatches/tok, GPU busy only 46% of wall, 54% CPU dispatch overhead. NOT a proxy for the 8b's bandwidth-bound (36.8% util) gap. The dominant small-model lever = components 2 (R2 cooperative/gdn-attention-fusion — HIGHEST leverage) + 3 (R3 elementwise), the SAME buckets as the MoE; est ~40% dispatch cut (513→~300). So R2/R3 are the levers for both regimes; extend THIS spec, don't open a new one.
+- Landed this session (uncommitted, proxima-wt-hoist), both CORRECT but mis-targeted for their measured symptom (see [[feedback_verify_fix_target_against_model_bytes]]): (a) Q8_0 packed-row fast-path (emit_and_classify.rs:1731 + packed_row_blocked_ggml.rs Q8_0 arm; 2.1e-6 vs f32 oracle, 26/26 green) — helps Q8_0-weight models (likely qwen35moe attn_v), NOT qwen3:0.6b (its attn_v is F16, zero Q8_0). (b) CPU-path prefill guard drop (run_reduce_scan.rs leading_total==1; 669 green) — CPU engine only; gpu prefill runs omega Metal (already token-batched), so it doesn't touch the gpu 769ms.
+- Also found: gemma4-E2B doesn't load (matformer per-layer-array feed_forward_length, hparams.rs:74) — enablement in flight.
+- REFUTATION GATE HOLDS: measure component-1-only TTNT (the 24GB run) BEFORE building R2/R3 — do not spend fusion tooling until dispatch-collapse is proven to move wall-clock. So the decode-dense fusion campaign's next step IS the 24GB component-1 measurement (owner RAM go).
+
 ## struck
 
 -
