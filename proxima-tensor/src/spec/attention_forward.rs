@@ -114,10 +114,10 @@ pub enum EmbeddingScale {
     Sqrt,
 }
 
-/// The nonlinearity [`append_activation`] composes for an FFN's
+/// The nonlinearity `append_activation` composes for an FFN's
 /// gate/up product -- FFN activation was a hardcoded `sigmoid(gate) * gate`
-/// (SiLU) chain buried in [`append_dense_swiglu_ffn`] and
-/// [`append_moe_round_output`] until Gemma 4's GeGLU (`gelu_pytorch_tanh`)
+/// (SiLU) chain buried in `append_dense_swiglu_ffn` and
+/// `append_moe_round_output` until Gemma 4's GeGLU (`gelu_pytorch_tanh`)
 /// needed a different nonlinearity on the same graph shape. `Silu` (every
 /// caller in this crate today, [`LayerFfnConfig::exclusive`]'s default)
 /// reproduces the prior hardcoded chain node-for-node.
@@ -315,17 +315,17 @@ pub struct LayerFfnConfig {
     /// FFN residual add. `false` (every caller today) reproduces the prior
     /// unscaled residual.
     pub output_scale: bool,
-    /// Gating function [`append_routed_expert_ffn`] applies to the routed
+    /// Gating function `append_routed_expert_ffn` applies to the routed
     /// branch's router logits. `Sigmoid` (every caller in this crate today,
     /// [`FfnCombination::Exclusive`]'s own prior hardcoded choice) reproduces
     /// LFM2's own MoE softmax-free routing; Gemma 4 uses `Softmax`.
     pub routed_gating: ExpertGatingFunc,
     /// `true` (every caller today) binds `blk.{layer}.exp_probs_b.bias` and
     /// adds it into the router logits before argmax selection, exactly
-    /// [`append_routed_expert_ffn`]'s prior hardcoded leaf. Gemma 4 has no
+    /// `append_routed_expert_ffn`'s prior hardcoded leaf. Gemma 4 has no
     /// such bias on its routed branch and sets `false`.
     pub routed_expert_bias: bool,
-    /// Nonlinearity [`append_activation`] applies to both the dense and
+    /// Nonlinearity `append_activation` applies to both the dense and
     /// routed branches' gate/up product. `Silu` (every caller in this
     /// crate today) reproduces the prior hardcoded SiLU chain
     /// node-for-node; Gemma 4 sets `GeluTanh` for its GeGLU FFN.
@@ -1689,8 +1689,8 @@ pub(crate) fn ple_layer_input(
 /// exists (`spec::lfm2_single_range_cached::lfm2_single_range_cached_forward_program_with_experts`,
 /// behind the `gemma4-kv-cache` feature one level up in
 /// `proxima-model-interop`) -- it shares this function's own
-/// [`build_attention_layer_resources`] pre-pass and
-/// [`append_lfm2_layer_ffn`] post-attention/FFN composition, only the
+/// `build_attention_layer_resources` pre-pass and
+/// `append_lfm2_layer_ffn` post-attention/FFN composition, only the
 /// attention sub-block itself differs (merged-cache scoring in place of
 /// block-local scoring). A CONV-state-cached counterpart for a schedule
 /// containing [`LayerKind::ShortConv`] is still a further step neither
@@ -1709,9 +1709,9 @@ pub(crate) fn ple_layer_input(
 /// today, reproducing the prior unscaled embedding and untransformed
 /// final logits. `ple_dim` (`Some(256)` for gemma4 E2B, `None` for every
 /// other caller) is the checkpoint-wide per-layer-embedding (PLE) toggle --
-/// `Some` builds [`PleSharedProjections`] once via
-/// [`append_ple_shared_projections`] and slices this loop's own
-/// `per_layer_input` per layer via [`ple_layer_input`]; a layer only
+/// `Some` builds `PleSharedProjections` once via
+/// `append_ple_shared_projections` and slices this loop's own
+/// `per_layer_input` per layer via `ple_layer_input`; a layer only
 /// INJECTS it (Stage B) when its own `schedule[layer].ffn.ple` is also
 /// `true`. `None` (every caller before Gemma 4 E2B) skips Stage A
 /// entirely, reproducing this function's prior program byte-for-byte.

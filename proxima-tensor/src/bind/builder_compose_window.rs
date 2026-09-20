@@ -332,7 +332,7 @@ impl BoundOpBuilder {
         Ok(emitted)
     }
 
-    /// [`bind_plain`]'s reachability skip lane: advances the position
+    /// `bind_plain`'s reachability skip lane: advances the position
     /// counter and keeps every per-node bookkeeping vector
     /// (`ones`/`is_iota`/`packed_mapping_subtree`/`constant_value`) aligned
     /// to it, without running any of [`push`](Self::push)'s binding work.
@@ -350,7 +350,7 @@ impl BoundOpBuilder {
 
     /// Flush every elementwise op still held: each was a requested output,
     /// and either way it materializes as its own op. A node reachable from
-    /// no output never enters `held` at all — [`bind_plain`] never calls
+    /// no output never enters `held` at all — `bind_plain` never calls
     /// [`push`](Self::push) for it — so this no longer flushes dead code.
     /// Processed from the highest [`NodeId`] down: a still-held node can
     /// only ever be fused into a consumer with a *greater* id (references

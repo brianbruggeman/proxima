@@ -47,9 +47,9 @@ pub fn annotate(program: &[Op], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
     retires
 }
 
-/// Every node reachable from `outputs` through [`uses`] — operands, gather
+/// Every node reachable from `outputs` through `uses` — operands, gather
 /// indices, and a data-dependent reduce `out_map`'s own indices. This is
-/// [`bind::bind_plain`](crate::bind::bind_plain)'s reachability pass: a
+/// `bind::bind_plain`'s reachability pass: a
 /// program built once and bound for several output sets (ROW 541,
 /// `docs/discipline.md` — a prefill tap a decode-only `outputs` never
 /// requests) only ever binds the ops this set names, never the whole

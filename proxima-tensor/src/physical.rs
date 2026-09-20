@@ -293,7 +293,7 @@ pub struct CachedAttentionPassPlane<'buffer> {
 }
 
 /// The rotated width per head plus its optional pass-plane companion,
-/// bundled into one parameter the same way [`cpu::OperandSpan`]-style
+/// bundled into one parameter the same way `cpu::OperandSpan`-style
 /// bundling cut a prior arity-limit failure (`docs/discipline.md` ROW 3
 /// addendum) — `rotary_dim` and `pass` always travel together (`pass` is
 /// `Some` if and only if `rotary_dim < extents.head_dim`), so bundling them
