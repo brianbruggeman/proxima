@@ -62,8 +62,9 @@
 use proxima_model_interop::gemma4::program::gemma4_sliding_rope_table;
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
-    LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, ParallelDenseMoeConfig,
-    RopePairing, RopeTableSel, ValueSourceKind, lfm2_forward_program_with_experts,
+    KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
+    ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind,
+    lfm2_forward_program_with_experts,
 };
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};
@@ -127,6 +128,7 @@ fn gemma4_synthetic_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
         dense_feed_forward: None,
         exclusive_dense_post_norm: false,
         activation: Activation::GeluTanh,
+        ple: false,
     };
     sliding_pattern
         .iter()
@@ -137,6 +139,7 @@ fn gemma4_synthetic_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
                     kv_heads: KV_HEADS,
                     mask_window: Some(SLIDING_WINDOW),
                     value_source_kind: ValueSourceKind::ProjectedV,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos_swa",
                         sin_name: "rope_sin_swa",
@@ -153,6 +156,7 @@ fn gemma4_synthetic_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
                     kv_heads: KV_HEADS,
                     mask_window: None,
                     value_source_kind: ValueSourceKind::SharedWithKey,
+                    key_source_kind: KeySourceKind::ProjectedK,
                     rope_table: RopeTableSel {
                         cos_name: "rope_cos",
                         sin_name: "rope_sin",
@@ -261,6 +265,7 @@ fn logits_relative_error(layer_count: u32) -> f32 {
         Some(EmbeddingScale::Sqrt),
         None,
         false,
+        None,
     )
     .expect("the gemma4-shaped forward program lowers at the synthetic architecture's width");
 
