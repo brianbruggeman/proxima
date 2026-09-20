@@ -445,6 +445,19 @@ required-features = ["std"]
 name = "speculative_decode_parity"
 required-features = ["std"]
 
+# Task brief "attribute a real gemma4-E2B forward's GPU time onto op/kernel
+# types" -- drives `generate_with_serving_config` through
+# `PROXIMA_METAL_DISPATCH_PROFILE_STEP` (already-wired production per-
+# dispatch GPU-timestamp path, `decode.rs:4126-4157`), not a new isolated-
+# kernel bench (SLICE 3's own floor-doubling finding rules that out).
+# `metal-output-placement` pulls in `evaluate_dispatch_timed_with_placements`
+# (`generate/residency_caches.rs:2058-2063`); `instrument` pulls in the
+# `report_op_timings` emission this example reads via a console telemetry
+# sink.
+[[example]]
+name = "gemma4_dispatch_profile_widths"
+required-features = ["std", "metal", "instrument", "metal-output-placement"]
+
 # SLICE 1 forward decomposition harness (`bench/forward-decomposition`):
 # root-causes the multi-position gpu_exec floor by splitting the gemma4-E2B
 # Metal forward into named components, each on the compile axis
