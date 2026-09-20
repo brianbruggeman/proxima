@@ -12008,26 +12008,26 @@ mod gemma4_synthetic_parity {
         let mut v_val = alloc::vec![alloc::vec![alloc::vec![0.0f32; HEAD_DIM]; KV_HEADS]; seq];
 
         for s in 0..seq {
-            for h in 0..QUERY_HEADS {
+            for (h, q_rot_head) in q_rot[s].iter_mut().enumerate() {
                 let mut raw = alloc::vec![0.0f32; HEAD_DIM];
-                for d in 0..HEAD_DIM {
+                for (d, raw_value) in raw.iter_mut().enumerate() {
                     let mut acc = 0.0f32;
-                    for i in 0..EMBEDDING {
-                        acc += normed[s][i] * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
+                    for (i, &normed_value) in normed[s].iter().enumerate() {
+                        acc += normed_value * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
                     }
-                    raw[d] = acc;
+                    *raw_value = acc;
                 }
                 let head_normed = rmsnorm_ref(&raw, &weights.q_norm, EPS);
-                q_rot[s][h] = rope_split_half(&head_normed, &cos[s], &sin[s]);
+                *q_rot_head = rope_split_half(&head_normed, &cos[s], &sin[s]);
             }
             for u in 0..KV_HEADS {
                 let mut raw = alloc::vec![0.0f32; HEAD_DIM];
-                for d in 0..HEAD_DIM {
+                for (d, raw_value) in raw.iter_mut().enumerate() {
                     let mut acc = 0.0f32;
-                    for i in 0..EMBEDDING {
-                        acc += normed[s][i] * weights.wk[(i * KV_HEADS + u) * HEAD_DIM + d];
+                    for (i, &normed_value) in normed[s].iter().enumerate() {
+                        acc += normed_value * weights.wk[(i * KV_HEADS + u) * HEAD_DIM + d];
                     }
-                    raw[d] = acc;
+                    *raw_value = acc;
                 }
                 let head_normed = rmsnorm_ref(&raw, &weights.k_norm, EPS);
                 k_rot[s][u] = rope_split_half(&head_normed, &cos[s], &sin[s]);
@@ -12062,7 +12062,7 @@ mod gemma4_synthetic_parity {
         let scale = 1.0;
         let mut attn_out = alloc::vec![alloc::vec![0.0f32; EMBEDDING]; seq];
         for s in 0..seq {
-            for h in 0..QUERY_HEADS {
+            for (h, q_rot_head) in q_rot[s].iter().enumerate() {
                 let u = h / GROUP;
                 let lo = match window {
                     Some(w) if s + 1 > w => s + 1 - w,
@@ -12075,7 +12075,7 @@ mod gemma4_synthetic_parity {
                 for t in lo..=s {
                     let mut dot = 0.0f32;
                     for d in 0..HEAD_DIM {
-                        dot += q_rot[s][h][d] * k_rot[t][u][d];
+                        dot += q_rot_head[d] * k_rot[t][u][d];
                     }
                     scores[t] = dot * scale;
                 }
@@ -12098,13 +12098,13 @@ mod gemma4_synthetic_parity {
                     }
                 }
                 let g = h % GROUP;
-                for o in 0..EMBEDDING {
-                    let mut acc = attn_out[s][o];
-                    for d in 0..HEAD_DIM {
-                        acc += attended[d]
+                for (o, slot) in attn_out[s].iter_mut().enumerate() {
+                    let mut acc = *slot;
+                    for (d, &attended_value) in attended.iter().enumerate() {
+                        acc += attended_value
                             * weights.wo[((u * GROUP + g) * HEAD_DIM + d) * EMBEDDING + o];
                     }
-                    attn_out[s][o] = acc;
+                    *slot = acc;
                 }
             }
         }
@@ -12129,20 +12129,20 @@ mod gemma4_synthetic_parity {
         for g in 0..FEED_FORWARD {
             let mut gate_acc = 0.0f32;
             let mut up_acc = 0.0f32;
-            for i in 0..EMBEDDING {
-                gate_acc += x[i] * weights.ffn_gate[i * FEED_FORWARD + g];
-                up_acc += x[i] * weights.ffn_up[i * FEED_FORWARD + g];
+            for (i, &x_value) in x.iter().enumerate() {
+                gate_acc += x_value * weights.ffn_gate[i * FEED_FORWARD + g];
+                up_acc += x_value * weights.ffn_up[i * FEED_FORWARD + g];
             }
             gate[g] = gate_acc;
             up[g] = up_acc;
         }
         let mut out = alloc::vec![0.0f32; EMBEDDING];
-        for o in 0..EMBEDDING {
+        for (o, slot) in out.iter_mut().enumerate() {
             let mut acc = 0.0f32;
             for g in 0..FEED_FORWARD {
                 acc += gelu_tanh(gate[g]) * up[g] * weights.ffn_down[g * EMBEDDING + o];
             }
-            out[o] = acc;
+            *slot = acc;
         }
         out
     }
@@ -12167,12 +12167,12 @@ mod gemma4_synthetic_parity {
             .map(|&value| value * inv_sqrt_embedding)
             .collect();
         let mut logits = alloc::vec![0.0f32; EXPERT_COUNT];
-        for e in 0..EXPERT_COUNT {
+        for (e, slot) in logits.iter_mut().enumerate() {
             let mut acc = 0.0f32;
-            for i in 0..EMBEDDING {
-                acc += scaled[i] * weights.gate_inp[i * EXPERT_COUNT + e];
+            for (i, &scaled_value) in scaled.iter().enumerate() {
+                acc += scaled_value * weights.gate_inp[i * EXPERT_COUNT + e];
             }
-            logits[e] = acc;
+            *slot = acc;
         }
 
         let mut scores = logits.clone();
@@ -12196,22 +12196,22 @@ mod gemma4_synthetic_parity {
             for g in 0..EXPERT_FF {
                 let mut gate_acc = 0.0f32;
                 let mut up_acc = 0.0f32;
-                for i in 0..EMBEDDING {
+                for (i, &expert_input_value) in expert_input.iter().enumerate() {
                     let index = (route * EMBEDDING + i) * EXPERT_FF + g;
-                    gate_acc += expert_input[i] * weights.gate_exps[index];
-                    up_acc += expert_input[i] * weights.up_exps[index];
+                    gate_acc += expert_input_value * weights.gate_exps[index];
+                    up_acc += expert_input_value * weights.up_exps[index];
                 }
                 gate[g] = gate_acc;
                 up[g] = up_acc;
             }
-            for o in 0..EMBEDDING {
+            for (o, slot) in weighted_sum.iter_mut().enumerate() {
                 let mut acc = 0.0f32;
                 for g in 0..EXPERT_FF {
                     acc += gelu_tanh(gate[g])
                         * up[g]
                         * weights.down_exps[(route * EXPERT_FF + g) * EMBEDDING + o];
                 }
-                weighted_sum[o] += combine_weight * acc;
+                *slot += combine_weight * acc;
             }
             scores[route] = f32::NEG_INFINITY;
         }
@@ -13020,12 +13020,12 @@ mod gemma4_synthetic_parity {
             for (s, row) in normed.iter().enumerate().take(seq) {
                 for u in 0..KV_HEADS {
                     let mut raw = alloc::vec![0.0f32; HEAD_DIM];
-                    for d in 0..HEAD_DIM {
+                    for (d, raw_value) in raw.iter_mut().enumerate() {
                         let mut acc = 0.0f32;
-                        for i in 0..EMBEDDING {
-                            acc += row[i] * weights.wk[(i * KV_HEADS + u) * HEAD_DIM + d];
+                        for (i, &row_value) in row.iter().enumerate() {
+                            acc += row_value * weights.wk[(i * KV_HEADS + u) * HEAD_DIM + d];
                         }
-                        raw[d] = acc;
+                        *raw_value = acc;
                     }
                     let head_normed = rmsnorm_ref(&raw, &weights.k_norm, EPS);
                     let rotated = rope_split_half(&head_normed, &cos[s], &sin[s]);
@@ -14534,8 +14534,8 @@ mod gemma4_synthetic_parity {
         for h in 0..QUERY_HEADS {
             for d in 0..HEAD_DIM {
                 let mut acc = 0.0f32;
-                for i in 0..EMBEDDING {
-                    acc += normed_x[i] * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
+                for (i, &normed_x_value) in normed_x.iter().enumerate() {
+                    acc += normed_x_value * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
                 }
                 reference_q[h * HEAD_DIM + d] = acc;
             }
@@ -14622,9 +14622,8 @@ mod gemma4_synthetic_parity {
             for g in 0..GROUP {
                 for d in 0..HEAD_DIM {
                     let value = attended[(u * GROUP + g) * HEAD_DIM + d];
-                    for o in 0..EMBEDDING {
-                        reference_out[o] +=
-                            value * weights.wo[((u * GROUP + g) * HEAD_DIM + d) * EMBEDDING + o];
+                    for (o, slot) in reference_out.iter_mut().enumerate() {
+                        *slot += value * weights.wo[((u * GROUP + g) * HEAD_DIM + d) * EMBEDDING + o];
                     }
                 }
             }
@@ -14937,8 +14936,8 @@ mod gemma4_synthetic_parity {
         for h in 0..QUERY_HEADS {
             for d in 0..HEAD_DIM {
                 let mut acc = 0.0f32;
-                for i in 0..EMBEDDING {
-                    acc += normed[i] * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
+                for (i, &normed_value) in normed.iter().enumerate() {
+                    acc += normed_value * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
                 }
                 raw_q[h * HEAD_DIM + d] = acc;
             }
@@ -14969,10 +14968,11 @@ mod gemma4_synthetic_parity {
                 let score: f32 = (0..HEAD_DIM).map(|d| q_head[d] * k[d]).sum::<f32>() * scale;
                 let _ = score; // single key -> softmax always 1.0, score value is inert here.
                 let g = h % GROUP;
-                for o in 0..EMBEDDING {
-                    for d in 0..HEAD_DIM {
-                        out[o] +=
-                            v[d] * weights.wo[((0 * GROUP + g) * HEAD_DIM + d) * EMBEDDING + o];
+                // KV_HEADS == 1 in this module, so the kv-head term is always 0;
+                // the wo index collapses to `g * HEAD_DIM + d`.
+                for (o, slot) in out.iter_mut().enumerate() {
+                    for (d, &v_value) in v.iter().enumerate() {
+                        *slot += v_value * weights.wo[(g * HEAD_DIM + d) * EMBEDDING + o];
                     }
                 }
             }
@@ -15178,8 +15178,8 @@ mod gemma4_synthetic_parity {
         for h in 0..QUERY_HEADS {
             for d in 0..HEAD_DIM {
                 let mut acc = 0.0f32;
-                for i in 0..EMBEDDING {
-                    acc += reference_normed[i] * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
+                for (i, &reference_normed_value) in reference_normed.iter().enumerate() {
+                    acc += reference_normed_value * weights.wq[(i * QUERY_HEADS + h) * HEAD_DIM + d];
                 }
                 reference_q_raw[h * HEAD_DIM + d] = acc;
             }
