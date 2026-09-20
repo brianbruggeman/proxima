@@ -78,6 +78,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
         None,
         None,
         false,
+        None,
     )
     .expect("build shallow throwaway lfm2 program");
 
@@ -98,6 +99,7 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
         None,
         None,
         false,
+        None,
     )
     .expect("build deep throwaway lfm2 program");
 
@@ -290,6 +292,7 @@ fn main() {
         None,
         None,
         false,
+        None,
     )
     .expect("build full lfm2 program to scan for route nodes");
 

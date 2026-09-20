@@ -7843,6 +7843,7 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
         None,
         None,
         false,
+        None,
     )
     .expect("the hybrid forward pass lowers to a program");
     let build_elapsed = build_start.elapsed();
@@ -7906,6 +7907,7 @@ async fn lfm2_forward_program_rejects_a_layer_schedule_length_mismatch() {
         None,
         None,
         false,
+        None,
     )
     .expect_err("2 schedule entries against block_count=24 must be rejected");
     assert!(
@@ -12686,6 +12688,7 @@ mod gemma4_synthetic_parity {
             routed_expert_bias: false,
             dense_feed_forward: None,
             activation: Activation::GeluTanh,
+            ple: false,
         };
         let schedule = alloc::vec![
             LayerSchedule {
@@ -12744,6 +12747,7 @@ mod gemma4_synthetic_parity {
             Some(EmbeddingScale::Sqrt),
             Some(SOFTCAP),
             false,
+            None,
         )
         .expect("the real gemma4-shaped forward program lowers");
 
@@ -13066,6 +13070,7 @@ mod gemma4_synthetic_parity {
             routed_expert_bias: false,
             dense_feed_forward: None,
             activation: Activation::GeluTanh,
+            ple: false,
         };
         let schedule = alloc::vec![
             LayerSchedule {
@@ -13381,6 +13386,7 @@ mod gemma4_synthetic_parity {
             routed_expert_bias: false,
             dense_feed_forward: None,
             activation: Activation::GeluTanh,
+            ple: false,
         };
         let schedule = alloc::vec![
             LayerSchedule {
@@ -13666,6 +13672,7 @@ mod gemma4_synthetic_parity {
             routed_expert_bias: false,
             dense_feed_forward: None,
             activation: Activation::GeluTanh,
+            ple: false,
         };
         let layers = alloc::vec![
             LayerSchedule {
@@ -13918,6 +13925,7 @@ mod gemma4_synthetic_parity {
             routed_expert_bias: false,
             dense_feed_forward: None,
             activation: Activation::GeluTanh,
+            ple: false,
         };
 
         // mirrors `gemma4::bind::gemma4_layer_schedule`'s own per-layer
@@ -14185,6 +14193,7 @@ mod gemma4_synthetic_parity {
             routed_expert_bias: false,
             dense_feed_forward: None,
             activation: Activation::GeluTanh,
+            ple: false,
         };
         let schedule = alloc::vec![
             LayerSchedule {

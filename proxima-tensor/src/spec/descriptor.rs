@@ -174,6 +174,7 @@ pub fn gemma4_descriptor(vocab: u32) -> ModelDescriptor {
         routed_expert_bias: false,
         dense_feed_forward: None,
         activation: Activation::GeluTanh,
+        ple: false,
     };
 
     let layers: Vec<LayerSchedule> = (0..GEMMA4_BLOCK_COUNT)
@@ -353,6 +354,7 @@ pub fn mistral_descriptor_from_shape(
         routed_expert_bias: false,
         dense_feed_forward: None,
         activation: Activation::Silu,
+        ple: false,
     };
 
     let attention = LayerAttentionConfig {
@@ -529,6 +531,7 @@ pub fn build_forward(
                 descriptor.embedding_scale,
                 descriptor.logit_softcap,
                 last_row_only,
+                None,
             )?;
             Ok((program, logits, Vec::new(), moe_sites, Vec::new(), None))
         }
