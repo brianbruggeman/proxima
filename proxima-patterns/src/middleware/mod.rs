@@ -40,7 +40,8 @@ pub(crate) fn labels_with(base: &Labels, key: &str, value: &str) -> Labels {
 pub use auth::{Auth, AuthFactory};
 #[cfg(feature = "std")]
 pub use client_auth::{
-    ClientAuthFactory, ClientAuthPipe, DigestAuthPipe, OauthAuthPipe, SigV4AuthPipe,
+    ClientAuthConfig, ClientAuthFactory, ClientAuthPipe, ClientAuthScheme, DigestAuthPipe,
+    MissingCredentialResolver, OauthAuthPipe, ResolverClientAuthPipe, SigV4AuthPipe,
 };
 #[cfg(feature = "std")]
 pub use context_inject::ContextInjector;

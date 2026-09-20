@@ -74,6 +74,10 @@ pub enum ClientAuthScheme {
         username: String,
         password: String,
     },
+    Resolver {
+        #[serde(alias = "credential_reference")]
+        credential_ref: String,
+    },
     Oauth {
         token_url: String,
         client_id: String,
@@ -130,6 +134,18 @@ impl ClientAuthConfig {
         }
     }
 
+    /// Build a config that stores only a resolver reference, not credential
+    /// material.
+    #[must_use]
+    pub fn resolver(credential_ref: impl Into<String>) -> Self {
+        Self {
+            header: default_client_auth_header(),
+            scheme: ClientAuthScheme::Resolver {
+                credential_ref: credential_ref.into(),
+            },
+        }
+    }
+
     /// Override the injection header (defaults to `authorization`).
     #[must_use]
     pub fn with_header(mut self, header: impl Into<String>) -> Self {
@@ -147,6 +163,11 @@ impl ClientAuthConfig {
             ClientAuthScheme::Bearer { token } => format!("Bearer {token}"),
             ClientAuthScheme::Basic { username, password } => {
                 format!("Basic {}", BASE64.encode(format!("{username}:{password}")))
+            }
+            ClientAuthScheme::Resolver { .. } => {
+                return Err(ProximaError::Config(
+                    "resolver auth requires a credential resolver".into(),
+                ));
             }
             ClientAuthScheme::Oauth { .. } => {
                 return Err(ProximaError::Config(
@@ -178,6 +199,32 @@ impl ClientAuthConfig {
             inner,
             header: self.header,
             value,
+        })
+    }
+
+    /// Build resolver-backed outbound authentication. The resolver is called
+    /// for each request immediately before dispatch to `inner`.
+    pub fn into_resolver_pipe<Resolver>(
+        self,
+        inner: PipeHandle,
+        resolver: Resolver,
+    ) -> Result<ResolverClientAuthPipe<PipeHandle, Resolver>, ProximaError>
+    where
+        Resolver: SendPipe<In = String, Out = Credential, Err = ProximaError> + Clone,
+    {
+        let credential_ref = match self.scheme {
+            ClientAuthScheme::Resolver { credential_ref } => credential_ref,
+            _ => {
+                return Err(ProximaError::Config(
+                    "client-auth config is not resolver-backed".into(),
+                ));
+            }
+        };
+        Ok(ResolverClientAuthPipe {
+            inner,
+            resolver,
+            header: self.header,
+            credential_ref,
         })
     }
 }
@@ -229,22 +276,111 @@ where
     }
 }
 
+/// Outbound client authentication that resolves an ephemeral credential for
+/// each request immediately before dispatch.
+pub struct ResolverClientAuthPipe<Inner, Resolver> {
+    inner: Inner,
+    resolver: Resolver,
+    header: String,
+    credential_ref: String,
+}
+
+impl<Inner, Resolver> SendPipe for ResolverClientAuthPipe<Inner, Resolver>
+where
+    Inner: Handler + Clone,
+    Resolver: SendPipe<In = String, Out = Credential, Err = ProximaError> + Clone,
+{
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        mut request: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+        let inner = self.inner.clone();
+        let resolver = self.resolver.clone();
+        let header = self.header.clone();
+        let credential_ref = self.credential_ref.clone();
+        async move {
+            let credential = SendPipe::call(&resolver, credential_ref)
+                .await
+                .map_err(|_| {
+                    ProximaError::Upstream("client-auth credential resolution failed".into())
+                })?;
+            let secret = credential.secret();
+            let header_value = match &credential {
+                Credential::Bearer(_) => Zeroizing::new(format!("Bearer {}", secret.as_str())),
+                Credential::Signature(_) => Zeroizing::new(secret.to_string()),
+            };
+            if !header_safe(header_value.as_str()) {
+                return Err(ProximaError::Config(
+                    "client-auth resolved credential contains control characters (header smuggling guard)"
+                        .into(),
+                ));
+            }
+            request
+                .metadata
+                .insert(header.as_str(), header_value.as_str());
+            SendPipe::call(&inner, request).await
+        }
+    }
+}
+
 /// Factory for the `client-auth` key. Holds a `Weak<PipeFactoryRegistry>` so the
 /// oauth scheme can build its token-endpoint sub-pipe through the same registry
 /// (the exchange edge resolves like any other upstream — mirrors
 /// `RecordPipeFactory`). The static schemes (bearer/basic) ignore it.
-pub struct ClientAuthFactory {
-    upstreams: Weak<PipeFactoryRegistry>,
-}
+#[derive(Clone, Copy)]
+pub struct MissingCredentialResolver;
 
-impl ClientAuthFactory {
-    #[must_use]
-    pub fn new(upstreams: Weak<PipeFactoryRegistry>) -> Self {
-        Self { upstreams }
+impl SendPipe for MissingCredentialResolver {
+    type In = String;
+    type Out = Credential;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        _credential_ref: String,
+    ) -> impl Future<Output = Result<Credential, ProximaError>> + Send {
+        async {
+            Err(ProximaError::Registry(
+                "client-auth credential resolver is not configured".into(),
+            ))
+        }
     }
 }
 
-impl PipeFactory for ClientAuthFactory {
+pub struct ClientAuthFactory<Resolver = MissingCredentialResolver> {
+    upstreams: Weak<PipeFactoryRegistry>,
+    resolver: Resolver,
+}
+
+impl ClientAuthFactory<MissingCredentialResolver> {
+    #[must_use]
+    pub fn new(upstreams: Weak<PipeFactoryRegistry>) -> Self {
+        Self {
+            upstreams,
+            resolver: MissingCredentialResolver,
+        }
+    }
+
+    #[must_use]
+    pub fn with_resolver<CredentialResolver>(
+        upstreams: Weak<PipeFactoryRegistry>,
+        resolver: CredentialResolver,
+    ) -> ClientAuthFactory<CredentialResolver> {
+        ClientAuthFactory {
+            upstreams,
+            resolver,
+        }
+    }
+}
+
+impl<Resolver> PipeFactory for ClientAuthFactory<Resolver>
+where
+    Resolver: SendPipe<In = String, Out = Credential, Err = ProximaError> + Clone,
+{
     fn name(&self) -> &str {
         "client-auth"
     }
@@ -256,12 +392,22 @@ impl PipeFactory for ClientAuthFactory {
     ) -> Pin<Box<dyn Future<Output = Result<PipeHandle, ProximaError>> + Send + '_>> {
         let spec = spec.clone();
         let upstreams = self.upstreams.clone();
+        let resolver = self.resolver.clone();
         Box::pin(async move {
             let inner = inner
                 .ok_or_else(|| ProximaError::Config("client-auth requires an inner pipe".into()))?;
             let config: ClientAuthConfig = serde_json::from_value(spec)
                 .map_err(|err| ProximaError::Config(format!("client-auth config: {err}")))?;
-            match config.scheme {
+            let ClientAuthConfig { header, scheme } = config;
+            match scheme {
+                ClientAuthScheme::Resolver { credential_ref } => {
+                    Ok(into_handle(ResolverClientAuthPipe {
+                        inner,
+                        resolver,
+                        header,
+                        credential_ref,
+                    }))
+                }
                 ClientAuthScheme::Oauth {
                     token_url,
                     client_id,
@@ -314,7 +460,9 @@ impl PipeFactory for ClientAuthFactory {
                         nc: Arc::new(AtomicU32::new(0)),
                     }))
                 }
-                _ => Ok(into_handle(config.into_static_pipe(inner)?)),
+                _ => Ok(into_handle(
+                    ClientAuthConfig { header, scheme }.into_static_pipe(inner)?,
+                )),
             }
         })
     }
