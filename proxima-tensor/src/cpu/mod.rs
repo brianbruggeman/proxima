@@ -226,7 +226,14 @@ use elementwise_matmul::*;
 pub use epilogue::*;
 pub use gemm_dot_quant::*;
 pub use gemm_q8k::*;
+// every item gemm_tile exports `pub` is aarch64-gated; glob re-exporting an
+// empty pub set fails to compile on other targets. `PackedWidthPanels` stays
+// `pub(super)` on every target (one `run_reduce` signature everywhere), so
+// non-aarch64 still needs it named into scope for `arena.rs`/`run_reduce_scan.rs`.
+#[cfg(target_arch = "aarch64")]
 pub use gemm_tile::*;
+#[cfg(not(target_arch = "aarch64"))]
+use gemm_tile::PackedWidthPanels;
 pub use quantized_eval::*;
 pub use run_node::*;
 pub use run_reduce_scan::*;
