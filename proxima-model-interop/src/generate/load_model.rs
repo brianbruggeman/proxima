@@ -946,6 +946,19 @@ pub struct LoadedModel<'file> {
     /// the runtime backend selection together allow.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) single_range: Option<SingleRangeProgram>,
+    /// gemma4-only all-positions verify program
+    /// ([`crate::gemma4::bind::bind_gemma4_all_positions_logits`]) -- the
+    /// same weights and layer schedule as `program`/`logits_root`/
+    /// `layer_roots`, but `logits_root` gathers EVERY new position's own
+    /// row (`[new_count, vocab]`) instead of just the last one
+    /// (`Gemma4Arch::bind`'s own `last_row_only: true`). Speculative
+    /// decode's verify step (`Self::run_decode_loop_observed_seeded`)
+    /// swaps this in for one forward over `[current, draft...]` the same
+    /// way `one_evaluation_prefill_programs` swaps in an alt program, then
+    /// reads back one row per drafted token instead of one row total.
+    /// `None` for every non-gemma4 checkpoint -- built once, at load time,
+    /// never per step, since the program itself never changes.
+    pub(super) speculative_verify_program: Option<(Vec<Op>, NodeId, Vec<Qwen35LayerRoots>)>,
     /// The same `file_bytes` slice [`Self::load`]/[`Self::load_inner`]
     /// registered with `omega::backend::register_checkpoint_mapping` (GGUF
     /// checkpoints only -- [`Self::load_from_safetensors`] never registers

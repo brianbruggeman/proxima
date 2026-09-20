@@ -1,5 +1,7 @@
 use core::ops::ControlFlow;
 
+use alloc::collections::VecDeque;
+
 use super::*;
 
 /// Measurement-only edge switch: mirrors `ServingConfig`'s three fusion
@@ -1656,11 +1658,64 @@ impl<'file> LoadedModel<'file> {
             }
         }
 
+        // Default-off greedy speculative decode (gemma4-only -- see
+        // [`Self::speculative_verify_program`]'s own doc): read once, here,
+        // outside the closure, matching [`prefill_one_evaluation_requested`]'s
+        // own env-gate shape. `pending` is the queue-draining FSM's own
+        // state -- popped from at the top of every closure call before any
+        // forward runs, and pushed onto by the speculative verify branch
+        // below whenever it accepts more than one token in a single pass.
+        let speculative_enabled = std::env::var_os("PROXIMA_SPECULATIVE_DECODE").is_some();
+        let speculative_k: usize = std::env::var("PROXIMA_SPECULATIVE_K")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(4);
+        let mut pending: VecDeque<u32> = VecDeque::new();
+
         let decode_result = decode_until_stop_or_budget(
             &self.vocab,
             max_tokens,
             prompt_token_count,
             |_step| {
+                if let Some(queued) = pending.pop_front() {
+                    if std::env::var_os("PROXIMA_DEBUG_SPECULATIVE").is_some() {
+                        eprintln!("speculative_pending_pop step={_step}");
+                    }
+                    return Ok(queued);
+                }
+                // Speculative decode's draft half (`proxima_tokenizer::draft::
+                // draft_ngram_lookup`, no second model): only attempted on a
+                // genuine one-token decode step (`next_ids.len() == 1`,
+                // excludes the prompt's own prefill at `_step == 0`) with a
+                // real cache to draft against (`cached_len > 0`) and a
+                // gemma4-only verify program bound at load time
+                // (`Self::speculative_verify_program`'s own doc). Constants
+                // `3`/`8` are `transformers`' own `PromptLookupCandidateGenerator`
+                // defaults (`min_ngram_size`/`max_matching_ngram_size`).
+                let speculative_draft: Vec<u32> = if speculative_enabled
+                    && next_ids.len() == 1
+                    && cached_len > 0
+                    && self.speculative_verify_program.is_some()
+                {
+                    proxima_tokenizer::draft::draft_ngram_lookup(
+                        &token_history,
+                        speculative_k,
+                        3,
+                        8,
+                    )
+                } else {
+                    Vec::new()
+                };
+                let speculative_step = !speculative_draft.is_empty();
+                let speculative_ids: Vec<u32> = if speculative_step {
+                    let mut ids = Vec::with_capacity(1 + speculative_draft.len());
+                    ids.push(next_ids[0]);
+                    ids.extend_from_slice(&speculative_draft);
+                    ids
+                } else {
+                    Vec::new()
+                };
                 // ROW 130's own fix, built: every counter this step's
                 // `evaluate_ms` decomposition reads is zeroed HERE, at step
                 // start, and read back after `evaluate_ticks` below is computed
@@ -1703,7 +1758,9 @@ impl<'file> LoadedModel<'file> {
 
                 let mut token_id: u32 = 0;
                 for batch_index in 0..batch_count {
-                    let ids_for_step: &[u32] = if one_evaluation_prefill {
+                    let ids_for_step: &[u32] = if speculative_step {
+                        speculative_ids.as_slice()
+                    } else if one_evaluation_prefill {
                         let (offset, width) = one_evaluation_chunks[batch_index];
                         &next_ids[offset..offset + width]
                     } else if split_prefill {
@@ -1720,12 +1777,24 @@ impl<'file> LoadedModel<'file> {
                     // `self.resident_names()`'s own borrowed `BTreeSet<&str>`
                     // (computed once, above) is already live across every
                     // step, so nothing here may take `&mut self`.
+                    // `speculative_step`'s own swap: identical shape to the
+                    // `one_evaluation_prefill` swap above, into
+                    // `self.speculative_verify_program` instead of a
+                    // precomputed chunk-width program -- same weights, same
+                    // per-layer cache leaves, only `logits_root` differs
+                    // (every new position's own row, not just the last).
+                    #[allow(clippy::expect_used)]
                     let (active_program, active_layer_roots, active_single_position_step) =
-                        if one_evaluation_prefill {
+                        if speculative_step {
+                            let (program, _logits_root, layer_roots) = self
+                                .speculative_verify_program
+                                .as_ref()
+                                .expect("speculative_step only set true when this is Some");
+                            (program, layer_roots, false)
+                        } else if one_evaluation_prefill {
                             let (_offset, width) = one_evaluation_chunks[batch_index];
                             // every width in `one_evaluation_chunks` was built into
                             // `one_evaluation_prefill_programs` above, in the same loop.
-                            #[allow(clippy::expect_used)]
                             let (_, program, _logits_root, layer_roots) =
                                 one_evaluation_prefill_programs
                                     .iter()
@@ -1737,17 +1806,21 @@ impl<'file> LoadedModel<'file> {
                         } else {
                             (&self.program, &self.layer_roots, self.single_position_step)
                         };
-                    let active_logits_root = if one_evaluation_prefill {
+                    #[allow(clippy::expect_used)]
+                    let active_logits_root = if speculative_step {
+                        self.speculative_verify_program
+                            .as_ref()
+                            .expect("speculative_step only set true when this is Some")
+                            .1
+                    } else if one_evaluation_prefill {
                         let (_offset, width) = one_evaluation_chunks[batch_index];
                         // every width in `one_evaluation_chunks` was built into
                         // `one_evaluation_prefill_programs` above, in the same loop.
-                        #[allow(clippy::expect_used)]
-                        let logits_root = one_evaluation_prefill_programs
+                        one_evaluation_prefill_programs
                             .iter()
                             .find(|(built_width, ..)| *built_width == width)
                             .expect("chunk width program built above for every chunk width")
-                            .2;
-                        logits_root
+                            .2
                     } else {
                         self.logits_root
                     };
@@ -3305,7 +3378,6 @@ impl<'file> LoadedModel<'file> {
                     }
                     #[cfg(feature = "instrument")]
                     let layer_cache_append_ticks = elapsed_ticks(layer_cache_append_started);
-                    #[cfg(feature = "instrument")]
                     let cached_len_before_step = cached_len;
                     #[cfg(feature = "instrument")]
                     {
@@ -3335,7 +3407,14 @@ impl<'file> LoadedModel<'file> {
                     // compute positions against the FULL re-fed sequence starting
                     // at 0, matching the `next_ids` re-prefill below, rather than
                     // an offset into a cache that was never populated.
-                    if !active_layer_roots.is_empty() {
+                    // Speculative decode's own verify batch appended K+1
+                    // positions' worth of K/V above, but only `verified.
+                    // accepted + 1` of them survive (`LayerCache::truncate`'s
+                    // own doc) -- the readout branch below computes that
+                    // count and both advances `cached_len` and rewinds the
+                    // cache to match it, so this generic advance is skipped
+                    // here rather than corrected twice.
+                    if !active_layer_roots.is_empty() && !speculative_step {
                         cached_len += new_count;
                     }
 
@@ -3352,6 +3431,76 @@ impl<'file> LoadedModel<'file> {
                     // batch's logits the ones `decode_until_stop_or_budget`
                     // actually samples, exactly like a `new_count == 1` decode
                     // step always has.
+                    // Speculative decode's own readout, parallel to the
+                    // ordinary single-row branch below (`Verified`'s own
+                    // doc): `active_logits_root` here is
+                    // `speculative_verify_program`'s all-positions gather
+                    // (`new_count` rows of `vocab_size`, not one), so the
+                    // single-row guard just below does not apply -- this
+                    // branch verifies the whole drafted span in one pass
+                    // and returns before reaching it.
+                    if speculative_step {
+                        let (logits, _shape) = evaluated.get(active_logits_root).ok_or(
+                            InteropError::MissingEvaluatedNode {
+                                node: active_logits_root,
+                            },
+                        )?;
+                        if logits.len() != new_count * vocab_size {
+                            return Err(InteropError::LogitsShapeMismatch {
+                                expected_rows: new_count,
+                                found_rows: logits.len() / vocab_size,
+                                vocab: vocab_size,
+                            });
+                        }
+                        let rows: Vec<&[f32]> = logits.chunks_exact(vocab_size).collect();
+                        let verified = proxima_tokenizer::draft::verify_greedy(
+                            &rows,
+                            &speculative_draft,
+                        )
+                        .ok_or(InteropError::EmptyLogits)?;
+                        let mut emitted: Vec<u32> =
+                            speculative_draft[..verified.accepted].to_vec();
+                        emitted.push(verified.next);
+                        if std::env::var_os("PROXIMA_DEBUG_SPECULATIVE").is_some() {
+                            eprintln!(
+                                "speculative_verify step={_step} draft_len={} accepted={} emitted={}",
+                                speculative_draft.len(),
+                                verified.accepted,
+                                emitted.len()
+                            );
+                        }
+
+                        // The append loop above wrote `new_count` positions'
+                        // worth of K/V for every layer; only
+                        // `verified.accepted + 1` of them are real
+                        // (`LayerCache::truncate`'s own doc -- proved
+                        // against an incrementally-appended prefix in
+                        // `layer_cache_truncate_tests`).
+                        let keep_positions = cached_len_before_step + verified.accepted + 1;
+                        for (layer, widths) in layer_row_widths.iter().enumerate() {
+                            if let (
+                                LayerPadRowWidths::Attention {
+                                    even_odd_row,
+                                    v_row,
+                                },
+                                LayerCacheState::Attention(cache),
+                            ) = (widths, &mut layer_caches[layer])
+                            {
+                                cache.truncate(keep_positions, *even_odd_row, *v_row);
+                            }
+                        }
+                        cached_len = keep_positions;
+                        token_history.extend_from_slice(&emitted);
+                        for &extra in &emitted[1..] {
+                            pending.push_back(extra);
+                        }
+                        // `emitted`'s own last element is always
+                        // `verified.next` (pushed onto the accepted-draft
+                        // prefix immediately above), so this is the same
+                        // value without an `Option` to unwrap.
+                        next_ids = alloc::vec![verified.next];
+                        return Ok(emitted[0]);
+                    }
                     if is_last_step_batch {
                         let (logits, _shape) = evaluated.get(active_logits_root).ok_or(
                             InteropError::MissingEvaluatedNode {

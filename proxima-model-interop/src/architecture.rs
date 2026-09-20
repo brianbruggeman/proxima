@@ -272,6 +272,32 @@ pub trait Architecture: Send + Sync {
         file_bytes: &'file [u8],
     ) -> Result<BoundProgram<'file>, InteropError>;
 
+    /// The all-positions counterpart of [`Architecture::bind`], for
+    /// architectures that support speculative decode's verify step
+    /// (`crate::generate::LoadedModel::run_decode_loop_observed_seeded`'s
+    /// own draft-and-verify branch): same weights, same per-layer cache
+    /// leaves, but `BoundProgram::logits_root` gathers EVERY new position's
+    /// own row instead of just the last one, so one forward over
+    /// `[current, draft...]` reads back one row per drafted token. Default
+    /// `Ok(None)`: every architecture this crate ships except gemma4 has no
+    /// all-positions builder yet, and speculative decode's verify step
+    /// simply stays off for them (`LoadedModel::speculative_verify_program`
+    /// is `None`, never a name comparison at the load site -- see
+    /// [`Gemma4Arch::speculative_verify_program`] for the one override).
+    ///
+    /// # Errors
+    ///
+    /// Whatever this architecture's own all-positions bind can fail with.
+    fn speculative_verify_program<'file>(
+        &self,
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+    ) -> Result<Option<BoundProgram<'file>>, InteropError> {
+        let _ = parsed;
+        let _ = file_bytes;
+        Ok(None)
+    }
+
     /// This architecture's per-decode-step scratch sizing, re-derived
     /// straight off `parsed`'s own metadata (the same source
     /// [`Architecture::bind`] itself reads) rather than threaded through

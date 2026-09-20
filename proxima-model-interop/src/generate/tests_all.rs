@@ -2447,6 +2447,7 @@ pub(super) mod memory_fit_gate_tests {
             qwen35moe_hparams: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range: None,
+            speculative_verify_program: None,
             expert_slab: std::sync::Mutex::new(crate::expert_slab::ExpertSlab::new()),
             expert_sidecar: None,
         }
