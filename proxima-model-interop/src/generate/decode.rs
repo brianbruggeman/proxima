@@ -2572,6 +2572,28 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     #[cfg(not(feature = "instrument"))]
                     let monolithic_profile_target = false;
+                    // `PROXIMA_METAL_DISPATCH_PROFILE_STEP`'s own reader for
+                    // THIS step's two-range/non-placed-KV shape -- gemma4-E2B's
+                    // real forward (`KvCacheShape::Custom` excludes it from
+                    // `LoadedModel::single_range`, so it never reaches the
+                    // placed-KV branch above, and it is not qwen35moe so it
+                    // never reaches `monolithic_profile_target` either) falls
+                    // through every arm above to plain `runtime.evaluate`
+                    // below. Same default-off, one-env-var-per-step
+                    // convention as `monolithic_profile_target` and the
+                    // single-range path's own `PROXIMA_METAL_DISPATCH_PROFILE_STEP`
+                    // reader (`Self::run_decode_loop_placed_kv`, this file
+                    // around line 4134).
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    #[cfg(feature = "instrument")]
+                    let dispatch_profile_target =
+                        std::env::var("PROXIMA_METAL_DISPATCH_PROFILE_STEP")
+                            .ok()
+                            .and_then(|value| value.parse::<usize>().ok())
+                            == Some(_step);
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    #[cfg(not(feature = "instrument"))]
+                    let dispatch_profile_target = false;
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     let evaluated = if monolithic_profile_target {
                         #[cfg(feature = "instrument")]
@@ -2675,6 +2697,39 @@ impl<'file> LoadedModel<'file> {
                             &ssm_output_placements,
                             expert_source_substitutions,
                         )?
+                    } else if dispatch_profile_target {
+                        #[cfg(feature = "instrument")]
+                        {
+                            // Empty placement slices: `plan_named_with_placed_inputs`
+                            // with `placed_input_nodes: &[]` is byte-identical to
+                            // `plan_named` (`omega/src/metal/placements_execute_named.rs:594`
+                            // literally delegates to it with `&[]`), and
+                            // `execute_plan_with_placements_dispatch_timed` with
+                            // empty `input_placed`/`output_placed` maps takes the
+                            // same `upload_block` path every node takes in
+                            // `runtime.evaluate` below -- so this arm reuses the
+                            // placed-KV timed executor to time the SAME unplaced
+                            // shape gemma4's two-range path actually runs, never a
+                            // fabricated placement.
+                            let (evaluated, timings, sampling_mode, _split_ns) = runtime
+                                .evaluate_dispatch_timed_with_placements(
+                                    active_program,
+                                    &symbols,
+                                    &named_blocks,
+                                    &roots,
+                                    &resident_names,
+                                    &[],
+                                    &[],
+                                )?;
+                            info!(
+                                step = _step as u64,
+                                sampling_mode, "dispatch_profile: two-range full graph"
+                            );
+                            report_op_timings(_step, &timings, active_program);
+                            evaluated
+                        }
+                        #[cfg(not(feature = "instrument"))]
+                        unreachable!("the profiler is compiled out without instrumentation")
                     } else {
                         runtime.evaluate(
                             active_program,
