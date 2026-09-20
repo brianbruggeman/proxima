@@ -125,6 +125,7 @@ fn gemma4_synthetic_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
         routed_gating: ExpertGatingFunc::Softmax,
         routed_expert_bias: false,
         dense_feed_forward: None,
+        exclusive_dense_post_norm: false,
         activation: Activation::GeluTanh,
     };
     sliding_pattern

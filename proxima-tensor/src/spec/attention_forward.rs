@@ -338,6 +338,16 @@ pub struct LayerFfnConfig {
     /// (every caller in this crate before Gemma 4 E2B) reproduces the
     /// prior uniform-width behaviour unchanged.
     pub dense_feed_forward: Option<u32>,
+    /// `true` builds `blk.{layer}.post_ffw_norm.weight` and applies it (a
+    /// plain [`rmsnorm`]) to [`FfnCombination::Exclusive`]'s dense-branch
+    /// output before the residual add -- Gemma 4 E2B/E4B's own dense-only
+    /// sandwich norm (`gemma4.go`'s `PostFFNorm`), the same role
+    /// [`ParallelDenseMoeConfig::combined_post_norm`] plays for a MoE
+    /// checkpoint's combined dense+routed output, reading the identical
+    /// `blk.{layer}.post_ffw_norm.weight` tensor name. `false` (every
+    /// caller before Gemma 4 E2B, including LFM2) reproduces the prior
+    /// unnormalized dense-branch residual add unchanged.
+    pub exclusive_dense_post_norm: bool,
     /// `true` injects this layer's per-layer-embedding (PLE) contribution
     /// (gemma4.go:1349-1361: gate/GeGLU/proj/`post_norm`, added into the
     /// residual right after the FFN residual add, BEFORE
@@ -364,6 +374,7 @@ impl LayerFfnConfig {
             routed_expert_bias: true,
             activation: Activation::Silu,
             dense_feed_forward: None,
+            exclusive_dense_post_norm: false,
             ple: false,
         }
     }
@@ -1156,7 +1167,7 @@ pub(crate) fn append_lfm2_layer_ffn(
     let ffn_out = match ffn_config.combination {
         FfnCombination::Exclusive => {
             if layer < leading_dense_block_count {
-                append_dense_swiglu_ffn(
+                let dense_out = append_dense_swiglu_ffn(
                     program,
                     layer,
                     normed2,
@@ -1164,7 +1175,18 @@ pub(crate) fn append_lfm2_layer_ffn(
                     feed_forward,
                     ones,
                     ffn_config.activation,
-                )?
+                )?;
+                if ffn_config.exclusive_dense_post_norm {
+                    let gamma = input_leaf(
+                        program,
+                        DType::Float32,
+                        alloc::vec![Extent::Static(embedding)],
+                        &alloc::format!("blk.{layer}.post_ffw_norm.weight"),
+                    );
+                    rmsnorm(program, dense_out, gamma, inv_dim, eps)?
+                } else {
+                    dense_out
+                }
             } else {
                 append_routed_expert_ffn(
                     program,

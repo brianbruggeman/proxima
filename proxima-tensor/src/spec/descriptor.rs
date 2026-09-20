@@ -173,6 +173,7 @@ pub fn gemma4_descriptor(vocab: u32) -> ModelDescriptor {
         routed_gating: ExpertGatingFunc::Softmax,
         routed_expert_bias: false,
         dense_feed_forward: None,
+        exclusive_dense_post_norm: false,
         activation: Activation::GeluTanh,
         ple: false,
     };
@@ -353,6 +354,7 @@ pub fn mistral_descriptor_from_shape(
         routed_gating: ExpertGatingFunc::Softmax,
         routed_expert_bias: false,
         dense_feed_forward: None,
+        exclusive_dense_post_norm: false,
         activation: Activation::Silu,
         ple: false,
     };
