@@ -42,7 +42,7 @@
 //!    `omega::execute` directly — the same technique
 //!    `omega/benches/metal_vs_cpu.rs` already uses for `matvec_batch1_f32`,
 //!    applied at the LM head's own real shape instead of a decode matvec's.
-//! 3+4. **One gemma4 layer** (cached attention + FFN, fused — see the
+//!    3+4. **One gemma4 layer** (cached attention + FFN, fused — see the
 //!    NOTE on this pairing below) — real isolation: `block_count=1` through
 //!    the REAL `lfm2_forward_program_with_experts` engine
 //!    (`proxima-tensor/src/spec/attention_forward.rs:1719`, the same
@@ -83,10 +83,10 @@
 //!
 //! For each width, this bench prints Σ(component 2 exec + component 3/4 exec
 //! * 35 layers) vs the measured Component 1 exec — the "accounted vs
-//! unaccounted" fraction the owner asked for. The `* 35` term is a DERIVED
-//! extrapolation from ONE measured layer (principle 18: tagged as such,
-//! never reported as measured for all 35), since block-count=35 real-layer
-//! isolation is out of this slice's time budget.
+//!   unaccounted" fraction the owner asked for. The `* 35` term is a DERIVED
+//!   extrapolation from ONE measured layer (principle 18: tagged as such,
+//!   never reported as measured for all 35), since block-count=35 real-layer
+//!   isolation is out of this slice's time budget.
 //!
 //! # Run
 //!
