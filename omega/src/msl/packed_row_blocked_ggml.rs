@@ -200,6 +200,21 @@ pub(super) fn push_packed_row_blocked_body(
             )
             && cfg!(feature = "metal-q4k-ggml-port")
             && !cfg!(feature = "metal-q4k-split-k");
+        // `metal-q4_0-native` (default-off): ggml's OWN `Q4_0` lane geometry
+        // (`push_q4_0_native_body`'s own doc) rather than this preamble's
+        // K-quant-shaped `ix = lane/8` split -- `Q4_0` has no `codec_
+        // supports_pair_dot` entry (its own doc: only the four K-quants have
+        // a paired-nibble body), so it never sets `plain_product` above and
+        // needs its own gate mirroring `Codec::Q4_0 if is_plain_product_
+        // reduce`'s existing per-element/pair-dot arms below. Not `metal-
+        // q4k-split-k`-aware, same posture as `use_ggml_port`/`use_single_
+        // fetch`: this body owns its own complete `ib` loop with no
+        // `sgitg`/`split` stride of its own.
+        let use_q4_0_native = matches!(codec, Codec::Q4_0)
+            && resolved.dtype == DType::Float32
+            && is_plain_product_reduce(resolved, reduce_op, weight, other)
+            && cfg!(feature = "metal-q4_0-native")
+            && !cfg!(feature = "metal-q4k-split-k");
         if use_ggml_port && matches!(codec, Codec::Q6K) {
             push_q6k_ggml_port_body(
                 source,
@@ -227,6 +242,8 @@ pub(super) fn push_packed_row_blocked_body(
                 block_bytes,
                 other_stride_is_one,
             );
+        } else if use_q4_0_native {
+            push_q4_0_native_body(source, weight, other, rows, other_stride_is_one);
         } else if use_single_fetch {
             push_q4k_single_fetch_body(
                 source,
@@ -1164,6 +1181,142 @@ pub(super) fn push_q4k_ggml_port_body(
     );
     source.push_str(
         "                      dmin * (sumy0 * (float)sc8_2 + sumy1 * (float)sc8_3 + sumy2 * (float)sc8_6 + sumy3 * (float)sc8_7);\n",
+    );
+    source.push_str("        }\n");
+    source.push_str(&format!(
+        "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
+    ));
+    source.push_str("        y4 += y4_step;\n");
+    source.push_str("    }\n");
+}
+
+// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
+// master/LICENSE) `mul_vec_q_n_f32_impl<block_q4_0, N_R0_Q4_0=4>` +
+// `block_q_n_dot_y(device const block_q4_0 *, ...)`
+// (ggml/src/ggml-metal/kernels/mul_mv.metal), transcribed line-for-line onto
+// this crate's operand-base/stride addressing.
+//
+// Copyright (c) 2023-2024 The ggml authors. MIT-licensed; see THIRD_PARTY.md.
+//
+/// `metal-q4_0-native` (default-off): a VERBATIM port of ggml's own `Q4_0`
+/// matvec lane geometry -- TWO threads per REAL 32-element block (`ix =
+/// tiisg/2`, 16 distinct block-owning lane-PAIRS per simdgroup; `il =
+/// (tiisg%2)*8`, the two lanes of a pair split one block's 16 packed-nibble
+/// bytes into adjacent 8-byte halves) -- NOT the K-quant-shaped `ix =
+/// lane/8` split [`push_packed_row_blocked_body`]'s generic arm and
+/// [`Q4_0_PAIR_DOT_MSL`] both inherit from the 256-element "virtual
+/// super-block" grouping [`codec_row_block_step_bytes`] imposes on every
+/// flat 32-element codec in this file so they can share one preamble with
+/// the real K-quant super-block codecs. `Q4_0` has no super-block of its
+/// own; ggml's kernel instead walks REAL blocks directly (`nb =
+/// reduction_total / 32`, `weight_base[q] / 32`, one real
+/// [`Q4_0_BLOCK_BYTES`] (18) per step), so 16 lane-PAIRS of one 32-lane
+/// simdgroup read 16 contiguous blocks (288 bytes) every outer-loop
+/// iteration -- see this landing's discipline row for the measured effect
+/// on real gemma4-E2B `Q4_0` weights.
+///
+/// Activation gather (`yl[16]`, `sumy0`/`sumy1`): four registers are filled
+/// per iteration of the inner 4-step loop (`i = 0, 2, 4, 6`), pre-scaled by
+/// ggml's fixed `1/16`/`1/256`/`1/4096` factors so the nibble dot below
+/// needs no runtime shift -- ggml's own comment: "we assume the yl's have
+/// been multiplied with the appropriate scale factor that corresponds to
+/// the missing bit shifts".
+///
+/// Dot product (`block_q_n_dot_y<block_q4_0>`): `d` (this block's one
+/// `half` scale) read once; `qs` is the block's 16 packed-nibble bytes
+/// viewed as 8 `uint16_t` words, offset by `il/2` words (0 or 4) so each
+/// lane's `qs` already lands on its own half; the fixed masks
+/// `0x000F`/`0x0F00`/`0x00F0`/`0xF000` pull all four nibbles a lane needs
+/// with no runtime shift, and `sumy * -8.0f` folds the fixed nibble
+/// zero-point (stored levels are `0..15`, the real value is `level - 8`) in
+/// algebraically instead of per element.
+///
+/// SIMD reduction: unchanged from every other row-blocked arm, handled by
+/// the shared `push_packed_row_combine_and_write` tail this function's
+/// caller still invokes after it returns.
+pub(super) fn push_q4_0_native_body(
+    source: &mut String,
+    weight: usize,
+    other: usize,
+    rows: usize,
+    other_stride_is_one: bool,
+) {
+    source.push_str("    uint ix = (uint)lane / 2u;\n");
+    source.push_str("    uint il = ((uint)lane % 2u) * 8u;\n");
+    source.push_str(&format!(
+        "    int nb = (int)u.reduction_total / {Q4_0_BLOCK_ELEMENTS};\n"
+    ));
+    source.push_str("    float yl[16];\n");
+    source.push_str("    int ib_first = (int)ix;\n    int ib_step = 16;\n");
+    source.push_str(&format!(
+        "    long blk_step = (long)ib_step * {Q4_0_BLOCK_BYTES};\n"
+    ));
+    source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
+    source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4_0_BLOCK_ELEMENTS}) + (long)ib_first) * {Q4_0_BLOCK_BYTES};\n"
+    ));
+    source.push_str("    }\n");
+    if other_stride_is_one {
+        source.push_str(&format!(
+            "    long y4_step = (long)ib_step * {Q4_0_BLOCK_ELEMENTS};\n"
+        ));
+        source.push_str(&format!(
+            "    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4_0_BLOCK_ELEMENTS} + (long)il;\n"
+        ));
+    } else {
+        source.push_str(&format!(
+            "    long y4_step = (long)ib_step * {Q4_0_BLOCK_ELEMENTS} * other_stride;\n"
+        ));
+        source.push_str(&format!(
+            "    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4_0_BLOCK_ELEMENTS} * other_stride + (long)il * other_stride;\n"
+        ));
+    }
+    source.push_str("    for (int ib = ib_first; ib < nb; ib += ib_step) {\n");
+    source.push_str("        float sumy0 = 0.0f; float sumy1 = 0.0f;\n");
+    if other_stride_is_one {
+        source.push_str("        for (uint i = 0u; i < 8u; i += 2u) {\n");
+        source.push_str("            sumy0 += y4[i + 0u] + y4[i + 1u];\n");
+        source.push_str("            yl[i + 0u] = y4[i + 0u];\n");
+        source.push_str("            yl[i + 1u] = y4[i + 1u] * (1.0f / 256.0f);\n");
+        source.push_str("            sumy1 += y4[i + 16u] + y4[i + 17u];\n");
+        source.push_str("            yl[i + 8u] = y4[i + 16u] * (1.0f / 16.0f);\n");
+        source.push_str("            yl[i + 9u] = y4[i + 17u] * (1.0f / 4096.0f);\n");
+        source.push_str("        }\n");
+    } else {
+        source.push_str("        for (uint i = 0u; i < 8u; i += 2u) {\n");
+        source.push_str("            float y0 = y4[(long)(i + 0u) * other_stride];\n");
+        source.push_str("            float y1 = y4[(long)(i + 1u) * other_stride];\n");
+        source.push_str("            float y16 = y4[(long)(i + 16u) * other_stride];\n");
+        source.push_str("            float y17 = y4[(long)(i + 17u) * other_stride];\n");
+        source.push_str("            sumy0 += y0 + y1;\n");
+        source.push_str("            yl[i + 0u] = y0;\n");
+        source.push_str("            yl[i + 1u] = y1 * (1.0f / 256.0f);\n");
+        source.push_str("            sumy1 += y16 + y17;\n");
+        source.push_str("            yl[i + 8u] = y16 * (1.0f / 16.0f);\n");
+        source.push_str("            yl[i + 9u] = y17 * (1.0f / 4096.0f);\n");
+        source.push_str("        }\n");
+    }
+    source.push_str("        float sumy = sumy0 + sumy1;\n");
+    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str("            device const uchar *blk = blk_ptr[q];\n");
+    source.push_str("            device const half *dh = (device const half *)blk;\n");
+    source.push_str("            float d = (float)dh[0];\n");
+    source.push_str(
+        "            device const ushort *qs = (device const ushort *)(blk + 2) + (il / 2u);\n",
+    );
+    source.push_str(
+        "            float acc0 = 0.0f; float acc1 = 0.0f; float acc2 = 0.0f; float acc3 = 0.0f;\n",
+    );
+    source.push_str("            for (uint i = 0u; i < 8u; i += 2u) {\n");
+    source.push_str("                ushort word = qs[i / 2u];\n");
+    source.push_str("                acc0 += yl[i + 0u] * (float)(word & (ushort)0x000Fu);\n");
+    source.push_str("                acc1 += yl[i + 1u] * (float)(word & (ushort)0x0F00u);\n");
+    source.push_str("                acc2 += yl[i + 8u] * (float)(word & (ushort)0x00F0u);\n");
+    source.push_str("                acc3 += yl[i + 9u] * (float)(word & (ushort)0xF000u);\n");
+    source.push_str("            }\n");
+    source.push_str(
+        "            sumf[q] = sumf[q] + d * (sumy * -8.0f + acc0 + acc1 + acc2 + acc3);\n",
     );
     source.push_str("        }\n");
     source.push_str(&format!(

@@ -1142,14 +1142,31 @@ fn q4_0_codec_takes_the_row_blocked_path_at_a_256_extent() {
     let source = emit(&bound, &q4_0, NumericPolicy::default())
         .expect("emits")
         .source;
-    assert!(
-        source.contains("q4_0_pair_dot(blk"),
-        "a plain-product row-blocked Q4_0 weight must call the batched pair-dot accessor:\n{source}"
-    );
-    assert!(
-        !source.contains("q4_0_super_element(blk"),
-        "the batched arm must fully replace the per-element accessor for a plain product:\n{source}"
-    );
+    // `metal-q4_0-native` (default-off) takes priority over the batched
+    // `q4_0_pair_dot` arm for a plain-product reduce -- see
+    // `push_q4_0_native_body`'s own doc. Under that feature this same
+    // matmul renders ggml's own inline dot (`sumy * -8.0f`), not a call to
+    // the named accessor, so the assertion below is feature-conditional
+    // rather than a second copy of this whole test.
+    if cfg!(feature = "metal-q4_0-native") {
+        assert!(
+            source.contains("sumy * -8.0f"),
+            "metal-q4_0-native must render ggml's inline nibble dot for a plain-product Q4_0 matmul:\n{source}"
+        );
+        assert!(
+            !source.contains("q4_0_pair_dot(blk") && !source.contains("q4_0_super_element(blk"),
+            "metal-q4_0-native must fully replace both the pair-dot and per-element accessors:\n{source}"
+        );
+    } else {
+        assert!(
+            source.contains("q4_0_pair_dot(blk"),
+            "a plain-product row-blocked Q4_0 weight must call the batched pair-dot accessor:\n{source}"
+        );
+        assert!(
+            !source.contains("q4_0_super_element(blk"),
+            "the batched arm must fully replace the per-element accessor for a plain product:\n{source}"
+        );
+    }
     assert!(
         !source.contains("q4k_run8(blk")
             && !source.contains("q5k_value(blk")
@@ -2974,10 +2991,19 @@ fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
         false,
     )
     .expect("Q4_0 now reaches the row-blocked path and renders a kernel body");
-    assert!(
-        source.contains("q4_0_pair_dot(blk"),
-        "row-blocked Q4_0 body for a plain-product reduce must call the batched pair-dot accessor: {source}"
-    );
+    // See the sibling assertion in `q4_0_codec_takes_the_row_blocked_path_
+    // at_a_256_extent` for why this branches on `metal-q4_0-native`.
+    if cfg!(feature = "metal-q4_0-native") {
+        assert!(
+            source.contains("sumy * -8.0f"),
+            "metal-q4_0-native must render ggml's inline nibble dot: {source}"
+        );
+    } else {
+        assert!(
+            source.contains("q4_0_pair_dot(blk"),
+            "row-blocked Q4_0 body for a plain-product reduce must call the batched pair-dot accessor: {source}"
+        );
+    }
 }
 
 /// Reachability proof for [`packed_row_split_factor`]'s row-count gate
