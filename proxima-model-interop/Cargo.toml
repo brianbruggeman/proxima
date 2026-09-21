@@ -427,6 +427,13 @@ required-features = ["std"]
 name = "decode_gbps_baseline"
 required-features = ["std", "metal", "instrument"]
 
+# Batched Q4_0 real-DRAM-streaming rate: matvec/floor/copy-ceiling arms over
+# one command buffer, per-dispatch launch/drain floor amortized -- see the
+# example's own module doc for the full measurement design.
+[[example]]
+name = "q4_0_dram_streaming_bench"
+required-features = ["std", "metal", "instrument"]
+
 # Drives `proxima_tokenizer::{vocab::Vocab, gguf::vocab_from_metadata, encode,
 # unigram::encode_fragment}` -- same `std`-only reason as `tokenize_local`.
 [[example]]
