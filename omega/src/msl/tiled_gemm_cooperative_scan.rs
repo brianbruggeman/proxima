@@ -632,7 +632,11 @@ pub(super) fn cooperative_reduce_width(
 /// `PACKED_ROW_NSG` from code it does not generate (mirrors
 /// [`packed_row_split_factor`]'s own on/off pair).
 #[cfg(all(
-    any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port"),
+    any(
+        feature = "metal-packed-row-nsg2",
+        feature = "metal-q4k-ggml-port",
+        feature = "metal-q4_0-native"
+    ),
     not(feature = "metal-q4k-split-k")
 ))]
 pub(super) fn packed_row_nsg_factor() -> u64 {
@@ -643,7 +647,11 @@ pub(super) fn packed_row_nsg_factor() -> u64 {
 /// engages, so the factor is always `1` -- see [`packed_row_nsg_factor`]'s
 /// feature-on twin for the real policy.
 #[cfg(not(all(
-    any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port"),
+    any(
+        feature = "metal-packed-row-nsg2",
+        feature = "metal-q4k-ggml-port",
+        feature = "metal-q4_0-native"
+    ),
     not(feature = "metal-q4k-split-k")
 )))]
 pub(super) fn packed_row_nsg_factor() -> u64 {

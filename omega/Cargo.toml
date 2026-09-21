@@ -377,6 +377,26 @@ kv-capacity-bucket = ["proxima-tensor/kv-capacity-bucket"]
 # body rewrite earns the production default only after a quiet-box
 # decode-step seal, not on the "verbatim port" argument alone.
 metal-q4k-ggml-port = ["metal"]
+# Line-for-line port of ggml's `mul_vec_q_n_f32_impl<block_q4_0, N_R0_Q4_0=4>`
+# + `block_q_n_dot_y<block_q4_0>`
+# (`ggml/src/ggml-metal/kernels/mul_mv.metal`, MIT-licensed, upstream:
+# https://github.com/ggml-org/llama.cpp) for the row-blocked packed `Q4_0`
+# matvec (`msl.rs`'s `push_q4_0_native_body`). `Q4_0` has no K-quant
+# super-block of its own, so every OTHER `Q4_0` arm in this crate (the
+# generic row-blocked preamble's per-element fallback, `q4_0_pair_dot`) still
+# spreads 8 lanes across a 256-element "virtual superblock" grouping built
+# for the real K-quant codecs -- this feature instead puts 2 threads on ONE
+# real 32-element block's contiguous 18 bytes, ggml's own `ix = tiisg/2`/
+# `il = (tiisg%2)*8` split, so 16 lane-pairs of a simdgroup span 16
+# contiguous blocks (288B) per outer-loop iteration. Also sets the dispatch
+# geometry to ggml's own `nsg=2`/`nr0=4` (`N_SG_Q4_0`/`N_R0_Q4_0`,
+# `tiled_gemm_threadgroup_width`), reusing the SAME `packed_row_nsg_factor`
+# mechanism `metal-q4k-ggml-port` already proved correctness-neutral
+# (`docs/discipline.md`'s q4k-ggml-port row). Default-off per the same
+# discipline as `metal-q4k-ggml-port` above: earns the production default
+# only after a quiet-box decode-step seal, not on the "verbatim port"
+# argument alone.
+metal-q4_0-native = ["metal"]
 # Plan-time grouping of independent, identically-shaped packed-row matvec
 # dispatches sharing one `kernel_identity` (the 8 routed-expert gate/up/down
 # gathers per (layer, projection) `append_moe_round_output` already emits,

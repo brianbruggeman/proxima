@@ -232,6 +232,8 @@ kv-capacity-bucket = [
 ]
 # passthrough to `omega/metal-q4k-ggml-port` so the decode harness can measure that arm.
 metal-q4k-ggml-port = ["omega?/metal-q4k-ggml-port"]
+# passthrough to `omega/metal-q4_0-native` so the decode harness can measure that arm.
+metal-q4_0-native = ["omega?/metal-q4_0-native"]
 memmap2 = ["dep:memmap2"]
 proxima-storage = ["dep:proxima-storage", "proxima-storage/dax"]
 conflaguration = ["dep:conflaguration"]
