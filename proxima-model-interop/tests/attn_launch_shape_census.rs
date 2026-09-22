@@ -134,3 +134,69 @@ async fn attn_launch_shape_census() {
     write_launch_shapes(OFF_CSV_PATH, "off_unfused", &(unfused_bound_ops,));
     write_launch_shapes(ON_CSV_PATH, "on_fused", &(fused_bound_ops,));
 }
+
+#[cfg(feature = "metal-fuse-attn-decode")]
+const OFF_CSV_DECODE_PATH: &str = "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/f00a0e26-f6a4-4429-b155-6f5915575ad2/scratchpad/attn_parity/measure/saturation/launch_shapes_off_decode.csv";
+#[cfg(feature = "metal-fuse-attn-decode")]
+const ON_CSV_DECODE_PATH: &str = "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/f00a0e26-f6a4-4429-b155-6f5915575ad2/scratchpad/attn_parity/measure/saturation/launch_shapes_on_decode.csv";
+
+/// Decode-shaped counterpart to [`attn_launch_shape_census`]: that test's
+/// fixed input binds `single_position_step=false` (`bind_program.single_position_step`
+/// off `dense.rs:156`, gemma4's own `DenseArch`), so the recognizer's
+/// `#[cfg(feature = "metal-fuse-attn-decode")]`-gated gemma4 arms in
+/// `proxima-tensor/src/bind/dead_code_cached_attention.rs` (e.g. the
+/// `via_gemma_template` guard) never see a decode-shaped candidate and this
+/// crate's own `metal` feature list does not pull in `metal-fuse-attn-decode`
+/// (`proxima-model-interop/Cargo.toml:117-131` omits it), so a plain
+/// `--features metal` build never even compiles those arms in. This case
+/// binds `bind_symbols` with `single_position_step=true` and the same
+/// `NEW_COUNT=1`/`KV_BUCKET_EXTENT=32` bucket-32 geometry the probe uses
+/// (`attn_parity_probe.rs`'s own decode step), gated
+/// `#[cfg(feature = "metal-fuse-attn-decode")]` so it only runs when that
+/// feature is actually enabled.
+#[cfg(feature = "metal-fuse-attn-decode")]
+#[proxima::test]
+async fn attn_launch_shape_census_decode_shaped() {
+    let Ok(file) = File::open(REAL_GEMMA4_E2B_GGUF_PATH) else {
+        eprintln!("skipping: real gemma4-E2B blob not found at {REAL_GEMMA4_E2B_GGUF_PATH}");
+        return;
+    };
+    // SAFETY: the checkpoint file is not written or truncated by any other
+    // process for the duration of this read-only mapping.
+    let mapping = unsafe { Mmap::map(&file) }.expect("mmap the real gemma4-E2B checkpoint");
+    let bytes: &[u8] = &mapping;
+    let parsed = parse_complete(bytes).expect("parse the real gemma4-E2B checkpoint header");
+
+    let bound_program = GEMMA4
+        .bind(&parsed, bytes)
+        .expect("bind the real gemma4-E2B checkpoint's production decode program");
+
+    let outputs = production_step_outputs(bound_program.logits_root, &bound_program.layer_roots);
+
+    let symbols = bind_symbols(NEW_COUNT, KV_BUCKET_EXTENT, &[], true)
+        .expect("bind_symbols: single_position_step=true with NEW_COUNT=1 is a legal decode step");
+    let shapes =
+        infer(&bound_program.program, &symbols).expect("shape inference over the real program");
+
+    let numeric_policy = NumericPolicy::llama_relaxed();
+
+    let unfused_bound_ops = bind_with_fusion(&bound_program.program, &shapes, &outputs, false, numeric_policy)
+        .expect("bind_with_fusion unfused (OFF)");
+    let fused_bound_ops = bind_with_fusion(&bound_program.program, &shapes, &outputs, true, numeric_policy)
+        .expect("bind_with_fusion fused (ON)");
+    let pruned_fused_bound_ops =
+        proxima_tensor::bind::prune_dead(fused_bound_ops.clone(), &outputs);
+    let cached_attention_count = fused_bound_ops
+        .iter()
+        .filter(|bound| matches!(bound.kind, proxima_tensor::bind::BoundOpKind::CachedAttention { .. }))
+        .count();
+    println!(
+        "attn_launch_shape_census_decode_shaped: unfused_len={} fused_len={} fused_pruned_len={} fused_cached_attention_count={cached_attention_count}",
+        unfused_bound_ops.len(),
+        fused_bound_ops.len(),
+        pruned_fused_bound_ops.len(),
+    );
+
+    write_launch_shapes(OFF_CSV_DECODE_PATH, "off_unfused_decode", &(unfused_bound_ops,));
+    write_launch_shapes(ON_CSV_DECODE_PATH, "on_fused_decode_pruned", &(pruned_fused_bound_ops,));
+}
