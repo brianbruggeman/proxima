@@ -20,6 +20,13 @@ std = ["alloc", "thiserror/std", "proxima-tensor/std", "dep:conflaguration", "de
 mlx-gdn = ["std"]
 alloc = []
 cached-attention-streaming = ["proxima-tensor/cached-attention-streaming"]
+# Default-off passthrough to `proxima-tensor/metal-fuse-attn-decode` (the
+# gemma4-shaped windowed/padded cached-attention matcher extension) -- same
+# shape as `cached-attention-streaming` above; the renderer this feeds
+# (`cached_attention_render.rs`) is always compiled, so this flag's only
+# effect is whether `proxima-tensor::bind` ever emits the kind for the
+# gemma4-shaped masks.
+metal-fuse-attn-decode = ["proxima-tensor/metal-fuse-attn-decode"]
 # Default-off passthrough to `proxima-tensor/gated-delta-net-fusion` (the
 # `BoundOpKind::GatedDeltaNet` bind-time matcher) -- same shape as
 # `cached-attention-streaming` above. `crate::msl::render_gated_delta_net`

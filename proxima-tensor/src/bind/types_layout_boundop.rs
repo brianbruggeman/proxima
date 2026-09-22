@@ -209,6 +209,17 @@ pub enum BoundOpKind {
         scale: f32,
         cached_lower_inclusive: i64,
         new_upper_inclusive: i64,
+        /// `true` only for the gemma4 recognizer arm's decode
+        /// (`new_key_rows == 1`), unity-scale candidates
+        /// (`proxima-tensor/src/bind/dead_code_cached_attention.rs`'s own
+        /// `staged_decode_only`/`staged_scale_not_unity` decline stages) --
+        /// every other producer (qwen35, mistral single/two-range, prefill)
+        /// sets this `false`. Selects the staged two-pass MSL emitter
+        /// (`omega/src/msl/cached_attention_two_pass.rs`) over the existing
+        /// online-softmax kernel at `render_cached_attention` time; the CPU
+        /// evaluator ignores it (both kernels compute the same values, this
+        /// field only chooses which GPU kernel TEXT to emit).
+        two_pass: bool,
     },
     /// One backend-neutral gated-delta-net recurrence step
     /// ([`crate::spec::append_qwen35_delta_net_step`]'s own ~12-op chain,
@@ -718,6 +729,7 @@ impl BoundOp {
                 scale,
                 cached_lower_inclusive,
                 new_upper_inclusive,
+                two_pass,
             } => BoundOpKind::CachedAttention {
                 operands: rebase_operands(operands, split_axis, chunk_start),
                 query_rows: *query_rows,
@@ -730,6 +742,7 @@ impl BoundOp {
                 scale: *scale,
                 cached_lower_inclusive: *cached_lower_inclusive,
                 new_upper_inclusive: *new_upper_inclusive,
+                two_pass: *two_pass,
             },
             BoundOpKind::Elementwise { body, operands } => BoundOpKind::Elementwise {
                 body: body.clone(),

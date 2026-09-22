@@ -284,6 +284,7 @@ fn name_reports_the_variant_backends_render_error_messages_with() {
         scale: 0.0,
         cached_lower_inclusive: 0,
         new_upper_inclusive: 0,
+        two_pass: false,
     };
     let elementwise = BoundOpKind::Elementwise {
         body: ComposedBody::leaf(ScalarOp::Identity),
@@ -2827,11 +2828,18 @@ fn select_push_emits_three_when_all_three_operands_are_held_and_non_fusing() {
         },
     );
     let identity = || IndexMap::Affine(map::projection(1, &[0]));
+    // `Negate`, not `Identity`: the pure-copy fold rule
+    // (`builder_compose_window.rs`'s own `is_pure_copy`) now admits a
+    // still-live `ScalarOp::Identity`-over-one-operand held node into its
+    // consumer regardless of `still_live`, which would fuse all three here
+    // and defeat this test's own premise (isolating what a single push
+    // materializes with nothing ever retiring). A real unary body keeps
+    // these three genuinely non-fusing.
     let held_a = append(
         &mut program,
         Op::Elementwise {
             dtype: DType::Float32,
-            body: ScalarOp::Identity,
+            body: ScalarOp::Negate,
             operands: alloc::vec![(a, identity())],
             name: None,
         },
@@ -2840,7 +2848,7 @@ fn select_push_emits_three_when_all_three_operands_are_held_and_non_fusing() {
         &mut program,
         Op::Elementwise {
             dtype: DType::Float32,
-            body: ScalarOp::Identity,
+            body: ScalarOp::Negate,
             operands: alloc::vec![(b, identity())],
             name: None,
         },
@@ -2849,7 +2857,7 @@ fn select_push_emits_three_when_all_three_operands_are_held_and_non_fusing() {
         &mut program,
         Op::Elementwise {
             dtype: DType::Float32,
-            body: ScalarOp::Identity,
+            body: ScalarOp::Negate,
             operands: alloc::vec![(c, identity())],
             name: None,
         },

@@ -31,6 +31,15 @@ alloc = []
 # that the real checkpoint work and CPU/Metal differential records are
 # accepted -- this feature stays selectable standalone for CPU-only callers.
 cached-attention-streaming = ["std"]
+# Recognizer extension only (dead_code_cached_attention.rs's own matcher
+# functions) -- admits the gemma4-shaped windowed/padded mask forms the
+# base cached-attention-streaming matcher declines (`is_exact_causal_mask`,
+# `unwrap_cached_padding_select`). No new kernel, no new BoundOpKind field
+# beyond what the fused op already carries; implies cached-attention-streaming
+# since every new matcher arm lives inside that feature's own gated function.
+# Default-off: the byte-equivalence acceptance bar is not yet met (attn_decode_
+# fusion_review.md 4b/4c).
+metal-fuse-attn-decode = ["cached-attention-streaming"]
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
 # AffineMap/validate) never sees this feature.

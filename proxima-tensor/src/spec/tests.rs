@@ -13609,6 +13609,145 @@ mod gemma4_synthetic_parity {
         );
     }
 
+    /// `metal-fuse-attn-decode` recognizer-extension acceptance gate: the
+    /// SAME sliding+global two-layer schedule the prior test builds, bound
+    /// (never evaluated -- shape inference and [`crate::bind::bind`] need
+    /// no real weight data) at a decode-shaped `[new_count=1,
+    /// kv_extent=SWA_WINDOW/2]` symbol pair and a prefill-shaped
+    /// `[new_count=600, kv_extent=0]` pair exceeding the sliding window.
+    /// With the feature ON: decode fuses both layers, BOTH with
+    /// `two_pass: true` (`BoundOpKind::CachedAttention::two_pass`'s own
+    /// doc -- the gemma4 arm's `staged_decode_only`/`staged_scale_not_unity`
+    /// decline stages in
+    /// `proxima-tensor/src/bind/dead_code_cached_attention.rs` gate only
+    /// the gemma-template mask match, `via_gemma_template`, never qwen's
+    /// own bare-Select arm). Prefill past the sliding window now declines
+    /// BOTH layers (0/2, not 1/2 as an earlier revision of this guard had
+    /// it): `staged_decode_only` declines the global layer's own
+    /// `new_key_rows > 1` candidate too, rather than falling back to the
+    /// online-softmax kernel for a shape the staged kernel has not
+    /// verified -- its surrounding ops stay fully unfused, byte-exact by
+    /// construction (`local_window_not_vacuous` still separately declines
+    /// the sliding layer, as before). With the feature OFF: 0 in both
+    /// cases, matching the pre-extension decline this crate's own review
+    /// recorded (`mask_form`/`cached_scale_shape`).
+    #[test]
+    fn gemma4_shaped_two_range_recognizer_accept_decline_counts() {
+        let schedule = alloc::vec![
+            LayerSchedule {
+                kind: LayerKind::Attention,
+                attention: LayerAttentionConfig {
+                    head_dim: HEAD_DIM as u32,
+                    kv_heads: KV_HEADS as u32,
+                    mask_window: Some(SWA_WINDOW as u32),
+                    value_source_kind: ValueSourceKind::ProjectedV,
+                    key_source_kind: KeySourceKind::ProjectedK,
+                    rope_table: RopeTableSel {
+                        cos_name: "rope_cos_swa",
+                        sin_name: "rope_sin_swa"
+                    },
+                    rope_pairing: RopePairing::SplitHalf {
+                        pairs: PAIRS as u32
+                    },
+                    score_scale: AttentionScoreScale::Unscaled,
+                    value_norm: true,
+                },
+                ffn: LayerFfnConfig::exclusive(),
+            },
+            LayerSchedule {
+                kind: LayerKind::Attention,
+                attention: LayerAttentionConfig {
+                    head_dim: HEAD_DIM as u32,
+                    kv_heads: KV_HEADS as u32,
+                    mask_window: None,
+                    value_source_kind: ValueSourceKind::SharedWithKey,
+                    key_source_kind: KeySourceKind::ProjectedK,
+                    rope_table: RopeTableSel {
+                        cos_name: "rope_cos",
+                        sin_name: "rope_sin"
+                    },
+                    rope_pairing: RopePairing::SplitHalf {
+                        pairs: PAIRS as u32
+                    },
+                    score_scale: AttentionScoreScale::Unscaled,
+                    value_norm: true,
+                },
+                ffn: LayerFfnConfig::exclusive(),
+            },
+        ];
+        let (program, logits, _cache_roots, _moe_sites) =
+            lfm2_two_range_cached_forward_program_with_experts(
+                VOCAB as u32,
+                EMBEDDING as u32,
+                FEED_FORWARD as u32,
+                EXPERT_FF as u32,
+                QUERY_HEADS as u32,
+                2,
+                EXPERT_COUNT as u32,
+                EXPERT_USED as u32,
+                0,
+                &schedule,
+                Some(EmbeddingScale::Sqrt),
+                Some(SOFTCAP),
+                true,
+                None,
+            )
+            .expect("the gemma4-shaped two-range recognizer fixture lowers");
+
+        let accepted = |new_count: u64, kv_extent: u64| -> (usize, alloc::vec::Vec<bool>) {
+            let shapes = crate::shape::infer(&program, &[new_count, kv_extent])
+                .expect("the gemma4-shaped recognizer fixture shape-infers");
+            let resolved = crate::bind::bind(
+                &program,
+                &shapes,
+                &[logits],
+                crate::numeric::NumericPolicy::llama_relaxed(),
+            )
+            .expect("the gemma4-shaped recognizer fixture binds");
+            let two_pass_flags: alloc::vec::Vec<bool> = resolved
+                .iter()
+                .filter_map(|bound| match bound.kind {
+                    crate::bind::BoundOpKind::CachedAttention { two_pass, .. } => Some(two_pass),
+                    _ => None,
+                })
+                .collect();
+            (two_pass_flags.len(), two_pass_flags)
+        };
+
+        let (decode_accepted, decode_two_pass) = accepted(1, SWA_WINDOW as u64 / 2);
+        let (prefill_accepted, _prefill_two_pass) = accepted(600, 0);
+
+        #[cfg(feature = "metal-fuse-attn-decode")]
+        {
+            assert_eq!(
+                decode_accepted, 2,
+                "feature on: decode step fuses both the sliding and global layers"
+            );
+            assert!(
+                decode_two_pass.iter().all(|&flag| flag),
+                "feature on: both decode-shaped candidates set two_pass (decode, unity scale, \
+                 gemma template match) -- found {decode_two_pass:?}"
+            );
+            assert_eq!(
+                prefill_accepted, 0,
+                "feature on: prefill past the sliding window now declines BOTH layers -- \
+                 staged_decode_only declines the global layer too (new_key_rows > 1), rather \
+                 than falling back to the online kernel for an unverified shape"
+            );
+        }
+        #[cfg(not(feature = "metal-fuse-attn-decode"))]
+        {
+            assert_eq!(
+                decode_accepted, 0,
+                "feature off: the gemma4-shaped masks stay declined at decode"
+            );
+            assert_eq!(
+                prefill_accepted, 0,
+                "feature off: the gemma4-shaped masks stay declined at prefill"
+            );
+        }
+    }
+
     /// Milestone-1 correctness gate for gemma4 E2B's cross-layer shared-KV
     /// shape in the two-range cached engine: a schedule with
     /// `KeySourceKind::SharedFromLayer`/`ValueSourceKind::SharedFromLayer`

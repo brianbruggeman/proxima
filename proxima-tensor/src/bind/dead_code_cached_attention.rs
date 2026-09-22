@@ -352,6 +352,156 @@ pub(super) fn unwrap_cached_padding_select(
     (Some(bound) == cached_len).then_some(*inner)
 }
 
+/// `node`'s (key, query) [`NodeId`] pair when `node` is exactly
+/// `Greater(Iota_t, Iota_s)` with the affine projections
+/// [`is_exact_causal_mask`] itself checks -- factored out so
+/// [`local_causal_mask_new_row_bound`]'s windowed arm can confirm its own
+/// `too_old` term subtracts the SAME two `Iota`s `is_future` compares,
+/// rather than merely matching the same shape twice over unrelated nodes.
+#[cfg(feature = "metal-fuse-attn-decode")]
+fn causal_greater_iota_pair(program: &[Op], node: NodeId) -> Option<(NodeId, NodeId)> {
+    let operands = elementwise_operands(program, node, ScalarOp::Greater)?;
+    let [(key, key_map), (query, query_map)] = operands else {
+        return None;
+    };
+    if *key_map != IndexMap::Affine(map::projection(2, &[1]))
+        || *query_map != IndexMap::Affine(map::projection(2, &[0]))
+    {
+        return None;
+    }
+    if !matches!(program.get(key.0 as usize), Some(Op::Iota { .. }))
+        || !matches!(program.get(query.0 as usize), Some(Op::Iota { .. }))
+    {
+        return None;
+    }
+    Some((*key, *query))
+}
+
+/// The new-row-count bound a local causal mask admits: `u64::MAX` for the
+/// bare causal form ([`causal_mask`]'s own shape, unbounded), `Some(W)` for
+/// [`causal_mask_windowed`]'s own shape -- `Maximum(is_future, too_old)`
+/// where `too_old = Greater(Subtract(Iota_s, Iota_t), window_ceiling)` and
+/// `too_old`'s two `Iota`s are the SAME NodeIds `is_future` compares (this
+/// is what makes `too_old` a real restatement of "too far behind THIS
+/// mask's own query/key", not an unrelated window pasted alongside it).
+/// `W = window_ceiling + 1`; declines (`None`) unless `window_ceiling` is a
+/// finite non-negative integral constant and `W` fits `1..=2^24`
+/// (`cached_len_precision`'s own f32-exactness bound, restated for the
+/// window itself).
+#[cfg(feature = "metal-fuse-attn-decode")]
+pub(super) fn local_causal_mask_new_row_bound(program: &[Op], node: NodeId) -> Option<u64> {
+    if is_exact_causal_mask(program, node) {
+        return Some(u64::MAX);
+    }
+    let masked = binary_elementwise(program, node, ScalarOp::Maximum)?;
+    let (future_key, future_query) = causal_greater_iota_pair(program, masked[0])?;
+    let too_old = binary_elementwise(program, masked[1], ScalarOp::Greater)?;
+    let distance = binary_elementwise(program, too_old[0], ScalarOp::Subtract)?;
+    if distance[0] != future_query || distance[1] != future_key {
+        return None;
+    }
+    let window_ceiling = constant_value(program, too_old[1])?;
+    if !window_ceiling.is_finite() || window_ceiling < 0.0 || window_ceiling.fract() != 0.0 {
+        return None;
+    }
+    let window = window_ceiling as u64 + 1;
+    (1..=(1u64 << 24)).contains(&window).then_some(window)
+}
+
+/// [`lfm2_single_range_cached::causal_mask_cached_windowed`]'s own
+/// `is_padding` shape: `Greater(Iota_t, Subtract(Subtract(Add(Iota_s, C),
+/// Iota_s), 1.0))`, value-equal to [`cached_len_padding_bound`]'s bare
+/// `Greater(Iota_t, Subtract(C, 1.0))` (`(s+c)-s == c` bit-exact in f32
+/// while `s+c < 2^24`, asserted by `cached_len_precision` at the call
+/// site) but structurally different because the query-absolute term is
+/// carried explicitly. Returns `(C, query_absolute, Iota_t)` -- the
+/// caller needs `query_absolute`'s own [`NodeId`] to confirm a windowed
+/// `too_old` term subtracts the SAME query-absolute and key-index nodes
+/// this predicate already walked, not an unrelated pair.
+#[cfg(feature = "metal-fuse-attn-decode")]
+fn cached_len_padding_template(program: &[Op], node: NodeId) -> Option<(NodeId, NodeId, NodeId)> {
+    let padding = elementwise_operands(program, node, ScalarOp::Greater)?;
+    let [(key_index, key_map), (ceiling_source, ceiling_map)] = padding else {
+        return None;
+    };
+    if *key_map != IndexMap::Affine(map::projection(2, &[1]))
+        || *ceiling_map != IndexMap::Affine(map::projection(2, &[0]))
+    {
+        return None;
+    }
+    let key_index = *key_index;
+    let ceiling_source = *ceiling_source;
+    if !is_iota(program, key_index) {
+        return None;
+    }
+    let ceiling = binary_elementwise(program, ceiling_source, ScalarOp::Subtract)?;
+    if constant_value(program, ceiling[1]) != Some(1.0) {
+        return None;
+    }
+    let cached_len_row = binary_elementwise(program, ceiling[0], ScalarOp::Subtract)?;
+    let query_index = cached_len_row[1];
+    if !is_iota(program, query_index) {
+        return None;
+    }
+    let query_absolute = binary_elementwise(program, cached_len_row[0], ScalarOp::Add)?;
+    if query_absolute[0] != query_index {
+        return None;
+    }
+    Some((query_absolute[1], cached_len_row[0], key_index))
+}
+
+/// [`unwrap_cached_padding_select`]'s gemma4-shaped counterpart: walks past
+/// `Select(pred, -inf, inner)` where `pred` is either
+/// [`cached_len_padding_template`]'s bare `is_padding` (unwindowed --
+/// `cached_lower_inclusive = i64::MIN`) or `Maximum(is_padding, too_old)`
+/// (windowed -- `causal_mask_cached_windowed`'s own shape,
+/// `cached_lower_inclusive = 1 - W`), and `too_old`'s `Subtract` reads the
+/// SAME `query_absolute`/key-index [`NodeId`]s `is_padding` walked.
+/// [`unwrap_cached_padding_select`] is tried FIRST and unconditionally, so
+/// qwen35's own bare shape is untouched by this function's existence.
+#[cfg(feature = "metal-fuse-attn-decode")]
+pub(super) fn cached_padding_mask_lower_bound(
+    program: &[Op],
+    node: NodeId,
+    cached_len: Option<NodeId>,
+) -> Option<(NodeId, i64, bool)> {
+    if let Some(inner) = unwrap_cached_padding_select(program, node, cached_len) {
+        return Some((inner, i64::MIN, false));
+    }
+    let select_operands = elementwise_operands(program, node, ScalarOp::Select)?;
+    let [(predicate, _), (negative_infinity, _), (inner, _)] = select_operands else {
+        return None;
+    };
+    if constant_value(program, *negative_infinity) != Some(f32::NEG_INFINITY) {
+        return None;
+    }
+    if let Some((cached_len_candidate, _, _)) = cached_len_padding_template(program, *predicate)
+        && Some(cached_len_candidate) == cached_len
+    {
+        return Some((*inner, i64::MIN, true));
+    }
+    let parts = binary_elementwise(program, *predicate, ScalarOp::Maximum)?;
+    let (cached_len_candidate, query_absolute, key_index) =
+        cached_len_padding_template(program, parts[0])?;
+    if Some(cached_len_candidate) != cached_len {
+        return None;
+    }
+    let too_old = binary_elementwise(program, parts[1], ScalarOp::Greater)?;
+    let distance = binary_elementwise(program, too_old[0], ScalarOp::Subtract)?;
+    if distance[0] != query_absolute || distance[1] != key_index {
+        return None;
+    }
+    let window_ceiling = constant_value(program, too_old[1])?;
+    if !window_ceiling.is_finite() || window_ceiling < 0.0 || window_ceiling.fract() != 0.0 {
+        return None;
+    }
+    let window = window_ceiling as i64 + 1;
+    if !(1..=(1i64 << 24)).contains(&window) {
+        return None;
+    }
+    Some((*inner, 1 - window, true))
+}
+
 #[cfg(feature = "cached-attention-streaming")]
 pub(super) fn is_exact_causal_mask(program: &[Op], node: NodeId) -> bool {
     let Some(operands) = elementwise_operands(program, node, ScalarOp::Greater) else {
@@ -568,9 +718,16 @@ pub(super) fn cached_attention_candidates(
             );
             continue;
         };
-        if !is_exact_causal_mask(program, *mask)
-            || constant_value(program, *negative_infinity) != Some(f32::NEG_INFINITY)
-        {
+        let negative_infinity_ok = constant_value(program, *negative_infinity) == Some(f32::NEG_INFINITY);
+        #[cfg(feature = "metal-fuse-attn-decode")]
+        let local_row_bound = negative_infinity_ok
+            .then(|| local_causal_mask_new_row_bound(program, *mask))
+            .flatten();
+        #[cfg(not(feature = "metal-fuse-attn-decode"))]
+        let local_row_bound = negative_infinity_ok
+            .then(|| is_exact_causal_mask(program, *mask).then_some(u64::MAX))
+            .flatten();
+        let Some(local_row_bound) = local_row_bound else {
             #[cfg(feature = "instrument")]
             debug!(
                 node = output.0,
@@ -579,7 +736,9 @@ pub(super) fn cached_attention_candidates(
                 "cached_attention decline -- mask is not the exact causal form"
             );
             continue;
-        }
+        };
+        #[cfg(not(feature = "metal-fuse-attn-decode"))]
+        let _ = local_row_bound;
         // qwen35's own chain masks cached-range padding with a `Select`
         // right here (`spec.rs:4979-4997`, `is_cached_padding`) before the
         // online-softmax subtract this matcher already walked past above --
@@ -587,9 +746,19 @@ pub(super) fn cached_attention_candidates(
         // (`cpu.rs:6944-6974`) excludes exactly those rows, so dropping the
         // mask node is sound whenever its bound is the SAME `cached_len`
         // leaf the ninth operand below reads.
-        let cached_scaled_source =
-            unwrap_cached_padding_select(program, cached_score_parts[0], named_cached_len)
-                .unwrap_or(cached_score_parts[0]);
+        #[cfg(feature = "metal-fuse-attn-decode")]
+        let (cached_scaled_source, cached_lower_inclusive, cached_padding_matched, via_gemma_template) =
+            match cached_padding_mask_lower_bound(program, cached_score_parts[0], named_cached_len)
+            {
+                Some((inner, bound, via_gemma_template)) => (inner, bound, true, via_gemma_template),
+                None => (cached_score_parts[0], i64::MIN, false, false),
+            };
+        #[cfg(not(feature = "metal-fuse-attn-decode"))]
+        let (cached_scaled_source, cached_lower_inclusive, _cached_padding_matched) =
+            match unwrap_cached_padding_select(program, cached_score_parts[0], named_cached_len) {
+                Some(inner) => (inner, i64::MIN, true),
+                None => (cached_score_parts[0], i64::MIN, false),
+            };
         let Some(cached_scaled_parts) =
             binary_elementwise(program, cached_scaled_source, ScalarOp::Multiply)
         else {
@@ -866,6 +1035,114 @@ pub(super) fn cached_attention_candidates(
         let new_key_shape = shapes.of(new_key_even);
         let cached_value_shape = shapes.of(cached_value);
         let new_value_shape = shapes.of(new_value);
+        // Eligibility guards for the gemma4-shaped windowed/padded masks
+        // `local_row_bound`/`cached_lower_inclusive` above may have matched.
+        // Every guard here is a no-op off this feature: `local_row_bound` is
+        // always `u64::MAX` and `cached_padding_matched` always came from
+        // [`unwrap_cached_padding_select`]'s unwindowed bare shape, so none
+        // of qwen35's existing accepted candidates can be reached by them.
+        #[cfg(feature = "metal-fuse-attn-decode")]
+        let two_pass_eligible;
+        #[cfg(not(feature = "metal-fuse-attn-decode"))]
+        let two_pass_eligible = false;
+        #[cfg(feature = "metal-fuse-attn-decode")]
+        {
+            if local_row_bound != u64::MAX && new_key_shape[0] > local_row_bound {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "local_window_not_vacuous",
+                    window = local_row_bound,
+                    new_key_rows = new_key_shape[0],
+                    "cached_attention decline -- new range exceeds the local sliding window"
+                );
+                continue;
+            }
+            let precision_ok = new_key_shape[0]
+                .checked_sub(1)
+                .and_then(|max_new_index| max_new_index.checked_add(cached_key_shape[0]))
+                .map(|bound| bound < (1u64 << 24))
+                .unwrap_or(cached_key_shape[0] < (1u64 << 24));
+            if !precision_ok {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "cached_len_precision",
+                    new_key_rows = new_key_shape[0],
+                    cached_key_rows = cached_key_shape[0],
+                    "cached_attention decline -- new_key_rows + cached_key_rows exceeds the f32-exact integer bound"
+                );
+                continue;
+            }
+            let ninth_operand_available = named_cached_len
+                .map(|node| shapes.of(node).is_empty())
+                .unwrap_or(false);
+            if cached_padding_matched && cached_key_shape[0] > 0 && !ninth_operand_available {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "cached_len_operand_required",
+                    "cached_attention decline -- a matched cached padding mask has no rank-0 cached_len input to bind"
+                );
+                continue;
+            }
+            if cached_key_shape[0] > 0 {
+                let window_cached = (cached_lower_inclusive != i64::MIN)
+                    .then(|| 1 - cached_lower_inclusive)
+                    .map(|window| window as u64);
+                let window_local = (local_row_bound != u64::MAX).then_some(local_row_bound);
+                if window_cached != window_local {
+                    #[cfg(feature = "instrument")]
+                    debug!(
+                        node = output.0,
+                        stage = "window_mismatch",
+                        ?window_cached,
+                        ?window_local,
+                        "cached_attention decline -- cached and local windows disagree"
+                    );
+                    continue;
+                }
+            }
+            // gemma4 arm only (`via_gemma_template`, the THIRD element
+            // `cached_padding_mask_lower_bound` now returns -- `true` only
+            // when the gemma-shaped `cached_len_padding_template` matched,
+            // `false` when `unwrap_cached_padding_select`'s qwen bare-Select
+            // arm matched first; `cached_padding_matched` alone conflated
+            // the two and wrongly gated these declines on qwen's own
+            // accepted shape too). The staged two-pass kernel
+            // (`omega/src/msl/cached_attention_two_pass.rs`) is proven
+            // byte-exact against `R9/vectors_relaxed` for decode
+            // (`new_key_rows == 1`) at unity scale only -- a gemma
+            // candidate that fails either check DECLINES here (its
+            // surrounding ops stay fully unfused, byte-exact by
+            // construction), rather than falling back to the online-
+            // softmax kernel, which was never re-verified against this
+            // mask/window shape. `via_gemma_template` being `false` (qwen,
+            // mistral, or no match at all) skips both declines entirely --
+            // those candidates are untouched by this feature, exactly as
+            // before.
+            if via_gemma_template && new_key_shape[0] != 1 {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "staged_decode_only",
+                    new_key_rows = new_key_shape[0],
+                    "cached_attention decline -- staged two-pass kernel is decode-only (new_key_rows must be 1)"
+                );
+                continue;
+            }
+            if via_gemma_template && scale_value != 1.0 {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "staged_scale_not_unity",
+                    scale_value,
+                    "cached_attention decline -- staged two-pass kernel is proven at unity scale only"
+                );
+                continue;
+            }
+            two_pass_eligible = via_gemma_template;
+        }
         let Some(rotary_width) = query_shape[3].checked_mul(2) else {
             continue;
         };
@@ -1089,6 +1366,12 @@ pub(super) fn cached_attention_candidates(
         if let Some(pass_operands) = pass_operands {
             operands.extend(pass_operands);
         }
+        // true only for the gemma4 arm's decode-unity-scale candidates
+        // (`two_pass_eligible`, set above) -- every other caller (qwen35,
+        // mistral, prefill, non-unity scale) stays `false` and renders the
+        // existing online-softmax kernel; this candidate is ACCEPTED
+        // either way, never declined by this axis.
+        let two_pass = two_pass_eligible;
         let fused = BoundOp {
             node: output,
             dtype: DType::Float32,
@@ -1107,8 +1390,9 @@ pub(super) fn cached_attention_candidates(
                 // below `head_dim` (`attention_score_sources`'s own doc).
                 rotary_dim: rotary_width,
                 scale: scale_value,
-                cached_lower_inclusive: i64::MIN,
+                cached_lower_inclusive,
                 new_upper_inclusive: 0,
+                two_pass,
             },
         };
         #[cfg(feature = "instrument")]
@@ -1404,6 +1688,7 @@ pub(super) fn cached_attention_single_range_candidates(
                 scale: scale_value,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
+                two_pass: false,
             },
         };
         candidates.push((fused, absorbed));
