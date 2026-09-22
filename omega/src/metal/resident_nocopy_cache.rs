@@ -1330,6 +1330,22 @@ pub(super) fn dispatch(
         height: 1,
         depth: 1,
     };
+    #[cfg(feature = "instrument")]
+    if let Some(requested_width) = grid.threadgroup_width {
+        let entry_name = pipeline
+            .label()
+            .map(|label| label.to_string().replace(char::is_whitespace, "_"))
+            .unwrap_or_else(|| "unknown".to_string());
+        debug!(
+            requested_width,
+            compiled_width = threadgroup_width as u64,
+            limit = max_threadgroup as u64,
+            "cooperative-reduce threadgroup width"
+        );
+        eprintln!(
+            "cooperative_reduce_width requested_width={requested_width} compiled_width={threadgroup_width} limit={max_threadgroup} entry_name={entry_name}"
+        );
+    }
     encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup);
     #[cfg(feature = "instrument")]
     counter!(PHYSICAL_DISPATCH_CALLS, 1);
