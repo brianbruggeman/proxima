@@ -3824,6 +3824,14 @@ impl<'file> LoadedModel<'file> {
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     #[cfg(not(feature = "instrument"))]
                     let dispatch_profile_target = false;
+                    // ROW 329: this step's encoder-split result, if
+                    // `dispatch_profile_target` below actually takes it --
+                    // declared here (not inside the match arm) so the
+                    // post-match `metal_stage` snapshot a few lines down can
+                    // read it out, same convention as
+                    // `run_decode_loop_placed_kv`'s own `encoder_split_ns`.
+                    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                    let mut encoder_split_ns: Option<(u64, u64)> = None;
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     let evaluated = if monolithic_profile_target {
                         #[cfg(feature = "instrument")]
@@ -3941,7 +3949,7 @@ impl<'file> LoadedModel<'file> {
                             // placed-KV timed executor to time the SAME unplaced
                             // shape gemma4's two-range path actually runs, never a
                             // fabricated placement.
-                            let (evaluated, timings, sampling_mode, _split_ns) = runtime
+                            let (evaluated, timings, sampling_mode, split_ns) = runtime
                                 .evaluate_dispatch_timed_with_placements(
                                     active_program,
                                     &symbols,
@@ -3956,6 +3964,7 @@ impl<'file> LoadedModel<'file> {
                                 sampling_mode, "dispatch_profile: two-range full graph"
                             );
                             report_op_timings(_step, &timings, active_program);
+                            encoder_split_ns = split_ns;
                             evaluated
                         }
                         #[cfg(not(feature = "instrument"))]
@@ -4213,6 +4222,20 @@ impl<'file> LoadedModel<'file> {
                     let evaluate_ticks = elapsed_ticks(evaluate_started);
                     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                     let metal_stage = metal_stage_totals();
+                    // ROW 329's own two-range twin: the dispatch_profile_target
+                    // arm above stores its `execute_plan_with_placements_dispatch_timed`
+                    // split into `encoder_split_ns` instead of dropping it, so
+                    // this step's `report_encoder_split` fires here exactly like
+                    // `run_decode_loop_placed_kv`'s single-range arm does, using
+                    // this same post-match `metal_stage` snapshot for `gpu_exec_ms`.
+                    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                    if let Some(split_ns) = encoder_split_ns {
+                        report_encoder_split(
+                            _step,
+                            split_ns,
+                            ticks_to_nanos(metal_stage.gpu_exec_ticks),
+                        );
+                    }
                     if std::env::var_os("PROXIMA_DEBUG_PREFILL_BATCHES").is_some()
                         && _step == 0
                         && split_prefill
