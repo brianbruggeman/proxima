@@ -70,27 +70,12 @@ fn main() {
         .expect("create output dir");
     fs::write(OUTPUT_PATH, &kernel.source).unwrap_or_else(|error| panic!("write {OUTPUT_PATH}: {error}"));
 
-    // With `metal-fuse-attn-decode` ON, the recognizer now ALWAYS sets
-    // `two_pass: true` for an eligible gemma op (Part A's own fix -- a
-    // gemma decode candidate is never accepted with `two_pass: false`
-    // anymore, by design). `r3/fused_production.metal` was captured before
-    // `two_pass` existed at all, so there is no live recognizer path left
-    // that reproduces its ONLINE-kernel text for this exact op shape.
-    // Force the field back to `false` on a clone of the SAME resolved op
-    // (same query_groups/head_dim/cached_key_rows/scale/window -- only the
-    // dispatch selector bit differs) to exercise the unmodified fallthrough
-    // branch `render_cached_attention` always ran before this session's
-    // `if *two_pass` insertion.
-    let mut online_kernel_op = (**first).clone();
-    if let BoundOpKind::CachedAttention { two_pass, .. } = &mut online_kernel_op.kind {
-        *two_pass = false;
-    }
-    let online_kernel = omega::emit(&online_kernel_op, &packed_operands, numeric_policy)
-        .unwrap_or_else(|error| panic!("emit (two_pass forced false) node={} failed: {error}", online_kernel_op.node.0));
-    println!("attn_fused_op_dump: online_kernel entry={}", online_kernel.entry);
-    let online_kernel_path = format!("{OUTPUT_PATH}.online_kernel_fallback.metal");
-    fs::write(&online_kernel_path, &online_kernel.source)
-        .unwrap_or_else(|error| panic!("write {online_kernel_path}: {error}"));
+    // `BoundOpKind::CachedAttention::two_pass` (the online-vs-staged kernel
+    // selector this diagnostic used to flip on a cloned op) is deleted --
+    // the gemma4 decode arm this file's own `cached_attention_ops` walk
+    // targets is now served entirely by `BoundOpKind::CachedSoftmaxWeights`
+    // (`R9/PROGRESS.md`'s "Candidate B" sections), so there is no online-
+    // kernel fallback text left to dump for this op shape.
 }
 
 fn alloc_outputs(bound_program: &proxima_model_interop::BoundProgram<'_>) -> Vec<proxima_tensor::NodeId> {

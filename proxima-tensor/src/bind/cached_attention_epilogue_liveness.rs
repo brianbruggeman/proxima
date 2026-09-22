@@ -1,5 +1,10 @@
 use super::*;
 
+#[cfg(feature = "cached-attention-streaming")]
+use alloc::collections::BinaryHeap;
+#[cfg(feature = "cached-attention-streaming")]
+use core::cmp::Reverse;
+
 pub(super) fn bind_cached_attention_fusion(
     program: &[Op],
     shapes: &Shapes,
@@ -43,25 +48,66 @@ pub(super) fn bind_cached_attention_fusion(
             planning_outputs.push(root);
         }
         for (fused, _) in &initial_candidates {
-            let BoundOpKind::CachedAttention { operands, .. } = &fused.kind else {
-                continue;
-            };
-            // the anchor itself (qwen35's own `attended` tap, single-consumer
-            // into the per-head gate multiply) must be pinned alongside its
-            // sources -- `bind_plain`'s single-consumer elementwise fusion
-            // folds an unrequested single-consumer node into its consumer
-            // before this function ever sees it (`bind.rs:993`'s own
-            // `elementwise_operand_fuse`), so without this the anchor never
-            // gets a standalone `BoundOp` for the second pass below to find
-            // (`qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer`'s
-            // own comment names the same requirement for its fixture's outputs).
-            if !planning_outputs.contains(&fused.node) {
-                planning_outputs.push(fused.node);
-            }
-            for (source, _, _) in operands {
-                if !planning_outputs.contains(source) {
-                    planning_outputs.push(*source);
+            match &fused.kind {
+                BoundOpKind::CachedAttention { operands, .. } => {
+                    // the anchor itself (qwen35's own `attended` tap, single-
+                    // consumer into the per-head gate multiply) must be
+                    // pinned alongside its sources -- `bind_plain`'s single-
+                    // consumer elementwise fusion folds an unrequested
+                    // single-consumer node into its consumer before this
+                    // function ever sees it (`bind.rs:993`'s own
+                    // `elementwise_operand_fuse`), so without this the anchor
+                    // never gets a standalone `BoundOp` for the second pass
+                    // below to find
+                    // (`qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer`'s
+                    // own comment names the same requirement for its
+                    // fixture's outputs).
+                    if !planning_outputs.contains(&fused.node) {
+                        planning_outputs.push(fused.node);
+                    }
+                    for (source, _, _) in operands {
+                        if !planning_outputs.contains(source) {
+                            planning_outputs.push(*source);
+                        }
+                    }
                 }
+                // Candidate B's gemma-arm softmax op (`R9/PROGRESS.md`'s own
+                // "Candidate B" sections): pin its own node (154) plus its
+                // three operands (142/149/127) -- the same shape
+                // `CachedAttention`'s own arm just pinned, so `bind_plain`
+                // cannot fold either the anchor or its sources away before
+                // the second pass' `resolved.iter().find(..)` lookups run.
+                #[cfg(feature = "metal-fuse-attn-decode")]
+                BoundOpKind::CachedSoftmaxWeights { operands, .. } => {
+                    if !planning_outputs.contains(&fused.node) {
+                        planning_outputs.push(fused.node);
+                    }
+                    for (source, _, _) in operands {
+                        if !planning_outputs.contains(source) {
+                            planning_outputs.push(*source);
+                        }
+                    }
+                }
+                // Candidate B's gemma-arm combine op (166, replacing 162's
+                // own node): pin the combine's own node, its epilogue
+                // operands (157/158/164), and its base fold operands (82,
+                // 154) -- the coordinator's own explicit pin list.
+                #[cfg(feature = "metal-fuse-attn-decode")]
+                BoundOpKind::Reduce {
+                    operands,
+                    epilogue_operands,
+                    ..
+                } if !epilogue_operands.is_empty() => {
+                    if !planning_outputs.contains(&fused.node) {
+                        planning_outputs.push(fused.node);
+                    }
+                    for (source, _, _) in operands.iter().chain(epilogue_operands.iter()) {
+                        if !planning_outputs.contains(source) {
+                            planning_outputs.push(*source);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         let rebuilt = bind_plain(program, shapes, &planning_outputs, numeric_policy)?;
@@ -88,8 +134,92 @@ pub(super) fn bind_cached_attention_fusion(
                 rewritten.push(bound);
             }
         }
-        Ok(rewritten)
+        Ok(topological_order_by_read_sources(rewritten))
     }
+}
+
+/// Restores a valid topological order after fusion substitutes a node
+/// in-place (`bind_cached_attention_fusion`'s own `rewritten` loop above):
+/// splicing a fused op at the SAME array position the node it replaces held
+/// is only safe when the fused op's own [`BoundOp::all_read_sources`] is a
+/// SUBSET of what that node needed. It is not, for a fused op whose new
+/// operand was only needed LATER in the unfused graph (`R9/PROGRESS.md`'s
+/// own "Root cause of bug 5" section: `CachedSoftmaxWeights` also reads the
+/// raw value tensor, which the unfused graph only needed downstream, at a
+/// later position -- the fused op ran before its own operand was computed).
+///
+/// Kahn's algorithm, ties broken by ORIGINAL index (a min-heap over ready
+/// positions): every ready node is emitted in the same relative order
+/// `bind_plain` gave it, so a `nodes` slice that already satisfies every
+/// dependency -- every existing `CachedAttention`/166-into-162 splice,
+/// which always replaces the LAST node in its own subgraph and therefore
+/// never widens a dependency past an already-computed position -- passes
+/// through completely UNCHANGED. This is a pure widening of legality, never
+/// a repositioning of anything that did not need to move (see
+/// `bind/tests.rs`'s own `topological_order_by_read_sources_*` cases).
+///
+/// A genuine cycle is impossible for this caller: every new operand a
+/// fusion pass introduces here is a real upstream node the ORIGINAL,
+/// already-acyclic unfused graph also depended on (never the fused op's own
+/// downstream), so `order.len() != nodes.len()` is unreachable in practice
+/// -- handled by returning `nodes` unchanged rather than panicking, since a
+/// pass-through is never less correct than a partial reorder would be.
+#[cfg(feature = "cached-attention-streaming")]
+pub(super) fn topological_order_by_read_sources(nodes: Vec<BoundOp>) -> Vec<BoundOp> {
+    let position_of: BTreeMap<NodeId, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, bound)| (bound.node, index))
+        .collect();
+    let node_count = nodes.len();
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+    let mut in_degree = vec![0usize; node_count];
+    for (index, bound) in nodes.iter().enumerate() {
+        let mut producers = BTreeSet::new();
+        for (source, _, lookup) in bound.all_read_sources() {
+            producers.insert(*source);
+            if let Some(lookup) = lookup {
+                producers.insert(lookup.indices);
+            }
+        }
+        if let BoundOpKind::Reduce {
+            out_scatter: Some(lookup),
+            ..
+        } = &bound.kind
+        {
+            producers.insert(lookup.indices);
+        }
+        for source in producers {
+            if let Some(&producer_index) = position_of.get(&source)
+                && producer_index != index
+            {
+                dependents[producer_index].push(index);
+                in_degree[index] += 1;
+            }
+        }
+    }
+    let mut ready: BinaryHeap<Reverse<usize>> = (0..node_count)
+        .filter(|&index| in_degree[index] == 0)
+        .map(Reverse)
+        .collect();
+    let mut order = Vec::with_capacity(node_count);
+    while let Some(Reverse(index)) = ready.pop() {
+        order.push(index);
+        for &dependent in &dependents[index] {
+            in_degree[dependent] -= 1;
+            if in_degree[dependent] == 0 {
+                ready.push(Reverse(dependent));
+            }
+        }
+    }
+    if order.len() != node_count {
+        return nodes;
+    }
+    let mut slots: Vec<Option<BoundOp>> = nodes.into_iter().map(Some).collect();
+    order
+        .into_iter()
+        .filter_map(|index| slots.get_mut(index).and_then(Option::take))
+        .collect()
 }
 
 /// Is `bound` a still-un-scattered `Keep::Reduce` fold — the only

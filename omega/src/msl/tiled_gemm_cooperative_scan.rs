@@ -414,6 +414,17 @@ pub(super) fn tiled_gemm_threadgroup_width(
     if let BoundOpKind::GatedDeltaNet { head_v_dim, .. } = &resolved.kind {
         return Some(*head_v_dim);
     }
+    // Must agree with `grid_threads`'s own `CachedSoftmaxWeights` arm: one
+    // threadgroup per attention row, `width` lanes wide -- the same
+    // cooperative-reduce width the surviving 152/157/162 production folds
+    // use for this same `cached_key_rows` bucket (`BoundOpKind::
+    // CachedSoftmaxWeights::cached_key_rows`'s own doc).
+    if let BoundOpKind::CachedSoftmaxWeights {
+        cached_key_rows, ..
+    } = &resolved.kind
+    {
+        return Some(wide_cooperative_reduce_width(*cached_key_rows));
+    }
     // `query_groups * SIMD_WIDTH` threads per threadgroup -- one simdgroup
     // per query head sharing this kv_head, cooperatively loading that
     // kv_head's K/V row once per key into `threadgroup` memory instead of
@@ -425,19 +436,6 @@ pub(super) fn tiled_gemm_threadgroup_width(
     // out of this width entirely -- one query head per threadgroup, decoded
     // from `tgid` instead of shared threadgroup memory -- so the width there
     // is `chunks * SIMD_WIDTH` alone.
-    // Part D: must agree with `grid_threads`'s own two_pass arm exactly --
-    // one threadgroup per `(query_row, kv_head)`, `query_groups` simdgroups
-    // wide, no chunk/split widening (see that arm's own doc).
-    if let BoundOpKind::CachedAttention {
-        query_groups,
-        two_pass: true,
-        head_dim,
-        cached_key_rows,
-        ..
-    } = &resolved.kind
-    {
-        return Some(two_pass_physical_threadgroup_width(*query_groups, *head_dim, *cached_key_rows));
-    }
     if let BoundOpKind::CachedAttention {
         query_groups,
         head_dim,
@@ -607,17 +605,16 @@ pub(super) fn q4k_super_block_tiled(
 /// Apple GPU family this crate targets.
 /// The pure numeric core of [`cooperative_reduce_width`] -- taking
 /// `reduction_total` directly rather than reading it off a `BoundOp`'s
-/// `extents`, so a caller with no real reduce `BoundOp` to point at (the
-/// two-pass attention kernel's own K-dot and row-reduce folds, which bake
-/// every shape constant at emit time instead of packing a `Uniforms::
-/// reduction_total` field -- `cached_attention_two_pass.rs`'s own
-/// `two_pass_threadgroup_width`) computes the SAME width production's real
-/// per-node reduce kernels do, so the two can never drift onto different
-/// topologies for the same `reduction_total`. `cooperative_reduce_width`
-/// itself calls straight through to this after resolving its own
-/// `reduction_total` from `reduce_dims`.
+/// `extents`, so a caller with no real reduce `BoundOp` to point at
+/// (`crate::metal::prepare_uniforms_pack`'s own `CachedSoftmaxWeights`
+/// uniform packer, which bakes every shape constant at emit time instead of
+/// packing a `Uniforms::reduction_total` field) computes the SAME width
+/// production's real per-node reduce kernels do, so the two can never drift
+/// onto different topologies for the same `reduction_total`.
+/// `cooperative_reduce_width` itself calls straight through to this after
+/// resolving its own `reduction_total` from `reduce_dims`.
 #[cfg(feature = "metal-wide-cooperative-reduce")]
-pub(super) fn wide_cooperative_reduce_width(reduction_total: u64) -> u64 {
+pub(crate) fn wide_cooperative_reduce_width(reduction_total: u64) -> u64 {
     let quarter = reduction_total.div_ceil(4).max(1);
     quarter
         .next_multiple_of(SIMD_WIDTH)
@@ -627,7 +624,7 @@ pub(super) fn wide_cooperative_reduce_width(reduction_total: u64) -> u64 {
 /// Feature off: always `SIMD_WIDTH`, matching [`cooperative_reduce_width`]'s
 /// own feature-off arm -- see that function's doc.
 #[cfg(not(feature = "metal-wide-cooperative-reduce"))]
-pub(super) fn wide_cooperative_reduce_width(_reduction_total: u64) -> u64 {
+pub(crate) fn wide_cooperative_reduce_width(_reduction_total: u64) -> u64 {
     SIMD_WIDTH
 }
 

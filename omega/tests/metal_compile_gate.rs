@@ -426,7 +426,6 @@ fn cached_attention_kernel() -> omega::Kernel {
             scale: 0.5,
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
-            two_pass: false,
         },
     };
     omega::emit(

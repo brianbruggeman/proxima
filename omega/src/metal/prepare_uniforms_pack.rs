@@ -631,6 +631,12 @@ pub(super) fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
             }
         }
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => WORD,
+        // Candidate B's design (`R9/PROGRESS.md`'s own "Candidate B"
+        // sections): `Uniforms { long total_elements; }`, the same one-word
+        // leaf shape `MoeTopK` packs below -- every other field this kind
+        // carries (`cached_key_rows`/`attention_rows`/`head_dim`/...) is
+        // baked `constexpr` into the kernel text by whatever renderer lands.
+        BoundOpKind::CachedSoftmaxWeights { .. } => WORD,
         BoundOpKind::Elementwise { .. } => {
             (1 + rank_len + operand_count + operand_count * rank_len) * WORD
                 + gather_uniform_byte_len(gather, rank_len)
@@ -778,6 +784,23 @@ pub(super) fn pack_uniforms_into(
         // `long` is exactly `sizeof(Uniforms)`.
         BoundOpKind::MoeTopK { .. } => {
             pack_leaf_uniforms(bound, scratch);
+            Ok(())
+        }
+        // Mirrors `MoeTopK` immediately above: `render_cached_softmax_
+        // weights`'s own `Uniforms { long total_elements; }` never reads
+        // this field either (every real shape constant is baked `constexpr`
+        // at emit time, that renderer's own doc) -- packed only because
+        // `bindings` gives every kind one slot. `attention_rows * width`
+        // (not `bound.extents`' own product) matches `grid_threads`'s own
+        // `CachedSoftmaxWeights` total exactly, so a future caller that DOES
+        // start reading this field sees the real dispatched thread count.
+        BoundOpKind::CachedSoftmaxWeights {
+            cached_key_rows,
+            attention_rows,
+            ..
+        } => {
+            let width = crate::msl::wide_cooperative_reduce_width(*cached_key_rows);
+            push_i64(scratch, (*attention_rows * width) as i64);
             Ok(())
         }
     }
@@ -1195,7 +1218,6 @@ pub(super) fn pack_cached_attention_uniforms(
         query_groups,
         cached_key_rows,
         new_key_rows,
-        two_pass,
         ..
     } = &bound.kind
     else {
@@ -1205,21 +1227,6 @@ pub(super) fn pack_cached_attention_uniforms(
             found: bound.kind.name(),
         });
     };
-    // Part D: `render_cached_attention_two_pass`'s own kernel reads
-    // `thread_index` off `[[thread_position_in_threadgroup]]` -- a LOCAL
-    // index, `0..query_groups*two_pass_threadgroup_width(..)`, the same
-    // regardless of how many `(query_row, kv_head)` threadgroups the grid
-    // dispatches -- never the
-    // GLOBAL thread total the online-softmax kernel's own early-return
-    // check below compares against. `staged_two_pass_source`'s emitted
-    // `Uniforms` struct has no extra fields (its `two_pass` op is never
-    // `dynamic_cached_len` -- see that branch's own guard), so this returns
-    // before it.
-    if *two_pass {
-        let physical_threads = crate::msl::two_pass_physical_threadgroup_width(*query_groups, *head_dim, *cached_key_rows);
-        push_i64(bytes, physical_threads as i64);
-        return Ok(());
-    }
     // Same `cached_key_rows == 0` discriminator as `crate::msl::render_
     // cached_attention` / `grid_threads` -- `two_range_cached_bound` (nine
     // operands, `cached_key_rows != 0`) reads its live bound off `in8`

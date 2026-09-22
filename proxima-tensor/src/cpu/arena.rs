@@ -761,6 +761,27 @@ pub fn build_static_arena_with_constants(
                 buffers[extra_node.0 as usize] = Some(vec![0.0f32; 1]);
             }
         }
+        // Candidate B's integration (`R9/PROGRESS.md`'s own "Candidate B"
+        // sections): `cached_weight_sum`/`new_weight_sum` never appear as
+        // any resolved node's own `.node` (one scalar per attention row,
+        // the same "extra output" shape `MoeTopK`'s own routes/weights
+        // establish); `new_attended` is `attention_rows * head_dim` values.
+        // Sized here, once, so `run_resolved_nodes_in_arena`'s own
+        // persistence write below has a pre-sized slot to land in.
+        if let BoundOpKind::CachedSoftmaxWeights {
+            attention_rows,
+            head_dim,
+            cached_weight_sum,
+            new_weight_sum,
+            new_attended,
+            ..
+        } = &computed.kind
+        {
+            let row_count = *attention_rows as usize;
+            buffers[cached_weight_sum.0 as usize] = Some(vec![0.0f32; row_count]);
+            buffers[new_weight_sum.0 as usize] = Some(vec![0.0f32; row_count]);
+            buffers[new_attended.0 as usize] = Some(vec![0.0f32; row_count * *head_dim as usize]);
+        }
         // `round_outputs[1..]` (ROW 569's own shape, generalized): the k-1
         // round-sibling nodes this fusion dropped from `resolved` never
         // appear as any resolved node's own `.node` either -- size each
@@ -1031,6 +1052,13 @@ pub(super) fn arena_node_kind_label(kind: &BoundOpKind) -> &'static str {
         BoundOpKind::Iota => "iota",
         BoundOpKind::Constant { .. } => "constant",
         BoundOpKind::CachedAttention { .. } => "cached_attention",
+        // Candidate B's kind (`R9/PROGRESS.md`'s own "Candidate B"
+        // sections) -- mechanical addition to keep this match total; not in
+        // this task's isolation grant (`arena.rs` is outside the listed
+        // writable set), landed anyway for the same reason `identity.rs`'s
+        // own arm was: no way to keep `proxima-tensor` compiling under
+        // `instrument` otherwise. Reported as a deviation.
+        BoundOpKind::CachedSoftmaxWeights { .. } => "cached_softmax_weights",
         BoundOpKind::GatedDeltaNet { .. } => "gated_delta_net",
         BoundOpKind::MoeTopK { .. } => "moe_topk",
     }
@@ -1129,6 +1157,33 @@ pub(super) fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(),
                     .zip(moe_topk_extra.iter().copied())
                 {
                     arena.buffers[extra_node.0 as usize] = Some(vec![value]);
+                }
+            }
+            // Candidate B's integration (`R9/PROGRESS.md`'s own "Candidate
+            // B" sections): `moe_topk_extra` is the SAME sink slot
+            // `run_cached_softmax_weights` fills for THIS kind (mutually
+            // exclusive with `MoeTopK`, `cpu::run_node`'s own dispatcher
+            // doc) -- `cached_softmax_weights_extra_node_order`'s own fixed
+            // order (cached_weight_sum, new_weight_sum, new_attended) is
+            // what `run_cached_softmax_weights` filled it in.
+            if let BoundOpKind::CachedSoftmaxWeights {
+                cached_weight_sum,
+                new_weight_sum,
+                new_attended,
+                attention_rows,
+                head_dim,
+                ..
+            } = &computed.kind
+            {
+                let row_count = *attention_rows as usize;
+                let attended_len = row_count * *head_dim as usize;
+                if moe_topk_extra.len() == 2 * row_count + attended_len {
+                    arena.buffers[cached_weight_sum.0 as usize] =
+                        Some(moe_topk_extra[..row_count].to_vec());
+                    arena.buffers[new_weight_sum.0 as usize] =
+                        Some(moe_topk_extra[row_count..2 * row_count].to_vec());
+                    arena.buffers[new_attended.0 as usize] =
+                        Some(moe_topk_extra[2 * row_count..].to_vec());
                 }
             }
             if let BoundOpKind::RoundBatchedReduce { round_outputs, .. } = &computed.kind {

@@ -7,32 +7,6 @@ pub(super) fn grid_threads(
     expert_source_mode: bool,
 ) -> Result<u64, EmitError> {
     let threads = match &resolved.kind {
-        // Part D: `render_cached_attention_two_pass`'s own kernel dispatches
-        // ONE threadgroup per `(query_row, kv_head)` -- unlike the
-        // online-softmax path above, a two-pass threadgroup never splits its
-        // own key range across simdgroups or threadgroups (`chunks`/`splits`
-        // both stay `1` by construction: the whole `CACHED_CAPACITY` range is
-        // walked serially, per simdgroup, inside the one threadgroup --
-        // `staged_two_pass_source`'s own `for (uint key = 0u; key <
-        // CACHED_CAPACITY; key++)` loops). `tiled_gemm_threadgroup_width`'s
-        // own `CachedAttention` arm must agree exactly (`query_groups *
-        // SIMD_WIDTH` threads per threadgroup) or `dispatchThreads_
-        // threadsPerThreadgroup` splits threads across MORE threadgroups
-        // than the kernel's own `thread_position_in_threadgroup`-only
-        // addressing assumes.
-        BoundOpKind::CachedAttention {
-            query_rows,
-            kv_heads,
-            query_groups,
-            head_dim,
-            cached_key_rows,
-            two_pass: true,
-            ..
-        } => {
-            *query_rows
-                * *kv_heads
-                * two_pass_physical_threadgroup_width(*query_groups, *head_dim, *cached_key_rows)
-        }
         BoundOpKind::CachedAttention {
             head_dim,
             cached_key_rows,
@@ -206,6 +180,16 @@ pub(super) fn grid_threads(
         // reduction (`live`/`reduce_val`/`reduce_idx` are `threadgroup`
         // arrays, coherent only within one threadgroup) requires.
         BoundOpKind::MoeTopK { expert_count, .. } => *expert_count,
+        // One threadgroup per attention row, `width` lanes cooperating --
+        // `render_cached_softmax_weights`'s own doc; `tiled_gemm_
+        // threadgroup_width`'s sibling arm sets `width` as the threadgroup
+        // width so this total splits evenly into `attention_rows`
+        // threadgroups.
+        BoundOpKind::CachedSoftmaxWeights {
+            cached_key_rows,
+            attention_rows,
+            ..
+        } => *attention_rows * wide_cooperative_reduce_width(*cached_key_rows),
     };
     Ok(threads)
 }
@@ -262,7 +246,6 @@ pub(super) fn entry_name(resolved: &BoundOp) -> String {
             scale,
             cached_lower_inclusive,
             new_upper_inclusive,
-            two_pass,
             ..
         } => {
             // `operand_count == 9` names a runtime ninth operand, but that
@@ -283,14 +266,6 @@ pub(super) fn entry_name(resolved: &BoundOp) -> String {
             } else {
                 signed_name_part(*new_upper_inclusive)
             };
-            // `_tp` marks a `two_pass` op's compiled pipeline as distinct
-            // from the online-softmax kernel of the identical shape --
-            // `render_cached_attention` renders GENUINELY different MSL
-            // text for the two (the staged two-pass kernel vs. the
-            // register-resident online kernel), so they must never share a
-            // `PIPELINE_CACHE` entry even when every other token here is
-            // identical.
-            let two_pass_token = if *two_pass { "_tp" } else { "" };
             if single_range_dynamic {
                 // `_b{width}` names the build-time block-staging width
                 // (`block_width_for`) -- a build-time constant, so a build
@@ -316,7 +291,7 @@ pub(super) fn entry_name(resolved: &BoundOp) -> String {
                 let per_query_head_grid =
                     cached_attention_per_query_head_grid(true, *cached_key_rows + *new_key_rows);
                 format!(
-                    "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_b{}_qh{}{two_pass_token}",
+                    "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_b{}_qh{}",
                     scale.to_bits(),
                     signed_name_part(*cached_lower_inclusive),
                     effective_context_chunk_cap(*query_groups, *head_dim),
@@ -333,13 +308,13 @@ pub(super) fn entry_name(resolved: &BoundOp) -> String {
                 // different generated statement for `cached_key_rows`, so
                 // the two must never share a compiled pipeline.
                 format!(
-                    "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_cb{two_pass_token}",
+                    "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_cb",
                     scale.to_bits(),
                     signed_name_part(*cached_lower_inclusive),
                 )
             } else {
                 format!(
-                    "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}{two_pass_token}",
+                    "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}",
                     scale.to_bits(),
                     signed_name_part(*cached_lower_inclusive),
                 )
@@ -437,6 +412,20 @@ pub(super) fn entry_name(resolved: &BoundOp) -> String {
             top_k,
             ..
         } => format!("omega_moe_topk_e{expert_count}_k{top_k}"),
+        // `render_cached_softmax_weights` renders one kernel per
+        // `(cached_key_rows, attention_rows, head_dim)` triple -- no other
+        // field this kind carries changes the emitted text (operand
+        // strides/bases are baked `constexpr`, but they never change WHICH
+        // statements get emitted, only the literals inside them), so this
+        // is a real, reachable cache key, shaped like every other arm here.
+        BoundOpKind::CachedSoftmaxWeights {
+            cached_key_rows,
+            attention_rows,
+            head_dim,
+            ..
+        } => format!(
+            "omega_cached_softmax_weights_c{cached_key_rows}_a{attention_rows}_d{head_dim}"
+        ),
     };
     let gather_bits: String = resolved
         .operands()

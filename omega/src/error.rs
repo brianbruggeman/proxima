@@ -63,6 +63,22 @@ pub enum EmitError {
     )]
     GatedDeltaNetNotSupported { node: NodeId },
 
+    /// Candidate B's integration (`R9/PROGRESS.md`'s own "Candidate B"
+    /// sections): `crate::msl::render_cached_softmax_weights` renders this
+    /// kind now -- this variant stays reachable for the precondition checks
+    /// that renderer's own doc names (`new_key_rows != 1`, a gathered
+    /// operand, or an operand `Layout` not already collapsed to
+    /// `[key,row]`/`[row]`/`[row,dim]`), and for the other GPU backends
+    /// (`wgsl`/`cuda`) this kind has no renderer on at all yet -- the same
+    /// CPU-ahead-of-GPU gap [`Self::GatedDeltaNetNotSupported`] names for
+    /// those two.
+    #[error(
+        "node {node} is a cached softmax weights op this backend cannot render -- either an \
+         unsupported shape (new_key_rows != 1, a gathered operand, or an uncollapsed operand \
+         layout) or a GPU emitter that does not support this kind yet"
+    )]
+    CachedSoftmaxWeightsNotSupported { node: NodeId },
+
     /// `crate::msl::render_gated_delta_net` keeps one `head_k_dim`-long
     /// state row resident in registers per thread
     /// (`omega-runtime.toml`'s `[gated_delta_net] head_k_dim_max`); a bind
@@ -94,16 +110,6 @@ pub enum EmitError {
          the only executor with the pass-plane term so far"
     )]
     CachedAttentionPartialRotaryNotSupported { node: NodeId },
-
-    /// `BoundOpKind::CachedAttention::two_pass` is only ever set `true` by
-    /// the gemma4 recognizer arm's `staged_scale_not_unity` decline stage
-    /// (`proxima-tensor/src/bind/dead_code_cached_attention.rs`), which
-    /// already guarantees `scale == 1.0` before this op reaches the
-    /// emitter -- this is a defense-in-depth rejection for a hand-built
-    /// `BoundOp` that sets `two_pass: true` directly, not a reachable path
-    /// through the recognizer.
-    #[error("node {node} is a two_pass cached attention bind with scale bits 0x{scale_bits:08x} != 1.0, which the staged emitter has not verified")]
-    CachedAttentionTwoPassScaleNotUnity { node: NodeId, scale_bits: u32 },
 
     /// `omega::execute`'s own upstream gate (`reject_unsupported_gpu_dtype`)
     /// never lets anything but `Float32`/`Float16` reach [`crate::msl::emit`]

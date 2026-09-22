@@ -226,6 +226,7 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
                 epilogue_operands, ..
             } => epilogue_operands,
             BoundOpKind::CachedAttention { .. }
+            | BoundOpKind::CachedSoftmaxWeights { .. }
             | BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. }
             | BoundOpKind::Iota

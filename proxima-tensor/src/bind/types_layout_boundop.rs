@@ -209,17 +209,6 @@ pub enum BoundOpKind {
         scale: f32,
         cached_lower_inclusive: i64,
         new_upper_inclusive: i64,
-        /// `true` only for the gemma4 recognizer arm's decode
-        /// (`new_key_rows == 1`), unity-scale candidates
-        /// (`proxima-tensor/src/bind/dead_code_cached_attention.rs`'s own
-        /// `staged_decode_only`/`staged_scale_not_unity` decline stages) --
-        /// every other producer (qwen35, mistral single/two-range, prefill)
-        /// sets this `false`. Selects the staged two-pass MSL emitter
-        /// (`omega/src/msl/cached_attention_two_pass.rs`) over the existing
-        /// online-softmax kernel at `render_cached_attention` time; the CPU
-        /// evaluator ignores it (both kernels compute the same values, this
-        /// field only chooses which GPU kernel TEXT to emit).
-        two_pass: bool,
     },
     /// One backend-neutral gated-delta-net recurrence step
     /// ([`crate::spec::append_qwen35_delta_net_step`]'s own ~12-op chain,
@@ -476,6 +465,54 @@ pub enum BoundOpKind {
         /// did, unperturbed by whether this kind fired.
         round_outputs: Vec<NodeId>,
     },
+    /// One backend-neutral fused softmax-normalization step for gemma4's
+    /// decode-only, unity-scale cached attention (`docs/candidate_b`'s own
+    /// integration design): absorbs the online-softmax combine's register/
+    /// threadgroup-only stages (151 max, 152 cooperative max, 156 trivial
+    /// shift, 158 trivial weight-sum, 164 new-key AV) while leaving the QK
+    /// score folds (139/142/146/149) and the cached-key AV fold (162) as
+    /// separate, untouched production dispatches. `operands` is exactly
+    /// `[cached_scores, new_scores, new_value]` — `cached_scores`/
+    /// `new_scores` are the two already-bound `Reduce` folds' own outputs
+    /// (the design's nodes 142/149), `new_value` is the raw V leaf (127).
+    /// `node` is this op's own primary output: the cached-side normalized
+    /// probability tensor (154 in the design's own layer-0 numbering) — the
+    /// replacement for [`CachedAttention`](Self::CachedAttention)'s own
+    /// removed `two_pass` field, which could only choose between two
+    /// whole-kernel renderers, never keep the surrounding QK/AV folds alive;
+    /// this kind answers the pipe question the field could not (a caller
+    /// can now emit the fused softmax while keeping five production folds
+    /// intact — an all-or-nothing `bool` cannot express that).
+    ///
+    /// `cached_weight_sum`/`new_weight_sum`/`new_attended` are this op's own
+    /// extra outputs (157/158/164), the same "first output is `node`, extra
+    /// outputs are named fields" shape [`GatedDeltaNet::state_out`] and
+    /// [`MoeTopK::routes`] already establish — ordinary device buffers a
+    /// renderer writes alongside `node`'s own, read downstream by the
+    /// existing, unmodified 162-fold's epilogue (`cached_attention_epilogue_
+    /// liveness.rs`'s own `epilogue_sources` extension).
+    CachedSoftmaxWeights {
+        operands: BoundOperands,
+        cached_weight_sum: NodeId,
+        new_weight_sum: NodeId,
+        new_attended: NodeId,
+        /// The compiled KV-capacity bucket this op's cached range was bound
+        /// against — the same width-selection input
+        /// `wide_cooperative_reduce_width` (`omega::msl::tiled_gemm_
+        /// cooperative_scan`) reads for the surviving 152/157/162 folds, so
+        /// this kernel's own cooperative width matches theirs exactly.
+        cached_key_rows: u64,
+        /// Always `1` on this arm (`staged_decode_only`'s own decline
+        /// already restricts the surviving recognizer to `new_key_rows ==
+        /// 1`); carried as a real field rather than assumed so a renderer
+        /// can assert it instead of hard-coding it.
+        new_key_rows: u64,
+        query_rows: u64,
+        /// `kv_heads * query_groups` — the number of independent softmax
+        /// rows this kernel's grid covers, one per threadgroup.
+        attention_rows: u64,
+        head_dim: u64,
+    },
     /// The resolved counterpart of [`Op::Iota`]: no operands, no body — an
     /// executor derives every output value straight from its own position
     /// in `BoundOp::extents`, which is why this variant carries no fields of
@@ -498,6 +535,7 @@ impl BoundOpKind {
     pub fn name(&self) -> &'static str {
         match self {
             BoundOpKind::CachedAttention { .. } => "cached_attention",
+            BoundOpKind::CachedSoftmaxWeights { .. } => "cached_softmax_weights",
             BoundOpKind::GatedDeltaNet { .. } => "gated_delta_net",
             BoundOpKind::MoeTopK { .. } => "moe_topk",
             BoundOpKind::Elementwise { .. } => "elementwise",
@@ -528,6 +566,7 @@ impl BoundOp {
     pub fn operands(&self) -> &[(NodeId, Layout, Option<Lookup>)] {
         match &self.kind {
             BoundOpKind::CachedAttention { operands, .. }
+            | BoundOpKind::CachedSoftmaxWeights { operands, .. }
             | BoundOpKind::GatedDeltaNet { operands, .. }
             | BoundOpKind::MoeTopK { operands, .. }
             | BoundOpKind::Elementwise { operands, .. }
@@ -563,6 +602,7 @@ impl BoundOp {
                 epilogue_operands, ..
             } => epilogue_operands,
             BoundOpKind::CachedAttention { .. }
+            | BoundOpKind::CachedSoftmaxWeights { .. }
             | BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. }
             | BoundOpKind::Elementwise { .. }
@@ -581,6 +621,7 @@ impl BoundOp {
     pub fn element_body(&self) -> &ComposedBody {
         match &self.kind {
             BoundOpKind::CachedAttention { .. }
+            | BoundOpKind::CachedSoftmaxWeights { .. }
             | BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. } => &EMPTY_BODY,
             BoundOpKind::Elementwise { body, .. } => body,
@@ -666,8 +707,10 @@ impl BoundOp {
 
     fn split_axis(&self) -> Option<u16> {
         match &self.kind {
-            // decode-only shape (`n_tokens == 1`): never worth splitting.
+            // decode-only shape (`n_tokens == 1` / `new_key_rows == 1`):
+            // never worth splitting.
             BoundOpKind::CachedAttention { .. }
+            | BoundOpKind::CachedSoftmaxWeights { .. }
             | BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. } => None,
             // a round-merged fold is never split: `extents`' trailing round
@@ -729,7 +772,6 @@ impl BoundOp {
                 scale,
                 cached_lower_inclusive,
                 new_upper_inclusive,
-                two_pass,
             } => BoundOpKind::CachedAttention {
                 operands: rebase_operands(operands, split_axis, chunk_start),
                 query_rows: *query_rows,
@@ -742,19 +784,18 @@ impl BoundOp {
                 scale: *scale,
                 cached_lower_inclusive: *cached_lower_inclusive,
                 new_upper_inclusive: *new_upper_inclusive,
-                two_pass: *two_pass,
             },
             BoundOpKind::Elementwise { body, operands } => BoundOpKind::Elementwise {
                 body: body.clone(),
                 operands: rebase_operands(operands, split_axis, chunk_start),
             },
             // unreachable in practice: `split_axis` returns `None` for
-            // `GatedDeltaNet`/`MoeTopK` (both this slice's `n_tokens == 1`
-            // shape, never worth chunking), kept explicit for the same
-            // reason `Iota`/`Constant` below are.
-            kind @ (BoundOpKind::GatedDeltaNet { .. } | BoundOpKind::MoeTopK { .. }) => {
-                kind.clone()
-            }
+            // `GatedDeltaNet`/`MoeTopK`/`CachedSoftmaxWeights` (all
+            // this-slice's decode-only shape, never worth chunking), kept
+            // explicit for the same reason `Iota`/`Constant` below are.
+            kind @ (BoundOpKind::GatedDeltaNet { .. }
+            | BoundOpKind::MoeTopK { .. }
+            | BoundOpKind::CachedSoftmaxWeights { .. }) => kind.clone(),
             BoundOpKind::Reduce {
                 element_body,
                 reduce_op,

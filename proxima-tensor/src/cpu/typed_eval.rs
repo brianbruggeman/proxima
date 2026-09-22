@@ -847,6 +847,12 @@ pub(super) fn run_typed_program<T: Element>(
                     reason: "cached attention binding is not wired into the typed executor",
                 });
             }
+            BoundOpKind::CachedSoftmaxWeights { .. } => {
+                return Err(TensorError::NotLowerable {
+                    node: node.node,
+                    reason: "cached softmax weights binding is not wired into the typed executor",
+                });
+            }
             BoundOpKind::GatedDeltaNet { .. } => {
                 return Err(TensorError::NotLowerable {
                     node: node.node,
@@ -1018,6 +1024,12 @@ where
                         reason: "cached attention binding is not wired into the widened executor",
                     });
                 }
+                BoundOpKind::CachedSoftmaxWeights { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "cached softmax weights binding is not wired into the widened executor",
+                    });
+                }
                 BoundOpKind::GatedDeltaNet { .. } => {
                     return Err(TensorError::NotLowerable {
                         node: node.node,
@@ -1075,6 +1087,12 @@ where
                     return Err(TensorError::NotLowerable {
                         node: node.node,
                         reason: "cached attention binding is not wired into the widened executor",
+                    });
+                }
+                BoundOpKind::CachedSoftmaxWeights { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "cached softmax weights binding is not wired into the widened executor",
                     });
                 }
                 BoundOpKind::GatedDeltaNet { .. } => {

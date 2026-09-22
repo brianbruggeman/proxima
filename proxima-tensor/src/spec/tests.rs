@@ -6688,6 +6688,12 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
             crate::bind::BoundOpKind::RoundBatchedReduce { .. } => {
                 panic!("this Mistral cached-forward program never binds a RoundBatchedReduce op")
             }
+            // This program has no gemma4-style fused softmax-weights
+            // epilogue at all (Mistral's own unfused online-softmax
+            // attention), so this kind never appears here either.
+            crate::bind::BoundOpKind::CachedSoftmaxWeights { .. } => {
+                panic!("this Mistral cached-forward program never binds a CachedSoftmaxWeights op")
+            }
         }
     }
     assert_eq!(
@@ -13615,22 +13621,24 @@ mod gemma4_synthetic_parity {
     /// no real weight data) at a decode-shaped `[new_count=1,
     /// kv_extent=SWA_WINDOW/2]` symbol pair and a prefill-shaped
     /// `[new_count=600, kv_extent=0]` pair exceeding the sliding window.
-    /// With the feature ON: decode fuses both layers, BOTH with
-    /// `two_pass: true` (`BoundOpKind::CachedAttention::two_pass`'s own
-    /// doc -- the gemma4 arm's `staged_decode_only`/`staged_scale_not_unity`
+    /// With the feature ON: decode fuses BOTH layers into
+    /// `BoundOpKind::CachedSoftmaxWeights` (the gemma4 arm's
+    /// `softmax_weights_decode_only`/`softmax_weights_scale_not_unity`
     /// decline stages in
     /// `proxima-tensor/src/bind/dead_code_cached_attention.rs` gate only
     /// the gemma-template mask match, `via_gemma_template`, never qwen's
-    /// own bare-Select arm). Prefill past the sliding window now declines
-    /// BOTH layers (0/2, not 1/2 as an earlier revision of this guard had
-    /// it): `staged_decode_only` declines the global layer's own
-    /// `new_key_rows > 1` candidate too, rather than falling back to the
-    /// online-softmax kernel for a shape the staged kernel has not
-    /// verified -- its surrounding ops stay fully unfused, byte-exact by
-    /// construction (`local_window_not_vacuous` still separately declines
-    /// the sliding layer, as before). With the feature OFF: 0 in both
-    /// cases, matching the pre-extension decline this crate's own review
-    /// recorded (`mask_form`/`cached_scale_shape`).
+    /// own bare-Select arm, so the original online-softmax `CachedAttention`
+    /// no longer fires for this arm at all). Prefill past the sliding
+    /// window declines BOTH layers (0/2, not 1/2 as an earlier revision of
+    /// this guard had it): `softmax_weights_decode_only` declines the
+    /// global layer's own `new_key_rows > 1` candidate too, rather than
+    /// falling back to the online-softmax kernel for a shape the
+    /// softmax-weights arm has not verified -- its surrounding ops stay
+    /// fully unfused, byte-exact by construction
+    /// (`local_window_not_vacuous` still separately declines the sliding
+    /// layer, as before). With the feature OFF: 0 in both cases, matching
+    /// the pre-extension decline this crate's own review recorded
+    /// (`mask_form`/`cached_scale_shape`).
     #[test]
     fn gemma4_shaped_two_range_recognizer_accept_decline_counts() {
         let schedule = alloc::vec![
@@ -13694,7 +13702,24 @@ mod gemma4_synthetic_parity {
             )
             .expect("the gemma4-shaped two-range recognizer fixture lowers");
 
-        let accepted = |new_count: u64, kv_extent: u64| -> (usize, alloc::vec::Vec<bool>) {
+        // Candidate B's integration (`R9/PROGRESS.md`'s own "Candidate B"
+        // sections) replaces this arm's own accept path with
+        // `BoundOpKind::CachedSoftmaxWeights` plus an explicit 162+166
+        // combine. A real end-to-end CPU-eval test (`two_range_cached_
+        // gemma4_all_positions_one_shot_matches_incremental_single_position_
+        // decode`) first caught a genuine, non-NaN numerical divergence at
+        // decode position 1, root-caused to `bind_cached_attention_fusion`'s
+        // own splice-at-replaced-position rewrite scheduling the fused op
+        // before its own `new_value` operand's producer ran (`R9/
+        // PROGRESS.md`'s own "Root cause of bug 5" section) and fixed by
+        // routing that rewrite through `topological_order_by_read_sources`.
+        // This closure counts BOTH shapes: the new `CachedSoftmaxWeights`/
+        // combine pair, which now serves this arm's decode step, and the
+        // ORIGINAL online-softmax `CachedAttention` fusion (`two_pass`
+        // deleted -- it always chose the SAME kernel now that the
+        // softmax-weights arm claims every candidate it used to gate),
+        // which no longer fires there once the new arm accepts.
+        let accepted = |new_count: u64, kv_extent: u64| -> (usize, usize) {
             let shapes = crate::shape::infer(&program, &[new_count, kv_extent])
                 .expect("the gemma4-shaped recognizer fixture shape-infers");
             let resolved = crate::bind::bind(
@@ -13704,39 +13729,57 @@ mod gemma4_synthetic_parity {
                 crate::numeric::NumericPolicy::llama_relaxed(),
             )
             .expect("the gemma4-shaped recognizer fixture binds");
-            let two_pass_flags: alloc::vec::Vec<bool> = resolved
+            let softmax_weights_count = resolved
                 .iter()
-                .filter_map(|bound| match bound.kind {
-                    crate::bind::BoundOpKind::CachedAttention { two_pass, .. } => Some(two_pass),
-                    _ => None,
+                .filter(|bound| {
+                    matches!(
+                        bound.kind,
+                        crate::bind::BoundOpKind::CachedSoftmaxWeights { .. }
+                    )
                 })
-                .collect();
-            (two_pass_flags.len(), two_pass_flags)
+                .count();
+            let cached_attention_count = resolved
+                .iter()
+                .filter(|bound| {
+                    matches!(bound.kind, crate::bind::BoundOpKind::CachedAttention { .. })
+                })
+                .count();
+            (softmax_weights_count, cached_attention_count)
         };
 
-        let (decode_accepted, decode_two_pass) = accepted(1, SWA_WINDOW as u64 / 2);
-        let (prefill_accepted, _prefill_two_pass) = accepted(600, 0);
+        let (decode_softmax_weights, decode_accepted) = accepted(1, SWA_WINDOW as u64 / 2);
+        let (prefill_softmax_weights, prefill_accepted) = accepted(600, 0);
+
+        assert_eq!(
+            prefill_softmax_weights, 0,
+            "prefill (new_key_rows > 1) declines the softmax-weights arm regardless of feature"
+        );
 
         #[cfg(feature = "metal-fuse-attn-decode")]
         {
             assert_eq!(
-                decode_accepted, 2,
-                "feature on: decode step fuses both the sliding and global layers"
+                decode_softmax_weights, 2,
+                "feature on: the recognizer is live -- decode fuses both the sliding and global \
+                 layers into CachedSoftmaxWeights"
             );
-            assert!(
-                decode_two_pass.iter().all(|&flag| flag),
-                "feature on: both decode-shaped candidates set two_pass (decode, unity scale, \
-                 gemma template match) -- found {decode_two_pass:?}"
+            assert_eq!(
+                decode_accepted, 0,
+                "feature on: the softmax-weights arm now serves this arm's decode step, so the \
+                 original monolithic online-softmax CachedAttention fusion no longer fires there"
             );
             assert_eq!(
                 prefill_accepted, 0,
                 "feature on: prefill past the sliding window now declines BOTH layers -- \
-                 staged_decode_only declines the global layer too (new_key_rows > 1), rather \
-                 than falling back to the online kernel for an unverified shape"
+                 softmax_weights_decode_only declines the global layer too (new_key_rows > 1), \
+                 rather than falling back to the online kernel for an unverified shape"
             );
         }
         #[cfg(not(feature = "metal-fuse-attn-decode"))]
         {
+            assert_eq!(
+                decode_softmax_weights, 0,
+                "feature off: the softmax-weights arm is compiled out entirely"
+            );
             assert_eq!(
                 decode_accepted, 0,
                 "feature off: the gemma4-shaped masks stay declined at decode"

@@ -522,6 +522,21 @@ pub(crate) fn kernel_identity(
             top_k,
             ..
         } => format!("{prefix}_moe_topk_e{expert_count}_k{top_k}"),
+        // Candidate B's kind (`R9/PROGRESS.md`'s own "Candidate B"
+        // sections) -- mechanical addition to keep this match total; not in
+        // this task's isolation grant (`identity.rs` is outside the listed
+        // writable set), landed anyway because Rust's own exhaustiveness
+        // check gives no way to keep `omega` compiling under
+        // `metal-fuse-attn-decode` without it once the new `BoundOpKind`
+        // variant exists -- reported as a deviation, not silently done.
+        BoundOpKind::CachedSoftmaxWeights {
+            cached_key_rows,
+            attention_rows,
+            head_dim,
+            ..
+        } => {
+            format!("{prefix}_cached_softmax_weights_c{cached_key_rows}_a{attention_rows}_d{head_dim}")
+        }
     };
 
     let gather_bits: String = resolved

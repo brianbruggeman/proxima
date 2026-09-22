@@ -1289,6 +1289,7 @@ pub(super) fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -
         // its own copy, so a future variant or renamed arm cannot drift
         // between this profiler label and `RenderKindMismatch`'s own.
         BoundOpKind::CachedAttention { .. }
+        | BoundOpKind::CachedSoftmaxWeights { .. }
         | BoundOpKind::Elementwise { .. }
         | BoundOpKind::Iota
         | BoundOpKind::Constant { .. }

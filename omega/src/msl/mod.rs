@@ -111,7 +111,7 @@ mod emit_and_classify;
 mod signature_tokens_prelude;
 #[macro_use]
 mod cached_attention_render;
-mod cached_attention_two_pass;
+mod cached_softmax_weights_render;
 #[macro_use]
 mod elementwise_reduce_core;
 #[macro_use]
@@ -139,15 +139,12 @@ pub use signature_tokens_prelude::context_chunks_for;
 // wider leaves it unused in a plain (non-test) `metal`+macos lib build,
 // since nothing else ever names it through `msl`'s namespace.
 use cached_attention_render::render_cached_attention;
-// `pub` so `omega/examples/attn_staged_replay.rs` reaches it as
-// `omega::msl::render_cached_attention_two_pass` -- the standalone R9
-// gates (`stage_gates.log`, `staged_final_gate.log`) keep exercising the
-// SAME text `render_cached_attention` now selects for real `two_pass` ops,
-// rather than a second copy that could drift.
-pub use cached_attention_two_pass::{
-    ScratchRegion, render_cached_attention_two_pass, two_pass_groups_per_wave, two_pass_physical_threadgroup_width,
-    two_pass_scratch_elements, two_pass_scratch_layout, two_pass_threadgroup_width,
-};
+// Same "plain reexport for descendant modules" shape as
+// `render_cached_attention` immediately above -- `render_cached_softmax_
+// weights` is `pub(super)` on its own definition (`cached_softmax_weights_
+// render.rs`), and its only caller is `emit_and_classify::emit_inner`'s
+// `use super::*`.
+use cached_softmax_weights_render::render_cached_softmax_weights;
 #[cfg(test)]
 use cached_attention_render::render_cached_attention_merge;
 #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
@@ -155,6 +152,11 @@ pub(crate) use cached_attention_render::emit_cached_attention_merge;
 pub(crate) use elementwise_reduce_core::*;
 use packed_row_blocked_ggml::*;
 use tiled_gemm_cooperative_scan::*;
+// `crate::metal::prepare_uniforms_pack` (a sibling of `msl`, not a
+// descendant, so `pub(super)` there would not reach it) needs this to pack
+// `CachedSoftmaxWeights::Uniforms::total_elements` as `attention_rows *
+// width`, matching `grid_threads`'s own total exactly.
+pub(crate) use tiled_gemm_cooperative_scan::wide_cooperative_reduce_width;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

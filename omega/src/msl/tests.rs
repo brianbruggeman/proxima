@@ -323,7 +323,6 @@ fn cached_attention_op() -> BoundOp {
             scale: 0.5,
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
-            two_pass: false,
         },
     }
 }
@@ -372,7 +371,6 @@ fn cached_attention_op_dynamic(cached_key_rows: u64, new_key_rows: u64) -> Bound
             scale: 0.5,
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
-            two_pass: false,
         },
     }
 }
@@ -3907,4 +3905,108 @@ fn block_staged_attention_rejects_a_head_dim_not_a_multiple_of_eight() {
             head_dim: 12,
         }
     );
+}
+
+/// Candidate B's fused softmax op (`BoundOpKind::CachedSoftmaxWeights`'s own
+/// doc): three operands collapsed to exactly the axes `run_cached_softmax_
+/// weights` reads -- `cached_scores` at `[key, row]` (KEY-outer/ROW-inner,
+/// `stride(key) == attention_rows`, `stride(row) == 1`, the real R9-dump
+/// shape that CPU evaluator's own doc records, bug 1's fix), `new_scores`
+/// at `[row]`, `new_value` at `[row, dim]` (ROW-outer/DIM-inner). `node`'s
+/// own output extents follow the same dense `[cached_key_rows,
+/// attention_rows]` convention that evaluator's doc names for 154.
+fn cached_softmax_weights_op(attention_rows: u64, cached_key_rows: u64, head_dim: u64) -> BoundOp {
+    let operands = vec![
+        (
+            NodeId(0),
+            Layout {
+                base: 0,
+                strides: vec![attention_rows as i64, 1].into(),
+            },
+            None,
+        ),
+        (
+            NodeId(1),
+            Layout {
+                base: 0,
+                strides: vec![1].into(),
+            },
+            None,
+        ),
+        (
+            NodeId(2),
+            Layout {
+                base: 0,
+                strides: vec![head_dim as i64, 1].into(),
+            },
+            None,
+        ),
+    ];
+    BoundOp {
+        node: NodeId(3),
+        dtype: DType::Float32,
+        extents: vec![cached_key_rows, attention_rows],
+        kind: BoundOpKind::CachedSoftmaxWeights {
+            operands,
+            cached_weight_sum: NodeId(4),
+            new_weight_sum: NodeId(5),
+            new_attended: NodeId(6),
+            cached_key_rows,
+            new_key_rows: 1,
+            query_rows: attention_rows,
+            attention_rows,
+            head_dim,
+        },
+    }
+}
+
+/// `render_cached_softmax_weights` is deterministic over its `BoundOp`
+/// (`emit_is_deterministic_byte_equal`'s own doc establishes the same
+/// property for the general `emit` entry point) at both the narrow
+/// (`cached_key_rows == 32`, one physical simdgroup, `wide_cooperative_
+/// reduce_width` stays at `SIMD_WIDTH`) and wide (`cached_key_rows == 512`,
+/// `wide_cooperative_reduce_width` widens to 128, the cross-simdgroup
+/// `threadgroup float partials{N}[...]` combine path) shapes -- two
+/// independently constructed `BoundOp`s of the identical shape must render
+/// byte-identical text, and the two shapes must render DIFFERENT text (the
+/// wide shape's cooperative combine is structurally distinct from the
+/// narrow shape's direct `simd_max`/`simd_sum`, `push_cooperative_fold`'s
+/// own doc). Both texts are also saved under `scratchpad/attn_parity/
+/// candidate_b/integration/omega/softmax_c{32,512}.metal` (this task's own
+/// brief) as a readable artifact of what got gated here.
+#[test]
+fn cached_softmax_weights_render_is_deterministic_and_width_dependent() {
+    let narrow_a = cached_softmax_weights_op(8, 32, 256);
+    let narrow_b = cached_softmax_weights_op(8, 32, 256);
+    let wide_a = cached_softmax_weights_op(8, 512, 256);
+    let wide_b = cached_softmax_weights_op(8, 512, 256);
+
+    let narrow_text_a = render_cached_softmax_weights(&narrow_a, "omega_cached_softmax_weights_c32_a8_d256")
+        .expect("narrow shape renders");
+    let narrow_text_b = render_cached_softmax_weights(&narrow_b, "omega_cached_softmax_weights_c32_a8_d256")
+        .expect("narrow shape renders (second construction)");
+    let wide_text_a = render_cached_softmax_weights(&wide_a, "omega_cached_softmax_weights_c512_a8_d256")
+        .expect("wide shape renders");
+    let wide_text_b = render_cached_softmax_weights(&wide_b, "omega_cached_softmax_weights_c512_a8_d256")
+        .expect("wide shape renders (second construction)");
+
+    assert_eq!(narrow_text_a, narrow_text_b, "narrow shape must render byte-identical text across constructions");
+    assert_eq!(wide_text_a, wide_text_b, "wide shape must render byte-identical text across constructions");
+    assert_ne!(narrow_text_a, wide_text_a, "narrow and wide shapes take structurally different cooperative-fold paths");
+
+    // narrow: one physical simdgroup, direct `simd_max`/`simd_sum`, no
+    // threadgroup partials array.
+    assert!(narrow_text_a.contains("simd_max(accumulator0)"));
+    assert!(!narrow_text_a.contains("threadgroup float partials0"));
+    // wide: `wide_cooperative_reduce_width(512) == 128` -> 4 simdgroups.
+    assert!(wide_text_a.contains("threadgroup float partials0[4]"));
+    assert!(wide_text_a.contains("threadgroup float partials1[4]"));
+
+    let integration_dir = std::path::Path::new(
+        "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/f00a0e26-f6a4-4429-b155-6f5915575ad2/scratchpad/attn_parity/candidate_b/integration/omega",
+    );
+    if integration_dir.is_dir() {
+        let _ = std::fs::write(integration_dir.join("softmax_c32.metal"), &narrow_text_a);
+        let _ = std::fs::write(integration_dir.join("softmax_c512.metal"), &wide_text_a);
+    }
 }
