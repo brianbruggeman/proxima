@@ -282,6 +282,40 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
     exact_activations: bool,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, TensorError> {
+    evaluate_quantized_with_scratch_impl_with_fusion(
+        program,
+        symbols,
+        blocks,
+        outputs,
+        free_buffers,
+        validated_weight_nodes,
+        exact_activations,
+        expert_sources,
+        true,
+    )
+}
+
+/// [`evaluate_quantized_with_scratch_impl`] plus an explicit
+/// `fuse_cached_attention` bool -- the CPU-side counterpart to
+/// `omega/src/metal/prepare_uniforms_pack.rs`'s own `fuse_cached_attention`
+/// parameter on `prepare`. Exists so a caller comparing the fused and
+/// unfused CPU evaluation of the SAME `outputs` (the attention parity
+/// cross-check in `proxima-model-interop`'s decode loop) can select the
+/// arm through this parameter rather than the process-global
+/// `PROXIMA_DISABLE_CACHED_ATTENTION_FUSION` env var `bind_with_fusion`
+/// reads as its own default.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_quantized_with_scratch_impl_with_fusion(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+    validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
+    exact_activations: bool,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+    fuse_cached_attention: bool,
+) -> Result<Evaluated, TensorError> {
     // brackets the portion of evaluate_quantized that is neither the
     // per-node loop below nor run_node_into itself -- shape::infer,
     // bind::bind, node_retirement, and the buffers table setup all run
@@ -358,10 +392,11 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
     }
     reject_non_float32_outputs(program, &quantized_weight_nodes, &effective_outputs)?;
 
-    let resolved = bind::bind(
+    let resolved = bind::bind_with_fusion(
         program,
         &shapes,
         &effective_outputs,
+        fuse_cached_attention,
         NumericPolicy::bit_exact(),
     )?;
     // Packed matmul lowering is valid only when the weight's contraction axes
@@ -1115,6 +1150,38 @@ pub fn evaluate_quantized_named_with_scratch_and_experts<'block>(
         free_buffers,
         validated_weight_nodes,
         expert_sources,
+    )
+}
+
+/// [`evaluate_quantized_named_with_scratch_and_experts`] plus an explicit
+/// `fuse_cached_attention` bool routed to [`bind::bind_with_fusion`] --
+/// lets a caller comparing the fused and unfused CPU arm of the SAME
+/// `outputs` (the attention parity cross-check in `proxima-model-interop`'s
+/// decode loop) select the arm through this parameter instead of the
+/// process-global `PROXIMA_DISABLE_CACHED_ATTENTION_FUSION` env var.
+// the bool mirrors bind_with_fusion's own positional flag; bundling it would mint a type
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_quantized_named_with_scratch_and_experts_with_fusion<'block>(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'block>)],
+    outputs: &[NodeId],
+    free_buffers: &mut Vec<Vec<f32>>,
+    validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+    fuse_cached_attention: bool,
+) -> Result<Evaluated, TensorError> {
+    let blocks = resolve_named_blocks_with_experts(program, named, expert_sources)?;
+    evaluate_quantized_with_scratch_impl_with_fusion(
+        program,
+        symbols,
+        &blocks,
+        outputs,
+        free_buffers,
+        validated_weight_nodes,
+        false,
+        expert_sources,
+        fuse_cached_attention,
     )
 }
 

@@ -38,6 +38,1051 @@ fn set_fusion_disable_env_var(name: &str, disable: bool) {
     }
 }
 
+/// `PROXIMA_METAL_FUSE_ATTN_PARITY_STEPS` reader -- a comma list of decode
+/// step indices [`run_decode_loop_placed_kv`]'s parity probe runs on, same
+/// one-env-var-per-diagnostic convention as `PROXIMA_METAL_OP_PROFILE_STEP`.
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-fuse-attn-decode",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
+fn attn_fuse_parity_target_steps() -> Vec<usize> {
+    std::env::var("PROXIMA_METAL_FUSE_ATTN_PARITY_STEPS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|part| part.trim().parse::<usize>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `PROXIMA_ATTN_LAYER` reader -- which of `run_attn_fuse_parity_probe`'s own
+/// `candidates` (the `CachedAttention` nodes in program order, one per
+/// decoder layer) the failure report / read-source-vector dump targets.
+/// Default `0` preserves round-9's layer-0-only behaviour exactly.
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-fuse-attn-decode",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
+fn attn_fuse_parity_target_layer() -> usize {
+    std::env::var("PROXIMA_ATTN_LAYER")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+/// The live cached-row count for this step -- the ninth `CachedAttention`
+/// operand (`dead_code_cached_attention.rs:1311-1319`), a runtime scalar
+/// named input distinct from `symbols[1]` (the cache buffer's allocated
+/// row CAPACITY, fixed per bucket). Reading `symbols[1]` here reports
+/// capacity as if it were live length -- this reads the actual named
+/// "cached_len" block the step supplied.
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-fuse-attn-decode",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
+fn live_cached_len(named_blocks: &[(&str, QuantizedBlock<'_>)]) -> Option<f32> {
+    named_blocks.iter().find_map(|(name, block)| {
+        if *name != "cached_len" {
+            return None;
+        }
+        match block {
+            QuantizedBlock::Float32(values) => values.first().copied(),
+            _ => None,
+        }
+    })
+}
+
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-fuse-attn-decode",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
+fn bits_at_slice(values: &[u32], index: usize) -> String {
+    values.get(index).map_or("MISSING".to_string(), |bits| format!("0x{bits:08x}"))
+}
+
+/// First element where two equal-length f32 buffers diverge at the bit
+/// level, carrying both bit patterns -- `==` on the floats themselves would
+/// treat two differently-rounded NaNs as equal.
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-fuse-attn-decode",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
+fn first_diff_f32(unfused: &[f32], fused: &[f32]) -> Option<(usize, u32, u32)> {
+    unfused
+        .iter()
+        .zip(fused.iter())
+        .enumerate()
+        .find_map(|(index, (&left, &right))| {
+            (left.to_bits() != right.to_bits()).then_some((index, left.to_bits(), right.to_bits()))
+        })
+}
+
+/// Builds two throwaway plans for THIS step's `program`/`outputs` -- one
+/// with [`proxima_tensor::bind_with_fusion`]'s `fuse_cached_attention` set,
+/// one cleared -- and diffs every [`proxima_tensor::BoundOpKind::CachedAttention`]
+/// node's output plus the logits root as raw bit patterns. Read-only: both
+/// plans read the caller's resident `input_placements` but pass no
+/// `output_placements`, so every root comes back through host [`Evaluated`]
+/// instead of landing in a device [`PlacedBuffer`] -- neither call mutates
+/// the KV cache the real step's own `evaluate_with_placements` reads next.
+/// Never touches [`BackendRuntime::placed_plans`] -- both plans are built
+/// and dropped locally, not inserted into the cache.
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-fuse-attn-decode",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
+#[allow(clippy::too_many_arguments)]
+fn run_attn_fuse_parity_probe(
+    step: usize,
+    program: &[Op],
+    symbols: &[u64],
+    named_blocks: &[(&str, QuantizedBlock<'_>)],
+    roots: &[NodeId],
+    logits_root: NodeId,
+    resident_names: &alloc::collections::BTreeSet<&str>,
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    runtime: &BackendRuntime,
+) -> Result<(), InteropError> {
+    let shapes = proxima_tensor::infer(program, symbols)?;
+    let resolved =
+        proxima_tensor::bind_with_fusion(program, &shapes, roots, true, runtime.numeric_policy)?;
+    let candidates: Vec<NodeId> = resolved
+        .iter()
+        .filter(|bound| {
+            matches!(
+                bound.kind,
+                proxima_tensor::BoundOpKind::CachedAttention { .. }
+            )
+        })
+        .map(|bound| bound.node)
+        .collect();
+    eprintln!("parity_candidates step={step} n={}", candidates.len());
+
+    let mut parity_outputs: Vec<NodeId> = roots.to_vec();
+    parity_outputs.extend(candidates.iter().copied());
+    let placed_input_nodes: Vec<NodeId> =
+        input_placements.iter().map(|(node, _, _)| *node).collect();
+
+    let build_plan = |fuse_cached_attention: bool| -> Result<omega::metal::Plan, InteropError> {
+        let mut plan = plan_named_with_placed_inputs(
+            program,
+            symbols,
+            named_blocks,
+            &parity_outputs,
+            runtime.numeric_policy,
+            &placed_input_nodes,
+            fuse_cached_attention,
+        )?;
+        plan.mark_resident(resident_names);
+        if runtime.plan_time_constants {
+            plan.mark_plan_time_constants_resident();
+        }
+        // ROOTCAUSE TOGGLE (temporary, reverted before this slice closes):
+        // holds MTLCompileOptions.mathMode at Safe for BOTH arms so
+        // compiler FMA contraction/reassociation is held constant while
+        // the per-position/per-op walk below isolates the residual
+        // (route steps b-e, coordinator directive). `PROXIMA_ATTN_MATH_MODE`
+        // (round-4 addition, default `safe`, unset preserves the prior
+        // behaviour exactly) lets a caller re-run the SAME probe under
+        // Relaxed to get a real production reference instead of guessing at
+        // one from a stale pre-`all_read_sources()` log.
+        let probe_math_mode = match std::env::var("PROXIMA_ATTN_MATH_MODE").ok().as_deref() {
+            Some("relaxed") => omega::MathMode::Relaxed,
+            _ => omega::MathMode::Safe,
+        };
+        plan.set_math_mode(probe_math_mode)?;
+        plan.set_dispatch_type(runtime.dispatch_type);
+        Ok(plan)
+    };
+    let fused_plan = build_plan(true)?;
+    let unfused_plan = build_plan(false)?;
+
+    let fused_evaluated =
+        execute_plan_named_with_placements(&fused_plan, named_blocks, input_placements, &[])?;
+    let unfused_evaluated =
+        execute_plan_named_with_placements(&unfused_plan, named_blocks, input_placements, &[])?;
+
+    // V5 degenerate control: the SAME plan, evaluated twice against the
+    // SAME inputs. If either arm disagrees with itself, the
+    // fused-vs-unfused diff above is not evidence of a fusion defect --
+    // it is evidence the Metal path is not bit-stable run-to-run at all.
+    let unfused_evaluated_again =
+        execute_plan_named_with_placements(&unfused_plan, named_blocks, input_placements, &[])?;
+    let fused_evaluated_again =
+        execute_plan_named_with_placements(&fused_plan, named_blocks, input_placements, &[])?;
+    for (arm, first, second) in [
+        ("unfused", &unfused_evaluated, &unfused_evaluated_again),
+        ("fused", &fused_evaluated, &fused_evaluated_again),
+    ] {
+        let mut layers_with_diff = 0_usize;
+        for node in &candidates {
+            let (first_values, _) = first
+                .get(*node)
+                .ok_or(InteropError::MissingEvaluatedNode { node: *node })?;
+            let (second_values, _) = second
+                .get(*node)
+                .ok_or(InteropError::MissingEvaluatedNode { node: *node })?;
+            if first_diff_f32(first_values, second_values).is_some() {
+                layers_with_diff += 1;
+            }
+        }
+        let (first_logits, _) = first
+            .get(logits_root)
+            .ok_or(InteropError::MissingEvaluatedNode { node: logits_root })?;
+        let (second_logits, _) = second
+            .get(logits_root)
+            .ok_or(InteropError::MissingEvaluatedNode { node: logits_root })?;
+        let logits_diff = first_diff_f32(first_logits, second_logits);
+        eprintln!(
+            "parity_control step={step} arm={arm} layers_with_diff={layers_with_diff}/{} logits_first_diff={}",
+            candidates.len(),
+            match logits_diff {
+                None => "none".to_string(),
+                Some((element, first_bits, second_bits)) =>
+                    format!("({element}, 0x{first_bits:08x}, 0x{second_bits:08x})"),
+            }
+        );
+    }
+
+    let leaf_extent = symbols.get(1).copied().unwrap_or_default();
+    let cached_len = live_cached_len(named_blocks);
+    let cached_len_display = cached_len.map_or("MISSING".to_string(), |value| value.to_string());
+    for (layer, node) in candidates.iter().enumerate() {
+        let (fused_values, _) = fused_evaluated
+            .get(*node)
+            .ok_or(InteropError::MissingEvaluatedNode { node: *node })?;
+        let (unfused_values, _) = unfused_evaluated
+            .get(*node)
+            .ok_or(InteropError::MissingEvaluatedNode { node: *node })?;
+        match first_diff_f32(unfused_values, fused_values) {
+            None => eprintln!(
+                "parity step={step} layer={layer} node={} cached_len={cached_len_display} leaf_extent={leaf_extent} first_diff=none",
+                node.0
+            ),
+            Some((element, unfused_bits, fused_bits)) => eprintln!(
+                "parity step={step} layer={layer} node={} cached_len={cached_len_display} leaf_extent={leaf_extent} first_diff=({element}, 0x{unfused_bits:08x}, 0x{fused_bits:08x})",
+                node.0
+            ),
+        }
+    }
+
+    let (fused_logits, _) = fused_evaluated
+        .get(logits_root)
+        .ok_or(InteropError::MissingEvaluatedNode { node: logits_root })?;
+    let (unfused_logits, _) = unfused_evaluated
+        .get(logits_root)
+        .ok_or(InteropError::MissingEvaluatedNode { node: logits_root })?;
+    match first_diff_f32(unfused_logits, fused_logits) {
+        None => eprintln!("parity_logits step={step} first_diff=none"),
+        Some((element, unfused_bits, fused_bits)) => eprintln!(
+            "parity_logits step={step} first_diff=({element}, 0x{unfused_bits:08x}, 0x{fused_bits:08x})"
+        ),
+    }
+
+    if step == 1
+        && let Some(&layer0_node) = candidates.get(attn_fuse_parity_target_layer())
+    {
+        let metal_unfused_full: Vec<u32> = unfused_evaluated
+            .get(layer0_node)
+            .map(|(values, _)| values.iter().map(|value| value.to_bits()).collect())
+            .unwrap_or_default();
+        let metal_fused_full: Vec<u32> = fused_evaluated
+            .get(layer0_node)
+            .map(|(values, _)| values.iter().map(|value| value.to_bits()).collect())
+            .unwrap_or_default();
+        let metal_unfused_logits_full: Vec<u32> = unfused_evaluated
+            .get(logits_root)
+            .map(|(values, _)| values.iter().map(|value| value.to_bits()).collect())
+            .unwrap_or_default();
+        let metal_fused_logits_full: Vec<u32> = fused_evaluated
+            .get(logits_root)
+            .map(|(values, _)| values.iter().map(|value| value.to_bits()).collect())
+            .unwrap_or_default();
+        write_attn_layer0_failure_report(
+            layer0_node,
+            program,
+            symbols,
+            named_blocks,
+            &resolved,
+            runtime.numeric_policy,
+            &metal_unfused_full,
+            &metal_fused_full,
+            &metal_unfused_logits_full,
+            &metal_fused_logits_full,
+            resident_names,
+            input_placements,
+            runtime,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Owner's slice-4 failure report for `step=1 layer=0 node=166`: the
+/// element-0 chain from `q_even_grouped`/`q_odd_grouped` through the
+/// `attended` node, plus the UNFUSED `BoundOp` sequence between them and a
+/// CPU cross-check of the same element under both fusion states. Written to
+/// `PROXIMA_ATTN_PAYLOAD_PATH` (default `attn_parity_payload.txt`, relative
+/// to the process's own cwd -- run from the scratch `attn_parity/`
+/// directory so the default lands there).
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-fuse-attn-decode",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
+#[allow(clippy::too_many_arguments)]
+fn write_attn_layer0_failure_report(
+    attended_node: NodeId,
+    program: &[Op],
+    symbols: &[u64],
+    named_blocks: &[(&str, QuantizedBlock<'_>)],
+    fused_resolved: &[proxima_tensor::BoundOp],
+    numeric_policy: proxima_tensor::NumericPolicy,
+    metal_unfused_full: &[u32],
+    metal_fused_full: &[u32],
+    metal_unfused_logits_full: &[u32],
+    metal_fused_logits_full: &[u32],
+    resident_names: &alloc::collections::BTreeSet<&str>,
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    runtime: &BackendRuntime,
+) -> Result<(), InteropError> {
+    let mut report = String::new();
+
+    let fused_bound = fused_resolved
+        .iter()
+        .find(|bound| bound.node == attended_node)
+        .ok_or(InteropError::MissingEvaluatedNode {
+            node: attended_node,
+        })?;
+    let (
+        kv_heads,
+        query_groups,
+        head_dim,
+        rotary_dim,
+        cached_lower_inclusive,
+        new_upper_inclusive,
+        scale,
+        cached_key_rows,
+        new_key_rows,
+    ) = match fused_bound.kind {
+        proxima_tensor::BoundOpKind::CachedAttention {
+            kv_heads,
+            query_groups,
+            head_dim,
+            rotary_dim,
+            cached_lower_inclusive,
+            new_upper_inclusive,
+            scale,
+            cached_key_rows,
+            new_key_rows,
+            ..
+        } => (
+            kv_heads,
+            query_groups,
+            head_dim,
+            rotary_dim,
+            cached_lower_inclusive,
+            new_upper_inclusive,
+            scale,
+            cached_key_rows,
+            new_key_rows,
+        ),
+        _ => {
+            return Err(InteropError::MissingEvaluatedNode {
+                node: attended_node,
+            });
+        }
+    };
+    let operand_nodes: Vec<NodeId> = fused_bound
+        .operands()
+        .iter()
+        .take(8)
+        .map(|(node, _, _)| *node)
+        .collect();
+    let [q_even, q_odd, k_even_cache, k_odd_cache, new_k_even, new_k_odd, v_cache, v_new] =
+        operand_nodes[..8]
+            .try_into()
+            .map_err(|_| InteropError::MissingEvaluatedNode {
+                node: attended_node,
+            })?;
+    report.push_str(&format!(
+        "layer0 node={} kv_heads={kv_heads} query_groups={query_groups} head_dim={head_dim} rotary_dim={rotary_dim} scale={scale} cached_lower_inclusive={cached_lower_inclusive} new_upper_inclusive={new_upper_inclusive}\n",
+        attended_node.0
+    ));
+    report.push_str(&format!(
+        "operand_nodes q_even={} q_odd={} k_even_cache={} k_odd_cache={} new_k_even={} new_k_odd={} v_cache={} v_new={}\n",
+        q_even.0, q_odd.0, k_even_cache.0, k_odd_cache.0, new_k_even.0, new_k_odd.0, v_cache.0, v_new.0
+    ));
+
+    // Backward walk over the UNFUSED bind, from `attended_node` down to
+    // the 8 leaf operands above -- collects every internal BoundOp on
+    // layer 0's score/softmax/weighted-sum chain without assuming a node
+    // numbering.
+    let shapes = proxima_tensor::infer(program, symbols)?;
+    let unfused_resolved =
+        proxima_tensor::bind_with_fusion(program, &shapes, &[attended_node], false, numeric_policy)?;
+    let by_node: alloc::collections::BTreeMap<NodeId, &proxima_tensor::BoundOp> =
+        unfused_resolved.iter().map(|bound| (bound.node, bound)).collect();
+    let leaves: alloc::collections::BTreeSet<NodeId> = operand_nodes.iter().copied().collect();
+    let mut visited: alloc::collections::BTreeSet<NodeId> = alloc::collections::BTreeSet::new();
+    let mut stack = alloc::vec![attended_node];
+    let mut chain: Vec<NodeId> = Vec::new();
+    while let Some(node) = stack.pop() {
+        if leaves.contains(&node) || !visited.insert(node) {
+            continue;
+        }
+        chain.push(node);
+        if let Some(bound) = by_node.get(&node) {
+            // `all_read_sources()`, not `operands()`: a `Reduce`'s
+            // `epilogue_operands` (`types_layout_boundop.rs:529-545`) are a
+            // real read this walk must follow -- `operands()` alone silently
+            // drops an epilogue-only reader, which is exactly how q_odd/
+            // k_odd's own even+odd combine stayed invisible to this walk
+            // before this fix (the earlier `unfused_op` printout showed
+            // node=134 with a single `130` (q_even) operand and no odd-dot
+            // term anywhere in the chain).
+            for (operand, _, _) in bound.all_read_sources() {
+                stack.push(*operand);
+            }
+        }
+    }
+    chain.sort_unstable_by_key(|node| node.0);
+    report.push_str(&format!(
+        "unfused_chain_len={} (q_even_grouped/q_odd_grouped through node={} exclusive of the 8 leaf operands)\n",
+        chain.len(),
+        attended_node.0
+    ));
+    let packed_operands = omega::PackedOperands::new();
+    for node in &chain {
+        if let Some(bound) = by_node.get(node) {
+            let operand_summary: Vec<String> = bound
+                .operands()
+                .iter()
+                .map(|(operand, layout, _)| {
+                    format!("{}@base={},strides={:?}", operand.0, layout.base, layout.strides)
+                })
+                .collect();
+            // `epilogue_operands` -- a `Reduce`'s epilogue reads these but
+            // `operands()` does not enumerate them (see the chain-walk fix
+            // above). Printed separately so a "keep::reduce fold" node's
+            // FULL read set (even-dot AND odd-dot sources both) is visible,
+            // not just its primary `operands`.
+            let epilogue_summary: Vec<String> = match &bound.kind {
+                proxima_tensor::BoundOpKind::Reduce {
+                    epilogue_operands, ..
+                }
+                | proxima_tensor::BoundOpKind::RoundBatchedReduce {
+                    epilogue_operands, ..
+                } => epilogue_operands
+                    .iter()
+                    .map(|(operand, layout, _)| {
+                        format!("{}@base={},strides={:?}", operand.0, layout.base, layout.strides)
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let dispatch = match omega::emit(bound, &packed_operands, numeric_policy) {
+                Ok(kernel) => {
+                    // round-4 work item B: nodes 139 (odd-dot fold) and 142
+                    // (even-dot fold + epilogue add/select) are the two
+                    // UNFUSED reductions feeding the t=2 residual -- their
+                    // own emitted MSL, fenced the same way the fused
+                    // kernel's is, so a standalone replay can compile the
+                    // real per-lane reduction order instead of guessing it.
+                    if node.0 == 139 || node.0 == 142 {
+                        report.push_str(&format!("unfused_kernel_source_begin node={}\n", node.0));
+                        report.push_str(&kernel.source);
+                        report.push_str(&format!("\nunfused_kernel_source_end node={}\n", node.0));
+                    }
+                    format!(
+                        "entry={} grid_threads={} threadgroup_width={:?} grid_depth={}",
+                        kernel.entry, kernel.grid.threads, kernel.grid.threadgroup_width, kernel.grid.depth
+                    )
+                }
+                Err(error) => format!("emit_failed={error:?}"),
+            };
+            report.push_str(&format!(
+                "unfused_op node={} kind={} operands=[{}] epilogue_operands=[{}] dispatch=[{dispatch}]\n",
+                node.0,
+                bound.kind.name(),
+                operand_summary.join(", "),
+                epilogue_summary.join(", "),
+            ));
+        }
+    }
+
+    // Route step (route.d/item 4): request every chain node PLUS
+    // `attended_node` as outputs of the PRODUCTION unfused Metal plan (not
+    // the CPU evaluator) -- confirms requesting the intermediates does not
+    // itself change `attended_node`'s own bits (a materialization-order
+    // side effect would show up here), and gives the REAL Metal-computed
+    // per-op values for the per-position walk below instead of a CPU
+    // stand-in. Same math_mode as `run_attn_fuse_parity_probe`'s own
+    // `build_plan` this round (Safe, held constant across arms).
+    let placed_input_nodes: Vec<NodeId> =
+        input_placements.iter().map(|(node, _, _)| *node).collect();
+    let mut intermediate_outputs = chain.clone();
+    intermediate_outputs.push(attended_node);
+    // rootcause round 3 fixture step: the 8 leaf operands are excluded from
+    // `chain` by construction (see the `unfused_chain_len` note above) but a
+    // standalone fused-kernel replay needs their FULL bits, not the
+    // first-8-dims preview `q_even_grouped`/`new_k_even` print elsewhere --
+    // request them as outputs of the same production plan so the dump below
+    // reads real Metal-computed bytes, not a CPU stand-in.
+    intermediate_outputs.extend_from_slice(&operand_nodes);
+    let mut unfused_intermediates_plan = plan_named_with_placed_inputs(
+        program,
+        symbols,
+        named_blocks,
+        &intermediate_outputs,
+        numeric_policy,
+        &placed_input_nodes,
+        false,
+    )?;
+    unfused_intermediates_plan.mark_resident(resident_names);
+    if runtime.plan_time_constants {
+        unfused_intermediates_plan.mark_plan_time_constants_resident();
+    }
+    // round-4: same `PROXIMA_ATTN_MATH_MODE` override as `build_plan` above,
+    // so this fixture's leaf/chain dump is captured under the SAME mode the
+    // parity-probe arms just ran under, not silently pinned to Safe while
+    // the caller asked for Relaxed.
+    let intermediates_math_mode = match std::env::var("PROXIMA_ATTN_MATH_MODE").ok().as_deref() {
+        Some("relaxed") => omega::MathMode::Relaxed,
+        _ => omega::MathMode::Safe,
+    };
+    unfused_intermediates_plan.set_math_mode(intermediates_math_mode)?;
+    unfused_intermediates_plan.set_dispatch_type(runtime.dispatch_type);
+    let intermediates_evaluated = execute_plan_named_with_placements(
+        &unfused_intermediates_plan,
+        named_blocks,
+        input_placements,
+        &[],
+    )?;
+    let intermediates_attended_bits: Vec<u32> = intermediates_evaluated
+        .get(attended_node)
+        .map(|(values, _)| values.iter().map(|value| value.to_bits()).collect())
+        .unwrap_or_default();
+    let attended_bits_unchanged = intermediates_attended_bits.first() == metal_unfused_full.first()
+        && intermediates_attended_bits.get(1) == metal_unfused_full.get(1);
+    report.push_str(&format!(
+        "unfused_intermediates_probe requested_outputs={} attended_element0={} attended_element1={} unchanged_vs_production={attended_bits_unchanged}\n",
+        intermediate_outputs.len(),
+        bits_at_slice(&intermediates_attended_bits, 0),
+        bits_at_slice(&intermediates_attended_bits, 1),
+    ));
+    for node in &chain {
+        if let Some((values, shape)) = intermediates_evaluated.get(*node) {
+            let all_bits: Vec<u32> = values.iter().map(|value| value.to_bits()).collect();
+            // query-group-0 column: every score/sum node here ends in an
+            // 8-wide query_groups axis, unit stride -- index i is qg0 exactly
+            // when i % 8 == 0. Covers all 6 live cached rows (t=0..5) in one
+            // slice for the [1,32,1,8]-shaped score nodes (142/154), and the
+            // single new-range row for the [*,1,1,8]-shaped ones (149/156).
+            let qg0_column: Vec<u32> = if !all_bits.is_empty() && all_bits.len().is_multiple_of(8) {
+                all_bits.iter().step_by(8).copied().collect()
+            } else {
+                Vec::new()
+            };
+            report.push_str(&format!(
+                "unfused_metal_intermediate node={} shape={shape:?} len={} qg0_column={:?} first16_bits={:?}\n",
+                node.0,
+                all_bits.len(),
+                qg0_column,
+                &all_bits[..all_bits.len().min(16)]
+            ));
+        }
+    }
+
+    // rootcause round 3 fixture step: full raw bits for the 8 leaf operands,
+    // identical Metal-produced buffers a standalone fused-kernel replay would
+    // bind at the production indices -- printed complete (not truncated to
+    // 16) since the dot-product walk needs every dim, not a preview.
+    let leaf_labels = [
+        "q_even", "q_odd", "k_even_cache", "k_odd_cache", "new_k_even", "new_k_odd", "v_cache",
+        "v_new",
+    ];
+    for (label, node) in leaf_labels.iter().zip(operand_nodes.iter()) {
+        if let Some((values, shape)) = intermediates_evaluated.get(*node) {
+            let all_bits: Vec<u32> = values.iter().map(|value| value.to_bits()).collect();
+            report.push_str(&format!(
+                "leaf_full label={label} node={} shape={shape:?} len={} bits={:?}\n",
+                node.0,
+                all_bits.len(),
+                all_bits,
+            ));
+        } else {
+            report.push_str(&format!("leaf_full label={label} node={} MISSING\n", node.0));
+        }
+    }
+
+    // Fused-arm entry: `context_chunks_for` is `pub` (widened this slice,
+    // `omega/src/msl/signature_tokens_prelude.rs`) and `omega::emit` is the
+    // SAME function `pipeline_for` calls before compiling -- both called
+    // here with the production `fused_bound`/`cached_key_rows`/
+    // `new_key_rows`/`query_groups`/`head_dim`/`numeric_policy`, not
+    // inferred from the `cached_len <= ATTENTION_CONTEXT_KEYS_PER_CHUNK`
+    // relationship.
+    let live_cached_len = live_cached_len(named_blocks);
+    let cache_capacity = symbols.get(1).copied().unwrap_or_default();
+    let context_chunks = omega::context_chunks_for(
+        cached_key_rows + new_key_rows,
+        query_groups,
+        head_dim,
+        numeric_policy,
+    );
+    let fused_dispatch = match omega::emit(fused_bound, &packed_operands, numeric_policy) {
+        Ok(kernel) => {
+            // rootcause round 3: the production fused kernel's own MSL text,
+            // fenced so a shell step can carve it into its own .metal file
+            // for the standalone replay/diagnostic-store steps without this
+            // harness hardcoding a scratch path.
+            report.push_str("fused_kernel_source_begin\n");
+            report.push_str(&kernel.source);
+            report.push_str("\nfused_kernel_source_end\n");
+            format!(
+                "entry={} grid_threads={} threadgroup_width={:?} grid_depth={}",
+                kernel.entry, kernel.grid.threads, kernel.grid.threadgroup_width, kernel.grid.depth
+            )
+        }
+        Err(error) => format!("emit_failed={error:?}"),
+    };
+    report.push_str(&format!(
+        "fused_arm node={} cached_lower_inclusive={cached_lower_inclusive} new_upper_inclusive={new_upper_inclusive} cached_len={} cache_capacity={cache_capacity} cached_key_rows={cached_key_rows} new_key_rows={new_key_rows} context_chunks={context_chunks} dispatch=[{fused_dispatch}]\n",
+        attended_node.0,
+        live_cached_len.map_or("MISSING".to_string(), |value| value.to_string()),
+    ));
+
+    // Route step (falsification toggle, not the div/reciprocal one -- that
+    // one moved element1 FURTHER from the unfused value and was reverted,
+    // see the report's own note): `NumericPolicy::bit_exact()` does not
+    // grant `NumericRewrite::ContextChunkMerge`
+    // (`proxima-tensor/src/numeric.rs:171-172,207`), so `context_chunks_for`
+    // (`signature_tokens_prelude.rs:1202-1203`) unconditionally returns 1
+    // for this policy -- ONE simdgroup walks every live key sequentially,
+    // no cross-chunk merge at all. This BoundOp's `chunks<=1`/`context_
+    // chunks>1` arms never read `block_width_for` (that only gates the
+    // `single_range_dynamic` path this bind is not), so this is the ONLY
+    // structural difference `bit_exact()` introduces here versus
+    // `runtime.numeric_policy` (which produced `context_chunks=3` above).
+    // An explicit, existing, non-env-var policy value -- not a source edit.
+    let context_chunks_one_plan = plan_named_with_placed_inputs(
+        program,
+        symbols,
+        named_blocks,
+        &[attended_node],
+        proxima_tensor::NumericPolicy::bit_exact(),
+        &placed_input_nodes,
+        true,
+    );
+    match context_chunks_one_plan {
+        Ok(mut plan) => {
+            plan.mark_resident(resident_names);
+            if runtime.plan_time_constants {
+                plan.mark_plan_time_constants_resident();
+            }
+            plan.set_math_mode(omega::MathMode::Safe)?;
+            plan.set_dispatch_type(runtime.dispatch_type);
+            let evaluated =
+                execute_plan_named_with_placements(&plan, named_blocks, input_placements, &[]);
+            match evaluated {
+                Ok(evaluated) => {
+                    let bits: Vec<u32> = evaluated
+                        .get(attended_node)
+                        .map(|(values, _)| values.iter().map(|value| value.to_bits()).collect())
+                        .unwrap_or_default();
+                    report.push_str(&format!(
+                        "context_chunks_one_probe element0={} element1={} (compare against production fused element0={} element1={} and unfused element0={} element1={})\n",
+                        bits_at_slice(&bits, 0),
+                        bits_at_slice(&bits, 1),
+                        bits_at_slice(metal_fused_full, 0),
+                        bits_at_slice(metal_fused_full, 1),
+                        bits_at_slice(metal_unfused_full, 0),
+                        bits_at_slice(metal_unfused_full, 1),
+                    ));
+                }
+                Err(error) => report.push_str(&format!("context_chunks_one_probe execute_failed={error:?}\n")),
+            }
+        }
+        Err(error) => report.push_str(&format!("context_chunks_one_probe plan_failed={error:?}\n")),
+    }
+
+    // Element-0 payload: the SAME `named_blocks` this step's real Metal
+    // evaluation reads, via the unfused plan's own outputs (every
+    // intermediate the fused kernel would otherwise absorb).
+    let mut payload_outputs = chain.clone();
+    payload_outputs.extend(operand_nodes.iter().copied());
+    payload_outputs.push(attended_node);
+    payload_outputs.sort_unstable_by_key(|node| node.0);
+    payload_outputs.dedup();
+    let unfused_plan_evaluated = proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts(
+        program,
+        symbols,
+        named_blocks,
+        &payload_outputs,
+        &mut Vec::new(),
+        &mut None,
+        None,
+    )?;
+
+    let dump_slice = |report: &mut String, label: &str, node: NodeId, max_len: usize| {
+        if let Some((values, shape)) = unfused_plan_evaluated.get(node) {
+            let shown = &values[..values.len().min(max_len)];
+            report.push_str(&format!(
+                "{label} node={} shape={shape:?} len={} dims_0_7={:?}\n",
+                node.0,
+                values.len(),
+                &shown[..shown.len().min(8)]
+            ));
+            if values.len() >= 128 {
+                report.push_str(&format!("{label} full_128={:?}\n", &values[..128]));
+            }
+        } else {
+            report.push_str(&format!("{label} node={} MISSING from unfused evaluation\n", node.0));
+        }
+    };
+    dump_slice(&mut report, "q_even_grouped", q_even, 128);
+    dump_slice(&mut report, "q_odd_grouped", q_odd, 128);
+
+    let kv_stride = usize::try_from(kv_heads).unwrap_or(1) * usize::try_from(rotary_dim / 2).unwrap_or(1);
+    if let Some((k_even_values, _)) = unfused_plan_evaluated.get(k_even_cache) {
+        let rows = symbols.get(1).copied().unwrap_or_default() as usize;
+        let row_width = usize::try_from(rotary_dim / 2).unwrap_or(1);
+        for row in [0_usize, rows.saturating_sub(1)] {
+            let start = row * kv_stride;
+            let end = (start + row_width).min(k_even_values.len());
+            report.push_str(&format!(
+                "k_even_cache row={row} kv_head=0 dims_0_7={:?}\nk_even_cache row={row} kv_head=0 full={:?}\n",
+                &k_even_values[start..(start + 8).min(end)],
+                &k_even_values[start..end]
+            ));
+        }
+    }
+    if let Some((k_odd_values, _)) = unfused_plan_evaluated.get(k_odd_cache) {
+        let rows = symbols.get(1).copied().unwrap_or_default() as usize;
+        let row_width = usize::try_from(rotary_dim / 2).unwrap_or(1);
+        for row in [0_usize, rows.saturating_sub(1)] {
+            let start = row * kv_stride;
+            let end = (start + row_width).min(k_odd_values.len());
+            report.push_str(&format!(
+                "k_odd_cache row={row} kv_head=0 dims_0_7={:?}\nk_odd_cache row={row} kv_head=0 full={:?}\n",
+                &k_odd_values[start..(start + 8).min(end)],
+                &k_odd_values[start..end]
+            ));
+        }
+    }
+    dump_slice(&mut report, "new_k_even", new_k_even, 128);
+    dump_slice(&mut report, "new_k_odd", new_k_odd, 128);
+
+    let v_stride = usize::try_from(kv_heads).unwrap_or(1) * usize::try_from(head_dim).unwrap_or(1);
+    if let Some((v_cache_values, _)) = unfused_plan_evaluated.get(v_cache) {
+        let rows = symbols.get(1).copied().unwrap_or_default() as usize;
+        let column_d0: Vec<f32> = (0..rows)
+            .filter_map(|row| v_cache_values.get(row * v_stride).copied())
+            .collect();
+        report.push_str(&format!("v_cache column_d0 kv_head=0 all_rows={column_d0:?}\n"));
+    }
+    if let Some((v_new_values, _)) = unfused_plan_evaluated.get(v_new) {
+        report.push_str(&format!(
+            "v_new row0 kv_head=0 d0={:?}\n",
+            v_new_values.first()
+        ));
+    }
+
+    for (label, node) in &chain
+        .iter()
+        .map(|node| (format!("unfused_intermediate_{}", node.0), *node))
+        .collect::<Vec<_>>()
+    {
+        dump_slice(&mut report, label, *node, 32);
+    }
+    dump_slice(&mut report, "attended", attended_node, 8);
+
+    // CPU cross-evidence: same `program`/`named_blocks`, CPU evaluator,
+    // both fusion states selected via `bind_with_fusion`'s own explicit
+    // bool (no process env var involved).
+    let cpu_fused_bits = {
+        let evaluated =
+            proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts_with_fusion(
+                program,
+                symbols,
+                named_blocks,
+                &[attended_node],
+                &mut Vec::new(),
+                &mut None,
+                None,
+                true,
+            )?;
+        evaluated
+            .get(attended_node)
+            .and_then(|(values, _)| values.first().copied())
+            .map(f32::to_bits)
+    };
+    let cpu_unfused_bits = {
+        let evaluated =
+            proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts_with_fusion(
+                program,
+                symbols,
+                named_blocks,
+                &[attended_node],
+                &mut Vec::new(),
+                &mut None,
+                None,
+                false,
+            )?;
+        evaluated
+            .get(attended_node)
+            .and_then(|(values, _)| values.first().copied())
+            .map(f32::to_bits)
+    };
+
+    report.push_str(&format!(
+        "cross_evidence element0 cpu_unfused={} cpu_fused={} metal_unfused={} metal_fused={}\n",
+        cpu_unfused_bits.map_or("MISSING".to_string(), |bits| format!("0x{bits:08x}")),
+        cpu_fused_bits.map_or("MISSING".to_string(), |bits| format!("0x{bits:08x}")),
+        bits_at_slice(metal_unfused_full, 0),
+        bits_at_slice(metal_fused_full, 0),
+    ));
+    report.push_str(&format!(
+        "cross_evidence element1 metal_unfused={} metal_fused={}\n",
+        bits_at_slice(metal_unfused_full, 1),
+        bits_at_slice(metal_fused_full, 1),
+    ));
+    // Round-2 requirement 1: the full layer-0 `attended` vector's u32 bit
+    // patterns, both arms -- printed here (production, THIS invocation)
+    // so the diagnostic-variant comparison later in this report can be
+    // checked against these exact lines rather than re-inferred.
+    report.push_str(&format!(
+        "production_attended_bits_unfused len={} bits={:?}\n",
+        metal_unfused_full.len(),
+        metal_unfused_full
+    ));
+    report.push_str(&format!(
+        "production_attended_bits_fused len={} bits={:?}\n",
+        metal_fused_full.len(),
+        metal_fused_full
+    ));
+    report.push_str(&format!(
+        "production_logits_bits_unfused len={} first8={:?}\n",
+        metal_unfused_logits_full.len(),
+        &metal_unfused_logits_full[..metal_unfused_logits_full.len().min(8)]
+    ));
+    report.push_str(&format!(
+        "production_logits_bits_fused len={} first8={:?}\n",
+        metal_fused_logits_full.len(),
+        &metal_fused_logits_full[..metal_fused_logits_full.len().min(8)]
+    ));
+
+    let path = std::env::var("PROXIMA_ATTN_PAYLOAD_PATH")
+        .unwrap_or_else(|_| "attn_parity_payload.txt".to_string());
+    std::fs::write(&path, &report)?;
+    eprintln!("attn_layer0_report step=1 layer=0 node={} path={path}", attended_node.0);
+    eprint!("{report}");
+
+    write_attn_read_source_vectors(
+        program,
+        symbols,
+        named_blocks,
+        &shapes,
+        &by_node,
+        resident_names,
+        input_placements,
+        runtime,
+        attended_node,
+        metal_unfused_full,
+    )?;
+
+    Ok(())
+}
+
+/// `PROXIMA_ATTN_VECTORS_DIR` optional dump: the 15 target nodes' own
+/// read-source closure (every `Input(NodeId(_))` a target's emitted
+/// [`omega::Kernel::bindings`] names -- same node ids the `.grid.txt` dumps
+/// already show) plus the 15 targets themselves, requested as extra outputs
+/// of ONE evaluation of the production UNFUSED plan. `PROXIMA_ATTN_MATH_MODE`
+/// (same convention as `build_plan` above, default `safe`, unset preserves
+/// the r3 fixture convention exactly) selects Safe- or Relaxed-native
+/// capture -- round-9 needs both: Safe to isolate transcription bugs from
+/// compile-mode contraction, Relaxed because that is what
+/// `resident_nocopy_cache::dispatch` actually compiles for the serving
+/// default. Also proves requesting those extra outputs does not move
+/// `attended_node` by diffing this evaluation's bits against
+/// `metal_unfused_full` (the SAME node's bits from
+/// `run_attn_fuse_parity_probe`'s own unfused evaluation, no extra outputs
+/// requested there, same math mode both places).
+///
+/// `target_node_offsets` are the 14 absorbed nodes' ids MINUS
+/// `attended_node.0` -- `S/census/absorbed_nodes.txt`'s own per-layer
+/// `ABSORBED` blocks show every gemma4 layer (0, 1, 2, 4, 10 checked
+/// directly) shares this EXACT relative layout (node numbering is one fixed
+/// per-layer template offset by a constant 189-node stride), so the 15-node
+/// closure generalizes to any layer from its own attended node alone,
+/// without re-deriving a base per layer.
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-fuse-attn-decode",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
+const ATTN_ABSORBED_NODE_OFFSETS: [i32; 14] =
+    [-32, -31, -27, -20, -24, -17, -15, -14, -12, -9, -10, -8, -4, -2];
+
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-fuse-attn-decode",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
+#[allow(clippy::too_many_arguments)]
+fn write_attn_read_source_vectors(
+    program: &[Op],
+    symbols: &[u64],
+    named_blocks: &[(&str, QuantizedBlock<'_>)],
+    shapes: &proxima_tensor::Shapes,
+    by_node: &alloc::collections::BTreeMap<NodeId, &proxima_tensor::BoundOp>,
+    resident_names: &alloc::collections::BTreeSet<&str>,
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    runtime: &BackendRuntime,
+    attended_node: NodeId,
+    metal_unfused_full: &[u32],
+) -> Result<(), InteropError> {
+    let Ok(dir) = std::env::var("PROXIMA_ATTN_VECTORS_DIR") else {
+        return Ok(());
+    };
+
+    let target_nodes: Vec<u32> = ATTN_ABSORBED_NODE_OFFSETS
+        .iter()
+        .map(|offset| (attended_node.0 as i32 + offset) as u32)
+        .chain(core::iter::once(attended_node.0))
+        .collect();
+
+    let mut all_nodes: alloc::collections::BTreeSet<NodeId> =
+        target_nodes.iter().map(|&id| NodeId(id)).collect();
+    for &id in &target_nodes {
+        if let Some(bound) = by_node.get(&NodeId(id)) {
+            for (operand, _, _) in bound.all_read_sources() {
+                all_nodes.insert(*operand);
+            }
+        }
+    }
+    let outputs: Vec<NodeId> = all_nodes.iter().copied().collect();
+
+    let placed_input_nodes: Vec<NodeId> =
+        input_placements.iter().map(|(node, _, _)| *node).collect();
+    let mut plan = plan_named_with_placed_inputs(
+        program,
+        symbols,
+        named_blocks,
+        &outputs,
+        runtime.numeric_policy,
+        &placed_input_nodes,
+        false,
+    )?;
+    plan.mark_resident(resident_names);
+    if runtime.plan_time_constants {
+        plan.mark_plan_time_constants_resident();
+    }
+    // same `PROXIMA_ATTN_MATH_MODE` convention as `build_plan` above
+    // (default `safe`, unset preserves the r3 fixture convention exactly)
+    // -- round-9 needs a Relaxed-native capture of these same vectors to
+    // gate the production (Relaxed) unfused bytes against, not only Safe.
+    let vectors_math_mode = match std::env::var("PROXIMA_ATTN_MATH_MODE").ok().as_deref() {
+        Some("relaxed") => omega::MathMode::Relaxed,
+        _ => omega::MathMode::Safe,
+    };
+    plan.set_math_mode(vectors_math_mode)?;
+    plan.set_dispatch_type(runtime.dispatch_type);
+    let evaluated =
+        execute_plan_named_with_placements(&plan, named_blocks, input_placements, &[])?;
+
+    std::fs::create_dir_all(&dir)?;
+
+    let mut manifest = String::new();
+    for &node in &outputs {
+        let extents = shapes.of(node);
+        let Some((values, _)) = evaluated.get(node) else {
+            manifest.push_str(&format!("node={} MISSING\n", node.0));
+            continue;
+        };
+        manifest.push_str(&format!(
+            "node={} elements={} extents={extents:?} source=production_metal_unfused\n",
+            node.0,
+            values.len(),
+        ));
+        let mut bits_text = String::with_capacity(values.len() * 11);
+        for value in values {
+            bits_text.push_str(&format!("0x{:08x}\n", value.to_bits()));
+        }
+        std::fs::write(format!("{dir}/{}.bits", node.0), &bits_text)?;
+    }
+    std::fs::write(format!("{dir}/manifest.txt"), &manifest)?;
+
+    let attended_from_vectors_run: Vec<u32> = evaluated
+        .get(attended_node)
+        .map(|(values, _)| values.iter().map(|value| value.to_bits()).collect())
+        .unwrap_or_default();
+    let mut unchanged_report = String::new();
+    unchanged_report.push_str(&format!(
+        "attended_node={} normal_probe_element0={} normal_probe_element1={} extra_outputs_element0={} extra_outputs_element1={}\n",
+        attended_node.0,
+        bits_at_slice(metal_unfused_full, 0),
+        bits_at_slice(metal_unfused_full, 1),
+        bits_at_slice(&attended_from_vectors_run, 0),
+        bits_at_slice(&attended_from_vectors_run, 1),
+    ));
+    let element_count = metal_unfused_full.len().max(attended_from_vectors_run.len());
+    let mut all_unchanged = true;
+    for index in 0..element_count {
+        let normal_probe = metal_unfused_full.get(index).copied();
+        let extra_outputs = attended_from_vectors_run.get(index).copied();
+        let unchanged = normal_probe == extra_outputs;
+        all_unchanged &= unchanged;
+        unchanged_report.push_str(&format!(
+            "index={index} normal_probe={} extra_outputs={} unchanged={unchanged}\n",
+            normal_probe.map_or("MISSING".to_string(), |bits| format!("0x{bits:08x}")),
+            extra_outputs.map_or("MISSING".to_string(), |bits| format!("0x{bits:08x}")),
+        ));
+    }
+    unchanged_report.push_str(&format!("all_unchanged={all_unchanged}\n"));
+    std::fs::write(format!("{dir}/attended_unchanged.txt"), &unchanged_report)?;
+    eprintln!(
+        "attn_vectors_dump nodes={} all_unchanged={all_unchanged} dir={dir}",
+        outputs.len()
+    );
+
+    Ok(())
+}
+
+/// `fnv1a64` of `logits`' raw bit patterns -- lets a `metal-fuse-attn-decode`
+/// build and a feature-off build be compared step-for-step on the same
+/// prompt without diffing the full f32 buffer by hand.
+#[cfg(feature = "metal")]
+fn logits_bits_hash(logits: &[f32]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    logits
+        .iter()
+        .flat_map(|value| value.to_bits().to_le_bytes())
+        .fold(OFFSET_BASIS, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+        })
+}
+
 /// Resolves the `PROXIMA_PREFILL_ONE_EVALUATION`/`PROXIMA_PREFILL_SEQUENTIAL`
 /// escape hatches (`ServingConfig::prefill_one_evaluation`'s own doc) into
 /// the one presence-based override
@@ -2205,6 +3250,34 @@ impl<'file> LoadedModel<'file> {
                     }
                     roots.sort_unstable_by_key(|node| node.0);
                     roots.dedup();
+                    // gemma4's `KvCacheShape::Custom` excludes it from
+                    // `LoadedModel::single_range` (`run_decode_loop_placed_kv`'s
+                    // own doc, this function's own branch above at
+                    // `self.single_range`), so its real decode step reaches
+                    // THIS loop's `runtime.evaluate` below, never the
+                    // placed-KV arm -- this is the parity probe's other
+                    // call site, gated identically, with empty
+                    // input/output placements since this arm's KV cache
+                    // lives in `named_blocks`, not a device `PlacedBuffer`.
+                    #[cfg(all(
+                        feature = "metal",
+                        feature = "metal-fuse-attn-decode",
+                        feature = "metal-output-placement",
+                        target_os = "macos"
+                    ))]
+                    if attn_fuse_parity_target_steps().contains(&_step) {
+                        run_attn_fuse_parity_probe(
+                            _step,
+                            active_program,
+                            &symbols,
+                            &named_blocks,
+                            &roots,
+                            active_logits_root,
+                            &resident_names,
+                            &[],
+                            runtime,
+                        )?;
+                    }
                     // Only requested when a routing observer is actually
                     // registered (`instrument::expert_observer`'s own doc): the
                     // CPU evaluator keeps every requested output's full lifetime
@@ -3632,6 +4705,12 @@ impl<'file> LoadedModel<'file> {
                         )))]
                         let barriers_step = 0_u64;
                         logits_sink.observe(last_position, barriers_step);
+                        #[cfg(feature = "metal")]
+                        eprintln!(
+                            "logits_hash step={} hash=0x{:016x}",
+                            _step,
+                            logits_bits_hash(last_position)
+                        );
 
                         #[cfg(feature = "instrument")]
                         let greedy_pick_started = read_ticks();
@@ -4138,6 +5217,25 @@ impl<'file> LoadedModel<'file> {
                     roots.push(*odd);
                     roots.push(*value);
                 }
+                #[cfg(all(
+                    feature = "metal",
+                    feature = "metal-fuse-attn-decode",
+                    feature = "metal-output-placement",
+                    target_os = "macos"
+                ))]
+                if attn_fuse_parity_target_steps().contains(&_step) {
+                    run_attn_fuse_parity_probe(
+                        _step,
+                        &single_range.program,
+                        &symbols,
+                        &named_blocks,
+                        &roots,
+                        single_range.logits_root,
+                        &resident_names,
+                        &input_placements,
+                        runtime,
+                    )?;
+                }
                 #[cfg(feature = "instrument")]
                 let evaluate_started = read_ticks();
                 // ROW 329: this step's `execute_plan_with_placements_dispatch_timed`
@@ -4314,6 +5412,12 @@ impl<'file> LoadedModel<'file> {
                 #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
                 let barriers_step = 0_u64;
                 logits_sink.observe(last_position, barriers_step);
+                #[cfg(feature = "metal")]
+                eprintln!(
+                    "logits_hash step={} hash=0x{:016x}",
+                    _step,
+                    logits_bits_hash(last_position)
+                );
 
                 #[cfg(feature = "instrument")]
                 let greedy_pick_started = read_ticks();
