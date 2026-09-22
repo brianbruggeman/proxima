@@ -432,6 +432,14 @@ required-features = ["std"]
 name = "gemma4_decode_probe"
 required-features = ["std"]
 
+# Prompt-token counter under the same `cached_len` BOS/EOS convention
+# `generate/decode.rs::run_decode_loop_observed_seeded` uses -- reads one
+# prompt off stdin, prints its token count so a coverage run can be handed
+# exact prompt strings instead of searching for lengths itself.
+[[example]]
+name = "attn_prompt_tokens"
+required-features = ["std"]
+
 # bench/decode-gbps-baseline MEASUREMENT 0a/0b: real decode, reads
 # per-step wall vs the aggregate `metal_stage_totals().gpu_exec_ticks`
 # counter via the already-wired `PROXIMA_DEBUG_METAL_STAGES` env var --
@@ -439,6 +447,24 @@ required-features = ["std"]
 [[example]]
 name = "decode_gbps_baseline"
 required-features = ["std", "metal", "instrument"]
+
+# `metal-fuse-attn-decode` byte-equivalence harness: fused vs. unfused
+# `BoundOpKind::CachedAttention` parity on the real gemma4-E2B checkpoint,
+# read via `PROXIMA_METAL_FUSE_ATTN_PARITY_STEPS` in `decode.rs`.
+[[example]]
+name = "attn_parity_probe"
+required-features = ["metal"]
+
+# Per-node MSL/uniforms/grid dump for a fixed set of gemma4-E2B decode-step
+# attention-chain `NodeId`s, off the real production (unfused) bind -- see
+# the example's own module doc for the full node list and file layout.
+[[example]]
+name = "attn_node_dump"
+required-features = ["metal"]
+
+[[example]]
+name = "attn_fused_op_dump"
+required-features = ["metal"]
 
 # Batched Q4_0 real-DRAM-streaming rate: matvec/floor/copy-ceiling arms over
 # one command buffer, per-dispatch launch/drain floor amortized -- see the
