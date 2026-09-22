@@ -591,7 +591,7 @@ pub fn plan_named(
     numeric_policy: NumericPolicy,
 ) -> Result<Plan, MetalError> {
     let blocks = resolve_named_blocks(program, named)?;
-    plan_with_placed_inputs(program, symbols, &blocks, outputs, numeric_policy, &[])
+    plan_with_placed_inputs(program, symbols, &blocks, outputs, numeric_policy, &[], true)
 }
 
 /// [`plan`] against named blocks plus caller-owned input placements.
@@ -608,6 +608,7 @@ pub fn plan_named_with_placed_inputs(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
     placed_input_nodes: &[NodeId],
+    fuse_cached_attention: bool,
 ) -> Result<Plan, MetalError> {
     let blocks = resolve_named_blocks_with_placed_nodes(program, named, |node| {
         placed_input_nodes.contains(&node)
@@ -619,6 +620,7 @@ pub fn plan_named_with_placed_inputs(
         outputs,
         numeric_policy,
         placed_input_nodes,
+        fuse_cached_attention,
     )
 }
 

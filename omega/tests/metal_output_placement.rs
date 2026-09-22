@@ -64,6 +64,7 @@ fn a_placed_input_can_be_planned_without_a_named_host_payload() {
         &[identity_node],
         NumericPolicy::default(),
         &[placed_input_node],
+        true,
     )
     .expect("placed input is valid without a host-side placeholder");
     let output_buffer =
@@ -88,6 +89,7 @@ fn a_placed_input_can_be_planned_without_a_named_host_payload() {
         &[identity_node],
         NumericPolicy::default(),
         &[],
+        true,
     ) {
         Ok(_) => panic!("an omitted input must still fail without a placement declaration"),
         Err(error) => error,

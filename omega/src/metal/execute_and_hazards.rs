@@ -13,7 +13,7 @@ pub fn plan(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
 ) -> Result<Plan, MetalError> {
-    plan_with_placed_inputs(program, symbols, blocks, outputs, numeric_policy, &[])
+    plan_with_placed_inputs(program, symbols, blocks, outputs, numeric_policy, &[], true)
 }
 
 pub(super) fn plan_with_placed_inputs(
@@ -23,6 +23,7 @@ pub(super) fn plan_with_placed_inputs(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
     placed_input_nodes: &[NodeId],
+    fuse_cached_attention: bool,
 ) -> Result<Plan, MetalError> {
     #[cfg(feature = "instrument")]
     let prepare_started = read_ticks();
@@ -33,6 +34,7 @@ pub(super) fn plan_with_placed_inputs(
         outputs,
         numeric_policy,
         placed_input_nodes,
+        fuse_cached_attention,
     )?;
     #[cfg(feature = "instrument")]
     {

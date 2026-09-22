@@ -219,8 +219,9 @@ use proxima_tensor::instrument::{
 };
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, NumericPolicy, Op,
-    QuantizedBlock, Shapes, TensorError, bind, block_node_ids, correct_packed_matmul_layouts,
-    index_node_ids, infer, node_retirement, prune_dead, resolve_named_blocks,
+    QuantizedBlock, Shapes, TensorError, bind_with_fusion, block_node_ids,
+    correct_packed_matmul_layouts, index_node_ids, infer, node_retirement, prune_dead,
+    resolve_named_blocks,
 };
 #[cfg(any(not(feature = "metal-buffer-pool"), test))]
 use proxima_tensor::node_last_reader;
@@ -261,3 +262,11 @@ use prepare_uniforms_pack::*;
 pub use pipeline_buffers_upload::*;
 pub use resident_nocopy_cache::*;
 use arena_encode_dispatch_finish::*;
+
+/// Public wrapper around [`prepare_uniforms_pack::pack_uniforms`] (crate-private) --
+/// the same packer [`execute`] uses per dispatch, exposed so a caller outside
+/// this module (a probe/dump binary) can pack the exact bytes a real
+/// dispatch would upload without duplicating the per-`BoundOpKind` match.
+pub fn pack_uniforms_for(bound: &BoundOp, numeric_policy: NumericPolicy) -> Result<Vec<u8>, EmitError> {
+    prepare_uniforms_pack::pack_uniforms(bound, numeric_policy)
+}
