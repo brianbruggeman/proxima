@@ -188,6 +188,23 @@ fn run_one_bind(
 ) -> (Vec<BoundOp>, Vec<LayerChainCensus>) {
     let bound_ops = bind_with_fusion(program, shapes, outputs, fuse_cached_attention, numeric_policy)
         .unwrap_or_else(|error| panic!("bind_with_fusion[{label}] failed: {error}"));
+    // `bind_with_fusion` alone never prunes a node unreachable from
+    // `outputs` (this module's own doc, further down: `prune_dead` is
+    // `omega`'s own plan-preparation step, never `bind_with_fusion`
+    // itself). Two DIFFERENT recognizer candidates -- the softmax arm's own
+    // walk over `program` and the underlying `program`'s own online-softmax
+    // construction -- structurally emit sibling max-fold `Reduce`s that
+    // feed nothing (`R9/PROGRESS.md`'s "closing the census gap" session:
+    // real checkpoint node ids verified via the recognizer's own bound ids,
+    // never literal 151/152 -- the recognizer's `cached_score_parts[1]`/
+    // `new_score_parts[1]` both resolve to the SAME real node (152) and it
+    // IS correctly absorbed; the survivors are a DIFFERENT, unrelated pair
+    // of dead `Reduce`s the online-softmax builder emits regardless of this
+    // fusion). Pruning here, before any per-layer accounting runs, is what
+    // `prepare`'s own real dispatch pipeline already does before a plan
+    // reaches `execute` -- this census's counts should match what actually
+    // gets dispatched, not the raw unpruned bind.
+    let bound_ops = prune_dead(bound_ops, outputs);
 
     println!(
         "gemma4_attention_chain_census[{label}]: total_bound_ops={} new_count={NEW_COUNT} \
@@ -454,77 +471,43 @@ async fn gemma4_attention_chain_census() {
     }
     println!(
         "gemma4_attention_chain_census: total_absorbed_nodes={total_absorbed} \
-         (expected to equal unfused_total - fused_total = {} - {} = {}) \
-         absorbed_nodes_log={ABSORBED_NODES_LOG_PATH}",
+         (unfused_total - fused_total = {} - {} = {}) absorbed_nodes_log={ABSORBED_NODES_LOG_PATH}",
         unfused_bound_ops.len(),
         fused_bound_ops.len(),
         unfused_bound_ops.len() as i64 - fused_bound_ops.len() as i64
     );
-
-    // Attribution of the 2-op gap (1663 here vs. the stored 1661
-    // `ENCODE_DISPATCH_CALLS` log): `bind_with_fusion` alone never prunes a
-    // node unreachable from `outputs` -- that pass is `prune_dead`, called
-    // by `omega`'s OWN plan-preparation step, `prepare_uniforms_pack.rs:132-167`
-    // (`prepare`, the function `plan`/`plan_named` calls before a `Plan`
-    // ever reaches `execute`), never by `bind_with_fusion` itself. This
-    // census called `bind_with_fusion` directly and stopped there, so it
-    // never ran the SAME dead-node prune `prepare` runs immediately
-    // afterward with `effective_outputs == outputs` unchanged (`outputs` is
-    // non-empty here, so `prepare_uniforms_pack.rs:126-129`'s
-    // `effective_outputs = outputs.to_vec()` arm applies verbatim). Running
-    // the identical `prune_dead(unfused_bound_ops, &outputs)` call here is
-    // pure graph pruning -- no device, no dispatch -- so it stays inside
-    // this census's own "no GPU execution" bound.
-    let pruned = prune_dead(unfused_bound_ops.clone(), &outputs);
-    let pruned_ids: BTreeSet<u32> = pruned.iter().map(|bound| bound.node.0).collect();
-    let dropped_by_prune: Vec<&BoundOp> = unfused_bound_ops
-        .iter()
-        .filter(|bound| !pruned_ids.contains(&bound.node.0))
-        .collect();
-    println!(
-        "gemma4_attention_chain_census: prune_dead(unfused_production, outputs).len()={} \
-         (unfused_production before pruning: {}; stored production log: 1661) \
-         dropped_by_prune_dead={}",
-        pruned.len(),
-        unfused_bound_ops.len(),
-        dropped_by_prune.len()
+    // `run_one_bind` now prunes both binds before any of this accounting
+    // runs (`bind_with_fusion` alone never prunes a node unreachable from
+    // `outputs` -- that pass is `prune_dead`, called by `omega`'s OWN
+    // plan-preparation step, `prepare_uniforms_pack.rs:132-167`, before a
+    // `Plan` ever reaches `execute`), so `unfused_bound_ops`/
+    // `fused_bound_ops` here already reflect what actually gets
+    // dispatched, not the raw unpruned bind -- the per-layer node-id set
+    // difference above and this total match on the nose, with no orphaned
+    // dead `Reduce`s (`R9/PROGRESS.md`'s "closing the census gap" session:
+    // real checkpoint ids 150/151, sibling `Reduce{Maximum}` folds the
+    // online-softmax construction emits alongside the ONE the recognizer's
+    // own walk actually uses (152, correctly absorbed already) -- dead in
+    // BOTH binds, present in neither once pruned) inflating one side.
+    assert_eq!(
+        total_absorbed,
+        unfused_bound_ops.len() - fused_bound_ops.len(),
+        "summed per-layer absorbed_count must equal the pruned unfused/fused total delta -- a \
+         mismatch means either a layer's span window missed a node or a node outside every \
+         layer's [q,wo) span was absorbed"
     );
-    for bound in &dropped_by_prune {
-        println!(
-            "gemma4_attention_chain_census: prune_dead dropped node={} kind={} extents={:?} \
-             reads={:?} debug={}",
-            bound.node.0,
-            bound.kind.name(),
-            bound.extents,
-            read_sources(bound),
-            truncated_debug(&bound.kind)
-        );
-    }
-    if pruned.len() != 1661 {
-        println!(
-            "gemma4_attention_chain_census: prune_dead(unfused_production).len()={} still != \
-             1661 -- the {}-op residual is NOT attributed by this census (candidates not ruled \
-             out: `resident_skip` for a plan-time-constant `Iota`/`Constant` leaf on a WARM call \
-             (`placements_execute_named.rs:333-336`), only fires when `ServingConfig::plan_time_constants` \
-             is `true` -- `false` by default, `proxima-model-interop/src/serving.rs:605` -- and \
-             this census does not know the stored log's own `ServingConfig`; a `metal-horizontal-merge` \
-             multi-position merge folding two BoundOps into one `ENCODE_DISPATCH_CALLS` increment \
-             (`device_buffers_arena_plan.rs:1387`), off by default per this crate's own `metal` \
-             feature list (`Cargo.toml:117-131`, `metal-horizontal-merge` absent) -- neither is \
-             confirmed against the artifact that produced 1661, which this census did not open)",
-            pruned.len(),
-            pruned.len() as i64 - 1661
-        );
-    } else {
-        println!(
-            "gemma4_attention_chain_census: prune_dead(unfused_production, outputs).len() == 1661 \
-             -- the 2-op gap between the raw bind_with_fusion output (1663) and the stored \
-             ENCODE_DISPATCH_CALLS log (1661) attributes to `prune_dead` dropping the \
-             {}-node dead set printed above, a pass this census's earlier bind_with_fusion-only \
-             report never ran.",
-            dropped_by_prune.len()
-        );
-    }
+
+    // Attribution of the 2-op gap (1663 raw vs. the stored 1661
+    // `ENCODE_DISPATCH_CALLS` log): `unfused_bound_ops` is now ALREADY
+    // pruned (see above), so this is a direct assertion, not a second
+    // `prune_dead` call -- pruning an already-pruned graph is idempotent
+    // (nothing newly becomes dead once its own sole reader is already
+    // gone), confirmed by this assertion itself passing.
+    assert_eq!(
+        unfused_bound_ops.len(),
+        1661,
+        "unfused_production, pruned, must match the stored ENCODE_DISPATCH_CALLS log"
+    );
     println!("gemma4_attention_chain_census: physical launches remain unmeasured");
 
     // (c) physical Metal dispatches: NOT observed in this census -- no plan
